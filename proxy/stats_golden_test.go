@@ -109,6 +109,8 @@ var statsGoldenTopLevel = []string{
 	"frozen_misses",
 	"frozen_repaired",
 	"frozen_tokens",
+	"keepalive_pings_priced",
+	"keepalive_rescue_facts_missing",
 	"llm_calls",
 	// llm_call_timeout_ms / llm_errors / llm_timeouts make the compaction model's
 	// fail-open path countable. Without them an arm whose extract_llm kept hitting its

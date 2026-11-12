@@ -55,7 +55,8 @@ export type View = {
   window?: number
   /** `▲ update v0.6.1` (or `▲ v0.6.1 auto`): a release the user has not declined, from the update-check record. */
   update?: string
-  /** On a Claude subscription: `saved 1.2M rd / 85.0k wr`, the tokens compaction kept out of this 5-hour window. */
+  /** On a Claude subscription: `saved 1.2M rd / 85.0k wr`, the tokens compaction kept out of this 5-hour window, this
+   * session only. */
   windowSaved?: string
   /** The server's answer for a manual ping: true or false, undefined when it did not say (older server). */
   pingable?: boolean

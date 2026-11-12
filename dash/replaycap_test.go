@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 func fixedWindow(w int) windowFn { return func(string) (int, bool) { return w, true } }
@@ -118,9 +120,12 @@ func TestReplayCapSplitsFirstRemovalAndReplay(t *testing.T) {
 	r2 := capTestRow(2, 110_000, 600_000, 500_000, "extract_llm", 0) // cf 1.1M
 	r2.Credits = []compCredit{{Component: "extract_llm", Gross: 10, USD: 5, FirstUSD: 2}}
 	c := walkReplayCap([]capRow{r1, r2}, fixedWindow(1_000_000)).ByComponent["extract_llm"]
-	nearEq(t, "first", c.FirstRemovalUSD, 3)
+	// Row 2 closes the epoch, and its first removal ($2) is the first of the new one (#940), so it counts.
+	// Its replay part ($3) is past the cap: the new epoch has no first removal before this row.
+	nearEq(t, "first", c.FirstRemovalUSD, 5)
 	nearEq(t, "replay", c.ReplayUSD, 1)
-	nearEq(t, "past first", c.PastCapFirstUSD, 2)
+	nearEq(t, "past first", c.PastCapFirstUSD, 0)
+	nearEq(t, "past cap", c.PastCapUSD, 3)
 	nearEq(t, "stored", c.StoredUSD, 9)
 }
 
@@ -202,13 +207,12 @@ func TestReplayLedgerThroughSQLMovesTheHeadlineAndTheRow(t *testing.T) {
 	if c.Rows != 5 || c.PastRows != 2 {
 		t.Errorf("rows = %d past = %d, want 5 and 2", c.Rows, c.PastRows)
 	}
-	o := &Overview{BaselineCostUSD: 10, NetSavedUSD: 4, TotalSavedUSD: 5, TotalReducedUSD: 5}
+	o := &Overview{BaselineCostUSD: 10, NetSavedUSD: 4, TotalSavedUSD: 5}
 	o.ApplyReplayLedger(l)
 	nearEq(t, "baseline", o.BaselineCostUSD, 10+l.DeltaUSD())
 	nearEq(t, "correction", o.ReplayCapCorrectionUSD, l.DeltaUSD())
 	nearEq(t, "net saved", o.NetSavedUSD, 4+l.DeltaUSD())
 	nearEq(t, "total saved", o.TotalSavedUSD, 5+l.DeltaUSD())
-	nearEq(t, "total reduced", o.TotalReducedUSD, 5+l.DeltaUSD())
 	if l.DeltaUSD() >= 0 {
 		t.Fatal("the fixture does not cap anything")
 	}
@@ -478,7 +482,6 @@ func TestLeanStatsMatchFullForTheSameWindow(t *testing.T) {
 	type body struct {
 		Net        float64 `json:"net_saved_usd"`
 		Total      float64 `json:"total_saved_usd"`
-		Reduced    float64 `json:"total_reduced_usd"`
 		Correction float64 `json:"replay_cap_correction_usd"`
 	}
 	for _, path := range []string{fmt.Sprintf("/api/stats?since=0&until=%d", until), "/api/stats?session=s"} {
@@ -491,7 +494,6 @@ func TestLeanStatsMatchFullForTheSameWindow(t *testing.T) {
 		nearEq(t, path+" correction", lean.Correction, full.Correction)
 		nearEq(t, path+" net_saved_usd", lean.Net, full.Net)
 		nearEq(t, path+" total_saved_usd", lean.Total, full.Total)
-		nearEq(t, path+" total_reduced_usd", lean.Reduced, full.Reduced)
 	}
 }
 
@@ -670,6 +672,258 @@ func TestReplayLedgerThroughSQLReadsAgentCompaction(t *testing.T) {
 	nearEq(t, "past real", l.ByComponent["searchfold"].PastClientCompact, 1)
 }
 
+// The cap closes the credit of a replay. It must never erase a cost. Since the accountant library prices
+// breaks and TTL premiums, a stored saving can be negative, and a negative row after the cap is money that was
+// spent. Before, DeltaUSD removed every row past the cap, so a loss was taken out of the net and the "correction"
+// raised it (context-guru#768 B5: rows +1, +1, -2 gave a correction of +1.00).
+//
+// The row that reaches the ceiling is already past the cap: the walker closes the cap before it reads that row.
+func TestReplayCapNeverErasesACost(t *testing.T) {
+	rows := []capRow{
+		capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1),   // counted
+		capTestRow(2, 110_000, 500_000, 500_000, "extract_llm", 1),  // cf 1,000k: closes the cap, so this credit is past it
+		capTestRow(3, 120_000, 500_000, 500_000, "extract_llm", -2), // after the cap: a cost
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	c := l.ByComponent["extract_llm"]
+	nearEq(t, "the credit past the cap", c.PastCapUSD, 1)
+	nearEq(t, "the cost stays in the net", c.CountedUSD, -1) // +1 counted, -2 kept
+	if d := l.DeltaUSD(); d > 1e-9 {
+		t.Fatalf("DeltaUSD = %g: a cap must never raise the net", d)
+	}
+	nearEq(t, "delta", l.DeltaUSD(), -1)
+}
+
+// A positive row past the cap is still removed: this is the cap's job, and it must not change.
+func TestReplayCapStillRemovesAPositiveCreditPastTheCap(t *testing.T) {
+	rows := []capRow{
+		capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1),   // counted
+		capTestRow(2, 110_000, 500_000, 500_000, "extract_llm", 1),  // closes the cap: credit, removed
+		capTestRow(3, 120_000, 500_000, 500_000, "extract_llm", 3),  // after the cap: credit, removed
+		capTestRow(4, 130_000, 500_000, 500_000, "extract_llm", -2), // after the cap: a cost, kept
+	}
+	c := walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"]
+	nearEq(t, "past cap", c.PastCapUSD, 4)
+	nearEq(t, "counted", c.CountedUSD, -1) // +1 counted, -2 kept
+}
+
+// After the cap removes credit, a component whose costs exceed what is left must not print a gain: its replay
+// multiple is the amortized verdict over the first-removal credit, and a negative verdict is 0, as in
+// decomposeFromGroups (review of #893).
+func TestReplayLedgerRowKeepsTheReplayMultipleAtZeroForALoss(t *testing.T) {
+	row := &ComponentRow{Component: "extract_llm", SavedUSDFirstRemoval: 1, SavedUSDReplay: 3, SavedUSDCosts: -9}
+	l := walkReplayCap([]capRow{
+		capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1),
+		capTestRow(2, 110_000, 500_000, 500_000, "extract_llm", 3),
+	}, fixedWindow(1_000_000))
+	applyReplayLedgerToRow(row, l)
+	if row.ReplayMultiple < 0 {
+		t.Fatalf("ReplayMultiple = %g for a loss, want 0", row.ReplayMultiple)
+	}
+}
+
+// epochRow is a request with one component credit of the given first and replay tokens, priced at $1
+// per 10 tokens of each so the expected figures read off the tokens.
+func epochRow(ts, before, removed, billed int64, first, replay int64) capRow {
+	r := capTestRow(ts, before, removed, billed, "", 0)
+	r.Credits = []compCredit{{Component: "extract_llm", Gross: first + replay, Unique: first,
+		USD: float64(first+replay) / 10, FirstUSD: float64(first) / 10}}
+	return r
+}
+
+// A real compaction closes the epoch of the removals made before it. A removal first made after it earns
+// credit, and its replays count up to the first-removal tokens of the new epoch (#940).
+func TestReplayCapARemovalAfterARealCompactionEarnsAndIsReplayed(t *testing.T) {
+	compaction := capTestRow(3, 130_000, 0, 130_000, "", 0)
+	compaction.Bypassed = true
+	rows := []capRow{
+		epochRow(1, 100_000, 100, 100_000, 100, 0), // first epoch: a first removal of 100 tokens
+		epochRow(2, 120_000, 100, 120_000, 0, 100), // its replay: counts
+		compaction,                               // the client compacts
+		epochRow(4, 30_000, 100, 30_000, 100, 0), // a new first removal: counts
+		epochRow(5, 40_000, 100, 40_000, 0, 100), // its replay: counts, 100 of 100 first tokens
+		epochRow(6, 50_000, 100, 50_000, 0, 100), // a second replay of it: counts, the removal is still in the transcript
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	c := l.ByComponent["extract_llm"]
+	nearEq(t, "stored", c.StoredUSD, 10+10+10+10+10)
+	nearEq(t, "first", c.FirstRemovalUSD, 20)
+	// Row 5 and row 6 each replay 100 tokens against 100 first-removal tokens: both count in full.
+	nearEq(t, "counted", c.CountedUSD, 50)
+	nearEq(t, "past cap", c.PastCapUSD, 0)
+	if l.ClosedClientCompaction != 1 || l.ReopenedEpochs != 1 {
+		t.Errorf("real closes=%d reopened=%d, want 1/1", l.ClosedClientCompaction, l.ReopenedEpochs)
+	}
+}
+
+// After a close, a replay of a removal made BEFORE it is past the cap: the removal is inside the summary.
+func TestReplayCapDoesNotReplayAcrossACompaction(t *testing.T) {
+	compaction := capTestRow(3, 130_000, 0, 130_000, "", 0)
+	compaction.Bypassed = true
+	rows := []capRow{
+		epochRow(1, 100_000, 100, 100_000, 100, 0), // first removal, before the compaction
+		epochRow(2, 120_000, 100, 120_000, 0, 100), // replay: counts
+		compaction,
+		epochRow(4, 30_000, 100, 30_000, 0, 100), // replay of the old removal: it is in the summary, past the cap
+	}
+	c := walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"]
+	nearEq(t, "counted", c.CountedUSD, 20)
+	nearEq(t, "past cap", c.PastCapUSD, 10)
+	nearEq(t, "past real", c.PastClientCompact, 10)
+}
+
+// A counterfactual close reopens too. The baseline then restarts from a summary: cf = S + f * (growth since
+// the close), so the next close is far away, and a removal made after the close earns credit.
+func TestReplayCapACounterfactualCloseStartsAnEpochFromASummary(t *testing.T) {
+	rows := []capRow{
+		epochRow(1, 100_000, 500_000, 500_000, 100, 0), // cf 1,000k: closes at once
+		epochRow(2, 110_000, 100, 110_000, 100, 0),     // a new first removal after the close: counts
+		epochRow(3, 120_000, 100, 120_000, 0, 100),     // its replay: counts
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	c := l.ByComponent["extract_llm"]
+	nearEq(t, "past cap", c.PastCapUSD, 0)
+	nearEq(t, "counted", c.CountedUSD, 30)
+	if l.ClosedCounterfactual != 1 || l.ReopenedEpochs != 1 {
+		t.Errorf("cf closes=%d reopened=%d, want 1/1", l.ClosedCounterfactual, l.ReopenedEpochs)
+	}
+}
+
+// A second counterfactual close: the baseline grows from S, and when it reaches the ceiling again the epoch
+// closes again. 80k summary + 920k of growth = 1,000k.
+func TestReplayCapASecondCounterfactualCloseComesWhenTheSummaryGrowsToTheCeiling(t *testing.T) {
+	rows := []capRow{
+		epochRow(1, 100_000, 500_000, 500_000, 100, 0), // close 1 (tokens_before 100k)
+		epochRow(2, 600_000, 100, 600_000, 100, 0),     // growth 500k: cf 580k, open
+		epochRow(3, 1_020_000, 100, 700_000, 0, 100),   // growth 920k: cf 1,000k, close 2; this row opens the next epoch
+		epochRow(4, 1_030_000, 100, 710_000, 0, 100),   // after close 2: its first removals are not in this epoch
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	if l.ClosedCounterfactual != 2 {
+		t.Errorf("cf closes = %d, want 2", l.ClosedCounterfactual)
+	}
+	c := l.ByComponent["extract_llm"]
+	// The row that closes an epoch is the first row of the next one. Rows 3 and 4 are replays with no first
+	// removal in the epoch that close 2 started: both are past the cap.
+	nearEq(t, "past cap", c.PastCapUSD, 20)
+}
+
+// A real compaction inside an epoch that a counterfactual close started: the baseline restarts from the
+// real size and the summary size no longer applies.
+func TestReplayCapARealCompactionInsideACounterfactualEpoch(t *testing.T) {
+	compaction := capTestRow(4, 400_000, 0, 400_000, "", 0)
+	compaction.Bypassed = true
+	rows := []capRow{
+		epochRow(1, 100_000, 500_000, 500_000, 100, 0), // counterfactual close
+		epochRow(2, 300_000, 100, 300_000, 100, 0),
+		epochRow(3, 400_000, 100, 400_000, 0, 100),
+		compaction,
+		epochRow(5, 30_000, 100, 30_000, 100, 0), // after the real compaction: new first removal, counts
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	if l.ClosedCounterfactual != 1 || l.ClosedClientCompaction != 1 || l.ReopenedEpochs != 2 {
+		t.Errorf("cf=%d real=%d reopened=%d, want 1/1/2", l.ClosedCounterfactual, l.ClosedClientCompaction, l.ReopenedEpochs)
+	}
+	nearEq(t, "past cap", l.ByComponent["extract_llm"].PastCapUSD, 0)
+}
+
+// The first close of a conversation does not limit the replay before it: a window that starts mid-session
+// cannot know what was first removed earlier.
+func TestReplayCapTheFirstEpochCountsItsReplayInFull(t *testing.T) {
+	rows := []capRow{
+		epochRow(1, 100_000, 100, 100_000, 0, 100), // a replay with no first removal in the window
+		epochRow(2, 110_000, 100, 110_000, 0, 100),
+	}
+	nearEq(t, "past cap", walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"].PastCapUSD, 0)
+}
+
+// A negative credit is a cost and always counts, after a close too.
+func TestReplayCapACostStillCountsAfterAClose(t *testing.T) {
+	compaction := capTestRow(2, 130_000, 0, 130_000, "", 0)
+	compaction.Bypassed = true
+	cost := epochRow(4, 30_000, 100, 30_000, 0, 100)
+	cost.Credits[0].USD = -5
+	cost.Credits[0].FirstUSD = 0
+	rows := []capRow{epochRow(1, 100_000, 100, 100_000, 100, 0), compaction, cost}
+	nearEq(t, "past cap", walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"].PastCapUSD, 0)
+}
+
+// The avoided compaction: at each counterfactual close the baseline pays for a compaction request that we do
+// not. It is its own figure and moves no total.
+func TestReplayLedgerPricesTheAvoidedCompaction(t *testing.T) {
+	rows := []capRow{
+		epochRow(1, 100_000, 500_000, 500_000, 100, 0), // close 1
+		epochRow(2, 600_000, 100, 600_000, 0, 0),
+		epochRow(3, 1_020_000, 100, 700_000, 0, 0), // close 2
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	l.priceAvoided(func(string) (modelinfo.Price, bool) {
+		return modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 0.3e-6}, true
+	})
+	// 2 closes: 2 x 1,000,000 tokens read at $0.30/M, 2 x 80,000 tokens written at $15/M.
+	nearEq(t, "avoided", l.AvoidedCompactionUSD, 2*1_000_000*0.3e-6+2*assumedSummaryTokens*15e-6)
+	if !l.SummaryAssumed {
+		t.Error("SummaryAssumed = false, want true: the summary size is an assumption")
+	}
+	nearEq(t, "delta", l.DeltaUSD(), 0)
+}
+
+// A model with no price adds nothing to the avoided figure: it is a lower bound there.
+func TestReplayLedgerAvoidedCompactionNeedsAPrice(t *testing.T) {
+	l := walkReplayCap([]capRow{epochRow(1, 100_000, 500_000, 500_000, 100, 0)}, fixedWindow(1_000_000))
+	l.priceAvoided(func(string) (modelinfo.Price, bool) { return modelinfo.Price{}, false })
+	nearEq(t, "avoided", l.AvoidedCompactionUSD, 0)
+	if l.SummaryAssumed {
+		t.Error("SummaryAssumed = true with no price")
+	}
+}
+
+// After a counterfactual close the baseline is the summary plus what the transcript grew by, and not the
+// billed size plus the removals. Here the billed size and the removals alone would close the epoch again
+// at row 2 (billed 900k + removed 200k = 1,100k); the summary baseline is 80k + 100k of growth = 180k, so
+// it stays open.
+func TestReplayCapTheBaselineAfterACounterfactualCloseIsTheSummaryPlusGrowth(t *testing.T) {
+	rows := []capRow{
+		epochRow(1, 100_000, 500_000, 500_000, 100, 0), // close 1, tokens_before 100k
+		epochRow(2, 200_000, 200_000, 900_000, 100, 0), // growth 100k: the summary baseline stays open
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	if l.ClosedCounterfactual != 1 {
+		t.Errorf("cf closes = %d, want 1", l.ClosedCounterfactual)
+	}
+}
+
+// The avoided compaction reaches the headline as its own field and moves no total.
+func TestApplyReplayLedgerCarriesTheAvoidedCompactionApart(t *testing.T) {
+	l := walkReplayCap([]capRow{epochRow(1, 100_000, 500_000, 500_000, 100, 0)}, fixedWindow(1_000_000))
+	l.priceAvoided(func(string) (modelinfo.Price, bool) {
+		return modelinfo.Price{Output: 15e-6, CacheRead: 0.3e-6}, true
+	})
+	o := &Overview{NetSavedUSD: 10, TotalSavedUSD: 10, BaselineCostUSD: 20}
+	o.ApplyReplayLedger(l)
+	nearEq(t, "avoided", o.AvoidedCompactionUSD, 1_000_000*0.3e-6+assumedSummaryTokens*15e-6)
+	if !o.AvoidedCompactionAssumed {
+		t.Error("AvoidedCompactionAssumed = false, want true")
+	}
+	nearEq(t, "net saved", o.NetSavedUSD, 10)
+	nearEq(t, "baseline", o.BaselineCostUSD, 20)
+}
+
+// The cap only removes credit: a row after a close whose first removal is worth more than its net (the rest of
+// it is a cost) counts no more than it stored.
+func TestReplayCapNeverCountsMoreThanARowStored(t *testing.T) {
+	compaction := capTestRow(2, 130_000, 0, 130_000, "", 0)
+	compaction.Bypassed = true
+	mixed := capTestRow(3, 30_000, 100, 30_000, "", 0)
+	mixed.Credits = []compCredit{{Component: "extract_llm", Gross: 200, Unique: 100, USD: 1, FirstUSD: 3}} // net 1, first 3
+	rows := []capRow{epochRow(1, 100_000, 100, 100_000, 100, 0), compaction, mixed}
+	c := walkReplayCap(rows, fixedWindow(1_000_000)).ByComponent["extract_llm"]
+	if c.CountedUSD > c.StoredUSD+1e-9 {
+		t.Errorf("counted %v > stored %v: the cap added credit", c.CountedUSD, c.StoredUSD)
+	}
+	nearEq(t, "past cap", c.PastCapUSD, 0)
+}
+
 // A user's own compaction point (#948) replaces the table value for the walk: the credit ends when
 // the counterfactual transcript reaches IT, and the ledger says which C was used.
 func TestReplayCapUsesTheUsersOwnCompactionPoint(t *testing.T) {
@@ -744,5 +998,44 @@ func TestReplayCapUsesAClientDefaultCompactionPoint(t *testing.T) {
 	}
 	if got.CeilingConfigured["m1"] != 200_000 {
 		t.Errorf("ledger C = %v / %v", got.CeilingConfigured, got.CeilingFrac)
+	}
+}
+
+// A small compaction point: when C is at or below the assumed summary, the baseline cannot restart
+// from S, or every later row reaches C at once and closes again. Claude Code reaches it with
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW=100k, which gives C = 67,000. The summary is capped at half of C, so
+// the counterfactual closes once per real cycle and books one avoided compaction for it.
+func TestReplayCapASmallCompactionPointClosesOncePerCycle(t *testing.T) {
+	var rows []capRow
+	for i := int64(1); i <= 10; i++ { // 10 rows that grow by 1,000 tokens each, all above C
+		r := epochRow(i, 60_000+i*1_000, 0, 70_000+i*1_000, 0, 0)
+		r.CPoint, r.CPointSource = 67_000, "configured"
+		rows = append(rows, r)
+	}
+	l := walkReplayCap(rows, fixedWindow(200_000))
+	if l.ClosedCounterfactual != 1 || l.ReopenedEpochs != 1 {
+		t.Errorf("cf closes=%d reopened=%d, want 1/1: the summary restart must stay below C", l.ClosedCounterfactual, l.ReopenedEpochs)
+	}
+	l.priceAvoided(func(string) (modelinfo.Price, bool) { return modelinfo.Price{Output: 15e-6, CacheRead: 0.3e-6}, true })
+	// One compaction: C = 67,000 read, and a summary of C/2 = 33,500 written.
+	nearEq(t, "avoided", l.AvoidedCompactionUSD, 67_000*0.3e-6+33_500*15e-6)
+}
+
+// The summary of a close is capped at half of C, and it grows again from there. The next close comes when
+// that summary plus the growth since the close reaches C: 33,500 + 33,500 = 67,000.
+func TestReplayCapASmallCompactionPointClosesAgainAfterItsSummaryGrowsToC(t *testing.T) {
+	mk := func(ts, before int64) capRow {
+		r := epochRow(ts, before, 0, before+10_000, 0, 0)
+		r.CPoint, r.CPointSource = 67_000, "configured"
+		return r
+	}
+	rows := []capRow{
+		mk(1, 60_000), // billed 70,000 >= 67,000: close 1, closedAt 60,000
+		mk(2, 93_000), // 33,500 + 33,000 = 66,500: open
+		mk(3, 93_500), // 33,500 + 33,500 = 67,000: close 2
+		mk(4, 94_000), // 33,500 + 500: open
+	}
+	if l := walkReplayCap(rows, fixedWindow(200_000)); l.ClosedCounterfactual != 2 {
+		t.Errorf("cf closes = %d, want 2", l.ClosedCounterfactual)
 	}
 }

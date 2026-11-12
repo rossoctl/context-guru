@@ -361,11 +361,12 @@ func contentKey(s string) string { return extract.ContentKey(s) }
 // the key: the session part may hold ":" (a scoped id is tenant:base, and an explicit id may hold
 // one too), so the key is only ever built and looked up whole.
 //
-// There is no read of the pre-#175 shape (cg:keep:<contentkey>). The Store is in memory and never
-// written to disk, so a mark cannot outlive the process that wrote it, and the process that
-// writes the new shape is a new process. Reading the old shape would only keep the cross-session
-// exemption alive for no gain.
-func keptKey(session, ck string) string { return "cg:keep:" + session + ":" + ck }
+// There is no read of the pre-#175 shape (cg:keep:<contentkey>). Since #1097 the mark can outlive
+// the process (session state on disk) and a tenant pipeline rebuild (store.CarryPrefix), but both
+// copy only marks written in the new shape, because the new shape is the only one that was ever
+// written after #175. Reading the old shape would only keep the cross-session exemption alive for
+// no gain.
+func keptKey(session, ck string) string { return store.KeptPrefix + session + ":" + ck }
 
 // MarkKeptVerbatim records that this session expanded this original content, so it must not be
 // re-compacted in this session (keyed by session and content hash). Exported for the proxy's

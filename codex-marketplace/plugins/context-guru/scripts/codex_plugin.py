@@ -29,6 +29,18 @@ MARKER = "# Managed by the context-guru Codex plugin."
 CONFIG_MARKER = "# Managed by the context-guru Codex plugin."
 RELEASE_REPO = "rossoctl/context-guru"
 MINIMUM_CODEX_RELEASE = (0, 4, 0)
+# `context-guru-proxy strategies` exists from this release. An older binary has no fallback here.
+STRATEGIES_RELEASE = "v0.7.1"
+# The picker ladder is a plugin choice. The proxy lists every preset it registers, not this ladder.
+# This is the one copy in the plugin. load_strategy_table checks each name against the proxy.
+PRESETS = ("off", "conservative", "medium", "high", "xhigh", "ultrahigh")
+# The strategy Codex starts with. The proxy default ("auto") is an Anthropic strategy.
+DEFAULT_STRATEGY = "30-min-ping"
+# Codex routes OpenAI traffic. A strategy for "any" provider fits too.
+PROVIDERS = ("openai", "any")
+STRATEGIES_TIMEOUT = 5
+PROBE_SCRUBBED_PREFIXES = ("DASHBOARD_", "SESSION_STATE", "CG_RECORD_", "ARCHIVE_")
+PROBE_SCRUBBED_NAMES = {"CONTROL_DB", "UPSTREAMS", "STORE", "IDLE_EXIT"}
 
 
 def codex_home():
@@ -226,29 +238,93 @@ def install_escape_hatch():
     return target
 
 
-def write_proxy_config():
+def update_hint():
+    return (f"update the proxy to {STRATEGIES_RELEASE} or later "
+            f"(run context-guru-update, or remove the binary so setup downloads the latest release, {STRATEGIES_RELEASE} or later)")
+
+
+def load_strategy_table(binary):
+    """Read the cache strategy table from the proxy binary. Raise RuntimeError if it cannot.
+
+    The proxy owns the table. A binary older than v0.7.1 does not know `strategies`: it starts
+    serving instead. So the command gets a loopback port 0 and a short time limit, and anything that
+    is not valid JSON counts as an old binary.
+    """
+    hint = update_hint()
+    if not binary:
+        raise RuntimeError(f"no proxy binary found to list cache strategies; {hint}")
+    # A v0.7.0 binary serves instead. The probe must not open the user's dashboard DB, session
+    # state, control DB, record dirs or store. So scrub every setting that turns one on, and run in
+    # a fresh directory so a relative default path cannot land in the user's folder.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(PROBE_SCRUBBED_PREFIXES) and k not in PROBE_SCRUBBED_NAMES}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as scratch:
+            run = subprocess.run([binary, "strategies"], capture_output=True, text=True,
+                                 timeout=STRATEGIES_TIMEOUT, env=env, cwd=scratch,
+                                 stdin=subprocess.DEVNULL)
+        table, code = json.loads(run.stdout), run.returncode
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # ValueError includes UnicodeDecodeError from output that is not UTF-8.
+        table, code = None, 1
+    rows = table.get("strategies") if isinstance(table, dict) else None
+    valid = (code == 0 and isinstance(rows, list) and rows and isinstance(table.get("presets"), list)
+             and all(isinstance(r, dict) and isinstance(r.get("name"), str)
+                     and isinstance(r.get("providers"), list) and isinstance(r.get("spends"), bool)
+                     and isinstance(r.get("desc"), str) for r in rows))
+    if not valid:
+        raise RuntimeError(f"{binary} cannot list cache strategies; {hint}")
+    missing = [name for name in PRESETS if name not in table["presets"]]
+    if missing:
+        raise RuntimeError(f"the proxy does not know preset(s) {', '.join(missing)}; {hint}")
+    return table
+
+
+def offered_strategies(table):
+    # Exactly openai or any: a row that also lists anthropic is not offered (owner decision, #1062).
+    return [row for row in table["strategies"]
+            if row["providers"] and all(p in PROVIDERS for p in row["providers"])]
+
+
+def resolve_strategy(table, name):
+    """Return the canonical offered name for `name`, or raise RuntimeError."""
+    name = (table.get("aliases") or {}).get(name, name)
+    if name not in [row["name"] for row in offered_strategies(table)]:
+        raise RuntimeError(f"cache strategy {name!r} is not offered for Codex")
+    return name
+
+
+def render_proxy_config(preset, strategy):
+    return f"{CONFIG_MARKER}\npreset: {preset}\ncache:\n  strategy: {strategy}\n"
+
+
+def check_proxy_config_writable():
     path = proxy_config()
-    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not path.read_text().startswith(CONFIG_MARKER):
         raise RuntimeError(f"refusing to overwrite unmanaged proxy config: {path}")
+
+
+def write_proxy_config(binary=None):
+    table = load_strategy_table(binary or find_binary())
+    strategy = resolve_strategy(table, DEFAULT_STRATEGY)
+    path = proxy_config()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    check_proxy_config_writable()
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        f"{CONFIG_MARKER}\n"
-        "preset: off\n"
-        "cache:\n"
-        "  keepalive: true\n"
-    )
+    temporary.write_text(render_proxy_config("off", strategy))
     temporary.chmod(0o600)
     os.replace(temporary, path)
     return path
 
 
 def read_proxy_options():
-    preset, keepalive = "off", True
+    """Return (preset, strategy). An older file has `keepalive: true/false` and no `strategy`."""
+    preset, keepalive, strategy = "off", True, None
     try:
         lines = proxy_config().read_text().splitlines()
     except OSError:
-        return preset, keepalive
+        return preset, DEFAULT_STRATEGY
     in_cache = False
     for line in lines:
         stripped = line.strip()
@@ -260,19 +336,22 @@ def read_proxy_options():
             in_cache = False
         elif in_cache and stripped.startswith("keepalive:"):
             keepalive = stripped.split(":", 1)[1].strip().lower() == "true"
-    return preset, keepalive
+        elif in_cache and stripped.startswith("strategy:"):
+            strategy = stripped.split(":", 1)[1].strip().strip("'\"")
+    if strategy is None:
+        strategy = DEFAULT_STRATEGY if keepalive else "none"
+    return preset, strategy
 
 
-def save_proxy_options(preset, keepalive):
-    if preset not in {"off", "conservative", "medium", "high", "xhigh", "ultrahigh"}:
+def save_proxy_options(preset, strategy):
+    if preset not in PRESETS:
         raise RuntimeError(f"unknown preset: {preset}")
     path = proxy_config()
     if path.exists() and not path.read_text().startswith(CONFIG_MARKER):
         raise RuntimeError(f"refusing to overwrite unmanaged proxy config: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(f"{CONFIG_MARKER}\npreset: {preset}\ncache:\n"
-                         f"  keepalive: {str(keepalive).lower()}\n")
+    temporary.write_text(render_proxy_config(preset, strategy))
     temporary.chmod(0o600)
     os.replace(temporary, path)
 
@@ -301,17 +380,26 @@ def configure(args):
     if not routing_state().exists():
         facts(result="not_installed")
         return 2
-    preset, keepalive = read_proxy_options()
+    preset, strategy = read_proxy_options()
+    try:
+        table = load_strategy_table(read_record().get("binary") or find_binary())
+        strategy = resolve_strategy(table, strategy)
+        requested = None if args.show else args.cache_strategy
+        if requested:
+            strategy = resolve_strategy(table, requested)
+    except RuntimeError as error:
+        facts(result="refused", detail=error)
+        return 2
     if args.show:
-        facts(result="ok", preset=preset,
-              cache_strategy="30-min-ping" if keepalive else "none")
+        facts(result="ok", preset=preset, cache_strategy=strategy,
+              presets=list(PRESETS),
+              strategies=[{"name": r["name"], "spends": r["spends"], "desc": r["desc"]}
+                          for r in offered_strategies(table)])
         return 0
     if args.preset:
         preset = args.preset
-    if args.cache_strategy:
-        keepalive = args.cache_strategy == "30-min-ping"
     try:
-        save_proxy_options(preset, keepalive)
+        save_proxy_options(preset, strategy)
     except Exception as error:
         facts(result="refused", detail=error)
         return 2
@@ -319,8 +407,7 @@ def configure(args):
     extra = {}
     if restarted and preset == "ultrahigh":
         extra["probe"] = ask_defer_probe(int(read_record().get("port", 0)))
-    facts(result="configured", preset=preset,
-          cache_strategy="30-min-ping" if keepalive else "none",
+    facts(result="configured", preset=preset, cache_strategy=strategy,
           proxy_restarted=str(restarted).lower(), **extra)
     return 0 if restarted else 1
 
@@ -492,7 +579,7 @@ def setup(args):
         facts(result="refused", reason="consent_required")
         return 2
     try:
-        write_proxy_config()
+        check_proxy_config_writable()
     except Exception as error:
         facts(result="config_conflict", config=proxy_config(), detail=error)
         return 2
@@ -505,10 +592,34 @@ def setup(args):
             facts(result="binary_install_failed", detail=error)
             return 2
     existing = read_record()
+    port = int(existing.get("port", 0))
+    # A proxy that already runs keeps its recorded binary, and every restart reads this file with
+    # that binary. So that binary, not the new one, must be able to list the strategies. If it
+    # cannot, setup refuses and writes nothing. (Restarting on the new binary would change the
+    # running proxy without a request to do so.)
+    running = bool(port and existing.get("binary") and healthy(port))
+    try:
+        if running:
+            write_proxy_config(existing["binary"])
+        else:
+            # The proxy is down. Restarts (`ensure`, `serve`) run the recorded binary with this file.
+            # So the record must name the binary that validated the file BEFORE the file is written.
+            # Then a later setup failure leaves a file and a binary that match. The user may have
+            # installed a new binary to replace an old record on purpose: this path accepts that.
+            load_strategy_table(executable)
+            if existing.get("binary") and existing["binary"] != executable:
+                existing["binary"] = executable
+                (state_dir() / "install.json").write_text(json.dumps(existing, indent=2) + "\n")
+            write_proxy_config(executable)
+    except RuntimeError as error:
+        facts(result="strategies_unavailable", detail=error)
+        return 2
+    except OSError as error:
+        facts(result="config_conflict", config=proxy_config(), detail=error)
+        return 2
     provider = existing.get("provider") if is_routed(main_config()) else None
     if not isinstance(provider, dict):
         provider = base_provider()
-    port = int(existing.get("port", 0))
     if port and healthy(port):
         try:
             install_default_route(main_config(), routing_state(), port, provider)
@@ -791,8 +902,8 @@ def main():
     remove.add_argument("--dry-run", action="store_true")
     settings = commands.add_parser("configure")
     settings.add_argument("--show", action="store_true")
-    settings.add_argument("--preset", choices=("off", "conservative", "medium", "high", "xhigh", "ultrahigh"))
-    settings.add_argument("--cache-strategy", choices=("none", "30-min-ping"))
+    settings.add_argument("--preset", choices=PRESETS)
+    settings.add_argument("--cache-strategy")
     args = parser.parse_args()
     return {"setup": setup, "status": status, "ensure": ensure, "serve": serve, "signal": signal_hook,
             "update": update, "uninstall": uninstall, "configure": configure}[args.command](args)

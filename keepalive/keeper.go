@@ -50,11 +50,11 @@ type kaEntry struct {
 	// thread is the session thread this entry keeps warm; "" is the primary thread.
 	thread string
 	// refreshedAt is the last moment this entry's provider-side cache entry is KNOWN refreshed:
-	// the real request that created it, or a later ping or summary substitute call that actually
-	// READ the cache (CacheRead > 0). A ping or substitute that wrote instead of reading refreshed
-	// nothing that was there before, so it must not move this clock — see record1 and
-	// recordSummarySubstitute, both gated on CacheRead > 0 the same way. Surfaced to hosts via
-	// Plan.RefreshedAt, for a status line.
+	// the real request that created it, or a later ping or summary substitute call that READ the
+	// cache (CacheRead > 0) or WROTE it (CacheWrite > 0, which re-created the entry and started a
+	// fresh lifetime, #580). A call that billed neither touched nothing. See record1, manual ping and
+	// recordSummarySubstitute, all gated the same way. Surfaced to hosts via Plan.RefreshedAt, for a
+	// status line.
 	refreshedAt time.Time
 	// startedAt is when the last upstream request on this session STARTED — a real request
 	// or a ping, whichever was later.
@@ -68,6 +68,11 @@ type kaEntry struct {
 	// over the production window, that one change takes X=280 from **+$164.46 to −$241.99**,
 	// with ping cost tripling to $408.85.
 	startedAt time.Time
+	// gapStart is the start of the last REAL upstream request on this entry, which is the start of
+	// the current idle gap. Set once when a real request is recorded (the same instant as
+	// startedAt then); NEVER moved by a ping, a manual press or a substitute call, unlike
+	// startedAt. Every ping of one gap reports it as KeepAliveReport.Window.
+	gapStart time.Time
 	// st is the tenant's state store, held so a successful ping can record that it refreshed the
 	// provider's entry — see apply.RecordCacheTouch and issue #243. Held for the same interval as
 	// the masked body below, and for the same reason: the entry exists exactly between one request
@@ -83,7 +88,7 @@ type kaEntry struct {
 	// without corrupting a slice something else still reads.
 	//
 	// Masked for the reason the credential is, and the asymmetry decides it: a leaked key is
-	// rotatable, a leaked transcript is not. This is up to 8 MiB of the user's conversation, and
+	// rotatable, a leaked transcript is not. This is up to 32 MiB (Policy.BodyLimit) of the user's conversation, and
 	// XOR over it costs a memcpy-shaped pass on a path that runs a few hundred times a day.
 	// The prefix hash covers this content, which is why the ping must resend it verbatim.
 	body []byte
@@ -157,8 +162,8 @@ type kaEntry struct {
 	// spent is what this session's pings have cost so far. Reported, never a cap — see
 	// Policy.MaxUSDPerPing for why the guard is per ping.
 	spent float64
-	// refreshed is what the last ping read from cache. It is the ceiling on what the next
-	// real request may credit to this mechanism — see dash.Event.keepaliveSavedUSD.
+	// refreshed is what the last ping read from cache, reported on the next real request's
+	// row. The keep-alive's credit is the accountant library's rescue.
 	refreshed int64
 	// stopped means this session will not be pinged again: a ping wrote instead of reading,
 	// or the upstream refused in a way that repeating cannot fix.
@@ -321,7 +326,7 @@ func (e *kaEntry) isDone() bool { return waitcause.IsDone(e.toolUseNames, e.term
 // ~$8.8 of avoided misses, and 45 never came back, ~$5.8 of pings. A blanket gate would lose more
 // than it saves there.
 func (e *kaEntry) pingable() bool {
-	if e.turn < 1 || e.prefix < int64(e.pol.MinPrefixTokens) || e.pingUSD > e.pol.Ceiling() {
+	if e.turn < 1 || e.prefix < int64(e.pol.WaitMinPrefix(e.wait, IsSubagentThread(e.thread))) || e.pingUSD > e.pol.Ceiling() {
 		return false
 	}
 	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no
@@ -708,7 +713,7 @@ func (k *Keeper) Arrive(key Key) (pings int, refreshed int64, tag string) {
 
 // ArriveAt is Arrive plus the instant the entry's provider-side cache was last known refreshed
 // (see kaEntry.refreshedAt) — the real request that started the idle span, or the start of the
-// last ping that READ the cache. Zero when there was no entry.
+// last ping that READ or WROTE the cache. Zero when there was no entry.
 func (k *Keeper) ArriveAt(key Key) (pings int, refreshed int64, tag string, refreshedAt time.Time) {
 	if k == nil || key.Session == "" {
 		return 0, 0, "", time.Time{}
@@ -855,7 +860,15 @@ func (k *Keeper) Record(r Record) {
 		}
 		return
 	}
-	if len(body) > MaxBodyBytes {
+	// The cost cap is what lets a body past the old 8 MiB limit, so it must be able to judge it. With
+	// no price for the model (or no usage to size the prefix) the projected cost is 0 and the cap would
+	// pass any size: keep the old limit then (#1100).
+	limit := pol.BodyLimit()
+	if limit > LegacyMaxBodyBytes && len(body) > LegacyMaxBodyBytes &&
+		k.projectedPingUSD(model, u.CacheRead+u.CacheWrite, route, r.Endpoint) == 0 {
+		limit = LegacyMaxBodyBytes
+	}
+	if len(body) > limit {
 		refuse(ReasonTooLarge)
 		k.retire(key)
 		k.skipped.Add(1)
@@ -932,7 +945,7 @@ func (k *Keeper) Record(r Record) {
 		emitter = components.NopEmitter{}
 	}
 	e := &kaEntry{
-		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt,
+		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt, gapStart: startedAt,
 		cred: r.Cred, touchAlias: r.TouchAlias,
 		body: owned, endpoint: r.Endpoint,
 		st:       r.Store,
@@ -1314,7 +1327,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 			due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 				route: e.route, provider: e.provider, model: e.model,
 				tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
-				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt})
+				ping: e.pings + 1, extra: true, prevStartedAt: e.startedAt, gapStart: e.gapStart})
 			continue
 		}
 		if e.stopped || e.pings >= e.pol.MaxPings || !e.pingable() {
@@ -1360,7 +1373,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
-			ping: e.pings, prevStartedAt: prevStartedAt})
+			ping: e.pings, prevStartedAt: prevStartedAt, gapStart: e.gapStart})
 	}
 	k.mu.Unlock()
 
@@ -1412,6 +1425,9 @@ type pingJob struct {
 	// until this ping expires" instead of "how close was this ENTRY to expiring" — answering a
 	// different, always-nearly-full-TTL question.
 	prevStartedAt time.Time
+	// gapStart is e.gapStart when the job was created: the idle gap this ping serves, reported as
+	// KeepAliveReport.Window. Unlike prevStartedAt it is the same for every ping of the gap.
+	gapStart time.Time
 }
 
 // fire sends one ping and accounts for it. Always fails open and quietly: the agent is not
@@ -1507,21 +1523,21 @@ func (k *Keeper) fire(j pingJob) {
 	}
 	switch k.noteOutcome(j, status, u) {
 	case outcomeTransient:
-		k.record1(j, u, status, ms, start) // the audit row; the next ping may work
+		k.record1(j, u, status, ms, start, resp.Header) // the audit row; the next ping may work
 		return
 	case outcomeFailed:
 		return
 	case outcomeFailedRecorded:
-		k.record1(j, u, status, ms, start)
+		k.record1(j, u, status, ms, start, resp.Header)
 		return
 	case outcomeMissed:
-		cost := k.record1(j, u, status, ms, start)
+		cost := k.record1(j, u, status, ms, start, resp.Header)
 		slog.Info("context-guru: cache keep-alive ping missed (entry had expired); cache re-written",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
 			"cache_write", u.CacheWrite, "fresh_input", u.FreshInput, "cost_usd", cost)
 		return
 	}
-	cost := k.record1(j, u, status, ms, start)
+	cost := k.record1(j, u, status, ms, start, resp.Header)
 	slog.Debug("context-guru: cache keep-alive ping",
 		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "ping", j.ping,
 		"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "output", u.Output,
@@ -1678,7 +1694,8 @@ func (k *Keeper) giveBackFailedPing(j pingJob) bool {
 //
 // startedAt is when THIS ping's request began, not when it completed. The provider's cache lifetime
 // runs from request start, which is the same anchor kaEntry.startedAt uses and for the same reason.
-func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt time.Time) float64 {
+// hdr is the ping response's headers, passed through to the report for the host to read.
+func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt time.Time, hdr http.Header) float64 {
 	e := j.e
 	// The identifying fields are read under the lock with everything else: they are set once
 	// at record time and never mutated, but a retired entry is concurrent with this goroutine
@@ -1707,9 +1724,11 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// away?" must not. The recency map answers the second and stays untouched; this writes only
 	// the first, so the dashboard's idle-gap statistics are unaffected.
 	//
-	// GATED ON CacheRead > 0, because only a ping that actually read the entry refreshed it. A ping
-	// that WROTE (the entry was already gone) refreshed nothing that was there before, and claiming
-	// otherwise would make the clock lie in the expensive direction.
+	// GATED ON CacheRead > 0 || CacheWrite > 0, because only a ping that billed the cache touched the
+	// entry. A ping that READ it refreshed it. A ping that WROTE (the entry was already gone) re-created
+	// it, which starts a fresh lifetime at that ping all the same: left on the earlier clock, the next
+	// real request is aged by the whole gap and a live entry reads as ttl_expiry (#580). A ping that
+	// billed neither left the entry alone.
 	//
 	// Anchored on the ping's START, not its completion, for the same reason kaEntry.startedAt is:
 	// the provider's lifetime runs from request start.
@@ -1717,14 +1736,14 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// j.raw is the UNMASKED body copy, and reading it here is safe: fire zeroizes it in a defer that
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
-	if status >= 200 && status < 300 && u.CacheRead > 0 {
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
 		j.touch(provider, startedAt.UnixMilli())
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
-	if u.CacheRead > 0 {
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
 		e.refreshedAt = startedAt
 	}
 	k.mu.Unlock()
@@ -1745,6 +1764,8 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// column that is blank because nobody filled it in is the same defect at a smaller
 			// scale.
 			MaxTokens: pingOutputBudget(route) + j.vary%pingVary,
+			Window:    j.gapStart,
+			Header:    hdr,
 		})
 	}
 	return cost
@@ -1864,9 +1885,13 @@ type Stats struct {
 	// event is sweep_batch_skipped_deadline). SweepBatchOverCap counts EVERY candidate left unasked by a
 	// limit: max_ask_batches, or the cost ceiling lowering the count. SweepBatchesLowered counts sweeps
 	// where the per-ping cost ceiling admitted fewer questions than planned.
-	SweepBatchSkipped   int64 `json:"sweep_batch_skipped"`
-	SweepBatchOverCap   int64 `json:"sweep_batch_over_cap"`
-	SweepBatchesLowered int64 `json:"sweep_batches_lowered"`
+	SweepBatchSkipped int64 `json:"sweep_batch_skipped"`
+	// SweepBatchByIndex tells the batches apart by their position in a sweep: asked, items carried, verdicts
+	// judged and fabricated quotes. A fabrication rate that differs between batch 0 and the later ones is a
+	// batch effect; the same everywhere, it is the model.
+	SweepBatchByIndex   []offload.SweepBatchIndexStats `json:"sweep_batch_by_index,omitempty"`
+	SweepBatchOverCap   int64                          `json:"sweep_batch_over_cap"`
+	SweepBatchesLowered int64                          `json:"sweep_batches_lowered"`
 	// SweepDrops is what became of the drops the sweep applied (#404 point 7), overall and for the
 	// busiest threads, under hashed labels. The false-drop rate is the number to pull the sweep from
 	// xhigh on. Metadata only: counts, never content, never a session id.
@@ -1875,20 +1900,91 @@ type Stats struct {
 	// (sweep_kept, sweep_unparseable, sweep_dropped, ...), the counters a request's Report carries
 	// for an in-request question.
 	SweepGates map[string]int64 `json:"sweep_gates,omitempty"`
+	// SweepWarm is the warm path's ledger (#491). Absent unless the path ran.
+	SweepWarm *SweepWarmStats `json:"sweep_warm,omitempty"`
+}
+
+// SweepWarmStats is offload.SweepWarmStats in /stats shape: how often the trigger fired, what the
+// questions and the held answers did, and the economic gate's accepts and refusals with the reasons.
+type SweepWarmStats struct {
+	Fired             int64            `json:"fired"`
+	Asked             int64            `json:"asked"`
+	Held              int64            `json:"held"`
+	Failed            int64            `json:"failed"`
+	NotWorth          int64            `json:"not_worth"`
+	NoBilledSize      int64            `json:"no_billed_size"`
+	ThreadBusy        int64            `json:"thread_busy"`
+	ModelDeclined     int64            `json:"model_declined"`
+	ConcurrencyFull   int64            `json:"concurrency_full"`
+	HeldExpired       int64            `json:"held_expired"`
+	HeldShrunk        int64            `json:"held_shrunk"`
+	CarriedMerged     int64            `json:"carried_merged"`
+	CarriedOverridden int64            `json:"carried_overridden"`
+	CarriedRefused    int64            `json:"carried_refused"`
+	CarriedExpired    int64            `json:"carried_expired"`
+	CarriedCapped     int64            `json:"carried_capped"`
+	NotRegistered     int64            `json:"not_registered"`
+	ThreadsFull       int64            `json:"threads_full"`
+	AlreadyAsked      int64            `json:"already_asked"`
+	NoInventory       int64            `json:"no_inventory"`
+	Gates             map[string]int64 `json:"gates,omitempty"`
+	// TriggerRefusals counts the refusals at the trigger, by reason. Recent is the last warm sweeps
+	// applied, each with the gate's numbers, the conversation before and after, and the net it expected.
+	TriggerRefusals map[string]int64 `json:"trigger_refusals,omitempty"`
+	// GatePriceModel is set only when the DIAGNOSTIC warm_gate_price_model is on: the gate priced with that
+	// model, not the request's. A run with it is not a normal run. PriceModelUnknown counts gate decisions
+	// where that model was not on the rate card and the built-in rates were used.
+	GatePriceModel    string              `json:"gate_price_model,omitempty"`
+	PriceModelUnknown int64               `json:"price_model_unknown,omitempty"`
+	Recent            []offload.WarmSweep `json:"recent_sweeps,omitempty"`
+	// RecentDecisions is every trigger and apply-gate decision, accepted or refused (last 50), with D,
+	// R, N, the weight, the ratios, deep or not and the reason: why a run refused reads as numbers.
+	RecentDecisions []offload.WarmDecision `json:"recent_decisions,omitempty"`
+	GateAccept      int64                  `json:"gate_accept"`
+	GateRefuse      int64                  `json:"gate_refuse"`
+	GateReasons     map[string]int64       `json:"gate_refuse_reasons,omitempty"`
+	Panics          int64                  `json:"panics"`
+	// V3 is sweep v3: why cut attempts were refused, the rule and judge drops, and each cut's D/P and P/C.
+	V3 *offload.V3Stats `json:"v3,omitempty"`
+}
+
+func sweepWarmStats() *SweepWarmStats {
+	w := offload.SweepWarmCounters()
+	if !w.Any() {
+		return nil
+	}
+	return &SweepWarmStats{Fired: w.Fired, Asked: w.Asked, Held: w.Held, Failed: w.Failed, NotWorth: w.NotWorth,
+		NoBilledSize: w.NoBilled, ThreadBusy: w.ThreadBusy, ModelDeclined: w.ModelDeclined,
+		ConcurrencyFull: w.ConcurrencyFull, HeldExpired: w.HeldExpired, HeldShrunk: w.HeldShrunk, CarriedMerged: w.CarriedMerged, CarriedOverridden: w.CarriedOverridden, CarriedRefused: w.CarriedRefused, CarriedExpired: w.CarriedExpired, CarriedCapped: w.CarriedCapped, NotRegistered: w.NotRegistered, ThreadsFull: w.ThreadsFull, AlreadyAsked: w.AlreadyAsked,
+		NoInventory: w.NoInventory, GatePriceModel: w.GatePriceModel, PriceModelUnknown: w.PriceModelUnknown, Gates: w.Gates, TriggerRefusals: w.TriggerReasons, Recent: w.Recent, RecentDecisions: w.RecentDecisions, GateAccept: w.GateAccept,
+		GateRefuse: w.GateRefuse, GateReasons: w.Reasons, Panics: w.Panics, V3: v3StatsOrNil(w.V3)}
+}
+
+func v3StatsOrNil(v offload.V3Stats) *offload.V3Stats {
+	if !v.Any() {
+		return nil
+	}
+	return &v
 }
 
 // SweepDropStats is offload.SweepDropStats in /stats shape.
 type SweepDropStats struct {
-	Applied              int64   `json:"applied"`
-	AppliedCold          int64   `json:"applied_cold"`
-	AppliedChangedPrefix int64   `json:"applied_changed_prefix"`
-	ApplyDeclined        int64   `json:"apply_declined"`
-	Referenced           int64   `json:"referenced_later"`
-	Expanded             int64   `json:"expanded"`
-	FalseDrops           int64   `json:"false_drops"`
-	FalseDropRate        float64 `json:"false_drop_rate"`
-	ExpandEvents         int64   `json:"expand_events"`
-	ExpandTokens         int64   `json:"expand_tokens"`
+	Applied              int64 `json:"applied"`
+	AppliedCold          int64 `json:"applied_cold"`
+	AppliedChangedPrefix int64 `json:"applied_changed_prefix"`
+	// AppliedWarm is the warm path's share of Applied (#491). The warm false-drop rate is beside the
+	// cold one so the two can be read apart.
+	AppliedWarm       int64   `json:"applied_warm"`
+	FalseDropsWarm    int64   `json:"false_drops_warm"`
+	FalseDropRateWarm float64 `json:"false_drop_rate_warm"`
+	FalseDropRateCold float64 `json:"false_drop_rate_cold"`
+	ApplyDeclined     int64   `json:"apply_declined"`
+	Referenced        int64   `json:"referenced_later"`
+	Expanded          int64   `json:"expanded"`
+	FalseDrops        int64   `json:"false_drops"`
+	FalseDropRate     float64 `json:"false_drop_rate"`
+	ExpandEvents      int64   `json:"expand_events"`
+	ExpandTokens      int64   `json:"expand_tokens"`
 	// ApplyPanics counts recovered cold-apply panics; HeldStaleWrites older answers refused.
 	ApplyPanics int64 `json:"apply_panics"`
 	// Threads are the busiest threads by drops applied, most first.
@@ -1913,6 +2009,8 @@ func sweepDropStats() *SweepDropStats {
 	}
 	out := &SweepDropStats{Applied: o.Applied, AppliedCold: o.AppliedCold,
 		AppliedChangedPrefix: o.AppliedChangedPrefix, ApplyDeclined: o.ApplyDeclined,
+		AppliedWarm: o.AppliedWarm, FalseDropsWarm: o.FalseDropsWarm(),
+		FalseDropRateWarm: o.FalseDropRateWarm(), FalseDropRateCold: o.FalseDropRateCold(),
 		Referenced: o.Referenced, Expanded: o.Expanded, FalseDrops: o.FalseDrops(),
 		FalseDropRate: o.FalseDropRate(), ExpandEvents: o.ExpandEvents, ExpandTokens: o.ExpandTokens,
 		ApplyPanics: offload.SweepApplyPanics()}
@@ -1988,10 +2086,12 @@ func (k *Keeper) Stats() Stats {
 		SweepBatchFailed:                   bc.Failed,
 		SweepBatchFailedBy:                 bc.FailedBy,
 		SweepBatchSkipped:                  bc.Skipped,
+		SweepBatchByIndex:                  bc.ByIndex,
 		SweepBatchOverCap:                  bc.OverCap,
 		SweepBatchesLowered:                k.sweepBatchesLowered.Load(),
 		SweepDrops:                         sweepDropStats(),
 		SweepGates:                         sw.Gates,
+		SweepWarm:                          sweepWarmStats(),
 	}
 }
 

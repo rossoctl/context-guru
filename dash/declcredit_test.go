@@ -52,12 +52,11 @@ func seedCredit(t *testing.T, filteredTokens int) *DB {
 	return db
 }
 
-// The two halves are computed and reported apart. Adding them would be the whole mistake this
-// type exists to prevent: one is a component of ours rewriting a body, the other is the account
-// changing its own configuration, and only the first is a saving this product may claim.
-func TestDeclCreditKeepsTheMeasuredAndModelledHalvesApart(t *testing.T) {
+// The credit is the filter's measured saving and nothing else. What an account stops declaring on
+// its own is not credited anywhere (#583, #584), even when the fixture holds such a removal.
+func TestDeclCreditIsTheFiltersMeasuredSavingOnly(t *testing.T) {
 	db := seedCredit(t, 1000)
-	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, nil)
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,43 +69,8 @@ func TestDeclCreditKeepsTheMeasuredAndModelledHalvesApart(t *testing.T) {
 	if math.Abs(c.FilterUSD-0.003) > 1e-9 {
 		t.Errorf("filter USD = %g, want 0.003", c.FilterUSD)
 	}
-	// Modelled: mcp__gone__x, 800 tokens x the 30 requests of the six later sessions.
-	if c.SelfItems != 1 || c.SelfReads != 24_000 {
-		t.Errorf("self half = %d items / %d reads, want 1 / 24000", c.SelfItems, c.SelfReads)
-	}
-	if math.Abs(c.SelfUSD-0.0024) > 1e-9 {
-		t.Errorf("self USD = %g, want 0.0024", c.SelfUSD)
-	}
 	if !c.Priced {
 		t.Error("priced = false on a fully priced fixture")
-	}
-	// The one thing that must NOT exist: a field holding the two added together.
-	if c.FilterUSD == c.SelfUSD {
-		t.Error("the fixture cannot tell the halves apart; it is not testing the split")
-	}
-}
-
-// A name on the account's own removal list is already counted in the MEASURED half, so the
-// modelled half must drop it — and say that it did, rather than the row silently vanishing.
-func TestDeclCreditDropsWhatTheFilterIsAlreadyCreditedFor(t *testing.T) {
-	db := seedCredit(t, 1000)
-	// The list is passed VERBATIM as the configuration stores it, which for a whole MCP server is
-	// the bare `mcp__<server>` form and not the tool name.
-	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, []string{"mcp__gone__x"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.SelfItems != 0 || c.SelfReads != 0 || c.SelfUSD != 0 {
-		t.Errorf("self half = %d items / %d reads / $%g, want nothing: the filter is already "+
-			"credited for those tokens", c.SelfItems, c.SelfReads, c.SelfUSD)
-	}
-	if c.SelfOverlap != 1 {
-		t.Errorf("overlap = %d, want 1 — a dropped row must be counted, not silently absent",
-			c.SelfOverlap)
-	}
-	// The measured half is untouched by the overlap accounting.
-	if c.FilterReads != 30_000 {
-		t.Errorf("filter reads = %d, want 30000", c.FilterReads)
 	}
 }
 
@@ -114,7 +78,7 @@ func TestDeclCreditDropsWhatTheFilterIsAlreadyCreditedFor(t *testing.T) {
 // as zero, which is this dashboard's rule everywhere — a $0.00 saving is a claim.
 func TestDeclCreditWithoutRatesReportsTokensAndNoDollars(t *testing.T) {
 	db := seedCredit(t, 1000)
-	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, nil, nil)
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,8 +88,8 @@ func TestDeclCreditWithoutRatesReportsTokensAndNoDollars(t *testing.T) {
 	if c.FilterReads != 30_000 {
 		t.Errorf("filter reads = %d, want 30000 even unpriced", c.FilterReads)
 	}
-	if c.FilterUSD != 0 || c.SelfUSD != 0 {
-		t.Errorf("dollars were invented without rates: %g / %g", c.FilterUSD, c.SelfUSD)
+	if c.FilterUSD != 0 {
+		t.Errorf("dollars were invented without rates: %g", c.FilterUSD)
 	}
 }
 
@@ -134,7 +98,7 @@ func TestDeclCreditWithoutRatesReportsTokensAndNoDollars(t *testing.T) {
 func TestDeclCreditFlagsAnUnpricedModel(t *testing.T) {
 	db := seedCredit(t, 1000)
 	c, err := db.DeclCreditFor(Filter{Tenant: "t1"},
-		func(string) (modelinfo.Price, bool) { return modelinfo.Price{}, false }, nil)
+		func(string) (modelinfo.Price, bool) { return modelinfo.Price{}, false })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,33 +181,26 @@ func TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions(t *testing.T) {
 	}
 }
 
-// The filter half reaches TotalSavedUSD and the self half does not; both reach TotalReducedUSD.
-// This is the field-level statement of the whole argument, and it is asserted on the Overview
-// rather than on the credit, because the totals are where a wrong answer becomes a headline.
-func TestSetDeclCreditPutsEachHalfInTheRightTotal(t *testing.T) {
+// The filter's saving reaches TotalSavedUSD, which is where our savings live. This is asserted on
+// the Overview rather than on the credit, because the totals are where a wrong answer becomes a
+// headline.
+func TestSetDeclCreditAddsTheFilterSavingToTheTotal(t *testing.T) {
 	db := seedCredit(t, 1000)
 	o, err := db.Overview(Filter{Tenant: "t1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, baseReduced := o.TotalSavedUSD, o.TotalReducedUSD
-	if base != baseReduced {
-		t.Fatalf("the two totals differ before any credit is attached: %g vs %g", base, baseReduced)
-	}
-	o.SetDeclCredit(&DeclCredit{FilterUSD: 0.25, SelfUSD: 0.75, Priced: true})
+	base := o.TotalSavedUSD
+	o.SetDeclCredit(&DeclCredit{FilterUSD: 0.25, Priced: true})
 	if got := o.TotalSavedUSD - base; math.Abs(got-0.25) > 1e-9 {
-		t.Errorf("total_saved moved by %g, want exactly the filter's $0.25 — a self-removal is "+
-			"the account's own reduction and this total claims ours", got)
-	}
-	if got := o.TotalReducedUSD - baseReduced; math.Abs(got-1.00) > 1e-9 {
-		t.Errorf("total_reduced moved by %g, want $1.00 (both halves)", got)
+		t.Errorf("total_saved moved by %g, want exactly the filter's $0.25", got)
 	}
 	// And a nil credit changes nothing, so a deployment where the query fails reads a total that
 	// is short rather than one that is wrong.
-	saved, reduced := o.TotalSavedUSD, o.TotalReducedUSD
+	saved := o.TotalSavedUSD
 	o.SetDeclCredit(nil)
-	if o.TotalSavedUSD != saved || o.TotalReducedUSD != reduced {
-		t.Error("a nil credit moved a total")
+	if o.TotalSavedUSD != saved {
+		t.Error("a nil credit moved the total")
 	}
 }
 
@@ -302,7 +259,7 @@ func TestTheDeclarationFilterSavingIsDisjointFromCompactions(t *testing.T) {
 	}
 	// And the filter half does carry it, so this is a test of disjointness rather than of an
 	// empty fixture.
-	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, nil)
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,48 +304,43 @@ func TestTheWalkAndTheTotalAgreeOnHowManyAddendsThereAre(t *testing.T) {
 	}
 }
 
-// TestOverlapMatchesTheConfigVocabularyNotTheReportsIsTheF3 regression: the overlap exclusion
-// compared a REPORT name against a CONFIG list and so could never fire for two of the three shapes.
+// TestOverlapMatchesTheConfigVocabularyNotTheReports: SelfRemovals marks a row that the server-side
+// filter list already covers, so the savings-since-removal estimate (adaptToolsSaved) leaves it to the
+// filter. The comparison used to be a REPORT name against a CONFIG list and could never fire for two
+// of the three shapes.
 //
 // The config stores `skill__dataviz` and `mcp__plan`; a report row is named `dataviz` with kind
-// skill, or `mcp__plan__make_plan` with server `plan`. The old test passed a bare `mcp__gone__x`
-// and passed, because an exact tool name is the ONE shape where the two vocabularies coincide.
-//
-// Not a literal double count — declarations are captured pre-filter, so a filtered item keeps
-// appearing in later sessions and does not read as self-removed. It matters because it is a
-// documented honesty guarantee (the field's doc, the waterfall description, the tile's count) that
-// was false for exactly the class this change newly made filterable, and because the case it
-// guards is real: an account can remove something locally AND have it on the server list.
+// skill, or `mcp__plan__make_plan` with server `plan`. An exact tool name is the ONE shape where the
+// two vocabularies coincide.
 func TestOverlapMatchesTheConfigVocabularyNotTheReports(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		removed []string
-		want    int // expected SelfOverlap
+		want    bool // expected Overlap on the one removed row
 	}{
 		// A whole MCP SERVER, which is how the dashboard's own group switch writes it. `gone` is
 		// the server whose tools stopped being declared, so this must be recognised as overlap.
-		{"whole mcp server, config form", []string{"mcp__gone"}, 1},
+		{"whole mcp server, config form", []string{"mcp__gone"}, true},
 		// The exact tool name — the one shape that worked before.
-		{"exact mcp tool name", []string{"mcp__gone__x"}, 1},
+		{"exact mcp tool name", []string{"mcp__gone__x"}, true},
 		// A name in the REPORT's vocabulary is not what the config holds and must NOT match, or
 		// the exclusion starts firing on things the filter is not credited for.
-		{"bare server name is not a config entry", []string{"gone"}, 0},
-		{"an unrelated entry", []string{"mcp__other"}, 0},
+		{"bare server name is not a config entry", []string{"gone"}, false},
+		{"an unrelated entry", []string{"mcp__other"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := seedCredit(t, 1000)
-			c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, tc.removed)
+			rows, err := db.SelfRemovals(Filter{Tenant: "t1"}, flatPrice, tc.removed)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.SelfOverlap != tc.want {
-				t.Errorf("removed=%v gave overlap=%d items=%d, want overlap=%d\n"+
-					"The config and the report name things differently; the comparison has to be "+
-					"made in one vocabulary.", tc.removed, c.SelfOverlap, c.SelfItems, tc.want)
+			if len(rows) != 1 {
+				t.Fatalf("got %d removed rows, want 1: %+v", len(rows), rows)
 			}
-			// And the two are complementary: an excluded row leaves the modelled half.
-			if tc.want == 1 && c.SelfItems != 0 {
-				t.Errorf("overlap counted but the row is still credited: items=%d", c.SelfItems)
+			if rows[0].Overlap != tc.want {
+				t.Errorf("removed=%v gave overlap=%v, want %v\n"+
+					"The config and the report name things differently; the comparison has to be "+
+					"made in one vocabulary.", tc.removed, rows[0].Overlap, tc.want)
 			}
 		})
 	}
@@ -424,33 +376,202 @@ func TestOverlapFiresForASkillInTheConfigForm(t *testing.T) {
 	if err := w.write(msgs); err != nil {
 		t.Fatal(err)
 	}
-	// With nothing on the list it is credited as the account's own removal.
-	base, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, nil)
+	// With nothing on the list the skill is a removal of the account's own.
+	base, err := db.SelfRemovals(Filter{Tenant: "t1"}, flatPrice, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if base.SelfItems != 1 {
-		t.Fatalf("the skill was not detected as self-removed at all (items=%d); the fixture is "+
-			"not exercising the overlap path", base.SelfItems)
+	if len(base) != 1 || base[0].Overlap {
+		t.Fatalf("the skill was not detected as a plain removal (rows=%+v); the fixture is "+
+			"not exercising the overlap path", base)
 	}
-	// With the CONFIG form on the list it is overlap, not a second credit.
-	got, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, []string{"skill__dataviz"})
+	// With the CONFIG form on the list it is overlap.
+	got, err := db.SelfRemovals(Filter{Tenant: "t1"}, flatPrice, []string{"skill__dataviz"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SelfOverlap != 1 || got.SelfItems != 0 {
-		t.Errorf("skill__dataviz on the list gave overlap=%d items=%d, want 1 and 0.\n"+
-			"This is the shape the dashboard actually writes, and the exclusion has to see it.",
-			got.SelfOverlap, got.SelfItems)
+	if len(got) != 1 || !got[0].Overlap {
+		t.Errorf("skill__dataviz on the list gave %+v, want one row marked overlap.\n"+
+			"This is the shape the dashboard actually writes, and the exclusion has to see it.", got)
 	}
 	// The bare name is the REPORT's vocabulary and is not what a config holds.
-	bare, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice, []string{"dataviz"})
+	bare, err := db.SelfRemovals(Filter{Tenant: "t1"}, flatPrice, []string{"dataviz"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bare.SelfOverlap != 0 {
-		t.Errorf("a bare `dataviz` matched (overlap=%d); the config stores skill__dataviz and "+
-			"matching the bare form would exclude rows the filter is not credited for",
-			bare.SelfOverlap)
+	if len(bare) != 1 || bare[0].Overlap {
+		t.Errorf("a bare `dataviz` matched (rows=%+v); the config stores skill__dataviz and "+
+			"matching the bare form would exclude rows the filter is not credited for", bare)
+	}
+}
+
+// The accountant library prices each toolfilter removal, so on a request it priced the removal is already
+// in baseline_cost_usd and in the net saving. The measured credit must not add it a second time
+// (context-guru#768 B2: one 1000-token removal gave a row of $0.0001 and a total of $0.0002). A request it
+// could not price, and one written before the switch, have nothing in the baseline: they keep the credit.
+func TestDeclCreditSkipsRequestsTheAccountantPriced(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(i int, pricedBy string) *Event {
+		e := mkEvent(day(0)+int64(i), "s1", "claude", 100, 90)
+		e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, 1000
+		e.Components = append(e.Components, CompRow{Component: "toolfilter", Kind: KindEnvelope, Acted: true,
+			Mutated: true, PricedBy: pricedBy})
+		return e
+	}
+	// 1: the library priced it. 2: it could not (no saving booked). 3: a row from before the switch.
+	if err := db.insertBatch([]*Event{mk(1, PricedByAccountant), mk(2, PricedByNone), mk(3, "")}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := db.DeclCreditFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FilterRequests != 3 || c.FilterReads != 3000 {
+		t.Fatalf("filter half = %d requests / %d reads, want 3 / 3000 (the priced request keeps its facts and adds no dollars)",
+			c.FilterRequests, c.FilterReads)
+	}
+	// 2,000 cache-read tokens at flatPrice's $0.1/MTok.
+	if math.Abs(c.FilterUSD-0.0002) > 1e-9 {
+		t.Errorf("filter USD = %g, want 0.0002", c.FilterUSD)
+	}
+}
+
+// The accountant's pricing drops only the DOLLARS of a request's filter credit. The requests, the tokens
+// the filter did not send and the first date are facts, so they stay (context-guru#911). The items of
+// /api/adapt/tools must then agree with the total: both add no dollars for the same rows.
+func TestFilterCreditKeepsFactsAndSkipsDollarsForAccountantPricedRows(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(day(0)+int64(i), "s1", "claude", 100, 90)
+		e.TenantID, e.Tools, e.FilteredDeclTokens, e.DeclDigest = "t1", 2, 5000, "d1"
+		e.Components = append(e.Components, CompRow{Component: "toolfilter", Kind: KindEnvelope, Acted: true,
+			Mutated: true, PricedBy: PricedByAccountant})
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: day(0), inv: &Inventory{Digest: "d1",
+		UseFingerprint: 1, Decls: []Decl{{Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 5000}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.DeclFilterSavings(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Requests != 10 || got.Reads != 50000 || got.Since != day(0) {
+		t.Errorf("facts = %d requests / %d reads / since %d, want 10 / 50000 / %d", got.Requests, got.Reads, got.Since, day(0))
+	}
+	if got.USD != 0 {
+		t.Errorf("USD = %g, want 0: the accountant booked these tokens", got.USD)
+	}
+	doc, err := db.ToolFilterDocFor(Filter{Tenant: "t1"}, flatPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Realized == nil || doc.Realized.Requests != 10 {
+		t.Errorf("Realized = %+v, want the measured block with 10 requests", doc.Realized)
+	}
+	saved, err := db.adaptToolsSaved(Filter{Tenant: "t1"}, flatPrice, []string{"mcp__srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Filter.Requests != 10 || saved.Filter.USD != 0 {
+		t.Errorf("saved.filter = %d requests / $%g, want 10 / 0", saved.Filter.Requests, saved.Filter.USD)
+	}
+	sum := 0.0
+	for _, it := range saved.Filter.Items {
+		sum += it.USD
+	}
+	if sum > saved.Filter.USD+1e-12 {
+		t.Errorf("items sum to $%g, more than the total $%g: %+v", sum, saved.Filter.USD, saved.Filter.Items)
+	}
+}
+
+// Review 927 round 1, finding 1. A request whose figure was held out (estimate_held = 1, #915) books
+// nothing in the baseline, filter part included. The measured credit owns that request's filter dollars:
+// it adds them, and the totals do not count the request. A request the accountant booked still adds none.
+func TestFilterCreditKeepsDollarsForAHeldEstimatedRequest(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 10; i++ {
+		e := mkEvent(day(0)+int64(i), "s1", "claude", 100, 90)
+		e.TenantID, e.Tools, e.FilteredDeclTokens, e.DeclDigest = "t1", 2, 5000, "d1"
+		e.Components = append(e.Components, CompRow{Component: "toolfilter", Kind: KindEnvelope, Acted: true,
+			Mutated: true, PricedBy: PricedByAccountant})
+		e.BaselineCostUSD = e.CostUSD
+		if i < 4 { // the first four are estimated requests whose figure was held out
+			e.PriceEstimated, e.EstimateHeld, e.EstimatedSavedUSD = true, true, 0.05
+			e.BaselineCostUSD = e.CostUSD
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: day(0), inv: &Inventory{Digest: "d1",
+		UseFingerprint: 1, Decls: []Decl{{Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 5000}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	one, ok := flatPrice("claude")
+	if !ok {
+		t.Fatal("flatPrice has no price")
+	}
+	want := 4 * 5000 * one.CacheRead // mkEvent rows read the cache
+	got, err := db.DeclFilterSavings(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Requests != 10 || got.Reads != 50000 {
+		t.Errorf("facts = %d requests / %d reads, want 10 / 50000", got.Requests, got.Reads)
+	}
+	if !accNear(got.USD, want) || want == 0 {
+		t.Errorf("USD = %g, want %g: only the 4 held requests add dollars", got.USD, want)
+	}
+	doc, err := db.ToolFilterDocFor(Filter{Tenant: "t1"}, flatPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Realized == nil || doc.Realized.Requests != 10 || !accNear(doc.Realized.USD, want) {
+		t.Errorf("Realized = %+v, want 10 requests and $%g", doc.Realized, want)
+	}
+	saved, err := db.adaptToolsSaved(Filter{Tenant: "t1"}, flatPrice, []string{"mcp__srv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Filter.Requests != 10 || !accNear(saved.Filter.USD, want) {
+		t.Errorf("saved.filter = %d requests / $%g, want 10 / $%g", saved.Filter.Requests, saved.Filter.USD, want)
+	}
+	// The totals hold the request out: no baseline delta on any of these rows.
+	o, err := db.Overview(Filter{TenantAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := o.BaselineCostUSD - o.CostUSD; !accNear(d, 0) || o.EstimatedRequests != 4 {
+		t.Errorf("baseline delta %g, held requests %d, want 0 and 4", d, o.EstimatedRequests)
+	}
+}
+
+// TestSelfRemovalsWithoutRatesLeavesTheRowUnpriced. A deployment with no pricer passes a nil price
+// function (API.priceFn). The savings-since-removal estimate (adaptToolsSaved) reaches
+// SelfRemovals with that nil, and the dollars are then unknown, not zero and not a panic.
+func TestSelfRemovalsWithoutRatesLeavesTheRowUnpriced(t *testing.T) {
+	db := seedCredit(t, 1000)
+	rows, err := db.SelfRemovals(Filter{Tenant: "t1"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d removed rows, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].Priced || rows[0].AvoidedUSD != 0 {
+		t.Errorf("priced=%v avoidedUSD=%g without rates, want unpriced and 0",
+			rows[0].Priced, rows[0].AvoidedUSD)
+	}
+	if rows[0].AvoidedReads == 0 {
+		t.Error("the token count is known without rates and must still stand")
 	}
 }

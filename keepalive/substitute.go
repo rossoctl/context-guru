@@ -3,6 +3,7 @@ package keepalive
 import (
 	"log/slog"
 	"math"
+	"net/http"
 	"time"
 
 	"github.com/rossoctl/context-guru/components"
@@ -218,7 +219,7 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
 		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output),
 		CacheWrite1h: int64(res.CacheWrite1h)}
-	cost := k.recordSubstitutePing(j, res.Model, u, ms, startedAt, 0)
+	cost := k.recordSubstitutePing(j, res.Model, u, ms, startedAt, 0, res.Header)
 	k.summarySubstituted.Add(1)
 	return cost
 }
@@ -228,7 +229,10 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 //
 // answerUSD is what the answer cost beyond the ping's own read (0 for the summary): it is carried on
 // the ping row in its own field.
-func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float64, startedAt time.Time, answerUSD float64) float64 {
+//
+// hdr is the substitute call's response headers, passed through to the report as record1 does for
+// an ordinary ping (#1016). The keeper reads nothing from them; nil when the call had none.
+func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float64, startedAt time.Time, answerUSD float64, hdr http.Header) float64 {
 	e := j.e
 	k.mu.Lock()
 	provider, route, preset, agent := e.provider, e.route, e.preset, e.agent
@@ -245,8 +249,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	// Same clock, same gate, same reason as record1: a substitute call reads the SAME cached
 	// prefix a ping would (it is built from the byte-identical forwarded body — see
 	// offload.registerKeepAliveCandidate), so it refreshes the SAME liveness clock
-	// cache_state: pre_expiry reads, and only when it actually read something.
-	if u.CacheRead > 0 {
+	// cache_state: pre_expiry reads, and only when it read or wrote something: a write re-created
+	// the entry and started a fresh lifetime (#580).
+	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		j.touch(provider, startedAt.UnixMilli())
 	}
 	var cost float64
@@ -258,7 +263,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	k.mu.Lock()
 	e.spent += cost
 	e.refreshed = u.CacheRead
-	if u.CacheRead > 0 {
+	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		e.refreshedAt = startedAt
 	}
 	k.mu.Unlock()
@@ -282,6 +287,8 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 			// an ordinary ping would have, so reporting the ping's own budget here would misdescribe
 			// what was actually requested.
 			MaxTokens: 0,
+			Window:    j.gapStart,
+			Header:    hdr,
 		})
 	}
 	return cost
@@ -469,7 +476,7 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	}
 	u := Usage{FreshInput: int64(res.FreshInput), CacheRead: int64(res.CacheRead),
 		CacheWrite: int64(res.CacheWrite), Output: int64(res.Output), CacheWrite1h: int64(res.CacheWrite1h)}
-	spent := k.recordSubstitutePing(j, res.Model, u, ms, start, k.sweepAnswerUSD(j, res.Model, u))
+	spent := k.recordSubstitutePing(j, res.Model, u, ms, start, k.sweepAnswerUSD(j, res.Model, u), res.Header)
 	k.sweepSubstituted.Add(1)
 	// THE guard, as in fire(): a question that wrote more than it read did not match the prefix. The
 	// cache is refreshed by the write, but a repeat would pay the same mismatch, so stop.

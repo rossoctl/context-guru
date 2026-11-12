@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // The dashboard's heavy endpoints were rewritten for speed (id-sliced concurrent aggregates, one
@@ -53,6 +54,13 @@ func goldenAPIAt(t *testing.T, path string) *API {
 	t.Helper()
 	a, rec := newTestAPI(t, Options{CaptureContent: true, DBPath: path})
 	a.SetPricer(stubPrices{})
+	// The fixture's prefixes are 20k-45k and its rows state no wait cause. The shipped general floor is
+	// 80k, so the fixture pins the account's floor at 20k to keep the replay columns non-empty.
+	a.SetWaitPolicy(func(string) keepalive.Policy {
+		p := DefaultWaitPolicy(0)
+		p.MinPrefixTokens = 20000
+		return p
+	})
 	models := []string{"m-sonnet", "m-opus", "m-unpriced"}
 	var evs []*Event
 	var msgs []invMsg

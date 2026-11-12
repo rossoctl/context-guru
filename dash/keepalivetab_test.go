@@ -106,17 +106,15 @@ func TestPingRowsStayOutOfAgentAggregates(t *testing.T) {
 	// The keep-alive fields and the two totals they feed are the ONLY keys allowed to differ.
 	mayMove := map[string]bool{
 		"keepalive_pings": true, "keepalive_ping_usd": true, "keepalive_net_usd": true,
+		// The token form of keepalive_ping_usd (#998): the pings' own billed tokens.
+		"keepalive_ping_tokens": true, "keepalive_ping_output_tokens": true,
 		// The credit and its count move too, and that is the correction rather than a leak: a
 		// credit is only booked for a gap a ping row demonstrably covered (kaSaved), so the
 		// fixture WITHOUT pings has a credited row with no ping anywhere on its session — the
 		// impossible state that was being credited — and reads $0. Deleting the pings deletes
 		// the evidence, so it has to delete the credit.
 		"keepalive_saved_usd": true, "keepalive_misses_avoided": true,
-		// total_reduced_usd is total_saved plus the account's own removals, so it moves with the
-		// total it is built on. Allowed, and pinned to the SAME delta below rather than merely
-		// excused: if it ever moved by a different amount, the ping spend would be reaching one
-		// total and not the other.
-		"total_saved_usd": true, "total_reduced_usd": true,
+		"total_saved_usd": true,
 		// The waterfall carries the ping SPEND as a step of its own, which is the whole point of
 		// having it; its reconciliation is TestTheWaterfallReconcilesWithTotalSaved.
 		"waterfall": true,
@@ -138,10 +136,6 @@ func TestPingRowsStayOutOfAgentAggregates(t *testing.T) {
 	// keep-alive's NET. Both halves of that net move here — adding the ping rows adds their cost
 	// AND makes the credit reachable — so the assertion is the decomposition below rather than
 	// the ping spend alone. That is what fails on `+= SavedUSD`.
-	if got, want := b.TotalReducedUSD-a.TotalReducedUSD, b.TotalSavedUSD-a.TotalSavedUSD; math.Abs(got-want) > 1e-9 {
-		t.Errorf("total_reduced moved by %v while total_saved moved by %v: the ping spend is "+
-			"reaching one total and not the other", got, want)
-	}
 	if got, want := b.TotalSavedUSD-a.TotalSavedUSD, b.KeepAliveNetUSD-a.KeepAliveNetUSD; math.Abs(got-want) > 1e-9 {
 		t.Errorf("total_saved moved by %.6f, want exactly the change in keepalive_net_usd %.6f",
 			got, want)
@@ -303,11 +297,7 @@ func TestTheWaterfallReconcilesWithTotalSaved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The declaration-removal credit is attached with BOTH halves non-zero and DIFFERENT, which
-	// is the only configuration that can tell the two totals apart: equal halves, or a zero in
-	// either, reconcile even if the code puts the wrong one in the wrong total.
-	o.SetDeclCredit(&DeclCredit{FilterUSD: 0.11, FilterReads: 4000, FilterRequests: 7,
-		SelfUSD: 0.37, SelfReads: 9000, SelfItems: 2, SelfOverlap: 1, Priced: true})
+	o.SetDeclCredit(&DeclCredit{FilterUSD: 0.11, FilterReads: 4000, FilterRequests: 7, Priced: true})
 	steps := map[string]float64{}
 	for _, s := range o.waterfall() {
 		steps[s.Key] = s.DeltaUSD
@@ -322,16 +312,11 @@ func TestTheWaterfallReconcilesWithTotalSaved(t *testing.T) {
 		t.Errorf("the walk does not reconcile: steps sum to %.4f, total_saved is %.4f",
 			sum, steps["total_saved"])
 	}
-	// And the second total is the first plus the account's OWN removals — the one step that is
-	// deliberately outside total_saved, because those tokens are not ours.
-	if got := steps["total_reduced"] - steps["total_saved"]; math.Abs(got-0.37) > 0.005 {
-		t.Errorf("total_reduced − total_saved = %.4f, want the $0.37 the account removed itself; "+
-			"a self-removal has leaked into the figure that claims our credit, or is missing from "+
-			"the one that does not", got)
-	}
-	if math.Abs(sum-steps["total_reduced"]) < 0.005 {
-		t.Error("the two totals are equal: the self-removal half is reaching neither total, or " +
-			"both")
+	// What an account removes on its own is not a step at all (#583, #584).
+	for _, gone := range []string{"self_removed", "total_reduced"} {
+		if _, ok := steps[gone]; ok {
+			t.Errorf("the waterfall still has a %q step", gone)
+		}
 	}
 }
 
@@ -889,9 +874,10 @@ func smallPrefix(e *Event) *Event {
 // The replay gate is the request path's gate. A drift here is a calculator modelling a policy
 // nobody runs, which is the whole of F5.
 func TestTheReplayGateMatchesTheShippedPolicy(t *testing.T) {
-	if kaGateMinPrefix != 20000 {
-		t.Errorf("kaGateMinPrefix = %d; config.DefaultKeepAliveMinPrefix is 20000 and the replay "+
-			"has to gate on what the request path gates on", kaGateMinPrefix)
+	if kaGateMinPrefix != 80000 || kaGateToolWaitMinPrefix != 20000 {
+		t.Errorf("replay floors = %d / %d; config.DefaultKeepAliveMinPrefix is 80000 and "+
+			"DefaultKeepAliveToolWaitMinPrefix is 20000, and the replay "+
+			"has to gate on what the request path gates on", kaGateMinPrefix, kaGateToolWaitMinPrefix)
 	}
 }
 
@@ -1298,4 +1284,107 @@ func TestMedianPingUSDEmptyModelKeepsTheOldWriteMultiple(t *testing.T) {
 	if math.Abs(got-0.10) > 1e-9 {
 		t.Errorf("median ping with no model = %v, want 0.10", got)
 	}
+}
+
+// A ping that found the entry gone re-created it: it WROTE, it did not read. The accountant library
+// credits the rescue on the next request, because that request read the entry the ping wrote
+// (accountant case keepalive/ping-miss-restarts-clock/5m). The reachability gate asked for
+// cache_read > 0 on the ping, so it zeroed that credit and kept the ping's cost: the session read
+// -$0.01146 where the hand value is -$0.00094, 12x too negative (context-guru#768 B4).
+func TestTheGateKeepsTheRescueOfAPingThatWroteTheEntry(t *testing.T) {
+	rescued := kaCredit(1_100_000, "s1", 0.01045695)
+	rescued.Components = []CompRow{{Component: "mask", PricedBy: PricedByAccountant}}
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "s1", 0.10),
+		kaPing(1_050_000, "s1", 0.01145625, 0, 3051), // the entry had expired: the ping wrote it again
+		rescued,
+	)
+	rows, _, err := fx.db.Sessions(Filter{TenantAll: true}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *SessionRow
+	for _, r := range rows {
+		if r.SessionID == "s1" {
+			got = r
+		}
+	}
+	if got == nil {
+		t.Fatal("session s1 is missing from the list")
+	}
+	if math.Abs(got.KeepAliveSavedUSD-0.01045695) > 1e-9 {
+		t.Errorf("saved = %.6f, want 0.010457: the rescue the library credited was zeroed by the gate", got.KeepAliveSavedUSD)
+	}
+	if want := 0.01045695 - 0.01145625; math.Abs(got.KeepAliveNetUSD-want) > 1e-9 {
+		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
+	}
+}
+
+// A keep-alive-only setup stores no component rows, so the rescue the library credited has nothing for the
+// gate to find and was zeroed by the strict probe: the original B4 symptom, left in the case the keep-alive
+// is mostly used for (context-guru#912). The request itself must say the library priced it.
+func TestTheGateKeepsTheRescueOfALibraryPricedRequestWithNoComponentRows(t *testing.T) {
+	rescued := kaCredit(1_100_000, "s1", 0.01045695)
+	rescued.Components = nil
+	rescued.AccountantPriced = true
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "s1", 0.10),
+		kaPing(1_050_000, "s1", 0.01145625, 0, 3051), // the entry had expired: the ping wrote it again
+		rescued,
+	)
+	got := kaSession(t, fx, "s1")
+	if math.Abs(got.KeepAliveSavedUSD-0.01045695) > 1e-9 {
+		t.Errorf("saved = %.6f, want 0.010457: the rescue the library credited was zeroed by the gate", got.KeepAliveSavedUSD)
+	}
+	if want := 0.01045695 - 0.01145625; math.Abs(got.KeepAliveNetUSD-want) > 1e-9 {
+		t.Errorf("net = %.6f, want %.6f", got.KeepAliveNetUSD, want)
+	}
+}
+
+// The library's decision is trusted for a library-priced request even when the SQL model finds no ping that
+// reached the entry, and a row without the marker keeps the SQL gate (context-guru#919).
+func TestTheGateTrustsTheLibraryForPricedRowsAndKeepsSQLForLegacyRows(t *testing.T) {
+	priced := kaCredit(1_100_000, "lib", 0.01)
+	priced.AccountantPriced = true
+	legacy := kaCredit(1_100_000, "old", 0.01)
+	fx := newKAFixture(t,
+		kaAgent(1_000_000, "lib", 0.10), kaPing(1_050_000, "lib", 0.001, 0, 0), priced, // the ping read and wrote nothing
+		kaAgent(1_000_000, "old", 0.10), kaPing(1_050_000, "old", 0.001, 0, 0), legacy,
+	)
+	if got := kaSession(t, fx, "lib"); math.Abs(got.KeepAliveSavedUSD-0.01) > 1e-9 {
+		t.Errorf("library-priced saved = %.6f, want 0.01: the stored decision is trusted", got.KeepAliveSavedUSD)
+	}
+	if got := kaSession(t, fx, "old"); got.KeepAliveSavedUSD != 0 {
+		t.Errorf("legacy saved = %.6f, want 0: the SQL gate still judges a row with no marker", got.KeepAliveSavedUSD)
+	}
+}
+
+// The credited-row guard must come before every probe (a 197x slowdown, see
+// kaSavedGate), so the marker test sits inside the same AND after `col > 0`.
+func TestKaSavedGateKeepsTheCreditGuardFirst(t *testing.T) {
+	g := kaSaved("r.")
+	if !strings.HasPrefix(g, "(CASE WHEN r.keepalive_saved_usd > 0 AND (r.acc_priced = 1 OR ") {
+		t.Fatalf("the guard order changed: %.120s", g)
+	}
+	db := openTestDB(t)
+	// The probe must still seek the ping by its session index, and the marker must be a plain column read.
+	plan := explainPlan(t, db, "SELECT SUM("+g+") FROM requests r WHERE r.ts >= ?", []any{0})
+	if !strings.Contains(strings.Join(plan, "\n"), "idx_requests_tenant_session") {
+		t.Errorf("the ping probe no longer seeks idx_requests_tenant_session:\n%v", plan)
+	}
+}
+
+func kaSession(t *testing.T, fx *kaFixture, id string) *SessionRow {
+	t.Helper()
+	rows, _, err := fx.db.Sessions(Filter{TenantAll: true}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.SessionID == id {
+			return r
+		}
+	}
+	t.Fatalf("session %s is missing from the list", id)
+	return nil
 }

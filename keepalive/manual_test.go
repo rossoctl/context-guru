@@ -219,6 +219,32 @@ func TestPingNowCreditsNothingWhenThePingMissed(t *testing.T) {
 	}
 }
 
+// A manual ping that read nothing but wrote re-created the entry (#580): the refresh clock moves to
+// it, the automatic schedule does not restart, and there is still no rewrite credit.
+func TestPingNowMovesTheRefreshClockWhenThePingReWrote(t *testing.T) {
+	k, _, clock := manualKeeper(t)
+	k.mu.Lock()
+	before := k.live[sess1.id()].refreshedAt
+	k.mu.Unlock()
+	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, nil
+	})
+	at := clock.advance(20 * time.Second)
+	if _, err := k.PingNow(ManualRequest{Key: sess1, RewriteUSD: 0.18}); err != nil {
+		t.Fatal(err)
+	}
+	k.mu.Lock()
+	e := k.live[sess1.id()]
+	got, started := e.refreshedAt, e.startedAt
+	k.mu.Unlock()
+	if !got.Equal(at) || got.Equal(before) {
+		t.Errorf("refreshedAt = %v after a manual ping that re-wrote, want its start %v (was %v)", got, at, before)
+	}
+	if started.Equal(at) {
+		t.Errorf("a manual ping that only wrote restarted the automatic schedule at %v", started)
+	}
+}
+
 // The upstream failing is an error to the caller, and the audit row still records the attempt's status.
 func TestPingNowReportsAnUpstreamTransportFailure(t *testing.T) {
 	k, sink, _ := manualKeeper(t)
@@ -263,6 +289,79 @@ func TestPingStatesAgreeWithPingNowNotHeld(t *testing.T) {
 	}
 	if _, err := k2.PingNow(ManualRequest{Key: sess1}); errors.Is(err, ErrNotHeld) {
 		t.Errorf("PingNow on a stopped thread = %v, want a ping to be sent", err)
+	}
+}
+
+// The Window of every ping of one idle gap is the start of the last REAL request, whichever path
+// sent the ping and however often it has moved the entry's own clock.
+func TestPingReportsCarryTheWindowTheyServed(t *testing.T) {
+	k, sink, clock := manualKeeper(t)
+	gap := clock.now()
+	clock.advance(100 * time.Second)
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
+		t.Fatalf("scheduled ping fired %d times", n)
+	}
+	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
+		t.Fatalf("second scheduled ping fired %d times", n)
+	}
+	reps := sink.all()
+	if len(reps) != 3 {
+		t.Fatalf("reports = %d, want 3", len(reps))
+	}
+	if gap.IsZero() {
+		t.Fatal("test clock is zero")
+	}
+	for i, r := range reps {
+		if !r.Window.Equal(gap) {
+			t.Errorf("report %d (manual=%v) Window = %v, want the real request's start %v", i, r.Manual, r.Window, gap)
+		}
+	}
+}
+
+// A new real request opens a new gap: the next ping's Window is that request's start.
+func TestPingWindowFollowsTheNewestRealRequest(t *testing.T) {
+	k, sink, clock := manualKeeper(t)
+	first := clock.now()
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("fired %d", n)
+	}
+	second := clock.advance(10 * time.Second)
+	recordWithSink(k, sink, sess1, second)
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("fired %d", n)
+	}
+	reps := sink.all()
+	if len(reps) != 2 || !reps[0].Window.Equal(first) || !reps[1].Window.Equal(second) || reps[0].Window.Equal(reps[1].Window) {
+		t.Fatalf("windows %+v", reps)
+	}
+}
+
+// A manual-only hold never moves its clock on a press, and its Window stays the real request's start.
+func TestManualHoldPressKeepsTheGapWindow(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}}})
+	sink := &reportSink{}
+	at := clock.now()
+	pol := offPolicy
+	pol.ManualHold = true
+	for _, d := range []time.Duration{-time.Second, 0} {
+		k.Record(Record{Key: sess1, StartedAt: at.Add(d), Body: []byte(kaBody), Provider: "anthropic",
+			Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200},
+			UsageOK: true, Policy: pol, Header: kaHeader(), Emitter: sink, Hold: fakeOf(k).hold(sess1)})
+	}
+	clock.advance(60 * time.Second)
+	for i := 0; i < 2; i++ {
+		if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Second}); err != nil {
+			t.Fatal(err)
+		}
+		clock.advance(60 * time.Second)
+	}
+	reps := sink.all()
+	if len(reps) != 2 || !reps[0].Window.Equal(at) || !reps[1].Window.Equal(at) {
+		t.Fatalf("windows %+v, want both %v", reps, at)
 	}
 }
 

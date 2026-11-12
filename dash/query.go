@@ -193,18 +193,24 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
 	r.project, r.source,
 	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
-	r.session_alias,
+	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held, r.estimated_saved_low_usd,
 	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
-	r.compaction_point, r.compaction_point_source, r.backend`
+	r.compaction_point, r.compaction_point_source, r.defer_cost_usd,
+	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, r.restored_tokens, ` + requestTokenSelect + `, r.backend`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive, agentComp, manual int
+	var byp, ca, stream, keepAlive, agentComp, manual, estimated, accPriced, held int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
-	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
+	var u5, u7 sql.NullFloat64
+	var r5, r7 sql.NullInt64
+	var s5, s7 sql.NullString
+	var authSub int
+	err := rows.Scan(append([]any{&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
@@ -220,10 +226,17 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
 		&e.Project, &e.Source,
 		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
-		&e.SessionAlias,
+		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held, &e.EstimatedSavedLowUSD,
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
-		&e.CompactionPoint, &e.CompactionPointSource, &e.Backend)
+		&e.CompactionPoint, &e.CompactionPointSource, &e.DeferCostUSD,
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm, &e.RestoredTokens}, append(requestTokenDest(&e.AccTokens), &e.Backend)...)...)
+	e.AuthSubscription = authSub != 0
+	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
+		e.Limits = &l
+	}
+	e.PriceEstimated, e.AccountantPriced = estimated != 0, accPriced != 0
+	e.EstimateHeld = held != 0
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
@@ -310,7 +323,8 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events FROM request_components
+		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events,
+		saved_first_usd, saved_replay_usd, priced_by, `+strings.Join(compTokenColumns, ", ")+` FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -320,9 +334,9 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		var c CompRow
 		var a, m, rv, sk int
 		var gates, events string
-		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
+		if err := crows.Scan(append([]any{&c.Component, &c.Kind, &a, &m, &rv, &sk,
 			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err,
-			&gates, &events); err != nil {
+			&gates, &events, &c.SavedFirstUSD, &c.SavedReplayUSD, &c.PricedBy}, c.Tokens.dest()...)...); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
@@ -593,6 +607,79 @@ type SessionRow struct {
 	KeepAlivePingUSD  float64 `json:"keepalive_ping_usd"`
 	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
+	// The same session in tokens, for a Claude subscription (#1023). See sessionTokens.
+	SessionTokens
+}
+
+// SessionTokens is one session's figures in tokens, by tier (#1023). A subscription is limited in
+// tokens, so the Sessions tab shows these there in place of the dollars. The tiers are never added.
+//
+//   - Tokens is the accountant's figure for the session, less the keep-alive rescue: the token form of
+//     saved_usd. It also has the split, the 1-hour head and the ended-change break, which the dollar
+//     row has no column for.
+//   - KeepAliveTokens is the accountant's own keep-alive rescue figure (the tok_ka columns). It is a
+//     different measurement from keepalive_saved_usd, which is the legacy credit gated on read
+//     (kaSavedSince): the two can disagree on a row. Tokens and KeepAliveTokens add up to the
+//     tok_total columns.
+//   - KeepAlivePingTokens is what the cache strategy's pings paid, in billed tokens: the token form of
+//     keepalive_ping_usd. It is never added into a cost: the view shows it on its own line.
+//   - UsedTokens is the session's agent requests' billed input tokens: the token form of cost_usd.
+//     context-guru's own model calls (cg_llm_cost_usd) have no token form here.
+//   - TokensUnmeasured counts the agent requests the library did not price (acc_priced = 0).
+type SessionTokens struct {
+	Tokens              TokenFlow  `json:"tokens"`
+	KeepAliveTokens     TokenFlow  `json:"keepalive_tokens"`
+	KeepAlivePingTokens TierTokens `json:"keepalive_ping_tokens"`
+	UsedTokens          TierTokens `json:"used_tokens"`
+	TokensUnmeasured    int64      `json:"tokens_unmeasured_requests"`
+}
+
+// sessionTokensQuery sums the token figures of the given sessions, over the same filter as the
+// session list, with the pings in scope. It does not widen the list's own aggregate: it reads only
+// the rows of the sessions on the page (r.session_id IN, on idx_requests_session or
+// idx_requests_tenant_session), so its cost follows one page of sessions, not the window.
+func sessionTokensQuery(f Filter, ids []string) (string, []any) {
+	f = withKeepAlive(f)
+	f.SessionIn = ids
+	cond, args := f.where()
+	agent := func(expr string) string {
+		return `COALESCE(SUM(CASE WHEN r.keepalive = 0 THEN ` + expr + ` ELSE 0 END),0)`
+	}
+	return `SELECT r.tenant_id, r.session_id, ` + tokenSumTerms(totalColumns) + `, ` + tokenSumTerms(flowColumns("tok_ka")) + `,
+		` + accTokenTailTerms + `,
+		` + agent("r.fresh_input") + `, ` + agent("r.cache_read") + `,
+		` + agent("MAX(r.cache_write - r.cache_write_1h, 0)") + `, ` + agent("r.cache_write_1h") + `
+		FROM requests r WHERE ` + cond + ` GROUP BY 1, 2`, args
+}
+
+// sessionTokens answers SessionTokens for each of the given sessions, keyed by tenant and session id.
+func (d *DB) sessionTokens(f Filter, ids []string) (map[sessKey]SessionTokens, error) {
+	q, args := sessionTokensQuery(f, ids)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[sessKey]SessionTokens{}
+	for rows.Next() {
+		var id sessKey
+		var agg accTokensAgg
+		var used TierTokens
+		dest := append([]any{&id.tenant, &id.session}, agg.dest(16)...)
+		dest = append(dest, &used.Input, &used.CacheRead, &used.CacheWrite5m, &used.CacheWrite1h)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		total, ka := flowOf(agg.sums[:8]), flowOf(agg.sums[8:])
+		out[id] = SessionTokens{
+			Tokens:              total.less(ka),
+			KeepAliveTokens:     ka,
+			KeepAlivePingTokens: agg.ping,
+			UsedTokens:          used,
+			TokensUnmeasured:    agg.unmeasured,
+		}
+	}
+	return out, rows.Err()
 }
 
 // cacheTTLMs is one provider prompt-cache TTL, the horizon inside which a session's next
@@ -634,13 +721,13 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 	if byCost {
 		order = "SUM(r.cost_usd) DESC, MAX(r.ts) DESC"
 	}
-	q := `SELECT r.session_id, GROUP_CONCAT(DISTINCT r.tenant_id), COUNT(*), MIN(r.ts), MAX(r.ts),
+	q := `SELECT r.session_id, r.tenant_id, COUNT(*), MIN(r.ts), MAX(r.ts),
 		GROUP_CONCAT(DISTINCT r.model), GROUP_CONCAT(DISTINCT r.provider),
 		GROUP_CONCAT(DISTINCT r.agent), GROUP_CONCAT(DISTINCT r.preset),
 		-- The model with the most output_tokens for this session, picked by the same
 		-- correlated subquery pattern as pingsBySession's second query, but cheap enough
 		-- (one session's own rows) to inline rather than join.
-		(SELECT r2.model FROM requests r2 WHERE r2.session_id = r.session_id
+		(SELECT r2.model FROM requests r2 WHERE r2.tenant_id = r.tenant_id AND r2.session_id = r.session_id
 			GROUP BY r2.model ORDER BY SUM(r2.output_tokens) DESC, r2.model LIMIT 1),
 		SUM(r.tokens_before), SUM(r.tokens_after), SUM(r.saved_unique),
 		SUM(r.attempted_tokens), SUM(r.frozen_tokens),
@@ -656,7 +743,7 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		-- is summed inside the window: both halves of the net must span the same pings (#678).
 		COALESCE(SUM(` + kaSavedSince("r.", f.Since) + `),0)
 		FROM requests r WHERE ` + cond + `
-		GROUP BY r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
+		GROUP BY r.tenant_id, r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -698,14 +785,25 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 			return nil, 0, err
 		}
 		for _, s := range out {
-			if p, ok := pings[s.SessionID]; ok {
+			if p, ok := pings[sessKey{s.TenantID, s.SessionID}]; ok {
 				s.KeepAlivePings, s.KeepAlivePingUSD = p.n, p.usd
 			}
 			s.KeepAliveNetUSD = s.KeepAliveSavedUSD - s.KeepAlivePingUSD
 		}
+		ids := make([]string, len(out))
+		for i, s := range out {
+			ids[i] = s.SessionID
+		}
+		toks, err := d.sessionTokens(f, ids)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, s := range out {
+			s.SessionTokens = toks[sessKey{s.TenantID, s.SessionID}]
+		}
 	}
 	var total int64
-	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE `+cond, args...).Scan(&total)
+	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM (SELECT DISTINCT r.tenant_id, r.session_id FROM requests r WHERE `+cond+`)`, args...).Scan(&total)
 	return out, total, err
 }
 
@@ -716,21 +814,21 @@ type pingCount struct {
 }
 
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
-func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1`, args...)
+func (d *DB) pingsBySession(cond string, args []any) (map[sessKey]pingCount, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
+		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]pingCount{}
+	out := map[sessKey]pingCount{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var p pingCount
-		if err := rows.Scan(&s, &p.n, &p.usd); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &p.n, &p.usd); err != nil {
 			return nil, err
 		}
-		out[s] = p
+		out[k] = p
 	}
 	return out, rows.Err()
 }
@@ -808,6 +906,10 @@ type ComponentRow struct {
 	// runs the identical formula, so agreement is arithmetic. The UI prints the covered
 	// fraction rather than presenting the whole comparison as evidence.
 	SavedUSDDecomposedStored float64 `json:"saved_usd_decomposed_stored"`
+	// SavedUSDCosts is the costs the accountant library netted into saved_usd on the rows it
+	// priced: added tokens and the breaks a component caused. Negative. It is the third term of
+	// SavedUSDDecomposed on those rows (first removal + replay + costs = saved_usd); 0 before them.
+	SavedUSDCosts float64 `json:"saved_usd_costs,omitempty"`
 	// UniqueUnkeyed marks a component whose saved_unique is not a dedup measurement, because
 	// it reports no content keys and MarkUnique therefore returns its saving in full every
 	// turn. True for every reformatter. See DecomposeComponentSavedUSD for why this is
@@ -1147,6 +1249,13 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 type compGroupKey struct {
 	comp, model, tier    string
 	usd, gross, complete bool
+	// acc is a group of rows the accountant library priced (priced_by): their dollar split is
+	// stored (firstUSD, replayUSD), and no read-time formula re-prices them.
+	acc bool
+	// fallback is a group of rows of a request the accountant path handled and could not price
+	// (priced_by 'none'). They are also acc: no read-time formula values them. They book no saving, and the
+	// reader must be told that, because a stored 0 here is not a measured 0 (context-guru#768 B8).
+	fallback bool
 }
 
 // compGroup is one cell of that pass. uClamp and rClamp are the decomposition's unique and replay
@@ -1157,6 +1266,7 @@ type compGroup struct {
 	runs, acted, mutated, reverted, skipped, gross, unique int64
 	errs, uClamp, rClamp, nDiff                            int64
 	usd, dur                                               float64
+	firstUSD, replayUSD                                    float64 // the stored split, on an acc group
 }
 
 func sortedCompKeys(groups map[compGroupKey]*compGroup) []compGroupKey {
@@ -1196,13 +1306,14 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
-		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete',
+		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete', c.priced_by <> '', c.priced_by = 'none',
 		MAX(c.kind), COUNT(*), SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
 		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
 		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END),
-		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END)
+		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END),
+		SUM(c.saved_first_usd), SUM(c.saved_replay_usd)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6`,
+		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`,
 			append(append([]any(nil), args...), bounds...)...)
 		if err != nil {
 			return err
@@ -1212,9 +1323,9 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 			var k compGroupKey
 			var g compGroup
 			var usd sql.NullFloat64
-			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete,
+			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete, &k.acc, &k.fallback,
 				&g.kind, &g.runs, &g.acted, &g.mutated, &g.reverted, &g.skipped, &g.gross, &g.unique,
-				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff); err != nil {
+				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff, &g.firstUSD, &g.replayUSD); err != nil {
 				return err
 			}
 			g.usd = usd.Float64
@@ -1238,6 +1349,8 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 				m.nDiff += g.nDiff
 				m.usd += g.usd
 				m.dur += g.dur
+				m.firstUSD += g.firstUSD
+				m.replayUSD += g.replayUSD
 			}
 			mu.Unlock()
 		}

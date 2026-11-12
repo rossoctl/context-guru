@@ -9,6 +9,8 @@ import (
 
 // Part of issue #856: one function decides a cache price. This test records what each caller
 // priced BEFORE the change (fixture made on origin/main c2a06dd5) and fails if any value moves.
+// The four table/*/claude-sonnet-5 rows were re-baselined by #334, which
+// makes a bare id resolve to the qualified entry it is the tail of; every other row is unchanged.
 
 func TestRateFillTableAndPrice(t *testing.T) {
 	docs := map[string]string{

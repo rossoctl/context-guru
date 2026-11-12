@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
@@ -30,7 +31,8 @@ import (
 //
 // # Why almost nothing is computed here
 //
-// The economics already exist and are already right. Event.baselineDeltaUSD prices a removal as
+// The economics already exist. The legacy rule (Event.ComponentSavedUSD, which still values rows
+// from before the accountant library) prices a removal as
 // `SavedUnique × cacheWriteRate + (Saved − SavedUnique) × repeatRate`, and repeatRate prices the
 // re-sent remainder at the cache-READ rate on a turn whose cache hit, the cache-CREATION rate on a
 // turn whose cache missed, and fresh otherwise — with three documented guards against inflation.
@@ -100,8 +102,8 @@ type compactRow struct {
 	// Conservative for a savings figure, and stated in the panel's assumptions.
 	SavedGross int64
 	// SavedUSD is summarize's share of this request's baseline delta: the credit this turn earns.
-	// The dataset loader prices it through Event.ComponentSavedUSD, the same path Event.Price
-	// stores, so a row written before the first-removal rule changed is valued like a new one.
+	// The dataset loader prices it through Event.ComponentSavedUSD, the path the legacy
+	// write-time rules stored it with, so a row written before the first-removal rule changed is valued like a new one.
 	// Zero means summarize did nothing priceable on this turn (or the row predates the column).
 	SavedUSD float64
 	// FirstUSD is the part of SavedUSD that is a FIRST removal: the unique tokens, priced at the rate
@@ -120,6 +122,10 @@ type compactRow struct {
 	Events string
 	// Acted is the stored flag: summarize removed tokens on this turn. True on a replay too.
 	Acted bool
+	// Accountant is true when the accountant library priced the row: SavedUSD is its figure and
+	// storedFirstUSD its first-removal part, and no read-time formula re-prices it (rePriceRow).
+	Accountant     bool
+	storedFirstUSD float64
 }
 
 // Episode states. A closed episode is the only one that contributes to a total.
@@ -446,6 +452,22 @@ func spanFor(fillFrac, ceilingFrac float64) (float64, bool) {
 // is a pure function under test — no resolver, no network, no clock.
 type windowFn func(model string) (tokens int, exact bool)
 
+// pointFn resolves a model's compaction point (internal/compactionpoint) for a window. The dashboard builds
+// one that puts the operator's compaction_point from the MODEL_PRICES table in front of the bootstrap table,
+// the way it already reads the operator's window. With no field set it is compactionpoint.For.
+type pointFn func(model string, window int) compactionpoint.Point
+
+// bootstrapPoint is the point with no operator in front of it: the built-in table.
+func bootstrapPoint(model string, _ int) compactionpoint.Point { return compactionpoint.For(model) }
+
+// operatorPoint is pointFn over a resolver that may state a compaction point.
+func operatorPoint(ctx context.Context, windows modelinfo.Resolver) pointFn {
+	return func(model string, window int) compactionpoint.Point {
+		stated, _ := modelinfo.OperatorCompactionPoint(windows, ctx, model)
+		return compactionpoint.Resolve(model, stated, window)
+	}
+}
+
 // priceFn resolves a model's cache-write rates. Injected for the same reason.
 type priceFn func(model string) kvcache.Pricing
 
@@ -458,12 +480,18 @@ type priceFn func(model string) kvcache.Pricing
 // one is a test nobody writes the fifth variant of.
 func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 	spanFrac, fillFrac, ceilingFrac float64) *CompactionEpisodes {
+	return walkCompactEpisodesWith(rows, window, bootstrapPoint, price, spanFrac, fillFrac, ceilingFrac)
+}
+
+// walkCompactEpisodesWith is walkCompactEpisodes with the compaction point resolver stated.
+func walkCompactEpisodesWith(rows []compactRow, window windowFn, point pointFn, price priceFn,
+	spanFrac, fillFrac, ceilingFrac float64) *CompactionEpisodes {
 	// fillFrac FIRST: the span derives from it. Reversing these two silently derived the span from a
 	// zero fill, i.e. the whole ceiling — a span ten times too wide.
 	if fillFrac <= 0 {
 		fillFrac = defaultFillFrac
 	}
-	// THE CEILING IS PER MODEL, so it is resolved per conversation below rather than once here — it
+	// THE CEILING IS PER MODEL (the operator's compaction_point first, then the built-in table), so it is resolved per conversation below rather than once here — it
 	// is a fact about the CLIENT's behaviour on a given model, and a query spanning haiku and opus
 	// must not average the two. `ceilingFrac > 0` is the explicit `?ceiling=` override, which applies
 	// to every conversation because an operator using it is investigating one deployment.
@@ -503,7 +531,7 @@ func walkCompactEpisodes(rows []compactRow, window windowFn, price priceFn,
 		p := price(conv[0].Model)
 
 		// This conversation's own span, from this MODEL's compaction point.
-		ceil := episodeConversationPoint(conv, w)
+		ceil := episodeConversationPoint(conv, w, point)
 		if explicitCeiling {
 			ceil = compactionpoint.Point{Frac: ceilingFrac, Source: compactionpoint.Assumed,
 				Note: "supplied explicitly on the request"}
@@ -1101,7 +1129,7 @@ type ClientCeilingUsed struct {
 	Frac float64 `json:"frac"`
 	// SpanFrac is what that ceiling produced for this model: `frac - fill_frac`.
 	SpanFrac float64 `json:"span_frac"`
-	// Provenance is "measured", "assumed", "configured", "client_default" or "window_fallback". A measured ceiling came
+	// Provenance is "measured", "assumed", "configured", "client_default", "operator" or "window_fallback". A measured ceiling came
 	// from watching a real client compact, in billed tokens. A configured one is the user's own client
 	// setting (#948), taken as billed tokens at a factor of 1.0 that is not measured. The others did not, and an assumed ceiling that is too high
 	// makes the span too wide and OVER-reports.
@@ -1112,7 +1140,7 @@ type ClientCeilingUsed struct {
 
 // episodeConversationPoint is C for one conversation: the user's own setting when a row recorded
 // one (the newest), else the table (#948). The fraction is C over the window, as spanFor wants it.
-func episodeConversationPoint(conv []compactRow, window int) compactionpoint.Point {
+func episodeConversationPoint(conv []compactRow, window int, point pointFn) compactionpoint.Point {
 	for i := len(conv) - 1; i >= 0; i-- {
 		if compactionpoint.IsClientSource(conv[i].CPointSource) && conv[i].CPoint > 0 && window > 0 {
 			p := compactionpoint.Recorded(conv[0].Model, conv[i].CPoint, conv[i].CPointSource)
@@ -1120,7 +1148,7 @@ func episodeConversationPoint(conv []compactRow, window int) compactionpoint.Poi
 			return p
 		}
 	}
-	return compactionpoint.For(conv[0].Model)
+	return point(conv[0].Model, window)
 }
 
 // noteCeiling records the ceiling one model was measured against, once per model and source: a
@@ -1185,7 +1213,7 @@ const compactEpisodeSelectTmpl = `SELECT r.tenant_id, r.session_id, r.thread_id,
 		r.compaction_point, r.compaction_point_source,
 		r.fresh_input + r.cache_read + r.cache_write AS billed,
 		r.cache_miss_reason, r.cache_write, r.cache_write_1h, r.cache_read, r.cg_llm_cost_usd,
-		%[1]s, r.fresh_input, %[2]s
+		%[1]s, r.fresh_input, %[2]s, %[4]s, %[5]s
 	FROM requests r
 	%[3]s
 	WHERE %%s
@@ -1196,7 +1224,7 @@ const compactEpisodeSelectTmpl = `SELECT r.tenant_id, r.session_id, r.thread_id,
 // the sum across the components (a request normally has one). Names come from SummarizerComponents
 // only; anything else is refused.
 func compactEpisodeSelectFor(components []string) string {
-	var joins, gross, usd, events, acted, unique []string
+	var joins, gross, usd, events, acted, unique, first, acc []string
 	for i, name := range components {
 		if !IsSummarizer(name) {
 			continue
@@ -1208,6 +1236,8 @@ func compactEpisodeSelectFor(components []string) string {
 		events = append(events, al+".events")
 		acted = append(acted, "COALESCE("+al+".acted, 0)")
 		unique = append(unique, "COALESCE("+al+".saved_unique, 0)")
+		first = append(first, "COALESCE("+al+".saved_first_usd, 0)")
+		acc = append(acc, "COALESCE("+al+".priced_by <> '', 0)")
 	}
 	if len(joins) == 0 {
 		return "" // no valid component: the caller reads nothing
@@ -1219,7 +1249,8 @@ func compactEpisodeSelectFor(components []string) string {
 		cols = strings.Join(gross, " + ") + ", " + strings.Join(usd, " + ") + ", COALESCE(" +
 			strings.Join(events, ", ") + ", ''), " + acted[0]
 	}
-	return fmt.Sprintf(compactEpisodeSelectTmpl, cols, strings.Join(unique, " + "), strings.Join(joins, "\n\t"))
+	return fmt.Sprintf(compactEpisodeSelectTmpl, cols, strings.Join(unique, " + "), strings.Join(joins, "\n\t"),
+		strings.Join(first, " + "), strings.Join(acc, " OR "))
 }
 
 // summarizeSessionsOnly narrows the dataset to sessions in which a summarizer ever acted. The
@@ -1265,7 +1296,7 @@ func (d *DB) compactEpisodeDataset(f Filter, price rePriceFn, summarizeOnly bool
 		if err := rows.Scan(&r.Tenant, &r.Session, &r.Thread, &r.Model, &r.TS, &r.TokensBefore,
 			&r.CPoint, &r.CPointSource, &r.Billed, &r.MissReason, &r.CacheWrite, &r.CacheWrite1h, &r.CacheRead,
 			&r.CGLLMCostUSD, &r.SavedGross, &r.SavedUSD, &r.Events, &acted,
-			&r.FreshInput, &r.SavedUnique); err != nil {
+			&r.FreshInput, &r.SavedUnique, &r.storedFirstUSD, &r.Accountant); err != nil {
 			return nil, err
 		}
 		r.Acted = acted != 0
@@ -1298,11 +1329,12 @@ func (d *DB) CompactionEpisodesFor(f Filter, windows modelinfo.Resolver, p model
 		names = append(names, m)
 	}
 	list := kvcache.NewPriceList(ctx, names, p, cfg.Multipliers, cfg.Overrides)
-	out := walkCompactEpisodes(rows,
+	out := walkCompactEpisodesWith(rows,
 		func(model string) (int, bool) {
 			w, exact, ok := modelinfo.Exact(windows, ctx, model)
 			return w, exact && ok
 		},
+		operatorPoint(ctx, windows),
 		list.For, spanFrac, fillFrac, ceilingFrac)
 	out.Pricing = list
 	if rl, err := d.ReplayLedgerFor(f, windows, p); err == nil {

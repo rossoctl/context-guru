@@ -4,6 +4,8 @@
  },
  "attempted_requests": 591,
  "attempted_tokens": 20900053,
+ "avoided_compaction_assumed": false,
+ "avoided_compaction_usd": 0,
  "baseline_cost_usd": 3.0431815,
  "billed_input_rows": 591,
  "billed_input_tokens": 20923693,
@@ -41,7 +43,7 @@
  "compaction_resets": 0,
  "corrected_saving_rows": 0,
  "cost_usd": 2.794,
- "decl_credit_priced": false,
+ "decl_credit_priced": true,
  "decl_filter_reads": 0,
  "decl_filter_requests": 0,
  "decl_filter_usd": 0,
@@ -84,6 +86,9 @@
    "percent": 2.3845059148893064
   }
  ],
+ "estimated_requests": 0,
+ "estimated_saved_low_usd": 0,
+ "estimated_saved_usd": 0,
  "estimator_divergence": 1.001123848055743,
  "estimator_divergence_compacted": 1.0011973896904747,
  "estimator_divergence_compacted_rows": 197,
@@ -97,6 +102,13 @@
  "invalid_config_requests": 0,
  "keepalive_misses_avoided": 0,
  "keepalive_net_usd": -0.006,
+ "keepalive_ping_output_tokens": 750,
+ "keepalive_ping_tokens": {
+  "cache_read": 720540,
+  "cache_write_1h": 0,
+  "cache_write_5m": 0,
+  "input": 150
+ },
  "keepalive_ping_usd": 0.006,
  "keepalive_pings": 15,
  "keepalive_saved_usd": 0,
@@ -138,10 +150,6 @@
  "saved_gross": 498363,
  "saved_gross_attempted": 498363,
  "saved_unique": 498363,
- "self_removed_items": 6,
- "self_removed_overlap": 0,
- "self_removed_reads": 128880,
- "self_removed_usd": 0.4028729999999999,
  "sessions": 60,
  "since": 0,
  "split_credited": 0,
@@ -167,11 +175,25 @@
   "total_usd": 66.92121449999999,
   "uncovered_requests": 217
  },
+ "tokens": {
+  "caused": {
+   "cache_read": 0,
+   "cache_write_1h": 0,
+   "cache_write_5m": 0,
+   "input": 0
+  },
+  "saved": {
+   "cache_read": 0,
+   "cache_write_1h": 0,
+   "cache_write_5m": 0,
+   "input": 0
+  }
+ },
  "tokens_after": 20401690,
  "tokens_before": 20900053,
  "tokens_before_billed": 20900053,
+ "tokens_unmeasured_requests": 591,
  "total_ms_avg_buffered": 0,
- "total_reduced_usd": 0.6460545000000001,
  "total_saved_usd": 0.24318150000000016,
  "ttfb_ms_avg_streamed": 0,
  "uncompressed": {
@@ -253,7 +275,7 @@
   },
   {
    "delta_usd": -0,
-   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them, NET of the names list and the searches that cost. From the per-request ledger, so it is the same figure as the Tools page. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
+   "description": "Tool definitions the ultrahigh preset left out of the prompt until the model searched for them, net of what that cost. On a request the accountant priced, this line holds the library's whole deferral saving (the definitions left out, less the names list) minus the searches and the definitions they loaded; the saving is not in \"Your preset\". On a request it held, or could not price, it is the ledger's net. The same figure as the Tools page and /api/tool-defer. Its own line: the definitions sit in the top-level `tools` array, which the compaction walk never counted, and deferral runs after the declaration filter, so it holds none of the tokens that filter dropped.",
    "key": "defer_net",
    "label": "Tool deferral",
    "total": false
@@ -263,20 +285,6 @@
    "description": "Net compaction savings, plus prefix-cache savings, plus the idle keep-alive's NET — its savings minus what its pings cost — plus the manual pings' net, plus the declarations the removal filter stopped sending, plus tool deferral's net. FIVE disjoint token sets, all ours, so nothing is counted twice: compaction's removals never reached the provider, the split moved a breakpoint over tokens that did, the keep-alive refreshed entries that already existed, and the filter's declarations were dropped before the compaction baseline was even measured — so they are absent from the first line rather than counted in it. The keep-alive enters as a net because the pings' own spend is not in the billed-cost line above — ping rows are excluded from agent traffic — so this is the only place both halves are comparable, and its saving half is a CEILING (see Keep-alive savings). It is not the cost of a fully uncached world: the provider's own cache saved far more than this on the same traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that is credited here.",
    "key": "total_saved",
    "label": "Total cost avoided",
-   "total": true
-  },
-  {
-   "delta_usd": -0.4028729999999999,
-   "description": "Declarations this ACCOUNT stopped carrying on its own — an MCP server you removed, a skill you switched off. The tokens genuinely were not billed, and no component of ours was involved, so this is deliberately OUTSIDE the total above and inside the one below. It is also MODELLED rather than measured: the evidence is that the inventory is a time series and a name is in its early part and not its late part, which cannot tell a removal from a session that ran in a different environment — on the production snapshot the largest candidate is the editor integration, which is simply absent outside the IDE. Every row and its own evidence is on the Inventory tab; rows the filter is already credited for are excluded here rather than counted twice.",
-   "key": "self_removed",
-   "label": "Removed by you, not by us",
-   "total": false
-  },
-  {
-   "delta_usd": 0.6460545000000001,
-   "description": "Everything above, ours and yours: the total cost avoided plus what you removed yourself. It answers 'how much smaller did this bill get', where the total above answers 'how much of that did context-guru do'. Both are worth knowing and they are not the same number, so neither is printed under the other's label.",
-   "key": "total_reduced",
-   "label": "Total the bill came down",
    "total": true
   }
  ]

@@ -204,7 +204,7 @@ type kaArrival struct {
 	refreshed  int64
 	strategyID string
 	// refreshedAt is when the provider's entry was last known refreshed: the previous real
-	// request's start, or the start of the last ping that READ the cache. Zero when no entry.
+	// request's start, or the start of the last ping that READ or WROTE the cache. Zero when no entry.
 	refreshedAt time.Time
 }
 
@@ -599,7 +599,7 @@ func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 			return off
 		}
 		c := tn.Cache
-		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings,
+		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings, ToolWaitMinPrefix: c.ToolWaitMinPrefix, MinPrefixTokens: c.MinPrefixTokens,
 			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings, KeepAlive: c.KeepAlive}
 		// With an active campaign the request path does not retry a closed window (resolvePolicyWindows),
 		// so a strategy counts only while its window is open and a closed one falls through to the

@@ -608,13 +608,13 @@
         <thead><tr>
           <th>Session</th><th data-scope-col hidden class="narrow-hide">Account</th><th class="narrow-hide">Started</th>
           <th class="num" title="Number of requests the agent sent in this session">Turns</th>
-          <th class="num" title="What this session cost: the provider's bill plus our own model calls">Cost</th>
-          <th class="num" title="Dollars saved after subtracting what context-guru itself cost">Net saved $</th>
+          <th class="num" title="What this session cost: the provider's bill plus our own model calls" data-sub-label="Tokens used" data-sub-title="Input tokens this session was billed, by kind (wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input)">Cost</th>
+          <th class="num" title="Dollars saved after subtracting what context-guru itself cost" data-sub-label="Tokens saved" data-sub-title="Tokens saved by kind, and the tokens the savings cost. The keep-alive has its own column.">Net saved $</th>
           <th class="more">Model</th><th class="more">Agent</th><th class="more" title="The preset this session used">Preset</th>
           <th class="num more" title="Tokens sent to context-guru, before any removal">Before</th>
           <th class="num more" title="Gross counts a removed span once per request it was missing from; unique counts it once.">Tokens removed<br><span class="hint">total / distinct</span></th>
           <th class="num more" title="Tokens read from / written to the provider prompt cache">Cache read / write</th>
-          <th class="num more" title="Dollars gained or lost by keeping the cache warm with pings">Keep-alive net</th><th class="num more" title="Times the agent asked for removed text to be restored">Restores</th>
+          <th class="num more" title="Dollars gained or lost by keeping the cache warm with pings" data-sub-label="Keep-alive" data-sub-title="Cache rewrites the pings avoided, and on its own line what the pings paid">Keep-alive net</th><th class="num more" title="Times the agent asked for removed text to be restored">Restores</th>
           <th class="num more" title="Milliseconds context-guru added to the request">Added delay</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="sessions-body"></tbody>
@@ -651,7 +651,7 @@
       the sessions it touches that pays a large rebate to a few. Across this service
       <strong>34 of 119</strong> pinged sessions came out ahead and the worst single session
       paid <strong>$2.42</strong> for nothing.</p>
-    <p class="hint">The bar splits your sessions into winners and losers. Each table row is
+    <p class="hint" data-sub-label="The bar splits your sessions into winners and losers, at API-price weights. Each table row is one session: expiries are times its cache ran out while idle, and strategy requests are warm-up requests sent. Token figures are by kind: wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input. The kinds are never added, so a row shows no net: only ahead or behind, at API-price weights. The avoided figure is a ceiling, not a measurement.">The bar splits your sessions into winners and losers. Each table row is
       one session: <em>Expiries</em> are times its cache ran out while idle, <em>Pings</em> are warm-up
       requests sent, and <em>Net</em> is what was avoided minus what was spent (the avoided figure is a ceiling, not a measurement).</p>
     <div id="ka-split"></div>
@@ -660,9 +660,9 @@
       <table class="tbl" data-testid="ka-sessions-table">
         <thead><tr>
           <th>Session</th><th data-scope-col hidden>Account</th><th class="num">Turns</th>
-          <th class="num" title="Times the cached prompt was forgotten while the session sat idle">Cache ran out</th><th class="num" title="What those cache rewrites cost">Cost of running out</th>
-          <th class="num" title="Requests your cache strategy sent to keep the cache warm">Strategy requests</th><th class="num" title="What those requests cost">Their cost</th>
-          <th class="num" title="The most your cache strategy could have saved; an upper bound">Avoided (upper bound)</th><th class="num">Net</th>
+          <th class="num" title="Times the cached prompt was forgotten while the session sat idle">Cache ran out</th><th class="num" title="What those cache rewrites cost" data-sub-label="Tokens at running out" data-sub-title="The input tokens those requests billed, by kind (wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input)">Cost of running out</th>
+          <th class="num" title="Requests your cache strategy sent to keep the cache warm">Strategy requests</th><th class="num" title="What those requests cost" data-sub-label="Their tokens" data-sub-title="What those requests paid in tokens, by kind. It is in its own column and not in any total.">Their cost</th>
+          <th class="num" title="The most your cache strategy could have saved; an upper bound" data-sub-label="Avoided (upper bound)" data-sub-title="The cache writes your cache strategy avoided, and the reads it paid for them, in tokens by kind; an upper bound">Avoided (upper bound)</th><th class="num" data-sub-label="Ahead or behind" data-sub-title="Decided by the dollar net at API-price weights: token kinds have no common unit, so they are not added">Net</th>
           <th class="num" title="Size of the cached start of the conversation, in tokens">Cached prompt size</th><th><span class="vh">Row actions</span></th>
         </tr></thead>
         <tbody id="ka-sessions-body"></tbody>
@@ -688,8 +688,8 @@
           <th>SESSION</th><th data-scope-col hidden>TENANT</th>
           <th class="num">TURNS</th><th class="num" title="Size of the cached start of the conversation, in tokens">CACHED PROMPT</th>
           <th title="How long the provider keeps this cache before forgetting it">CACHE LIFETIME</th><th class="num">LEFT</th>
-          <th class="num" title="Cost of one request that keeps the cache warm">ONE WARM-UP</th><th class="num" title="Cost if the cache is forgotten and has to be rewritten">IF IT LAPSES</th>
-          <th class="num" title="Warm-up requests that cost the same as one rewrite">REQUESTS PER REWRITE</th><th class="num">REALISED</th><th></th>
+          <th class="num" title="Cost of one request that keeps the cache warm" data-sub-label="ONE WARM-UP (API-PRICE WEIGHTS)" data-sub-title="Cost of one request that keeps the cache warm, at API-price weights: a what-if, not a bill">ONE WARM-UP</th><th class="num" title="Cost if the cache is forgotten and has to be rewritten" data-sub-label="IF IT LAPSES (API-PRICE WEIGHTS)" data-sub-title="Cost if the cache is forgotten and has to be rewritten, at API-price weights: a what-if, not a bill">IF IT LAPSES</th>
+          <th class="num" title="Warm-up requests that cost the same as one rewrite" data-sub-label="REQUESTS PER REWRITE" data-sub-title="Warm-up requests that cost the same as one rewrite, at API-price weights">REQUESTS PER REWRITE</th><th class="num" data-sub-label="REALISED (TOKENS)" data-sub-title="Cache rewrites the pings avoided, and on its own line what the pings paid">REALISED</th><th></th>
         </tr></thead>
         <tbody id="ka-live-body"></tbody>
       </table>
@@ -697,7 +697,7 @@
     <p class="hint" id="ka-live-hint"></p>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="ka-behaviour-panel">
     <h2>How often your cache ran out</h2>
     <p class="note">The cache lasts about five minutes. If a session sits idle longer, the next turn pays to rewrite the
       whole prompt. Each such event is an <span class="term" tabindex="0">expiry<span class="tip" role="tooltip">The moment a session came back after its cached prompt had already been forgotten.</span></span> (the provider calls the cache lifetime its <span class="term" tabindex="0">TTL<span class="tip" role="tooltip">Time to live: how long the provider keeps a cache before forgetting it.</span></span>). Below: how often, when and how costly.</p>
@@ -715,8 +715,8 @@
         <div id="ka-chart-misses" class="chart" data-testid="ka-chart-misses"></div>
       </div>
       <div class="panel">
-        <h3>What they cost, per day</h3>
-        <p class="hint">Each point is one day. Higher means those rewrites cost more.</p>
+        <h3 data-sub-label="Tokens they billed, per day">What they cost, per day</h3>
+        <p class="hint" data-sub-label="Each point is one day. One line per token kind: the kinds are never added.">Each point is one day. Higher means those rewrites cost more.</p>
         <div id="ka-chart-usd" class="chart" data-testid="ka-chart-usd"></div>
       </div>
     </div>

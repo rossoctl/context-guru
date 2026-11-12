@@ -2,6 +2,12 @@
  "addressable_misses": 204,
  "addressable_usd": 0.848,
  "bytes_per_day": 802.6755852842809,
+ "keepalive_ping_tokens": {
+  "cache_read": 720540,
+  "cache_write_1h": 0,
+  "cache_write_5m": 0,
+  "input": 150
+ },
  "keepalive_recorded_from": 1767606380000,
  "keepalive_recorded_rows": 585,
  "latency": {
@@ -23,6 +29,22 @@
  "requests": 591,
  "saved_usd": 0,
  "sessions_touched": 15,
+ "tokens": {
+  "caused": {
+   "cache_read": 0,
+   "cache_write_1h": 0,
+   "cache_write_5m": 0,
+   "input": 0
+  },
+  "saved": {
+   "cache_read": 0,
+   "cache_write_1h": 0,
+   "cache_write_5m": 0,
+   "input": 0
+  }
+ },
+ "tokens_unmeasured_requests": 591,
  "winners": 0,
- "worst_net_usd": -0.0004
+ "worst_net_usd": -0.0004,
+ "worst_session_tenant": "t1"
 }

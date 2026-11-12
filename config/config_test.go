@@ -266,13 +266,13 @@ func TestPresetLadderSummarizerModes(t *testing.T) {
 	}
 }
 
-// The recommended keep-alive policy (#435, B-policy-r2; floor 20000 since #858) is the default; pin the four knobs.
+// The recommended keep-alive policy (#435, B-policy-r2; general floor 80000; tool-wait floor 20000 since #858) is the default; pin the four knobs.
 func TestKeepAliveRecommendedDefaults(t *testing.T) {
 	r := CacheConfig{}.Resolved()
 	if r.KeepAliveIdleSeconds != 240 || r.KeepAliveMaxPings != 2 ||
-		r.KeepAliveMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0.50 {
-		t.Errorf("Resolved() = idle %d, K %d, floor %d, ceiling %v; want 240, 2, 20000, 0.50",
-			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
+		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0.50 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d/%d, ceiling %v; want 240, 2, 80000/20000, 0.50",
+			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
 	}
 }
 
@@ -468,5 +468,17 @@ func TestToolfilterAlwaysDeferParses(t *testing.T) {
 	}
 	if got, err := list("preset: ultrahigh\n"); err != nil || len(got) != 0 {
 		t.Errorf("ultrahigh always_defer = %v (err %v), want empty", got, err)
+	}
+}
+
+func TestKeepAliveMaxBodyBytesDefaultsAndRejectsNegative(t *testing.T) {
+	if got := (CacheConfig{}).Resolved().KeepAliveMaxBodyBytes; got != DefaultKeepAliveMaxBodyBytes {
+		t.Errorf("default = %d, want %d", got, DefaultKeepAliveMaxBodyBytes)
+	}
+	if got := (CacheConfig{KeepAliveMaxBodyBytes: 8 << 20}).Resolved().KeepAliveMaxBodyBytes; got != 8<<20 {
+		t.Errorf("explicit 8 MiB came back as %d", got)
+	}
+	if (CacheConfig{KeepAliveMaxBodyBytes: -1}).validate() == nil {
+		t.Error("a negative body limit was accepted")
 	}
 }

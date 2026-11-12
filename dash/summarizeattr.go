@@ -35,12 +35,18 @@ func pricerFn(ctx context.Context, p modelinfo.Pricer) rePriceFn {
 	}
 }
 
-// rePriceRow values a stored summarize row through Event.ComponentSavedUSD, the same path
-// Event.Price used to store it, so a row written before the first-removal rule changed reads
-// like a new one. Only a row with a unique (first) part changes; a pure replay keeps its stored
+// rePriceRow values a stored summarize row from before the accountant library through
+// Event.ComponentSavedUSD, the path the legacy rules stored it with, so a row written before the
+// first-removal rule changed reads like a new one. A row the library priced is not re-priced. Only a row with a unique (first) part changes; a pure replay keeps its stored
 // figure, which keeps the rates it was written with. A row with no stored figure is left at zero:
 // it predates the column, and the estimate path owns it.
 func rePriceRow(r *compactRow, price rePriceFn) {
+	if r.Accountant {
+		// The library priced it from the thread's history, which the row does not keep: its
+		// figure and its first-removal part are stored and stand as written.
+		r.FirstUSD = r.storedFirstUSD
+		return
+	}
 	if price == nil || r.StoredUSD == 0 || r.SavedUnique <= 0 || r.SavedGross <= 0 {
 		return
 	}
@@ -60,7 +66,7 @@ func rePriceRow(r *compactRow, price rePriceFn) {
 // apportionFirst gives a row that was not re-priced (no rates available) the unique share of its
 // stored figure as its first removal, so the ledger can still tell a first removal from a replay.
 func apportionFirst(r *compactRow) {
-	if r.FirstUSD != 0 || r.SavedUnique <= 0 || r.SavedGross <= 0 {
+	if r.Accountant || r.FirstUSD != 0 || r.SavedUnique <= 0 || r.SavedGross <= 0 {
 		return
 	}
 	share := float64(min(int(r.SavedUnique), int(r.SavedGross))) / float64(r.SavedGross)
@@ -131,11 +137,12 @@ func (d *DB) summarizerLedger(f Filter, windows modelinfo.Resolver, p modelinfo.
 		names = append(names, m)
 	}
 	list := kvcache.NewPriceList(ctx, names, p, kvcache.Multipliers{}, nil)
-	out := walkCompactEpisodes(rows,
+	out := walkCompactEpisodesWith(rows,
 		func(model string) (int, bool) {
 			w, exact, ok := modelinfo.Exact(windows, ctx, model)
 			return w, exact && ok
 		},
+		operatorPoint(ctx, windows),
 		list.For, 0, defaultFillFrac, 0)
 	return &out.Ledger, nil
 }
@@ -151,7 +158,6 @@ func (o *Overview) ApplySummarizeLedger(l *SummarizeLedger) {
 	o.BaselineCostUSD += delta
 	o.NetSavedUSD += delta
 	o.TotalSavedUSD += delta
-	o.TotalReducedUSD += delta
 }
 
 // applySummarizeLedgerToRow moves summarize's component row onto the ledger: the saved figure,

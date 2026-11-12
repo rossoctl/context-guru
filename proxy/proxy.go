@@ -28,6 +28,9 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -151,6 +154,9 @@ type Options struct {
 	// request is captured off the hot path into a durable store and the dashboard UI
 	// + API are mounted. nil = the proxy behaves exactly as before.
 	Dashboard *dash.Recorder
+	// AccountantState, when set with Dashboard, is the file the savings tracker's thread state is saved to
+	// (every minute and at Close) and restored from at New. Empty = the state starts empty at every start.
+	AccountantState string
 	// Record, when non-nil, records one OTLP span per proxied turn: exported to a collector
 	// (--record-otlp), written as OTLP JSON one file per session (--record), or both. nil = no
 	// recording, and every touchpoint is nil-guarded, so the default path costs one nil check
@@ -161,6 +167,11 @@ type Options struct {
 	// a research corpus and the wrong one for an unattended deployment; --record says so in
 	// its help text and at startup.
 	Record *sessionRecorder
+
+	// Pings is the store the keep-alive emitter writes ping facts to and the next request of the
+	// same thread reads them from (see PingSavings). It must be the same instance on both sides.
+	// nil = none, and pings then feed no request.
+	Pings *PingStore
 
 	// PipelineFor builds a pipeline for a per-request override on /compact
 	// (?preset=… or x-context-guru-pipeline: a,b,c). nil = overrides ignored, the
@@ -256,6 +267,8 @@ type Handler struct {
 	// bobWin is Bob's own max_input_tokens for each model id, from its model/info response (#963).
 	bobWinMu sync.Mutex
 	bobWin   map[string]int
+	// agentFor finds the client agent that owns a route: agent.ForPath, or a test's own registry.
+	agentFor func(path string) agent.Agent
 	pipe     *components.Pipeline
 	store    store.Store
 	agg      *metrics.Aggregator
@@ -279,6 +292,10 @@ type Handler struct {
 	pool *modes.Pool
 	// observeSeq numbers observations so each request enqueues one.
 	observeSeq atomic.Uint64
+	// savings is nil without a dashboard recorder: the Result is attached to the recorded event.
+	savings *savingsTracker
+	// accSeq numbers requests for the accountant RequestMeta.RequestID.
+	accSeq atomic.Uint64
 	// shadow is observe mode's own state store, separate from the live one. Observe must
 	// not write into the live store — a real request would then replay a decision that was
 	// never enforced — but it also cannot simply discard its writes: offloaders FREEZE a
@@ -351,6 +368,10 @@ type Handler struct {
 	// for every send still in flight before its mail sink goes away (see waitMailForTest).
 	mailWG sync.WaitGroup
 
+	// stateStop and stateDone run the periodic save of the savings tracker's state (Options.AccountantState).
+	stateStop, stateDone chan struct{}
+	stateOnce            sync.Once
+
 	// lastSessionMu guards lastSession.
 	lastSessionMu sync.Mutex
 	// lastSession is the session id of the most recent REAL (non-ping) request this
@@ -358,6 +379,8 @@ type Handler struct {
 	// never on the keep-alive ping path, so a ping can never make itself "current".
 	// Empty until the first real request arrives.
 	lastSession string
+	// capCache holds the cap's correction per /stats scope for capCacheTTL (savings.go).
+	capCache capCorrectionCache
 
 	// defer_ is tool deferral's state (#485, tooldefer.go). Built on first use.
 	defer_ deferHost
@@ -418,9 +441,18 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	if opts.RestartGrace != nil {
 		tr.SetRestartGrace(*opts.RestartGrace)
 	}
-	h := &Handler{pipe: pipe, store: st, agg: agg, opts: opts, client: c,
+	h := &Handler{agentFor: agent.ForPath, pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
+	// The tracker needs a dashboard: the Result is attached to the recorded event.
+	if opts.Dashboard != nil {
+		h.savings = newSavingsTracker()
+		if opts.AccountantState != "" {
+			h.savings.restore(opts.AccountantState, time.Now())
+			h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})
+			go h.savings.keepSaved(opts.AccountantState, h.stateStop, h.stateDone)
+		}
+	}
 	// The restart grace decides by the thread's own last cache refresh — its last request or
 	// a keep-alive ping that read the cache — and not by this process's start (#766). The
 	// recorder holds that time per thread — seeded from the database at startup
@@ -517,6 +549,10 @@ func (h *Handler) onRegistryChange(kind string) {
 // sync-mode handler and safe to call twice.
 func (h *Handler) Close() {
 	h.pool.Stop()
+	if h.stateStop != nil {
+		h.stateOnce.Do(func() { close(h.stateStop) })
+		<-h.stateDone // saves the state once more
+	}
 	// The keeper holds request bodies and, on a caller-pays upstream, callers' provider
 	// credentials. Stopping it drops both, which is why this is not optional on a host that
 	// builds and discards handlers.
@@ -671,6 +707,8 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		}
 		copyHeaders(req.Header, r.Header)
 		setUpstreamAuth(req.Header, up)
+		// The model-info half below is local-only. Bob is not deployed on hosted for now (owner,
+		// 2026-11-12), so this rule was not designed for hosted Bob. See docs/reference/hosted-vs-local.md.
 		if isBobProfile(r) || (h.opts.Tenants == nil && isBobModelInfo(r)) {
 			// We have to read this one response, so do not let it arrive compressed.
 			req.Header.Del("Accept-Encoding")
@@ -698,23 +736,39 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 // one response the catch-all does not forward verbatim. See forwardBobProfile.
 const bobProfilePath = "/admin/v1/profile"
 
-// bobModelPath is Bob's model route. Only a request on it may take its session from
-// X-Task-Id (see explicitSessionOf).
-const bobModelPath = "/inference/v1/chat/completions"
+// bobModelPath is Bob's model route.
+const bobModelPath = bob.ModelPath
 
 // explicitSessionOf is the explicit session id a chat request gives to apply. Every place that
 // derives this request's session calls it. So the pipeline, the expand repair, the observe
 // record and the wire recorder use the same id.
 //
-// The Bob IDE sends its task id only in the X-Task-Id header. The header has no vendor prefix,
-// so any client can send it. So only the Bob model route reads it. It comes after every other
-// id (session.Explicit). Other routes get the session header unchanged.
-func explicitSessionOf(r *http.Request, upPath string, body []byte) string {
+// The agent that owns the route may add a session id from a header (agent.Agent.SessionID). It
+// comes after every other id (session.Explicit). With no agent id, the request gets the session
+// header unchanged, as a route no agent owns does. So an agent that does not override SessionID
+// changes nothing on its route. (The body's own ids, such as Bob Shell's metadata.taskId, are read
+// downstream either way: sessionIDFrom.)
+func (h *Handler) explicitSessionOf(r *http.Request, upPath string, body []byte) string {
 	sess := r.Header.Get("x-context-guru-session")
-	if upPath != bobModelPath {
+	id := agentSessionID(r, h.agentFor(upPath))
+	if id == "" {
 		return sess
 	}
-	return apply.ExplicitSession(sess, body, r.Header.Get("X-Task-Id"))
+	return apply.ExplicitSession(sess, body, id)
+}
+
+// agentSessionID is a.SessionID, fail open: a panic in the agent gives "", no agent id, so the
+// request keeps the session it has without one.
+func agentSessionID(r *http.Request, a agent.Agent) (id string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			logging.From(r.Context()).Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", a), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return a.SessionID(r.Header)
 }
 
 func isBobProfile(r *http.Request) bool {
@@ -1010,6 +1064,9 @@ func (h *Handler) ratesFor(ctx context.Context) func(string) components.TokenRat
 // Reading up.setKey rather than re-deriving the credential is the fix and the invariant:
 // there is one decision, and both exits read it.
 //
+// A route whose agent owns its auth (agent.ModelTarget) never gets the server-held OpenAI key:
+// that key belongs to the OpenAI upstream, not to the agent's server.
+//
 // FAIL OPEN: no credential, no upstream or no model name returns nil, and the
 // component degrades to its deterministic path. It never errors the request.
 func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, body []byte, r *http.Request) components.Model {
@@ -1041,14 +1098,23 @@ func (h *Handler) incomingModel(provider bschemas.ModelProvider, up upstream, bo
 		ref := h.dispatch.incoming(up, AuthHeader(bschemas.Anthropic, key, scheme))
 		return cheapmodel.Anthropic{D: h.dispatch, Ref: ref, Model: model}
 	case bschemas.OpenAI:
-		if key == "" {
+		// The route's agent names the path and the auth scheme its upstream takes (IBM Bob: its own
+		// model path, and Apikey). The zero target keeps the defaults: /v1/chat/completions, Bearer.
+		target, owned := agentModelTarget(r.Context(), h.agentFor(up.path))
+		// The operator's OpenAI key belongs to the OpenAI upstream. A route whose agent owns its auth
+		// is another provider's server, so it gets the caller's key or no model call.
+		if key == "" && !owned {
 			key = h.serverKey(h.opts.OpenAIKey)
 		}
 		if key == "" {
 			return nil
 		}
-		ref := h.dispatch.incoming(up, AuthHeader(bschemas.OpenAI, key, ""))
-		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model}
+		auth := AuthHeader(bschemas.OpenAI, key, "")
+		if target.AuthScheme != "" {
+			auth = http.Header{"Authorization": {target.AuthScheme + " " + key}}
+		}
+		ref := h.dispatch.incoming(up, auth)
+		return cheapmodel.OpenAI{D: h.dispatch, Ref: ref, Model: model, Path: target.Path}
 	}
 	return nil
 }
@@ -1290,7 +1356,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
 		// Once, so the pipeline, the expand repair and the wire recorder use one id.
-		explicitSess := explicitSessionOf(r, static.path, body)
+		explicitSess := h.explicitSessionOf(r, static.path, body)
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -1387,6 +1453,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				if rec := recover(); rec != nil {
 					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
 					body = orig
+					// The original goes upstream, so no operation of the savings record is on the
+					// wire: drop the record, and the event books no saving.
+					cp.accDrop()
 				}
 			}()
 			// A client that received our own expand tool_use answered it itself, with an
@@ -1474,6 +1543,27 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
+			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
+			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
+			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
+			// sent. An empty session means the pipeline did not run (bypassed, observe, no
+			// messages): there are no operations to price, so the request is skipped.
+			//
+			// Not on the OpenAI Responses wire: it keeps the conversation in `input`, accBodies hashes
+			// `messages`, and apply reports no operations there. The record would price nothing and fail the
+			// library's sum check. The event is marked instead, so the dashboard says why it has no saving.
+			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) {
+				cp.accUnsupportedWire = true
+			} else if cp != nil && cp.savings != nil && tr.Session != "" {
+				cp.accBegin(accountant.RequestMeta{
+					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
+					Session:   tr.Session,
+					Model:     gjson.GetBytes(orig, "model").String(),
+					At:        cp.start,
+					// The proxy has no subscription detection, so every request is billed as api.
+					Billing: accountant.Billing{Mode: accountant.BillingAPI},
+				}, orig)
+			}
 			// A real request has arrived on this session: cancel any pending keep-alive
 			// (this request refreshes the entry itself, and a ping concurrent with it would
 			// be a second request against the tenant's budget for nothing), and pick up what
@@ -1533,8 +1623,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			//
 			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
 			// tool, so both need a model that ignores it):
-			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand, the
-			//     client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
+			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
+			//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
 			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
 			//   - Any dialect: if the model calls expand on every round, the client gets the raw
 			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
@@ -1584,18 +1674,33 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// control arm of every published comparison in this repo — and including presets
 				// like codesmart that contain no extract_llm_sweep and so can never adjudicate.
 				// The provider half is not cosmetic either: the prefixed ask needs a
-				// matching wire adapter. Responses has one; Chat Completions does not.
+				// matching wire adapter. Anthropic, Responses and Chat Completions have one
+				// (chatPrefixAsker, #1030); every other wire does not.
 				//
 				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
 				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || schema.IsResponses(wire)) && tn.Pipe.Has("extract_llm_sweep") {
+				if (provider == bschemas.Anthropic || schema.IsResponses(wire) || wire == schema.WireOpenAI) && tn.Pipe.Has("extract_llm_sweep") {
 					body, _ = adjudicate.Inject(wire, body)
 				}
 				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
 				// the never-defer list, and the names list must see the tools as they go upstream.
 				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
+				preDefer := body
 				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
+				// Deferral adds its names list to the messages after the pipeline reported its
+				// operations. Report it as an operation of its own, after theirs (#908).
+				if di != nil && !bytes.Equal(preDefer, body) {
+					if cp != nil {
+						cp.accPreDefer = preDefer
+					}
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], messageOps("tooldefer", preDefer, body)...)
+				}
 			}
+			// The savings record ends HERE, after both injections, with the body that goes
+			// upstream: the provider bills the injected tool declarations, so the library's
+			// bytes-to-tokens ratio must count them too. They are appended to `tools`, so no
+			// message moves and the operations' positions stay valid.
+			cp.accEnd(th, body, tr.Ops)
 		}()
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly
@@ -1806,9 +1911,9 @@ var errNoUpstream = errors.New("no upstream configured")
 // next request would otherwise carry the content.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
 	wire := schema.WireFor(string(provider), up.path)
-	// Only Bob's model route reads the cache writes Bob adds to its OpenAI chat usage block
-	// (bobUsage). Every other route keeps the shared parser's reading unchanged.
-	bob := up.path == bobModelPath
+	// The agent that owns the route may correct the shared parser's usage reading
+	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
+	ag := h.agentFor(up.path)
 	// ONE condition governs both halves of the loop: the tool is intercepted exactly when
 	// it is advertised on the outgoing request. Those used to be different conditions —
 	// advertised when the request had tools, intercepted (for SSE) when it had markers —
@@ -1942,6 +2047,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
 		// majority of sessions that never deferred anything.
 		offload.ResolveDeferredCacheAwareSummary(session, threadID)
+		// The warm sweep's question (#491), if the trigger registered one: it runs now, after this
+		// request was forwarded and answered, on its own goroutine. A failed forward drops it.
+		offload.ResolveWarmQuestion(session, threadID, status/100 == 2, int(usage.CacheRead))
 		if sse {
 			// The same two facts to both sinks. The aggregator keeps the process-lifetime
 			// average; the dashboard row keeps the per-request pair, so "which model, which
@@ -1986,7 +2094,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
 				// The id the shadow pipeline derives (post-transform), not the raw body's: see
 				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSessionOf(r, up.path, body),
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, up.path, body),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
@@ -2000,6 +2108,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				}
 			}
 		}
+		cp.noteRounds(rounds)
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
@@ -2159,6 +2268,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		upMs := float64(time.Since(upStart).Microseconds()) / 1000.0
 		status = resp.StatusCode
 		cp.noteUpstream(upMs, resp.StatusCode)
+		cp.noteLimits(resp.Header)
 		if h.agg != nil {
 			h.agg.RecordUpstreamLatency(upMs, bypassed)
 		}
@@ -2178,7 +2288,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2277,7 +2387,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see fillResponse.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, bob)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2305,8 +2415,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
-		if bob {
-			u = bobResponseUsage(resp.Header.Get("Content-Type"), respBody, u, ok)
+		// The agent reads its backend label from any reply, with or without usage; its token
+		// reading counts only when the shared parser read usage too.
+		agentU := readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
+		if ok {
+			u = agentU
+		} else {
+			u.Backend = agentU.Backend
 		}
 		if ok {
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
@@ -2546,6 +2661,22 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 	}
 }
 
+// resolveCompactionPoint is C for this request's model: the operator's compaction_point from the MODEL_PRICES
+// table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
+// and /compact) go through it, as they do for the window.
+func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
+	model := gjson.GetBytes(body, "model").String()
+	stated := 0
+	if cp, ok := h.opts.Windows.(interface {
+		CompactionPoint(context.Context, string) (int, bool)
+	}); ok {
+		if n, found := cp.CompactionPoint(ctx, model); found {
+			stated = n
+		}
+	}
+	return compactionpoint.Resolve(model, stated, window)
+}
+
 // resolveWindow resolves this request's model context window and whether that figure is
 // published for the model rather than guessed at from its family.
 //
@@ -2666,12 +2797,12 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
-	return h.streamRecOn(w, resp, tee, false)
+	return h.streamRecOn(w, resp, tee, agent.Base{})
 }
 
-// streamRecOn is streamRec for a chat route. bob is true only on Bob's model route, where the
-// usage block also carries the cache writes (bobUsage).
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, bob bool) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+// streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
+// the shared parser's usage reading (readAgentUsage).
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2704,8 +2835,18 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
-	if bob {
-		u = bobResponseUsage(resp.Header.Get("Content-Type"), win, u, ok)
+	{
+		// The request's context carries its logger. A test's hand-built response has no request.
+		ctx := context.Background()
+		if resp.Request != nil {
+			ctx = resp.Request.Context()
+		}
+		agentU := readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
+		if ok {
+			u = agentU
+		} else {
+			u.Backend = agentU.Backend // a reply with no usage still has a backend label
+		}
 	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
@@ -2975,7 +3116,9 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		snap.Savings = s
 	}
 	snap.ToolDefer = h.deferStats()
-	snap.BobBackend = BobBackendCounts()
+	snap.KeepAlivePingsPriced = h.opts.Pings.Priced()
+	snap.KeepAliveRescueFactsMissing = h.savings.RescueFactsMissing()
+	snap.BobBackend = bob.BackendCounts()
 	json.NewEncoder(w).Encode(snap)
 }
 

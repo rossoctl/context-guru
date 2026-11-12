@@ -284,16 +284,114 @@ test('a release the user has not declined shows `▲ update` first on the status
 test('on a Claude subscription the money gives way to the 5-hour limit and the tokens saved in it', async ($, on) => {
   usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
   const calls: string[][] = []
-  docOverride = d => ({ ...d, window_saved: 'saved 1.2M rd / 85.0k wr' })
+  docOverride = d => ({ ...d, window_saved: 'saved 85.0k wr · cost 40.0k rd' })
   await boot($, on, true, calls)
   usage = docOverride = null
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
   const row = (await dump(ui)).split('\n')[1]
-  expect(row).toMatch(/^5h 34% · saved 1\.2M rd \/ 85\.0k wr │ cache ● /)
-  expect(row).not.toMatch(/\$/)
+  expect(row).toMatch(/^5h 34% · this session saved 85\.0k wr · cost 40\.0k rd │ cache ● /)
+  // the next message is in tokens too, one figure for the warm cache: the 90k cached prefix is read (#1095)
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message 90\.0k rd\s/)
+  expect(await dump(ui)).not.toMatch(/\$/)
   // the window's start (its reset less five hours) reaches the helper, which reads that window's totals
   expect(calls.some(c => c.join(' ').includes(`--window-start-ms ${NOW + 3_600_000 - 5 * 3_600_000}`))).toBe(true)
   await ui.unmount()
+})
+
+test('on a subscription a cold cache prices the next message as the prefix written again', async ($, on) => {
+  usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ ○ cache cold · next message 90\.0k wr/)
+  expect(await dump(ui)).not.toMatch(/\$/)
+  await ui.unmount()
+})
+
+const FIVE_HOUR = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+
+for (const narrow of [false, true]) {
+  test(`on a subscription a warm band shows one figure, the read, in the success color (${narrow ? '60' : '140'} columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    await boot($, on, true)
+    usage = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: narrow ? 60 : 140 }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(narrow ? /^◆ next 90\.0k rd\s/ : /^◆ next message 90\.0k rd\s/)
+    expect(row1).not.toMatch(/wr|cold/) // no second figure: the read and the write are the same 90k prefix
+    const fig = await ui.find({ type: 'Text', text: /^90\.0k rd$/ })
+    expect((fig as any)?.props?.color).toBe('success')
+    await ui.unmount()
+  })
+}
+
+test('on a subscription a cold band shows one figure, the write, in the warning color', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/^◆ ○ cache cold · next message 90\.0k wr\s/)
+  expect(row1).not.toMatch(/\brd\b/)
+  const fig = await ui.find({ type: 'Text', text: /^90\.0k wr$/ })
+  expect((fig as any)?.props?.color).toBe('warning')
+  await ui.unmount()
+})
+
+test('on a subscription a cold band at 60 columns shows the write in the warning color', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/^◆ ○ cache cold · next message 90\.0k wr\s/)
+  const fig = await ui.find({ type: 'Text', text: /^90\.0k wr$/ })
+  expect((fig as any)?.props?.color).toBe('warning')
+  await ui.unmount()
+})
+
+test('on a subscription a warm band with no warm price shows no bare next-message label', async ($, on) => {
+  usage = FIVE_HOUR
+  const drop = (t: any) => { const { next_warm_usd, ...rest } = t; return rest }
+  docOverride = d => ({ ...drop(d), threads: d.threads?.map((t: any) => (t.main ? drop(t) : t)) })
+  await boot($, on, true)
+  usage = docOverride = null
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row1 = (await dump(band)).split('\n')[0]
+  expect(row1).not.toMatch(/next message/)
+  expect(row1).not.toMatch(/\b(rd|wr)\b/)
+  await band.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await dump(pane)).toMatch(/NEXT MESSAGE\nnext message unknown\n/)
+  await pane.unmount()
+})
+
+for (const warm of [true, false]) {
+  test(`on a subscription the pane shows one next-message figure for a ${warm ? 'warm' : 'cold'} cache`, async ($, on) => {
+    usage = FIVE_HOUR
+    await boot($, on, warm)
+    usage = null
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = await dump(ui)
+    expect(text).toMatch(warm ? /NEXT MESSAGE\nnext message 90\.0k rd\n/ : /NEXT MESSAGE\nnext message 90\.0k wr\n/)
+    expect(text).not.toMatch(/if the cache is warm|if it is cold/)
+    expect(text).not.toMatch(warm ? /90\.0k wr/ : /90\.0k rd/)
+    const fig = await ui.find({ type: 'Text', text: warm ? /^90\.0k rd$/ : /^90\.0k wr$/ })
+    expect((fig as any)?.props?.color).toBe(warm ? 'success' : 'warning')
+    await ui.unmount()
+  })
+}
+
+test('with an API key the band and the pane keep the dollar pair, warm and cold', async ($, on) => {
+  await boot($, on, true)
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(band)).split('\n')[0]).toMatch(/^◆ next message \$0\.06 · \$0\.78 if cold\s/)
+  await band.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(pane)
+  expect(text).toMatch(/if the cache is warm \$0\.06\n/)
+  expect(text).toMatch(/if it is cold +\$0\.78  \(90k tokens in the cached prefix\)\n/)
+  await pane.unmount()
 })
 
 test('the weekly tip shows when a command is stale, never rotates, and needs room for a third row', async ($, on) => {

@@ -200,7 +200,7 @@ So the two halves happen at different moments:
 1. **Ask at the keep-alive ping, in place of the ping.** The ping already reads the cached prefix to
    refresh it; the question is the same read plus an answer, so the answer is the only extra cost. There
    is no timer of its own. No keep-alive means no question, and a prompt under the keep-alive floor
-   (80k tokens, #444) gets none. The summary call (`cache_aware_summarizer`) takes the ping first when
+   (80k tokens, or 20k except for a main thread that waits for a person or for an unknown cause; #444, #858) gets none. The summary call (`cache_aware_summarizer`) takes the ping first when
    it has material.
 2. **Ask whenever there is at least one candidate.** No economic gate and no minimum of ten
    (`min_inventory` defaults to 1).
@@ -585,6 +585,205 @@ The reply budget stays at the flat 16,000 tokens per batch. 12 is the batch size
 verbatim quote) for every output in it, and a reply cut off mid-array parses as nothing. A cut reply now loses its batch
 and not the whole sweep.
 
+### The warm path (#491, off by default, in no preset)
+
+The cold apply never fires for a session that never goes idle. `warm: true` adds a second way, behind an
+economic gate.
+
+1. **Trigger, a rule.** On a warm request of a thread, at most once every `warm_every_n` requests
+   (default 30). Only when old outputs could pay back a rewrite even if every one were dropped: each at
+   least `min_tokens` (1,000) and at least `warm_min_age_turns` (default 30) model turns old. The removable mass must also be at least `warm_min_mass_frac` (default 0.20) of the conversation. The expected turns at the trigger are the warm turns the thread has run so far, capped. Every refusal is counted by reason (`keepalive.sweep_warm.trigger_refusals`). Each applied sweep leaves a record in `keepalive.sweep_warm.recent_sweeps`: tokens removed, conversation before and after, the gate's numbers and the net it expected.
+2. **What to drop, the model.** The same question as at the ping, plus a file clause for a file read:
+   `file_read=yes later_edits=N later_rereads=N`. It comes from tool names and tool input paths only. No
+   path and no output text reaches the question.
+3. **In the background.** The question runs after the request is forwarded, under the thread's ping claim
+   and the shared question slots. A thread never has two questions at once. It reads the ping registry's
+   existing copy of the conversation and keeps none of its own, so it asks only on a thread the keep-alive
+   can ping (counted as `not_registered` otherwise).
+   **A list longer than 12 is asked in balanced batches, by the same function the cold sweep uses**
+   (see [Batches](#batches-how-a-long-list-of-outputs-is-asked-max_ask_batches)), up to `max_ask_batches`.
+   The answers merge into ONE waiting answer, so the gate below decides once over all of them. The same
+   rules apply as at the ping: each batch is judged on its own by the shared cache-read rule, a failed
+   batch is left out, a panic keeps the thread marked asked, and the outer bound is the keeper's 300 s.
+4. **Held in memory only.** The answer waits in a bounded per-thread map (256 threads, 30 minutes). It is
+   never written to the Store. A restart loses it, which drops nothing.
+5. **On a later warm request:** recheck as the cold apply does, then the gate, then apply. Apply only if
+   `removed x read rate x expected warm turns` is more than `rewritten x (write rate - read rate)`. The
+   rewrite is what comes after the last cache entry the provider can still reach. It looks back about 20
+   content blocks from the previous request's last breakpoint. A drop farther back than that reaches only
+   the fixed system prompt and tools, so the rewrite is the **whole conversation**. A drop inside it
+   rewrites only the tail from the drop. In 6,968 recorded Opus calls every large cache drop read back
+   exactly the fixed size, so a deep drop costs about ten times what it removes. Sizes
+   come from the provider's billed count of the previous turn: the rewrite scales by billed over local
+   size of the whole prompt, the removed content by the family factor (never more than that ratio). A
+   missing billed size refuses. Expected warm turns are the thread's own warm run, capped at
+   `warm_max_turns` (default 60, twice the question interval), times a wait-cause weight read off the
+   request (last message a tool result 1.0, a person's message 0.5, other 0.75).
+   **A refusal keeps the drops that passed the recheck, in memory only.** The next question's answer is
+   merged with them by tool-use id. Each output counts once, and the NEWER verdict wins, a newer keep
+   included. Every apply attempt rechecks the whole merged set, and a carried drop that fails the recheck
+   leaves for good. The gate decides once on the surviving set. Accept means one cut, then the set is
+   cleared. Refuse keeps the survivors. A carried set that was already refused is not retried on each warm
+   request: the trigger asks a new question, and the gate runs when its answer arrives. The set is bounded:
+   30 minutes from the OLDEST question that still contributes a verdict (a refusal does not make it
+   younger), at most 256 carried drops (the oldest go first), and a conversation that gets shorter clears
+   it. The trigger does not count carried drops. It prices every candidate as dropped, as before.
+   A carried drop survives only if the next question does not cover its output, or also drops it. A question
+   that covers it and keeps it overrides it.
+6. **Same apply as the cold path.** Same markers, stash, drop records and replay. A cold request, or a
+   changed prefix, that meets a waiting answer applies it as the cold apply does, with no gate.
+
+**Every decision is recorded, accepted or refused.** `keepalive.sweep_warm.recent_decisions` (last 50, thread as a hash
+label) lists each trigger and apply-gate decision with D (tokens removed, local and billed), R (tokens rewritten, local
+and billed), N (expected warm turns), the wait-cause weight, the full and content ratios, deep or not, the gate's saving
+and rewrite in USD, and the reason. Each decision also writes one INFO line (`cg.sweep.warm_decision`) with the same
+numbers and no content. A refused apply books the same numbers as events on the row
+(`sweep_warm_refused_removed_tokens`, `_rewrite_tokens`, `_expected_turns`, `_deep`).
+
+`warm_gate_price_model` (unset, in no preset) is a **diagnostic**: the gate prices its saving and rewrite with that
+model's rates (for example `claude-opus-5`), for a test run on a model the price table prices at $0. Only the gate's
+decision uses it. The dashboard and `/stats` price the real model. It is logged once at start and shown as
+`keepalive.sweep_warm.gate_price_model`, so such a run is never mistaken for a normal one. A model the rate card
+does not know falls back to the built-in rates and is counted (`price_model_unknown`).
+
+A decision also records `proposed`, the recheck's losses by reason (`dropped`), and the carried and new
+counts and tokens. The recheck's reasons are booked BEFORE the gate, as `sweep_apply_dropped_<reason>`, so
+a refusal shows them too. A held answer judged on a longer conversation than the request has is dropped
+and counted as `held_shrunk` (decision reason `conversation_shrunk`). An empty proposal is
+`no_drop_proposed`. `no_valid_drop` means the recheck threw out a whole proposal.
+Carried-set counters in `keepalive.sweep_warm`: `carried_merged`, `carried_overridden`, `carried_refused`,
+`carried_expired` (a carried set that aged out; an answer never refused that went stale is `held_expired`),
+`carried_capped` (carried drops the 256 cap evicted); event `sweep_warm_carried_drops`.
+
+Counted apart: `sweep_applied_warm`, `sweep_false_ref_warm`, `sweep_warm_gate_accept`,
+`sweep_warm_gate_refuse_<reason>`; in `/stats` under `keepalive.sweep_drops` (`applied_warm`,
+`false_drop_rate_warm`, `false_drop_rate_cold`) and `keepalive.sweep_warm` (trigger, question and gate
+counts with refusal reasons).
+
+### Sweep v3: rules and one big cut (`selector`, off by default)
+
+Sweep v3 is a **setting** of the warm path. It is not a new component. It needs `warm: true`. It is off unless you write one
+of its settings. With none written, the warm path runs exactly as described above.
+
+A cut is one big removal, made late, when the conversation is near the point where it would be compacted anyway.
+
+1. **Sweet spot.** The sweep tries a cut when `P >= fill(C) x C`.
+   - `P` is the billed prompt of this thread. `C` is the **effective context**: where the client compacts, not the window.
+     `C` is the summarizer's fraction of that point when a summarizer is in the pipeline (`c_source: cutfrac`), else the
+     compaction point when it is known (`compaction`), else the window (`window`). `C` needs an exact window.
+   - A compaction point comes from the operator (`compaction_point` in the `MODEL_PRICES` table), or from the built-in
+     table (measured or assumed). A model with no entry has none: the built-in table calls it `window_fallback`, and v3
+     treats that as the window.
+   - Claude Code compacts a GLM near 167k billed of a 200k window. Without the field the sweet spot is 0.70 x 200k = 140k,
+     which is a share of the window and not of where the client acts. State it and the sweet spot is 0.70 x 167k = 117k:
+     `- {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 200000, compaction_point: 167000}`.
+     `compaction_point` is in billed tokens. It does not change `window`.
+   - The summarizer and the dashboard (the compact-episode span, the summarize ledger and the replay cap) read the same figure, so an operator value applies to them too. Nothing changes
+     unless the field is set.
+   - `fill(C)` is `fill_small` (0.70, a general rule of 70% of the effective context) at `C <= 200k` and `fill_large` (0.6) at `C >= 1M`. It is linear in `C` between.
+2. **One cut per round.** After an accepted cut, the next one waits until `P` has grown by `min_drop_frac x C` since the cut.
+   A refused cut does not start this wait. The sweep asks the judge no question during the wait.
+3. **Meaningful drop.** `D >= min_drop_frac x P` (default 0.15). `D` is the rule drops and the judge drops that survive the recheck.
+4. **Payback.** The warm gate above. The saving is priced on **N only**: the turns until the compaction would have come
+   without the cut, `N = (C - P) / g`, where `g` is the billed growth per turn. It is capped by `warm_max_turns` and
+   weighted as before. The rule is: count until the compaction would have occurred, given the context growth. If the session
+   ends before N, the saving is not collected. The reason is that a cut only **delays** the compaction. Compaction at N
+   removes the dropped outputs anyway, so a saving counted past N would be paid for by a compaction that happens regardless.
+   The gate accepts when `saving > rewrite` (strictly), as #720's does. The decision log also shows `N'`
+   (`turns_after_cut`), the turns counted from the prompt after the cut, `(C - (P - D)) / g`, for reading only: nothing prices
+   on it. N and N' come from one function (`turnsUntilCut`), shared with the co-reference horizon.
+
+   **`compaction_premium_usd` (default 0, an experiment knob).** It exists to find out whether cutting as much as possible
+   improves quality at all, with cost as a constraint and not the goal. When a cut postpones the compaction (N' is more than
+   N, which is any cut that removes something in the `cut` turns model), the gate adds the premium to the saving side and
+   accepts when `saving_to_N + premium > rewrite`. With 0 the gate is the cost gate above: saving to N, no credit. A high
+   value (for example 10) effectively turns the cost gate off in a $0 test, while the Opus-priced cost is still logged
+   (`saving_usd`, `rewrite_usd`). Every apply-stage decision logs `premium_usd` and `passed_on_cost` (true when the saving to
+   N beat the rewrite by itself), so a run shows which cuts needed the premium. `/stats` counts the accepted cuts as
+   `v3.cuts_on_cost` and `v3.cuts_on_premium`. Do not leave a premium set in production.
+
+`selector` picks who chooses the drops:
+
+- `judge` (default): the model, as before. Protected outputs are not offered.
+- `rule`: rules only. **No model call.**
+- `hybrid`: the rules, then the judge on what the rules did not decide. It is **one** cut: nothing is applied while the
+  question is out. If the judge gives no answer, the rules go alone, through the same gates (`hybrid_rules_only`).
+
+The same rules cover the keep-alive ping question and the cold apply. With `selector: rule` the ping stays a plain ping (no
+model call, and no copy of the conversation is kept, so the ping counts as `sweep_no_candidate`; `ping_refused_rule` fires only for a
+candidate left from before a config change). With `judge` or `hybrid` the ping question never offers a protected output, and
+in `hybrid` it does not offer a rule-decided one. A stored answer applied on a cold request skips protected outputs
+(`cold_protected_filtered`), so an answer made before a config change cannot drop them. A cold or changed-prefix apply counts
+as a cut and starts the growth wait.
+
+The rules read tool names, input paths and commands from the request in flight. They store nothing.
+
+- `file_reread`: a file read whose same path was read again later, or edited or written later.
+- `build_rerun`: a build, test or lint run in a shell tool whose same command (white space collapsed) ran again later.
+- `unreferenced` (rule (c), off by default; `rule_unreferenced: true`): a tool output that nothing later references. It is the
+  recheck's `referenced_later` signal, from the same code (`coref.IndexNovel`), run over the whole later conversation: no
+  later model turn or tool call reuses an identifier the output introduced (a path, an id, a quoted value). An output that
+  introduced no identifier is never chosen. `rule_unreferenced_min_age` (default 30) is how many tool calls newer the output
+  must be. Setting `rule_unreferenced` switches v3 on. It needs `selector: rule` or `hybrid`.
+- An output that already has a `<<cg:...>>` marker, or that the agent expanded, is never chosen.
+
+Never dropped, by rule or by judge: outputs of `protect_tools` (tool names), outputs whose call path matches `protect_paths`
+(globs; `*` stays in one folder, `**` crosses folders), the newest `protect_last_n` tool results (default 10), and anything
+expanded in this session.
+
+`not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every apply-stage decision line, accepted or refused, `does_not_pay` included.
+
+**Dry run (`dry_run`, an experiment, off by default).** For a paired test of Context Guru in the path with no cut ever. With
+`dry_run: true` everything runs as a normal v3 run, but no drop is applied on any path: warm, cold (a Store or a memory
+answer), changed-prefix and the v3 cold branch. The gates run and their decision lines are written. Each cut the gate
+accepted is logged as `cg.sweep.dry_run_cut`, with a real cut's fields (`billed_prompt`, `cut_point`, `c_source`,
+`dropped_billed`, `d_share_of_p`, `p_share_of_c`, `rule_d`, `premium_usd`, `passed_on_cost`), and counted in
+`v3.dry_run_cuts` (the drops in them in `v3.dry_run_drops`, the last cuts in `v3.dry_run_recent_cuts`).
+- **No growth wait.** A would-be cut does not start the growth wait. The prompt never shrank, so a wait would make the run
+  ask less often than a run with cuts does before its first cut. The result is that a dry run attempts a cut at every paced
+  request in the sweet spot.
+- **The forwarded request is the request of a run whose sweep drops nothing:** no message changes, nothing is stashed, no
+  marker is made, and no drop record is written (`cg:swd:`, `cg:swx:`).
+- **What Context Guru still adds to the wire in a dry run.** These are not sweep drops and `dry_run` does not touch them:
+  the `context_guru_expand` tool (appended to `tools` when the pipeline can mint a marker and the store persists), the
+  `context_guru_adjudicate` tool (when `extract_llm_sweep` is in the pipeline, on Anthropic and Responses), the
+  cache-breakpoint work of `cachesplit` and `cacheinject` if they are in the pipeline (the split of the volatile system
+  tail, the placement of `cache_control`), the one-hour head TTL if it is switched on, and every other component in the
+  pipeline. The keep-alive pings and the judge's questions are separate requests to the provider; they are not in the
+  forwarded body. A pair test should hold these the same on both arms, or list them as the arm difference.
+
+**Did the agent go back?** With v3 on, the drop record also stores the tool name and a **hash** of the file path or command of the call that produced the output. The path is never stored. On each later request the sweep hashes the path or command of the later tool calls and matches them against those hashes. Each drop is counted once, as `reread_after_drop`, by source and by kind. With `dropped_by_kind` it gives a re-read rate.
+
+The drop record in the Store carries the name of what chose the drop (a rule, or `judge`). It is a name only. An expand reads it, so the expand rate can be shown per rule.
+
+Counters, in `/stats` under `keepalive.sweep_warm.v3` and in the decision log (`d_share_of_p`, `p_share_of_c`):
+`dropped_by_kind` (applied v3 drops by the class of the tool: `read`, `edit`, `command`, `other`) and `reread_after_drop` (later tool calls that went back to what a drop removed: the same file read or edited again, or the same command run again; `total`, `by_source` (a rule name or `judge`) and `by_kind`), `expands` (first expands of v3 drops, by what chose them: a rule name or `judge`; with `rule_drops` and `judge_drops` it gives the
+expand rate per rule), `recent_refusals` (the last refusals made before the gate, with D, D/P, P/C, C, `c_source` and D by rule; the gate's own refusals are in the decision log),
+`c_source` (how often C came from `cutfrac`, `compaction` or `window`, counted once per `warm_every_n` warm requests), `refused` by reason (`not_in_sweet_spot`, `drop_too_small`, `waiting_for_growth`, `does_not_pay`, `cut_point_unknown`,
+`no_rule_drops`, `ping_refused_rule`, `cold_protected_filtered`), `rule_drops` by rule, `judge_drops`, `hybrid_rules_only`, `cuts`, and `recent_cuts` (C and its `c_source`, D as a share of P,
+P as a share of C).
+
+### How many warm turns are left (`warm_expected_turns`)
+
+The warm gate collects its saving over N more warm turns. N comes from one of three models, and the decision log says which
+(`turns_model`), with the raw N before the cap (`turns_raw`), the cut, and the growth per turn:
+
+1. **`expected`** when `warm_expected_turns` is set: N = max(expected - warm turns so far, 0).
+2. **`cut`** otherwise: the session is assumed to run until it is **cut**. The cut is the `cache_aware_summarizer` or
+   `summarize` trigger's fraction of the window when one is in the pipeline (`trigger.min_request_frac`), else the full window.
+   N = (cut - the current billed prompt) / (the average billed growth per turn on this thread). The growth restarts when the
+   billed prompt shrinks (a client compaction, our own sweep, a rewind). Billed sizes only.
+3. **`so_far_fallback`**: the warm turns so far. Used when the growth is unknown or not positive, there is no billed size, the
+   window is only a family guess (the summarizer's own trigger refuses to act on a guessed window too), or the session is
+   already past the cut. `turns_why` says which.
+
+`warm_max_turns` caps N in every model, and the wait-cause weight applies on top.
+
+The `cut` model needs an **exact** context window, as the summarizer's own trigger does. For a model the public map does
+not list (a GLM behind a gateway, a preview id), an agent builder supplies it with a `window:` in the `MODEL_PRICES` table
+(`MODEL_PRICES=<file>`); an operator's table is authoritative, so it counts as exact. See
+[`deploy/service/prices.example.yaml`](https://github.com/rossoctl/context-guru/blob/main/deploy/service/prices.example.yaml).
+
 ### Counters
 
 At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `sweep_held`,
@@ -593,7 +792,8 @@ At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `
 `sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
 `sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
 candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
-`keepalive_sweep_over_budget`, and `sweep_gates`: the adjudication's own gate and event names
+`keepalive_sweep_over_budget`, `sweep_batch_by_index` (per batch position: asked, items, judged,
+fabricated, to see whether later batches judge worse), and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
 In a request: `sweep_applied_cold`, `sweep_applied_changed_prefix`, `sweep_apply_declined`,
@@ -629,7 +829,9 @@ The two to **alert** on:
   reply, just said was still needed. The removal did not happen; that is the invariant. But a
   non-zero rate means the contract is not holding.
 - **`sweep_quote_fabricated`** — the model cited transcript text that is not in the transcript. It is
-  inventing evidence, and this is the only signal that says so.
+  inventing evidence, and this is the only signal that says so. The quote is checked against the body the
+  model READ (the stashed body the question was appended to), not the newest request: a quote from a message
+  newer than that body is real and is not counted. It changes only this counter, never a drop decision.
 
 Diagnostics, visible at `/stats` under the component and as
 `cg_component_gate_declines_total{component="extract_llm_sweep",gate="…"}`:

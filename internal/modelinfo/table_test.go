@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -230,6 +231,124 @@ func TestSpecificEntryBeatsAFamilyRegardlessOfMatchKind(t *testing.T) {
 	}
 }
 
+// Regression test for #324. A bare id (no provider prefix) must resolve to the
+// SPECIFIC qualified entry the operator wrote it under, not to a wildcard family
+// that happens to also match — mirroring modelinfo.LiteLLM.fetch, which indexes the
+// public map under both a model's full key and its bare tail. This fails on
+// today's code: `claude-sonnet-5` falls past `aws/claude-sonnet-5` ($1.52) straight
+// to `claude-sonnet*` ($2.28, "the 4-x rate"), a live 1.5x overcharge on the
+// shipped list.
+func TestBareIDResolvesToQualifiedEntryNotFamily324(t *testing.T) {
+	tb, err := LoadTable("../../deploy/service/prices.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok {
+		t.Fatal("claude-sonnet-5 unpriced")
+	}
+	if math.Abs(p.Input-1.52e-6) > 1e-15 {
+		t.Fatalf("bare claude-sonnet-5: in = $%.2f/MTok, want $1.52 (aws/claude-sonnet-5's own rate) — "+
+			"got the claude-sonnet* family rate instead", p.Input*1e6)
+	}
+	// Second, smaller instance of the same root cause (#324): bare gpt-5.6-sol has no
+	// wildcard family entry, so on today's code it skips Table entirely and would be
+	// priced by the public LiteLLM map instead of azure/gpt-5.6-sol's explicit $5/$30.
+	p, ok = tb.Price(context.Background(), "gpt-5.6-sol")
+	if !ok {
+		t.Fatal("gpt-5.6-sol unpriced — should resolve to azure/gpt-5.6-sol's own rate")
+	}
+	if math.Abs(p.Input-5.00e-6) > 1e-15 {
+		t.Fatalf("bare gpt-5.6-sol: in = $%.2f/MTok, want $5.00 (azure/gpt-5.6-sol's own rate)", p.Input*1e6)
+	}
+}
+
+// An operator who deliberately writes both a bare entry and a qualified one keeps
+// their own distinction: the explicit bare entry is an exact match in pass one and
+// must win over the tail derived from the qualified entry.
+func TestExplicitBareEntryBeatsQualifiedTail(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet-5",     in: 9.99, out: 40.00, note: "operator's own bare rate"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok {
+		t.Fatal("claude-sonnet-5 unpriced")
+	}
+	if math.Abs(p.Input-9.99e-6) > 1e-15 {
+		t.Fatalf("in = $%.2f/MTok, want $9.99 (the explicit bare entry, not the qualified tail)", p.Input*1e6)
+	}
+}
+
+// Two qualified entries under different providers sharing a bare tail, at DIFFERENT
+// rates, is genuinely ambiguous: silently picking one is the exact mechanism that
+// caused #324. The tail must not be indexed at all — it falls through to whatever
+// family/containment match would otherwise apply, same as if neither existed.
+func TestAmbiguousBareTailFallsThroughInsteadOfGuessing(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60}
+  - {match: "vertex/claude-sonnet-5", in: 2.00, out: 10.00}
+  - {match: "claude-sonnet*",         in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The qualified ids themselves are unambiguous and still resolve exactly.
+	if p, _ := tb.Price(context.Background(), "aws/claude-sonnet-5"); math.Abs(p.Input-1.52e-6) > 1e-15 {
+		t.Fatalf("aws/claude-sonnet-5: in = $%.2f/MTok, want $1.52", p.Input*1e6)
+	}
+	// The bare id is ambiguous between the two providers' rates, so it must fall
+	// through to the family entry rather than silently picking one.
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok {
+		t.Fatal("claude-sonnet-5 unpriced")
+	}
+	if math.Abs(p.Input-2.28e-6) > 1e-15 {
+		t.Fatalf("ambiguous bare claude-sonnet-5: in = $%.2f/MTok, want $2.28 (the family fallback)", p.Input*1e6)
+	}
+}
+
+// A bare id that is the tail of no qualified entry still falls to its family.
+func TestBareIDWithNoQualifiedTailUsesTheFamily(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-opus-5",  in: 3.80, out: 19.00}
+  - {match: "claude-opus*",       in: 3.80, out: 19.00}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// claude-opus-4-8 has no qualified entry of its own, only the family.
+	p, ok := tb.Price(context.Background(), "claude-opus-4-8")
+	if !ok {
+		t.Fatal("claude-opus-4-8 unpriced")
+	}
+	if math.Abs(p.Input-3.80e-6) > 1e-15 {
+		t.Fatalf("claude-opus-4-8: in = $%.2f/MTok, want $3.80 (the family fallback)", p.Input*1e6)
+	}
+}
+
+// A bare id with neither a qualified entry nor a family wildcard is a genuine miss:
+// Table must say ok=false so the Chain's next source (the public LiteLLM map) answers,
+// rather than the request being silently priced at anything.
+func TestBareIDWithNoTableEntryAtAllReportsUnknown(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tb.Price(context.Background(), "gpt-5.6-sol"); ok {
+		t.Fatal("gpt-5.6-sol matched something in a table that has no entry for it")
+	}
+}
+
 // The file-level cache_read_frac: unset follows the model, a set value (even 0.1) wins for every
 // entry, and an entry's own cache_read beats both.
 func TestTableCacheReadFracUnsetFollowsTheModel(t *testing.T) {
@@ -309,5 +428,154 @@ models:
 		if got := p.CacheRead * perMTok; math.Abs(got-tc.want) > 1e-9 {
 			t.Errorf("%s: cache_read = %v per MTok, want %v", tc.model, got, tc.want)
 		}
+	}
+}
+
+func TestTableParsesCompactionPoint(t *testing.T) {
+	tb, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1.0, out: 4.0, window: 200000, compaction_point: 167000}\n  - {match: \"aws/claude-sonnet-5\", in: 1.52, out: 7.6, window: 1000000}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if n, ok := tb.CompactionPoint(ctx, "rits/zai-org/glm-5-3"); !ok || n != 167_000 {
+		t.Fatalf("compaction point = %d, %v, want 167000", n, ok)
+	}
+	if w, ok := tb.Window(ctx, "rits/zai-org/glm-5-3"); !ok || w != 200_000 {
+		t.Fatalf("the window must stay the real window, got %d", w)
+	}
+	if _, ok := tb.CompactionPoint(ctx, "aws/claude-sonnet-5"); ok {
+		t.Fatal("an entry with no compaction_point reported one")
+	}
+	if _, ok := (Chain{tb}).CompactionPoint(ctx, "rits/zai-org/glm-5-3"); !ok {
+		t.Fatal("the chain did not pass the table's compaction point on")
+	}
+	if _, err := ParseTable([]byte("models:\n  - {match: x, in: 1, out: 1, compaction_point: -1}\n")); err == nil {
+		t.Fatal("a negative compaction_point was accepted")
+	}
+}
+
+func TestTableRejectsACompactionPointAboveItsWindow(t *testing.T) {
+	_, err := ParseTable([]byte("models:\n  - {match: \"rits/zai-org/glm-5-3\", in: 1, out: 1, window: 200000, compaction_point: 250000}\n"))
+	if err == nil || !strings.Contains(err.Error(), "rits/zai-org/glm-5-3") {
+		t.Fatalf("err = %v, want a refusal that names the model", err)
+	}
+	// Not stated together: no check. A point alone is fine, and equal to the window is fine.
+	for _, y := range []string{
+		"models:\n  - {match: x, in: 1, out: 1, compaction_point: 250000}\n",
+		"models:\n  - {match: x, in: 1, out: 1, window: 200000, compaction_point: 200000}\n",
+	} {
+		if _, err := ParseTable([]byte(y)); err != nil {
+			t.Errorf("%q refused: %v", y, err)
+		}
+	}
+}
+
+// The inline form of the #324 acceptance test: it does not depend on the shipped example file.
+func TestBareIDResolvesToQualifiedEntryInline(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",      in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok || math.Abs(p.Input-1.52e-6) > 1e-15 {
+		t.Fatalf("bare claude-sonnet-5: ok=%v in=$%.2f/MTok, want $1.52", ok, p.Input*1e6)
+	}
+}
+
+// A request that names ANOTHER provider must not take the rate of a different provider's
+// entry because the two share a tail.
+func TestOtherProvidersPrefixDoesNotTakeAQualifiedTail(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",      in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "vertex/claude-sonnet-5")
+	if !ok || math.Abs(p.Input-2.28e-6) > 1e-15 {
+		t.Fatalf("vertex/claude-sonnet-5: ok=%v in=$%.2f/MTok, want $2.28 (the family, not aws's $1.52)", ok, p.Input*1e6)
+	}
+}
+
+// Two providers that price a tail identically are not ambiguous: the bare id takes that rate.
+func TestSameRateTailIsNotAmbiguous(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "claude-sonnet*",         in: 2.28, out: 11.40}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(context.Background(), "claude-sonnet-5")
+	if !ok || math.Abs(p.Input-1.52e-6) > 1e-15 {
+		t.Fatalf("bare claude-sonnet-5: ok=%v in=$%.2f/MTok, want $1.52", ok, p.Input*1e6)
+	}
+}
+
+// Same rate is not enough: the entry also serves Window, WindowExact and CompactionPoint, so
+// two providers that differ there are ambiguous and the bare id must not report either one's
+// window as exact.
+func TestSameRateDifferentWindowTailIsAmbiguous(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60, window: 200000}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60, window: 1000000}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if w, ok, exact := tb.WindowExact(ctx, "claude-sonnet-5"); ok || exact {
+		t.Fatalf("bare claude-sonnet-5 reports window %d (exact=%v); the providers disagree", w, exact)
+	}
+	if w, ok, exact := tb.WindowExact(ctx, "aws/claude-sonnet-5"); !ok || !exact || w != 200000 {
+		t.Fatalf("aws/claude-sonnet-5: window=%d ok=%v exact=%v, want 200000 exact", w, ok, exact)
+	}
+}
+
+func TestSameRateDifferentCompactionPointTailIsAmbiguous(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60, window: 1000000, compaction_point: 150000}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60, window: 1000000, compaction_point: 800000}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp, ok := tb.CompactionPoint(context.Background(), "claude-sonnet-5"); ok {
+		t.Fatalf("bare claude-sonnet-5 compaction point = %d, want none (ambiguous)", cp)
+	}
+}
+
+func TestSameRateAndWindowTailKeepsItsWindow(t *testing.T) {
+	tb, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5",    in: 1.52, out: 7.60, window: 200000}
+  - {match: "vertex/claude-sonnet-5", in: 1.52, out: 7.60, window: 200000}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, ok, exact := tb.WindowExact(context.Background(), "claude-sonnet-5"); !ok || !exact || w != 200000 {
+		t.Fatalf("window=%d ok=%v exact=%v, want 200000 exact", w, ok, exact)
+	}
+}
+
+func TestParseTableRejectsDuplicateMatch(t *testing.T) {
+	_, err := ParseTable([]byte(`
+models:
+  - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
+  - {match: "AWS/claude-sonnet-5", in: 3.00, out: 15.00}
+`))
+	if err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Fatalf("err = %v, want a duplicate-match error", err)
 	}
 }

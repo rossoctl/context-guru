@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/config"
 )
 
 func scriptsDir(t *testing.T) string {
@@ -90,7 +92,8 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "settings.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home,
+		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t)) // the strategy table comes from the proxy binary
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -3053,15 +3056,14 @@ func TestOldStrategyNamesStillResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"strategy=auto", "keepalive_idle_seconds: 240", "keepalive_max_pings: 2"} {
+	// The file names the strategy; the proxy owns the keys.
+	for _, want := range []string{"strategy=auto", "cache:\n  strategy: auto\n"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("auto config lacks %q:\n%s", want, body)
 		}
 	}
-	// The 1-hour defaults are the proxy's own, so they are not written: an older proxy binary's strict
-	// loader rejects a key it does not know, and the plugin ships separately from the binary.
-	if strings.Contains(string(body), "_1h") {
-		t.Errorf("auto config writes a 1-hour key an older proxy binary would reject:\n%s", body)
+	if strings.Contains(string(body), "keepalive") {
+		t.Errorf("auto config carries keys the proxy owns:\n%s", body)
 	}
 	// A marker written by the old version.
 	old := strings.Replace(string(body), "strategy=auto", "strategy=5-min-ping", 1)
@@ -3072,31 +3074,35 @@ func TestOldStrategyNamesStillResolve(t *testing.T) {
 	if show["strategy"] != "auto" {
 		t.Errorf("show reports %q for an old 5-min-ping marker, want auto: %v", show["strategy"], show)
 	}
-	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
-	if sync["result"] != "synced" || sync["strategy"] != "auto" {
-		t.Errorf("sync did not migrate the old marker: %v", sync)
-	}
 }
 
-// TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault. `2-ping` is the one strategy that
-// needs a key; `--legacy-binary` (what start-proxy.sh uses after an old binary rejected it) drops it,
-// and `strategy sync` keeps it dropped on later starts.
-func TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault(t *testing.T) {
+// oldTwoPingFile is what a plugin older than the proxy-owned table wrote for `2-ping`: the keys
+// themselves, with the one non-default 1-hour key. Such files are on users' machines and must keep
+// working, so the legacy recovery below still applies to them.
+const oldTwoPingFile = "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+	"preset: off\ncache:\n  keepalive: true\n  keepalive_idle_seconds: 240\n  keepalive_max_pings: 2\n" +
+	"  keepalive_max_usd_per_ping: 0.5\n  keepalive_min_prefix_tokens: 80000\n  keepalive_max_pings_1h: 2\n"
+
+func writeOldTwoPing(t *testing.T, state, port string) string {
+	t.Helper()
+	path := filepath.Join(state, "keepalive-"+port+".yaml")
+	if err := os.WriteFile(path, []byte(oldTwoPingFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestLegacyOneHourKeysAreDroppedForAnOldKeysFile. A file with its own keys that an old proxy binary
+// rejected: `--legacy-binary` (what start-proxy.sh uses after the rejection) drops the 1-hour key, and
+// `strategy sync` keeps it dropped on later starts.
+func TestLegacyOneHourKeysAreDroppedForAnOldKeysFile(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
-	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
-		"--port", keepalivePort, "--preset", "off")
-	if code != 0 {
-		t.Fatalf("exit %d: %v", code, facts)
-	}
-	body := readFileString(t, facts["file"])
-	if !strings.Contains(body, "keepalive_max_pings_1h: 2") || strings.Contains(body, "keepalive_idle_seconds_1h") {
-		t.Fatalf("2-ping should write only keepalive_max_pings_1h:\n%s", body)
-	}
+	file := writeOldTwoPing(t, state, keepalivePort)
 	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
 	if sync["result"] != "synced" {
 		t.Fatalf("legacy sync: %v", sync)
 	}
-	body = readFileString(t, facts["file"])
+	body := readFileString(t, file)
 	if strings.Contains(body, "_1h:") || !strings.Contains(body, "1h-keys-omitted") {
 		t.Fatalf("legacy render still carries a 1-hour key, or lacks its marker:\n%s", body)
 	}
@@ -3110,15 +3116,12 @@ func TestOneHourKeysAreWrittenOnlyWhenTheyDifferFromTheProxyDefault(t *testing.T
 }
 
 // TestTheLegacyMarkerEndsWhenTheProxyIsUpdated. The marker means "this proxy version rejected the
-// 1-hour keys". After an update (install.sh records the new version) a plain `strategy sync` must put
-// them back, or `2-ping` would stay at one ping on a 1-hour cache for good.
+// 1-hour key". After an update to a proxy that owns the table (v0.7.1 or later), a plain sync moves the
+// file to the new form, so `2-ping` is whole again. An update to a version that cannot (older than
+// v0.7.1) leaves the file as it is.
 func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
-	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "2-ping",
-		"--port", keepalivePort, "--preset", "off")
-	if code != 0 {
-		t.Fatalf("exit %d: %v", code, facts)
-	}
+	file := writeOldTwoPing(t, state, keepalivePort)
 	version := func(v string) {
 		if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte(v+"\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -3130,11 +3133,15 @@ func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
 		t.Fatalf("the same binary lost the legacy render: %v", again)
 	}
 	version("v0.5.0")
+	if up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off"); up["result"] != "unchanged" {
+		t.Errorf("an update to a proxy that cannot own the table changed the file: %v", up)
+	}
+	version("v0.7.1")
 	up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
-	body := readFileString(t, facts["file"])
-	if up["result"] != "synced" || !strings.Contains(body, "keepalive_max_pings_1h: 2") ||
-		strings.Contains(body, "1h-keys-omitted") {
-		t.Fatalf("after the proxy update the 1-hour key did not come back (%v):\n%s", up, body)
+	body := readFileString(t, file)
+	if up["result"] != "synced" || strings.Contains(body, "1h-keys-omitted") ||
+		!strings.HasSuffix(body, "cache:\n  strategy: 2-ping\n") {
+		t.Fatalf("after the update to v0.7.1 the file did not move to the new form (%v):\n%s", up, body)
 	}
 }
 
@@ -3144,10 +3151,7 @@ func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
 func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
 	dir, state := t.TempDir(), t.TempDir()
 	port := freePort(t)
-	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
-		"--port", port, "--preset", "off"); code != 0 {
-		t.Fatalf("set: %d %v", code, f)
-	}
+	writeOldTwoPing(t, state, port)
 	// The log now lives in the state directory start-proxy.sh itself resolves (#251), so the stale
 	// line is planted there: the test must forge what the run will actually read.
 	logPath := filepath.Join(state, "proxy-"+port+".log")
@@ -3229,10 +3233,7 @@ func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
 	requireTool(t, "python3")
 	dir, state := t.TempDir(), t.TempDir()
 	port := freePort(t)
-	if f, code := settingsIn(t, state, t.TempDir(), "strategy", "set", "--name", "2-ping",
-		"--port", port, "--preset", "off"); code != 0 {
-		t.Fatalf("set: %d %v", code, f)
-	}
+	writeOldTwoPing(t, state, port)
 	sentinel := filepath.Join(dir, "started")
 	// Behaves like an old binary: a config naming a 1-hour key is a parse error; any other serves.
 	script := "#!/usr/bin/env bash\n" +
@@ -3265,7 +3266,7 @@ func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
 
 // TestStrategySetWritesTheStatedPresetAndRecordsTheName is the old
 // TestKeepaliveEnableWritesAPresetPreservingConfig, moved to the script. --config REPLACES --preset
-// entirely (loadConfig in cmd/context-guru-proxy/main.go reads --preset only when --config is
+// entirely (loadConfig in proxyapp/main_run.go reads --preset only when --config is
 // ABSENT), so a strategy file that omitted its own `preset:` line would silently turn compaction off
 // at the moment a cache strategy was armed — the opposite of the intent.
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
@@ -3288,8 +3289,8 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 		t.Errorf("the CONFIGURED preset did not survive into the file, which silently drops "+
 			"compaction the moment --config is passed:\n%s", body)
 	}
-	if !strings.Contains(body, "keepalive: true") {
-		t.Errorf("cache.keepalive: true is missing, so the strategy would not actually ping:\n%s", body)
+	if !strings.HasSuffix(body, "cache:\n  strategy: auto\n") {
+		t.Errorf("cache.strategy: auto is missing, so the proxy would not fill the ping keys:\n%s", body)
 	}
 	// The name has to be IN the file, not merely in the command that wrote it: `strategy show` and
 	// start-proxy.sh both read it back, and the whole point of a name is that it survives.
@@ -3527,45 +3528,36 @@ func TestPluginJSONCacheStrategyAgreesWithTheScript(t *testing.T) {
 	}
 }
 
-// TestPickerSkillOffersOnlyRealStrategies is a docdrift guard: the picker's table is what a model
-// reads before choosing a --name, so a name that exists only in prose becomes an
-// `unknown_strategy` at the worst moment, and a strategy missing from the table is undiscoverable.
-func TestPickerSkillOffersOnlyRealStrategies(t *testing.T) {
+// TestPickerSkillHoldsNoStrategyList. The proxy owns the names and the texts. The picker skill tells
+// the model to read them with `settings.py strategy list`, and holds no list of its own. Any strategy
+// shaped token it does name must be one the proxy offers, and it must send the reader to the list.
+func TestPickerSkillHoldsNoStrategyList(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("skills", "cache-strategy-picker", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(b)
+	if !strings.Contains(body, "settings.py\" strategy list") {
+		t.Error("the picker skill never tells the model to run `settings.py strategy list`")
+	}
+	if strings.Contains(body, "| Name | ELI5 | Cost |") {
+		t.Error("the picker skill holds a table of strategies again; the proxy owns that text")
+	}
 	state, home := t.TempDir(), t.TempDir()
 	facts, _ := settingsIn(t, state, home, "strategy", "list")
 	real := map[string]bool{}
-	for k := range facts {
-		if name, ok := strings.CutPrefix(k, "strategy_"); ok {
-			real[name] = true
-		}
+	for _, n := range strings.Split(facts["names"], ",") {
+		real[n] = true
 	}
-	if len(real) == 0 {
+	if len(real) == 0 || !real["auto"] {
 		t.Fatal("no strategies were discovered, so this guard proved nothing")
 	}
-	for name := range real {
-		// The skill spells names with hyphens; `strategy list` keys use underscores.
-		spelled := strings.ReplaceAll(name, "_", "-")
-		if !strings.Contains(body, "`"+spelled+"`") {
-			t.Errorf("the picker skill never mentions the strategy %q, so a user cannot discover it",
-				spelled)
-		}
-	}
-	// Every backticked hyphenated token that LOOKS like a strategy must be one.
 	for _, m := range regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+){1,3})`").FindAllStringSubmatch(body, -1) {
 		tok := m[1]
-		if strings.Contains(tok, ".") || strings.HasSuffix(tok, ".py") {
-			continue
+		if strings.Contains(strings.ReplaceAll(","+facts["aliases"], ":", ","), ","+tok+",") {
+			continue // an alias is a real name the script accepts
 		}
-		// An alias is a real name the script accepts; the skill documents the old one.
-		if strings.Contains(","+strings.ReplaceAll(facts["aliases"], ":", ",")+",", ","+tok+",") {
-			continue
-		}
-		if !real[strings.ReplaceAll(tok, "-", "_")] && isStrategyShaped(tok) {
+		if !real[tok] && isStrategyShaped(tok) {
 			t.Errorf("the picker skill offers %q, which `strategy list` does not know: a model that "+
 				"passes it gets reason=unknown_strategy", tok)
 		}
@@ -6407,7 +6399,8 @@ func TestPresetUltrahighAsksForAProbe(t *testing.T) {
 	py := requireTool(t, "python3")
 	run := func(name string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", name)
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url,
+			"CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -6451,7 +6444,7 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 
 		py := requireTool(t, "python3")
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "conservative")
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -6483,7 +6476,7 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 
 		py := requireTool(t, "python3")
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "conservative")
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -7290,6 +7283,11 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 		env = append(env, kv)
 	}
 	path := os.Getenv("PATH")
+	if extraPath == "" {
+		// The plugin asks the proxy binary for its strategies. Without a stub first on PATH, a test
+		// would depend on whatever proxy the machine has installed (an old one cannot answer).
+		extraPath = filepath.Dir(fakeStrategiesBin(t))
+	}
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
 		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
@@ -7610,6 +7608,7 @@ func fakeProxyDir(t *testing.T, port string, listen bool) string {
 	}
 	script := "#!/usr/bin/env bash\n" +
 		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
+		strategiesStubSnippet(t) +
 		body
 	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -8858,19 +8857,26 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 // second, undisclosed reason. The threshold is defensible (it is what makes the strategy pay at all);
 // advertising a measurement while hiding the gate that measurement would not have passed is not.
 func TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed(t *testing.T) {
-	// The gate as actually shipped. If this changes, every description below has to change with it,
-	// which is the coupling this test exists to enforce.
-	gate, err := os.ReadFile(filepath.Join("scripts", "settings.py"))
-	if err != nil {
-		t.Fatal(err)
+	// The gate as actually shipped, in the proxy's table. If this changes, every description below has
+	// to change with it, which is the coupling this test exists to enforce.
+	head, ok := config.LookupStrategy("1-hour-head")
+	if !ok {
+		t.Fatal("the proxy has no 1-hour-head strategy")
 	}
-	if !strings.Contains(string(gate), `head_ttl_min_tokens": 50000`) {
+	gate := false
+	for _, k := range head.Cache {
+		if k.Key == "head_ttl_min_tokens" && k.Value == 50000 {
+			gate = true
+		}
+	}
+	if !gate {
 		t.Skip("the 1-hour-head size gate is no longer 50000; re-anchor this test on the new value")
+	}
+	if !strings.Contains(head.Desc, "50k") {
+		t.Errorf("the proxy's own 1-hour-head description does not state the >=50k-token gate: %s", head.Desc)
 	}
 
 	for _, f := range []struct{ what, path string }{
-		{"the strategy's own description, printed by `strategy list`",
-			filepath.Join("scripts", "settings.py")},
 		{"plugin.json, where the option is actually chosen",
 			filepath.Join(".claude-plugin", "plugin.json")},
 		{"the picker skill, which is what a user reads to decide",
@@ -8881,8 +8887,11 @@ func TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed(t *testing.T) {
 			t.Fatal(err)
 		}
 		body := string(b)
-		// Only the text that talks about this strategy matters, but every one of these files mentions it
-		// exactly once in prose, so a whole-file check is honest and stays readable.
+		// The picker skill no longer names the strategies: it shows the proxy's text, which the check
+		// above covers. plugin.json still names 1-hour-head and must state the gate.
+		if f.path != filepath.Join(".claude-plugin", "plugin.json") {
+			continue
+		}
 		if !strings.Contains(body, "1-hour-head") && !strings.Contains(body, "1-hour tier") {
 			t.Errorf("%s (%s) does not describe 1-hour-head at all", f.what, f.path)
 			continue
@@ -9063,7 +9072,7 @@ func TestConsentQuestionReadsWhetherAStrategySpendsFromTheStrategyList(t *testin
 			warns := questionWarnsAboutSpend(q)
 			if warns != (spends == "true") {
 				t.Errorf("strategy list says spends=%s for %q, and the consent question %s warn about "+
-					"spending. The sentence a user agrees to has to agree with STRATEGIES:\n  %s",
+					"spending. The sentence a user agrees to has to agree with the proxy's strategy table:\n  %s",
 					spends, name, map[bool]string{true: "does", false: "does not"}[warns], q)
 			}
 		})
@@ -10487,6 +10496,7 @@ func fakeProxyDirAnyPort(t *testing.T) string {
 	dir := t.TempDir()
 	script := "#!/usr/bin/env bash\n" +
 		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
+		strategiesStubSnippet(t) +
 		"addr=\"\"\n" +
 		"while [ $# -gt 0 ]; do case \"$1\" in --listen) addr=$2; shift 2;; *) shift;; esac; done\n" +
 		"port=${addr##*:}\n" +

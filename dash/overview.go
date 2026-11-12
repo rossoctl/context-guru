@@ -153,8 +153,14 @@ type Overview struct {
 	SummarizeCorrectionUSD float64 `json:"summarize_correction_usd"`
 	// ReplayCapCorrectionUSD is what ApplyReplayLedger moved the baseline by: the credit of the
 	// replaying components (extract_llm, searchfold, ...) earned after the counterfactual client
-	// compaction, or after a real one. Zero or negative.
+	// compaction, or after a real one, for the removals made before that close. A removal first made
+	// after a close earns again until the next one (#940). Zero or negative.
 	ReplayCapCorrectionUSD float64 `json:"replay_cap_correction_usd"`
+	// AvoidedCompactionUSD is the price of the compaction requests the world without context-guru paid at
+	// its counterfactual closes and we did not. It is not a saving on any request and no total above
+	// includes it. AvoidedCompactionAssumed is true when it rests on the assumed summary size.
+	AvoidedCompactionUSD     float64 `json:"avoided_compaction_usd"`
+	AvoidedCompactionAssumed bool    `json:"avoided_compaction_assumed"`
 	// ReplayCapNotApplied is true when the cap could not be computed (it errored or timed out), so
 	// the figures above carry the stored, uncapped replay credit. The page says so.
 	ReplayCapNotApplied bool `json:"replay_cap_not_applied"`
@@ -167,17 +173,19 @@ type Overview struct {
 	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
 	// volatile-tail split ran, the snapshot had MOVED since the session's previous request,
 	// and the provider then read at least the stable half from cache while writing less than
-	// it. Priced against a cache miss. A floor. See Event.cachesplitSavedUSD.
+	// it. Priced against a cache miss. A floor. The accountant library's split effect.
 	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
-	// `defer_net_usd` the proxy wrote (gross minus the names list and the searches). It is in
-	// TotalSavedUSD and is its own lever. 0 for an account that never deferred.
+	// `defer_net_usd`. On a request the accountant priced it is the library's deferral figure minus the
+	// searches and the definitions they loaded; on any other request it is the ledger's net (gross minus the
+	// names list and the searches). It is in TotalSavedUSD and is its own lever, and the library's figure is
+	// not also in the baseline. 0 for an account that never deferred.
 	DeferNetUSD float64 `json:"defer_net_usd"`
 	// The three counts behind that figure, so a small number is explicable rather than
 	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
 	// figure read ~$0 on real traffic, and the reason was visible only in these counts —
 	// 1,105 of 1,127 session starts had no cache to hit, because the previous session's had
-	// expired. That gate is gone (it is TailChanged now, see Event.cachesplitSavedUSD); the
+	// expired. That gate is gone (the split is priced by the accountant library now); the
 	// counts stay, because the replacement gate also fires rarely and for its own reason.
 	//
 	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
@@ -234,27 +242,16 @@ type Overview struct {
 	SplitTailMoved     int64 `json:"split_tail_moved"`
 	SplitCredited      int64 `json:"split_credited"`
 	SplitCreditedMoved int64 `json:"split_credited_moved"`
-	// The declarations no longer sent. TWO figures, because they are two different claims about
-	// the same kind of tokens and adding them together would either overstate what this product
-	// did or refuse a number a reader has asked for. See dash/declcredit.go for the argument.
-	//
-	// DeclFilterUSD is MEASURED and OURS: `requests.filtered_decl_tokens`, written by the filter
-	// on every request it acted on, priced at the tier those requests paid. It is in
-	// TotalSavedUSD. It was in NO total before, and that was a bug rather than a policy — the
-	// savings walk is built on tokens_before, which is message text only, and a tool declaration
-	// is not in `messages`, so the biggest measured lever in the product moved none of it.
-	//
-	// SelfRemovedUSD is MODELLED and the USER's: the account stopped declaring something and no
-	// component of ours was involved. It is NOT in TotalSavedUSD, which states that its addends
-	// are all ours. SelfRemovedOverlap is how many candidate rows were dropped because the filter
-	// is already credited for the same tokens.
+	// The declarations the filter stopped sending, MEASURED and OURS: `requests.filtered_decl_tokens`,
+	// written by the filter on every request it acted on, priced at the tier those requests paid.
+	// It is in TotalSavedUSD. It was in NO total before, and that was a bug rather than a policy —
+	// the savings walk is built on tokens_before, which is message text only, and a tool
+	// declaration is not in `messages`, so the biggest measured lever in the product moved none of
+	// it. What an account stops declaring on its own is not shown (#583, #584); see
+	// dash/declcredit.go.
 	DeclFilterUSD      float64 `json:"decl_filter_usd"`
 	DeclFilterReads    int64   `json:"decl_filter_reads"`
 	DeclFilterRequests int64   `json:"decl_filter_requests"`
-	SelfRemovedUSD     float64 `json:"self_removed_usd"`
-	SelfRemovedReads   int64   `json:"self_removed_reads"`
-	SelfRemovedItems   int64   `json:"self_removed_items"`
-	SelfRemovedOverlap int64   `json:"self_removed_overlap"`
 	// DeclCreditPriced is false when a contributing model had no rates: the token counts above
 	// stand and the dollars are the priced subset, which a consumer must not read as the total.
 	DeclCreditPriced bool `json:"decl_credit_priced"`
@@ -281,11 +278,6 @@ type Overview struct {
 	// The keep-alive contributes its net rather than its gross because the ping spend is excluded
 	// from CostUSD — a ping is not agent traffic — so it has nowhere else in this walk to appear.
 	TotalSavedUSD float64 `json:"total_saved_usd"`
-	// TotalReducedUSD is TotalSavedUSD plus what the ACCOUNT removed itself. It answers "how much
-	// smaller did this account's bill get", where TotalSavedUSD answers "how much of that did
-	// context-guru do". A reader wants both and they are not the same question; printing one
-	// under the other's label is how a dashboard takes credit for its user's work.
-	TotalReducedUSD float64 `json:"total_reduced_usd"`
 	// PrefixChangeCost is a DIAGNOSTIC, not a cost subtracted from net.
 	//
 	// It sums cost_usd over requests whose cache missed with reason prefix_change AND whose
@@ -385,8 +377,8 @@ type Overview struct {
 	//
 	// DOLLARS ARE NOT UNAFFECTED. This comment used to end "Dollars are unaffected: they come
 	// from the provider's own reported usage", which is true of cost_usd and false of every
-	// savings figure beside it: baseline_cost_usd is cost_usd + baselineDeltaUSD, and that
-	// delta prices OUR token counts (Saved(), SavedUnique) at the provider's rate. A reader
+	// savings figure beside it: baseline_cost_usd is cost_usd plus a delta that prices OUR
+	// token counts at the provider's rate (the accountant library's bytes-to-tokens ratio). A reader
 	// auditing exactly this was told not to look, which is how #240 survived. The correction
 	// factor is NOT this ratio — see tokens.BilledDeltaFactor, which is a factor on a
 	// DIFFERENCE, measured against real bills, where the fixed overhead above cancels.
@@ -417,6 +409,36 @@ type Overview struct {
 	PreCorrectionSavingRows int64   `json:"pre_correction_saving_rows"`
 	PreCorrectionSavedUSD   float64 `json:"pre_correction_saved_usd"`
 	CorrectedSavingRows     int64   `json:"corrected_saving_rows"`
+	// EstimatedRequests counts the requests whose saving the accountant library priced without knowing whether
+	// a component broke the cache AND that the proxy held out of the books (requests.estimate_held): the first
+	// request of a thread, and the first one after a restart that lost the state. It does not count a row
+	// written before #915, which has price_estimated = 1 but booked its figure. Overview.Requests is the denominator.
+	EstimatedRequests int64 `json:"estimated_requests"`
+	// Tokens is the accountant library's figures in tokens by tier, in total and by feature (#998).
+	// Every accountant-measured saving has its token form here. The read-time credits (the declaration
+	// filter, the split's historical credit), defer_net_usd and the manual pings' savings do not.
+	// The tiers are never added into one number.
+	// TokensUnmeasuredRequests counts the agent requests in the period the library did not price
+	// (acc_priced = 0: rows from before the library, and rows it could not price): they have no
+	// token figure, which is not a zero saving. A held estimate (EstimatedRequests) is measured
+	// and its component tokens are held out, as its dollars are. Both reads come from DB.AccTokens,
+	// so the full and the lean answer agree.
+	Tokens                   AccTokenStats `json:"tokens"`
+	TokensUnmeasuredRequests int64         `json:"tokens_unmeasured_requests"`
+	// KeepAlivePingTokens is what the cache strategy's pings paid, in billed tokens by tier (the ping
+	// rows' usage), and KeepAlivePingOutputTokens their output tokens: the token form of
+	// KeepAlivePingUSD. Not in Tokens. The keep-alive's net in tokens is
+	// Tokens.ByFeature["keepalive"] less these.
+	KeepAlivePingTokens       TierTokens `json:"keepalive_ping_tokens"`
+	KeepAlivePingOutputTokens int64      `json:"keepalive_ping_output_tokens"`
+	// EstimatedSavedUSD is what those requests would have saved, held OUT of every total (#915):
+	// NetSavedUSD, TotalSavedUSD, the components and the keep-alive tab never include it. It is
+	// what the library priced without knowing whether the cache was already warm, and that can be
+	// about 2x too high. Shown beside the totals, never added to them.
+	EstimatedSavedUSD float64 `json:"estimated_saved_usd"`
+	// EstimatedSavedLowUSD is the floor of EstimatedSavedUSD: the same removals priced at the read rate. The
+	// true held saving is between the two (#915). Shown beside the ceiling, never added to any total.
+	EstimatedSavedLowUSD float64 `json:"estimated_saved_low_usd"`
 	// BilledInputTokens is fresh + cache reads + cache writes: the input the PROVIDER counted.
 	// It is here to be compared with TokensBefore, which is what our own tokenizer counted
 	// over message text only — a different unit, roughly a third the size, and the reason no
@@ -534,7 +556,7 @@ func withKeepAlive(f Filter) Filter {
 const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 	AND r.split_tail_hash <> COALESCE((
 		SELECT p.split_tail_hash FROM requests p
-		WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
+		WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
 		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
@@ -553,7 +575,7 @@ const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
 const afterOurMutation = `EXISTS (
 			SELECT 1 FROM request_components c WHERE c.mutated = 1 AND c.request_id = (
 				SELECT p.id FROM requests p
-				WHERE p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.keepalive = 0
+				WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.keepalive = 0
 				  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
 				ORDER BY p.ts DESC, p.id DESC LIMIT 1)
 		)`
@@ -567,6 +589,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		CacheTTL: map[string]int64{},
 	}
 	var cgAvg, upAvg, ttfbAvg, upBufAvg sql.NullFloat64
+	var restoredTok int64
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), COUNT(DISTINCT r.session_id),
 		COALESCE(SUM(r.tokens_before),0), COALESCE(SUM(r.tokens_after),0), COALESCE(SUM(r.saved_unique),0),
 		COALESCE(SUM(r.attempted_tokens),0), COALESCE(SUM(r.frozen_tokens),0),
@@ -581,7 +604,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.cache_saved_usd),0),
 		-- Our own cache saving. A plain SUM of a per-request column, because all three
 		-- conditions that qualify a request were settled at write time where the model's
-		-- rates and the session's history were both in hand (Event.cachesplitSavedUSD).
+		-- rates and the session's history were both in hand (the accountant library).
 		-- The predecessor did the component test here as a correlated EXISTS over
 		-- request_components, which was both slower and wrong: it credited every cache read
 		-- in a session, including the later turns that would have hit anyway.
@@ -613,7 +636,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.cache_miss_reason = 'prefix_change' THEN 1 ELSE 0 END),0),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
-		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0),
+		COALESCE(SUM(r.expands),0), COALESCE(SUM(r.expand_tokens),0), COALESCE(SUM(r.reverts),0), COALESCE(SUM(r.restored_tokens),0),
 		COALESCE(SUM(CASE WHEN r.uncompressed_reason <> '' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.cg_latency_ms),0),
 		-- Streaming split. A "streamed" row is one with a measured first byte; a buffered row
@@ -668,7 +691,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			THEN r.baseline_cost_usd - r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN r.billed_token_factor > 0
 			AND r.baseline_cost_usd > r.cost_usd THEN 1 ELSE 0 END),0),
-		`+deferNetSum+`
+		`+deferNetSum+`,
+		COALESCE(SUM(r.estimate_held),0), COALESCE(SUM(r.estimated_saved_usd),0),
+		COALESCE(SUM(r.estimated_saved_low_usd),0)
 		FROM requests r WHERE `+cond, args...).Scan(
 		&o.Requests, &o.Sessions, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
@@ -677,7 +702,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
 		&o.SplitCreditedMoved,
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
-		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &o.Passthroughs,
+		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &restoredTok, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal,
 		&o.SSEStreamed, &o.SSEBuffered, &ttfbAvg, &upBufAvg,
 		&o.Breakpoints.System, &o.Breakpoints.Tools, &o.Breakpoints.Messages,
@@ -686,7 +711,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
 		&o.PreCorrectionSavingRows, &o.PreCorrectionSavedUSD, &o.CorrectedSavingRows,
-		&o.DeferNetUSD)
+		&o.DeferNetUSD, &o.EstimatedRequests, &o.EstimatedSavedUSD, &o.EstimatedSavedLowUSD)
 	if err != nil {
 		return nil, err
 	}
@@ -724,10 +749,11 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// TestPingRowsStayOutOfAgentAggregates, which compares the whole Overview key by key rather
 	// than the aggregates somebody thought of.
 	//
-	// Neither statement is scoped to the window or the tenant on its INNER side, and they agree
-	// about that, which is what matters: session ids are `tenant:uuid` so a cross-tenant
-	// collision is not reachable, and the ceiling is deliberately about the session's whole life
-	// rather than the filtered slice of it.
+	// Neither statement is scoped to the window on its INNER side, and they agree about that,
+	// which is what matters: the ceiling is deliberately about the session's whole life rather
+	// than the filtered slice of it. Both ARE scoped to the tenant (#501): session ids are
+	// client-supplied, so a cross-tenant collision is reachable, and the inner side names
+	// (tenant_id, session_id) — the pair idx_requests_tenant_session covers.
 	//
 	// NOT rewritten as a window function, despite looking like the same shape CompactionResets
 	// was fixed for. Tried it, verified against live production data: byte-identical result,
@@ -781,6 +807,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		invalidConfigRecent                    int64
 	)
 	var g errgroup.Group
+	g.Go(func() error {
+		t, err := d.AccTokens(f)
+		if err != nil {
+			return err
+		}
+		t.apply(o)
+		return nil
+	})
 	// See InvalidConfigRequests' own comment: preset is set to "invalid" by
 	// proxy/tenancy.go's build() exactly when this account's stored configuration failed to
 	// build, on every request forwarded uncompacted while that lasts. Cheap: cond already
@@ -864,14 +898,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		// #492: same scoping fix as `later` above, same reason — PARTITION BY session_id means a
 		// session with no pings of its own can never match `before.s` for a different reason: the
 		// CTE's own WHERE used to be every session that EVER pinged, not just the caller's.
-		beforeCond, beforeArgs := "r.session_id IN (SELECT k.session_id FROM requests k WHERE k.keepalive = 1)", []any{}
+		beforeCond, beforeArgs := "(r.tenant_id, r.session_id) IN (SELECT k.tenant_id, k.session_id FROM requests k WHERE k.keepalive = 1)", []any{}
 		if f.Session != "" {
-			beforeCond, beforeArgs = "r.session_id = ?", []any{f.Session}
+			beforeCond, beforeArgs = sessionScope(f)
 		}
 		return d.sql.QueryRowContext(d.readCtx(), `WITH before AS (
 				SELECT r.id AS rid, SUM(CASE WHEN `+cond+` AND r.saved_unique > 0
 						THEN r.saved_unique ELSE 0 END)
-					OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id
+					OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id
 						ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS s
 				FROM requests r
 				WHERE `+beforeCond+`)
@@ -1101,10 +1135,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
 		o.ManualPings.SavedUSD, o.DeferNetUSD)
-	// Both totals exist before the priced additions land, so a deployment with no rates — or a
+	// The total exists before the priced additions land, so a deployment with no rates — or a
 	// caller that does not attach the credit — reads a total that is short rather than one that
-	// is absent. SetDeclCredit moves both.
-	o.TotalReducedUSD = o.TotalSavedUSD
+	// is absent. SetDeclCredit moves it.
 	o.Accounting = accountingM
 	o.CacheMiss = cacheMissM
 	o.Uncompressed = uncompressedM
@@ -1113,7 +1146,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.InvalidConfigRecent = invalidConfigRecent
 
 	o.SafetyCost.FrozenTokens = o.FrozenTokens
-	o.SafetyCost.RestoredTokens = o.ExpandTokens
+	// Both are paid for twice: the round that served the expand, and the copy each later turn of a
+	// fixed_restore session sends again (#481).
+	o.SafetyCost.RestoredTokens = o.ExpandTokens + restoredTok
 	o.SafetyCost.RevertedRuns = o.Reverts
 	o.SafetyCost.CGLLMCostUSD = o.CGLLMCostUSD
 	// The freeze's own caveat, on the payload rather than only in a comment: frozen == 0 is
@@ -1156,15 +1191,15 @@ func replayCeilingQuery(f Filter, cond string, args []any) (string, []any) {
 	if f.Session != "" {
 		return `SELECT COALESCE(SUM(r.saved_unique * (
 				SELECT COUNT(*) FROM requests p
-				WHERE p.session_id = r.session_id AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id))
+				WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND (p.ts > r.ts OR (p.ts = r.ts AND p.id > r.id))
 			)),0)
 			FROM requests r WHERE ` + cond + ` AND r.saved_unique > 0`, args
 	}
 	return `WITH later AS (
-			SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.session_id)
-				- ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS n
+			SELECT r.id AS rid, COUNT(*) OVER (PARTITION BY r.tenant_id, r.session_id)
+				- ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id) AS n
 			FROM requests r
-			WHERE r.session_id IN (SELECT s.session_id FROM requests s WHERE s.saved_unique > 0))
+			WHERE (r.tenant_id, r.session_id) IN (SELECT s.tenant_id, s.session_id FROM requests s WHERE s.saved_unique > 0))
 		SELECT COALESCE(SUM(r.saved_unique * later.n),0)
 		FROM requests r JOIN later ON later.rid = r.id WHERE ` + cond + ` AND r.saved_unique > 0`, args
 }
@@ -1185,11 +1220,12 @@ func replayCeilingQuery(f Filter, cond string, args []any) (string, []any) {
 func compactionResetsQuery(f Filter, cond string, args []any) (string, []any) {
 	prevCond, prevArgs := "", []any{}
 	if f.Session != "" {
-		prevCond, prevArgs = "WHERE r.session_id = ?", []any{f.Session}
+		c, a := sessionScope(f)
+		prevCond, prevArgs = "WHERE "+c, a
 	}
 	q := `WITH prev AS (
 		SELECT r.id AS rid, LAG(CASE WHEN r.tokens_before > 0 THEN r.tokens_before END)
-			OVER (PARTITION BY r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
+			OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts, r.id) AS prev_tokens_before
 		FROM requests r
 		` + prevCond + `
 	) SELECT COUNT(*) FROM requests r JOIN prev ON prev.rid = r.id WHERE ` + cond + `
@@ -1212,21 +1248,17 @@ func (o *Overview) SetTiers(t *TierCosts) {
 	o.SafetyCost.Priced = true
 }
 
-// SetDeclCredit attaches the declarations-no-longer-sent credit and folds each half into the
-// total it belongs in: the filter's measured saving into TotalSavedUSD (it is ours), the account's
-// own removals into TotalReducedUSD only (they are not). Called by the API layer, which holds the
-// rates, for the same reason SetTiers is — DB.Overview deliberately cannot price anything.
+// SetDeclCredit attaches the declarations-no-longer-sent credit and folds the filter's measured
+// saving into TotalSavedUSD. Called by the API layer, which holds the rates, for the same reason
+// SetTiers is — DB.Overview deliberately cannot price anything.
 func (o *Overview) SetDeclCredit(c *DeclCredit) {
 	if c == nil {
 		return
 	}
 	o.DeclFilterUSD, o.DeclFilterReads = c.FilterUSD, c.FilterReads
 	o.DeclFilterRequests = int64(c.FilterRequests)
-	o.SelfRemovedUSD, o.SelfRemovedReads = c.SelfUSD, c.SelfReads
-	o.SelfRemovedItems, o.SelfRemovedOverlap = int64(c.SelfItems), int64(c.SelfOverlap)
 	o.DeclCreditPriced = c.Priced
 	o.TotalSavedUSD += c.FilterUSD
-	o.TotalReducedUSD = o.TotalSavedUSD + c.SelfUSD
 }
 
 // denominators builds the labelled savings ratios. Each one names its divisor.
@@ -1369,8 +1401,11 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"this project."},
 		{Key: "defer_net", Label: "Tool deferral", DeltaUSD: -o.DeferNetUSD,
 			Description: "Tool definitions the ultrahigh preset left out of the prompt until the model " +
-				"searched for them, NET of the names list and the searches that cost. From the " +
-				"per-request ledger, so it is the same figure as the Tools page. Its own line: the " +
+				"searched for them, net of what that cost. On a request the accountant priced, this " +
+				"line holds the library's whole deferral saving (the definitions left out, less the " +
+				"names list) minus the searches and the definitions they loaded; the saving is not " +
+				"in \"Your preset\". On a request it held, or could not price, it is the ledger's net. " +
+				"The same figure as the Tools page and /api/tool-defer. Its own line: the " +
 				"definitions sit in the top-level `tools` array, which the compaction walk never " +
 				"counted, and deferral runs after the declaration filter, so it holds none of the " +
 				"tokens that filter dropped."},
@@ -1390,24 +1425,6 @@ func (o *Overview) waterfall() []WaterfallStep {
 				"uncached world: the provider's own cache saved far more than this on the same " +
 				"traffic (cache_saved_usd, reported by the API as a diagnostic), and none of that " +
 				"is credited here."},
-		{Key: "self_removed", Label: "Removed by you, not by us", DeltaUSD: -o.SelfRemovedUSD,
-			Description: "Declarations this ACCOUNT stopped carrying on its own — an MCP server " +
-				"you removed, a skill you switched off. The tokens genuinely were not billed, and " +
-				"no component of ours was involved, so this is deliberately OUTSIDE the total " +
-				"above and inside the one below. It is also MODELLED rather than measured: the " +
-				"evidence is that the inventory is a time series and a name is in its early part " +
-				"and not its late part, which cannot tell a removal from a session that ran in a " +
-				"different environment — on the production snapshot the largest candidate is the " +
-				"editor integration, which is simply absent outside the IDE. Every row and its " +
-				"own evidence is on the Inventory tab; rows the filter is already credited for " +
-				"are excluded here rather than counted twice."},
-		{Key: "total_reduced", Label: "Total the bill came down", DeltaUSD: o.TotalReducedUSD,
-			Total: true,
-			Description: "Everything above, ours and yours: the total cost avoided plus what you " +
-				"removed yourself. It answers 'how much smaller did this bill get', where the " +
-				"total above answers 'how much of that did context-guru do'. Both are worth " +
-				"knowing and they are not the same number, so neither is printed under the " +
-				"other's label."},
 	}
 	return steps
 }
@@ -1461,4 +1478,18 @@ func percentileOf(xs []float64, p float64) float64 {
 	}
 	sort.Float64s(xs)
 	return xs[int64(float64(len(xs)-1)*p)]
+}
+
+// sessionScope is the row condition that selects ONE session's rows for a per-session window or
+// count (#501). Defense in depth: on the hosted path the stored id is already `tenant:base`
+// (session.Scoped), so two tenants cannot normally share one. A row written another way (a
+// test, a direct insert, an import) can, and a bare `session_id = ?` would then rank or count
+// both tenants' rows as one session. TenantAll (a manager's service-wide view) has no single
+// tenant to add, and there every window partitions by (tenant_id, session_id), so the two
+// tenants' rows are still kept apart.
+func sessionScope(f Filter) (string, []any) {
+	if f.TenantAll {
+		return "r.session_id = ?", []any{f.Session}
+	}
+	return "r.tenant_id = ? AND r.session_id = ?", []any{f.Tenant, f.Session}
 }

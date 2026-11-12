@@ -691,6 +691,14 @@ func (h *Handler) renderMetrics() string {
 		}
 	}
 
+	// --- keep-alive credit wiring --------------------------------------------
+	promHeaderProc(&b, "cg_keepalive_rescue_facts_missing_total",
+		"Requests that followed keep-alive pings but found no ping facts, so keep-alive credit was lost on that return. Also counts a return after an unpriced ping (non-2xx or no usage), after an eviction, or after a pricing panic. If it keeps rising while cg_keepalive_pings_priced_total stays 0, the host does not wire the ping side or its pings keep failing (compare the keeper counters pings, failed and skipped in /stats). Moves only with the dashboard on.", "counter")
+	promLine(&b, "cg_keepalive_rescue_facts_missing_total", "", float64(h.savings.RescueFactsMissing()))
+	promHeaderProc(&b, "cg_keepalive_pings_priced_total",
+		"Keep-alive pings the host priced (each PingSavings call that returned ok). Read it together with cg_keepalive_rescue_facts_missing_total.", "counter")
+	promLine(&b, "cg_keepalive_pings_priced_total", "", float64(h.opts.Pings.Priced()))
+
 	// --- refusals -----------------------------------------------------------
 	//
 	// Outside the h.agg guard: a refused request never reaches the aggregator, and these
@@ -836,13 +844,13 @@ func (h *Handler) renderMetrics() string {
 				"err", err)
 		} else {
 			promHeader(&b, "cg_baseline_cost_usd", monthToDateCaveat(
-				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill. The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
+				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586). The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
 			promLine(&b, "cg_baseline_cost_usd", "", v.BaselineUSD)
 			promHeader(&b, "cg_saved_usd", monthToDateCaveat(
-				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict. The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
+				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586). The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
 			promLine(&b, "cg_saved_usd", "", v.SavedUSD)
 			promHeader(&b, "cg_net_saved_usd", monthToDateCaveat(
-				"cg_saved_usd minus what context-guru's own compaction models cost. GOES NEGATIVE when a configuration spends more than it saves; that is a real outcome and this series reports it rather than clamping at zero. This is the number to alert on."), "gauge")
+				"cg_saved_usd minus what context-guru's own compaction models cost. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586). GOES NEGATIVE when a configuration spends more than it saves; that is a real outcome and this series reports it rather than clamping at zero. This is the number to alert on."), "gauge")
 			promLine(&b, "cg_net_saved_usd", "", v.NetSavedUSD)
 			promHeader(&b, "cg_frozen_tokens_total", monthToDateCaveat(
 				"Content tokens cache-aware compaction deliberately left alone because they sat inside the provider's already-cached prefix. The headroom, and usually the explanation for a small cg_saved_usd: rewriting a cached prefix costs more than the tokens it removes, so this is a cost paid on purpose. DO NOT read a low value as \"the cache is cold, it is safe to rewrite deep history\". Zero has TWO causes and they call for opposite actions. (1) OUR OWN prefix tracker was reset (a restart, an evicted entry) while the provider's cache was still warm: measured, 3,092 such requests still cache-HIT for 404,376,878 cache-read tokens, and acting on that reading was worth about -$708 on sonnet-5 against +$0.62 of upside. (2) The turn was a CONFIRMED cold one and the cold sweep already acted, which is free by construction. Tell them apart by the request's cache_miss_reason: a swept turn reads ttl_expiry/cold_start, a reset tracker reads hit. Ctx.ColdCache cannot confuse the two -- it demands a RECORDED previous turn plus the provider TTL and a one-minute margin, so a missing record reads warm, which is case (1) declining itself."), "gauge")
@@ -901,7 +909,7 @@ func (h *Handler) renderMetrics() string {
 				promLine(&b, "cg_tenant_cost_usd", tenantLabels(t), t.CostUSD)
 			}
 			promHeader(&b, "cg_tenant_baseline_cost_usd",
-				"What this tenant's traffic would have cost without compaction. Subtract cg_tenant_cost_usd for the saving.", "gauge")
+				"What this tenant's traffic would have cost without compaction. Subtract cg_tenant_cost_usd for the saving. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586).", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_baseline_cost_usd", tenantLabels(t), t.BaselineUSD)
 			}

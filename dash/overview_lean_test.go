@@ -140,8 +140,8 @@ func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 // instead of asking the query planner to bound something that is not bounded by nature.
 func TestCachesplitSizeSpreadQueryItselfIsAWholeTableScan(t *testing.T) {
 	db := openTestDB(t)
-	plan := explainPlan(t, db, `SELECT model, MIN(split_stable_tokens), MAX(split_stable_tokens)
-		FROM requests WHERE split_stable_tokens > 0 GROUP BY model`, nil)
+	plan := explainPlan(t, db, `SELECT tenant_id, model, MIN(split_stable_tokens), MAX(split_stable_tokens)
+		FROM requests WHERE split_stable_tokens > 0 GROUP BY tenant_id, model`, nil)
 	full := strings.Join(plan, " | ")
 	if !strings.Contains(full, "SCAN requests") {
 		t.Errorf("expected CachesplitSizeSpread's own query to scan the whole table (that is "+
@@ -168,7 +168,7 @@ func TestCachesplitSizeSpreadIsCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := first["m-cached"], [2]int{5_000, 5_000}; got != want {
+	if got, want := first["t1"]["m-cached"], [2]int{5_000, 5_000}; got != want {
 		t.Fatalf("first call: m-cached spread = %v, want %v", got, want)
 	}
 
@@ -183,7 +183,7 @@ func TestCachesplitSizeSpreadIsCached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := second["m-cached"], first["m-cached"]; got != want {
+	if got, want := second["t1"]["m-cached"], first["t1"]["m-cached"]; got != want {
 		t.Errorf("second call (within the TTL) = %v, want the FIRST call's cached %v — "+
 			"a changed answer means this re-queried instead of serving the cache", got, want)
 	}
@@ -415,5 +415,44 @@ func TestOverviewLeanSessionStaysUnderBudgetAt20000Requests(t *testing.T) {
 	}
 	if dt := time.Since(t0); dt > 10*time.Second {
 		t.Errorf("OverviewLean(session of 20,000 requests, 5,000 more elsewhere) took %v, want well under 10s", dt)
+	}
+}
+
+// A lean read gives the same saved token counts as the full read: the status line's `rd / wr` comes from the lean
+// read, and `rd` (replay_tokens) read 0 there before #990. The fixture removes 400 tokens on each of 3 turns of
+// one session but only 400 of them are unique, so 800 are replay: tokens the later turns did not re-send.
+func TestOverviewLeanCountsReplayTokensAsTheFullReadDoes(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := int64(1); i <= 3; i++ {
+		e := mkEvent(DayMs+i, "s-replay", "aws/claude-sonnet-5", 1000, 600)
+		e.TenantID = "t1"
+		if i > 1 { // the same removal again: not unique
+			e.SavedUnique = 0
+			e.Components[0].SavedUnique = 0
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []Filter{{Tenant: "t1", Session: "s-replay"}, {Tenant: "t1", Since: DayMs}} {
+		full, err := db.Overview(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lean, err := db.OverviewLean(f, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const wantGross, wantUnique, wantReplay = 1200, 400, 800 // fixture constants
+		if full.SavedGross != wantGross || full.SavedUnique != wantUnique || full.ReplayTokens != wantReplay {
+			t.Fatalf("%+v: the full read gives gross/unique/replay %d/%d/%d, want %d/%d/%d", f,
+				full.SavedGross, full.SavedUnique, full.ReplayTokens, wantGross, wantUnique, wantReplay)
+		}
+		if lean.SavedGross != full.SavedGross || lean.SavedUnique != full.SavedUnique || lean.ReplayTokens != full.ReplayTokens {
+			t.Errorf("%+v: lean gross/unique/replay = %d/%d/%d, full = %d/%d/%d", f,
+				lean.SavedGross, lean.SavedUnique, lean.ReplayTokens, full.SavedGross, full.SavedUnique, full.ReplayTokens)
+		}
 	}
 }

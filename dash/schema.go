@@ -101,6 +101,43 @@ CREATE TABLE IF NOT EXISTS requests (
   -- exactly this id. '' when there is no separate alias, and on every row written before this
   -- column existed. A hash, not content: the same kind of id session_id itself is.
   session_alias      TEXT    NOT NULL DEFAULT '',
+  -- 1 when the accountant library could not rule out a cache break (penalty_unknown), so the booked
+  -- net saving may be too high: the gross is right, the penalty is not known. 0 on an exact figure
+  -- and on every row written before this column existed, which is the claim those rows always made.
+  price_estimated    INTEGER NOT NULL DEFAULT 0,
+  -- 1 when the accountant override applied to the request, so keepalive_saved_usd is the library's own
+  -- rescue decision and the read-side gate trusts it. 0 on a request the library did not price and on
+  -- every row written before this column existed, which keep the SQL reachability gate.
+  acc_priced         INTEGER NOT NULL DEFAULT 0,
+  -- the saving the accountant library priced on an estimated request, kept OUT of baseline_cost_usd
+  -- and every total (#915). 0 on an exact request and on every row written before this column.
+  estimated_saved_usd REAL   NOT NULL DEFAULT 0,
+  -- the floor of that held figure: every removed token priced at the read rate (#915). The true saving
+  -- lies between this and estimated_saved_usd. 0 on every row written before this column.
+  estimated_saved_low_usd REAL NOT NULL DEFAULT 0,
+  -- 1 when the hold-out of #915 applied: the request is estimated and its figure was kept out of the books.
+  -- 0 on every row written before this column existed, including an old estimated row that DID book its
+  -- figure (price_estimated alone does not say which meaning a row has).
+  estimate_held      INTEGER NOT NULL DEFAULT 0,
+  -- The accountant library's cache effects in TOKENS by tier (#998), beside their dollars: the
+  -- keep-alive rescue (tok_ka_*), the split (tok_split_*), the head-TTL legs (tok_ttl_*) and the
+  -- ended-change break (tok_ended_*). Each is saved and caused, by tier: in = fresh input,
+  -- rd = cache read, w5m / w1h = the 5-minute / 1-hour cache write. Stored at write time for the
+  -- reason saved_first_usd is: the library prices from the thread's history, which a row does not
+  -- keep. 0 on a request the library did not price (acc_priced = 0) and on every older row, which is
+  -- "not measured", not "saved nothing". Additive (acctokens.go).
+  tok_ka_saved_in INTEGER NOT NULL DEFAULT 0, tok_ka_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ka_caused_in INTEGER NOT NULL DEFAULT 0, tok_ka_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_split_saved_in INTEGER NOT NULL DEFAULT 0, tok_split_saved_rd INTEGER NOT NULL DEFAULT 0, tok_split_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_split_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_split_caused_in INTEGER NOT NULL DEFAULT 0, tok_split_caused_rd INTEGER NOT NULL DEFAULT 0, tok_split_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_split_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ttl_saved_in INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ttl_caused_in INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ended_saved_in INTEGER NOT NULL DEFAULT 0, tok_ended_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_ended_caused_in INTEGER NOT NULL DEFAULT 0, tok_ended_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_caused_w1h INTEGER NOT NULL DEFAULT 0,
+  -- The request's whole token figure: the sum of its request_components tok_* figures and the four
+  -- effects above, written with them, so the lean stats read takes the totals from its one scan (#502).
+  tok_total_saved_in INTEGER NOT NULL DEFAULT 0, tok_total_saved_rd INTEGER NOT NULL DEFAULT 0, tok_total_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_total_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_total_caused_in INTEGER NOT NULL DEFAULT 0, tok_total_caused_rd INTEGER NOT NULL DEFAULT 0, tok_total_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_total_caused_w1h INTEGER NOT NULL DEFAULT 0,
   preset             TEXT    NOT NULL DEFAULT '',
   mode               TEXT    NOT NULL DEFAULT '', -- operating mode (active|bypass|observe)
   route              TEXT    NOT NULL DEFAULT '',
@@ -129,8 +166,8 @@ CREATE TABLE IF NOT EXISTS requests (
   -- provider read at least that much from cache while writing less, and the snapshot had MOVED
   -- since this session's previous request (Event.TailChanged) — the turn that would otherwise
   -- have missed. Priced against a cache MISS (creation rate), not fresh input.
-  -- See Event.cachesplitSavedUSD, which is the authority on the condition; the
-  -- session's-first-request test it once used was REPLACED because it reported ~$0, and three
+  -- Written from the accountant library's split effect. The legacy rule's
+  -- session's-first-request test was REPLACED because it reported ~$0, and three
   -- descriptions of this column went on stating it for a while after.
   cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
   -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
@@ -221,11 +258,38 @@ CREATE TABLE IF NOT EXISTS requests (
   defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
   defer_gross_usd     REAL    NOT NULL DEFAULT 0,
   defer_net_usd       REAL    NOT NULL DEFAULT 0,
+  -- The ledger's own cost of the deferral: the names list and the searches, gross less the ledger's net.
+  -- defer_net_usd is the deferral lever, which on a request the accountant priced is the library's figure less
+  -- the search cost, so gross less net no longer says what the deferral cost. Filled by the migration for rows
+  -- written before this column existed (see backfillDeferCost).
+  defer_cost_usd      REAL    NOT NULL DEFAULT 0,
   -- C, the client's own compaction point in billed tokens, and its source, written only when the
   -- user's own client setting set it (#948). 0 and '' otherwise: the table value is read back from
   -- the table. A number from a config file.
   compaction_point        INTEGER NOT NULL DEFAULT 0,
   compaction_point_source TEXT    NOT NULL DEFAULT '',
+  -- The subscription limit values of the provider's answer (#984), from its
+  -- anthropic-ratelimit-unified-5h-* and -7d-* response headers: the used share (0..1), the reset
+  -- time (unix seconds) and the status word. NULLABLE: NULL is "the header was missing or did not
+  -- parse", which must stay apart from a share of 0. limit_seen is 1 when at least one value is
+  -- set, for the partial indexes behind GET /api/me/limits. Numbers and status words only.
+  limit_seen           INTEGER NOT NULL DEFAULT 0,
+  limit_5h_utilization REAL,
+  limit_5h_reset       INTEGER,
+  limit_5h_status      TEXT,
+  limit_7d_utilization REAL,
+  limit_7d_reset       INTEGER,
+  limit_7d_status      TEXT,
+  -- 1 when the client authenticated this Anthropic request with a Claude subscription token (an
+  -- OAuth bearer token, sk-ant-oat...), 0 for an API key or any other credential. Only the kind:
+  -- the token itself is never stored. GET /api/me/limits reads it off the account's newest request.
+  auth_subscription    INTEGER NOT NULL DEFAULT 0,
+  -- The part of sweep_false_expands whose drop was applied on a WARM request (#491).
+  sweep_false_expands_warm INTEGER NOT NULL DEFAULT 0,
+  -- The tokens of the restored copies this request carried (expand.fixed_restore, #481): content the
+  -- model asked back for, inserted as a message of its own and sent again on every later turn. 0 when
+  -- none was inserted.
+  restored_tokens INTEGER NOT NULL DEFAULT 0,
   -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
   -- reply id.
   backend                 TEXT    NOT NULL DEFAULT '',
@@ -308,7 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_requests_model    ON requests(model, ts);
 -- session's transcripts are the bulk of the bytes and go early, while its numbers
 -- are small and stay queryable locally for much longer.
 CREATE TABLE IF NOT EXISTS archived_sessions (
-  session_id    TEXT PRIMARY KEY,
+  session_id    TEXT    NOT NULL,
   tenant_id     TEXT    NOT NULL DEFAULT '',
   first_ts      INTEGER NOT NULL DEFAULT 0,
   last_ts       INTEGER NOT NULL DEFAULT 0,
@@ -318,7 +382,8 @@ CREATE TABLE IF NOT EXISTS archived_sessions (
   full_path     TEXT    NOT NULL DEFAULT '',  -- whole session; local rows deleted
   full_bytes    INTEGER NOT NULL DEFAULT 0,
   archived_at   INTEGER NOT NULL DEFAULT 0,
-  remote        TEXT    NOT NULL DEFAULT ''
+  remote        TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, session_id)  -- #1069: a bare session_id let two tenants share a row
 );
 CREATE INDEX IF NOT EXISTS idx_archived_tenant ON archived_sessions(tenant_id, last_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_tenant   ON requests(tenant_id, ts DESC);
@@ -339,11 +404,21 @@ CREATE TABLE IF NOT EXISTS request_components (
   saved_gross  INTEGER NOT NULL DEFAULT 0,
   saved_unique INTEGER NOT NULL DEFAULT 0,
   -- This component's share of the request's baseline delta, in DOLLARS, priced at write
-  -- time from the request's own model and the cache tier the request itself paid (see
+  -- time from the request's own model and the cache tier the request itself paid. The tooldefer
+  -- row is the exception on a request the accountant priced: its dollars are in the deferral
+  -- lever (defer_net_usd), not in the baseline delta, and the row still carries them (see
   -- Event.Price). Stored rather than derived on read because the rate has to be the one
   -- that was in force, and because the UI was otherwise left improvising a dollar value
   -- from hardcoded rates.
   saved_usd    REAL    NOT NULL DEFAULT 0,
+  -- The accountant library's split of saved_usd and who priced the row (additiveColumns).
+  saved_first_usd  REAL NOT NULL DEFAULT 0,
+  saved_replay_usd REAL NOT NULL DEFAULT 0,
+  priced_by        TEXT NOT NULL DEFAULT '',
+  -- The same figure as saved_usd in TOKENS by tier (#998): what the component saved and what it
+  -- caused. 0 unless priced_by = 'accountant'. Additive (acctokens.go).
+  tok_saved_in INTEGER NOT NULL DEFAULT 0, tok_saved_rd INTEGER NOT NULL DEFAULT 0, tok_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_saved_w1h INTEGER NOT NULL DEFAULT 0,
+  tok_caused_in INTEGER NOT NULL DEFAULT 0, tok_caused_rd INTEGER NOT NULL DEFAULT 0, tok_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_caused_w1h INTEGER NOT NULL DEFAULT 0,
   duration_ms  REAL    NOT NULL DEFAULT 0,
   err          TEXT    NOT NULL DEFAULT '',
   -- Why this component turned candidates away, as {"gate_name":count} — the only answer
@@ -696,6 +771,14 @@ CREATE INDEX IF NOT EXISTS idx_requests_session_alias ON requests(session_alias)
 -- addColumns adds.
 CREATE INDEX IF NOT EXISTS idx_tooldecl_deferred
   ON tool_declarations(tenant_id, server, name, session_id) WHERE deferred = 1;
+-- GET /api/me/limits reads the newest row with limit values (#984). Partial, so only rows that
+-- carried the subscription headers are in them and a database without them pays nothing. One per
+-- read shape: a tenant's own rows, and every row on a single-tenant proxy. Here for the same reason
+-- as idx_requests_project: they name columns addColumns adds.
+CREATE INDEX IF NOT EXISTS idx_requests_limits_tenant
+  ON requests(tenant_id, ts DESC) WHERE limit_seen = 1;
+CREATE INDEX IF NOT EXISTS idx_requests_limits_ts
+  ON requests(ts DESC) WHERE limit_seen = 1;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
@@ -764,6 +847,11 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
+	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "acc_priced", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "estimated_saved_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "estimated_saved_low_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "estimate_held", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "cache_ttl", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "sse_buffered", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "ttfb_ms", "REAL NOT NULL DEFAULT 0"},
@@ -812,6 +900,16 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// records having got wrong once already.
 	{"request_components", "events", "TEXT NOT NULL DEFAULT ''"},
 	{"request_components", "saved_usd", "REAL NOT NULL DEFAULT 0"},
+	// The accountant library's split of saved_usd, stored at write time because the library prices
+	// from the thread's history, which a stored row does not keep, so a read cannot re-price it.
+	// saved_first_usd is the saved tokens it priced at the write or input tier (content the provider
+	// had not cached), saved_replay_usd those at the read tier (content in the cached prefix), and
+	// saved_usd - first - replay is the costs (added tokens, breaks, the head-TTL legs). priced_by is
+	// 'accountant' on such a row; '' on a row from before the switch, which the read views still
+	// value with the legacy estimate (readvalue.go).
+	{"request_components", "saved_first_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "saved_replay_usd", "REAL NOT NULL DEFAULT 0"},
+	{"request_components", "priced_by", "TEXT NOT NULL DEFAULT ''"},
 	// extract_llm_sweep's quality signals and answer cost (#404 PR C). Additive with a default of 0:
 	// a row from before the sweep applied anything reads as "no sweep activity", which is true.
 	// sweep_expands / sweep_expand_tokens are the part of expands / expand_tokens that restored a
@@ -831,11 +929,42 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "defer_wrong_guesses", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "defer_gross_usd", "REAL NOT NULL DEFAULT 0"},
 	{"requests", "defer_net_usd", "REAL NOT NULL DEFAULT 0"},
+	{"requests", "defer_cost_usd", "REAL NOT NULL DEFAULT 0"},
 	// The user's own compaction point (#948). Additive: an earlier row has none.
 	{"requests", "compaction_point", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "compaction_point_source", "TEXT NOT NULL DEFAULT ''"},
+	// The subscription limit headers (#984). Nullable, no default: an earlier row read no headers,
+	// and NULL says so. limit_seen 0 on an earlier row is true for the same reason.
+	{"requests", "limit_seen", "INTEGER NOT NULL DEFAULT 0"},
+	{"requests", "limit_5h_utilization", "REAL"},
+	{"requests", "limit_5h_reset", "INTEGER"},
+	{"requests", "limit_5h_status", "TEXT"},
+	{"requests", "limit_7d_utilization", "REAL"},
+	{"requests", "limit_7d_reset", "INTEGER"},
+	{"requests", "limit_7d_status", "TEXT"},
+	// The auth kind (#984): 1 for a subscription (OAuth) token. 0 on an earlier row, which reads as
+	// "not known to be a subscription" until the account's next request.
+	{"requests", "auth_subscription", "INTEGER NOT NULL DEFAULT 0"},
+	// The part of sweep_false_expands whose drop was applied on a warm request (#491). Additive, 0 on
+	// every earlier row, which is true: no warm drop existed then.
+	{"requests", "sweep_false_expands_warm", "INTEGER NOT NULL DEFAULT 0"},
+	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
+	// every earlier row: those were not recorded, so they read as no copy.
+	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	// Bob's backend label. Additive: an earlier row has none.
 	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
+// written by a build that stored the ledger's own net in defer_net_usd, so gross less net IS the ledger's cost
+// of the deferral, exactly. A row written since carries its cost from the ledger, and a row with no cost
+// (deferral changed it and the ledger priced it at zero) has gross equal to net, so the same update leaves it at
+// 0. The update touches only rows whose cost is still 0 and whose gross exceeds the net, so a second run finds
+// nothing to change.
+func backfillDeferCost(db *sql.DB) error {
+	_, err := db.Exec(`UPDATE requests SET defer_cost_usd = defer_gross_usd - defer_net_usd
+		WHERE defer_tokens > 0 AND defer_cost_usd = 0 AND defer_gross_usd > defer_net_usd`)
+	return err
 }
 
 // migrateToolUsesProject adds tool_uses.project and puts it in the primary key.
@@ -978,6 +1107,77 @@ func migrateToolUsesProject(db *sql.DB) error {
 	return tx.Commit()
 }
 
+// migrateArchivedSessionsKey rebuilds archived_sessions with PRIMARY KEY (tenant_id, session_id)
+// (#1069). The key used to be session_id alone, so a second tenant archiving a session id the first
+// had already archived overwrote the first's row: the index is the ONLY record of what is in cold
+// storage, so that tenant's archived session became unreachable. Run on every open, before the
+// version check, like the other table rebuilds. Idempotent: it probes the key and returns when it
+// already leads with tenant_id, or when the table does not exist yet (`ddl` creates it right).
+func migrateArchivedSessionsKey(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(archived_sessions)`)
+	if err != nil {
+		return nil
+	}
+	cols, tenantPK := 0, 0
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols++
+		if name == "tenant_id" {
+			tenantPK = pk
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Zero columns is a missing table, not an error, and rebuilding from nothing would fail the
+	// open (see migrateToolUsesProject for what a failed open costs).
+	if cols == 0 || tenantPK > 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`CREATE TABLE archived_sessions_new (
+			session_id    TEXT    NOT NULL,
+			tenant_id     TEXT    NOT NULL DEFAULT '',
+			first_ts      INTEGER NOT NULL DEFAULT 0,
+			last_ts       INTEGER NOT NULL DEFAULT 0,
+			requests      INTEGER NOT NULL DEFAULT 0,
+			content_path  TEXT    NOT NULL DEFAULT '',
+			content_bytes INTEGER NOT NULL DEFAULT 0,
+			full_path     TEXT    NOT NULL DEFAULT '',
+			full_bytes    INTEGER NOT NULL DEFAULT 0,
+			archived_at   INTEGER NOT NULL DEFAULT 0,
+			remote        TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tenant_id, session_id)
+		)`,
+		`INSERT INTO archived_sessions_new(session_id, tenant_id, first_ts, last_ts, requests,
+			content_path, content_bytes, full_path, full_bytes, archived_at, remote)
+		 SELECT session_id, tenant_id, first_ts, last_ts, requests,
+			content_path, content_bytes, full_path, full_bytes, archived_at, remote
+		 FROM archived_sessions`,
+		`DROP TABLE archived_sessions`,
+		`ALTER TABLE archived_sessions_new RENAME TO archived_sessions`,
+		`CREATE INDEX IF NOT EXISTS idx_archived_tenant ON archived_sessions(tenant_id, last_ts DESC)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate creates the schema and validates its version. A version mismatch is
 // reported to the caller, which renames the old file aside and retries — see Open.
 func migrate(db *sql.DB) error {
@@ -995,6 +1195,9 @@ func migrate(db *sql.DB) error {
 	if err := migrateToolUsesProject(db); err != nil {
 		return err
 	}
+	if err := migrateArchivedSessionsKey(db); err != nil {
+		return err
+	}
 	var have string
 	err := db.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have)
 	switch {
@@ -1009,6 +1212,9 @@ func migrate(db *sql.DB) error {
 		if _, err = db.Exec(additiveDDL2); err != nil {
 			return err
 		}
+		if err := backfillDeferCost(db); err != nil {
+			return err
+		}
 		warnPurge(purgeImportedHistory(db))
 		return nil
 	}
@@ -1016,6 +1222,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(additiveDDL2); err != nil {
+		return err
+	}
+	if err := backfillDeferCost(db); err != nil {
 		return err
 	}
 	warnPurge(purgeImportedHistory(db))

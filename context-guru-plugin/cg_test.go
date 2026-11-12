@@ -617,6 +617,7 @@ func TestCGScriptsAreVendoredIntoCodex(t *testing.T) {
 func TestDocsExamplesAreTheGoldens(t *testing.T) {
 	for golden, page := range map[string]string{
 		"home": "status", "savings": "savings", "cache-warm": "cache", "cache-cold": "cache",
+		"home-subscription": "status", "insights-savings-subscription": "savings",
 		"session": "session", "doctor": "doctor",
 		"save-more": "save-more", "save-more-ascii-80": "save-more", "apply-config": "save-more", "revert-config": "save-more",
 		"apply-gate": "save-more", "save-more-settings": "save-more",
@@ -666,6 +667,7 @@ func cgWaterfall(total float64, deltas map[string]float64) map[string]any {
 // cost is positive. #582: keepalive_saved was read as if positive, so a saving showed as a loss.
 // The lever rows must add up to total_saved_usd, which is compaction + cache split + the keep-alive's
 // net + tool filtering - own spend, and does NOT include self_removed (the account's own doing).
+// A proxy older than #584 still sends that row; a current one does not, and the rows add up either way.
 func TestInsightsLeversAddUpToTotalSaved(t *testing.T) {
 	st := cgWaterfall(80+20+(120-60)+15-6, map[string]float64{
 		"baseline": 1000, "compaction": -80, "cachesplit_saved": -20, "keepalive_saved": -120,

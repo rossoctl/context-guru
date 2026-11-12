@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/config"
 )
 
 // TestThePresetDefaultIsEncodedOnce.
@@ -58,7 +60,7 @@ func TestThePresetDefaultIsEncodedOnce(t *testing.T) {
 			"offer one default while every script assumed the other", got, want)
 	}
 
-	// NOT included, deliberately: cmd/context-guru-proxy/main.go defaults --preset to `house`. That
+	// NOT included, deliberately: proxyapp.Main (proxyapp/main_run.go) defaults --preset to `house`. That
 	// is a SIXTH encoding of a default and it is meant to differ, because it is a default for a
 	// different product - the standalone proxy binary, whose service default is `house`
 	// (tenant.DefaultConfigYAML is that pipeline). The plugin never relies on it: every path that
@@ -215,7 +217,7 @@ func TestTheRemovedStrategyNameIsRefused(t *testing.T) {
 		t.Errorf("reason=%q, want unknown_strategy: %v", facts["reason"], facts)
 	}
 	// The refusal has to carry the alternatives, or a caller who typed the old name is told only
-	// that they are wrong. `known=` is that list, and it comes from STRATEGIES rather than prose.
+	// that they are wrong. `known=` is that list, and it comes from the proxy's table rather than prose.
 	if !strings.Contains(facts["known"], "none") {
 		t.Errorf("known=%q does not offer `none`, so the refusal does not say what to type instead",
 			facts["known"])
@@ -806,5 +808,30 @@ func TestStartProxyDoesNotRecordWhenAnotherProcessOwnsThePort(t *testing.T) {
 	}
 	if !strings.Contains(out, "something") {
 		t.Errorf("said nothing about another process holding the port:\n%s", out)
+	}
+}
+
+// TestStrategyFileHasNoToolWaitFloor: the plugin writes the strategy NAME, so the proxy owns both
+// floors. The general floor is 80000 and the tool-wait floor is its default (20000); the file pins
+// neither, so a later change in the proxy table reaches an armed install.
+func TestStrategyFileHasNoToolWaitFloor(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	port := "8787"
+	if facts, code := settingsIn(t, state, home,
+		"strategy", "set", "--name", "auto", "--port", port, "--preset", "off"); code != 0 {
+		t.Fatalf("arming failed: %v", facts)
+	}
+	got := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
+	if strings.Contains(got, "tool_wait_min_prefix") || strings.Contains(got, "keepalive_min_prefix_tokens") ||
+		!strings.HasSuffix(got, "cache:\n  strategy: auto\n") {
+		t.Errorf("the file must name the strategy and pin no floor:\n%s", got)
+	}
+	cfg, err := config.LoadBytes([]byte(got))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Cache.Resolved()
+	if r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 {
+		t.Errorf("floors = %d / %d, want 80000 / 20000", r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens)
 	}
 }

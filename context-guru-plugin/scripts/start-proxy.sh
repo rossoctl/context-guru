@@ -793,7 +793,7 @@ fi
 # start spending the caller's credential on idle pings.
 #
 # --config REPLACES the preset entirely rather than layering over it (see loadConfig in
-# cmd/context-guru-proxy/main.go: `--config` bypasses the `--preset` flag/PRESET env var above
+# proxyapp/main_run.go: `--config` bypasses the `--preset` flag/PRESET env var above
 # completely once it is set). That is why the file the keepalive skill writes always states its
 # OWN `preset:` line — a config that forgot it would silently turn off cachesplit the moment
 # keep-alive was turned on, the exact opposite of what enabling it is supposed to do.
@@ -1090,8 +1090,9 @@ fi
 
 # The binary rejected a one-hour key (`keepalive_idle_seconds_1h`, `keepalive_max_pings_1h`). The
 # plugin updates through the marketplace and the binary does not, so a newer plugin can write a key an
-# older binary's strict loader has never heard of. Only a non-default value is ever written (see
-# settings.py ONE_HOUR_DEFAULTS), so this is the `2-ping` case; the recovery is the same shape as the
+# older binary's strict loader has never heard of. Only a file an older plugin wrote can carry such a
+# key (`2-ping`'s `keepalive_max_pings_1h`; the new form names the strategy and writes none), so this is
+# that case; the recovery is the same shape as the
 # preset one: re-render WITHOUT the keys and retry once. The proxy then pings a 1-hour cache like a
 # 5-minute one, which is what that binary always did.
 if [ -s "$LOG" ] && tail -c "+$((${ATTEMPT_LOG_START:-0} + 1))" "$LOG" 2>/dev/null | sed 's/\\//g' | grep -qE 'field keepalive_(idle_seconds|max_pings)_1h not found'; then

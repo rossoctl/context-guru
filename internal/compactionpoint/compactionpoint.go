@@ -119,6 +119,9 @@ const (
 	// used (see Bob, #963). Like Configured it is an absolute number in billed tokens and it is
 	// stored on the request row.
 	ClientDefault Source = "client_default"
+	// Operator: the operator stated it per model in the MODEL_PRICES table (compaction_point, billed
+	// tokens). It beats the bootstrap table. It is a statement, not an observation: the operator owns it.
+	Operator Source = "operator"
 	// WindowFallback: case 3 and case 4 together -- C == W, because either nothing compacts here
 	// (a fact) or we have never seen this client compact (a guess). This package cannot yet tell
 	// those apart, which is itself worth reporting rather than smoothing over.
@@ -129,8 +132,9 @@ const (
 type Point struct {
 	// Frac is C as a fraction of the model's context window, in provider-billed tokens.
 	Frac float64
-	// Abs is C in absolute billed tokens, set only by a Configured or ClientDefault point (the
-	// client's own number does not scale with OUR window). 0 = use Frac.
+	// Abs, when > 0, is C in absolute billed tokens and wins over Frac in Tokens. It is set by a Configured,
+	// ClientDefault or Operator point: the client's or operator's own number does not scale with OUR window,
+	// and a round trip through a fraction of the window could lose a token to the float. 0 = use Frac.
 	Abs    int
 	Source Source
 	// Note is why this value, in enough detail to tell whether it still holds.
@@ -241,4 +245,27 @@ func Recorded(model string, abs int, src string) Point {
 		}
 	}
 	return For(model)
+}
+
+// Resolve is For with the operator's table in front. tokens is the operator's compaction_point for this model
+// in billed input tokens (0 = none stated), window the model's context window (0 = unknown).
+//
+// A stated value is used as it is, whatever the window: the window is the model's limit and this is where the
+// CLIENT acts, and the two are not derived from each other. Frac is filled in when the window is known, for
+// the callers (the dashboard span) that think in fractions; it is capped at 1.
+func Resolve(model string, tokens, window int) Point {
+	if tokens <= 0 {
+		return For(model)
+	}
+	p := Point{Abs: tokens, Source: Operator,
+		Note: "stated by the operator in the MODEL_PRICES table (compaction_point), in billed input tokens."}
+	if window > 0 {
+		p.Frac = float64(tokens) / float64(window)
+		if p.Frac > 1 {
+			p.Frac = 1
+		}
+	} else {
+		p.Frac = 1
+	}
+	return p
 }

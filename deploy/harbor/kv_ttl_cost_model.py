@@ -239,6 +239,7 @@ import math
 import os
 import re
 import sqlite3
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -498,6 +499,7 @@ class PriceBook:
                  ping_input_tokens: int = DEFAULT_PING_INPUT_TOKENS,
                  ping_output_tokens: int = DEFAULT_PING_OUTPUT_TOKENS):
         self._entries = list(entries or ())
+        self._bare_tails: dict[str, ModelPricing] = {}
         self.write_1h_multiple = float(write_1h_multiple)
         self.ping_input_tokens = int(ping_input_tokens)
         self.ping_output_tokens = int(ping_output_tokens)
@@ -529,15 +531,30 @@ class PriceBook:
             raise ValueError(f"{path}: cache_write_frac must not be negative")
         book = cls(**kwargs)
         entries: list[tuple[str, bool, bool, ModelPricing]] = []
+        # Each entry's window and compaction point. Nothing here prices with them; the
+        # bare-tail ambiguity rule compares them, as table.go's does.
+        meta: dict[str, tuple[int, int]] = {}
+        seen: set[str] = set()  # the match as written, `*` included, as Go's seen map keys it
         for i, m in enumerate(raw.get("models") or ()):
             match = str(m.get("match", "")).strip().lower()
             if not match:
                 raise ValueError(f"{path}: entry {i} has no match")
+            if match in seen:
+                raise ValueError(f"{path}: {match!r} appears more than once")
+            seen.add(match)
             prefix = match.endswith("*")
-            match = match.rstrip("*")
+            match = match[:-1] if prefix else match  # one `*`, as Go's TrimSuffix
+            window, compaction = int(m.get("window") or 0), int(m.get("compaction_point") or 0)
+            if window < 0 or compaction < 0:
+                raise ValueError(f"{path}: {match!r} has a negative window or compaction_point")
+            if window > 0 and compaction > window:
+                raise ValueError(f"{path}: {match!r} states compaction_point {compaction} "
+                                 f"above its window {window}")
             in_r, out_r = float(m.get("in") or 0.0), float(m.get("out") or 0.0)
             cr, cw = float(m.get("cache_read") or 0.0), float(m.get("cache_write") or 0.0)
-            if min(in_r, out_r, cr, cw) < 0:
+            # The entry's 1-hour write as a multiple of `in` (table.go cache_write_1h_frac).
+            w1h_frac = float(m.get("cache_write_1h_frac") or 0.0)
+            if min(in_r, out_r, cr, cw, w1h_frac) < 0:
                 raise ValueError(f"{path}: {match!r} has a negative rate")
             if in_r == 0 and out_r == 0:
                 raise ValueError(
@@ -552,22 +569,29 @@ class PriceBook:
                 ping_input_tokens=book.ping_input_tokens,
                 ping_output_tokens=book.ping_output_tokens,
                 source=SOURCE_PRICE_LIST, known=True)
-            price = replace(price, write_1h=book._derive_write_1h(price))
+            price = replace(price, write_1h=book._derive_write_1h(price, w1h_frac))
             qualified = ("/" in match) or ("." in match)
             entries.append((match, prefix, qualified, price))
+            if not prefix:  # a family shares its trimmed match with an exact entry; it must not overwrite it
+                meta[match] = (window, compaction)
         # Longest match first: specificity is a property of the match, not of the file's
         # ordering or of the KIND of match.
         entries.sort(key=lambda e: len(e[0]), reverse=True)
         book._entries = entries
+        book._bare_tails = _derive_bare_tails(entries, meta)
         return book
 
-    def _derive_write_1h(self, p: ModelPricing) -> float:
+    def _derive_write_1h(self, p: ModelPricing, entry_frac: float = 0.0) -> float:
         """The 1-hour creation rate, the one rate no price list publishes.
 
         Derived from the multiplier against base INPUT, because that is how the provider
         documents it, and never allowed below the 5-minute rate: a list that implied
         otherwise would be a typo, and honouring it would make every 1h arm look free.
+        An entry's own cache_write_1h_frac wins over the book's multiple, as in Go's
+        Price.CacheWrite1hFor.
         """
+        if entry_frac > 0:
+            return max(p.input * entry_frac, p.write_5m)
         if p.input > 0:
             w = p.input * self.write_1h_multiple
         elif p.write_5m > 0:
@@ -608,6 +632,9 @@ class PriceBook:
 
     def _lookup(self, model: str) -> ModelPricing:
         full = (model or "").strip().lower()
+        # modelinfo.stripVariant: one trailing "[...]", unless the id is only that group.
+        if full.endswith("]") and full.rfind("[") > 0:
+            full = full[:full.rfind("[")]
         tail = full.rsplit("/", 1)[-1]
         def hit(price: ModelPricing) -> ModelPricing:
             if price.read_derived:
@@ -617,6 +644,10 @@ class PriceBook:
         for match, _prefix, _qual, price in self._entries:
             if match == full or match == tail:
                 return hit(price)
+        # A bare id resolves to the one qualified entry it is the tail of (#324), before any
+        # family is consulted — table.go's lookup, same gate: no provider prefix on the request.
+        if full == tail and tail in self._bare_tails:
+            return hit(self._bare_tails[tail])
         for match, prefix, qualified, price in self._entries:  # longest first
             if prefix:
                 if full.startswith(match) or tail.startswith(match):
@@ -626,6 +657,43 @@ class PriceBook:
                 return hit(price)
         return ModelPricing(model=model, ping_input_tokens=self.ping_input_tokens,
                             ping_output_tokens=self.ping_output_tokens)
+
+
+def _derive_bare_tails(entries: list[tuple[str, bool, bool, ModelPricing]],
+                       meta: Mapping[str, tuple[int, int]]) -> dict[str, ModelPricing]:
+    """Index each qualified, non-family entry by its bare tail — table.go's deriveBareTails.
+
+    An entry the operator wrote bare wins on its own, and a tail two providers price
+    differently is dropped with a warning rather than guessed.
+    """
+    def rates(match: str, p: ModelPricing) -> tuple[ModelPricing, tuple[int, int]]:
+        # The entry's own id and a read rate derived from that id are not part of its rate.
+        # The window and compaction point are: the entry serves them too.
+        return (replace(p, model="", cache_read=0.0 if p.read_derived else p.cache_read),
+                meta.get(match, (0, 0)))
+
+    literal = {e[0] for e in entries}
+    tails: dict[str, tuple[str, ModelPricing]] = {}
+    ambiguous: set[str] = set()
+    for match, prefix, qualified, price in entries:
+        if prefix or not qualified or "/" not in match:
+            continue
+        tail = match.rsplit("/", 1)[-1]
+        if not tail or tail in literal:
+            continue
+        prev = tails.get(tail)
+        if prev is not None and prev[0] != match:
+            if rates(prev[0], prev[1]) != rates(match, price):
+                ambiguous.add(tail)
+            continue
+        tails[tail] = (match, price)
+    if ambiguous:
+        for tail in ambiguous:
+            del tails[tail]
+        warnings.warn(f"model price list: bare id is ambiguous between two qualified entries that "
+                      f"differ in rate, window or compaction point; not indexing it: "
+                      f"{sorted(ambiguous)}")
+    return {tail: price for tail, (_m, price) in tails.items()}
 
 
 # ── the trajectory ─────────────────────────────────────────────────────────

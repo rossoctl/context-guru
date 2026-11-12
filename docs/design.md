@@ -20,6 +20,8 @@ infrastructure the components sit on.
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
+| `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. The shared code asks the request's agent; it never names one |
+| `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), and where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`) |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
@@ -29,7 +31,8 @@ infrastructure the components sit on.
 | `config/` | strict YAML loader, presets, pipeline builder |
 | `proxy/` | the standalone/gateway HTTP proxy |
 | `adapters/bifrost/` | `LLMPlugin` adapter to embed the pipeline in a bifrost deployment |
-| `cmd/context-guru-proxy/` | the proxy binary / eval-containers gateway |
+| `proxyapp/` | the proxy's startup, `proxyapp.Main`: flags, configuration, the dashboard, hosted mode and the server. A host adds its own parts through `proxyapp.Hooks` instead of copying the startup. Also a facade over the few `internal/` symbols a host needs |
+| `cmd/context-guru-proxy/` | the proxy binary / eval-containers gateway: one call, `proxyapp.Main(proxyapp.Hooks{})` |
 
 ## The component model
 
@@ -288,7 +291,7 @@ substitute kind.
 `sha256(system + firstUser)[:16]` so two turns of one conversation land on the same key.
 Explicit id sources: proxy header `x-context-guru-session`, then the agent's own id in the request
 metadata (`user_id` from Claude Code, `taskId` from Bob Shell; `session.Explicit`), then, on Bob's
-model route only, the Bob IDE's `X-Task-Id` header (`explicitSessionOf`); the external
+model route only, the Bob IDE's `X-Task-Id` header (`agent/bob`, through `agent.Agent.SessionID`); the external
 plugin's `pctx.Session`; eval-containers stamps it in the gateway. The bifrost adapter uses
 `session.ExplicitStrict`: it takes `user_id` only in Claude Code's JSON form, because a plain
 `user_id` may name a user, not a conversation.
@@ -359,7 +362,7 @@ there. After a proxy restart the tracker's records are gone but the provider's c
 not, so the first request of a thread the tracker no longer remembers reads as all-cached — but
 only while that thread's cached prefix was last refreshed inside the request's cache lifetime
 (5 minutes, 30 minutes on any OpenAI model, 1 hour on the extended tier). A refresh is the
-thread's own last request or a keep-alive ping that read the cache, under either session id the
+thread's own last request or a keep-alive ping that read or wrote the cache, under either session id the
 conversation uses (an explicit header on some turns, a content-derived id on others). The
 refresh time comes from the dashboard's recorder, which reloads it per thread at startup; with
 the dashboard off the fallback is the proxy's start time, and `--restart-grace=false` switches

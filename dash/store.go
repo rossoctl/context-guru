@@ -337,8 +337,8 @@ func OpenReadOnly(path string) (*DB, error) {
 // file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
 // query with "no such column" would break a reader (the cache-campaign tool opens live databases
 // this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
-// view named `requests` that adds every missing column as its default. Temp objects are searched
-// before main, so every unqualified `requests` resolves to the shim; the view is per connection and
+// view named after each table with additive columns (`requests`, `request_components`) that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified table name resolves to the shim; the view is per connection and
 // writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
 // last, because it forbids creating even a temp object.
 //
@@ -349,30 +349,37 @@ func init() {
 			return nil
 		}
 		ctx := context.Background()
-		rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('requests')`, nil)
-		if err != nil {
-			return err
-		}
-		have := map[string]bool{}
-		vals := make([]driver.Value, 1)
-		for rows.Next(vals) == nil {
-			if n, ok := vals[0].(string); ok {
-				have[n] = true
-			}
-		}
-		rows.Close()
-		var extra string
+		// One shim per table that has additive columns (requests, request_components, ...).
+		tables := map[string]bool{}
 		for _, c := range additiveColumns {
-			if c.table == "requests" && !have[c.column] {
-				extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
-			}
+			tables[c.table] = true
 		}
-		if extra != "" && len(have) > 0 {
-			if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW requests AS SELECT *`+extra+` FROM main.requests`, nil); err != nil {
+		for table := range tables {
+			rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('`+table+`')`, nil)
+			if err != nil {
 				return err
 			}
+			have := map[string]bool{}
+			vals := make([]driver.Value, 1)
+			for rows.Next(vals) == nil {
+				if n, ok := vals[0].(string); ok {
+					have[n] = true
+				}
+			}
+			rows.Close()
+			var extra string
+			for _, c := range additiveColumns {
+				if c.table == table && !have[c.column] {
+					extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
+				}
+			}
+			if extra != "" && len(have) > 0 {
+				if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW `+table+` AS SELECT rowid AS rowid, *`+extra+` FROM main.`+table, nil); err != nil {
+					return err
+				}
+			}
 		}
-		_, err = conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		_, err := conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
 		return err
 	})
 }
@@ -586,20 +593,23 @@ func (d *DB) insertBatch(evs []*Event) error {
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
 		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
 		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias,
+		price_estimated, acc_priced, estimated_saved_usd, estimate_held, estimated_saved_low_usd,
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
 		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
-		backend
+		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, restored_tokens, ` + strings.Join(requestStoredTokenColumns(), ", ") + `, backend
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `,?)`)
 	if err != nil {
 		return err
 	}
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
 		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
-		saved_usd, duration_ms, err, gates, events
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by,
+		` + strings.Join(compTokenColumns, ", ") + `
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(compTokenColumns)) + `)`)
 	if err != nil {
 		return err
 	}
@@ -639,7 +649,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		if e.KeepAliveStrategyID != "" {
 			strategyID = e.KeepAliveStrategyID
 		}
-		res, err := reqStmt.Exec(
+		res, err := reqStmt.Exec(append([]any{
 			e.TS, e.TenantID, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
@@ -666,12 +676,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 			 * safe direction — it claims LESS about the row. */
 			sourceOf(e.Source),
 			e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.SweepAnswerUSD,
-			e.SessionAlias,
+			e.SessionAlias, boolInt(e.PriceEstimated), boolInt(e.AccountantPriced), e.EstimatedSavedUSD, boolInt(e.EstimateHeld), e.EstimatedSavedLowUSD,
 			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
 			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
-			e.CompactionPoint, e.CompactionPointSource,
-			backendOf(e.Backend),
-		)
+			e.CompactionPoint, e.CompactionPointSource, e.DeferCostUSD,
+		}, append(limitArgs(e.Limits), append(append([]any{boolInt(e.AuthSubscription), e.SweepFalseExpandsWarm, e.RestoredTokens}, requestStoredTokenArgs(e)...), backendOf(e.Backend))...)...)...)
 		if err != nil {
 			return err
 		}
@@ -687,10 +696,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 			}
 		}
 		for _, c := range e.Components {
-			if _, err := compStmt.Exec(id, c.Component, c.Kind,
+			if _, err := compStmt.Exec(append([]any{id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
 				c.SavedGross, c.SavedUnique, c.SavedUSD, c.DurationMs, c.Err,
-				gatesJSON(c.Gates), gatesJSON(c.Events)); err != nil {
+				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy},
+				c.Tokens.args()...)...); err != nil {
 				return err
 			}
 		}
@@ -1002,12 +1012,16 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 	}
 	// Before the delete: afterwards the victims cannot be found. A failed pick returns its
 	// error rather than reading as an empty table (#775 review).
-	victims, err := d.oldestSessionIDs(n)
+	picked, err := d.oldestSessionKeys(n)
 	if err != nil {
 		return 0, err
 	}
-	if len(victims) == 0 {
+	if len(picked) == 0 {
 		return 0, nil
+	}
+	victims := make([]string, len(picked))
+	for i, k := range picked {
+		victims[i] = k.session
 	}
 	if d.dropProbe != nil {
 		d.dropProbe()
@@ -1018,9 +1032,14 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 		return 0, err
 	}
 	var affected int64
-	for _, chunk := range chunkStrings(victims) {
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (`+placeholders(len(chunk))+`)`,
-			anyArgs(chunk)...)
+	// By (tenant, session): a session id two tenants share must not take the other's rows (#1069).
+	for _, chunk := range chunkKeys(picked) {
+		pairs := strings.TrimSuffix(strings.Repeat("(?,?),", len(chunk)), ",")
+		args := make([]any, 0, 2*len(chunk))
+		for _, k := range chunk {
+			args = append(args, k.tenant, k.session)
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE (tenant_id, session_id) IN (VALUES `+pairs+`)`, args...)
 		if err != nil {
 			return affected, err
 		}
@@ -1031,17 +1050,17 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 	return affected, nil
 }
 
-func (d *DB) oldestSessionIDs(n int) ([]string, error) {
-	rows, err := d.sql.Query(`SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
+func (d *DB) oldestSessionKeys(n int) ([]sessKey, error) {
+	rows, err := d.sql.Query(`SELECT tenant_id, session_id FROM requests GROUP BY tenant_id, session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []sessKey
 	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			out = append(out, id)
+		var k sessKey
+		if rows.Scan(&k.tenant, &k.session) == nil {
+			out = append(out, k)
 		}
 	}
 	return out, rows.Err()
@@ -1070,6 +1089,21 @@ func chunkStrings(ss []string) [][]string {
 	}
 	if len(ss) > 0 {
 		out = append(out, ss)
+	}
+	return out
+}
+
+// chunkKeys is chunkStrings for (tenant, session) pairs. A pair binds two variables, so a chunk
+// holds half as many as chunkStrings does, keeping a statement under the same variable cap.
+func chunkKeys(ks []sessKey) [][]sessKey {
+	per := max(sqlChunk/2, 1)
+	var out [][]sessKey
+	for len(ks) > per {
+		out = append(out, ks[:per])
+		ks = ks[per:]
+	}
+	if len(ks) > 0 {
+		out = append(out, ks)
 	}
 	return out
 }

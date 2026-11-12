@@ -137,6 +137,7 @@ func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
 // bookkeeping (proxy/keepalive.go's record1) price the SAME request shape identically instead
 // of each inlining this formula — the two had drifted apart once already (see issue #382's
 // review) when the keep-alive mechanism was decoupled from dash's event type.
+// dash.tierUSD (dash/accountant_price.go) mirrors the 1h rule (2x Input); change both together.
 func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheWrite1h int64) float64 {
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
 	if cacheWrite1h > 0 {
@@ -348,6 +349,33 @@ func (c Chain) WindowExact(ctx context.Context, model string) (int, bool, bool) 
 		}
 	}
 	return 0, false, false
+}
+
+// CompactionPoint resolves an operator-stated compaction point (billed input tokens). The first link that
+// states one wins. Links that cannot state one are skipped.
+func (c Chain) CompactionPoint(ctx context.Context, model string) (int, bool) {
+	for _, r := range c {
+		if cp, ok := r.(interface {
+			CompactionPoint(context.Context, string) (int, bool)
+		}); ok {
+			if n, found := cp.CompactionPoint(ctx, model); found {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// OperatorCompactionPoint asks a resolver for the operator's stated compaction point (billed input tokens).
+// ok=false when the resolver cannot state one or states none. The capability is optional, as WindowExact is.
+func OperatorCompactionPoint(r Resolver, ctx context.Context, model string) (int, bool) {
+	cp, has := r.(interface {
+		CompactionPoint(context.Context, string) (int, bool)
+	})
+	if !has {
+		return 0, false
+	}
+	return cp.CompactionPoint(ctx, model)
 }
 
 // Price tries each element that can price a model; the first ok wins. Elements

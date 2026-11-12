@@ -98,6 +98,8 @@ type API struct {
 	promptCache jsonCache
 	// spendCache covers /api/spend/explain, a whole-window pass over requests.
 	spendCache jsonCache
+	// fiveHour holds the learned 5-hour weights per account (#1047), for fhCacheTTL.
+	fiveHour fhCache
 	// jsonInflight collapses concurrent COLD reads of the same cache key onto one computation.
 	// The flight key holds the cache pointer AND the entry key, so two caches never share a flight.
 	// The entry key is the same principal-scoped cacheKey as the caches, so two tenants never share a
@@ -531,21 +533,11 @@ func (a *API) refreshJSON(c *jsonCache, key string, compute func(db *DB) ([]byte
 // cacheKey scopes a cache entry to the actual caller, not just the URL: a manager and a
 // tenant hitting the same query string must never share a cached body.
 //
-// since/until are rounded to the cache TTL bucket rather than compared verbatim. The UI's
-// relative ranges ("last 24h") re-stamp since/until with Date.now() on every single call —
-// so the raw query string is different every time and this cache would otherwise never hit
-// for the single most common view on the page.
+// since and until stay exact in the key. An earlier version rounded them down to the TTL bucket,
+// so a narrower window got the wider window's cached totals (issue #916). The UI keeps its relative
+// ranges cheap by rounding `now` itself (resolveTime in ui/app.js), so one repaint burst shares a key.
 func cacheKey(p Principal, r *http.Request) string {
-	q := r.URL.Query()
-	bucket := dashCacheTTL.Milliseconds()
-	for _, param := range []string{"since", "until"} {
-		if v := q.Get(param); v != "" {
-			if ms, err := strconv.ParseInt(v, 10, 64); err == nil {
-				q.Set(param, strconv.FormatInt(ms/bucket*bucket, 10))
-			}
-		}
-	}
-	return p.TenantID + "\x00" + strconv.FormatBool(p.Manager) + "\x00" + q.Encode()
+	return p.TenantID + "\x00" + strconv.FormatBool(p.Manager) + "\x00" + r.URL.Query().Encode()
 }
 
 // NewAPI builds the HTTP surface for a recorder. Malformed CIDRs are skipped with
@@ -821,6 +813,9 @@ func (a *API) routes() []route {
 	rs = append(rs, a.adaptRoutes()...)
 	rs = append(rs, a.compactEpisodeRoutes()...)
 	rs = append(rs, a.insightsRoutes()...)
+	// The subscription limit values (#984), declared beside their handler in limits.go.
+	rs = append(rs, a.limitsRoutes()...)
+	rs = append(rs, a.fiveHourRoutes()...)
 	return rs
 }
 
@@ -1042,7 +1037,13 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		evs, f.Tenant, f.TenantAll = keep, owner, false
 	}
 	var arch *ArchivedSession
-	if meta, mErr := a.db(r).ArchivedSessionByID(session); mErr == nil {
+	// With a tenant in view the lookup is that tenant's; a shared id (#1069) otherwise returns
+	// whichever tenant archived it last, and the ownership test below would refuse the owner.
+	lookup := func() (ArchivedSession, error) { return a.db(r).ArchivedSessionOf(f.Tenant, session) }
+	if f.TenantAll {
+		lookup = func() (ArchivedSession, error) { return a.db(r).ArchivedSessionByID(session) }
+	}
+	if meta, mErr := lookup(); mErr == nil {
 		// Ownership again: the index is keyed by an id a caller could guess, and this
 		// row is the thing that says "there is something to fetch".
 		if a.auth == nil || f.TenantAll || meta.TenantID == f.Tenant {
@@ -1079,7 +1080,7 @@ func (a *API) sessionTranscript(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("fetch") == "1" {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
-			rows, ferr := a.rec.FetchArchived(ctx, session)
+			rows, ferr := a.rec.FetchArchived(ctx, arch.TenantID, session)
 			switch {
 			case errors.Is(ferr, ErrRemoteMissing):
 				state = TranscriptNeverArchived
@@ -1185,7 +1186,13 @@ func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.PathValue("session")
-	meta, err := a.db(r).ArchivedSessionByID(session)
+	var meta ArchivedSession
+	var err error
+	if a.auth == nil || p.Manager {
+		meta, err = a.db(r).ArchivedSessionByID(session)
+	} else {
+		meta, err = a.db(r).ArchivedSessionOf(p.TenantID, session)
+	}
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "no such archived session")
 		return
@@ -1198,7 +1205,7 @@ func (a *API) archivedSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	evs, err := a.rec.FetchArchived(ctx, session)
+	evs, err := a.rec.FetchArchived(ctx, meta.TenantID, session)
 	if err != nil {
 		// Distinguish the two, because they mean different things to whoever is
 		// looking: one is "this was never archived", the other is "cold storage is
@@ -1370,7 +1377,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 	if statsLean(r) && (f.Session != "" || f.Since != 0 || f.Until != 0) {
 		// ?lean=1 answers every field the status line's _fetch_stats actually reads
 		// (context-guru-plugin/scripts/statusline.py: total_saved_usd, keepalive_net_usd,
-		// keepalive_misses_avoided, upstream_ms_avg) plus what scripts/cg.py reads
+		// keepalive_misses_avoided, upstream_ms_avg, and saved_unique / replay_tokens for
+		// `rd / wr`) plus what scripts/cg.py reads
 		// (cost_usd, baseline_cost_usd, cache_saved_usd and 7 waterfall keys) at FULL
 		// precision for a SESSION, and at a small, disclosed, bounded discount (the two
 		// read-time-priced credits below) for a time window — see
@@ -1431,8 +1439,8 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// The four calls below are independent of each other — none reads another's result, only
 		// this handler's own fields afterward do — so they run concurrently rather than one after
 		// another. Sequentially, on a production-sized DB, Overview() alone measured ~5-10s (see its
-		// own errgroup for why) and DeclCreditFor another ~4-16s (see SelfRemovals' own comment for
-		// why it was rewritten), which summed past this handler's 10s caller-facing timeout on every
+		// own errgroup for why) and DeclCreditFor another ~4-16s (measured while it still scanned for
+		// the self-removal credit, removed in #584), which summed past this handler's 10s caller-facing timeout on every
 		// call. Run concurrently, wall time drops to roughly the slowest of the four rather than
 		// their sum.
 		var (
@@ -1468,12 +1476,12 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 				return nil
 			})
 		}
-		// The declarations no longer sent, both halves. Needs no pricer for the token counts, so it
+		// The declarations the filter stopped sending. Needs no pricer for the token counts, so it
 		// runs outside the block above; best-effort and non-fatal, because it is an addition to the
 		// walk and a deployment where it fails should still get the walk. NEVER silent, though: an
 		// error swallowed here returns zeros, and a zero in a savings figure is a claim.
 		g.Go(func() error {
-			c, err := db.DeclCreditFor(f, a.priceFn(r), a.toolFilterStateForScope(f).Removed)
+			c, err := db.DeclCreditFor(f, a.priceFn(r))
 			if err != nil {
 				slog.Warn("dash: declaration-removal credit unavailable", "err", err)
 				return nil
@@ -1555,7 +1563,23 @@ func (a *API) series(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"bucket_ms": bucket, "buckets": b})
+	// The buckets sum the stored credit. The headline caps the replay credit, so a client that adds
+	// the buckets up lands above it by exactly this correction (a negative number). A ledger scan
+	// streams every row of the window, so the figure is given beside the buckets and not spread over
+	// them: the ledgers do not say which bucket a correction belongs to (#586).
+	capCorr, capNotApplied := a.capCorrection(r, f)
+	writeJSON(w, map[string]any{"bucket_ms": bucket, "buckets": b,
+		"cap_correction_usd": capCorr, "cap_not_applied": capNotApplied})
+}
+
+// capCorrection is the headline's correction for the filter f, for the readers that sum stored
+// rows and so cannot apply a ledger row by row. notApplied is true when a ledger did not run: the
+// reader's totals then hold the stored, uncapped credit in whole or in part. It goes through
+// a.replayLedger, like the headline, so a test can fail the replay ledger for every reader.
+func (a *API) capCorrection(r *http.Request, f Filter) (corr float64, notApplied bool) {
+	db := a.db(r)
+	c := db.capCorrection(f, a.windows, a.pricer, func(f Filter) (*ReplayLedger, error) { return a.replayLedger(db, f) })
+	return c.CorrectionUSD, c.NotApplied
 }
 
 func (a *API) requests(w http.ResponseWriter, r *http.Request) {
@@ -1615,10 +1639,10 @@ func (a *API) request(w http.ResponseWriter, r *http.Request) {
 	// discover and call — is more moving parts for the same wait.
 	archived := false
 	if trusted && len(e.Content) == 0 && e.SessionID != "" {
-		if meta, err := a.db(r).ArchivedSessionByID(e.SessionID); err == nil && meta.ContentPath != "" {
+		if meta, err := a.db(r).ArchivedSessionOf(e.TenantID, e.SessionID); err == nil && meta.ContentPath != "" {
 			archived = true
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-			rows, ferr := a.rec.FetchArchivedContent(ctx, e.SessionID, e.ID)
+			rows, ferr := a.rec.FetchArchivedContent(ctx, e.TenantID, e.SessionID, e.ID)
 			cancel()
 			if ferr == nil {
 				e.Content = rows
@@ -1762,10 +1786,15 @@ func (a *API) breakdown(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	capCorr, capNotApplied := a.capCorrection(r, f)
 	writeJSON(w, map[string]any{
 		"dim":        dim,
 		"dimensions": BreakdownDims(),
 		"groups":     rows,
+		// Each group's saved_usd is the stored credit. The headline caps it; this is the part that
+		// is past the cap for the whole scope, and it is not split over the groups (#586).
+		"cap_correction_usd": capCorr,
+		"cap_not_applied":    capNotApplied,
 		"description": "Requests, tokens and spent-vs-saved for each value of one dimension. " +
 			"spent_usd is what was billed plus context-guru's own model spend; saved_usd is the " +
 			"baseline counterfactual minus that. incomplete_rows counts rows the provider gave " +

@@ -23,7 +23,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"golang.org/x/sync/errgroup"
-	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -138,17 +137,13 @@ type ModelRate struct {
 // SelfRemoval is a capability that STOPPED being declared partway through the window — the
 // user acted on it.
 //
-// This is a saving the product caused and it was being thrown away. Once somebody removes an
-// MCP server, the declaration is simply absent from later sessions: no component ran, no
-// filter fired, and every measurement on this dashboard is about content we removed, so the
-// reduction registered nowhere. Crediting it needs no new capture, only the observation that
-// the inventory is a time series and this name is present in the early part and absent from
-// the late part.
+// It is detected, not credited: what an account removes on its own is not a saving context-guru
+// made (#583, #584), so no total, tile or report shows it as one. The only reader is the
+// savings-since-removal estimate (adaptToolsSaved), which prices the removals a user made after
+// following a recommendation and keeps them apart from the filter's measured saving.
 //
-// It is kept SEPARATE from the tool-filter's realized savings and never added to them, because
-// the two can describe the same tokens: an account that removed a server locally AND has it in
-// its server-side filter list would otherwise be credited twice for one reduction. Overlap is
-// reported rather than resolved silently — see Overlap.
+// Overlap marks a row whose name is also on the server-side filter list, so the same tokens are
+// never counted by both.
 type SelfRemoval struct {
 	Kind   string `json:"kind"`
 	Name   string `json:"name"`
@@ -340,9 +335,6 @@ type ToolReport struct {
 	// "what would removing this save me" can be answered per model instead of at one blended
 	// rate that describes none of them.
 	Models []ModelRate `json:"models"`
-	// SelfRemoved is what the account stopped declaring partway through the window — savings
-	// the user made themselves, which no other measurement on this dashboard could see.
-	SelfRemoved []SelfRemoval `json:"self_removed,omitempty"`
 	// Prompt is the system prompt's weight and how much of the prefix can be shown as text.
 	Prompt PromptStat `json:"prompt"`
 	// Carried is how the unused figures were priced: requests matched to the declaration set they
@@ -1356,39 +1348,9 @@ func (a *API) tools(w http.ResponseWriter, r *http.Request) {
 				f.SessionIn = []string{""}
 			}
 		}
-		// The report and the user's own removal credit read the declarations independently, so they
-		// are read together; only the assignment of one onto the other waits.
-		var rep *ToolReport
-		var sr []SelfRemoval
-		var srErr error
-		var g errgroup.Group
-		g.Go(func() error {
-			var err error
-			rep, err = db.ToolReportFor(f, price)
-			return err
-		})
-		// Credit for what the USER removed themselves. Best-effort and non-fatal: it is an
-		// addition to the report, so a deployment where it fails still gets the inventory rather
-		// than an error page. Needs a pricer to put a dollar on, and the token counts stand
-		// without one.
-		if price != nil {
-			g.Go(func() error {
-				// The account's own server-side removal list, so a reduction that the tool filter is
-				// ALREADY credited for can be marked as overlapping instead of counted twice.
-				sr, srErr = db.SelfRemovals(f, price, a.toolFilterStateForScope(f).Removed)
-				return nil
-			})
-		}
-		if err := g.Wait(); err != nil {
+		rep, err := db.ToolReportFor(f, price)
+		if err != nil {
 			return nil, err
-		}
-		if price != nil {
-			if srErr != nil {
-				// Non-fatal, but never silent: swallowing this returned an empty list that was
-				// indistinguishable from "the account removed nothing", which is a claim.
-				slog.Warn("dash: self-removal credit unavailable", "err", srErr)
-			}
-			rep.SelfRemoved = sr
 		}
 		return json.Marshal(rep)
 	})
@@ -1639,7 +1601,13 @@ func (d *DB) SelfRemovals(f Filter, price func(string) (modelinfo.Price, bool), 
 			r.SessionsAfter++
 			n := int64(s.reads + s.writes + s.fresh)
 			r.AvoidedReads += int64(c.tokens) * n
-			p, ok := price(s.model)
+			// A nil price function is a deployment with no rates (API.priceFn). The row stays
+			// unpriced and keeps its token count: unknown dollars are not zero dollars.
+			var p modelinfo.Price
+			ok := false
+			if price != nil {
+				p, ok = price(s.model)
+			}
 			if !ok || p.Zero() {
 				priced = false
 				continue

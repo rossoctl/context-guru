@@ -62,6 +62,7 @@ const ttlTTL = modelinfo.AnthropicCacheTTL5m
 // a median 3.38x low.
 const addressableCTE = `WITH s AS (
 	SELECT r.tenant_id, r.session_id, r.ts, r.cost_usd, r.model, r.provider, r.cache_miss_reason, r.cache_write,
+	       r.fresh_input, r.cache_read, r.cache_write_1h,
 	       LAG(r.ts) OVER (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_ts,
 	       LAG(r.cache_read + r.cache_write) OVER
 	         (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts) AS prev_prefix
@@ -70,6 +71,20 @@ const addressableCTE = `WITH s AS (
 	SELECT *, (ts - prev_ts) / 1000.0 AS gap_s FROM s
 	WHERE cache_miss_reason = 'ttl_expiry' AND cache_write > 0 AND prev_ts IS NOT NULL
 )`
+
+// expiryTierTerms sums the billed input tokens of the `addressable` rows by tier: the token form of
+// their cost_usd, for a Claude subscription (#1048). In TierTokens order (input, read, 5-minute
+// write, 1-hour write). The tiers are never added. expiryTierCols is the same for one row.
+const (
+	expiryTierCols  = `fresh_input, cache_read, MAX(cache_write - cache_write_1h, 0), cache_write_1h`
+	expiryTierTerms = `COALESCE(SUM(fresh_input),0), COALESCE(SUM(cache_read),0),
+		COALESCE(SUM(MAX(cache_write - cache_write_1h, 0)),0), COALESCE(SUM(cache_write_1h),0)`
+)
+
+// tierDest is the scan targets of expiryTierCols or expiryTierTerms, in that order.
+func tierDest(t *TierTokens) []any {
+	return []any{&t.Input, &t.CacheRead, &t.CacheWrite5m, &t.CacheWrite1h}
+}
 
 // addressable renders the CTE for one filter.
 func addressable(f Filter) (string, []any) {
@@ -99,7 +114,7 @@ func kaSavedSince(alias string, since int64) string {
 // not make, applied on read. pingFloor is one extra predicate on the ping row (kp), "" for
 // none — see kaSavedSince for the only caller that needs one.
 //
-// The credit written at capture time asks four questions (Event.keepaliveSavedUSD) and not one
+// The credit the legacy rule wrote at capture time asked four questions and not one
 // of them is an upper bound on the idle gap: it requires that the gap EXCEEDED the provider's
 // lifetime — the floor — and then credits the row whatever the gap was, on the strength of
 // keepalive_pings alone. That column is the whole of the write path's evidence, and on real rows
@@ -194,10 +209,10 @@ func kaSavedGate(alias, pingFloor string) string {
 	//
 	// So no page treats a pre-GPT-5.6 OpenAI model as 30 minutes through this CASE: the outer
 	// `keepalive_saved_usd > 0` is true only for a row the write path credited, and the write path
-	// never credits one (keepaliveSavedUSD gates on GPT56OrLater). The provider-only CASE sees
+	// never credited one (the legacy rule gated on GPT56OrLater). The provider-only CASE sees
 	// only rows that already passed the model gate.
 	//
-	// This is a reachability ceiling for rows ALREADY credited by keepaliveSavedUSD,
+	// This is a reachability ceiling for rows ALREADY credited at write time,
 	// not a second model-eligibility rule. The write path uses GPT56OrLater and
 	// never credits older OpenAI models; SQL needs only the provider's coverage
 	// window for a successful ping. Duplicating Go's routed-model parser here
@@ -214,14 +229,35 @@ func kaSavedGate(alias, pingFloor string) string {
 	// The `> 0` FIRST is not style: it short-circuits the probe to the credited rows. Measured on
 	// a 2.1 GB database, a full-table SUM is 314 ms this way and 61.9 SECONDS with the EXISTS
 	// first, for the identical answer. Do not reorder.
-	return `(CASE WHEN ` + col + ` > 0 AND EXISTS (
+	probe := func(touched string) string {
+		return `EXISTS (
 			SELECT 1 FROM requests kp
-			WHERE kp.keepalive = 1 AND kp.cache_read > 0
+			WHERE kp.keepalive = 1 AND ` + touched + `
 			  AND kp.tenant_id = ` + alias + `tenant_id AND kp.session_id = ` + alias + `session_id
 			  AND kp.ts <= ` + alias + `ts` + pingFloor + `
 			  AND kp.ts + ` + modelinfo.CacheLifetimeSQL("kp.provider",
-		billedHour, time.Millisecond) + ` >= ` + alias + `ts)
-		THEN ` + col + ` ELSE 0 END)`
+			billedHour, time.Millisecond) + ` >= ` + alias + `ts)`
+	}
+	// A row the accountant library priced carries a credit the library gave from usage: it credits a rescue
+	// when the ping RE-CREATED an expired entry and the next request read what the ping wrote (accountant
+	// case keepalive/ping-miss-restarts-clock/5m). So for such a row a ping that wrote reached the entry as
+	// well as one that read it, and the test is cache_read > 0 OR cache_write > 0. The strict test above
+	// stays for every other row: the legacy write path credited a row on keepalive_pings alone, and a ping
+	// that only re-created the entry earned it a credit it did not deserve (context-guru#768 B4).
+	//
+	// The order is still load-bearing: col > 0 first, so a probe runs once per CREDITED row. The library test
+	// is a second EXISTS inside the same AND, and it runs only for a row the strict probe refused.
+	libraryPriced := `EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = ` + alias + `id AND c.priced_by = '` +
+		PricedByAccountant + `')`
+	// A request the accountant override priced (acc_priced = 1) carries the library's own rescue decision
+	// in keepalive_saved_usd. It is trusted as stored: the gap, the last ping and the extent were judged by
+	// the library, with the billed usage, and the SQL model below cannot see them. This also holds when the
+	// request has no component row, as in a keep-alive-only setup (context-guru#912, #919). The test is a
+	// plain column read, so the probe never runs for such a row. It stays AFTER col > 0: the credited-row
+	// guard is first (see above). A row with acc_priced = 0 (legacy, or one the library did not price) keeps
+	// the SQL model, with its component-row clause.
+	return `(CASE WHEN ` + col + ` > 0 AND (` + alias + `acc_priced = 1 OR ` + probe(`kp.cache_read > 0`) + ` OR (` + libraryPriced + ` AND ` +
+		probe(`kp.cache_write > 0`) + `)) THEN ` + col + ` ELSE 0 END)`
 }
 
 // KeepAliveCoverage is the "is this figure a measurement or an absence?" statement that
@@ -247,7 +283,7 @@ type KeepAliveLedger struct {
 	PingUSD       float64 `json:"ping_usd"`
 	MissesAvoided int64   `json:"misses_avoided"`
 	// SavedUSD is a CEILING, and every tile that shows it says so. The credit itself is exact
-	// arithmetic — see Event.keepaliveSavedUSD — but the provider's cache is keyed on CONTENT,
+	// arithmetic (the accountant library's rescue) — but the provider's cache is keyed on CONTENT,
 	// so another session sending a byte-identical prefix would have refreshed the same entry
 	// for nothing. That confound cannot be measured from our side; it can only be declared.
 	SavedUSD float64 `json:"saved_usd"`
@@ -255,13 +291,15 @@ type KeepAliveLedger struct {
 	// The winner/loser split over the sessions the mechanism TOUCHED. 85 of 119 lose about a
 	// third of a cent service-wide, funding a large rebate on 34 — the panel states that in
 	// words, unconditionally, above the fold.
-	Sessions       int64   `json:"sessions_touched"`
-	Winners        int64   `json:"winners"`
-	Losers         int64   `json:"losers"`
-	WorstSession   string  `json:"worst_session"`
-	WorstNetUSD    float64 `json:"worst_net_usd"`
-	Addressable    int64   `json:"addressable_misses"`
-	AddressableUSD float64 `json:"addressable_usd"`
+	Sessions     int64  `json:"sessions_touched"`
+	Winners      int64  `json:"winners"`
+	Losers       int64  `json:"losers"`
+	WorstSession string `json:"worst_session"`
+	// WorstSessionTenant says whose WorstSession it is: two tenants can hold the same session id.
+	WorstSessionTenant string  `json:"worst_session_tenant,omitempty"`
+	WorstNetUSD        float64 `json:"worst_net_usd"`
+	Addressable        int64   `json:"addressable_misses"`
+	AddressableUSD     float64 `json:"addressable_usd"`
 	// PingsThatReadNothing is the operator's check on SavedUSD: a ping that read nothing
 	// refreshed nothing. PingsThatWrote is worse — it CREATED an entry, which costs 12.5x a
 	// read, and the keeper stops pinging that session.
@@ -276,6 +314,14 @@ type KeepAliveLedger struct {
 	// requests — see KeepAliveLatencyDiagnostic. Known is false (and every figure zero) on
 	// a window too small to measure it, never a fabricated number.
 	Latency kvcache.Latency `json:"latency"`
+	// The same two halves in tokens, by tier, for a Claude subscription (#1022). Tokens is the
+	// rescue: the sum of the accountant's keep-alive figure (tok_ka_*), as /api/stats
+	// tokens.by_feature.keepalive. PingTokens is what the pings paid, as /api/stats
+	// keepalive_ping_tokens. The two are never netted: the tiers have no common unit.
+	// TokensUnmeasured counts the agent requests with no token figure (acc_priced = 0).
+	Tokens           TokenFlow  `json:"tokens"`
+	PingTokens       TierTokens `json:"keepalive_ping_tokens"`
+	TokensUnmeasured int64      `json:"tokens_unmeasured_requests"`
 	KeepAliveCoverage
 }
 
@@ -293,10 +339,10 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 	cond, args := f.where()
 	kaCond, kaArgs := withKeepAlive(f).where()
 	aCond, aArgs := addressable(f)
-	// Six independent reads, three of them a pass over every request (the saving, the per-session
-	// saving, the addressable CTE). They ran back to back; each goroutine fills its own fields.
+	// Seven independent reads, four of them a pass over every request (the saving, the per-session
+	// saving, the addressable CTE, the tokens). They ran back to back; each goroutine fills its own fields.
 	var (
-		saved, spent map[string]float64
+		saved, spent map[sessKey]float64
 		from         sql.NullInt64
 		lat          kvcache.Latency
 		days         float64
@@ -350,6 +396,17 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		SELECT COUNT(*), COALESCE(SUM(cost_usd),0) FROM addressable`, aArgs...).Scan(
 			&o.Addressable, &o.AddressableUSD)
 	})
+	// The tokens: the rescue over agent rows and the pings' billed tiers, in one pass. A ping row
+	// stores no token figure, so the plain sum over kaCond is the agent rows' sum (tokenSumTerms).
+	g.Go(func() error {
+		var agg accTokensAgg
+		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT `+tokenSumTerms(flowColumns("tok_ka"))+`,
+		`+accTokenTailTerms+` FROM requests r WHERE `+kaCond, kaArgs...).Scan(agg.dest(8)...); err != nil {
+			return err
+		}
+		o.Tokens, o.PingTokens, o.TokensUnmeasured = flowOf(agg.sums), agg.ping, agg.unmeasured
+		return nil
+	})
 	g.Go(func() error {
 		days = d.windowDays(kaCond, kaArgs)
 		var err error
@@ -360,7 +417,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		return nil, err
 	}
 	o.NetUSD = o.SavedUSD - o.PingUSD
-	nets := map[string]float64{}
+	nets := map[sessKey]float64{}
 	for s, v := range saved {
 		nets[s] += v
 	}
@@ -376,7 +433,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 			o.Losers++
 		}
 		if net < o.WorstNetUSD {
-			o.WorstNetUSD, o.WorstSession = net, s
+			o.WorstNetUSD, o.WorstSession, o.WorstSessionTenant = net, s.session, s.tenant
 		}
 	}
 	// Ping rate and its footprint on disk, over the window's own span. Nothing here stores
@@ -476,22 +533,26 @@ func (d *DB) KeepAliveLatencyDiagnostic(f Filter) (kvcache.Latency, error) {
 	return l, nil
 }
 
+// sessKey names one session: its tenant and its id (#501). A bare session id is not enough to
+// key a per-session figure, because two tenants can hold rows under the same one.
+type sessKey struct{ tenant, session string }
+
 // sumBySession groups one column by session under an extra predicate.
-func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[string]float64, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
-		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+func (d *DB) sumBySession(cond string, args []any, col, extra string) (map[sessKey]float64, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COALESCE(SUM(`+col+`),0) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]float64{}
+	out := map[sessKey]float64{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var v float64
-		if err := rows.Scan(&s, &v); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &v); err != nil {
 			return nil, err
 		}
-		out[s] = v
+		out[k] = v
 	}
 	return out, rows.Err()
 }
@@ -524,6 +585,9 @@ type Band struct {
 	Label string  `json:"label"`
 	N     int64   `json:"n"`
 	USD   float64 `json:"usd"`
+	// Tokens is the token form of USD: the billed input tokens of those expiries, by tier (#1048).
+	// Set by the Cache strategy tab only; nil (absent) on the KV-cache bands.
+	Tokens *TierTokens `json:"tokens,omitempty"`
 	// Beyond marks the bands the CURRENT policy's coverage cannot reach, which the chart draws
 	// in the de-emphasis gray beyond the coverage rule.
 	Beyond bool `json:"beyond,omitempty"`
@@ -531,14 +595,16 @@ type Band struct {
 
 // DayPoint is one day of the "how often, and what did it cost" series.
 type DayPoint struct {
-	Day        string  `json:"day"`
-	TS         int64   `json:"ts"`
-	Misses     int64   `json:"misses"`
-	USD        float64 `json:"usd"`
-	Requests   int64   `json:"requests"`
-	AllUSD     float64 `json:"all_usd"`
-	SharePct   float64 `json:"share_pct"`
-	MissRatePc float64 `json:"miss_rate_pct"`
+	Day    string  `json:"day"`
+	TS     int64   `json:"ts"`
+	Misses int64   `json:"misses"`
+	USD    float64 `json:"usd"`
+	// Tokens is the token form of USD: the billed input tokens of the day's expiries, by tier (#1048).
+	Tokens     TierTokens `json:"tokens"`
+	Requests   int64      `json:"requests"`
+	AllUSD     float64    `json:"all_usd"`
+	SharePct   float64    `json:"share_pct"`
+	MissRatePc float64    `json:"miss_rate_pct"`
 }
 
 // AccountGaps is panel 3d: how long between one account's own TTL expiries.
@@ -567,7 +633,8 @@ type KeepAliveBehaviour struct {
 	Gaps        []AccountGaps `json:"account_gaps"`
 	// PrefixP10/P50/P90 in tokens, over the lapsed entries. p50 is 292,527 on the corpus and
 	// 347 of 356 are past 20k — which is the measured reason a `prefix >= 20k` gate
-	// costs almost nothing at 20k (the pre-#435 gate; the shipped floor is 20k since #858), and the panel says so.
+	// costs almost nothing at 20k (the pre-#435 gate), and the panel says so. The shipped floors are 20k for a
+	// tool wait, background work, a teammate or a subagent and 80k for a main thread that waits for a person or for an unknown cause (#858).
 	PrefixP10 int64 `json:"prefix_p10"`
 	PrefixP50 int64 `json:"prefix_p50"`
 	PrefixP90 int64 `json:"prefix_p90"`
@@ -587,7 +654,7 @@ type KeepAliveBehaviour struct {
 // gapEdges are the idle-gap bands' fixed edges in seconds. The last is unbounded.
 var gapEdges = []float64{0, 300, 580, 600, 1800, 3600, 14400}
 
-// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 was the pre-#435 gate and is the shipped floor again since #858 (80,000 in between).
+// prefixEdges are the billed-prefix bands' fixed edges in tokens. 20,000 is the shipped floor for all but a main thread that waits for a person or for an unknown cause (#858); 80,000 is the general floor. Both are edges.
 var prefixEdges = []float64{0, 20000, 50000, 100000, 200000, 400000, 800000}
 
 // bandLabels renders the edge list as human labels, with a unit formatter.
@@ -640,6 +707,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	type addrRow struct {
 		gap, prefix, usd float64
 		hour             int
+		tokens           TierTokens
 	}
 	var (
 		all       = map[string]dayAll{}
@@ -672,7 +740,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	})
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0)
+		SELECT date(ts/1000,'unixepoch'), MIN(ts), COUNT(*), COALESCE(SUM(cost_usd),0), `+expiryTierTerms+`
 		FROM addressable GROUP BY 1 ORDER BY 1`, aArgs...)
 		if err != nil {
 			return err
@@ -680,7 +748,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		defer rows.Close()
 		for rows.Next() {
 			var p DayPoint
-			if err := rows.Scan(&p.Day, &p.TS, &p.Misses, &p.USD); err != nil {
+			if err := rows.Scan(append([]any{&p.Day, &p.TS, &p.Misses, &p.USD}, tierDest(&p.Tokens)...)...); err != nil {
 				return err
 			}
 			daily = append(daily, p)
@@ -693,7 +761,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
 		SELECT gap_s, COALESCE(prev_prefix,0), cost_usd,
-		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER)
+		       CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER), `+expiryTierCols+`
 		FROM addressable`, aArgs...)
 		if err != nil {
 			return err
@@ -701,7 +769,7 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		defer rows.Close()
 		for rows.Next() {
 			var x addrRow
-			if err := rows.Scan(&x.gap, &x.prefix, &x.usd, &x.hour); err != nil {
+			if err := rows.Scan(append([]any{&x.gap, &x.prefix, &x.usd, &x.hour}, tierDest(&x.tokens)...)...); err != nil {
 				return err
 			}
 			addr = append(addr, x)
@@ -786,18 +854,24 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 	preUSD := make([]float64, len(prefixEdges))
 	hourN := make([]int64, 24)
 	hourUSD := make([]float64, 24)
+	gapTok := make([]TierTokens, len(gapEdges))
+	preTok := make([]TierTokens, len(prefixEdges))
+	hourTok := make([]TierTokens, 24)
 	var gaps, prefixes []float64
 	for _, x := range addr {
 		out.Addressable++
 		gi := bandOf(gapEdges, x.gap)
 		gapN[gi]++
 		gapUSD[gi] += x.usd
+		gapTok[gi].add(x.tokens)
 		pi := bandOf(prefixEdges, x.prefix)
 		preN[pi]++
 		preUSD[pi] += x.usd
+		preTok[pi].add(x.tokens)
 		if x.hour >= 0 && x.hour < 24 {
 			hourN[x.hour]++
 			hourUSD[x.hour] += x.usd
+			hourTok[x.hour].add(x.tokens)
 		}
 		gaps = append(gaps, x.gap)
 		prefixes = append(prefixes, x.prefix)
@@ -829,15 +903,15 @@ func (d *DB) KeepAliveBehaviour(f Filter, coverageSeconds float64) (*KeepAliveBe
 		return trimZero(v)
 	}
 	for i, label := range bandLabels(gapEdges, secs) {
-		out.GapBands = append(out.GapBands, Band{Label: label, N: gapN[i], USD: gapUSD[i],
+		out.GapBands = append(out.GapBands, Band{Label: label, N: gapN[i], USD: gapUSD[i], Tokens: &gapTok[i],
 			Beyond: gapEdges[i] >= coverageSeconds})
 	}
 	for i, label := range bandLabels(prefixEdges, toks) {
-		out.PrefixBands = append(out.PrefixBands, Band{Label: label, N: preN[i], USD: preUSD[i]})
+		out.PrefixBands = append(out.PrefixBands, Band{Label: label, N: preN[i], USD: preUSD[i], Tokens: &preTok[i]})
 	}
 	for h := 0; h < 24; h++ {
 		out.HourBins = append(out.HourBins, Band{
-			Label: fmt.Sprintf("%02d", h), N: hourN[h], USD: hourUSD[h]})
+			Label: fmt.Sprintf("%02d", h), N: hourN[h], USD: hourUSD[h], Tokens: &hourTok[h]})
 	}
 	out.GapP10, out.GapP50, out.GapP90 = pctlF(gaps, 0.10), pctlF(gaps, 0.50), pctlF(gaps, 0.90)
 	out.PrefixP10 = int64(pctlF(prefixes, 0.10))
@@ -901,6 +975,41 @@ type KeepAliveSessionRow struct {
 	PingUSD    float64 `json:"ping_usd"`
 	SavedUSD   float64 `json:"saved_usd"`
 	NetUSD     float64 `json:"net_usd"`
+	// ExpiryTokens is the token form of ExpiryUSD: the billed input tokens of the session's
+	// expiries, by tier (#1048).
+	ExpiryTokens TierTokens `json:"expiry_tokens"`
+	KeepAliveSessionTokens
+}
+
+// KeepAliveSessionTokens is one session's keep-alive figures in tokens, by tier, for a Claude
+// subscription (#1048). They are the Sessions tab's own figures (sessionTokens, #1023), so the two
+// tabs cannot disagree about a session:
+//
+//   - KeepAliveTokens is the rescue: the accountant's keep-alive figure (tok_ka_*), the token form of
+//     saved_usd. It is a different measurement from saved_usd, which is the legacy credit gated on read.
+//   - KeepAlivePingTokens is what the pings paid, the token form of ping_usd. It is never netted
+//     against the rescue: the view shows it on its own line.
+//   - TokensUnmeasured counts the session's agent requests with no token figure.
+type KeepAliveSessionTokens struct {
+	KeepAliveTokens     TokenFlow  `json:"keepalive_tokens"`
+	KeepAlivePingTokens TierTokens `json:"keepalive_ping_tokens"`
+	TokensUnmeasured    int64      `json:"tokens_unmeasured_requests"`
+}
+
+// keepAliveSessionTokens answers KeepAliveSessionTokens for each of the given sessions, keyed by
+// session id. It reads through sessionTokens, the Sessions tab's query: one read of the given
+// sessions only, on a session index.
+func (d *DB) keepAliveSessionTokens(f Filter, ids []string) (map[sessKey]KeepAliveSessionTokens, error) {
+	toks, err := d.sessionTokens(f, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[sessKey]KeepAliveSessionTokens, len(toks))
+	for id, t := range toks {
+		out[id] = KeepAliveSessionTokens{KeepAliveTokens: t.KeepAliveTokens,
+			KeepAlivePingTokens: t.KeepAlivePingTokens, TokensUnmeasured: t.TokensUnmeasured}
+	}
+	return out, nil
 }
 
 // KeepAliveSessions lists the sessions this window's addressable expiries are concentrated in,
@@ -915,23 +1024,24 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	}
 	aCond, aArgs := addressable(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), aCond+`
-		SELECT session_id, MIN(tenant_id), COUNT(*), COALESCE(SUM(cost_usd),0)
+		SELECT session_id, tenant_id, COUNT(*), COALESCE(SUM(cost_usd),0), `+expiryTierTerms+`
 		FROM addressable WHERE session_id <> ''
-		GROUP BY session_id ORDER BY 4 DESC LIMIT ?`,
+		GROUP BY tenant_id, session_id ORDER BY 4 DESC, tenant_id, session_id LIMIT ?`,
 		append(append([]any(nil), aArgs...), limit)...)
 	if err != nil {
 		return nil, err
 	}
 	out := []*KeepAliveSessionRow{}
-	byID := map[string]*KeepAliveSessionRow{}
+	byID := map[sessKey]*KeepAliveSessionRow{}
 	for rows.Next() {
 		var s KeepAliveSessionRow
-		if err := rows.Scan(&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD); err != nil {
+		if err := rows.Scan(append([]any{&s.SessionID, &s.TenantID, &s.Expiries, &s.ExpiryUSD},
+			tierDest(&s.ExpiryTokens)...)...); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		out = append(out, &s)
-		byID[s.SessionID] = &s
+		byID[sessKey{s.TenantID, s.SessionID}] = &s
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -945,15 +1055,15 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	cond, args := f.where()
 	for _, s := range out {
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*), MAX(r.ts) FROM requests r
-			WHERE `+cond+` AND r.session_id = ?`,
-			append(append([]any(nil), args...), s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
+			WHERE `+cond+` AND r.tenant_id = ? AND r.session_id = ?`,
+			append(append([]any(nil), args...), s.TenantID, s.SessionID)...).Scan(&s.Turns, &s.Last); err != nil {
 			return nil, err
 		}
 		var prefix sql.NullInt64
 		var model sql.NullString
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.cache_read + r.cache_write, r.model FROM requests r
-			WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
-			append(append([]any(nil), args...), s.SessionID)...).Scan(&prefix, &model); err != nil &&
+			WHERE `+cond+` AND r.tenant_id = ? AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+			append(append([]any(nil), args...), s.TenantID, s.SessionID)...).Scan(&prefix, &model); err != nil &&
 			err != sql.ErrNoRows {
 			return nil, err
 		}
@@ -975,9 +1085,19 @@ func (d *DB) KeepAliveSessions(f Filter, limit int) ([]*KeepAliveSessionRow, err
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, len(out))
+	for i, s := range out {
+		ids[i] = s.SessionID
+	}
+	toks, err := d.keepAliveSessionTokens(f, ids)
+	if err != nil {
+		return nil, err
+	}
 	for _, s := range out {
-		s.SavedUSD, s.PingUSD, s.Pings = saved[s.SessionID], spent[s.SessionID], pings[s.SessionID]
+		k := sessKey{s.TenantID, s.SessionID}
+		s.SavedUSD, s.PingUSD, s.Pings = saved[k], spent[k], pings[k]
 		s.NetUSD = s.SavedUSD - s.PingUSD
+		s.KeepAliveSessionTokens = toks[k]
 	}
 	return out, nil
 }
@@ -1041,6 +1161,9 @@ type KeepAliveLiveRow struct {
 	// dearer and pays for more pings, and each ping buys an hour instead of five minutes.
 	Breakeven1hPings   int64   `json:"breakeven_1h_pings,omitempty"`
 	Breakeven1hMinutes float64 `json:"breakeven_1h_minutes,omitempty"`
+	// The same history as Pings/PingUSD/SavedUSD in tokens, by tier, for a Claude subscription
+	// (#1048). The per-ping and per-lapse figures above are a price what-if and have no token form.
+	KeepAliveSessionTokens
 }
 
 // KeepAliveLive is the live-session answer: the rows, and the clock they were computed against.
@@ -1193,30 +1316,39 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, len(out.Rows))
+	for i, r := range out.Rows {
+		ids[i] = r.SessionID
+	}
+	toks, err := d.keepAliveSessionTokens(f, ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out.Rows {
-		id := out.Rows[i].SessionID
-		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[id], spent[id]
-		out.Rows[i].Pings = pings[id]
+		k := sessKey{out.Rows[i].TenantID, out.Rows[i].SessionID}
+		out.Rows[i].SavedUSD, out.Rows[i].PingUSD = saved[k], spent[k]
+		out.Rows[i].Pings = pings[k]
+		out.Rows[i].KeepAliveSessionTokens = toks[k]
 	}
 	return out, nil
 }
 
 // countBySession counts rows per session under an extra predicate.
-func (d *DB) countBySession(cond string, args []any, extra string) (map[string]int64, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*) FROM requests r
-		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1`, args...)
+func (d *DB) countBySession(cond string, args []any, extra string) (map[sessKey]int64, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COUNT(*) FROM requests r
+		WHERE `+cond+` AND `+extra+` AND r.session_id <> '' GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]int64{}
+	out := map[sessKey]int64{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var n int64
-		if err := rows.Scan(&s, &n); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &n); err != nil {
 			return nil, err
 		}
-		out[s] = n
+		out[k] = n
 	}
 	return out, rows.Err()
 }
@@ -1269,10 +1401,27 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 	return n
 }
 
-// kaGateMinPrefix is the billed-prefix floor a replay gates on: the shipped default, mirroring
-// config.DefaultKeepAliveMinPrefix (20000 since #858), which this package may not import. Pinned by
+// kaGateMinPrefix and kaGateToolWaitMinPrefix are the billed-prefix floors a replay gates on: the
+// shipped defaults, mirroring config.DefaultKeepAliveMinPrefix (80000) and
+// config.DefaultKeepAliveToolWaitMinPrefix (20000), which this package may not import. The second
+// applies to a tool wait, background work, a teammate and any subagent wait (keepalive.Policy.WaitMinPrefix). Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
-const kaGateMinPrefix = 20000
+const (
+	kaGateMinPrefix         = 80000
+	kaGateToolWaitMinPrefix = 20000
+)
+
+// gatePolicy is the policy a replay gates and counts with: wait, with the shipped floors where it
+// states none.
+func gatePolicy(wait keepalive.Policy) keepalive.Policy {
+	if wait.MinPrefixTokens <= 0 {
+		wait.MinPrefixTokens = kaGateMinPrefix
+	}
+	if wait.ToolWaitMinPrefix <= 0 {
+		wait.ToolWaitMinPrefix = kaGateToolWaitMinPrefix
+	}
+	return wait
+}
 
 // pingSpan is one idle span a live keep-alive would send pings in.
 type pingSpan struct {
@@ -1357,7 +1506,7 @@ func scanFacts(thread, stop, wf, provider string, seen, hour int64) keepalive.Sp
 // DefaultWaitPolicy is the shipped keep-alive policy for the replay: the per-wait plan on, with
 // `base` as the base ping count. A host that knows the account's own policy supplies that instead.
 func DefaultWaitPolicy(base int) keepalive.Policy {
-	return keepalive.Policy{WaitPlan: true, MaxPings: base}
+	return keepalive.Policy{WaitPlan: true, MaxPings: base, MinPrefixTokens: kaGateMinPrefix, ToolWaitMinPrefix: kaGateToolWaitMinPrefix}
 }
 
 // pingSpans is the ONE definition of "the idle spans a live keep-alive would ping in", shared by
@@ -1379,9 +1528,8 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
 // The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
-// gates at 20k (the shipped default since #858) and not at the account's own configured floor: the host
-// hands this package only the plan settings (SetWaitPolicy), not the floor. An account that tuned its
-// floor sees a replay of the default policy, and the panel's copy names 20k so the page stays self-consistent.
+// gates at the shipped floors by wait cause (80k for a main thread that waits for a person or for an unknown cause, 20k otherwise): the host hands this package the plan settings and both floors (SetWaitPolicy);
+// a floor it leaves at zero is the shipped one. A strategy's own floor is not replayed.
 //
 // THE COUNT (#858, #868). The live policy picks the count per wait (keepalive.Policy.WaitPings: a tool
 // wait up to 8, background K+3, a person K+1, no tool call yet 0). With withFacts, every span carries the
@@ -1392,11 +1540,13 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // The span is the gap to the next request of the SESSION, and the wait is read from the request that
 // opens it, on its own thread. When the main agent and a subagent interleave, the last request before the
 // idle gap is the one that decides, as it would for the keeper's per-thread entry that is still warm last.
-func (d *DB) pingSpans(f Filter, minPrefix int64, withFacts bool) ([]pingSpan, error) {
+func (d *DB) pingSpans(f Filter, pol keepalive.Policy, withFacts bool) ([]pingSpan, error) {
 	cond, args := f.where()
+	pol = gatePolicy(pol)
 	if withFacts {
-		return d.pingSpansWithFacts(cond, args, minPrefix)
+		return d.pingSpansWithFacts(cond, args, pol)
 	}
+	minPrefix := int64(pol.MinPrefixTokens)
 	// LEAD, not LAG: a span belongs to the request that OPENS it, which is the request the gate
 	// is evaluated on, and LEAD is NULL exactly on the session-final row.
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH s AS (
@@ -1428,13 +1578,15 @@ func (d *DB) pingSpans(f Filter, minPrefix int64, withFacts bool) ([]pingSpan, e
 
 // pingSpansWithFacts is pingSpans with the plan's facts. One statement: the facts window and the span
 // windows run over the same filtered rows.
-func (d *DB) pingSpansWithFacts(cond string, args []any, minPrefix int64) ([]pingSpan, error) {
+func (d *DB) pingSpansWithFacts(cond string, args []any, pol keepalive.Policy) ([]pingSpan, error) {
+	// SQL admits the lowest floor of any wait; the loop then applies the floor of each span's own wait.
+	minPrefix := int64(pol.LowestMinPrefix())
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH `+factsCTE(cond)+`, s AS (
 		SELECT session_id, thread_id, provider, hour, stop, wf, seen, prefix,
 		       ROW_NUMBER() OVER (PARTITION BY tenant_id, session_id ORDER BY ts, id) - 1 AS turn,
 		       (LEAD(ts) OVER (PARTITION BY tenant_id, session_id ORDER BY ts, id) - ts) / 1000.0 AS gap_s
 		FROM t)
-		SELECT session_id, gap_s, thread_id, provider, hour, stop, wf, seen FROM s
+		SELECT session_id, gap_s, thread_id, provider, hour, stop, wf, seen, prefix FROM s
 		WHERE turn >= 1 AND prefix >= ? AND (gap_s IS NULL OR gap_s > 0)`,
 		append(args, minPrefix)...)
 	if err != nil {
@@ -1445,12 +1597,15 @@ func (d *DB) pingSpansWithFacts(cond string, args []any, minPrefix int64) ([]pin
 	for rows.Next() {
 		var sess, thread, prov, stop, wf string
 		var gap sql.NullFloat64
-		var seen, hour int64
-		if err := rows.Scan(&sess, &gap, &thread, &prov, &hour, &stop, &wf, &seen); err != nil {
+		var seen, hour, prefix int64
+		if err := rows.Scan(&sess, &gap, &thread, &prov, &hour, &stop, &wf, &seen, &prefix); err != nil {
 			return nil, err
 		}
-		out = append(out, pingSpan{session: sess, gap: gap.Float64, open: !gap.Valid,
-			facts: scanFacts(thread, stop, wf, prov, seen, hour)})
+		facts := scanFacts(thread, stop, wf, prov, seen, hour)
+		if !pol.SpanPrefixOK(facts, prefix) {
+			continue
+		}
+		out = append(out, pingSpan{session: sess, gap: gap.Float64, open: !gap.Valid, facts: facts})
 	}
 	return out, rows.Err()
 }
@@ -1617,6 +1772,9 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		k = recMaxPings
 	}
 	// The keeper applies per-wait counts only below 300 s of Idle: at 300 s or more it keeps the base.
+	// Known gap: this also turns the per-cause floor off (one general floor), while the keeper at 300 s or
+	// more keeps the per-cause floor and only the base count. So at 300 s or more the replay can
+	// under-count pings on 20k-80k tool waits and subagent spans.
 	if idleSeconds >= 300 {
 		wait.WaitPlan = false
 	}
@@ -1653,7 +1811,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	// on the panel, which says which pings are counted.
 	g.Go(func() error {
 		var err error
-		spans, err = d.pingSpans(f, kaGateMinPrefix, wait.WaitPlan)
+		spans, err = d.pingSpans(f, wait, wait.WaitPlan)
 		return err
 	})
 	g.Go(func() error {
@@ -1845,7 +2003,25 @@ type KeepAliveRecommendation struct {
 	// ServiceLoUSD/ServiceHiUSD is the service-wide interval, for scale in a refusal.
 	ServiceLoUSD float64 `json:"service_lo_usd,omitempty"`
 	ServiceHiUSD float64 `json:"service_hi_usd,omitempty"`
+	// Learned is the same forecast at the learned 5-hour weights (#1047), on a Claude subscription
+	// whose fit passed the gate. nil otherwise, and on a refusal for too little data, which no weight
+	// changes. The dashboard shows it in place of the API-price forecast on a subscription.
+	Learned *LearnedForecast `json:"learned,omitempty"`
 	KeepAliveCoverage
+}
+
+// LearnedForecast is the recommendation's yes or no and range at the learned 5-hour weights: the
+// same replay, with the saving and the ping cost each scaled by ForecastScale. Dollars at API
+// input prices, with the token kinds weighed as the 5-hour limit weighs them.
+type LearnedForecast struct {
+	Refused     string  `json:"refused,omitempty"`
+	IdleSeconds int     `json:"idle_seconds,omitempty"`
+	MaxPings    int     `json:"max_pings,omitempty"`
+	LoUSD       float64 `json:"lo_usd,omitempty"`
+	HiUSD       float64 `json:"hi_usd,omitempty"`
+	// Requests and Windows are what the weight fit used: the label says "from N requests".
+	Requests int `json:"requests"`
+	Windows  int `json:"windows"`
 }
 
 // PlanCounts are the counts of the per-wait plan in force: a tool wait up to ToolWaitMax pings,
@@ -1893,6 +2069,19 @@ const (
 // recMaxPings) and the fixed-K interval comes beside it; with WaitPlan off the interval is the
 // fixed-K one, as before #858.
 func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveRecommendation, error) {
+	return d.keepAliveRecommend(f, wait, nil)
+}
+
+// KeepAliveRecommendLearned is KeepAliveRecommend plus the forecast at the learned 5-hour weights
+// (Learned), from a fit that passed the gate.
+func (d *DB) KeepAliveRecommendLearned(f Filter, wait keepalive.Policy, fit FiveHourFit) (*KeepAliveRecommendation, error) {
+	if !fit.OK || fit.Forecast == nil {
+		return d.keepAliveRecommend(f, wait, nil)
+	}
+	return d.keepAliveRecommend(f, wait, &fit)
+}
+
+func (d *DB) keepAliveRecommend(f Filter, wait keepalive.Policy, fit *FiveHourFit) (*KeepAliveRecommendation, error) {
 	wait.MaxPings, wait.Idle = recMaxPings, recIdleSeconds*time.Second
 	out := &KeepAliveRecommendation{ServiceLoUSD: serviceLoUSD, ServiceHiUSD: serviceHiUSD, Plan: PlanFixed}
 	if wait.WaitPlan {
@@ -1933,7 +2122,7 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	})
 	g.Go(func() error {
 		var err error
-		spans, err = d.pingSpans(f, kaGateMinPrefix, wait.WaitPlan)
+		spans, err = d.pingSpans(f, wait, wait.WaitPlan)
 		return err
 	})
 	if err := g.Wait(); err != nil {
@@ -1982,31 +2171,47 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	}
 	sort.Strings(keys) // deterministic draw order for a given seed
 	// net is one session's value under a model: planned says "the per-wait plan with base k", else
-	// "k pings for every wait".
-	net := func(s string, k int, planned bool) float64 {
+	// "k pings for every wait". sc weighs the saving and the ping cost: API prices are all 1s, the
+	// learned 5-hour weights are the fit's ForecastScale (#1047).
+	net := func(s string, k int, planned bool, sc ForecastScale) float64 {
 		pol := wait
 		pol.MaxPings = k
 		var v float64
 		for _, m := range bySession[s] {
+			save := sc.Save5m
+			if m.ttl >= time.Hour || m.facts.OneHour {
+				save = sc.Save1h
+			}
 			if planned {
 				if planReaches(pol, m) {
-					v += m.usd * recRecoverableShare
+					v += m.usd * recRecoverableShare * save
 				}
 			} else if m.gap > recIdleSeconds && m.gap <= CoverageSecondsFor(recIdleSeconds, k, m.ttl) {
-				v += m.usd * recRecoverableShare
+				v += m.usd * recRecoverableShare * save
 			}
 		}
 		for _, sp := range bySpan[s] {
 			if planned {
-				v -= float64(sp.planPings(pol)) * pingUSD
+				v -= float64(sp.planPings(pol)) * pingUSD * sc.Ping
 			} else {
-				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD
+				v -= float64(sp.pings(recIdleSeconds, k)) * pingUSD * sc.Ping
 			}
 		}
 		return v
 	}
+	apiPrices := ForecastScale{Save5m: 1, Save1h: 1, Ping: 1}
 	planned := wait.WaitPlan
-	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned) })
+	if fit != nil {
+		sc := *fit.Forecast
+		llo, lhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned, sc) })
+		out.Learned = &LearnedForecast{Refused: recRefusal(out.N, out.Sessions, llo, lhi),
+			Requests: fit.Requests, Windows: fit.Windows}
+		if out.Learned.Refused == "" {
+			out.Learned.IdleSeconds, out.Learned.MaxPings = recIdleSeconds, recMaxPings
+			out.Learned.LoUSD, out.Learned.HiUSD = llo, lhi
+		}
+	}
+	lo, hi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, planned, apiPrices) })
 	// Condition 3, and it is a ONE-SIDED test. An interval that spans zero cannot tell the
 	// effect from nothing; an interval entirely BELOW zero is worse than inconclusive — this
 	// account's own gaps say the mechanism would cost it money — and both are refusals. The
@@ -2014,33 +2219,41 @@ func (d *DB) KeepAliveRecommend(f Filter, wait keepalive.Policy) (*KeepAliveReco
 	// interval was -$39 to -$5, which is what the first live look at this route produced: an
 	// account whose median idle gap is 57 minutes has almost nothing inside any coverage worth
 	// having, so it pays for pings and converts nothing.
-	if lo <= 0 {
-		if hi < 0 {
-			out.Refused = fmt.Sprintf("your own history says this would COST you money: over %d "+
-				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
-				"below zero. Your idle gaps are mostly too long for any setting worth having to "+
-				"reach", out.N, out.Sessions, lo, hi)
-		} else {
-			out.Refused = fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
-				"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
-				"includes no change at all", out.N, out.Sessions, lo, hi)
-		}
+	if out.Refused = recRefusal(out.N, out.Sessions, lo, hi); out.Refused != "" {
 		return out, nil
 	}
 	out.IdleSeconds, out.MaxPings = recIdleSeconds, recMaxPings
 	out.LoUSD, out.HiUSD = lo, hi
 	if planned {
-		flo, fhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, false) })
+		flo, fhi := bootstrapCI(keys, func(s string) float64 { return net(s, recMaxPings, false, apiPrices) })
 		out.FixedK = &RecInterval{LoUSD: flo, HiUSD: fhi}
 	}
 	// K=3 is offered only where it beats K=2 by more than this account's OWN noise — its
 	// interval has to clear K=2's entirely. Anything weaker than that is the comparison this
 	// project has got wrong five times: two numbers whose intervals overlap are a tie, and on
 	// the production corpus K=2 and K=3 ARE a tie for every account. The panel says so.
-	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3, planned) }); lo3 > hi {
+	if lo3, _ := bootstrapCI(keys, func(s string) float64 { return net(s, 3, planned, apiPrices) }); lo3 > hi {
 		out.AltMaxPings = 3
 	}
 	return out, nil
+}
+
+// recRefusal is condition 3's refusal for a 90% interval, or "" when it does not refuse. A ONE-SIDED
+// test: an interval that spans zero cannot tell the effect from nothing, and one entirely below zero
+// says the mechanism would cost money. Both refuse.
+func recRefusal(n, sessions int64, lo, hi float64) string {
+	if lo > 0 {
+		return ""
+	}
+	if hi < 0 {
+		return fmt.Sprintf("your own history says this would COST you money: over %d "+
+			"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, entirely "+
+			"below zero. Your idle gaps are mostly too long for any setting worth having to "+
+			"reach", n, sessions, lo, hi)
+	}
+	return fmt.Sprintf("your own history cannot tell this apart from zero: over %d "+
+		"cache expiries in %d sessions the 90%% interval is $%.2f to $%.2f, which "+
+		"includes no change at all", n, sessions, lo, hi)
 }
 
 // bootstrapCI resamples the units WITH REPLACEMENT and returns the 90% interval of the total.

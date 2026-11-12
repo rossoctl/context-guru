@@ -62,6 +62,20 @@ Choose your setup. Each button opens only the instructions for that path.
         <a href="codex-marketplace/plugins/context-guru/README.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge&amp;logo=openai&amp;logoColor=white"></a>
       </td>
     </tr>
+    <tr>
+      <th>Pi (experimental)</th>
+      <td align="center">
+        <a href="docs/how-to/install-pi-package.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge&amp;logoColor=white"></a>
+      </td>
+      <td align="center">Not yet</td>
+    </tr>
+    <tr>
+      <th>OpenCode (experimental)</th>
+      <td align="center">
+        <a href="docs/how-to/install-opencode-plugin.md"><img alt="Install locally" src="https://img.shields.io/badge/install-locally-009688?style=for-the-badge"></a>
+      </td>
+      <td align="center">Not yet</td>
+    </tr>
   </tbody>
 </table>
 

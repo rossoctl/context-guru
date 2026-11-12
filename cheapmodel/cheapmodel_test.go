@@ -87,3 +87,27 @@ func TestOpenAIComplete(t *testing.T) {
 		t.Fatalf("got %q err %v", got, err)
 	}
 }
+
+// An OpenAI client with no Path posts to /v1/chat/completions, as it always has. A host whose
+// route uses another path (Bob: /inference/v1/chat/completions) sets Path, and the call goes there.
+func TestOpenAIPostsToItsPath(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"", "/v1/chat/completions"},
+		{"/inference/v1/chat/completions", "/inference/v1/chat/completions"},
+	} {
+		var got string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"OUT"}}]}`)
+		}))
+		d, ref := dispatchtest.HTTP(srv.URL, nil)
+		out, err := OpenAI{D: d, Ref: ref, Model: "m", Path: tc.path}.Complete(context.Background(), "p")
+		srv.Close()
+		if err != nil || out != "OUT" {
+			t.Fatalf("Path %q: got %q err %v", tc.path, out, err)
+		}
+		if got != tc.want {
+			t.Errorf("Path %q: posted to %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}

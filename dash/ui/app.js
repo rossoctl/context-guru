@@ -102,6 +102,16 @@ function usd(v) {
   if (a < 1000) return (v < 0 ? '-' : '') + '$' + a.toFixed(2);
   return (v < 0 ? '-' : '') + '$' + nf.format(Math.round(a));
 }
+// estUsd renders a held-out estimate: a negative figure is a cost, so it reads as one.
+function estUsd(v) { return v < 0 ? 'a cost of ' + usd(-v) : usd(v); }
+// estRange shows the held estimate as the range it is: the true saving lies between the floor
+// (every removed token at the read rate) and the ceiling (every one at the write rate). A floor below
+// zero is shown: the true saving may be a cost, and the ceiling alone would hide that. A floor of
+// exactly 0 is also what a row from before the column holds, so it is not a floor and falls back to the
+// ceiling alone, as does a floor that is not below the ceiling.
+function estRange(low, high) {
+  return (low !== 0 && high > low) ? usd(low) + ' to ' + usd(high) : estUsd(high);
+}
 function pct(v, digits = 1) { return v === null || v === undefined ? '—' : v.toFixed(digits) + '%'; }
 /**
  * usdOrNA renders a dollar figure, or `n/a` WITH ITS REASON when the figure is not a
@@ -274,7 +284,9 @@ function resolveTime(v, nowMs) {
   if (v === 'now') return nowMs;
   if (typeof v === 'string') {
     const m = /^now-(\d+)([smhdw])$/.exec(v);
-    if (m) return nowMs - Number(m[1]) * RANGE_UNIT_MS[m[2]];
+    // Round `now` down to 30 s so a relative range gives the same since for 30 s and the server cache can hit.
+    // The server keeps since exact (issue #916), so this rounding is the UI's own choice.
+    if (m) return Math.floor(nowMs / 30000) * 30000 - Number(m[1]) * RANGE_UNIT_MS[m[2]];
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : 0;
   }
@@ -300,6 +312,9 @@ function writeRange(p) {
 }
 /** hasRange is whether the time filter is narrowing anything at all. */
 function hasRange() { const [a, b] = rangeMs(); return a > 0 || b > 0; }
+/** pageFiltered is whether a filter or the time range narrows the page. The tenant pick is not one:
+ *  it chooses whose figures, not a part of them. */
+function pageFiltered() { return hasRange() || Object.entries(state.filter).some(([k, v]) => v && k !== 'tenant'); }
 
 function qs(extra) {
   const p = new URLSearchParams();
@@ -900,6 +915,17 @@ const TILE_INFO = {
       + 'feeling. That confound cannot be measured from this side \u2014 the counts beside this '
       + 'figure (pings sent, pings that read nothing) are what to check it against.',
   },
+  'ka-net-tok': {
+    what: 'On a Claude subscription: what your cache strategy earned you, in tokens. The first line is '
+      + 'the rescues: the cache writes they avoided and the cache reads they paid. The second line is '
+      + 'what the pings paid.',
+    how: 'Both lines come from real rows, by token kind (wr cache write, rd cache read, in fresh input). '
+      + 'The rescues are the accountant’s figure on the request that resumed; the pings are their '
+      + 'own billed usage. The two lines are never added: Anthropic does not say how the limit weights '
+      + 'one kind against another.',
+    catch: 'The saving line is a CEILING: another session with a byte-identical prompt may have kept the '
+      + 'same cache warm for free. Ahead or behind on this tab is decided at API-price weights.',
+  },
   'ka-pings': {
     what: 'How many minimal requests this service sent on your behalf while you were away, and '
       + 'what they cost.',
@@ -1230,18 +1256,6 @@ const TILE_INFO = {
       + 'component configurations it EXCEEDS what the preset saved — check the '
       + "Preset steps tab, which shows each component's net separately.",
   },
-  'total-reduced-usd': {
-    what: 'How much smaller this bill got in total \u2014 what context-guru avoided PLUS what you '
-      + 'removed yourself.',
-    how: '"Total dollars avoided" plus the declarations this account stopped carrying on its own: '
-      + 'an MCP server you removed, a skill you switched off. Those tokens genuinely stopped being '
-      + 'billed.',
-    catch: 'The two totals are separate on purpose. This one answers "how much smaller did my '
-      + 'bill get"; the other answers "how much of that did context-guru do". Rolling your own '
-      + 'work into the figure this product claims for itself would be taking credit for it. The '
-      + 'half that is yours is also MODELLED rather than measured \u2014 see the "Removed by you" '
-      + 'tile for exactly how, and when it is wrong.',
-  },
   'decl-filter-saved': {
     what: 'Money not spent because the removal filter stopped sending tool schemas, MCP tool '
       + 'schemas and skill listing entries you opted out of.',
@@ -1258,23 +1272,6 @@ const TILE_INFO = {
       + 'also costs one cache miss per session in flight, once, because the declarations sit at '
       + 'the front of the cached prompt; that charge is inside the billed cost and is not '
       + 'subtracted from this figure.',
-  },
-  'self-removed': {
-    what: 'Declarations YOU stopped carrying \u2014 an MCP server removed with `claude mcp '
-      + 'remove`, a skill switched off. Real money, and not ours.',
-    how: 'The inventory is a time series. A name present in the early sessions of this window and '
-      + 'absent from the later ones stopped being declared, and its weight times the requests of '
-      + 'the sessions that followed is what carrying it would have cost. Only COMPARABLE later '
-      + 'sessions count \u2014 one that declared no MCP tool at all cannot testify about a missing '
-      + 'MCP tool \u2014 and fewer than three of them is not reported at all.',
-    catch: 'MODELLED, not measured, and the difference matters. The method sees that the '
-      + 'declaration set changed; it cannot see WHY. On this deployment\u2019s own history the '
-      + 'largest candidate was the editor integration, which is declared only when a session runs '
-      + 'inside the IDE \u2014 so "you removed it" and "you worked in a terminal that day" look '
-      + 'identical here, and no threshold separates them. The reduction is real either way; the '
-      + 'attribution is a guess. That is why this is outside "Total dollars avoided" and inside '
-      + '"Total the bill came down". Anything the removal filter is already credited for is '
-      + 'excluded rather than counted twice, and the count of exclusions is on the tile.',
   },
   'cachesplit-saved': {
     what: 'Money saved by splitting the prompt so that the stable part stays cached when '
@@ -1583,6 +1580,7 @@ async function loadOverview(opts = {}) {
     loadOverviewKeepAlive();
     loadOverviewTools();
     loadOverviewIdentity();
+    loadOverviewLimits();
     const o = await api('stats');
     state.overview = o;
     state.overviewFull = true;
@@ -1738,10 +1736,40 @@ function renderSavedLedger(o, ka, partial) {
 
   // ── The total ──
   const totalTok = presetTok + filterTok;
+  // A Claude subscription does not bill per token: every saving is in tokens (/api/stats `tokens`),
+  // with the 5-hour share as an estimate below the total. null keeps the dollar view.
+  const sub = state.sub ? subscriptionHeadline(state.sub.limits, o, state.sub.win, Date.now(), compact, pageFiltered(), state.sub.fit) : null;
+  const unmeasured = o.tokens_unmeasured_requests || 0;
+  const heroMain = sub
+    ? el('div', { class: 'ov-hero-money' },
+      el('div', { class: 'ov-hero-v ov-hero-sub', 'data-testid': 'saved-total-subscription', text: sub.main }),
+      el('div', { class: 'ov-hero-of', text: 'tokens in this period, by kind: wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input' }),
+      sub.pings ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-pings', text: sub.pings }) : null,
+      sub.estimate ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-5h-estimate', text: sub.estimate }) : null,
+      unmeasured > 0 ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-unmeasured',
+        text: num(unmeasured) + (unmeasured === 1 ? ' request' : ' requests') + ' not measured in tokens.' }) : null)
+    : el('div', { class: 'ov-hero-money' },
+      el('div', { class: 'ov-hero-v' + (t.saved < 0 ? ' neg' : ''), 'data-testid': 'saved-total-usd', text: usd(t.saved) }),
+      el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
+        ' without context-guru'),
+      el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
+      el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' }));
+  const subInfo = [
+    'On a Claude subscription every saving is in tokens, not dollars. A subscription does not bill per token.',
+    'The total is the sum of the parts below, kind by kind. wr is cache write (wr1h: the 1-hour cache), rd is cache read, in is fresh input.',
+    'Kinds are never added into one number: Anthropic does not say how the limit weights them. "cost" is what a saving made you pay, for example the cache reads after a keep-alive rescue.',
+    'Keep-alive pings are on a line of their own, not in the total: a ping is not your agent\'s traffic.',
+    'Requests from before the token count, or that could not be priced, are not measured. That is not "saved nothing". "saved 0 tokens" is a measured zero.',
+    'The 5-hour share is an estimate for the current 5-hour window: the share of the limit used, times what context-guru saved, divided by what you spent, at API prices.',
+    'With enough history, the estimate uses learned 5-hour weights instead: how much of the limit one token of each kind used, learned from the share the provider reported after each request. It is then the saved tokens, less the tokens a saving cost and the keep-alive pings, each kind times its weight.',
+    'Anthropic does not publish how the limit weights token kinds, and it reports whole percents only. That is why it is an estimate. It shows after $0.50 of spend and 2% of the limit used in the window.',
+    'The share saved can never be more than 100% less the share used: Anthropic stops you at 100%. When the estimate reaches that cap, the line says that without context-guru you would have hit the 5-hour limit.',
+    'The estimate is for your whole account. It is hidden while a filter (a session, a time range, a model...) narrows this page.',
+  ];
   const hero = el('section', { class: 'ov-hero', 'data-testid': 'saved-total' },
     el('div', { class: 'ov-hero-head' },
       el('h3', { text: 'Total saved by context-guru' }),
-      infoButton('total', 'Total saved', [
+      infoButton('total', 'Total saved', sub ? subInfo : [
         'Total saved is the sum of the parts below: the cache, your preset, the tools and skills filter, and tool deferral.',
         'Each part is already net of what context-guru spent to make it: our own model calls and the cache pings.',
         'The cache part is the most it could have saved: another session can keep the same cache warm. The preset and filter parts are estimates.',
@@ -1751,12 +1779,7 @@ function renderSavedLedger(o, ka, partial) {
     !ready
       ? el('p', { class: 'ov-none', text: partial ? 'Loading…' : 'Nothing priced yet in this period.' })
       : el('div', { class: 'ov-hero-body' },
-        el('div', { class: 'ov-hero-money' },
-          el('div', { class: 'ov-hero-v' + (t.saved < 0 ? ' neg' : ''), 'data-testid': 'saved-total-usd', text: usd(t.saved) }),
-          el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
-            ' without context-guru'),
-          el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
-          el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' })),
+        heroMain,
         el('div', { class: 'ov-hero-tok' },
           ovFigure('saved-total-tokens', 'Input tokens removed', compact(totalTok),
             'of ' + compact(inputWithout) + ' tokens', share(totalTok, inputWithout)))));
@@ -1772,14 +1795,30 @@ function renderSavedLedger(o, ka, partial) {
       el('h3', {}, el('a', { href, title: 'Open the tab for ' + title }, title)), info || null),
     el('p', { class: 'ov-what', text: what }),
     el('div', { class: 'ov-figs' }, kids));
+  // On a subscription each card shows tokens (tokens.by_feature, full read only) in place of money.
+  const ft = sub ? featureTokens(o) : null;
+  const tokens = (tid, flow, ran) => !ran ? el('p', { class: 'ov-none', text: 'Nothing saved yet in this period.' })
+    : partial ? el('p', { class: 'ov-none', text: 'Loading…' })
+      : ovFigure(tid, 'Tokens saved', tokenFigure(flow, o, compact).text, '', '', 'ov-fig-tok');
+  const saving = (tid, v, flow, ran) => sub ? tokens(tid.replace(/-usd$/, '-tok'), flow, ran) : money(tid, v, ran);
   const grid = el('div', { class: 'ov-cards' });
 
   // Cache: the automatic pings (and the cache reorder), plus your manual pings.
   const cacheUSD = parts.cache + parts.manual;
   const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
-  const brk = el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
+  const tokRow = (label, flow) => hasTokens(flow) ? el('li', {}, el('span', { text: label }), el('strong', { text: tokenLine(flow, compact) })) : null;
+  const pings = sub ? pingLine(o, compact) : '';
+  const subRows = sub ? [
+    tokRow('Keep-alive rescue', ft.keepalive),
+    pings ? el('li', { 'data-testid': 'saved-cache-pings' }, el('span', { text: PING_LABEL }), el('strong', { text: pings })) : null,
+    tokRow('Cache reorder', ft.cachesplit),
+    tokRow('1-hour cache', ft.ttl),
+  ].filter(Boolean) : [];
+  // No empty list when every row is empty.
+  const brk = sub ? (subRows.length ? el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' }, subRows) : null)
+    : el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
-    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') }),
+    el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + (mp.count ? ' · estimate' : '') }),
       el('strong', { text: usd(parts.manual) })),
     parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
   // The strategy's name, as the plugin calls it, beside "Cache" the way the preset's name sits beside
@@ -1790,9 +1829,9 @@ function renderSavedLedger(o, ka, partial) {
   grid.appendChild(card('cache', 'saved-cache', 'Cache' + (sName ? ' (' + sName + ')' : ''), '#/keepalive',
     'Keeps your prompt cache warm while you think, so the next turn reads it instead of writing it again.',
     [
-      money('saved-cache-usd', cacheUSD, cacheRan),
-      cacheRan && priced ? brk : null,
-      cacheRan && ready ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
+      saving('saved-cache-usd', cacheUSD, ft && ft.cache, cacheRan),
+      cacheRan && (sub ? !partial : priced) ? brk : null,
+      cacheRan && ready && !sub ? ovFigure('saved-cache-tokens', 'Tokens read instead of rewritten',
         cacheTok === null ? '—' : '≈ ' + compact(cacheTok), 'of ' + compact(inputWithout) + ' tokens',
         cacheTok === null ? '' : share(cacheTok, inputWithout)) : null,
       cacheRan ? el('div', { class: 'ov-fig', 'data-testid': 'saved-cache-latency' },
@@ -1809,9 +1848,14 @@ function renderSavedLedger(o, ka, partial) {
       cacheRan ? ovFigure('saved-cache-writes', 'Cache writes prevented', num(w.requests),
         'requests that read a warm cache' + (w.manual ? ' · up to ' + num(w.manual) + ' more from manual pings that found it warm' : ''), '') : null,
     ],
-    infoButton('cache', 'Cache', [
+    infoButton('cache', 'Cache', sub ? [
+      'Tokens saved: the cache writes context-guru prevented, by kind, and "cost" for what that made you pay. It is the keep-alive rescue, the cache reorder and the 1-hour cache together.',
+      'Keep-alive rescue: requests that read a cache a ping kept warm, in place of writing it again. Its cost is the cache reads.',
+      'Keep-alive pings: what the pings themselves paid. A ping is not your agent\'s traffic, so it is on its own line and not in the total.',
+      'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',
+    ] : [
       'Automatic pings: context-guru sends a small request before the cache expires. Saved = the cache writes it prevented, less the cost of the pings.',
-      'Manual pings: the same, when you press Ping.',
+      'Manual pings: the same, when you press Ping. This figure is an estimate. It is the write the ping avoided, taken from the cache lifetime and the size of the prefix. No request read it back. The other figures in this total are measured.',
       'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',
     ])));
 
@@ -1820,10 +1864,14 @@ function renderSavedLedger(o, ka, partial) {
   grid.appendChild(card('compaction', 'saved-compaction', 'Preset' + (named ? ' (' + named + ')' : ''), '#/components',
     'Removes old tool output and repeated text before it reaches the model.',
     [
-      money('saved-compaction-usd', parts.compaction, o.requests > 0),
+      saving('saved-compaction-usd', parts.compaction, ft && ft.compaction, o.requests > 0),
       o.requests > 0 && !partial ? ovFigure('saved-compaction-tokens', 'Tokens removed', compact(presetTok),
         'of ' + compact(inputWithout) + ' tokens', share(presetTok, inputWithout)) : null,
-      capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, usd) }) : null,
+      capNote(o, usd) ? el('p', { class: 'ov-none ov-small', 'data-testid': 'replay-capped', text: capNote(o, sub ? null : usd) }) : null,
+      o.estimated_requests > 0 ? el('p', { class: 'ov-none ov-small', 'data-testid': 'estimated-requests',
+        text: num(o.estimated_requests) + ' of ' + num(o.requests) + ' requests are not counted above: the first '
+          + 'request of a thread, or the first after a restart that lost its state. The proxy cannot tell if the cache was already warm.'
+          + (sub ? '' : ' Estimated saving, not in any total: ' + estRange(o.estimated_saved_low_usd || 0, o.estimated_saved_usd || 0) + '.') }) : null,
     ]));
 
   // Tools and skills filter.
@@ -1831,16 +1879,19 @@ function renderSavedLedger(o, ka, partial) {
   grid.appendChild(card('filter', 'saved-filter', 'Tools and skills filter', '#/tools',
     'Leaves tool and skill definitions the model does not need out of the prompt.',
     partial && !filterRan ? [el('p', { class: 'ov-none', text: 'Loading…' })] : [
-      money('saved-filter-usd', parts.filter, filterRan),
+      saving('saved-filter-usd', parts.filter, ft && ft.filter, filterRan),
       filterRan ? ovFigure('saved-filter-tokens', 'Tokens removed', compact(filterTok),
         'of ' + compact(inputWithout) + ' tokens', share(filterTok, inputWithout)) : null,
     ]));
 
   // Tool deferral (ultrahigh). Drawn only on an account that deferred: no card for 0.
-  if (parts.defer !== 0) {
+  if (parts.defer !== 0 || (ft && hasTokens(ft.defer))) {
     grid.appendChild(card('tooldefer', 'saved-defer', 'Tool deferral', '#/tools',
-      'Keeps tool definitions out of the prompt until the model searches for them. Net of the names list and the searches.',
-      [money('saved-defer-usd', parts.defer, true)]));
+      // In tokens the figure is net of the names list only: the searches are requests of their own
+      // and have no request-token figure here (#988 review).
+      'Keeps tool definitions out of the prompt until the model searches for them. '
+        + (sub ? 'Net of the names list.' : 'Net of the names list and the searches.') + ' Not counted in Your preset.',
+      [saving('saved-defer-usd', parts.defer, ft && ft.defer, true)]));
   }
   host.appendChild(grid);
 }
@@ -1859,6 +1910,38 @@ function keepAliveLedger() {
   }
   return state.kaLedgerP;
 }
+/**
+ * The Claude subscription (GET /api/me/limits), and the open 5-hour window's own stats for the
+ * estimate under the headline. On a subscription every saving shows in tokens. Any failure, or `{}`
+ * (an API key, Bedrock, Vertex), leaves state.sub null: the dollar view.
+ * A manager's Overview spans other accounts, so it keeps the dollar view (readsLimits).
+ */
+async function loadOverviewLimits() {
+  // Each call takes a number. An older answer that lands after a newer call must not overwrite it.
+  const seq = (state.subSeq = (state.subSeq || 0) + 1);
+  const done = (sub) => {
+    if (seq !== state.subSeq) return;
+    state.sub = sub;
+    if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
+  };
+  if (!readsLimits(account && account.tenant)) { done(null); return; }
+  let sub = null;
+  try {
+    const limits = await meLimits(0);
+    if (isSubscription(limits, Date.now())) {
+      sub = { limits, win: null };
+      // The estimate needs an open 5-hour window and its spend and saving. Without them the tokens still show.
+      const f = liveFiveHour(limits, Date.now());
+      if (f) {
+        try { sub.win = await ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f)); } catch (e) { /* tokens only */ }
+        // The learned 5-hour weights (#1047). Any failure keeps the estimate at API prices.
+        try { sub.fit = await ctl('/api/me/fivehour-weights?since=' + fiveHourStartMs(f)); } catch (e) { /* API prices */ }
+      }
+    }
+  } catch (e) { /* no subscription signal: the dollar view */ }
+  done(sub);
+}
+
 async function loadOverviewKeepAlive() {
   try {
     state.keepAliveLedger = await keepAliveLedger();
@@ -2258,6 +2341,8 @@ const REASON_TEXT = {
   empty: 'nothing there', cached_prefix: 'inside the cached part', reapplied_same_session: 'applied again in the same session',
   sweep_dropped: 'old output dropped', sweep_kept: 'old output kept', sweep_offered: 'offered for removal',
   sweep_applied_cold: 'dropped on a cold request', sweep_applied_changed_prefix: 'dropped after a changed prefix',
+  sweep_applied_warm: 'dropped on a warm request (gate passed)', sweep_false_ref_warm: 'warm drop, then used by a later turn',
+  sweep_warm_gate_accept: 'warm gate: applied', sweep_warm_removed_tokens: 'warm sweep: tokens removed (billed)', sweep_warm_rewrite_tokens: 'warm sweep: tokens rewritten (billed)', sweep_warm_expected_turns: 'warm sweep: warm turns the gate expected', sweep_warm_deep: 'warm sweep: drop deeper than the look-back (whole conversation rewritten)', sweep_warm_refused_removed_tokens: 'warm sweep refused: tokens it would remove (billed)', sweep_warm_refused_rewrite_tokens: 'warm sweep refused: tokens it would rewrite (billed)', sweep_warm_refused_expected_turns: 'warm sweep refused: warm turns the gate expected', sweep_warm_refused_deep: 'warm sweep refused: drop deeper than the look-back', sweep_warm_too_new: 'too new for a warm question',
   sweep_false_ref: 'dropped, then used by a later turn', sweep_apply_declined: 'drop refused (kept in full)',
   sweep_adjudicated: 'judged by the model', char_window: 'cut to a character window',
   over_per_request_cap: 'over the per-request limit', over_per_session_cap: 'over the per-session limit',
@@ -2514,7 +2599,8 @@ function savedNAReason(c) {
       + 'recorded per request instead, as the prefix-cache figure on Overview.';
   }
   return num(c.saved_usd_unpriced_rows) + ' of this component\u2019s acted rows ran on a model '
-    + 'with no entry in the operator\u2019s price list, so their saving could not be valued. '
+    + 'with no entry in the operator\u2019s price list, or on a request the accountant could not price '
+    + '(see acc_fallback in the proxy log), so their saving could not be valued. '
     + 'It is missing from this figure, not zero.';
 }
 
@@ -2533,8 +2619,9 @@ function savedTitle(c) {
     : usd(c.saved_usd) + ' recorded per request'];
   if (c.saved_usd_unpriced_rows) {
     parts.push(num(c.saved_usd_unpriced_rows) + ' row'
-      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no model '
-      + 'price for the model they ran on, so their saving is MISSING from this figure, not zero');
+      + (c.saved_usd_unpriced_rows === 1 ? '' : 's') + ' could not be priced at all — no price for the model they '
+      + 'ran on, or the request fell back (see acc_fallback in the proxy log) — so their saving is MISSING from '
+      + 'this figure, not zero');
   }
   return parts.join(' · ');
 }
@@ -2570,8 +2657,9 @@ function renderUnpricedNote(components) {
     host.appendChild(el('div', {},
       el('strong', {}, num(rows) + ' acted rows across ' + unpriced.length + ' component'
         + (unpriced.length === 1 ? '' : 's') + ' could not be priced'),
-      ' — the model they ran on has no entry in the operator’s price list, so their saving is '
-      + 'absent from the dollar columns rather than zero. Set MODEL_PRICES to value them.'));
+      ' — the model they ran on has no entry in the operator’s price list (set MODEL_PRICES to value them), or the '
+      + 'accountant could not price the request (the proxy logs acc_fallback with the reason). Either way their '
+      + 'saving is absent from the dollar columns rather than zero.'));
     if (partial.length) {
       host.appendChild(el('div', {},
         'Partly unpriced, so the dollar figure shown is a ', el('strong', {}, 'lower bound'),
@@ -2717,8 +2805,9 @@ async function loadComponents() {
           class: 'num' + (savedKnown(c) && c.net_usd_first_removal < 0 ? ' warn-text' : ''),
           title: !savedKnown(c) ? '' : 'PER-TURN verdict: each piece of content credited ONCE at '
             + 'the rate it would have entered the prompt at ('
-            + usd(c.saved_usd_first_removal || 0) + ') − own LLM cost '
-            + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
+            + usd(c.saved_usd_first_removal || 0) + ')'
+            + (c.saved_usd_costs ? ' + the costs the component caused (breaks, added tokens) ' + usd(c.saved_usd_costs) : '')
+            + ' − own LLM cost ' + usd(c.llm_cost_usd || 0) + '. This is what the proxy\'s /stats endpoint reports.',
         }, c.saved_gross
           ? usdOrNA(c.net_usd_first_removal, savedKnown(c),
             'the saving half of this net is not a number — ' + savedNAReason(c))
@@ -2993,105 +3082,207 @@ function showScopeCol(tableSel, wide) {
   return wide;
 }
 
+/**
+ * GET /api/me/limits, one request for the Overview and the Sessions tab. A request in flight is
+ * always shared. A good answer is reused while it is at most `maxAgeMs` old: the Overview passes 0
+ * (it always asks for a fresh answer, as before), the Sessions tab a minute. A failed answer is not
+ * kept, so the next caller asks again.
+ */
+function meLimits(maxAgeMs) {
+  const now = Date.now();
+  const reuse = state.limitsP && (state.limitsAt === null || now - state.limitsAt <= maxAgeMs);
+  if (!reuse) {
+    state.limitsAt = null; // null: in flight
+    const p = ctl('/api/me/limits');
+    state.limitsP = p;
+    p.then(() => { if (state.limitsP === p) state.limitsAt = Date.now(); },
+      () => { if (state.limitsP === p) state.limitsP = null; });
+  }
+  return state.limitsP;
+}
+
+/**
+ * True on a Claude subscription (GET /api/me/limits, isSubscription): the Sessions tab then shows
+ * tokens, not dollars. A manager (readsLimits), an API key and hosted mode (#997: `{}`) keep the
+ * dollars, and so does any failure.
+ */
+function onSubscription() {
+  if (!readsLimits(account && account.tenant)) return Promise.resolve(false);
+  return meLimits(60000).then((l) => isSubscription(l, Date.now()), () => false);
+}
+
+/** The elements under `host` that name dollars take their token label (data-sub-label, and
+ *  data-sub-title when set) on a subscription, and their own content back otherwise. The dollar
+ *  content is kept as nodes, so its markup (an em, a br) comes back as it was. */
+function subLabels(host, sub) {
+  if (!host) return;
+  for (const n of $$('[data-sub-label]', host)) {
+    if (!n.usdNodes) { n.usdNodes = [...n.childNodes].map((c) => c.cloneNode(true)); n.dataset.usdTitle = n.title; }
+    if (sub) n.textContent = n.dataset.subLabel;
+    else n.replaceChildren(...n.usdNodes.map((c) => c.cloneNode(true)));
+    n.title = sub && n.dataset.subTitle !== undefined ? n.dataset.subTitle : n.dataset.usdTitle;
+  }
+}
+
+/** The Sessions headers that name dollars take their token label (data-sub-label) on a subscription. */
+function sessionHeaders(sub) {
+  subLabels($('[data-testid=sessions-table]'), sub);
+  // "Costliest" still orders by the dollar cost: one token order would add the tiers. The dollar
+  // order weights them at API prices, as the 5-hour estimate does.
+  const opt = $('#sess-sort option[value=cost]');
+  if (opt) opt.textContent = sub ? 'Costliest first (at API prices)' : 'Costliest first';
+}
+
 async function loadSessions() {
   const body = clear($('#sessions-body'));
   const wide = showScopeCol('[data-testid=sessions-table]', wideScope());
   const cols = wide ? 15 : 14;
   loadingRows(body, cols);
+  // Each load takes a number: a limits answer that lands after a newer load must not repaint it.
+  const seq = (state.sessSeq = (state.sessSeq || 0) + 1);
+  const subP = onSubscription(); // asked beside the sessions, never before them
   try {
     const { sessions, total } = await api('sessions', { limit: 25, offset: state.sessOffset, sort: state.sessSort === 'cost' ? 'cost' : '' });
-    clear(body);
-    if (!sessions.length) {
-      if (activeFilters().length) renderNoMatch(body, cols, 'sessions');
-      else {
-        tableMessage(body, cols, 'No sessions yet',
-          'A session appears as soon as its first request is captured.');
+    // The table paints on the sessions answer, in the last known view. A slow or failed
+    // /api/me/limits never holds it back: when the answer differs, the table paints again.
+    const paint = (sub) => {
+      state.sessSub = sub;
+      clear(body);
+      sessionHeaders(sub);
+      if (!sessions.length) {
+        if (activeFilters().length) renderNoMatch(body, cols, 'sessions');
+        else {
+          tableMessage(body, cols, 'No sessions yet',
+            'A session appears as soon as its first request is captured.');
+        }
       }
-    }
-    for (const s of sessions) {
-      body.appendChild(el('tr', { class: 'click', onclick: () => { setFilter('session', s.session_id, { quiet: true }); go('requests'); } },
-        el('td', {}, el('span', { class: 'trunc', title: s.session_id, text: s.session_id || '(none)' }),
-          // A young session has paid for its extraction call and not yet collected the
-          // replay, so its net reads underwater and stops doing so as the turns come in.
-          // The pill says the amortization is unfinished instead of letting a half-collected
-          // figure read as a verdict.
-          s.in_flight
-            ? el('span', {
-              class: 'pill partial', 'data-testid': 'in-flight',
-              title: 'This session\'s last request is still inside one provider cache TTL, so '
-                   + 'the next turn may replay the same reduction. Its dollar figures are an '
-                   + 'incomplete amortization, not a verdict.',
-            }, 'in flight')
-            : null),
-        wide ? el('td', { class: 'narrow-hide' }, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
-        el('td', { class: 'narrow-hide', text: whenShort(s.start) }),
-        el('td', { class: 'num', text: num(s.turns) }),
-        el('td', { class: 'num' },
-          usdOrNA(s.cost_usd + s.cg_llm_cost_usd, !!s.baseline_cost_usd, 'no turn in this session reported the provider usage a cost needs')),
-        // A dollar figure over a session whose turns are not all priced is a figure with
-        // a different denominator from the token columns beside it: it covers the priced
-        // turns only. The dagger says so rather than letting the two read as one total.
-        // `—` was standing in for an uncomputable value, which DESIGN §3.6 rule 3 rules out the
-        // same way it rules out `$0`: neither carries a reason, and a dash reads as "nothing
-        // here" rather than "we cannot say". Routed through the same helper as the Components
-        // dollar cells so there is one answer to this in the codebase.
-        el('td', { class: 'num' },
-          usdOrNA(s.saved_usd, !!s.baseline_cost_usd,
-            'no turn in this session reported the provider usage a baseline cost needs, so there '
-            + 'is nothing to subtract an actual cost from'),
-          s.baseline_cost_usd && s.incomplete_rows > 0
-            ? el('span', {
-              class: 'na small',
-              title: `${num(s.incomplete_rows)} of this session's ${num(s.turns)} turns have no usable ` +
-                     'provider usage data, so this covers the ' + num(s.turns - s.incomplete_rows) +
-                     ' priced turns only — the token columns cover all of them.',
-            }, ' †')
-            : null),
-        el('td', { class: 'more', title: s.models || '', text: s.primary_model || firstOf(s.models) }),
-        el('td', { class: 'more', text: firstOf(s.agents) }),
-        el('td', { class: 'more', text: firstOf(s.presets) }),
-        el('td', { class: 'num more', text: compact(s.tokens_before) }),
-        // BOTH denominators, in one cell rather than a 16th column, and in the order the
-        // <details> above the table explains them. Gross alone was the only savings figure
-        // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
-        el('td', {
-          class: 'num more',
-          title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
-            + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
-            + 'counted once. Gross is the size of every request we sent; unique is how much '
-            + 'distinct text was dropped.',
-        }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
-        el('td', { class: 'num more', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
-        // The keep-alive's net for this session, from its own ping rows. `n/a` rather than $0
-        // where it never ran — a zero would read as "it broke even here", which it did not do —
-        // and rather than the `—` that was here, which carried the reason only in a title.
-        el('td', {
-          class: 'num more ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
-          title: s.keepalive_pings || s.keepalive_saved_usd
-            ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
-              + `${usd(s.keepalive_saved_usd)} of re-creations avoided (a ceiling)`
-            : '',
-        }, usdOrNA(s.keepalive_net_usd,
-          !!(s.keepalive_pings || s.keepalive_saved_usd),
-          'your cache strategy did not run on this session, so it neither spent nor avoided anything '
-          + 'here — this is an absence, not a break-even')),
-        el('td', { class: 'num more', text: num(s.expands) }),
-        el('td', { class: 'num more', text: ms(s.cg_latency_ms_avg) }),
-        // stopPropagation: the row itself navigates to this session's requests, and a
-        // click that does two things is a click that does the wrong one.
-        el('td', {}, el('button', {
-          class: 'ghost small', 'data-testid': 'session-diff',
-          onclick: (ev) => { ev.stopPropagation(); openSessionDiff(s.session_id); },
-        }, 'Diff'))));
-    }
-    const from = total ? state.sessOffset + 1 : 0;
-    $('#sess-page').textContent = `${from}–${Math.min(state.sessOffset + 25, total)} of ${num(total)}`;
-    $('#sess-prev').disabled = state.sessOffset === 0;
-    $('#sess-next').disabled = state.sessOffset + 25 >= total;
+      for (const s of sessions) {
+        body.appendChild(el('tr', { class: 'click', onclick: () => { setFilter('session', s.session_id, { quiet: true }); go('requests'); } },
+          el('td', {}, el('span', { class: 'trunc', title: s.session_id, text: s.session_id || '(none)' }),
+            // A young session has paid for its extraction call and not yet collected the
+            // replay, so its net reads underwater and stops doing so as the turns come in.
+            // The pill says the amortization is unfinished instead of letting a half-collected
+            // figure read as a verdict.
+            s.in_flight
+              ? el('span', {
+                class: 'pill partial', 'data-testid': 'in-flight',
+                title: 'This session\'s last request is still inside one provider cache TTL, so '
+                     + 'the next turn may replay the same reduction. Its dollar figures are an '
+                     + 'incomplete amortization, not a verdict.',
+              }, 'in flight')
+              : null),
+          wide ? el('td', { class: 'narrow-hide' }, el('span', { title: s.tenant_id, text: s.tenant_id ? s.tenant_id.slice(0, 6) : '—' })) : null,
+          el('td', { class: 'narrow-hide', text: whenShort(s.start) }),
+          el('td', { class: 'num', text: num(s.turns) }),
+          sub ? sessionTokenCost(s) : el('td', { class: 'num' },
+            usdOrNA(s.cost_usd + s.cg_llm_cost_usd, !!s.baseline_cost_usd, 'no turn in this session reported the provider usage a cost needs')),
+          // A dollar figure over a session whose turns are not all priced is a figure with
+          // a different denominator from the token columns beside it: it covers the priced
+          // turns only. The dagger says so rather than letting the two read as one total.
+          // `—` was standing in for an uncomputable value, which DESIGN §3.6 rule 3 rules out the
+          // same way it rules out `$0`: neither carries a reason, and a dash reads as "nothing
+          // here" rather than "we cannot say". Routed through the same helper as the Components
+          // dollar cells so there is one answer to this in the codebase.
+          sub ? sessionTokenSaved(s) : el('td', { class: 'num' },
+            usdOrNA(s.saved_usd, !!s.baseline_cost_usd,
+              'no turn in this session reported the provider usage a baseline cost needs, so there '
+              + 'is nothing to subtract an actual cost from'),
+            s.baseline_cost_usd && s.incomplete_rows > 0
+              ? el('span', {
+                class: 'na small',
+                title: `${num(s.incomplete_rows)} of this session's ${num(s.turns)} turns have no usable ` +
+                       'provider usage data, so this covers the ' + num(s.turns - s.incomplete_rows) +
+                       ' priced turns only — the token columns cover all of them.',
+              }, ' †')
+              : null),
+          el('td', { class: 'more', title: s.models || '', text: s.primary_model || firstOf(s.models) }),
+          el('td', { class: 'more', text: firstOf(s.agents) }),
+          el('td', { class: 'more', text: firstOf(s.presets) }),
+          el('td', { class: 'num more', text: compact(s.tokens_before) }),
+          // BOTH denominators, in one cell rather than a 16th column, and in the order the
+          // <details> above the table explains them. Gross alone was the only savings figure
+          // on this row and it overstates by 27.7x overall / up to 572.9x on one session.
+          el('td', {
+            class: 'num more',
+            title: 'gross ' + num(s.saved) + ' tokens: a removed span counted once per turn it '
+              + 'was absent from. unique ' + num(s.saved_unique) + ' tokens: the same text '
+              + 'counted once. Gross is the size of every request we sent; unique is how much '
+              + 'distinct text was dropped.',
+          }, compact(s.saved) + ' / ' + compact(s.saved_unique)),
+          el('td', { class: 'num more', text: compact(s.cache_read) + ' / ' + compact(s.cache_write) }),
+          // The keep-alive's net for this session, from its own ping rows. `n/a` rather than $0
+          // where it never ran — a zero would read as "it broke even here", which it did not do —
+          // and rather than the `—` that was here, which carried the reason only in a title.
+          sub ? sessionTokenKeepAlive(s) : el('td', {
+            class: 'num more ' + (s.keepalive_net_usd < 0 ? 'bad-text' : s.keepalive_net_usd > 0 ? 'good-text' : ''),
+            title: s.keepalive_pings || s.keepalive_saved_usd
+              ? `${num(s.keepalive_pings)} pings cost ${usd(s.keepalive_ping_usd)}; `
+                + `${usd(s.keepalive_saved_usd)} of re-creations avoided (a ceiling)`
+              : '',
+          }, usdOrNA(s.keepalive_net_usd,
+            !!(s.keepalive_pings || s.keepalive_saved_usd),
+            'your cache strategy did not run on this session, so it neither spent nor avoided anything '
+            + 'here — this is an absence, not a break-even')),
+          el('td', { class: 'num more', text: num(s.expands) }),
+          el('td', { class: 'num more', text: ms(s.cg_latency_ms_avg) }),
+          // stopPropagation: the row itself navigates to this session's requests, and a
+          // click that does two things is a click that does the wrong one.
+          el('td', {}, el('button', {
+            class: 'ghost small', 'data-testid': 'session-diff',
+            onclick: (ev) => { ev.stopPropagation(); openSessionDiff(s.session_id); },
+          }, 'Diff'))));
+      }
+      const from = total ? state.sessOffset + 1 : 0;
+      $('#sess-page').textContent = `${from}–${Math.min(state.sessOffset + 25, total)} of ${num(total)}`;
+      $('#sess-prev').disabled = state.sessOffset === 0;
+      $('#sess-next').disabled = state.sessOffset + 25 >= total;
+    };
+    paint(!!state.sessSub);
+    subP.then((sub) => { if (seq === state.sessSeq && sub !== state.sessSub) paint(sub); });
   } catch (err) {
     if (aborted(err)) return;
     tableMessage(body, cols, 'Could not load sessions', String(err.message || err), { error: true });
   }
+}
+
+// The three Sessions cells that show dollars, in tokens on a subscription (#1023, sessionTokenCells).
+function sessionTokenCost(s) {
+  const c = sessionTokenCells(s, compact);
+  return el('td', {
+    class: 'num', 'data-testid': 'session-used-tok',
+    title: 'Input tokens this session was billed, by kind: wr cache write, wr1h 1-hour cache write, rd cache read, in fresh input. '
+      + num(s.output_tokens) + ' output tokens are not in it. context-guru’s own model calls have no token figure here.',
+  }, s.baseline_cost_usd ? (c.cost || '0')
+    : usdOrNA(0, false, 'no turn in this session reported the provider usage a cost needs'));
+}
+function sessionTokenSaved(s) {
+  const c = sessionTokenCells(s, compact);
+  return el('td', {
+    class: 'num', 'data-testid': 'session-saved-tok',
+    title: 'Tokens context-guru saved, by kind. "cost" is what the savings made the session pay. '
+      + 'Kinds are never added: Anthropic does not say how the limit weights them. The keep-alive is in its own column.',
+  }, c.saved,
+  c.unmeasured > 0 && c.measured ? el('span', {
+    class: 'na small', 'data-testid': 'session-unmeasured',
+    title: num(c.unmeasured) + (c.unmeasured === 1 ? ' request' : ' requests') + ' of this session not measured in tokens: '
+      + 'from before the token count, or not priced. That is not "saved nothing".',
+  }, ' †') : null);
+}
+function sessionTokenKeepAlive(s) {
+  const c = sessionTokenCells(s, compact);
+  if (!c.keepaliveRan && !c.pings) {
+    return el('td', { class: 'num more' }, el('span', {
+      class: 'na', text: 'n/a',
+      title: 'your cache strategy did not run on this session, so it neither spent nor avoided anything here',
+    }));
+  }
+  return el('td', {
+    class: 'num more', 'data-testid': 'session-keepalive-tok',
+    title: num(s.keepalive_pings) + ' pings. The first line is the cache rewrites the pings avoided (a ceiling). '
+      + 'The second is what the pings paid: it is on its own line, not in any cost.',
+  },
+  el('div', { text: c.keepalive }),
+  c.pings ? el('div', { class: 'small', 'data-testid': 'session-pings-tok', text: PING_LABEL + ': ' + c.pings }) : null);
 }
 
 // ── requests ───────────────────────────────────────────────────────────────
@@ -3480,9 +3671,6 @@ function attributionChips(c, components) {
   return box;
 }
 
-function kv(k, v) { return el('div', {}, el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })); }
-
-
 /**
  * kvUnset prints a value the client never set as the WORD "unset", styled as absent.
  *
@@ -3696,8 +3884,14 @@ async function openRequest(id, fromURL) {
       // Directly beneath the cost, because the cost on its own is the figure that makes
       // readers conclude the product is worthless: baseline − actual − our own spend is
       // what this one turn was actually worth.
-      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'),
+      // price_estimated: the accountant could not rule out a cache break (no history for this
+      // thread yet), so the gross saving is right and the net may be too high. Marked "≈", the
+      // same way this page marks every other estimate.
+      kv(term('Net saving', 'Baseline cost minus actual cost minus context-guru model cost.'
+          + (e.estimate_held ? ' Not counted: there was no history to tell whether the cache was already warm, so no saving is booked. The estimate is shown on the next line.' : '')),
         priced ? usd(e.baseline_cost_usd - e.cost_usd - e.cg_llm_cost_usd) : '—'),
+      e.estimate_held ? kv(term('Estimated saving (not counted)', 'What the accountant would have booked with no history, shown as a range: the low end prices every removed token at the cache-read rate, the high end at the write rate. The true saving lies between them, so it is in no total. A negative figure is a cost.'),
+        priced ? (e.estimated_saved_usd < 0 ? '' : '≈ ') + estRange(e.estimated_saved_low_usd || 0, e.estimated_saved_usd || 0) : '—') : null,
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.
@@ -8835,7 +9029,12 @@ Object.assign(loaders, { feedback: loadFeedback });
 // to an entity and never to a rank.
 
 /** kaState holds the tab's loaded payloads, so a control redraw need not refetch. */
-const kaState = { ledger: null, recommend: null, behaviour: null, sessions: [], calc: null, armed: [], live: null,
+const kaState = { ledger: null, recommend: null,
+  // sub is true on a Claude subscription (#1022): the measured figures show in tokens, and the
+  // forecast keeps dollars with an "at API-price weights" label, or "at learned 5-hour weights" when the
+  // fit passed its gate (#1047, forecastView). False for a manager, an API key,
+  // Bedrock, Vertex and hosted mode (`{}`), which keep dollars.
+  sub: false, behaviour: null, sessions: [], calc: null, armed: [], live: null,
   x: 280, k: 2,
   // canArm is false on a single-tenant deployment, which mounts no control plane at all — so
   // there is nothing to POST an arm to. Drawing the button anyway would put an affordance on the
@@ -8845,6 +9044,13 @@ const kaState = { ledger: null, recommend: null, behaviour: null, sessions: [], 
 
 /** kaMuted is the de-emphasis gray for "outside the current coverage". Not a fifth series. */
 const KA_MUTED = 'var(--s-mute)';
+
+/** kaSubscription says whether this tab shows tokens: a subscription, and not a manager (whose
+ *  view spans other accounts, while the limits are the signed-in account's own). Any failure keeps dollars. */
+async function kaSubscription() {
+  if (!readsLimits(account && account.tenant)) return false;
+  try { return isSubscription(await ctl('/api/me/limits'), Date.now()); } catch (e) { return false; }
+}
 
 async function loadKeepAlive() {
   // Panels 1 and 2 first and from ONE request, so the verdict is on screen before any
@@ -8858,10 +9064,14 @@ async function loadKeepAlive() {
   // contending for the database slowed every one of them (the ledger took twice as long). Each panel
   // still fills from its own request, so one slow query never blanks another.
   const ledger = keepAliveLedger();
-  loadKARecommend();
+  const subP = kaSubscription();
+  loadKARecommend(subP);
   const rest = () => { loadKASessions(); loadKALive(); loadKABehaviour(); loadKACalc(); loadKAArmed(); };
   try {
-    kaState.ledger = await ledger;
+    // The limits read is fast; the ledger and the flag land together, so the tiles never flip units.
+    const [l, sub] = await Promise.all([ledger, subP]);
+    kaState.sub = sub;
+    kaState.ledger = l;
     rest();
     renderKAVerdict(kaState.ledger);
     // The decision row paints immediately with the ledger half, and again when the
@@ -8929,8 +9139,10 @@ function renderKACoverage(o) {
  * built with a placeholder and filled when that lands — the ledger must never wait on it
  * (see loadKeepAlive).
  */
-function renderKADecision(o, rec) {
+function renderKADecision(o, recIn) {
   const host = clear($('#ka-decision'));
+  // On a subscription with learned 5-hour weights, the forecast is the learned one (#1047).
+  const fv = forecastView(recIn, kaState.sub), rec = fv.rec;
   const ledgerNet = o && o.keepalive_recorded_from ? o.net_usd : null;
   if (!rec && ledgerNet === null) { host.hidden = true; return; }
   host.hidden = false;
@@ -8958,13 +9170,23 @@ function renderKADecision(o, rec) {
     setting = mid < 0 ? 'Leave your cache strategy off.'
       : 'Setting to use: ping after ' + rec.idle_seconds + ' s idle, at most ' + rec.max_pings + ' pings in a row.';
   }
+  // On a subscription the measured figures are tokens, but the forecast stays a dollar replay: a
+  // yes/no in tokens would need a rule to weigh a saved write against paid reads (#1022).
+  const tk = kaState.sub && ledgerNet !== null ? kaTokenLines(o, compact) : null;
   host.appendChild(el('div', { class: 'ka-hero', 'data-testid': 'ka-decision-panel' },
     el('div', { class: 'ka-kicker' }, 'Forecast for all your traffic'),
+    fv.label ? el('p', { class: 'ka-sentence', 'data-testid': 'ka-forecast-weights' }, fv.label) : null,
     el('div', { class: 'ka-verdict' + (cls ? ' ' + cls : ''), 'data-testid': 'ka-verdict' }, verdict),
     el('div', { class: 'ka-big ' + cls, 'data-testid': 'ka-forecast' }, big),
     el('p', { class: 'ka-sentence' }, sentence),
     setting ? el('p', { class: 'ka-setting', 'data-testid': 'ka-setting' }, setting) : null,
-    ledgerNet !== null ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured' },
+    tk ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured-tokens' },
+      el('strong', {}, tk.measuredText),
+      el('br'), el('strong', {}, 'Pings: ' + tk.pings),
+      el('br'), 'On ' + num(o.sessions_touched) + ' sessions. The saving is an ',
+      term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
+      ', so it is not the number to decide on.')
+    : ledgerNet !== null ? el('p', { class: 'ka-measured', 'data-testid': 'ka-measured' },
       el('strong', {}, 'Measured on the sessions where it ran: ' + usd(ledgerNet)),
       ' on ' + num(o.sessions_touched) + ' sessions. This is an ',
       term('upper bound', 'The most it could have saved. The provider keeps one cache per identical prompt start, so another session may have kept the same cache warm for free.'),
@@ -8982,21 +9204,27 @@ function renderKAVerdict(o) {
   // it outright. The position now states which population it describes, and the judgement — the
   // --good/--bad colour — is deferred to the decision row above, which has the counterfactual.
   const position = !ran || !o.pings ? 'No pings yet' : (o.net_usd < 0 ? 'Behind' : 'Ahead');
+  // On a subscription the saving and the pings are tokens, on two lines that are never netted (#1022).
+  const tk = kaState.sub ? kaTokenLines(o, compact) : null;
   const moreTiles = tileGroup(null, null, [
     // The words are beside the colour, always: a status must never rest on hue alone.
     tile('ka-position', 'Where it stands so far', position,
-      ran ? num(o.sessions_touched) + ' sessions touched — see the decision row above'
+      ran ? (tk && o.pings ? 'Ahead or behind at API-price weights · ' : '') + num(o.sessions_touched) + ' sessions touched — see the decision row above'
         : 'nothing to judge yet', ran ? 'accent' : ''),
-    tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd) : '—',
-      'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
-      ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
+    tk ? tile('ka-net-tok', 'Cache strategy, measured', ran ? tk.rescue : '—',
+      ran ? 'pings: ' + tk.pings + ' — on the sessions it fired on, an upper bound, not the decision' : 'none')
+      : tile('ka-net', 'Cache strategy net, measured', ran ? usd(o.net_usd) : '—',
+        'avoided − spent, on the sessions it fired on — an upper bound, not the decision',
+        ran ? (o.net_usd < 0 ? 'bad' : '') : ''),
     tile('ka-pings', 'Cache-strategy requests sent', ran ? num(o.pings) : '—',
-      ran ? usd(o.ping_usd) + ' spent on your key' : 'none'),
-    tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? usd(o.saved_usd) : '—',
+      ran ? (tk ? tk.pings + ' of your limit, not counting the pings\u2019 output tokens' : usd(o.ping_usd) + ' spent on your key') : 'none'),
+    tile('ka-saved', 'Cache rewrites avoided (upper bound)', ran ? (tk ? tk.rescue : usd(o.saved_usd)) : '—',
       ran ? num(o.misses_avoided) + ' requests rescued · a CEILING' : 'none',
       ran && o.saved_usd > 0 ? 'good' : ''),
-    tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
-      num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
+    tk ? tile('ka-addressable', 'Expiries still worth acting on', num(o.addressable_misses),
+      'cache expiries worth acting on', 'accent')
+      : tile('ka-addressable', 'Expiries still worth acting on', usd(o.addressable_usd),
+        num(o.addressable_misses) + ' cache expiries worth acting on', 'accent'),
     tile('ka-rowgrowth', 'Log growth from cache-strategy requests', o.pings_per_day > 0
       ? compact(o.bytes_per_day) + 'B/day' : '—',
       o.pings_per_day > 0 ? o.pings_per_day.toFixed(0) + ' requests/day × ~400 B' : 'no cache-strategy requests'),
@@ -9012,10 +9240,15 @@ function renderKAVerdict(o) {
   const row = (label, value, note) => rows.push(el('div', { class: 'ka-fact' },
     el('div', { class: 'ka-fl' }, label), el('div', { class: 'ka-fv' }, value), el('div', { class: 'ka-fn' }, note)));
   if (ran) {
-    row('Cache-strategy requests sent', num(o.pings) + ' for ' + usd(o.ping_usd),
-      ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'), ' is billed to your own key.']);
-    row('Cache rewrites avoided', 'up to ' + usd(o.saved_usd),
+    row('Cache-strategy requests sent', num(o.pings) + (tk ? ' · ' + tk.pings : ' for ' + usd(o.ping_usd)),
+      ['Each ', term('ping', 'A tiny request sent just before the cache would be forgotten, to keep it warm.'),
+        tk ? ' counts against your limit.' : ' is billed to your own key.']);
+    row('Cache rewrites avoided', tk ? tk.avoidedText : 'up to ' + usd(o.saved_usd),
       [num(o.misses_avoided) + ' requests rescued from a full rewrite. An upper bound.']);
+  }
+  if (tk && o.tokens_unmeasured_requests > 0) {
+    row('Not measured in tokens', num(o.tokens_unmeasured_requests) + ' requests',
+      'Requests from before the token count, or that could not be priced. That is not "saved nothing".');
   }
   if (o.latency && o.latency.known) {
     row('Time saved per avoided rewrite', 'about ' + Math.round(o.latency.per_miss_ms) + ' ms',
@@ -9042,6 +9275,8 @@ function renderKADownside(o) {
   const worst = clear($('#ka-worst'));
   const panel = $('#ka-downside-panel');
   panel.classList.remove('bad');
+  // The headers follow the units now: the sessions fetch can land later, or fail (#1065 review).
+  subLabels(panel, kaState.sub);
   if (!o.sessions_touched) {
     emptyState(host, 'This mechanism has not touched any of your sessions yet',
       'The service-wide split above is what to expect if you switch it on.');
@@ -9051,10 +9286,17 @@ function renderKADownside(o) {
     ['winners', 'Came out ahead', o.winners, 'good'],
     ['losers', 'Paid for nothing', o.losers, 'bad'],
   ];
-  host.appendChild(el('div', { class: 'nps-head' },
-    el('span', { class: 'nps-score' + (o.net_usd < 0 ? ' bad' : ''), text: usd(o.net_usd) }),
-    el('span', { class: 'muted small', text:
-      `your own net across ${o.sessions_touched} touched session${o.sessions_touched === 1 ? '' : 's'}` })));
+  // On a subscription the head is the two token lines, and the split is by the dollar net: labelled so.
+  const tk = kaState.sub ? kaTokenLines(o, compact) : null;
+  const across = `${o.sessions_touched} touched session${o.sessions_touched === 1 ? '' : 's'}`;
+  host.appendChild(tk
+    ? el('div', { class: 'nps-head', 'data-testid': 'ka-split-tokens' },
+      el('span', { class: 'nps-score', text: tk.rescue }),
+      el('span', { class: 'muted small', text: 'pings: ' + tk.pings + ' · across ' + across
+        + '. Ahead or behind is at API-price weights.' }))
+    : el('div', { class: 'nps-head' },
+      el('span', { class: 'nps-score' + (o.net_usd < 0 ? ' bad' : ''), text: usd(o.net_usd) }),
+      el('span', { class: 'muted small', text: 'your own net across ' + across })));
   host.appendChild(el('div', { class: 'nps-bar' }, ...parts
     .filter(([, , n]) => n > 0)
     .map(([key, label, n, c]) => el('div', {
@@ -9064,16 +9306,21 @@ function renderKADownside(o) {
   host.appendChild(el('div', { class: 'nps-legend' }, ...parts.map(([, label, n, c]) =>
     el('span', {}, el('i', { class: 'sw ' + c }), `${label}: ${n}`))));
   if (o.worst_net_usd < 0) {
-    worst.appendChild(el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
-      'Your worst session paid ', el('strong', {}, usd(-o.worst_net_usd)),
-      ' and got nothing back for it.'));
+    worst.appendChild(tk
+      ? el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
+        'Your worst session paid more for pings than it got back, at API-price weights.')
+      : el('p', { class: 'hint', 'data-testid': 'ka-worst-session' },
+        'Your worst session paid ', el('strong', {}, usd(-o.worst_net_usd)),
+        ' and got nothing back for it.'));
   }
   // A negative own net turns the panel into the refusal it should be, with the way out on it.
   if (o.net_usd < 0) {
     worst.appendChild(el('div', { class: 'banner bad', 'data-testid': 'ka-turn-off' },
-      el('div', {}, el('strong', {}, 'On your traffic this is costing you money. '),
-        'Over this window the pings cost ' + usd(o.ping_usd) + ' and avoided ' +
-        usd(o.saved_usd) + '.'),
+      tk ? el('div', {}, el('strong', {}, 'At API-price weights this costs more than it saves. '),
+        'Over this window the pings: ' + tk.pings + '. ' + tk.rescuesText)
+        : el('div', {}, el('strong', {}, 'On your traffic this is costing you money. '),
+          'Over this window the pings cost ' + usd(o.ping_usd) + ' and avoided ' +
+          usd(o.saved_usd) + '.'),
       el('button', {
         class: 'ghost small', 'data-testid': 'ka-turn-off-btn',
         onclick: async () => {
@@ -9110,6 +9357,9 @@ function renderKASessions() {
   const body = clear($('#ka-sessions-body'));
   const wide = wideScope();
   showScopeCol('[data-testid="ka-sessions-table"]', wide);
+  // On a subscription the dollar columns show tokens (#1048): kaSessionTokenCells.
+  const sub = kaState.sub;
+  subLabels($('#ka-downside-panel'), sub);
   if (!kaState.sessions.length) {
     tableMessage(body, 11, 'No cache expiries worth acting on in this window',
       'Nothing here has anything to keep warm.');
@@ -9118,17 +9368,27 @@ function renderKASessions() {
   }
   for (const s of kaState.sessions) {
     const net = s.net_usd;
+    const c = sub ? kaSessionTokenCells(s, compact) : null;
     body.appendChild(el('tr', {},
       el('td', {}, el('code', { class: 'clip', text: s.session_id })),
       wide ? el('td', {}, s.tenant_id || '—') : el('td', { hidden: 'hidden' }),
       el('td', { class: 'num' }, num(s.turns)),
       el('td', { class: 'num' }, num(s.expiries)),
-      el('td', { class: 'num' }, usd(s.expiry_usd)),
+      c ? el('td', { class: 'num', 'data-testid': 'ka-expiry-tok' }, c.expiry || '—')
+        : el('td', { class: 'num' }, usd(s.expiry_usd)),
       el('td', { class: 'num' }, s.pings ? num(s.pings) : '—'),
-      el('td', { class: 'num' }, s.pings ? usd(s.ping_usd) : '—'),
-      el('td', { class: 'num' }, s.saved_usd ? usd(s.saved_usd) : '—'),
-      el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : '') },
-        s.pings || s.saved_usd ? usd(net) : '—'),
+      // The pings' own column: what they paid is never added into the rescue beside it.
+      c ? el('td', { class: 'num', 'data-testid': 'ka-pings-tok' }, c.pings || '—')
+        : el('td', { class: 'num' }, s.pings ? usd(s.ping_usd) : '—'),
+      c ? el('td', { class: 'num', 'data-testid': 'ka-rescue-tok' }, c.ran ? c.rescue : '—')
+        : el('td', { class: 'num' }, s.saved_usd ? usd(s.saved_usd) : '—'),
+      // Tokens of different kinds have no common unit, so a subscription sees no net: only ahead or
+      // behind, decided by the dollar net at API-price weights, as the ledger's "Where it stands" (#1042).
+      c ? el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : ''), 'data-testid': 'ka-net-weights',
+        title: 'Decided at API-price weights. A subscription does not bill per token.' },
+      s.pings || s.saved_usd ? (net < 0 ? 'Behind' : net > 0 ? 'Ahead' : 'Even') : '—')
+        : el('td', { class: 'num ' + (net < 0 ? 'bad-text' : net > 0 ? 'good-text' : '') },
+          s.pings || s.saved_usd ? usd(net) : '—'),
       // 0 here means the last request reported no usage at all, which is an absence rather than
       // a prompt of no size — and it is also the reason such a session cannot be priced.
       el('td', { class: 'num' }, s.last_prefix > 0 ? compact(s.last_prefix) : '—'),
@@ -9153,14 +9413,24 @@ function renderKASessions() {
   // "$81.40 of $81.40" tautology, one step less degenerate: the numerator was fixed and the
   // denominator was not. The account's total is already on the page, in "Still on the table".
   const all = (kaState.ledger || {}).addressable_usd || 0;
-  const lead = kaState.sessions.length > 8
-    ? `The top 8 of these hold ${usd(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0))}`
-      + ` of ${usd(all)}. That concentration is real and it does NOT transfer forward: `
-    : `${usd(all)} of cache expiries across ${kaState.sessions.length} of your sessions. `
-      + 'Where it concentrates does NOT transfer forward: ';
+  // On a subscription the concentration is counted in expiries, not dollars: the expiries' tokens
+  // are by tier and do not add up. The order is still the dollar cost, at API-price weights.
+  const allN = (kaState.ledger || {}).addressable_misses || 0;
+  const lead = sub
+    ? (kaState.sessions.length > 8
+      ? `The top 8 of these hold ${num(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiries, 0))}`
+        + ` of ${num(allN)} cache expiries. That concentration is real and it does NOT transfer forward: `
+      : `${num(allN)} cache expiries across ${kaState.sessions.length} of your sessions. `
+        + 'Where it concentrates does NOT transfer forward: ')
+    : kaState.sessions.length > 8
+      ? `The top 8 of these hold ${usd(kaState.sessions.slice(0, 8).reduce((a, s) => a + s.expiry_usd, 0))}`
+        + ` of ${usd(all)}. That concentration is real and it does NOT transfer forward: `
+      : `${usd(all)} of cache expiries across ${kaState.sessions.length} of your sessions. `
+        + 'Where it concentrates does NOT transfer forward: ';
   $('#ka-sessions-note').textContent = lead +
     'sessions are ephemeral (median lifetime about zero hours), so this is a description of the ' +
-    'past and not a list to act on next week.';
+    'past and not a list to act on next week.' +
+    (sub ? ' The rows are in order of what the expiries cost at API-price weights.' : '');
 }
 
 /**
@@ -9254,6 +9524,10 @@ function renderKALive() {
   const warn = clear($('#ka-live-warning'));
   const wide = wideScope();
   showScopeCol('[data-testid="ka-live-table"]', wide);
+  // On a subscription the measured column shows tokens (#1048). One warm-up, a lapse and the
+  // break-even are a price what-if, with no token form yet: they keep dollars, labelled so.
+  const sub = kaState.sub;
+  subLabels($('#ka-live-panel'), sub);
   const rows = live.rows || [];
   if (!rows.length) {
     tableMessage(body, 11, 'No session of yours has a live cache entry',
@@ -9276,7 +9550,7 @@ function renderKALive() {
         + `${(live.soon_seconds / 60).toFixed(1).replace(/\.0$/, '')} minutes.`),
       ' ',
       live.soon_usd > 0
-        ? `Between them they would pay ${usd(live.soon_usd)} to re-create what they are about to lose`
+        ? `Between them they would pay ${usd(live.soon_usd)}${sub ? ' at API-price weights' : ''} to re-create what they are about to lose`
           + (live.soon_unpriced
             ? `, excluding ${num(live.soon_unpriced)} with no rate on the price list`
             : '')
@@ -9307,7 +9581,7 @@ function renderKALive() {
             + `${r.breakeven_1h_minutes.toFixed(0)} minutes.` },
           `${num(r.breakeven_pings)} · ${r.breakeven_minutes.toFixed(0)}m`)
         : '—'),
-      el('td', { class: 'num' }, r.saved_usd || r.ping_usd
+      sub ? kaLiveTokens(r) : el('td', { class: 'num' }, r.saved_usd || r.ping_usd
         ? usd(r.saved_usd - r.ping_usd)
         : '—'),
       el('td', {}, kaState.canArm && mySession(r)
@@ -9320,6 +9594,16 @@ function renderKALive() {
   // Realised against potential, both from figures already on this page, and the difference
   // between them named for what it is.
   const led = kaState.ledger || {};
+  if (sub) {
+    const tk = kaTokenLines(led, compact);
+    $('#ka-live-hint').textContent =
+      `So far in this window${tk.measured ? ' (measured)' : ''}: ${tk.rescuesText} ${PING_LABEL}: ${tk.pings}. `
+      + `Still open: these ${num(rows.length)} sessions hold ${usd(live.potential_usd)} of rewrite `
+      + 'cost a lapse would charge, at API-price weights. That is a CEILING, not a measurement: it is only earned by a '
+      + 'session that resumes AFTER its cache would have gone. PINGS PER LAPSE is the one to decide '
+      + 'on: below it, pinging is cheaper than the lapse it prevents.';
+    return;
+  }
   $('#ka-live-hint').textContent =
     `So far in this window: ${usd(led.saved_usd || 0)} of rewrites avoided against `
     + `${usd(led.ping_usd || 0)} of pings, a net of ${usd(led.net_usd || 0)} (measured). `
@@ -9327,6 +9611,19 @@ function renderKALive() {
     + 'cost a lapse would charge. That is a CEILING, not a measurement: it is only earned by a '
     + 'session that resumes AFTER its cache would have gone. PINGS PER LAPSE is the one to decide '
     + 'on: below it, pinging is cheaper than the lapse it prevents.';
+}
+
+/** The live table's REALISED cell in tokens, on a subscription (#1048): the rescue on one line, and
+ *  what the pings paid on a line of its own, never added into it. `—` when the strategy did not run. */
+function kaLiveTokens(r) {
+  const c = kaSessionTokenCells(r, compact);
+  if (!c.ran) return el('td', { class: 'num' }, '—');
+  return el('td', {
+    class: 'num', 'data-testid': 'ka-live-realised-tok',
+    title: 'The first line is the cache rewrites the pings avoided (a ceiling). The second is what the pings paid: it is on its own line, not in any total.',
+  },
+  el('div', { text: c.rescue }),
+  c.pings ? el('div', { class: 'small', 'data-testid': 'ka-live-pings-tok', text: PING_LABEL + ': ' + c.pings }) : null);
 }
 
 /**
@@ -9418,15 +9715,21 @@ async function loadKABehaviour() {
     return;
   }
   kaState.behaviour = b;
+  // On a subscription the expiries' cost shows as the tokens they billed, by tier (#1048).
+  const sub = kaState.sub;
+  subLabels($('#ka-behaviour-panel'), sub);
+  const cost = (g) => (sub ? bandTokens(g, compact) : usd(g.usd));
   const days = (b.daily || []).map((d) => [d.ts, d.misses]);
   const usdPts = (b.daily || []).map((d) => [d.ts, d.usd]);
   // TWO charts. A count and a dollar figure share no scale, and a second y-axis is the single
   // most common way a chart implies a relationship it has not measured.
   lineChart(misses, [{ name: 'Cache expiries', color: SERIES[0], points: days, area: true }],
     { yFmt: num, xFmt: whenAxis });
-  lineChart($('#ka-chart-usd'),
-    [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
-    { yFmt: usd, xFmt: whenAxis });
+  // In tokens: one line per tier, on one token scale. The tiers are never added into one line.
+  lineChart($('#ka-chart-usd'), sub
+    ? tierSeries(b.daily).map((t, i) => ({ name: t.name, color: SERIES[i], points: t.points }))
+    : [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
+  { yFmt: sub ? compact : usd, xFmt: whenAxis });
 
   // 3b: the gap bands, in EDGE ORDER — the order is the meaning, so they are never sorted by
   // size — with everything beyond the current coverage in the de-emphasis gray.
@@ -9438,12 +9741,12 @@ async function loadKABehaviour() {
     `setting cannot reach. ${num(b.phantom_ttl_rows)} further ttl_expiry rows are left out: they wrote nothing, so there was nothing to protect.`;
   barRows($('#ka-gap-bands'), (b.gap_bands || []).map((g) => ({
     label: g.label + (g.beyond ? ' (beyond coverage)' : ''),
-    value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
+    value: g.n, display: num(g.n) + ' · ' + cost(g),
     color: g.beyond ? KA_MUTED : SERIES[0],
-    title: `${g.n} expiries costing ${usd(g.usd)}`,
+    title: `${g.n} expiries ${sub ? 'billing' : 'costing'} ${cost(g)}`,
     onclick: () => { setFilter('reason', 'ttl_expiry'); go('requests'); },
   })), { emptyDetail: 'No cache expiries in this window.' });
-  kaTable('#ka-gap-bands', 'Idle gap', b.gap_bands);
+  kaTable('#ka-gap-bands', 'Idle gap', b.gap_bands, sub);
 
   // 3e: prefix size, and the measured reason the 20k gate is nearly free.
   const above = b.addressable_misses > 0
@@ -9451,13 +9754,13 @@ async function loadKABehaviour() {
   $('#ka-prefix-note').textContent =
     'Each bar is a range of cached-prompt sizes at the moment the cache ran out. ' +
     `Half were under ${compact(b.prefix_p50)} tokens (10% under ${compact(b.prefix_p10)}, 90% under ${compact(b.prefix_p90)}). ` +
-    `${above} were already past 20k tokens, so the default "only sessions ` +
-    'with a large cached prompt" filter costs almost nothing.';
+    `${above} were already past 20k tokens, so the 20k floor costs almost nothing. ` +
+    'A main thread that waits for a person or an unknown cause needs 80k.';
   barRows($('#ka-prefix-bands'), (b.prefix_bands || []).map((g) => ({
-    label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + usd(g.usd),
-    color: SERIES[0], title: `${g.n} expiries costing ${usd(g.usd)}`,
+    label: g.label + ' tokens', value: g.n, display: num(g.n) + ' · ' + cost(g),
+    color: SERIES[0], title: `${g.n} expiries ${sub ? 'billing' : 'costing'} ${cost(g)}`,
   })), { emptyDetail: 'No cache expiries in this window.' });
-  kaTable('#ka-prefix-bands', 'Cached prompt size', b.prefix_bands);
+  kaTable('#ka-prefix-bands', 'Cached prompt size', b.prefix_bands, sub);
 
   // 3c: 24 bins, in the VIEWER's own timezone with the offset stated. "What times of day" is
   // a human question and a UTC-only axis answers a different one.
@@ -9472,8 +9775,8 @@ async function loadKABehaviour() {
     const start = (Number(h.label) * 60 + offMin + 1440) % 1440;
     const hh = String(Math.floor(start / 60)).padStart(2, '0');
     const mm = String(start % 60).padStart(2, '0');
-    return { label: `${hh}:${mm}`, value: h.n, display: num(h.n) + ' · ' + usd(h.usd),
-      color: SERIES[0], title: `${h.n} expiries costing ${usd(h.usd)}`, sort: start };
+    return { label: `${hh}:${mm}`, value: h.n, display: num(h.n) + ' · ' + cost(h),
+      color: SERIES[0], title: `${h.n} expiries ${sub ? 'billing' : 'costing'} ${cost(h)}`, sort: start };
   }).sort((a, c) => a.sort - c.sort);
   barRows($('#ka-hour-bins'), bins, { emptyDetail: 'No cache expiries in this window.' });
 
@@ -9497,17 +9800,18 @@ async function loadKABehaviour() {
   }
 }
 
-/** kaTable adds the table view of a band chart, as the existing panels do. */
-function kaTable(sel, dim, bands) {
+/** kaTable adds the table view of a band chart, as the existing panels do. `sub`: the cost column
+ *  shows the tokens the expiries billed, by tier (#1048). */
+function kaTable(sel, dim, bands, sub) {
   const host = $(sel);
   if (!bands || !bands.length) return;
   const rows = bands.map((b) => el('tr', {}, el('td', {}, b.label),
-    el('td', { class: 'num' }, num(b.n)), el('td', { class: 'num' }, usd(b.usd))));
+    el('td', { class: 'num' }, num(b.n)), el('td', { class: 'num' }, sub ? bandTokens(b, compact) : usd(b.usd))));
   host.appendChild(el('details', { class: 'why' },
     el('summary', {}, 'Table view'),
     el('table', { class: 'grid' },
       el('thead', {}, el('tr', {}, el('th', {}, dim), el('th', { class: 'num' }, 'Expiries'),
-        el('th', { class: 'num' }, 'Cost'))),
+        el('th', { class: 'num' }, sub ? 'Tokens billed' : 'Cost'))),
       el('tbody', {}, ...rows))));
 }
 
@@ -9567,6 +9871,12 @@ async function loadKACalc() {
       'on. A service-wide average would be misleading: per-ping cost runs from $0.0004 at the ' +
       'median to $0.2275 at the 99th percentile.');
     return;
+  }
+  // The ladder is a replay priced at one prefix: a price what-if, with no token form yet. On a
+  // subscription it keeps dollars and says they are at API-price weights (#1048), as the forecast does.
+  if (kaState.sub) {
+    host.appendChild(el('p', { class: 'ka-sentence', 'data-testid': 'ka-calc-weights' },
+      'Dollars at API-price weights. A subscription does not bill per token.'));
   }
   const src = { session: 'the selected session’s last cached prompt',
     account_median: 'your own median cached prompt at a lapse',
@@ -9641,7 +9951,7 @@ async function loadKACalc() {
   host.appendChild(el('details', { class: 'why' }, el('summary', {}, 'Technical details'),
     el('p', {},
     'PINGS is every ping the policy would have sent over this window, gated as the ' +
-    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens) and ' +
+    'request path gates (past the session\u2019s first request, cached prompt over 20k tokens, or 80k for a main thread that waits for a person or an unknown cause) and ' +
     'including the pings a session\u2019s last request attracts, because a live policy cannot know a ' +
     'session has ended and sends its full K anyway. It counts only expiries that were ' +
     'addressable (the provider wrote a prefix that a ping could have refreshed). The live-plan row ' +
@@ -9656,24 +9966,27 @@ async function loadKACalc() {
  * whose relative half-width is at least 62%, and it crosses zero for 5 of 12 — so the honest
  * sentence is "the direction is resolvable, the size is not", and it is on the page.
  */
-async function loadKARecommend() {
+async function loadKARecommend(subP) {
   const host = clear($('#ka-recommend'));
   loadingState(host, 2);
-  let rec;
+  let raw, sub;
   try {
-    rec = await api('keepalive/recommend');
+    [raw, sub] = await Promise.all([api('keepalive/recommend'), subP || kaState.sub]);
   } catch (e) {
     if (aborted(e)) return;
     errorState(host, 'Could not work out a recommendation', e);
     return;
   }
-  kaState.recommend = rec;
+  kaState.recommend = raw;
+  // The decision row's forecast (#1047), so the two panels never disagree.
+  const fv = forecastView(raw, sub), rec = fv.rec;
   // Same payload, two places: the decision row above (which is what a reader acts on) and the
   // detail below. Rendering it only here is how the refusal came to sit 2,900 px under a green
   // "Winner" tile that contradicted it.
   // If the ledger has not landed yet, its own handler renders the decision row with this payload.
-  if (kaState.ledger) renderKADecision(kaState.ledger, rec);
+  if (kaState.ledger) renderKADecision(kaState.ledger, raw);
   clear(host);
+  if (fv.label) host.appendChild(el('p', { class: 'ka-sentence', 'data-testid': 'ka-rec-weights' }, fv.label));
   if (rec.refused) {
     // Two different refusals, and only one of them is about thin history: "your own gaps are
     // too long for this to reach" is a finding, not a shortage of data, and it is a `bad` banner
@@ -9699,7 +10012,7 @@ async function loadKARecommend() {
       rec.lo_usd > 0 ? 'good' : 'bad'),
     tile('ka-rec-policy', 'Suggested', rec.idle_seconds + 's / ' + rec.max_pings + ' pings'
       + (rec.plan === 'wait_plan' ? ' (base)' : ''),
-      'on sessions past their first request with a cached prompt over 20k tokens', 'accent'),
+      'past a session\u2019s first request, prompt over 20k (80k if a person or an unknown cause)', 'accent'),
   ]));
   if (rec.plan === 'wait_plan' && rec.fixed_k) {
     host.appendChild(el('p', { class: 'note', 'data-testid': 'ka-rec-fixed' },

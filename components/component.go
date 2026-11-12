@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -161,8 +162,9 @@ type PrefixUsage struct {
 // superseded and would be kept anyway — and it has the side benefit of keeping a large model call off
 // the agent's critical path.
 //
-// nil when the host cannot support it: no stashed body for this session yet, the first turn, a
-// non-Anthropic route, or the feature switched off. A caller must decide for itself what nil means;
+// nil when the host cannot support it: no asker exists for the route's wire (Anthropic, Responses and
+// Chat Completions have one), no incoming client, or the feature switched off. A first turn with no
+// stashed body yet is not nil: Ask returns ErrNoPrefix. A caller must decide for itself what nil means;
 // see extract_llm_sweep, which DECLINES rather than falling back, because the fallback is the cost the
 // mechanism exists to avoid.
 //
@@ -323,6 +325,16 @@ type PrefixCoverage interface {
 // `hash`, ErrNoPrefix when nothing is stashed, and otherwise asks on exactly the body it checked.
 type PrefixCoveredAsker interface {
 	AskCovered(ctx context.Context, session string, count int, hash, ask string) (string, PrefixUsage, error)
+}
+
+// PrefixReadAsker, when a PrefixAsker also implements it, asks over ONE snapshot of the stash and also
+// returns the text of the messages the model read in that snapshot. The sweep checks a judge's quote
+// against that text, because that is what the model was shown. The ping registry's snapshot is one
+// request newer, so a quote taken from the newest message there is real but not in what the model read.
+// count < 0 skips the coverage check; count >= 0 behaves as in PrefixCoveredAsker. The text is only used
+// to count fabricated quotes. It never decides a drop.
+type PrefixReadAsker interface {
+	AskRead(ctx context.Context, session string, count int, hash, ask string) (reply string, usage PrefixUsage, read string, err error)
 }
 
 // ErrNoPrefix is what Ask returns on the FIRST turn of a session: nothing has been forwarded yet, so
@@ -672,7 +684,7 @@ type Ctx struct {
 	// 199,184 — the same event in a different ruler. See internal/compactionpoint.
 	CompactionPoint int
 	// CompactionPointSource says where CompactionPoint came from: observed on real traffic, assumed
-	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), or fallen back to the window. Carried so a decision made on a guess
+	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), stated by the operator per model ("operator"), or fallen back to the window. Carried so a decision made on a guess
 	// is distinguishable from one made on a measurement — the discipline CtxWindowExact keeps.
 	CompactionPointSource string
 	// MaxCachedIdx is the highest req.Input index considered already committed to the
@@ -872,6 +884,23 @@ func (c *Ctx) Stats() FilterStatsSink {
 	return c.FilterStats
 }
 
+// Change is one message a component rewrote, in bytes. The pipeline fills it, so no component
+// has to. Hash is of the text BEFORE the run: the same content re-sent next turn gets the same
+// hash, which is what lets the savings code recognise a replay (accountant ChangeID).
+type Change struct {
+	Idx                     int // index in req.Input; for a splice, where the splice starts
+	BytesBefore, BytesAfter int
+	Hash                    string
+	// Splice is set, on the one Change of a count-changing run, to the contiguous range of
+	// messages the run replaced. BytesBefore/After are then the bytes of the removed and the
+	// inserted messages.
+	Splice *Splice
+}
+
+// Splice says a run replaced Removed messages of its input, starting at At, with Inserted
+// messages. At is a req.Input index (the same before and after the range).
+type Splice struct{ At, Removed, Inserted int }
+
 // Report is the per-component result, modelled after lean-ctx's ToolOutput
 // token accounting and headroom's record_pipeline_run inputs. The pipeline
 // fills TokensBefore/After/DurationMs; the component fills CacheKey and may set
@@ -899,6 +928,12 @@ type Report struct {
 	// pipeline. The writeback layer uses them to attribute a discarded change back to
 	// the component that made it (see Pipeline.RecordDiscards).
 	ChangedIdx []int
+	// Changes is ChangedIdx with sizes and a content hash. When CountChanged it holds exactly one
+	// Change, with Splice set, describing the replaced range.
+	Changes []Change
+	// CountChanged says the run added or removed messages (a summary, a drop). ChangedIdx is
+	// empty then, because indices before and after do not line up; Changes carries the splice.
+	CountChanged bool
 	// Discarded counts changes this component made that the WRITEBACK layer then threw
 	// away (bifrost could not round-trip the message, so splicing would have dropped
 	// provider fields). A report carrying Discarded > 0 is a follow-up attribution, not
@@ -1207,6 +1242,17 @@ type KeepAliveReport struct {
 	// any fresh input or cache write. Booked here once, on the ping row the question replaced, as the
 	// summary's call is (#458). Part of CostUSD, not added to it. 0 for every other ping.
 	SweepAnswerUSD float64
+	// Window is the start of the idle gap this ping served: the start of the last upstream
+	// request the entry was kept warm after (kaEntry.startedAt as it stood before this ping
+	// began). Zero when the emitter site cannot know it; consumers must then not treat the ping
+	// as belonging to a window.
+	Window time.Time
+	// Header is the ping response's headers. On a substitute call (a summary or sweep question
+	// in the ping's place) it is that call's response headers (#1016), but only when the call
+	// used the user's own credential. It is nil when no response came back (a host can also send
+	// none). A sink reads only the metadata it needs from it,
+	// such as the subscription limit headers (#995), and must not change it.
+	Header http.Header
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

@@ -88,6 +88,10 @@ type ExpandConfig struct {
 // Every field is off or zero by default. KeepAlive spends the caller's money without the
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
+	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
+	// 1-hour-head, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// no strategy, and the file behaves as it always did. An unknown name is a config error.
+	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
 	// IdleSeconds, re-read its cached prefix once so the provider refreshes the TTL.
 	//
@@ -153,6 +157,10 @@ type CacheConfig struct {
 	// the window's pings per session at 20 drops the net from +$164 to $92.34, and at 10 to
 	// $54.04. So the guard bounds the outlier ping and never the productive session.
 	KeepAliveMaxUSDPerPing float64 `yaml:"keepalive_max_usd_per_ping"`
+	// KeepAliveMaxBodyBytes is the largest request body the keeper holds for one thread. It is a
+	// memory guard. The per-ping cost cap decides whether a ping is worth it. 0 =
+	// DefaultKeepAliveMaxBodyBytes (32 MiB). Set 8388608 for the limit before #1100.
+	KeepAliveMaxBodyBytes int `yaml:"keepalive_max_body_bytes"`
 	// KeepAliveMinPrefixTokens is the billed-prefix floor a session must reach before it is
 	// pinged at all, in the provider's own units (cache_read + cache_write of the previous
 	// request). 0 = DefaultKeepAliveMinPrefix.
@@ -174,7 +182,7 @@ type CacheConfig struct {
 	// KeepAliveWaitPlan turns on the per-wait ping plan (#858). Absent: on. `false` is the one switch
 	// that brings back the behavior before #858: MaxPings for every wait, time windows for every wait,
 	// sweep questions during tool waits, and pings for a thread with no tool call yet. It does not
-	// bring back the 80k minimum prefix, which is only a default (keepalive_min_prefix_tokens).
+	// bring back one floor for every wait: with it false, keepalive_min_prefix_tokens applies to all.
 	//
 	// With the plan on, the ping count follows what the thread waits for. "Base" is
 	// keepalive_max_pings:
@@ -187,10 +195,15 @@ type CacheConfig struct {
 	// Manager-strategy time windows then apply only to a wait for a person, and the sweep question is
 	// not asked while a thread waits for its own tool. It applies to the 5-minute tier. 0 on the three
 	// counts means the default. The three counts are at most 11, the highest strategy ping count.
-	KeepAliveWaitPlan             *bool `yaml:"keepalive_wait_plan"`
-	KeepAliveToolWaitMaxPings     int   `yaml:"keepalive_tool_wait_max_pings"`
-	KeepAliveBackgroundExtraPings int   `yaml:"keepalive_background_extra_pings"`
-	KeepAliveHumanExtraPings      int   `yaml:"keepalive_human_extra_pings"`
+	KeepAliveWaitPlan         *bool `yaml:"keepalive_wait_plan"`
+	KeepAliveToolWaitMaxPings int   `yaml:"keepalive_tool_wait_max_pings"`
+	// KeepAliveToolWaitMinPrefixTokens is the billed-prefix floor for a tool wait, a wait for background
+	// work or a teammate, and every wait of a subagent thread. A main thread that waits for a person, or
+	// for an unknown cause, keeps keepalive_min_prefix_tokens. It never raises the general floor: the lower of
+	// the two applies. 0 = DefaultKeepAliveToolWaitMinPrefix. Read only while the plan is on.
+	KeepAliveToolWaitMinPrefixTokens int `yaml:"keepalive_tool_wait_min_prefix_tokens"`
+	KeepAliveBackgroundExtraPings    int `yaml:"keepalive_background_extra_pings"`
+	KeepAliveHumanExtraPings         int `yaml:"keepalive_human_extra_pings"`
 
 	// HeadTTL1h asks for the ONE-HOUR tier on the request's HEAD breakpoints (`tools` and
 	// `system`) while leaving the trailing message breakpoint at 5 minutes — the provider's
@@ -256,9 +269,15 @@ const (
 	DefaultKeepAliveIdle1h        = int(modelinfo.AnthropicDefaultKeepAliveIdle1h / time.Second)
 	DefaultKeepAliveMaxPings1h    = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
 	DefaultKeepAliveMaxUSDPerPing = 0.50
-	// DefaultKeepAliveMinPrefix is 20000 since #858. No long subagent idle span had a prefix under
-	// 20k, so any floor at or under 20k gives the same result there. It was 80000 (#435).
-	DefaultKeepAliveMinPrefix = 20000
+	// DefaultKeepAliveMaxBodyBytes mirrors keepalive.MaxBodyBytes (32 MiB).
+	DefaultKeepAliveMaxBodyBytes = 32 << 20
+	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
+	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait,
+	// background work, a teammate and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
+	DefaultKeepAliveMinPrefix = 80000
+	// DefaultKeepAliveToolWaitMinPrefix is 20000. No long subagent idle span had a prefix under 20k, and
+	// a 20k floor cut subagent tool-wait misses from 65 to 31 (#858). Mirrors keepalive.DefaultToolWaitMinPrefix.
+	DefaultKeepAliveToolWaitMinPrefix = 20000
 	// The per-wait ping plan defaults (#858). They mirror keepalive.DefaultToolWaitMaxPings,
 	// DefaultBackgroundExtraPings and DefaultHumanExtraPings, pinned equal by a test.
 	DefaultKeepAliveToolWaitMaxPings     = 8
@@ -305,11 +324,17 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMaxUSDPerPing <= 0 {
 		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
 	}
+	if c.KeepAliveMaxBodyBytes <= 0 {
+		c.KeepAliveMaxBodyBytes = DefaultKeepAliveMaxBodyBytes
+	}
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
 	if c.KeepAliveToolWaitMaxPings <= 0 {
 		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
+	}
+	if c.KeepAliveToolWaitMinPrefixTokens <= 0 {
+		c.KeepAliveToolWaitMinPrefixTokens = DefaultKeepAliveToolWaitMinPrefix
 	}
 	if c.KeepAliveBackgroundExtraPings <= 0 {
 		c.KeepAliveBackgroundExtraPings = DefaultKeepAliveBackgroundExtraPings
@@ -335,7 +360,7 @@ func (c CacheConfig) Resolved() CacheConfig {
 func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
-		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMinPrefixTokens < 0 ||
+		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMaxBodyBytes < 0 || c.KeepAliveMinPrefixTokens < 0 || c.KeepAliveToolWaitMinPrefixTokens < 0 ||
 		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
 		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
@@ -410,6 +435,9 @@ func LoadBytes(b []byte) (*Config, error) {
 	}
 	if _, err := c.OperatingMode(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
+	}
+	if err := c.applyStrategy(b); err != nil {
+		return nil, err
 	}
 	if err := c.Cache.validate(); err != nil {
 		return nil, err
@@ -610,7 +638,7 @@ var presets = map[string][]string{
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
 	// codesmart / codesafe are the SWE-bench study's winning configs and the RECOMMENDED
 	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
-	// cmd/context-guru-proxy/main.go). Asserting it here is how five documents came to repeat
+	// proxyapp/main_run.go). Asserting it here is how five documents came to repeat
 	// it: the claim was copied from three lines away from the flag that disproves it. Their
 	// tuned per-component
 	// settings live in presetConfigs; the name-lists here keep PresetPipeline (used by

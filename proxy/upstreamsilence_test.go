@@ -702,7 +702,21 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
-	for i := 0; i < 300; i++ {
+	// One limit does two jobs. On attempt 1 its length does not matter: the hook holds the byte
+	// until the watchdog has cancelled the attempt. It also limits the resend's first byte. On a
+	// loaded -race runner the resend can go silent too, and then the proxy returns the
+	// two-silences error. That result is correct, and this test does not study it. So the test
+	// accepts it and counts the calls that did get a resend. It fails only on the symptom it is
+	// for: a wrong body, or a read error on a body that was returned.
+	const (
+		silence    = 5 * time.Millisecond
+		iterations = 300
+		// Without load nearly every call is answered. The floor only has to prove that the race
+		// ran many times, so a run where every resend times out cannot pass.
+		minAnswered = 60
+	)
+	answered := 0
+	for i := 0; i < iterations; i++ {
 		var attempts atomic.Int64
 		build := func(ctx context.Context) (*http.Request, error) {
 			if attempts.Add(1) == 1 {
@@ -712,9 +726,13 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 			}
 			return silenceBuild(srv.URL, streamBody)(ctx)
 		}
-		resp, err := doWithSilenceGuard(context.Background(), c, 5*time.Millisecond, build)
+		resp, err := doWithSilenceGuard(context.Background(), c, silence, build)
 		if err != nil {
-			t.Fatalf("call %d: the resend should have been answered: %v", i, err)
+			// Only the two-silences error is allowed: both attempts timed out, so no body exists.
+			if !errors.Is(err, errUpstreamSilent) || !strings.HasSuffix(err.Error(), "on two connections") {
+				t.Fatalf("call %d: unexpected error: %v", i, err)
+			}
+			continue
 		}
 		b, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -722,6 +740,12 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 			t.Fatalf("call %d: the client got a response whose watchdog had fired (%d attempts): body=%q err=%v",
 				i, attempts.Load(), b, err)
 		}
+		answered++
+	}
+	t.Logf("%d of %d calls were answered by the resend", answered, iterations)
+	if answered < minAnswered {
+		t.Fatalf("only %d of %d calls were answered by the resend, want at least %d: the race was not exercised",
+			answered, iterations, minAnswered)
 	}
 }
 

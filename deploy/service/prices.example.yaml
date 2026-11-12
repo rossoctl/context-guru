@@ -26,6 +26,20 @@
 #
 # A trailing `*` matches a family. The longest match wins, so a specific id always
 # beats the family it belongs to regardless of order in this file.
+#
+# `window` (optional) is the model's context window in tokens, for a model the public map
+# does not list (a preview id, or a model behind a gateway such as a GLM). An operator's
+# table is authoritative, so the window counts as EXACT: a trigger that scales with the
+# window (a summarizer's min_request_frac, the warm sweep's turns-left estimate) then runs
+# instead of declining on a guess. Example:
+#   - {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 400000}
+
+# `compaction_point` (optional) is where the CLIENT compacts this model's conversation, in BILLED input
+# tokens. It is not the window and is not derived from it: Claude Code compacts a GLM at about 167k billed
+# of a 200k window. Sweep v3 sizes its sweet spot from it (fill x this, not fill x the window), and the
+# summarizer and the dashboard span read it too. Without it, a model the built-in table does not list
+# gets the whole window. Example:
+#   - {match: "rits/zai-org/glm-5-3", in: 1.00, out: 4.00, window: 200000, compaction_point: 167000}
 
 # cache_read_frac is NOT set here: the per-model tiers above apply while the key is unset.
 cache_write_frac: 1.25
@@ -71,9 +85,12 @@ models:
   # ── litellm-gateway: the bare aliases ────────────────────────────────────────────
   # The gateway also serves several ids WITHOUT a provider prefix (`claude-opus-4-8`,
   # `claude-sonnet-4-6`, `gemini-2.5-pro`, …) and with mixed case (`Azure/gpt-4o`).
-  # Case is normalised on lookup; the missing prefix is not, so these families catch
-  # the aliases. They sit below the specific entries above and only apply where none
-  # of those matched.
+  # Case is normalised on lookup; the missing prefix is not. A bare id first takes the
+  # qualified entry it is the tail of (`claude-sonnet-5` takes `aws/claude-sonnet-5`). A
+  # tail that two entries price differently, or give different windows or compaction
+  # points, is dropped with a load-time warning. The families below catch every other
+  # bare alias. They sit below the specific entries above and only apply where none of
+  # those matched.
   - {match: "claude-opus*",   in: 3.80, out: 19.00}
   - {match: "claude-sonnet*", in: 2.28, out: 11.40, note: "the 4-x rate; 5 is listed specifically above"}
   - {match: "claude-haiku*",  in: 0.76, out: 3.80}
@@ -103,15 +120,18 @@ models:
   # touch is the before/after RATIO, where a uniform rate error cancels: "68% of the tokens
   # removed" is exact whatever the rate is.
   #
+  # Bob bills a 1-hour cache write at the input rate (measured 2026-11-04), so each tier sets
+  # `cache_write_1h_frac: 1.0`.
+  #
   # Enumerated, NOT `premium*` / `standard*` / `fast*`. These are ordinary English words, and
   # as family prefixes they claimed every id that merely began with one — `standard-diffusion-xl`
   # would have been priced as a Bob tier, and priced CONFIDENTLY, so the public map was never
   # consulted for it. Add a variant here if Bob starts sending one.
-  - {match: "premium",      in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
-  - {match: "premium-ide",  in: 3.00, out: 15.00, note: "ESTIMATE, fitted: see the note above"}
-  - {match: "standard",     in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
-  - {match: "standard-ide", in: 0.76, out: 3.80, note: "estimate: claude-haiku-4-5 class"}
-  - {match: "fast",         in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
-  - {match: "fast-ide",     in: 0.15, out: 0.60, note: "estimate: gpt-oss-120b class"}
+  - {match: "premium",      in: 3.00, out: 15.00, cache_write_1h_frac: 1.0, note: "ESTIMATE, fitted: see the note above"}
+  - {match: "premium-ide",  in: 3.00, out: 15.00, cache_write_1h_frac: 1.0, note: "ESTIMATE, fitted: see the note above"}
+  - {match: "standard",     in: 0.76, out: 3.80, cache_write_1h_frac: 1.0, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "standard-ide", in: 0.76, out: 3.80, cache_write_1h_frac: 1.0, note: "estimate: claude-haiku-4-5 class"}
+  - {match: "fast",         in: 0.15, out: 0.60, cache_write_1h_frac: 1.0, note: "estimate: gpt-oss-120b class"}
+  - {match: "fast-ide",     in: 0.15, out: 0.60, cache_write_1h_frac: 1.0, note: "estimate: gpt-oss-120b class"}
   # Bob's own auxiliary calls (title generation, classification) name a real model.
   - {match: "openai/gpt-oss-20b", in: 0.10, out: 0.40, note: "estimate: gpt-oss class"}

@@ -176,11 +176,11 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	sessions := map[string]bool{}
 	for rows.Next() {
 		var session, model string
-		var tok, cacheRead, cacheWrite, cacheWrite1h, ts int64
-		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts); err != nil {
+		var tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
+		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline); err != nil {
 			return nil, err
 		}
-		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, price)
+		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -189,6 +189,21 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	return out, nil
 }
 
+// declFilterInBaseline is a SELECT column: 1 when the accountant library priced this request's toolfilter
+// removal. The proxy reports each removal to the library, so on such a request the removal is already in
+// baseline_cost_usd and in the net saving. Adding the measured dollar credit on top counts the same tokens
+// twice (context-guru#768 B2), so those rows add no USD. They still add their requests, tokens and dates:
+// those are facts about what the filter did, not dollars (context-guru#911). A request the library could
+// not price (priced_by='none') or one written before the switch has nothing in the baseline, so its
+// measured credit stays the only place its filter saving appears.
+//
+// A request whose figure was held out (r.estimate_held = 1, #915) is NOT in the baseline: the books hold the
+// whole estimated figure out, the filter part included, so the measured credit is the one place that
+// request's filter saving appears, in dollars. The measured credit owns it (it is measured from the rate
+// card and the tier, and it does not depend on the unknown cache state), and the totals never count it.
+const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM request_components c
+		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = '` + PricedByAccountant + `'))`
+
 // declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
 // #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
 // Bounded by `cond` directly: a session's own index for session scope, the ts range for a
@@ -196,16 +211,17 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 func declFilterSavingsQuery(f Filter) (string, []any) {
 	where, args := f.where()
 	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts, ` + declFilterInBaseline + ` FROM requests r
 		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
 }
 
 // accumulateDeclFilterRow folds one filtered_decl_tokens>0 row into a running total — the one
 // piece of DeclFilterSavings that has to run in Go rather than SQL, since each row prices at
 // ITS OWN model's rate and cache tier. Shared with DeclFilterSavingsByTenant so the two never
-// drift on how a row is priced.
+// drift on how a row is priced. skipUSD keeps the row's requests, tokens and dates and adds no dollars:
+// the accountant already booked them (declFilterInBaseline).
 func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
-	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, price func(string) (modelinfo.Price, bool)) {
+	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, skipUSD bool, price func(string) (modelinfo.Price, bool)) {
 	out.Requests++
 	sessions[session] = true
 	out.Reads += tok
@@ -239,6 +255,9 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		out.FreshTokens += tok
 		rate = p.Input
 	}
+	if skipUSD {
+		return
+	}
 	if priced {
 		out.USD += float64(tok) * rate
 	} else {
@@ -252,7 +271,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.cache_write_1h, r.ts FROM requests r
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts, `+declFilterInBaseline+` FROM requests r
 		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
 		return nil, err
@@ -262,8 +281,8 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 	sessions := map[string]map[string]bool{}
 	for rows.Next() {
 		var tenant, session, model string
-		var tok, cacheRead, cacheWrite, cacheWrite1h, ts int64
-		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts); err != nil {
+		var tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
+		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline); err != nil {
 			return nil, err
 		}
 		s, ok := out[tenant]
@@ -272,7 +291,7 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 			out[tenant] = s
 			sessions[tenant] = map[string]bool{}
 		}
-		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, price)
+		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -522,8 +541,8 @@ func excludedFrom(names []string, since int64) []ExcludedDecl {
 // config stores `skill__dataviz` and `mcp__plan`; a report row is named `dataviz` with kind skill,
 // or `mcp__plan__make_plan` with server `plan`. So `filtered[row.Name]` never matched a skill and
 // `filtered[row.Server]` never matched a whole MCP server — the overlap exclusion could not fire
-// for either, which made three user-facing statements false: the field's own doc, the
-// `self_removed` waterfall description, and the tile's overlap count.
+// for either, which made user-facing statements false: the field's own doc and the overlap
+// count of the savings-since-removal estimate.
 //
 // Built from excludedFrom rather than with a second mapping, because that function already knows
 // how a config name becomes a report row and a second copy is how the two drift apart. Taking the

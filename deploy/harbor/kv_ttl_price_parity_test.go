@@ -29,14 +29,22 @@ func TestPythonPriceReaderMatchesGoTable(t *testing.T) {
   - {match: "claude-haiku*", in: 1.0, out: 5.0, cache_write: 1.4}
   - {match: "gemini*", in: 2.0, out: 12.0}
   - {match: "azure/gpt-5.5", in: 2.5, out: 15.0}
-  - {match: "premium", in: 4.0, out: 20.0}
+  - {match: "premium", in: 4.0, out: 20.0, cache_write_1h_frac: 1.0}
+  - {match: "claude-sonnet-4*", in: 3.0, out: 15.0, cache_write_1h_frac: 1.0}
   - {match: "mythos*", in: 8.0, out: 40.0, cache_read: 0.4, cache_write: 9.5}
+  - {match: "aws/ambig-model", in: 1.0, out: 5.0, window: 200000}
+  - {match: "vertex/ambig-model", in: 1.0, out: 5.0, window: 1000000}
+  - {match: "ambig*", in: 3.0, out: 15.0}
+  - {match: "aws/famsib-model", in: 1.0, out: 5.0, window: 200000}
+  - {match: "aws/famsib-model*", in: 2.0, out: 9.0}
+  - {match: "vertex/famsib-model", in: 1.0, out: 5.0, window: 200000}
 `
 	ids := []string{
 		"claude-opus-5-5", "claude-opus-5", "claude-opus-5-5[1m]", "claude-opus-5-50",
-		"aws/claude-sonnet-5", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
+		"aws/claude-sonnet-5", "claude-sonnet-5", "claude-sonnet-5[1m]", "vertex/claude-sonnet-5",
+		"gemini-3-flash-preview[1m]", "ambig-model", "aws/ambig-model", "famsib-model", "aws/famsib-model", "aws/famsib-model-2", "aws/claude-sonnet-5-5", "aws/claude-fable-5-1",
 		"aws/claude-fable-5-1[1m]", "claude-haiku-4-5", "claude-mythos-5-1", "gemini-3-flash-preview",
-		"azure/gpt-5.5", "premium", "nobody-knows-this-one", "",
+		"azure/gpt-5.5", "premium", "claude-sonnet-4-6", "nobody-knows-this-one", "",
 	}
 	idJSON, _ := json.Marshal(ids)
 	script := `
@@ -98,5 +106,29 @@ print(json.dumps(out))
 				}
 			}
 		}
+	}
+}
+
+// Go refuses a price file that repeats a match; the Python reader must refuse it too, or the
+// analyses price from a file the proxy would not start on.
+func TestPythonPriceReaderRejectsADuplicateMatchLikeGo(t *testing.T) {
+	py := pythonBinFor(t, "kv_ttl_cost_model")
+	if py == "" {
+		t.Skip("no usable Python")
+	}
+	if out, err := exec.Command(py, "-c", "import yaml").CombinedOutput(); err != nil {
+		t.Skipf("PyYAML missing: %s", out)
+	}
+	doc := "models:\n  - {match: \"aws/x\", in: 1.0, out: 5.0}\n  - {match: \"aws/x\", in: 2.0, out: 9.0}\n"
+	if _, err := modelinfo.ParseTable([]byte(doc)); err == nil {
+		t.Fatal("go accepted a repeated match")
+	}
+	path := filepath.Join(t.TempDir(), "prices.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "import sys\nsys.path.insert(0, '.')\nimport kv_ttl_cost_model as m\nm.PriceBook.from_operator_file(sys.argv[1])\n"
+	if out, err := exec.Command(py, "-c", script, path).CombinedOutput(); err == nil {
+		t.Fatalf("python accepted a repeated match: %s", out)
 	}
 }

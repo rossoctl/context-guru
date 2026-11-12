@@ -1,0 +1,49 @@
+{
+  "name": "context-guru-bob",
+  "displayName": "context-guru for IBM Bob",
+  "description": "Shows the local context-guru proxy's state, cache clock and context fill in the status bar.",
+  "version": "0.1.0",
+  "publisher": "rossoctl",
+  "license": "Apache-2.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rossoctl/context-guru.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "contextGuru.bob.menu",
+        "title": "context-guru: Menu"
+      }
+    ],
+    "configuration": {
+      "title": "context-guru",
+      "properties": {
+        "contextGuru.bob.pollSeconds": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "description": "How often the status bar asks the local proxy for new numbers, in seconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test out/test/model.test.js out/test/client.test.js",
+    "package": "tsc -p . && mkdir -p ../context-guru/statusbar && vsce package --skip-license --out ../context-guru/statusbar/context-guru-bob.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1100,6 +1100,14 @@ type Snapshot struct {
 	// the host. Omitted when deferral never ran in this process.
 	ToolDefer any `json:"tool_defer,omitempty"`
 
+	// KeepAlivePingsPriced and KeepAliveRescueFactsMissing say whether the host wires keep-alive credit
+	// (filled by the host). Priced: pings the host priced (each PingSavings call that returned ok).
+	// Missing: real requests that followed keep-alive pings but found no ping facts, so credit was lost
+	// on that return. It also counts a return after an unpriced ping (non-2xx, no usage), after an
+	// eviction, and a request whose pricing panicked. If it keeps rising while Priced stays 0, the ping
+	// side is not wired or its pings keep failing (see the keeper's pings, failed and skipped). Counts only; Missing moves only with the dashboard on.
+	KeepAlivePingsPriced        int64 `json:"keepalive_pings_priced"`
+	KeepAliveRescueFactsMissing int64 `json:"keepalive_rescue_facts_missing"`
 	// BobBackend counts the replies on Bob's model route by backend label: A, B, other (the
 	// reply's marks match neither) and none (no id or no usage), plus id_no_usage (the none
 	// replies that have an id). Filled by the host. Always present, so a reader sees 0 and not a
