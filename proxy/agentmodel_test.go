@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -99,6 +101,13 @@ func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls 
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("proxy returned %d", resp.StatusCode)
+	}
+	// summarize sends the summary call in the background, after the proxy answers, so calls read now
+	// can miss it: a summary call a test wants, or an operator's key a test must not see. The call
+	// is in flight from before the response until the upstream has answered it. The registry is
+	// process-wide, so a summary another test leaves running also holds this wait.
+	if !offload.WaitForAllSummariesForTest(10 * time.Second) {
+		t.Fatal("a detached summary call was still running after 10s")
 	}
 	var summaries []seenCall
 	for _, c := range calls() {
