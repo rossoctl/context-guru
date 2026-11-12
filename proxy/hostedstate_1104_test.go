@@ -133,4 +133,3 @@ func TestAHostedSessionStateTableHoldsNoContentKeys(t *testing.T) {
 		t.Fatalf("rows = %d, want 1 (the metadata key only)", n)
 	}
 }
-
