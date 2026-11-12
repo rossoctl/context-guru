@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +20,8 @@ import (
 //   - "recording" is the account's consent, so an account that never opted in hears false;
 //   - an account that is not recorded writes no marker for an id it never had;
 //   - a file that exists is still deleted after the account opted out of recording;
-//   - calls are rate-limited per account.
+//   - a recorded account's opt-out is never refused for rate; an account that is not recorded is
+//     rate-limited, per account.
 func TestRecordOffHostedFollowsTheAccountAndItsConsent(t *testing.T) {
 	dir := t.TempDir()
 	rec := newRec(t, dir)
@@ -89,16 +91,37 @@ func TestRecordOffHostedFollowsTheAccountAndItsConsent(t *testing.T) {
 		t.Fatal("B's existing file is still there")
 	}
 
-	// Rate limit per account: A has used 1 of adaptApplyBurst.
-	for i := 1; i < adaptApplyBurst; i++ {
-		if code, _ := call(tokA, testSessionUUID); code != http.StatusOK {
-			t.Fatalf("call %d of the burst: %d", i+1, code)
+	// A recorded account is never refused for rate: a refused opt-out would leave the session
+	// recorded. Well past the limit, repeat calls (a hook on resume, /clear, compaction) and new
+	// sessions (parallel or scripted runs) are all stopped.
+	for i := 0; i < 3*adaptApplyBurst; i++ {
+		id := testSessionUUID
+		if i%2 == 1 {
+			id = sessionUUIDn(i)
+		}
+		if code, doc := call(tokA, id); code != http.StatusOK || doc["recording"] != true {
+			t.Fatalf("A, call %d: %d %v; want 200 recording", i+2, code, doc)
 		}
 	}
-	if code, _ := call(tokA, testSessionUUID); code != http.StatusTooManyRequests {
-		t.Fatalf("call past the burst: %d, want 429", code)
+	if !exists(t, markerOf(dirA, sessionUUIDn(3*adaptApplyBurst-1))) {
+		t.Fatal("A's last opt-out wrote no marker")
 	}
-	if code, _ := call(tokB, otherSessionUUID); code != http.StatusOK {
-		t.Fatalf("A's limit stopped B: %d", code)
+
+	// An account that is not recorded is still limited, per account: B has used 2 of adaptApplyBurst.
+	for i := 2; i < adaptApplyBurst; i++ {
+		if code, _ := call(tokB, otherSessionUUID); code != http.StatusOK {
+			t.Fatalf("B, call %d of the burst: %d", i+1, code)
+		}
 	}
+	if code, _ := call(tokB, otherSessionUUID); code != http.StatusTooManyRequests {
+		t.Fatalf("B, call past the burst: %d, want 429", code)
+	}
+	if code, _ := call(tokA, testSessionUUID); code != http.StatusOK {
+		t.Fatalf("B's limit stopped A: %d", code)
+	}
+}
+
+// sessionUUIDn is a distinct valid session id for each n.
+func sessionUUIDn(n int) string {
+	return fmt.Sprintf("00000000-0000-4000-8000-%012d", n)
 }
