@@ -34,6 +34,9 @@ GRAFANA_IMAGE="${GRAFANA_IMAGE:-docker.io/grafana/grafana:11.6.0}"
 PROM_RETENTION="${PROM_RETENTION:-30d}"
 PROM_RETENTION_SIZE="${PROM_RETENTION_SIZE:-20GB}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+# Serve Grafana under a path of a front end, for example https://host.example.com/grafana/. Empty:
+# Grafana serves at the root of 127.0.0.1:$GRAFANA_PORT.
+GRAFANA_ROOT_URL="${GRAFANA_ROOT_URL:-}"
 # The collector's two ports on the host. Change them if something else holds them.
 CORTEX_PORT="${CORTEX_PORT:-4318}"
 CG_PORT="${CG_PORT:-4319}"
@@ -197,6 +200,10 @@ cmd_install() {
     echo "GF_USERS_ALLOW_SIGN_UP=false"
     echo "GF_ANALYTICS_REPORTING_ENABLED=false"
     [ -z "$pw" ] || echo "GF_SECURITY_ADMIN_PASSWORD=$pw"
+    if [ -n "$GRAFANA_ROOT_URL" ]; then
+      echo "GF_SERVER_ROOT_URL=$GRAFANA_ROOT_URL"
+      echo "GF_SERVER_SERVE_FROM_SUB_PATH=true"
+    fi
   } > "$envfile"
   $OCI rm -f cm-grafana >/dev/null 2>&1 || true
   if ! $OCI run -d --name cm-grafana --network "$NET" --network-alias grafana --restart=unless-stopped \

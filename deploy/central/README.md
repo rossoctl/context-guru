@@ -123,6 +123,10 @@ Then add a user for each manager in Grafana (Administration, Users). There is no
 anonymous access. Grafana listens on `127.0.0.1:3000` only. Reach it with
 `ssh -L 3000:127.0.0.1:3000 <this host>`, or put your own front end in front of it.
 
+`nginx.example.conf` also serves Grafana at `https://<host>/grafana/`, behind Grafana's own login.
+For that, install with `GRAFANA_ROOT_URL=https://<host>/grafana/`. Without it, Grafana serves at the
+root of port 3000 and the `/grafana/` path does not work.
+
 ## Alerts
 
 `alerts.yml` holds the alerts of the spec (section 8). The thresholds are proposals. Change them after
