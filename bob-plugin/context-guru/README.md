@@ -58,8 +58,8 @@ python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --i-consent-to-t
 ### Status bar
 
 Setup also installs a status bar item in Bob: `CG ✓ ctx 21k/270k · cache 1h 54:10 · saved 0`. It
-reads only counts and times from the local proxy. With `bob-ultrahigh`, it also shows the saved
-Bobcoins, for example `saved 3.1k tok · 1.75 Bobcoins`.
+reads only counts and times from the local proxy. With `bob-ultrahigh` and a proxy from v0.7.4 or
+later, it also shows the saved Bobcoins, for example `saved 3.1k tok · 1.75 Bobcoins`.
 
 **The status bar needs a build before setup.** Until the install script ships it (plan phase P7):
 
