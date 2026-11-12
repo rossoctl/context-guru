@@ -30,7 +30,7 @@ On OpenCode 2 the config key is `plugins` (plural); the same local path works:
 ```
 
 For a project-only install, put the same local path in the project's `opencode.json` instead. The
-first startup downloads release v0.7.3 when `context-guru-proxy` is not already on `PATH`,
+first startup downloads release v0.7.4 when `context-guru-proxy` is not already on `PATH`,
 verifies its SHA-256 checksum, and stores it under `~/.local/state/context-guru-opencode/`.
 
 The default is `preset: off` with the `auto` cache strategy. These match the Claude Code plugin.

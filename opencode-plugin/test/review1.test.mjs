@@ -115,7 +115,7 @@ test("a pinned release that is not published gives an error that says so", async
     const config = { provider: anthropic() }
     await hooks.config(config)
     assert.equal(config.provider.anthropic.options.baseURL, "https://api.anthropic.com")
-    assert.ok(logs.some((message) => /v0\.7\.3 is not published yet/.test(message)), logs.join("|"))
+    assert.ok(logs.some((message) => /v0\.7\.4 is not published yet/.test(message)), logs.join("|"))
   } finally {
     server.close()
     process.env.PATH = previousPath
