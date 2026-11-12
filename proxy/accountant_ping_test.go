@@ -202,6 +202,62 @@ func TestThePingRescueIsCreditedFromTheUsage(t *testing.T) {
 	}
 }
 
+// Issue #1079. Two threads of one session: the main thread is pinged, and a sub-agent thread sends a
+// request that shares the main thread's first message inside the TTL. That prefix was warm without the
+// ping, so the rescue credits only the part past it (accountant R54). The shared prefix comes from
+// accountant.SharedWarmFrom through siblingStore, end to end: no hand-set EntryFacts.SharedWarm.
+func TestARescueLeavesOutThePrefixASiblingKeptWarm(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	user := func(c byte) string {
+		return `{"role":"user","content":[{"type":"text","text":"` + strings.Repeat(string(c), 2000) +
+			`","cache_control":{"type":"ephemeral"}}]}`
+	}
+	asst := `{"role":"assistant","content":"ok"}`
+	body := func(msgs ...string) []byte {
+		return []byte(`{"model":"m","system":[{"type":"text","text":"sys"}],"messages":[` + strings.Join(msgs, ",") + `]}`)
+	}
+	mainBody := body(user('x'), asst, user('y'))
+	grown := body(user('x'), asst, user('y'), asst, user('z'))
+	subBody := body(user('x'), asst, user('q')) // shares the system block and message 0 with the main thread
+
+	rescueAfter := func(withSibling bool) accountant.CacheEffect {
+		st, pings := newSavingsTracker(), NewPingStore()
+		turn := func(thread string, at time.Time, b []byte, u Usage) accountant.Result {
+			req := st.begin(accountant.RequestMeta{RequestID: thread + at.String(), Session: "s", Model: "m", At: at}, b)
+			th := accountant.Thread{ID: thread}
+			f := entryFacts(bschemas.Anthropic, "m", b, pings, "s", th)
+			st.end(req, th, b, nil, f)
+			return st.compute(req, u)
+		}
+		turn("main", t0, mainBody, Usage{CacheWrite: int64(len(mainBody))})
+		r := okReport()
+		r.Session, r.Thread, r.TS, r.Window = "s", "", t0.Add(4*time.Minute).UnixMilli(), t0
+		r.FreshInput, r.CacheRead, r.CacheWrite, r.Output = 0, int64(len(mainBody)), 0, 1
+		if _, ok := PingSavings(r, pings); !ok {
+			t.Fatal("the ping was not converted")
+		}
+		if withSibling {
+			turn("sub", t0.Add(5*time.Minute), subBody, Usage{CacheWrite: int64(len(subBody))})
+		}
+		res := turn("main", t0.Add(8*time.Minute), grown,
+			Usage{CacheRead: int64(len(mainBody)), CacheWrite: int64(len(grown) - len(mainBody))})
+		for _, e := range res.CacheEffects {
+			if e.Kind == accountant.EffectRescue {
+				return e
+			}
+		}
+		return accountant.CacheEffect{}
+	}
+	alone, shared := rescueAfter(false), rescueAfter(true)
+	if alone.Saved.CacheWrite5m <= 0 {
+		t.Fatalf("control: no rescue without a sibling: %+v", alone)
+	}
+	if shared.Saved.CacheWrite5m <= 0 || shared.Saved.CacheWrite5m >= alone.Saved.CacheWrite5m {
+		t.Fatalf("rescue with a warm sibling = %d tokens, alone = %d: want a smaller credit, the part past the shared prefix",
+			shared.Saved.CacheWrite5m, alone.Saved.CacheWrite5m)
+	}
+}
+
 // The facts carry the lifetime the cold gate uses, per provider.
 func TestEntryFactsTakeTheLifetimeFromTheProvider(t *testing.T) {
 	th := accountant.Thread{ID: "main"}
