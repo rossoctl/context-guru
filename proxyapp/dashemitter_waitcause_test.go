@@ -10,6 +10,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // TestDashEmitterKeepAlivePingCarriesNoWaitCause pins issue #424's own requirement: a
@@ -103,21 +104,13 @@ func TestDashEmitterSummarySubstitutePingCarriesNoWaitCause(t *testing.T) {
 // channel), so a direct query right after Record/KeepAlivePing can race it.
 func waitForRow(t *testing.T, rec *dash.Recorder) (*dash.Page, error) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		page, err := rec.DB().Requests(dash.Filter{TenantAll: true, WithKeepAlive: true}, 0, 10)
-		if err != nil {
-			return nil, err
-		}
-		if len(page.Requests) == 1 {
-			return page, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for the writer to flush the ping row (have %d rows, want 1)",
-				len(page.Requests))
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	var page *dash.Page
+	var err error
+	testutil.WaitForState(t, "the writer to flush the ping row", func() bool {
+		page, err = rec.DB().Requests(dash.Filter{TenantAll: true, WithKeepAlive: true}, 0, 10)
+		return err != nil || len(page.Requests) == 1
+	}, func() string { return fmt.Sprintf("rows=%d err=%v", len(page.Requests), err) })
+	return page, err
 }
 
 // A panic while a ping row is built must not end the process: the keeper calls KeepAlivePing from its own goroutine
