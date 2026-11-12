@@ -247,3 +247,5 @@ It removes only what context-guru wrote: a `baseUrl` that you changed after setu
 python3 -m unittest discover -s scripts      # controller and models.json route
 node --test tests/*.test.ts                   # extension helpers (Node 22.18+)
 ```
+
+See the [matrix of plugins, providers and settings](../docs/reference/plugins-matrix.md) for what each plugin offers per provider.
