@@ -13,6 +13,10 @@
 #
 # Rates here are LIST PRICES, not credentials. Nothing in this file is a secret.
 #
+# `currency` (optional, file level) names the unit of every rate, for a gateway that does not
+# bill in dollars (Bob's file says `currency: Bobcoins`). Unset means USD. 1 to 16 ASCII letters;
+# any other value stops the proxy at startup. The dashboard shows costs in this unit.
+#
 # `in`/`out` are required. `cache_read` defaults to a per-model multiple of `in`: 0.1x,
 # except 0.05x on Claude Opus 5.5 and Sonnet 5.5, and 0.025x on Claude Fable 5.1 and
 # Mythos 5.1 (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02).

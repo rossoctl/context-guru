@@ -94,13 +94,70 @@ function netUSD(x, perTok) {
   return (x.saved_tokens || 0) * perTok - (x.cost_usd || 0);
 }
 
+/*
+ * moneyUnit is the unit of every money figure on the page. A view has one unit, and the API says
+ * which in `currency` (dash/currency.go): USD, the name a price file gives (Bob's says Bobcoins), or
+ * 'mixed' when the view sums more than one unit and so has no money total.
+ */
+let moneyUnit = 'USD';
+const MONEY_UNIT_RE = /^[A-Za-z]{1,16}$/;
+// The name comes from a price file. The server lets only letters through; a name that is not plain
+// letters is refused here as well and read as mixed, so it hides money rather than reach the page.
+function setMoneyUnit(u) {
+  moneyUnit = typeof u === 'string' && MONEY_UNIT_RE.test(u) ? u : 'mixed';
+}
 function usd(v) {
   if (v === null || v === undefined) return '—';
+  if (moneyUnit === 'mixed') return '—';
   const a = Math.abs(v);
+  if (moneyUnit !== 'USD') {
+    const n = a === 0 ? '0' : a < 0.01 ? a.toFixed(4) : a < 1000 ? a.toFixed(2) : nf.format(Math.round(a));
+    return (v < 0 ? '-' : '') + n + ' ' + moneyUnit;
+  }
   if (a === 0) return '$0';
   if (a < 0.01) return (v < 0 ? '-' : '') + '$' + a.toFixed(4);
   if (a < 1000) return (v < 0 ? '-' : '') + '$' + a.toFixed(2);
   return (v < 0 ? '-' : '') + '$' + nf.format(Math.round(a));
+}
+// moneySym is the unit for a column head: `$` for dollars, else the unit's name.
+function moneySym() { return moneyUnit === 'USD' || moneyUnit === 'mixed' ? '$' : moneyUnit; }
+// moneyWord is the unit in prose: "dollars", the unit's name, or "mixed units", never "dollars" for a
+// view that adds two units.
+function moneyWord() { return moneyUnit === 'USD' ? 'dollars' : moneyUnit === 'mixed' ? 'mixed units' : moneyUnit; }
+// noMoneyChart draws the empty state in place of a money chart when the view has more than one unit,
+// and says whether it did. Such a chart would plot Bobcoins and dollars added into one line.
+function noMoneyChart(host) {
+  if (moneyUnit !== 'mixed') return false;
+  emptyState(host, 'Money is not charted',
+    'Costs are in more than one unit, so money is not charted. Token figures are correct.');
+  return true;
+}
+const MIXED_UNIT_NOTE = 'Costs are in more than one unit (for example Bobcoins and dollars), so money '
+  + 'totals are not shown. Token figures are correct.';
+// applyMoneyUnit sets the page's unit from an API reply, shows the note a mixed view needs, and
+// renames the column heads that name the unit.
+function applyMoneyUnit(u) {
+  setMoneyUnit(u);
+  const n = $('#money-unit-note');
+  if (n) { n.textContent = MIXED_UNIT_NOTE; n.hidden = moneyUnit !== 'mixed'; }
+  for (const s of document.querySelectorAll('.money-sym')) s.textContent = moneySym();
+}
+// coinsIcon is lucide's Coins icon (ISC licence), the icon Bob IDE shows beside a cost.
+function coinsIcon() {
+  const s = svgEl('svg', { class: 'coins-icon', viewBox: '0 0 24 24', width: '1em', height: '1em', fill: 'none',
+    stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+    'aria-hidden': 'true' });
+  s.appendChild(svgEl('circle', { cx: 8, cy: 8, r: 6 }));
+  for (const d of ['M18.09 10.37A6 6 0 1 1 10.34 18', 'M7 6h1v4', 'm16.71 13.88.7.71-2.82 2.82']) {
+    s.appendChild(svgEl('path', { d }));
+  }
+  return s;
+}
+// moneyIcon is the coins icon for a figure in a unit other than dollars, else null. The figure stays a
+// text node and the icon is a node of its own, so a unit name is never parsed as markup.
+function moneyIcon(text) {
+  const other = moneyUnit !== 'USD' && moneyUnit !== 'mixed';
+  return other && typeof text === 'string' && text.endsWith(' ' + moneyUnit) ? coinsIcon() : null;
 }
 // estUsd renders a held-out estimate: a negative figure is a cost, so it reads as one.
 function estUsd(v) { return v < 0 ? 'a cost of ' + usd(-v) : usd(v); }
@@ -342,7 +399,17 @@ async function api(path, extra) {
   // says how old in the Age header. Keep it per endpoint so a page can show the age of its DATA.
   const age = Number(res.headers.get('Age')) || 0;
   (state.ageMs ||= {})[path] = age * 1000;
-  return res.json();
+  return readMoneyUnit(await res.json());
+}
+
+/**
+ * readMoneyUnit applies the unit a money reply states (dash/currency.go) and returns the reply. Every
+ * fetch of a money route goes through it, before the caller renders. A reply read with a filter that
+ * is not the page's (a count with one filter dropped) must not use it.
+ */
+function readMoneyUnit(body) {
+  if (body && typeof body === 'object' && 'currency' in body) applyMoneyUnit(body.currency);
+  return body;
 }
 
 /**
@@ -1445,7 +1512,7 @@ function tile(key, label, value, sub, cls) {
   // means the "i" is in the same place on every tile, which is what makes it findable.
   return el('div', { class: 'tile ' + (cls || ''), 'data-testid': 'tile-' + key },
     el('div', { class: 'k', text: label }),
-    el('div', { class: 'v', 'data-testid': 'tile-' + key + '-value', text: value }),
+    el('div', { class: 'v', 'data-testid': 'tile-' + key + '-value' }, moneyIcon(value), value),
     sub ? el('div', { class: 's', text: sub }) : null,
     info ? tileInfo(key, label, info) : null);
 }
@@ -2134,6 +2201,7 @@ const DIM_LABELS = {
 function dailyColumns(host, totalHost, buckets) {
   clear(host);
   if (!buckets.length) { totalHost.textContent = ''; emptyState(host, 'No days in this window', 'Send traffic through the proxy, or widen the time range.'); return; }
+  if (noMoneyChart(host)) { totalHost.textContent = ''; return; }
   const spent = (b) => b.cost_usd + b.cg_llm_cost_usd;
   const sum = (f) => buckets.reduce((n, b) => n + f(b), 0);
   const priced = buckets.some((b) => !(b.baseline_cost_usd === 0 && b.cost_usd === 0));
@@ -3120,6 +3188,7 @@ function subLabels(host, sub) {
     if (!n.usdNodes) { n.usdNodes = [...n.childNodes].map((c) => c.cloneNode(true)); n.dataset.usdTitle = n.title; }
     if (sub) n.textContent = n.dataset.subLabel;
     else n.replaceChildren(...n.usdNodes.map((c) => c.cloneNode(true)));
+    for (const s of $$('.money-sym', n)) s.textContent = moneySym(); // the copy may predate the unit
     n.title = sub && n.dataset.subTitle !== undefined ? n.dataset.subTitle : n.dataset.usdTitle;
   }
 }
@@ -9726,7 +9795,8 @@ async function loadKABehaviour() {
   lineChart(misses, [{ name: 'Cache expiries', color: SERIES[0], points: days, area: true }],
     { yFmt: num, xFmt: whenAxis });
   // In tokens: one line per tier, on one token scale. The tiers are never added into one line.
-  lineChart($('#ka-chart-usd'), sub
+  // On a subscription the line is in tokens, so a mixed view still draws it.
+  if (sub || !noMoneyChart($('#ka-chart-usd'))) lineChart($('#ka-chart-usd'), sub
     ? tierSeries(b.daily).map((t, i) => ({ name: t.name, color: SERIES[i], points: t.points }))
     : [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
   { yFmt: sub ? compact : usd, xFmt: whenAxis });

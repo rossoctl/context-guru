@@ -397,7 +397,7 @@ async function kvFetch(path, extra) {
     try { const j = await res.json(); if (j.error) msg = j.error; } catch (_) { /* not json */ }
     const e = new Error(msg); e.status = res.status; throw e;
   }
-  return res.json();
+  return readMoneyUnit(await res.json());
 }
 
 // ── the page skeleton, built once ──────────────────────────────────────────
@@ -781,7 +781,7 @@ function renderKVPricing() {
   const table = el('table', { class: 'tbl compact', 'data-testid': 'kv-pricing-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Model'),
-      ...KV_RATE_FIELDS.map(([, label]) => el('th', { class: 'num' }, label + ' $/MTok')),
+      ...KV_RATE_FIELDS.map(([, label]) => el('th', { class: 'num' }, label + ' ' + moneySym() + '/MTok')),
       el('th', { class: 'num' }, 'Uncached'),
       el('th', { class: 'num' }, 'One read'),
       el('th', { class: 'num' }, 'Write 5m'),
@@ -1121,7 +1121,7 @@ function renderKVSim() {
       el('th', { class: 'num' }, 'Output'),
       el('th', { class: 'num' }, 'Unpriced'),
       el('th', {}, 'Decisions'),
-      el('th', {}, 'Own history used')))); 
+      el('th', {}, 'Own history used'))));
   const dbody = el('tbody');
   detail.appendChild(dbody);
   for (const r of sim.results) {

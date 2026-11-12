@@ -525,6 +525,8 @@ details.why dd { margin: 0; }
   border-radius: var(--r); font-size: var(--t-body); line-height: 1.5;
   border: 1px solid;
 }
+/* The coins icon before a cost in a unit other than dollars (Bob's Bobcoins), as in Bob IDE. */
+.coins-icon { vertical-align: -0.125em; margin-right: 0.25em; }
 .banner.warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
 .banner.ok   { background: var(--good-soft); color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
 .banner.bad  { background: var(--bad-soft);  color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, transparent); }

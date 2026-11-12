@@ -180,17 +180,17 @@ class ConfigureTest(Installed):
 
     def test_bob_ultrahigh_is_refused_on_a_proxy_older_than_its_settings(self):
         before, calls = self.tree(), len(self.launchctl_calls())
-        with mock.patch.object(PLUGIN, "binary_version", return_value="v0.7.1"):
+        with mock.patch.object(PLUGIN, "binary_version", return_value="v0.7.3"):
             code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
         self.assertEqual(code, 2, out)
         self.assertIn("result=refused\nreason=proxy_too_old\npreset=bob-ultrahigh\n", out)
-        self.assertIn("bob-ultrahigh needs context-guru-proxy v0.7.2 or newer; this one is "
-                      "v0.7.1. Run the update skill first.", out)
+        self.assertIn("bob-ultrahigh needs context-guru-proxy v0.7.4 or newer; this one is "
+                      "v0.7.3. Run the update skill first.", out)
         self.assertEqual(self.tree(), before)
         self.assertEqual(len(self.launchctl_calls()), calls)
 
     def test_bob_ultrahigh_runs_on_a_new_or_unnumbered_proxy(self):
-        for version in ("v0.7.2", "v0.8.0", "v0.6.7-32-g58939a47", "unknown"):
+        for version in ("v0.7.4", "v0.8.0", "v0.6.7-32-g58939a47", "unknown"):
             with self.subTest(version=version):
                 self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
                 with mock.patch.object(PLUGIN, "binary_version", return_value=version):

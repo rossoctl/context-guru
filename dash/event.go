@@ -285,6 +285,10 @@ type Event struct {
 	// downgraded request is indistinguishable from a granted one without this number.
 	CacheWrite1h int64 `json:"cache_write_1h"`
 
+	// Every *_usd figure on the row is in Currency, the unit of the price that costed it: US dollars,
+	// unless the operator's price file names another unit (Bob's says Bobcoins). The field names keep
+	// "usd" so no reader breaks. Empty until priced; an unpriced row is stored as USD, the default.
+	Currency        string  `json:"currency"`
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
@@ -941,6 +945,7 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 		return false
 	}
 	e.TokenAccounting = AccountingComplete
+	e.Currency = p.Unit()
 	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
 	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)

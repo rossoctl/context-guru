@@ -162,6 +162,7 @@
    "write_5m_usd": 0
   }
  ],
+ "currency": "USD",
  "prefix_known": true,
  "prefix_tokens": 34035,
  "pricing": {
