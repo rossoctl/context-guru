@@ -54,7 +54,9 @@ type Strategy struct {
 	Spends bool
 	// Desc is the one-line text for a picker.
 	Desc string
-	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" or "any".
+	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" (the
+	// OpenAI Responses route), "openai-chat" (the OpenAI Chat Completions route, for example IBM
+	// Bob) or "any". No row uses "openai-chat" yet.
 	// The proxy does not enforce it. A picker uses it to hide a name that does not fit.
 	Providers []string
 	Cache     []StrategyKey
