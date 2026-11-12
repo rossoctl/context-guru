@@ -1,12 +1,14 @@
 package proxyapp
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // A manual ping is written as a keepalive row flagged ManualPing, with the write it avoided beside
@@ -33,17 +35,12 @@ func TestDashEmitterWritesAManualPingRow(t *testing.T) {
 	})
 
 	var page *dash.Page
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+	testutil.WaitForState(t, "the writer to flush 2 rows", func() bool {
 		page, err = rec.DB().Requests(dash.Filter{TenantAll: true, WithKeepAlive: true}, 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(page.Requests) == 2 {
-			break
-		}
-	}
-	if len(page.Requests) != 2 {
-		t.Fatalf("rows = %d, want 2", len(page.Requests))
+		return err != nil || len(page.Requests) == 2
+	}, func() string { return fmt.Sprintf("rows=%d err=%v", len(page.Requests), err) })
+	if err != nil {
+		t.Fatal(err)
 	}
 	var manual, auto *dash.Event
 	for _, e := range page.Requests {
