@@ -902,6 +902,7 @@ A gateway does not have to charge that, and two things go wrong when it does not
 which carries the whole litellm-gateway table:
 
 ```yaml
+# currency: Bobcoins     # optional: the unit of every rate in the file. Unset, USD
 # cache_read_frac: 0.1  # optional: one read multiple for every model. Unset, it follows the model
                          # (0.1x; 0.05x Opus/Sonnet 5.5; 0.025x Fable/Mythos 5.1)
 cache_write_frac: 1.25   # …and cache_write
@@ -912,7 +913,12 @@ models:
 ```
 
 Rates are **dollars per million tokens**, matching every vendor's price page; they are
-converted once on load. Ids are matched case-insensitively: an exact id wins, and otherwise
+converted once on load. A file whose rates are in another unit names it with `currency` (1 to 16
+ASCII letters; any other value stops the proxy at startup). Bob's file says `currency: Bobcoins`.
+The dashboard then shows those costs in that unit. The API's money fields keep their `*_usd` names.
+Each dashboard reply that carries them also says `currency`: the unit of the rows in its filter, or
+`mixed` when they have more than one unit. `/stats` and the `cg_*_usd` metrics are in the price
+file's unit too. Needs context-guru-proxy v0.7.4 or newer. Ids are matched case-insensitively: an exact id wins, and otherwise
 the **longest** entry wins whether it matched as a family prefix or by containment — so a
 specific entry always beats the family it belongs to and order in the file decides nothing.
 Containment applies only to entries that look like a model id (one containing a `/` or a
