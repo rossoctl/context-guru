@@ -132,6 +132,10 @@ func ParseTable(b []byte) (*Table, error) {
 	if !currencyName.MatchString(f.Currency) {
 		return nil, fmt.Errorf("model price list: currency must be 1 to 16 ASCII letters, got %q", f.Currency)
 	}
+	// The dashboard shows dollars only for the one spelling "USD".
+	if strings.EqualFold(f.Currency, USD) {
+		f.Currency = USD
+	}
 	// The dashboard says "mixed" for a view in more than one unit, and then hides money.
 	if strings.EqualFold(f.Currency, "mixed") {
 		return nil, fmt.Errorf("model price list: currency %q is reserved; name the unit the rates are in", f.Currency)

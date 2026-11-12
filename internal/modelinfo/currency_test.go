@@ -53,6 +53,21 @@ func TestTableRefusesMixedAsACurrency(t *testing.T) {
 	}
 }
 
+// The dashboard shows dollars only for "USD". A file that writes usd in another case means dollars too,
+// so the loader stores the one spelling.
+func TestTableReadsUSDInAnyCase(t *testing.T) {
+	for _, c := range []string{"usd", "Usd", "USD"} {
+		tb, err := ParseTable([]byte("currency: " + c + "\nmodels:\n  - {match: premium, in: 2.0, out: 2.0}\n"))
+		if err != nil {
+			t.Fatalf("currency %s: %v", c, err)
+		}
+		p, _ := tb.Price(context.Background(), "premium")
+		if got := p.Unit(); got != USD {
+			t.Errorf("currency %s: unit = %q, want %q", c, got, USD)
+		}
+	}
+}
+
 // The public map and the built-in table price in dollars.
 func TestPriceWithoutAUnitIsUSD(t *testing.T) {
 	if got := (Price{Input: 1e-6}).Unit(); got != "USD" {
