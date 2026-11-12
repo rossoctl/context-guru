@@ -10,6 +10,8 @@ export const LOOPBACK = '127.0.0.1'
 export const DEFAULT_RESET = '~/.local/state/context-guru-bob/context-guru-reset'
 // The same session id shape the plugin's signal hook accepts.
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/
+// A money unit name the status bar can show: ASCII letters only, so no `$(icon)` syntax.
+const UNIT = /^[A-Za-z]{1,16}$/
 
 export type State = 'ok' | 'down' | 'not_installed'
 
@@ -25,6 +27,9 @@ export type CacheState = {
   window?: number
   priced?: boolean
   money?: { main?: Money, others?: Money }
+  // The unit of the money: "USD", a unit name such as "Bobcoins", or "mixed".
+  // An old proxy does not send it, and its money is USD.
+  currency?: unknown
 }
 
 export type Snapshot = {
@@ -96,10 +101,25 @@ export function formatSaved(saved: number | undefined, cache: CacheState | undef
   // undefined is "no data" (no session row, or a failed read), not zero.
   if (saved === undefined) return 'saved —'
   const tokens = saved > 0 ? `saved ${formatTokens(saved)} tok` : 'saved 0'
-  // Money only when the proxy has a price. Bob has none, so it never shows `$` today.
+  // Money only when the proxy has a price. With a preset that prices Bob, the unit is
+  // Bobcoins, and the `saved_usd` fields then hold Bobcoins, despite their name.
   if (cache?.priced !== true || !cache.money) return tokens
-  const usd = (num(cache.money.main?.saved_usd) ?? 0) + (num(cache.money.others?.saved_usd) ?? 0)
-  return `${tokens} · $${usd.toFixed(2)}`
+  const amount = (num(cache.money.main?.saved_usd) ?? 0) +
+    (num(cache.money.others?.saved_usd) ?? 0)
+  if (cache.currency === undefined || cache.currency === 'USD') {
+    return `${tokens} · $${amount.toFixed(2)}`
+  }
+  // "mixed", or a name the status bar cannot show safely: tokens only.
+  const unit = typeof cache.currency === 'string' ? cache.currency.trim() : ''
+  if (unit === 'mixed' || !UNIT.test(unit)) return tokens
+  return `${tokens} · ${formatAmount(amount)} ${unit}`
+}
+
+// The dashboard's rule: 0 as 0, 4 decimals below 0.01, else 2.
+function formatAmount(value: number): string {
+  const abs = Math.abs(value)
+  if (abs === 0) return '0'
+  return value.toFixed(abs < 0.01 ? 4 : 2)
 }
 
 export function parsePort(text: string | undefined): number {
