@@ -313,3 +313,5 @@ The hooks always exit 0 within 5 seconds, so they never block Bob.
 
 Bob asks you to approve each command a skill runs. Approve the read-only `status` and
 `--plan`/`--dry-run` commands as you like. Keep setup and uninstall behind a per-run approval.
+
+See the [matrix of plugins, providers and settings](../../docs/reference/plugins-matrix.md) for what each plugin offers per provider.
