@@ -9,14 +9,14 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
+// bobcoinsPerMillion is Bob's measured rate, in Bobcoins per million tokens.
+const bobcoinsPerMillion = 2.0
+
 // The plugin's prices.yaml is what the proxy loads as MODEL_PRICES under bob-ultrahigh. A file the
 // proxy cannot parse stops it at startup, so the shipped file itself is loaded here, the proxy's way.
 // Every Bob tier must price a cache read and a cache write at its input rate: Bob's flat rate.
 // Output too: IBM's own per-call credits are 2.0 x (prompt + completion) / 1e6 (20 calls, 0.0000%
 // error, 2026-11-04), so the file is in Bobcoins, 2.0 per million for every token type.
-// bobcoinsPerMillion is Bob's measured rate, in Bobcoins per million tokens.
-const bobcoinsPerMillion = 2.0
-
 func TestBobPricesFileIsAFlatRateForEveryTier(t *testing.T) {
 	table, err := modelinfo.LoadTable(filepath.Join("context-guru", "prices.yaml"))
 	if err != nil {

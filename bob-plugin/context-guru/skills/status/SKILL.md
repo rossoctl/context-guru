@@ -32,6 +32,6 @@ Tell the user they can open the dashboard at `dashboard=`.
 Always add the `note=`: after setup, and after uninstall, the user logs in to Bob once.
 
 Token figures are true. Bob bills in Bobcoins, not dollars. Never quote a cost for Bob in dollars.
-With `bob-ultrahigh`, the dashboard's Bob cost figures are Bobcoins (2.0 per million tokens), even
-where it shows a `$` sign: quote them as Bobcoins. With another preset, the proxy does not price
+With `bob-ultrahigh`, the dashboard's and the status bar's Bob cost figures are Bobcoins (2.0 per
+million tokens), even where they show a `$` sign: quote them as Bobcoins. With another preset, the proxy does not price
 Bob, so quote tokens only.

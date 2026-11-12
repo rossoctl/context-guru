@@ -8,8 +8,9 @@
 # the same. Measured from IBM's own per-call `credits` field: credits = 2.0 x (prompt + completion) /
 # 1,000,000, on 20 calls, with 0.0000% error, and the account total moved by exactly their sum
 # (2026-11-04; #1030). The sweep's warm cost gate needs the flat rate, or it prices a cache rewrite at
-# Claude rates and refuses every warm cut. The gate uses only ratios, so the unit does not change its
-# answer.
+# Claude rates and refuses every warm cut. The cost gates compare costs with each other, so the unit
+# does not change their answers. The measured output rate does: output is 1x input, not 5x, so a model
+# call that CG makes looks cheaper to extract_llm's economic gate than with the old estimates.
 #
 # Bob names a tier, not a model, so each tier is listed. The 20 calls did not separate the tiers, and
 # no per-tier rate is known, so every tier has the same measured rate.
