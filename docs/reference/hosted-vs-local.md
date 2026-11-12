@@ -4,6 +4,7 @@ A hosted proxy (multi-tenant, started with `--upstreams`) behaves the same as a 
 A new hosted-only branch must add its row to this page, with its reason.
 
 Hosted mode is the mode where `Options.Tenants` is set. Local mode is the single-tenant proxy.
+A row that says "Same in both modes" records a checked fact: the safety property holds in both modes.
 Line numbers point at the code on `main` when this page was written.
 
 ## A. Needed for tenant safety or credentials
@@ -16,16 +17,16 @@ Line numbers point at the code on `main` when this page was written.
 | Upstream choice ([tenancy.go:715](https://github.com/rossoctl/context-guru/blob/main/proxy/tenancy.go#L715)) | One fixed upstream | The tenant picks a name from the operator's allow-list. The call uses the tenant's own key | "a tenant never supplies a URL, so this stays an allow-list and not an SSRF hop" | None |
 | `/stats` and `/metrics` access ([proxy.go:2905](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L2905), [promexport.go:334](https://github.com/rossoctl/context-guru/blob/main/proxy/promexport.go#L334)) | Open | Loopback or a token | "one tenant's traffic mixed with everyone else's" | None |
 | `/stats` leaves out pipeline, preset and savings ([proxy.go:3016](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L3016), [proxy.go:3043](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L3043) for the store block, [proxy/savings.go:142](https://github.com/rossoctl/context-guru/blob/main/proxy/savings.go#L142)) | Shown | Left out | "/stats aggregates every tenant and h.pipe describes none of them" | None |
-| Bob `count_tokens` and the `/` catch-all ([counttokens.go:37](https://github.com/rossoctl/context-guru/blob/main/proxy/counttokens.go#L37), [proxy.go:671](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L671)) | Pass through | Authenticate, meter, and inject the tenant's key | "an unmetered open forwarder that also leaked OUR token to the upstream in place of the tenant's" | None |
-| Bob model-info forwarding ([proxy.go:710](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L710)) | The proxy reads the response | Not done | Bob does not run on hosted for now (owner, 2026-11-12) | None |
+| The `count_tokens` route and the Bob `/` catch-all ([counttokens.go:37](https://github.com/rossoctl/context-guru/blob/main/proxy/counttokens.go#L37), [proxy.go:671](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L671)) | Pass through | Authenticate, meter, and inject the tenant's key | "an unmetered open forwarder that also leaked OUR token to the upstream in place of the tenant's" | None |
+| Bob model-info forwarding ([proxy.go:710](https://github.com/rossoctl/context-guru/blob/main/proxy/proxy.go#L710)) | The proxy reads the response | Not done | Bob is not deployed on hosted for now (owner, 2026-11-12), so this rule was not designed for hosted Bob | None |
 | Process-wide counters on the dashboard ([dash/api.go:753](https://github.com/rossoctl/context-guru/blob/main/dash/api.go#L753), [app.js:4643](https://github.com/rossoctl/context-guru/blob/main/dash/ui/app.js#L4643)) | Everyone sees them | Managers only | "they leak other tenants' traffic volume" | None |
 | Manager-only tabs ([app.js:6141](https://github.com/rossoctl/context-guru/blob/main/dash/ui/app.js#L6141)) | Config and Components open, the rest locked | Hidden from non-managers | "a permissions boundary over somebody else's data" | None |
-| `campaigns.js` ([app.js:6188](https://github.com/rossoctl/context-guru/blob/main/dash/ui/app.js#L6188)) | Loaded as before | Loaded for managers only | A plain account must not see manager code in its network tab | None |
+| `campaigns.js` ([app.js:6188](https://github.com/rossoctl/context-guru/blob/main/dash/ui/app.js#L6188)) | Not loaded. The view does not exist locally | Loaded for managers only | A plain account must not see manager code in its network tab | None |
 | Cheap-model usage per request ([proxy/dashcapture.go:703](https://github.com/rossoctl/context-guru/blob/main/proxy/dashcapture.go#L703), [cheapmodel/usage.go:40](https://github.com/rossoctl/context-guru/blob/main/cheapmodel/usage.go#L40)) | Same in both modes | Same in both modes | A shared counter delta would "let a tenant infer other tenants' compaction activity from its own rows" | Metadata only |
 | Per-tenant limits, row quota, and `--idle-exit` ([limits.go](https://github.com/rossoctl/context-guru/blob/main/proxy/limits.go), [main_run.go:237](https://github.com/rossoctl/context-guru/blob/main/proxyapp/main_run.go#L237), [idleexit.go:277](https://github.com/rossoctl/context-guru/blob/main/proxyapp/idleexit.go#L277)) | No limits. `--idle-exit` allowed | Limits and a row quota. `--idle-exit` refused | "a gateway serving other people's agents must not self-terminate" | The row quota changes how much history is kept |
 | Session recorder directory ([sessionrec.go:366](https://github.com/rossoctl/context-guru/blob/main/proxy/sessionrec.go#L366)) | One flat directory | One owner-only (0700) directory per tenant | Tenant isolation | Recorded bodies, one directory per tenant |
 
-`--idle-exit` is also refused together with `--bob-upstream`. Bob does not run on hosted for now, so this rule also hits local Bob.
+`--idle-exit` is also refused together with `--bob-upstream`. Bob is not deployed on hosted for now (owner, 2026-11-12), so this rule was not designed for hosted Bob. It also hits local Bob.
 
 ## B. Product choices with a written reason
 
