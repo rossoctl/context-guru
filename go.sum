@@ -102,8 +102,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624 h1:/pfhva2bnjY8GanZIUoiqy0KQ1RbspWN0kG0gapnNrQ=
 github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624/go.mod h1:OtEYvVnZhMepTLXLTAXTFxf8fRAib/41vehHWKYO99o=
-github.com/rossoctl/accountant v0.1.1-0.20261111155940-181c523e81ae h1:aeJ4pIt1WqRHQv+OanzVuvTQ+3fct5ZN/gXYYpqpxcA=
-github.com/rossoctl/accountant v0.1.1-0.20261111155940-181c523e81ae/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
+github.com/rossoctl/accountant v0.1.1 h1:nODLHC3wcI1Xv/CxX+54xU4f8dDAIteDFaRrpdQzjvc=
+github.com/rossoctl/accountant v0.1.1/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
 github.com/spf13/cast v1.10.0 h1:h2x0u2shc1QuLHfxi+cTJvs30+ZAHOGRic8uyGTDWxY=
 github.com/spf13/cast v1.10.0/go.mod h1:jNfB8QC9IA6ZuY2ZjDp0KtFO2LZZlg4S/7bzP6qqeHo=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
