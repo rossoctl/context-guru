@@ -6,8 +6,8 @@
 //
 // This package imports no other package of this module, so any test package can use it without an
 // import cycle. For that reason it cannot call the production DSN builder (dash.dsn, which is
-// private and sits in a package that imports store). It copies the same pragmas. Keep them equal
-// to dash/store.go dsn and tooldefer/file.go Open.
+// private and sits in a package that imports store). It copies the pragmas of dash/store.go
+// dsn. tooldefer/file.go Open uses the first 3 of them. Keep them equal to dash/store.go dsn.
 package testdb
 
 import (
@@ -26,10 +26,12 @@ const openBound = 10 * time.Second
 // maxOpenConns is the pool size of tooldefer.Open, the smallest production pool.
 const maxOpenConns = 4
 
-// DSN returns the production DSN for a file path: busy_timeout first (the driver runs the pragmas
-// in order, and journal_mode needs a lock), then WAL and synchronous NORMAL.
+// DSN returns the dash DSN for a file path (dash/store.go dsn): busy_timeout first (the driver runs
+// the pragmas in order, and journal_mode needs a lock), then WAL, synchronous NORMAL, foreign keys
+// and incremental auto_vacuum. The last 2 are inert for the store and tooldefer schemas.
 func DSN(path string) string {
-	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)&_pragma=auto_vacuum(2)"
 }
 
 // Open opens the SQLite file at path with the production settings. It closes the database when the

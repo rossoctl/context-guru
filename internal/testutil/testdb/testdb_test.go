@@ -18,6 +18,10 @@ func TestOpenUsesProductionSettings(t *testing.T) {
 	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&bt); err != nil || bt != 5000 {
 		t.Fatalf("busy_timeout = %d, %v", bt, err)
 	}
+	var fk int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
+		t.Fatalf("foreign_keys = %d, %v", fk, err)
+	}
 	if n := db.Stats().MaxOpenConnections; n != maxOpenConns {
 		t.Fatalf("max open conns = %d", n)
 	}
@@ -58,7 +62,7 @@ func TestOpenFailsWithTheRealErrorOnALockedFile(t *testing.T) {
 		t.Fatal("open succeeded on a locked file")
 	}
 	if d := time.Since(start); d > openBound+2*time.Second {
-		t.Fatalf("open took %v, want at most %v", d, openBound)
+		t.Fatalf("open took %v, want at most %v", d, openBound+2*time.Second)
 	}
 	if !strings.Contains(err.Error(), "locked") && !strings.Contains(err.Error(), "busy") {
 		t.Fatalf("error does not name the lock: %v", err)
