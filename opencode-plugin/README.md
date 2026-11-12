@@ -30,11 +30,11 @@ On OpenCode 2 the config key is `plugins` (plural); the same local path works:
 ```
 
 For a project-only install, put the same local path in the project's `opencode.json` instead. The
-first startup downloads release v0.7.2 when `context-guru-proxy` is not already on `PATH`,
+first startup downloads release v0.7.3 when `context-guru-proxy` is not already on `PATH`,
 verifies its SHA-256 checksum, and stores it under `~/.local/state/context-guru-opencode/`.
 
 The default is `preset: off` with the `auto` cache strategy. These match the Claude Code plugin.
-If `auto` does not fit the routed providers (an OpenAI-only setup), the plugin runs `none` and logs why.
+`auto` fits Anthropic and OpenAI. If a chosen strategy does not fit the routed providers (for example `1-hour-head` on an OpenAI-only setup), the plugin runs `none` and logs why.
 Set other values with the tuple form:
 
 ```json
@@ -115,3 +115,5 @@ These Claude Code plugin features do not exist here:
 - `statusline` and the session signal hooks
 - the `x-context-guru-ping` header for manual pings
 - the keep-alive plan from `cache-campaign`
+
+See the [matrix of plugins, providers and settings](../docs/reference/plugins-matrix.md) for what each plugin offers per provider.

@@ -122,6 +122,8 @@ A review without this block does not count toward the 2.
   6. If the remerge-diff shows a hand resolution in code, the integrator starts one more `offload-review` round on the new head.
   7. A resolution that needs a design choice goes back to the PR owner.
   8. Code fixes stay with the PR owner.
+  9. **A semantic conflict that a file-overlap check cannot see.** A test can read a table that another PR removes. In v0.7.2, the pi-package test read `STRATEGIES` from `settings.py` after #1055 removed it. Only CI on the PR catches this. Wait for CI after every merge of `main`.
+  10. **A conflict in `docs/data-dependence.md`** is not a hand resolution. That page is generated from the row files in `docs/data-dependence/`. The subagent takes either side and runs `go run ./cmd/gen-datadep`. A row-file conflict (two PRs edited the same row) still goes to the PR owner. The remerge-diff may show the page; check that it equals the generator's output.
 
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
@@ -167,16 +169,23 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 1. Note the parent's head SHA **before** you merge the parent.
 2. Merge the parent.
 3. **Retarget the child to `main` first.** CI may not start for a push made while the PR targets another branch.
-4. Rebase only the child's own commits: `git rebase --onto origin/main <old-parent-head> <child>`.
-5. Push with a lease, so you never overwrite work the author pushed in the meantime: `git push --force-with-lease=refs/heads/<branch>:<sha-you-rebased> ...`.
+4. Merge `origin/main` into the child. Do not rebase, so there is no force-push. Do not push yet.
+5. Push the merge commit, without force.
 6. Wait for green CI, then merge.
 7. If CI did not start on the new head, close and reopen the PR.
 
-**Conflicts during a rebase:**
+**Conflicts during the merge:**
 - **Mechanical** (both sides add a line to the same list): resolve it, and say how in the merge body.
-- **Semantic** (the code was restructured under the PR): stop and hand the rebase to the author. Then review the author's conflict resolution before you merge.
+- **Semantic** (the code was restructured under the PR): stop and hand the merge to the author. Then review the author's conflict resolution before you merge.
 
-This section is about a stacked PR rebase. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
+**A PR that another PR is stacked on** (GitHub's stack feature) cannot merge with `gh pr merge` or `PUT /pulls/<n>/merge`. Use `PUT /repos/<owner>/<repo>/pulls/<n>/merge-async` with `merge_method: squash`, `merge_action: direct_merge`, `sha`, `commit_title` and `commit_message`. It merges that PR only, not the PRs stacked on top.
+- **Use it on the bottom PR of the stack only.** On a child, it also merges every open PR below it.
+- **Add `bypass_rules: true` only if a rule blocks the merge.** It is the same bypass as `--admin`. The rules in [Merge](#3-merge) apply: the owner's yes for any failed rule other than the review rule, `check-ready.sh` first, and the rule suite read after the merge.
+- **A `202` is not a merge.** Read the PR state back from GitHub.
+
+**Check that the child's own change is unchanged:** the added and removed lines of `git diff origin/main...<head>` match the approved change.
+
+This section is about a stacked PR. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
 ### Defects found on the way
 
@@ -212,6 +221,7 @@ Notes:
 - **Do not copy new code into that directory while a run is in progress.**
 - The script runs a failed step once more. "flaky" in the summary means the second run passed. If a step failed twice, run it on the same commit in a clean directory. That separates a flaky test from a defect.
 - Known flakes on a loaded machine: `SQLITE_BUSY` in `./dash/...`, and `TestDashEmitterKeepAlivePingCarriesNoWaitCause`.
+- **Known flake: `TestFailedLoadAllowsRetry`** (`store/disk_test.go:413`). It fails with `OpenDisk: context deadline exceeded` when the machine is under load. In v0.7.2 it passed on a re-run, and 3 times when run alone. Issue #1075 covers it. Check it with `gh issue view 1075`.
 - If a test fails, run it on an unmodified `origin/main` on the same machine before you call it a defect of the release. Some tests fail because of the machine itself.
 
 **Part B: one live session through a proxy built from `main`.**
@@ -239,6 +249,8 @@ Notes:
   - The keep-alive skips the first request of each session after every proxy restart. Restart, then send 2 turns before you test a ping.
   - The model gateway can replay a byte-identical request from its own cache. Put a new nonce in every prompt.
   - For the shape of a turn's last message, read `wake_cause`, not `stop_reason`. `ping_n` is in `request_lifecycle`.
+  - **Do not load the plugin with `--plugin-dir` for the ping-test turns.** When loaded this way, the plugin's SessionEnd hook releases the keep-alive entry as soon as `claude -p` exits. The ping then shows `pingable: false` and "no entry". Send the ping-test turns without the plugin.
+  - **The #858 gate: a thread gets pings only after it has made one earlier tool call.** Send a tool turn first. Then test pings.
   - `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` removes Claude Code's ToolSearch. Leave it unset for a tool-search check, and send one warm-up call first.
   - The status line prints nothing until a settings file records the routing: `settings.py add --file <work>/.claude/settings.local.json --url ...`, and run it with `CLAUDE_PROJECT_DIR=<work>`.
   - `sqlite3 "file:...?mode=ro"` fails once the proxy has stopped. Copy the database first.

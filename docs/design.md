@@ -21,7 +21,7 @@ infrastructure the components sit on.
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. The shared code asks the request's agent; it never names one |
-| `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`) and its usage reading (the cache writes and their 1-hour part) |
+| `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), and where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`) |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
@@ -31,7 +31,8 @@ infrastructure the components sit on.
 | `config/` | strict YAML loader, presets, pipeline builder |
 | `proxy/` | the standalone/gateway HTTP proxy |
 | `adapters/bifrost/` | `LLMPlugin` adapter to embed the pipeline in a bifrost deployment |
-| `cmd/context-guru-proxy/` | the proxy binary / eval-containers gateway |
+| `proxyapp/` | the proxy's startup, `proxyapp.Main`: flags, configuration, the dashboard, hosted mode and the server. A host adds its own parts through `proxyapp.Hooks` instead of copying the startup. Also a facade over the few `internal/` symbols a host needs |
+| `cmd/context-guru-proxy/` | the proxy binary / eval-containers gateway: one call, `proxyapp.Main(proxyapp.Hooks{})` |
 
 ## The component model
 

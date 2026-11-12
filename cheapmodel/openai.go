@@ -24,6 +24,17 @@ type OpenAI struct {
 	Ref       dispatch.Ref
 	Model     string // e.g. gpt-4o-mini
 	MaxTokens int    // default DefaultMaxTokens (4096)
+	// Path is the chat-completions path on the host's endpoint. Empty means /v1/chat/completions.
+	// A host sets it when its route uses another path (IBM Bob).
+	Path string
+}
+
+// chatPath is o.Path, or /v1/chat/completions when it is empty.
+func (o OpenAI) chatPath() string {
+	if o.Path == "" {
+		return "/v1/chat/completions"
+	}
+	return o.Path
 }
 
 // AsModel is components.Remodeler: same endpoint, same credential, different model.
@@ -245,7 +256,7 @@ func (o OpenAI) post(ctx context.Context, msgs []any) (string, error) {
 		"max_tokens": maxTok,
 		"messages":   msgs,
 	})
-	respBody, err := send(ctx, o.D, o.Ref, bschemas.OpenAI, "/v1/chat/completions", "",
+	respBody, err := send(ctx, o.D, o.Ref, bschemas.OpenAI, o.chatPath(), "",
 		http.Header{"Content-Type": {"application/json"}}, reqBody)
 	if err != nil {
 		return "", err

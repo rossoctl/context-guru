@@ -31,11 +31,13 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
   - `UserPromptSubmit`: `check` adds one line to the model context when the proxy is down. Else it
     prints nothing.
 - **State** in `~/.local/state/context-guru-bob/`: `install.json`, the proxy config
-  `bob-PORT.yaml`, the dashboard database `dashboard-PORT.db`, `proxy.log`, a copy of your rc file
+  `bob-PORT.yaml`, with `bob-ultrahigh` also Bob's prices `bob-PORT-prices.yaml`, the dashboard database `dashboard-PORT.db`, `proxy.log`, a copy of your rc file
   before the first change (`backup/`), and the reset script `context-guru-reset`.
 
-The proxy runs only lossless components (`format`, `toon`, `cachesplit`). The lossy ones need the
-expand step, which does not yet work on Bob's streams.
+By default the proxy runs the `bob-ultrahigh` preset. It cuts content, and it keeps the originals,
+summaries and held answers on your Mac. The model gets cut content back through the expand repair
+(test T4 passed on the real Bob IDE, 2026-11-11). For lossless components only (`format`, `toon`
+and `cachesplit`), run `configure --preset lossless`.
 
 ## Install
 
@@ -52,6 +54,12 @@ Without Bob, from a terminal:
 python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --plan
 python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --i-consent-to-traffic-interception
 ```
+
+Setup uses a `context-guru-proxy` on your PATH, or the plugin's own copy, only if it has the Bob
+gateway, can list its cache strategies (v0.7.1 or later) and is new enough for the preset setup
+writes (`bob-ultrahigh`, the default, needs v0.7.2 or later). It skips any other one, says why in
+`binary_skipped=`, and downloads the latest release. With no network, setup then stops with
+`result=binary_install_failed`; it does not fall back to the skipped proxy.
 
 ### Status bar
 
@@ -127,25 +135,75 @@ the variable. `result=no_bob_traffic` tells you this. The fix is to quit Bob and
 Dock.
 
 The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Dollar figures
-for Bob are not: Bob bills in Bobcoins, and the proxy does not price them yet.
+for Bob are not: Bob bills in Bobcoins, and the proxy does not price them yet. With `bob-ultrahigh`
+the proxy prices them with estimated dollar rates (see below).
 
 ## Presets
 
 ```sh
 python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py configure --show
-python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py configure --preset off       # or lossless
+python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py configure --preset off       # or lossless, bob-ultrahigh
 ```
 
-Or ask Bob "which context-guru preset runs". Bob has two presets:
+Or ask Bob "which context-guru preset runs". Bob has three presets:
 
 | Preset | Does |
 |---|---|
-| `lossless` (default) | Reformats requests (`format`, `toon`, `cachesplit`). Nothing is cut. |
+| `lossless` | Reformats requests (`format`, `toon`, `cachesplit`). Nothing is cut. It stores no content. |
+| `bob-ultrahigh` (default) | context-guru's `ultrahigh`, set up for Bob (see below). It cuts content, and the model can get it back. |
 | `off` | Sends requests through as they are. |
 
-The other context-guru presets (`conservative` to `xhigh`) can drop content. context-guru must be
-able to give it back to the model (the expand step), and that is not proven for Bob yet. So the
-plugin refuses them. A change restarts the proxy. If the new proxy does not start, the plugin puts
+### `bob-ultrahigh`
+
+It is `ultrahigh` with 4 Bob changes:
+
+1. **Summaries use Bob's own model.** No model is named. A summary call goes only to Bob's server,
+   with your own Bob key, and uses your Bob quota like any request.
+2. **`extract_llm` runs on Bob,** though Bob caches. Bob bills a cache rewrite at the input rate,
+   so a rewrite costs little.
+3. **The sweep may apply on a warm cache** (`warm: true`), behind its cost gate.
+4. **Tool deferral keeps Bob's core tools** (see below).
+
+It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`): every input token at one
+flat rate, a cache read and a cache write too. The sweep's cost gate needs that. Without it, the
+gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. The dollar rates are
+estimates; only the flat ratio is measured. So with this preset the dashboard's Bob dollar figures
+change. Leaving the preset, `uninstall` and the reset script remove the prices.
+
+It needs context-guru-proxy v0.7.2 or newer. On an older release, `configure` refuses it and says
+to update first.
+
+The model sees 3 more tools: `context_guru_tools` (the tool search), `context_guru_expand` (gets cut
+content back) and `context_guru_adjudicate` (the sweep's question).
+
+#### Tool deferral
+
+Bob's tool definitions are about 55% of every model call. `bob-ultrahigh` holds back the tools you
+do not use:
+
+- **What it holds back:** a tool that your last 3 Bob sessions declared and did not use, and that
+  weighs at least 200 tokens. With fewer than 3 past sessions, it holds back nothing.
+- **What it never holds back:** Bob's core tools: `read_file`, `write_file`, `apply_diff`,
+  `search_and_replace`, `insert_content`, `execute_command`, `grep`, `glob`, `list_files`,
+  `ask_followup_question`, `use_skill`, `switch_mode`, `update_todo_list`, `spawn_subagent`,
+  `start_subtask`.
+- **How a tool comes back:** the proxy adds a search tool, `context_guru_tools`, and a list of the
+  held-back names. The model calls the search, and the proxy answers it and adds the tool back for
+  the rest of the task. Bob never sees the search. One held-back tool costs one extra turn.
+- **A direct call is not detected:** if the model calls a held-back tool directly instead of
+  searching, Bob answers "Tool does not exist" and that call fails. On Bob the proxy does not
+  detect this, so deferral stays on, and each repeated direct call wastes a turn.
+- **The set stays fixed in a task,** so the prompt cache stays valid. A change reaches new tasks only.
+- **The off switch:** if Bob's gateway refuses a request with held-back tools, the proxy sends the
+  original request and stops deferral for that model. `doctor` warns (`tool_defer=warn`).
+- **What it keeps:** tool names, use flags and counts only. No tool text, no prompts.
+
+`status` shows the counts from the proxy's `/stats` when deferral ran: `tool_defer_requests`,
+`tool_defer_deferred_tokens`, `tool_defer_add_backs`, `tool_defer_wrong_guesses`,
+`tool_defer_turned_off`, `tool_defer_break`.
+
+The other context-guru presets (`conservative` to `ultrahigh`) are not tested on Bob, so the plugin
+refuses them. A change restarts the proxy. If the new proxy does not start, the plugin puts
 back the old config and the old service, and says if that failed (`rolled_back=false`). A config
 you edit by hand is kept: setup and `--cache-strategy` leave it, `configure --show` reports
 `preset=custom`, and only `--preset NAME` replaces it. Setup, configure, update and uninstall take
@@ -157,6 +215,9 @@ Only `none`. A keep-alive ping keeps a provider's prompt cache warm while you ar
 pings only Anthropic and OpenAI Responses caches, and Bob's model call is OpenAI chat/completions,
 so a ping strategy would do nothing for Bob. Also, Bob has no SessionEnd event, so a ping could not
 stop when a Bob task ends.
+
+The plugin reads the offer from the proxy's own table (`context-guru-proxy strategies`, proxy v0.7.1
+or later). Today that offer is only `none`.
 
 ## Update
 
@@ -188,6 +249,9 @@ status. Each check prints `ok`, `warn` or `fail`, and a `fix=` line for each tha
   shell startup files, so it is opt-in. Setup always runs it.
 - `service`: also checks that the agent's `--config` is the managed config file.
 - `preset`: `warn` when the config was edited by hand. It may hold a lossy component.
+- `tool_defer`: only with `bob-ultrahigh`, when the proxy reports it. `warn` when the proxy turned
+  tool deferral off at least once since it started (`/stats` `tool_defer.turned_off` or
+  `client_search_disabled.break` above 0). On Bob, only a refused request turns it off.
 - `hooks`, `binary`: our hooks are there; the binary has `--bob-upstream`.
 - `bob_traffic`: a Bob request reached the proxy in the last 24 hours.
 - `bob_bundle`: Bob's own code still has the names context-guru depends on (`VITE_GATEWAY_BASE_URL`,
@@ -255,3 +319,5 @@ The hooks always exit 0 within 5 seconds, so they never block Bob.
 
 Bob asks you to approve each command a skill runs. Approve the read-only `status` and
 `--plan`/`--dry-run` commands as you like. Keep setup and uninstall behind a per-run approval.
+
+See the [matrix of plugins, providers and settings](../../docs/reference/plugins-matrix.md) for what each plugin offers per provider.

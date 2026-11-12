@@ -470,3 +470,15 @@ func TestToolfilterAlwaysDeferParses(t *testing.T) {
 		t.Errorf("ultrahigh always_defer = %v (err %v), want empty", got, err)
 	}
 }
+
+func TestKeepAliveMaxBodyBytesDefaultsAndRejectsNegative(t *testing.T) {
+	if got := (CacheConfig{}).Resolved().KeepAliveMaxBodyBytes; got != DefaultKeepAliveMaxBodyBytes {
+		t.Errorf("default = %d, want %d", got, DefaultKeepAliveMaxBodyBytes)
+	}
+	if got := (CacheConfig{KeepAliveMaxBodyBytes: 8 << 20}).Resolved().KeepAliveMaxBodyBytes; got != 8<<20 {
+		t.Errorf("explicit 8 MiB came back as %d", got)
+	}
+	if (CacheConfig{KeepAliveMaxBodyBytes: -1}).validate() == nil {
+		t.Error("a negative body limit was accepted")
+	}
+}

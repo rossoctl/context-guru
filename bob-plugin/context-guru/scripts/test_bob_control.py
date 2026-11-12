@@ -15,15 +15,55 @@ import shutil
 import stat
 import sys
 import tarfile
+import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_bob_plugin import (  # noqa: E402
-    HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
+    FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
 
 LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
+# The proxy's own test runs this exact file through the real pipeline on Bob's route
+# (proxy/bobdefer_test.go), so the preset the plugin writes is the preset that was tested.
+BOB_ULTRAHIGH = (PLUGIN_ROOT.parents[1] / "proxy/testdata/bob_ultrahigh.yaml").read_text()
+# Loaded the proxy's way by bob-plugin/prices_test.go, so the file the plugin copies parses.
+PRICES = (PLUGIN_ROOT / "prices.yaml").read_bytes()
+
+# The shape of `context-guru-proxy strategies`. It has rows for other routes, so a test sees that
+# Bob offers only the rows that fit its own route.
+TABLE = {
+    "default": "auto", "aliases": {"5-min-ping": "auto"},
+    "presets": ["off", "conservative", "medium", "high", "xhigh"],
+    "strategies": [
+        {"name": "none", "spends": False, "desc": "no pings", "providers": ["any"], "cache": {}},
+        {"name": "auto", "spends": True, "desc": "anthropic pings", "providers": ["anthropic"],
+         "cache": {"keepalive": True}},
+        {"name": "1-hour-head", "spends": True, "desc": "anthropic head",
+         "providers": ["anthropic"], "cache": {"keepalive": True}},
+        {"name": "30-min-ping", "spends": True, "desc": "openai pings", "providers": ["openai"],
+         "cache": {"keepalive": True}},
+    ],
+}
+
+
+def write_script(path, body):
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return str(path)
+
+
+def table_binary(folder, table=TABLE):
+    """A fake proxy that prints `table` for `strategies`."""
+    return write_script(Path(folder) / "strategies-proxy",
+                        "cat <<'EOF'\n" + json.dumps(table) + "\nEOF\n")
+
+
+def with_row(name, providers):
+    row = {"name": name, "spends": True, "desc": "new pings", "providers": providers, "cache": {}}
+    return dict(TABLE, strategies=TABLE["strategies"] + [row])
 
 
 class Installed(TempHome):
@@ -44,17 +84,32 @@ class Installed(TempHome):
     def bootstraps(self, since=0):
         return sum(c.startswith("bootstrap") for c in self.launchctl_calls()[since:])
 
+    def record_binary(self, path):
+        record = PLUGIN.read_record()
+        record["binary"] = str(path)
+        PLUGIN.write_record(record)
+
+    def record_table_binary(self, table=TABLE):
+        """Point the install record at a fake proxy that lists `table` as its strategies."""
+        folder = self.root / "tablebin"
+        folder.mkdir(exist_ok=True)
+        self.record_binary(table_binary(folder, table))
+
 
 # ---------------------------------------------------------------------------- configure
 
 class ConfigureTest(Installed):
-    def test_show_reports_lossless_and_none_and_changes_nothing(self):
+    def setUp(self):
+        super().setUp()
+        self.record_table_binary()
+
+    def test_show_reports_bob_ultrahigh_and_none_and_changes_nothing(self):
         before = self.tree()
         code, out, _ = self.run_main("configure", "--show")
         self.assertEqual(code, 0, out)
-        self.assertIn("preset=lossless\n", out)
+        self.assertIn("preset=bob-ultrahigh\n", out)
         self.assertIn("cache_strategy=none\n", out)
-        self.assertIn("allowed_presets=off,lossless\n", out)
+        self.assertIn("allowed_presets=off,lossless,bob-ultrahigh\n", out)
         self.assertIn("allowed_cache_strategies=none\n", out)
         self.assertEqual(self.tree(), before)
 
@@ -71,15 +126,15 @@ class ConfigureTest(Installed):
         self.assertEqual(self.config.read_text(), LOSSLESS)
 
     def test_lossy_presets_are_refused_and_nothing_changes(self):
-        for name in ("conservative", "medium", "high", "xhigh", "coding", "house"):
+        for name in ("conservative", "medium", "high", "xhigh", "ultrahigh", "coding", "house",
+                     "lossless-defer"):
             with self.subTest(preset=name):
                 before, calls = self.tree(), len(self.launchctl_calls())
                 code, out, _ = self.run_main("configure", "--preset", name)
                 self.assertEqual(code, 2)
                 self.assertIn("result=refused\nreason=preset_not_allowed_for_bob\n", out)
-                self.assertIn(f"{name} can drop content that Bob cannot get back yet. Only off "
-                              "and lossless are allowed for Bob until reversibility is proven.",
-                              out)
+                self.assertIn(f"{name} is not tested on Bob. Only off, lossless and bob-ultrahigh "
+                              "are allowed for Bob.", out)
                 self.assertEqual(self.tree(), before)
                 self.assertEqual(len(self.launchctl_calls()), calls)
 
@@ -95,10 +150,72 @@ class ConfigureTest(Installed):
                 self.assertEqual(self.tree(), before)
         self.assertEqual(self.run_main("configure", "--cache-strategy", "none")[0], 0)
 
-    def test_the_allow_lists_are_single_constants(self):
-        self.assertEqual(PLUGIN.BOB_PRESETS, {"off": "preset: off\n",
-                                              "lossless": "pipeline: [format, toon, cachesplit]\n"})
-        self.assertEqual(PLUGIN.BOB_CACHE_STRATEGIES, ("none",))
+    def test_the_preset_allow_list_is_a_single_constant(self):
+        self.assertEqual(PLUGIN.BOB_PRESETS, {
+            "off": "preset: off\n",
+            "lossless": "pipeline: [format, toon, cachesplit]\n",
+            "bob-ultrahigh": BOB_ULTRAHIGH.removeprefix(PLUGIN.CONFIG_MARKER + "\n")})
+        self.assertEqual(PLUGIN.PRICED_PRESETS, ("bob-ultrahigh",))
+        self.assertEqual(PLUGIN.DEFAULT_PRESET, "bob-ultrahigh")
+
+    def test_show_lists_only_strategies_that_fit_the_route_and_the_plugin_applies(self):
+        self.record_table_binary(with_row("chat-ping", ["openai-chat"]))
+        code, out, _ = self.run_main("configure", "--show")
+        self.assertEqual(code, 0, out)
+        self.assertIn("allowed_cache_strategies=none\n", out)
+
+    def test_a_strategy_the_plugin_cannot_apply_is_refused_and_nothing_changes(self):
+        self.record_table_binary(with_row("chat-ping", ["openai-chat"]))
+        before, calls = self.tree(), len(self.launchctl_calls())
+        code, out, _ = self.run_main("configure", "--cache-strategy", "chat-ping")
+        self.assertEqual(code, 2)
+        self.assertIn("result=refused\nreason=cache_strategy_not_supported_by_plugin\n", out)
+        self.assertIn("cache_strategy=chat-ping\n", out)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.launchctl_calls()), calls)
+
+    def old_binary(self):
+        folder = self.root / "oldbin"
+        folder.mkdir()
+        self.record_binary(write_script(folder / "old",
+                                        "echo 'flag provided but not defined' >&2\nexit 2\n"))
+
+    def test_show_on_an_unreadable_table_still_reports_the_preset(self):
+        self.old_binary()
+        before = self.tree()
+        code, out, err = self.run_main("configure", "--show")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=ok\npreset=bob-ultrahigh\ncache_strategy=none\n"
+                      "allowed_presets=off,lossless,bob-ultrahigh\n", out)
+        self.assertIn("cache_strategy_error=strategy_table_unreadable\n", out)
+        self.assertIn("cache_strategy_detail=", out)
+        self.assertIn("update the proxy to v0.7.1 or later", out)
+        self.assertNotIn("allowed_cache_strategies", out)
+        self.assertEqual(err, "")
+        self.assertEqual(self.tree(), before)
+
+    def test_an_unreadable_table_is_a_clean_error_and_changes_nothing(self):
+        self.old_binary()
+        before = self.tree()
+        code, out, err = self.run_main("configure", "--cache-strategy", "30-min-ping")
+        self.assertEqual(code, 1)
+        self.assertIn("result=error\nreason=strategy_table_unreadable\n", out)
+        self.assertIn("update the proxy to v0.7.1 or later", out)
+        self.assertEqual(err, "")
+        self.assertEqual(self.tree(), before)
+
+    def test_cache_strategy_none_does_not_read_the_table(self):
+        self.old_binary()
+        code, out, _ = self.run_main("configure", "--preset", "off", "--cache-strategy", "none")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=configured\npreset=off\n", out)
+        self.assertEqual(self.config.read_text(), PLUGIN.CONFIG_MARKER + "\npreset: off\n")
+
+    def test_a_preset_change_does_not_read_the_table(self):
+        self.record_binary("/nonexistent/context-guru-proxy")
+        code, out, _ = self.run_main("configure", "--preset", "off")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=configured\npreset=off\n", out)
 
     def test_an_unmanaged_config_is_refused(self):
         self.config.write_text("preset: xhigh\n")
@@ -115,7 +232,7 @@ class ConfigureTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("result=restart_failed", out)
         self.assertIn("rolled_back=true", out)
-        self.assertEqual(self.config.read_text(), LOSSLESS)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
         self.assertEqual(PLUGIN.launchd_plist().read_bytes(), plist)
         self.assertEqual(self.bootstraps(calls), 2)
 
@@ -125,13 +242,169 @@ class ConfigureTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("rolled_back=false", out)
         self.assertIn("fix=", out)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
+
+    def plist_env(self):
+        return plistlib.loads(PLUGIN.launchd_plist().read_bytes()).get("EnvironmentVariables")
+
+    def test_preset_bob_ultrahigh_writes_the_tested_config_and_restarts(self):
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        calls = len(self.launchctl_calls())
+        code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+        self.assertEqual(code, 0, out)
+        self.assertIn("result=configured\npreset=bob-ultrahigh\n", out)
+        self.assertIn("proxy_restarted=true\n", out)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
+        self.assertEqual(self.bootstraps(calls), 1)
+        self.assertEqual(self.run_main("configure", "--show")[1].split("\n")[1],
+                         "preset=bob-ultrahigh")
+
+    def test_bob_ultrahigh_gives_the_proxy_bobs_flat_prices(self):
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        self.assertIsNone(self.plist_env())
+        self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+        prices = PLUGIN.proxy_prices(self.port)
+        self.assertEqual(prices.read_bytes(), PRICES)
+        self.assertEqual(stat.S_IMODE(prices.stat().st_mode), 0o600)
+        self.assertEqual(self.plist_env(), {"MODEL_PRICES": str(prices)})
+
+    def test_leaving_bob_ultrahigh_removes_the_prices(self):
+        self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        self.assertIsNone(self.plist_env())
+        self.assertFalse(PLUGIN.proxy_prices(self.port).exists())
         self.assertEqual(self.config.read_text(), LOSSLESS)
+
+    def test_a_failed_restart_on_bob_ultrahigh_puts_everything_back(self):
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        plist = PLUGIN.launchd_plist().read_bytes()
+        with mock.patch.object(PLUGIN, "wait_healthy", side_effect=[False, True]):
+            code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+        self.assertEqual(code, 1, out)
+        self.assertIn("rolled_back=true", out)
+        self.assertEqual(self.config.read_text(), LOSSLESS)
+        self.assertEqual(PLUGIN.launchd_plist().read_bytes(), plist)
+        self.assertFalse(PLUGIN.proxy_prices(self.port).exists())
+
+    def test_bob_ultrahigh_is_refused_on_a_proxy_older_than_its_settings(self):
+        before, calls = self.tree(), len(self.launchctl_calls())
+        with mock.patch.object(PLUGIN, "binary_version", return_value="v0.7.1"):
+            code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+        self.assertEqual(code, 2, out)
+        self.assertIn("result=refused\nreason=proxy_too_old\npreset=bob-ultrahigh\n", out)
+        self.assertIn("bob-ultrahigh needs context-guru-proxy v0.7.2 or newer; this one is "
+                      "v0.7.1. Run the update skill first.", out)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(self.launchctl_calls()), calls)
+
+    def test_bob_ultrahigh_runs_on_a_new_or_unnumbered_proxy(self):
+        for version in ("v0.7.2", "v0.8.0", "v0.6.7-32-g58939a47", "unknown"):
+            with self.subTest(version=version):
+                self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+                with mock.patch.object(PLUGIN, "binary_version", return_value=version):
+                    code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
+                self.assertEqual(code, 0, out)
+                self.assertIn("result=configured\npreset=bob-ultrahigh\n", out)
+
+    def test_setup_again_keeps_the_prices_of_bob_ultrahigh(self):
+        self.assertEqual(self.run_main("configure", "--preset", "bob-ultrahigh")[0], 0)
+        with mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"):
+            self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
+        self.assertEqual(self.config.read_text(), BOB_ULTRAHIGH)
+        self.assertEqual(self.plist_env(), {"MODEL_PRICES": str(PLUGIN.proxy_prices(self.port))})
+        self.assertEqual(PLUGIN.proxy_prices(self.port).read_bytes(), PRICES)
 
     def test_setup_again_keeps_the_chosen_preset(self):
         self.assertEqual(self.run_main("configure", "--preset", "off")[0], 0)
         with mock.patch.object(PLUGIN, "find_binary", return_value="/opt/cg/context-guru-proxy"):
             self.assertEqual(self.run_main("setup", "--i-consent-to-traffic-interception")[0], 0)
         self.assertEqual(self.config.read_text(), PLUGIN.CONFIG_MARKER + "\npreset: off\n")
+
+
+class StrategyTableTest(unittest.TestCase):
+    """The reader of `context-guru-proxy strategies` and the Bob offer. Fake binaries only."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name)
+
+    def test_reads_the_table_from_the_binary(self):
+        self.assertEqual(PLUGIN.load_strategy_table(table_binary(self.dir)), TABLE)
+
+    def test_bob_offers_exactly_none_from_a_table_with_other_routes(self):
+        self.assertEqual(PLUGIN.offered_strategies(TABLE), ["none"])
+
+    def test_the_offer_stays_none_when_the_proxy_adds_a_strategy_for_another_route(self):
+        for provider in ("openai", "anthropic"):
+            with self.subTest(provider=provider):
+                table = with_row(f"new-{provider}-ping", [provider])
+                self.assertEqual(PLUGIN.offered_strategies(table), ["none"])
+
+    def test_a_strategy_tagged_openai_chat_is_offered(self):
+        table = with_row("chat-ping", ["openai", "openai-chat"])
+        self.assertEqual(PLUGIN.offered_strategies(table), ["none", "chat-ping"])
+
+    def test_the_update_hint_covers_a_proxy_the_plugin_did_not_install(self):
+        with self.assertRaises(RuntimeError) as caught:
+            PLUGIN.load_strategy_table(None)
+        hint = str(caught.exception)
+        self.assertIn("run the context-guru-update skill", hint)
+        self.assertIn("for a proxy the plugin did not install", hint)
+        self.assertIn("remove it so setup downloads the latest release", hint)
+
+    def test_old_binary_that_serves_gets_the_update_error_within_the_timeout(self):
+        # v0.7.0 given `strategies` starts serving and prints no JSON.
+        binary = write_script(self.dir / "old", "echo 'listening on 127.0.0.1:0'\nexec sleep 30\n")
+        start = time.monotonic()
+        with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1), \
+             self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
+            PLUGIN.load_strategy_table(binary)
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_bad_output_is_the_update_error(self):
+        bodies = {
+            "exit": "echo 'flag provided but not defined' >&2\nexit 2\n",
+            "text": "echo 'not json'\n",
+            "utf8": "printf '\\377\\376 not utf8'\n",
+            "list": "echo '[1, 2]'\n",
+            "norows": "echo '{\"strategies\": []}'\n",
+            "badrow": "echo '{\"strategies\": [{\"name\": \"none\"}]}'\n",
+            "nonzero": "cat <<'EOF'\n" + json.dumps(TABLE) + "\nEOF\nexit 1\n",
+        }
+        for name, body in bodies.items():
+            with self.subTest(output=name):
+                with self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
+                    PLUGIN.load_strategy_table(write_script(self.dir / name, body))
+        with self.assertRaisesRegex(RuntimeError, "no proxy binary found"):
+            PLUGIN.load_strategy_table(None)
+
+    def test_strategies_command_gets_a_loopback_port_and_no_config(self):
+        out = self.dir / "env.txt"
+        binary = write_script(self.dir / "env", f'echo "$LISTEN_ADDR|$CONFIG|$1" > {out}\n'
+                              "cat <<'EOF'\n" + json.dumps(TABLE) + "\nEOF\n")
+        with mock.patch.dict(os.environ, {"CONFIG": "/etc/mine.yaml"}):
+            PLUGIN.load_strategy_table(binary)
+        self.assertEqual(out.read_text().strip(), "127.0.0.1:0||strategies")
+
+    def test_the_probe_scrubs_state_settings_and_runs_in_a_scratch_directory(self):
+        out = self.dir / "probe.txt"
+        names = "DASHBOARD|SESSION_STATE|CONTROL_DB|UPSTREAMS|STORE|IDLE_EXIT|CG_RECORD|ARCHIVE_"
+        binary = write_script(
+            self.dir / "probe",
+            f'{{ env | grep -E "^({names})"; echo "PWD=$(pwd)"; }} > {out}\n'
+            "cat <<'EOF'\n" + json.dumps(TABLE) + "\nEOF\n")
+        parent = {"DASHBOARD": "1", "DASHBOARD_DB": "/x", "DASHBOARD_CONTENT": "1",
+                  "SESSION_STATE": "1", "CONTROL_DB": "/c", "UPSTREAMS": "/u",
+                  "CG_RECORD_DIR": "/r", "STORE": "/s", "IDLE_EXIT": "1s", "ARCHIVE_DIR": "/a"}
+        with mock.patch.dict(os.environ, parent):
+            PLUGIN.load_strategy_table(binary)
+        lines = out.read_text().splitlines()
+        self.assertIn("DASHBOARD=0", lines)
+        self.assertEqual([l for l in lines if l.split("=")[0] != "PWD" and l != "DASHBOARD=0"], [])
+        cwd = [l for l in lines if l.startswith("PWD=")][0][4:]
+        self.assertIn("cg-strategies-", cwd)
+        self.assertFalse(Path(cwd).exists())
 
 
 class ConfigureNotInstalledTest(TempHome):
@@ -201,7 +474,8 @@ class FakeRelease:
 
 
 GOOD_BINARY = ('#!/bin/sh\ncase "$1" in --version) echo "context-guru-proxy v9.9.9" ;; '
-               '--help) echo "  -bob-upstream string" ;; esac\nexit 0\n')
+               '--help) echo "  -bob-upstream string" ;; '
+               f"strategies) echo '{FAKE_STRATEGIES}' ;; esac\nexit 0\n")
 
 
 class UpdateTest(TempHome):
@@ -212,10 +486,14 @@ class UpdateTest(TempHome):
         self.addCleanup(self.proxy.__exit__, None, None, None)
         managed = PLUGIN.managed_binary()
         managed.parent.mkdir(parents=True)
-        fake_binary(managed.parent, "context-guru-proxy v0.5.1 (commit old)")
+        # The oldest proxy setup keeps for the default preset (bob-ultrahigh needs v0.7.2).
+        fake_binary(managed.parent, "context-guru-proxy v0.7.2 (commit old)")
         self.old_bytes = managed.read_bytes()
         os.environ["CONTEXT_GURU_BIN"] = "/nonexistent/context-guru-proxy"
-        with mock.patch.object(PLUGIN, "first_free_port", return_value=self.proxy.port):
+        # Never the real network: setup must keep the managed fake, not download a release.
+        with mock.patch.object(PLUGIN, "first_free_port", return_value=self.proxy.port), \
+             mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=AssertionError("setup must not download")):
             code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
         self.assertEqual(code, 0, out)
 
@@ -234,7 +512,7 @@ class UpdateTest(TempHome):
         before = self.tree()
         code, out, _ = self.run_main("update", "--check")
         self.assertEqual(code, 0, out)
-        self.assertIn("installed_version=v0.5.1\n", out)
+        self.assertIn("installed_version=v0.7.2\n", out)
         self.assertIn("latest_version=v9.9.9\n", out)
         self.assertIn("update_available=true\n", out)
         self.assertEqual(self.tree(), before)
@@ -258,6 +536,19 @@ class UpdateTest(TempHome):
         self.assertIn("rolled_back=true", out)
         self.assertEqual(PLUGIN.managed_binary().read_bytes(), self.old_bytes)
         self.assertEqual(sum(c.startswith("bootstrap") for c in self.launchctl_calls()[calls:]), 2)
+
+    def test_a_release_before_v0_7_1_is_refused_because_it_cannot_list_strategies(self):
+        self.serve("v0.7.0", GOOD_BINARY)
+        destination = self.root / "staged/context-guru-proxy"
+        with self.assertRaisesRegex(RuntimeError, "v0.7.1 or newer is needed"):
+            PLUGIN.install_release_binary("v0.7.0", destination)
+        self.assertFalse(destination.exists())
+
+    def test_release_v0_7_1_is_installed(self):
+        self.serve("v0.7.1", GOOD_BINARY)
+        destination = self.root / "staged/context-guru-proxy"
+        PLUGIN.install_release_binary("v0.7.1", destination)
+        self.assertEqual(destination.read_text(), GOOD_BINARY)
 
     def test_a_bad_checksum_changes_nothing(self):
         self.serve("v9.9.9", GOOD_BINARY, bad_checksum=True)
@@ -286,6 +577,102 @@ class UpdateTest(TempHome):
         code, out, _ = self.run_main("update")
         self.assertEqual(code, 2)
         self.assertIn("reason=binary_not_managed", out)
+
+
+class SetupSkipsOldProxyTest(TempHome):
+    """Setup never settles on a proxy that cannot list its cache strategies, or that is too old
+    for the preset setup writes."""
+
+    def setUp(self):
+        super().setUp()
+        self.rc.write_bytes(b"x\n")
+        proxy = FakeProxy().__enter__()
+        self.addCleanup(proxy.__exit__, None, None, None)
+        self.port = proxy.port
+        self.folder = self.root / "brew"
+        self.folder.mkdir()
+
+    def on_path(self, version_line, **kwargs):
+        path = fake_binary(self.folder, version_line, **kwargs)
+        os.environ["CONTEXT_GURU_BIN"] = str(path)
+        return path
+
+    def setup_downloading(self):
+        release = FakeRelease("v9.9.9", GOOD_BINARY)
+        self.addCleanup(release.close)
+        with mock.patch.object(PLUGIN, "RELEASE_BASE", release.base), \
+             mock.patch.object(PLUGIN, "release_platform", return_value=("darwin", "arm64")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=self.port):
+            return self.run_main("setup", "--i-consent-to-traffic-interception")
+
+    def setup_without_download(self):
+        with mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=AssertionError("no download expected")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=self.port):
+            return self.run_main("setup", "--i-consent-to-traffic-interception")
+
+    def assert_downloaded(self, code, out):
+        self.assertEqual(code, 0, out)
+        self.assertIn("binary=installed\nbinary_version=v9.9.9\n", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(PLUGIN.managed_binary()))
+        self.assertEqual(PLUGIN.managed_binary().read_text(), GOOD_BINARY)
+
+    def test_an_old_proxy_on_path_is_skipped_and_setup_downloads_the_latest_release(self):
+        old = self.on_path("context-guru-proxy v0.7.0", lists_strategies=False)
+        code, out, _ = self.setup_downloading()
+        self.assertIn(f"binary_skipped={old} cannot list cache strategies "
+                      "(needs v0.7.1 or later)\n", out)
+        self.assert_downloaded(code, out)
+
+    def test_a_proxy_too_old_for_the_default_preset_is_skipped_and_setup_downloads(self):
+        old = self.on_path("context-guru-proxy v0.7.1")
+        code, out, _ = self.setup_downloading()
+        self.assertIn(f"binary_skipped={old} is v0.7.1; bob-ultrahigh needs v0.7.2 or later\n",
+                      out)
+        self.assert_downloaded(code, out)
+
+    def test_a_proxy_on_path_that_lists_strategies_is_used(self):
+        new = self.on_path("context-guru-proxy v0.7.2")
+        code, out, _ = self.setup_without_download()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(new.resolve()))
+
+    def test_a_dev_build_on_path_is_used(self):
+        new = self.on_path("context-guru-proxy dev")
+        code, out, _ = self.setup_without_download()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(new.resolve()))
+
+    def test_a_rerun_with_preset_lossless_keeps_a_v0_7_1_proxy(self):
+        self.on_path("context-guru-proxy v0.7.2")
+        self.assertEqual(self.setup_without_download()[0], 0)
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        older = self.on_path("context-guru-proxy v0.7.1")
+        code, out, _ = self.setup_without_download()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertIn("preset=lossless\n", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(older.resolve()))
+
+    def test_offline_an_old_proxy_is_not_used_and_setup_fails_clearly(self):
+        old = self.on_path("context-guru-proxy v0.7.0", lists_strategies=False)
+        before = self.tree()
+        with mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=RuntimeError("offline")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=self.port):
+            code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 2)
+        self.assertIn(f"binary_skipped={old} cannot list cache strategies", out)
+        self.assertIn("result=binary_install_failed\ndetail=offline\n", out)
+        # Only the state folder and its lock are new; every file that was there is unchanged.
+        after = self.tree()
+        lock = str((PLUGIN.state_dir() / "lock").relative_to(self.root))
+        self.assertEqual({k: v for k, v in after.items() if k in before}, before)
+        self.assertEqual({k for k in after if k not in before and after[k] is not None}, {lock})
+        self.assertFalse(PLUGIN.record_path().exists())
+        self.assertFalse(PLUGIN.launchd_plist().exists())
 
 
 # ---------------------------------------------------------------------------- doctor
@@ -418,6 +805,42 @@ class DoctorTest(Installed):
         self.assertEqual(code, 1)
         self.assertIn("binary=fail\n", out)
 
+    def defer_doctor(self, stats, preset="bob-ultrahigh"):
+        with FakeProxy(last_bob_ts_ms=self.proxy_bob_ts, stats=stats) as proxy:
+            record = PLUGIN.read_record()
+            record["port"] = proxy.port
+            PLUGIN.write_record(record)
+            PLUGIN.private_dir(PLUGIN.proxy_config(proxy.port).parent)
+            PLUGIN.proxy_config(proxy.port).write_text(
+                f"{PLUGIN.CONFIG_MARKER}\n{PLUGIN.BOB_PRESETS[preset]}")
+            code, out = self.doctor()
+        return code, self.lines(out), out
+
+    def test_doctor_warns_when_a_400_turned_tool_deferral_off(self):
+        code, facts, out = self.defer_doctor({"tool_defer": {"turned_off": 1}})
+        self.assertEqual(facts.get("tool_defer"), "warn", out)
+        self.assertIn("tool_defer=warn\nfix=", out)
+        # turned_off counts since the proxy started, and the gate retries after 24 hours: the
+        # warning must stay true after a retry that worked.
+        self.assertIn("tool deferral off at least once since it started", out)
+
+    def test_doctor_warns_when_a_break_disabled_tool_deferral(self):
+        code, facts, out = self.defer_doctor(
+            {"tool_defer": {"turned_off": 0, "client_search_disabled": {"break": 2}}})
+        self.assertEqual(facts.get("tool_defer"), "warn", out)
+
+    def test_doctor_tool_defer_ok_when_nothing_turned_it_off(self):
+        code, facts, out = self.defer_doctor(
+            {"tool_defer": {"turned_off": 0, "client_search_disabled": {"break": 0}}})
+        self.assertEqual(facts.get("tool_defer"), "ok", out)
+
+    def test_doctor_tool_defer_skips_absent_fields_and_other_presets(self):
+        for stats, preset in ((None, "bob-ultrahigh"), ({}, "bob-ultrahigh"),
+                              ({"tool_defer": {"turned_off": 3}}, "lossless")):
+            with self.subTest(stats=stats, preset=preset):
+                code, facts, out = self.defer_doctor(stats, preset)
+                self.assertNotIn("tool_defer", facts, out)
+
     def test_doctor_not_installed(self):
         PLUGIN.record_path().unlink()
         code, out = self.doctor()
@@ -479,6 +902,7 @@ class CustomConfigTest(Installed):
 
     def setUp(self):
         super().setUp()
+        self.record_table_binary()
         self.config.write_text(self.CUSTOM)
 
     def test_cache_strategy_none_keeps_a_custom_file_and_does_not_restart(self):
@@ -649,7 +1073,9 @@ class UpdateVersionTest(UpdateTest):
         self.assertIn("note=", out)
 
     def test_an_older_latest_is_not_a_downgrade_unless_asked(self):
-        self.serve("v0.4.0", GOOD_BINARY)
+        # The older release must still be v0.7.1 or newer, or install refuses it.
+        fake_binary(PLUGIN.managed_binary().parent, "context-guru-proxy v0.8.0")
+        self.serve("v0.7.1", GOOD_BINARY)
         code, out, _ = self.run_main("update", "--check")
         self.assertIn("update_available=false\n", out)
         before = self.tree()
@@ -676,6 +1102,12 @@ class ControlSkillsTest(unittest.TestCase):
         preset = (PLUGIN_ROOT / "skills/preset-picker/SKILL.md").read_text()
         self.assertIn("lossless", preset)
         self.assertIn("only one bare word", preset)
+        self.assertIn("`bob-ultrahigh`", preset)
+        self.assertIn("one extra turn", preset)
+        self.assertIn("3 past Bob sessions", preset)
+        self.assertIn("On Bob the proxy does not detect this", preset)
+        readme = (PLUGIN_ROOT / "README.md").read_text()
+        self.assertIn("On Bob the proxy does not\n  detect this", readme)
         update = (PLUGIN_ROOT / "skills/update/SKILL.md").read_text()
         self.assertIn("one network call to GitHub", update)
         doctor = (PLUGIN_ROOT / "skills/doctor/SKILL.md").read_text()

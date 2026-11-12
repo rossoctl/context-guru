@@ -31,8 +31,11 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Metadata first.** A component or feature works from metadata only (hashes, counts, sizes,
   ids, flags). Depending on stored customer data (transcript text, tool output, bodies,
   summaries) is a deliberate exception. Every PR that adds or changes a feature states its data
-  dependence and what it does at each storage level (off, metadata only, everything), and updates
-  [docs/data-dependence.md](docs/data-dependence.md) — the reason in plain words, not a code
+  dependence and what it does at each storage level (off, metadata only, everything). It adds or
+  edits that feature's row file under `docs/data-dependence/` (`components/<name>.md` or
+  `features/<slug>.md`), then runs `go run ./cmd/gen-datadep` to rebuild the generated page
+  [docs/data-dependence.md](docs/data-dependence.md). Never edit that page by hand, and on a
+  conflict in it, run the generator again. Write the reason in plain words, not a code
   reference. If the PR changes a feature's data dependence in either direction, say so at the top
   of the PR, and have the person in that row's "Decided by" confirm it before merge.
   `components/all/datadep_test.go` fails when a registered component has no row.
@@ -58,6 +61,23 @@ reference — port its *logic*, re-implement its transport in Go.
   line. Conventional-commit titles.
 - Observability: every exported metric is `cg_*` / `cg_tenant_*`. OpenTelemetry **GenAI
   semantic conventions** (`gen_ai.*`) are the intended direction and are not yet emitted.
+
+## Branches, worktrees and force-push
+
+Owner rule (David Amid, 2026-11-12): "subagents should work on their own worktree and own
+branch and then they can do any force push they want, no?"
+
+- Every agent works in its own worktree, at `.claude/worktrees/<topic>`, on its own branch. It
+  never touches the main checkout.
+- On its own branch, with no other writer, an agent may force-push.
+- Use the explicit lease: `--force-with-lease=refs/heads/<branch>:<expected-sha>`. The bare flag
+  fails when the remote is a URL.
+- After a force-push on a PR that already has approvals, follow
+  [When the head moves after an approval](RELEASING.md#when-the-head-moves-after-an-approval).
+  An approval names one commit. Run a new `offload-review` round only when that section asks for one.
+- Never force-push a branch that another person or session writes. Merge `origin/main` into it,
+  without force.
+- If a tool or a permission check blocks a push, stop and report. Do not route around it.
 
 ## How to write for me: ASD-STE100 style
 

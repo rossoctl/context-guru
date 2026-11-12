@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rossoctl/accountant"
 )
@@ -21,6 +22,23 @@ type savingsTracker struct {
 	written lastSaved
 	// billed1h is the tier each thread's last write was billed at, for accBilledTTL (issue #1078).
 	billed1h *tierStore
+	// rescueFactsMissing counts priced requests that followed keep-alive pings but found no ping facts.
+	rescueFactsMissing atomic.Int64
+}
+
+// noteRescueFactsMissing counts one priced request that followed pings and found no ping facts. Nil-safe.
+func (s *savingsTracker) noteRescueFactsMissing() {
+	if s != nil {
+		s.rescueFactsMissing.Add(1)
+	}
+}
+
+// RescueFactsMissing is the count noteRescueFactsMissing keeps. Nil-safe.
+func (s *savingsTracker) RescueFactsMissing() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.rescueFactsMissing.Load()
 }
 
 // clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does

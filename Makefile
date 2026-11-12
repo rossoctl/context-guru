@@ -46,6 +46,10 @@ build-static: ## Same as build, plus -trimpath — the exact build releases ship
 test: ## Run all tests with the race detector
 	go test -race -timeout 40m ./...
 
+.PHONY: datadep
+datadep: ## Rebuild docs/data-dependence.md from the row files in docs/data-dependence/
+	go run ./cmd/gen-datadep
+
 .PHONY: cover
 cover: ## Run all tests with race + cross-package coverage; write coverage.out and print total
 	go test -race -timeout 40m -coverpkg=./... -coverprofile=coverage.out ./...

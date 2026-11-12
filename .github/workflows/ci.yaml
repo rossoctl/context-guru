@@ -152,7 +152,7 @@ jobs:
         run: |
           go build ./...
           go vet ./...
-          go test -run TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf ./cmd/context-guru-proxy/
+          go test -run TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf ./proxyapp/
       - name: Build and vet with the recorder
         env:
           CGO_ENABLED: "0"
@@ -162,7 +162,7 @@ jobs:
       - name: Test with the recorder (race)
         env:
           CGO_ENABLED: "1"
-        run: go test -race -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./cmd/context-guru-proxy/...
+        run: go test -race -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
 
   trivy:
     runs-on: ubuntu-latest

@@ -847,6 +847,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			} else {
 				c.accNoResult = "compute_panicked"
 			}
+			// Pings went out in the gap this request ended, yet no ping facts were found for its thread:
+			// the credit for them is lost. Count it, so a host that does not wire the ping side shows.
+			if c.kaPings > 0 && c.accPingWindow == "" {
+				c.savings.noteRescueFactsMissing()
+			}
 			// The ping facts were read for this request; now that it is priced they are spent.
 			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}

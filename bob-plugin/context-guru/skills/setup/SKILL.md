@@ -11,9 +11,9 @@ description: Set up context-guru for IBM Bob on this Mac. Use when asked to inst
    python3 "$HOME/.bob/plugins/context-guru/scripts/bob_plugin.py" setup --plan
    ```
 
-2. Show the user what it found: `rc_file=`, `settings=`, `service_file=` and `note=`. If it printed
+2. Show the user what it found: `rc_file=`, `settings=`, `service_file=`, `preset=`, `preset_effects=` and `note=`. If it printed
    `rc_advice=`, say that setup cannot edit the startup file and will print a block to add by hand.
-3. Ask the `consent_question=` as one yes/no question. A missing or unclear answer is no. Stop there
+3. Tell the user what the `preset=` does, from `preset_effects=`. Then ask the `consent_question=` as one yes/no question. A missing or unclear answer is no. Stop there
    on a no.
 4. Only after a clear yes, run:
 
@@ -34,6 +34,10 @@ description: Set up context-guru for IBM Bob on this Mac. Use when asked to inst
      the status bar needs `make bob-statusbar` in the context-guru repo before setup, until the
      install script ships it. Then copy the plugin folder again and run setup again. The rest of
      setup still worked.
+   - `binary_skipped=`: setup did not use that proxy (it is too old: v0.7.1 is needed to list cache
+     strategies, and v0.7.2 for `bob-ultrahigh`) and downloaded the latest release. Say so, and
+     say why from the line. If the download failed too (`result=binary_install_failed`), say that
+     setup needs the network once, or a newer proxy on PATH.
 6. Always end with the two steps setup printed: **quit and reopen Bob from the Dock**, then **log in
    to Bob once**. Bob keeps its login per backend address, so the new address needs one new login.
    This is expected and is not a fault.

@@ -54,8 +54,12 @@ type Strategy struct {
 	Spends bool
 	// Desc is the one-line text for a picker.
 	Desc string
-	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" or "any".
-	// The proxy does not enforce it. A picker uses it to hide a name that does not fit.
+	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" (the
+	// OpenAI Responses route), "openai-chat" (the OpenAI Chat Completions route, for example IBM
+	// Bob) or "any". No row uses "openai-chat" yet. A strategy for both Anthropic and OpenAI lists
+	// both. The proxy does not enforce it. A picker uses it to hide a name that does not fit: the
+	// Claude Code plugin offers a row that lists anthropic or any, the Codex plugin only a row
+	// whose list is exactly openai or any.
 	Providers []string
 	Cache     []StrategyKey
 }
@@ -72,8 +76,8 @@ var Strategies = []Strategy{
 	{
 		Name:      "auto",
 		Spends:    true,
-		Desc:      "idle pings that follow the cache lifetime each session was billed at. 5-minute cache: first ping at 240s, at most 2. 1-hour cache: 1 ping at 59 minutes. prefix floor 20k tokens for a tool wait, background work, a teammate or a subagent, 80k for a main thread that waits for a person; <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
-		Providers: []string{"anthropic"},
+		Desc:      "idle pings that follow the cache lifetime each session was billed at. Anthropic 5-minute cache: first ping at 240s, at most 2. Anthropic 1-hour cache: 1 ping at 59 minutes. OpenAI: pings at its own cache lifetime. prefix floor 20k tokens for a tool wait, background work, a teammate or a subagent, 80k for a main thread that waits for a person; <=$0.50/ping. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic", "openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},
@@ -87,8 +91,8 @@ var Strategies = []Strategy{
 	{
 		Name:      "1-ping",
 		Spends:    true,
-		Desc:      "at most 1 idle ping per idle span, whichever cache lifetime the session was billed at (240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
-		Providers: []string{"anthropic"},
+		Desc:      "at most 1 idle ping per idle span, on Anthropic and on OpenAI, whichever cache lifetime the session was billed at (Anthropic: 240s into a 5-minute cache, 59 minutes into a 1-hour cache). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic", "openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},
@@ -102,8 +106,8 @@ var Strategies = []Strategy{
 	{
 		Name:      "2-ping",
 		Spends:    true,
-		Desc:      "at most 2 idle pings per idle span, whichever cache lifetime the session was billed at (a 1-hour cache is pinged at 59 minutes and again 59 minutes later). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
-		Providers: []string{"anthropic"},
+		Desc:      "at most 2 idle pings per idle span, on Anthropic and on OpenAI, whichever cache lifetime the session was billed at (Anthropic: a 1-hour cache is pinged at 59 minutes and again 59 minutes later). SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic", "openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
 			{"keepalive_idle_seconds", 240},

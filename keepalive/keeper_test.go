@@ -676,7 +676,7 @@ func TestEvictionReleasesTheEvictedEntriesCredentials(t *testing.T) {
 }
 
 // A body too large to hold is refused rather than kept: one multi-million-token request must
-// not spend a fifth of the whole memory budget.
+// not spend a quarter of the whole memory budget.
 func TestOversizedBodyIsNotHeld(t *testing.T) {
 	k, _, clock := testKeeper(t)
 	big := `{"model":"m","messages":[{"role":"user","content":"` +

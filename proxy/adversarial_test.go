@@ -57,12 +57,12 @@ func TestRegistrationEnforcementMatchesReportedMode(t *testing.T) {
 	}
 }
 
-// The banner in cmd/context-guru-proxy must not read CG_REGISTER itself — that is
+// The startup banner (proxyapp.Main) must not read CG_REGISTER itself — that is
 // exactly how it came to report "off" for a value this package accepts. Source
-// inspection because there is no way to call into package main; same approach as the
+// inspection because the banner is only a log line inside Main; same approach as the
 // METRICS_TOKEN check in security_test.go, and the thing a reviewer would grep for.
 func TestStartupBannerUsesTheSharedRegisterResolver(t *testing.T) {
-	src, err := os.ReadFile("../cmd/context-guru-proxy/main.go")
+	src, err := os.ReadFile("../proxyapp/main_run.go")
 	if err != nil {
 		t.Fatal(err)
 	}

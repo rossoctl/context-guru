@@ -9,18 +9,19 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite" // the host (the dashboard) brings the driver; the tests stand in for it
+	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 )
 
 // hostDB stands in for the dashboard's handle: a pool on a file the test owns.
 func hostDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return testdb.Open(t, path)
+}
+
+// brokenDB is hostDB for a file that is broken on purpose: it does not check the file.
+func brokenDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	return testdb.OpenUnchecked(t, path)
 }
 
 func newDiskStore(t *testing.T, path string, o DiskOptions, opt Options) (*Memory, *Disk) {
@@ -106,12 +107,12 @@ func TestStateTTLAppliesOnlyToStateKeys(t *testing.T) {
 	m := NewMemory(Options{StateTTLSeconds: 24 * 3600})
 	m.SetClock(func() time.Time { return now })
 	m.Put(SumPrefix+"s", []byte("x"))
-	m.Put("cg:keep:s:abc", []byte("x"))
+	m.Put("cg:other:s:abc", []byte("x"))
 	now = now.Add(5 * time.Hour) // past DefaultTTL (2.8 h), inside 24 h
 	if _, ok := m.Get(SumPrefix + "s"); !ok {
 		t.Fatal("state key must live 24 h")
 	}
-	if _, ok := m.Get("cg:keep:s:abc"); ok {
+	if _, ok := m.Get("cg:other:s:abc"); ok {
 		t.Fatal("a non-state key keeps the base lifetime")
 	}
 }
@@ -244,7 +245,7 @@ func TestStashNeverWritten(t *testing.T) {
 	if !m.PutStash("deadbeefdeadbeef", []byte("ORIGINAL TOOL OUTPUT")) {
 		t.Fatal("stash refused")
 	}
-	m.Put("cg:keep:s:abc", []byte("x"))
+	m.Put("cg:other:s:abc", []byte("x"))
 	m.Put("cg:own:s:abc", []byte("x"))
 	m.Put("cafe", []byte("plain payload via Put"))
 	m.Put(SumPrefix+"s", []byte("x"))
@@ -297,7 +298,7 @@ func TestDiskFailsOpen(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("this is not sqlite, it is a long enough text to fill a header....................................."), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := OpenDisk(hostDB(t, bad), DiskOptions{}); err == nil {
+	if d, err := OpenDisk(brokenDB(t, bad), DiskOptions{}); err == nil {
 		// The driver may open lazily; then every operation must fail soft.
 		m := NewMemory(stateOpts())
 		m.AttachDisk(d)
@@ -310,7 +311,7 @@ func TestDiskFailsOpen(t *testing.T) {
 		d.Close()
 	}
 	// A directory that does not exist.
-	if _, err := OpenDisk(hostDB(t, filepath.Join(dir, "no", "such", "dir", "s.db")), DiskOptions{}); err == nil {
+	if _, err := OpenDisk(brokenDB(t, filepath.Join(dir, "no", "such", "dir", "s.db")), DiskOptions{}); err == nil {
 		t.Fatal("expected an error for an unwritable path")
 	}
 	// A database closed under the store.
@@ -342,7 +343,7 @@ func TestDiskReadOnlyFile(t *testing.T) {
 	if err := os.Chmod(path, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := OpenDisk(hostDB(t, path), DiskOptions{}); err == nil {
+	if d, err := OpenDisk(brokenDB(t, path), DiskOptions{}); err == nil {
 		m := NewMemory(stateOpts())
 		m.AttachDisk(d)
 		m.Put(SumPrefix+"t", []byte("y"))

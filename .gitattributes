@@ -1,1 +1,4 @@
 docs/video/*.mp4 filter=lfs diff=lfs merge=lfs -text
+# Built by `go run ./cmd/gen-datadep`. GitHub folds it in diffs. A conflict is fixed by re-running
+# the generator, not by hand. (A merge driver would not help: GitHub ignores custom drivers.)
+docs/data-dependence.md linguist-generated=true
