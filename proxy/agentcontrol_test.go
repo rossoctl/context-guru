@@ -284,3 +284,18 @@ func TestNoteBobWindowsKeepsTheHostLimits(t *testing.T) {
 		t.Fatalf("bobWin = %d entries, want the old catalog kept", len(h.bobWin))
 	}
 }
+
+// The host stores a copy of the agent's windows: a change to the agent's map after the call does not
+// reach the store.
+func TestNoteBobWindowsStoresACopy(t *testing.T) {
+	h := &Handler{}
+	windows := map[string]int{"m1": 1000}
+
+	h.noteBobWindows(windows)
+	windows["m1"] = 5
+	windows["m2"] = 7
+
+	if h.bobWindow("m1") != 1000 || h.bobWindow("m2") != 0 {
+		t.Fatalf("bobWindow(m1, m2) = %d, %d, want 1000, 0", h.bobWindow("m1"), h.bobWindow("m2"))
+	}
+}

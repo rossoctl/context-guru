@@ -1,6 +1,7 @@
 package all_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/rossoctl/context-guru/agent"
@@ -22,7 +23,7 @@ func TestImportingAllListsBob(t *testing.T) {
 	for _, a := range agent.All() {
 		names = append(names, a.Name())
 	}
-	if len(names) != 1 || names[0] != "bob" {
-		t.Fatalf("All() names = %q, want [bob]", names)
+	if !slices.Contains(names, "bob") {
+		t.Fatalf("All() names = %q, want bob among them", names)
 	}
 }

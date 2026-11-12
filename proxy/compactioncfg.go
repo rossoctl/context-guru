@@ -196,7 +196,7 @@ func clientOf(userAgent string) string {
 }
 
 // bobWindow is Bob's own max_input_tokens for the model, as seen in the model/info response that
-// passed through this proxy (noteBobModelInfo). 0 = not seen. Metadata only: a number for each
+// passed through this proxy (the agent's ControlPlane reply, stored by noteBobWindows). 0 = not seen. Metadata only: a number for each
 // model id, in memory, at most bobWindowMax entries.
 func (h *Handler) bobWindow(model string) int {
 	h.bobWinMu.Lock()

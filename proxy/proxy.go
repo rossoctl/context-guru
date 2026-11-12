@@ -746,7 +746,8 @@ func (h *Handler) forwardAgentReply(w http.ResponseWriter, r *http.Request, resp
 		return false
 	}
 	resp.Body.Close()
-	rep := agentReply(r.Context(), cp, call, body)
+	// The agent gets a copy, so a panic after it wrote into the bytes still sends the original.
+	rep := agentReply(r.Context(), cp, call, bytes.Clone(body))
 	out := body
 	if rep.Body != nil {
 		out = rep.Body

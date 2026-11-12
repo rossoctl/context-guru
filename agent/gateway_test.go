@@ -123,6 +123,23 @@ func TestRegisterRefusesAGatewayWithAnEmptyName(t *testing.T) {
 	}
 }
 
+// The host keys a Gateway's upstream by its Name, so two Gateways with one Name would share it.
+func TestRegisterRefusesASecondGatewayWithTheSameName(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.Register(gateway{routed: routed{name: "x", paths: []string{"/a"}}, spec: GatewaySpec{Dialect: "openai"}}); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+
+	err := reg.Register(gateway{routed: routed{name: "x", paths: []string{"/b"}}, spec: GatewaySpec{Dialect: "openai"}})
+
+	if err == nil {
+		t.Fatal("second Gateway named x: got nil error, want a refusal")
+	}
+	if got := reg.ForPath("/b"); got != (Base{}) {
+		t.Errorf("ForPath(/b) = %#v, want Base{}", got)
+	}
+}
+
 // An agent that is not a Gateway may still have an empty Name: the shared code picks its label.
 func TestRegisterAcceptsANonGatewayWithAnEmptyName(t *testing.T) {
 	if err := NewRegistry().Register(routed{paths: []string{"/a"}}); err != nil {
