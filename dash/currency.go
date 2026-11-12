@@ -28,7 +28,7 @@ func rowCurrency(c string) string {
 func (d *DB) Currency(f Filter) (string, error) {
 	cond, args := f.where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT DISTINCT r.currency FROM requests r WHERE `+cond+
-		` AND r.token_accounting = '`+AccountingComplete+`' LIMIT 2`, args...)
+		` AND r.token_accounting = ? LIMIT 2`, append(args, AccountingComplete)...)
 	if err != nil {
 		return "", err
 	}

@@ -42,6 +42,17 @@ func TestTableRefusesABadCurrency(t *testing.T) {
 	}
 }
 
+// "mixed" is the dashboard's word for a view in more than one unit. A price file that named it as its
+// unit would hide every money figure, so it is refused, in any case.
+func TestTableRefusesMixedAsACurrency(t *testing.T) {
+	for _, bad := range []string{"mixed", "Mixed", "MIXED"} {
+		_, err := ParseTable([]byte("currency: " + bad + "\nmodels:\n  - {match: premium, in: 2.0, out: 2.0}\n"))
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("currency %s: err = %v, want a reserved-name load error", bad, err)
+		}
+	}
+}
+
 // The public map and the built-in table price in dollars.
 func TestPriceWithoutAUnitIsUSD(t *testing.T) {
 	if got := (Price{Input: 1e-6}).Unit(); got != "USD" {
