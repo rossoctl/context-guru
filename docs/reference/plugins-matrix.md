@@ -4,9 +4,6 @@ This page lists what each plugin offers for each provider. Use it to see, at a g
 cache strategy and which preset a user can pick. The cache-strategy tables are checked by a test
 (`config/pluginsmatrix_test.go`). The other tables are checked by hand.
 
-The state below holds once PR #1115 (strategy tags) and PR #1113 (Pi reads the table from the
-proxy) are merged.
-
 ## The proxy's strategy table
 
 The proxy owns the table (`config/strategy.go`, `Strategies`). Each row has a `Providers` tag.
