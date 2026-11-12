@@ -35,6 +35,9 @@ func TestSharedWarm(t *testing.T) {
 	}{
 		{"a sibling shares the system block", time.Minute, sharedBody("x"), bpAt(accountant.SectionSystem, 0), "sub", &sys0},
 		{"a sibling shares two messages", time.Minute, sharedBody("a", "b", "z"), bpAt(accountant.SectionMessages, 1), "sub", &msg1},
+		// Issue #1079: a sibling with no breakpoint (automatic prefix caching) kept the whole shared
+		// prefix warm, as the library's rule says (accountant design 5.1). It used to credit nothing.
+		{"a sibling without breakpoints kept the shared prefix", time.Minute, sharedBody("a", "b", "z"), nil, "sub", &msg1},
 		{"the sibling's mark is past the shared prefix", time.Minute, sharedBody("a", "z"), bpAt(accountant.SectionMessages, 1), "sub", nil},
 		{"the sibling is older than the TTL", -time.Minute, sharedBody("a", "b"), bpAt(accountant.SectionMessages, 1), "sub", nil},
 		{"the same thread is not a sibling", time.Minute, sharedBody("a", "b"), bpAt(accountant.SectionMessages, 1), "main", nil},

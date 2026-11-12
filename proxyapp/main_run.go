@@ -679,8 +679,6 @@ func Main(hooks Hooks) {
 	case !*sessionState:
 	case !*dashOn || rec == nil:
 		// Memory only, as before. Nothing to say: the dashboard is off.
-	case tenants != nil:
-		slog.Warn("context-guru: the session state database is off in hosted multi-tenant mode (--upstreams): each tenant has its own in-memory store")
 	case rec.DB().Path() == "" || rec.DB().Path() == ":memory:":
 		slog.Warn("context-guru: the session state database is off: the dashboard database is in memory, so nothing would survive a restart")
 	default:
@@ -692,7 +690,17 @@ func Main(hooks Hooks) {
 		cfg.Store.StateTTLSeconds = int(store.DefaultStateTTL / time.Second)
 	}
 	pstore := cfg.NewStore()
-	if stateDB != nil {
+	if stateDB != nil && tenants != nil {
+		// Hosted (#1104): ONE metadata-only table copy for every tenant store, whatever
+		// --session-state-metadata-only says. A tenant's summary text and other content keys
+		// never reach the file. Keys are tenant-scoped (session.Scoped), so tenants do not meet.
+		if d := openHostedSessionState(stateDB, *sessionStateRetention); d != nil {
+			tenants.SetSessionState(d, store.DefaultStateTTL)
+			defer d.Close()
+			slog.Info("context-guru: hosted session state in the dashboard database, metadata only",
+				"retention", *sessionStateRetention)
+		}
+	} else if stateDB != nil {
 		if mem, ok := pstore.(*store.Memory); !ok {
 			slog.Warn("context-guru: the session state database is off because the state store is disabled (--store=false)")
 		} else if d, err := store.OpenDisk(stateDB, store.DiskOptions{
@@ -1656,4 +1664,17 @@ func accountantStatePath(dashDB string, dashboard bool) string {
 		return ""
 	}
 	return dashDB + ".accountant-state.json"
+}
+
+// openHostedSessionState opens the session-state table for a hosted proxy (#1104). It is ALWAYS
+// metadata-only, whatever --session-state-metadata-only says: a tenant's summary text and other
+// content keys must never reach the file. It also refuses the keys that carry no session id (cg:swx:, cg:xres:): tenants would share a row. It returns nil, after a warning, when the table is
+// unusable; hosted state then stays in memory.
+func openHostedSessionState(db *sql.DB, retention time.Duration) *store.Disk {
+	d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, Hosted: true, Retention: retention})
+	if err != nil {
+		slog.Warn("context-guru: session state table unusable; hosted state stays in memory only", "err", err)
+		return nil
+	}
+	return d
 }

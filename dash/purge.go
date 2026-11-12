@@ -54,11 +54,14 @@ type PurgeResult struct {
 	// ToolDefer is tool deferral's rows removed (#485): the tenant's tool history and its per-thread
 	// records and opt-outs in the session state.
 	ToolDefer int64 `json:"tool_defer"`
+	// SessionState is the tenant's other session-state rows removed (#1104): the metadata a hosted
+	// proxy keeps so a restart does not lose a warm thread's state.
+	SessionState int64 `json:"session_state"`
 }
 
 // Removed reports whether anything at all was deleted.
 func (p PurgeResult) Removed() bool {
-	return p.Requests+p.Components+p.Content+p.Archives+p.Objects+p.SpendRows+p.ToolDefer > 0
+	return p.Requests+p.Components+p.Content+p.Archives+p.Objects+p.SpendRows+p.ToolDefer+p.SessionState > 0
 }
 
 // ErrPurgeNoTenant refuses a purge with no tenant named.
@@ -157,6 +160,14 @@ func (r *Recorder) PurgeTenant(ctx context.Context, tenantID string) (PurgeResul
 	}
 	out.ToolDefer += n
 
+	// 4. The tenant's session state (#1104), every namespace. After step 3, which counts the tool
+	// deferral keys. A missing table is skipped.
+	ss, err := store.DeleteTenantState(ctx, r.db.sql, tenantID)
+	if err != nil {
+		return out, err
+	}
+	out.SessionState += ss
+
 	// Hand the freed pages back. A purge is the one deletion big enough to be worth
 	// reclaiming immediately — it is usually run because something has to go away, and
 	// leaving the bytes in the file makes "purged" look untrue to anyone watching the disk.
@@ -227,6 +238,9 @@ func (d *DB) TenantHasRows(tenantID string) (bool, error) {
 	  (SELECT COUNT(*) FROM tenant_spend WHERE tenant_id = ?)`,
 		tenantID, tenantID, tenantID).Scan(&n)
 	if err != nil || n > 0 {
+		return n > 0, err
+	}
+	if n, err := store.TenantStateRows(d.readCtx(), d.sql, tenantID); err != nil || n > 0 {
 		return n > 0, err
 	}
 	// Tool deferral's rows, in the tables that exist.
