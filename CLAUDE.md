@@ -72,8 +72,9 @@ branch and then they can do any force push they want, no?"
 - On its own branch, with no other writer, an agent may force-push.
 - Use the explicit lease: `--force-with-lease=refs/heads/<branch>:<expected-sha>`. The bare flag
   fails when the remote is a URL.
-- After a force-push on a PR that already has approvals, run a new `offload-review` round. An
-  approval names one commit.
+- After a force-push on a PR that already has approvals, follow
+  [When the head moves after an approval](RELEASING.md#when-the-head-moves-after-an-approval).
+  An approval names one commit. Run a new `offload-review` round only when that section asks for one.
 - Never force-push a branch that another person or session writes. Merge `origin/main` into it,
   without force.
 - If a tool or a permission check blocks a push, stop and report. Do not route around it.
