@@ -87,6 +87,11 @@ func summarizableOpenAIRequest(model string) string {
 // the client's chat: it carries max_tokens, which the client request does not.
 func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls func() []seenCall) []seenCall {
 	t.Helper()
+	// A summary an earlier test left running holds a process-wide slot and a session key, and can
+	// make summarize decline this request's summary. Let it finish first.
+	if !offload.WaitForAllSummariesForTest(10 * time.Second) {
+		t.Fatal("a detached summary call from an earlier test was still running after 10s")
+	}
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(summarizableOpenAIRequest(model)))
@@ -109,6 +114,11 @@ func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls 
 	if !offload.WaitForAllSummariesForTest(10 * time.Second) {
 		t.Fatal("a detached summary call was still running after 10s")
 	}
+	return summaryCallsOf(calls)
+}
+
+// summaryCallsOf is the calls the fake upstream has now that are summary calls.
+func summaryCallsOf(calls func() []seenCall) []seenCall {
 	var summaries []seenCall
 	for _, c := range calls() {
 		if gjson.GetBytes(c.body, "max_tokens").Exists() {
@@ -116,6 +126,22 @@ func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls 
 		}
 	}
 	return summaries
+}
+
+// awaitSummaryCalls waits, with a time limit, until the upstream has got at least want summary
+// calls, then waits for every detached summary to end so a late extra call shows too. A test that
+// wants a call must use it: the in-flight check alone cannot tell "no summary started" from "the
+// summary has not started yet".
+func awaitSummaryCalls(t *testing.T, calls func() []seenCall, want int) []seenCall {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(summaryCallsOf(calls)) < want && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !offload.WaitForAllSummariesForTest(time.Until(deadline) + time.Second) {
+		t.Fatal("a detached summary call was still running after the time limit")
+	}
+	return summaryCallsOf(calls)
 }
 
 // On Bob's route, the summary call goes to Bob's model path with Bob's auth scheme. Before the
@@ -185,7 +211,8 @@ func summaryCallWith(t *testing.T, a agent.Agent) seenCall {
 		t.Fatal(err)
 	}
 	h.agentFor = reg.ForPath
-	got := postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "Bearer openai-caller-key", calls)
+	postSummarizable(t, h, "/openai/v1/chat/completions", "gpt-x", "Bearer openai-caller-key", calls)
+	got := awaitSummaryCalls(t, calls, 1)
 	if len(got) != 1 {
 		t.Fatalf("upstream got %d summary calls, want 1; all calls: %d", len(got), len(calls()))
 	}
