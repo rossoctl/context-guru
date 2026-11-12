@@ -1,6 +1,6 @@
 # Metrics reporting: design
 
-Status: draft, updated to match the build (accountant#59, context-guru#974 (open), context-guru#1086 (open)). Spec: [spec.md](spec.md). Issue: #886.
+Status: draft, updated to match the build (accountant#59 merged, context-guru#974 open; #1086 was closed and joined #974). Spec: [spec.md](spec.md). Issue: #886.
 
 This design says how to build the requirements in the spec. It covers the code path from the `accountant` result to the central collector. It does not change the requirements. If the two disagree, the spec wins.
 
@@ -145,7 +145,7 @@ Use the contrib distribution. The core one lacks the remote-write exporter.
 | Block | Setting | Why |
 |---|---|---|
 | Receiver | `otlp`, HTTP only. One receiver and one port for each proxy: 4318 for Cortex, 4319 for context-guru. TLS is done by a front end (nginx) in front of both ports. | R15: HTTPS, outgoing from the machine only. A separate port for each proxy lets the collector set `proxy` from the port, so a sender cannot choose it. |
-| Authentication | One `bearertokenauth` extension and one token file for each proxy. One token for each install, one line each. | R44. One token can be revoked without the others. |
+| Authentication | **Off in the first deployment** (context-guru#1130 tracks it). The receivers accept any push. The `bearertokenauth` blocks (one token file for each proxy, one token for each install) stay in the config, commented out. | R44 is the target. Off keeps the first deployment simple; the cost is that anyone who can reach the host can write metrics. |
 | Processor `memory_limiter` | First in the chain. | A burst from many machines must not stop the collector. |
 | Processor `transform` | Set `proxy` from the receiver. Set `machine` from `service.instance.id`. Keep four labels only: `proxy`, `machine`, `preset`, `service_version`. Blank the scope. | R17, R42. Without this the exporter adds `instance`, `service_instance_id` and `otel_scope_name`, and no `machine`. The drop keeps a bad proxy from adding series. A new proxy needs a new receiver and token file (R11). |
 | Processor `batch` | Default size, 10 s timeout. | Fewer writes to Prometheus. |
@@ -182,8 +182,8 @@ Today `deploy/service/install.sh grafana` installs Prometheus, Grafana, Loki and
 | Server | A separate server, not the hosted context-guru box (`deploy/service/`). It serves Cortex and context-guru alike. |
 | Images | Containers, pinned by version in `install.sh` (`OTELCOL_IMAGE` contrib, `PROM_IMAGE`, `ALERTMANAGER_IMAGE`, `GRAFANA_IMAGE`). No image of our own: all our changes are config files. |
 | Config files | `deploy/central/`: `otel-collector.yml`, `prometheus/prometheus.yml`, `prometheus/rules/` (11 recording rules, 10 alerts), `prometheus/tests/` (`promtool` unit tests), `alertmanager/alertmanager.yml`, `grafana/`. |
-| Script | `deploy/central/install.sh` with `install`, `status`, `token add\|revoke\|list` and `remove`. It does not extend `deploy/service/install.sh`. `remove` keeps the data. |
-| Secrets | A token file for each proxy, owned by the collector's uid, mode 0600, in a folder with mode 0700. `token add` prints the token once and stores only its SHA-256 beside the name. The Grafana password goes to the container in an env file on a tmpfs, not in argv. |
+| Script | `deploy/central/install.sh` with `install`, `status`, `nginx` and `remove` (the `token` commands are off). `deploy/central/deploy.sh` runs it from a laptop over ssh. It does not extend `deploy/service/install.sh`. `remove` keeps the data. |
+| Secrets | None for the push while authentication is off. The Grafana password goes to the container in an env file on a tmpfs, not in argv. |
 | Ports | The collector publishes 4318 and 4319 on loopback by default (`BIND`). The TLS front end on the same host forwards to them. Prometheus and Alertmanager are on a private container network. Grafana is on `127.0.0.1:3000` only. |
 | Order at start | Prometheus, Alertmanager, the collector, Grafana. |
 | Developer machine | `deploy/central/compose.yaml` starts the same four images with the same config and no TLS. The end-to-end tests in `internal/metricspush` use it. The production path is the script. |
@@ -192,16 +192,16 @@ Today `deploy/service/install.sh grafana` installs Prometheus, Grafana, Loki and
 ### 8.7 Operate
 
 - **Open:** who owns the central server and who is on call. The spec does not say.
-- The installer does not set up TLS. `nginx.example.conf` is an example. A proxy never sends a token over plain `http` to a remote host.
+- The installer does not set up TLS. `nginx.example.conf` is an example. A proxy refuses to push over plain `http` to a remote host.
 - One command must start the whole stack on a developer machine (the compose file). The end-to-end test uses it.
 - Back up the Prometheus data directory if the history matters. The proxies hold no history to replay (section 5).
-- Rotate the TLS certificate and the tokens on a schedule. A token that leaves a revoked machine must stop working at once.
+- Rotate the TLS certificate on a schedule. Token rotation comes with the authentication work (#1130).
 
 ### 8.8 What the built stack showed
 
 1. **Unit in the name.** An OTel unit `USD` made four cost metrics end in `_USD_total`. The unit now sits in the name as `usd`.
 2. **Labels.** The collector added `instance`, `service_instance_id` and `otel_scope_name`, and no `machine`. The `transform` processor now keeps exactly four labels.
-3. **A token does not tie a sender to a machine.** The collector sets `proxy` from the port, but `machine` is the sender's claim. A holder of a Cortex token can write under another Cortex machine's name. The token proves "a Cortex install", not "this Cortex install". **Open:** is that enough for tens of trusted machines (R43, R44)?
+3. **(Authentication is off today; this is the finding behind #1130.) A token does not tie a sender to a machine.** The collector sets `proxy` from the port, but `machine` is the sender's claim. A holder of a Cortex token can write under another Cortex machine's name. The token proves "a Cortex install", not "this Cortex install". **Open:** is that enough for tens of trusted machines (R43, R44)?
 4. **Revoke needs a restart.** The collector reads the token files once, at start. `token add` and `token revoke` restart it (about 1.5 s). A push in that gap fails, and the next push repairs it, because the totals are cumulative.
 5. **Atomic token list.** A failed `chown` in a first version of `token revoke` removed the whole list. The new file is now written beside the old one and renamed over it.
 6. **Keep-alive value.** The rule counted only the saved side of a rescue. It now nets the read cost: `saved - added`.
@@ -228,7 +228,7 @@ Status:
 | 2 | Built and merged: accountant#59. |
 | 3, 4 | Built for context-guru: #974 (open). Cortex is not wired. |
 | 5 | Not started. |
-| 6 | Built: #1086 (open). Depends on #974 for its end-to-end tests. |
+| 6 | Built: in #974 (it was #1086). Authentication is off; see #1130. |
 | 7 | Not started. Waits until the dashboards are in use. |
 
 Step 4 measured p50 at 12 to 35 microseconds. p99 is not measured, because the noise is too large, so R46 is not proven. No separate process is built for now. Keep that option open until a p99 is measured against a chosen budget.

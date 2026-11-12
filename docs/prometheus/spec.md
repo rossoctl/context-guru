@@ -190,7 +190,7 @@ Three needs drive these requirements.
 ### 3.7 Privacy and access
 
 - R43. `machine` is a pseudonymous install ID: a random value made at first start. It is not the host name, because a host name often holds a person's name. The operator keeps the map from install ID to person or team outside the metrics system.
-- R44. The collector accepts a push only over HTTPS and only with a valid access token. Each install has its own token, so one token can be revoked. Read access to the central Prometheus and Grafana is limited to named managers and operators. A token binds to a proxy, not to a machine: the `machine` label is the sender's claim (design 8.8). **Open:** who issues the tokens, and who is on the access list.
+- R44. **Status: authentication is OFF in the first deployment (rossoctl/context-guru#1130 tracks it).** The collector accepts any push that reaches it over TLS on the private network; the requirement below is the target. The collector accepts a push only over HTTPS and only with a valid access token. Each install has its own token, so one token can be revoked. Read access to the central Prometheus and Grafana is limited to named managers and operators. A token binds to a proxy, not to a machine: the `machine` label is the sender's claim (design 8.8). **Open:** who issues the tokens, and who is on the access list.
 
 ## 4. Proposed architecture
 
