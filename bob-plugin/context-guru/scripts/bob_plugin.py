@@ -43,8 +43,10 @@ CONFIG_MARKER = "# Managed by the context-guru Bob plugin."
 DEFAULT_UPSTREAM = "https://api.us-east.bob.ibm.com"
 RELEASE_REPO = "rossoctl/context-guru"
 RELEASE_BASE = f"https://github.com/{RELEASE_REPO}/releases"
-# The first release with the Bob gateway and its region fix for the profile reply.
-MINIMUM_BOB_RELEASE = (0, 3, 1)
+# The first release that can list its cache strategies (`context-guru-proxy strategies`). It also
+# has the Bob gateway and its region fix for the profile reply (v0.3.1).
+MINIMUM_BOB_RELEASE = (0, 7, 1)
+STRATEGIES_RELEASE = "v0.7.1"
 # The presets Bob may use: name -> the config body under the marker line. Only tested presets.
 # bob-ultrahigh is ultrahigh with 4 Bob changes (proxy/bobultrahigh_test.go): extract_llm names no
 # model (Bob picks its own) and runs on a caching backend, the sweep may apply on a warm cache, and
@@ -103,8 +105,13 @@ PRICED_PRESETS = ("bob-ultrahigh",)
 # for it, the restart check in change_and_restart is the guard.
 PRESET_MINIMUM_RELEASE = {"bob-ultrahigh": (0, 7, 2)}
 PRICES_SOURCE = Path(__file__).resolve().parent.parent / "prices.yaml"
-# The cache strategies Bob may use. Only none: see NO_KEEPALIVE_REASON.
-BOB_CACHE_STRATEGIES = ("none",)
+# The proxy's strategy table tags each row with the routes it fits. Bob's model call is OpenAI
+# Chat Completions ("openai-chat"). Not "openai": that tag is the OpenAI Responses route, which the
+# proxy pings. Today only none fits: see NO_KEEPALIVE_REASON.
+PROVIDERS = ("openai-chat", "any")
+STRATEGIES_TIMEOUT = 5
+PROBE_SCRUBBED_PREFIXES = ("DASHBOARD_", "SESSION_STATE", "CG_RECORD_", "ARCHIVE_")
+PROBE_SCRUBBED_NAMES = {"CONTROL_DB", "UPSTREAMS", "STORE", "IDLE_EXIT"}
 NO_KEEPALIVE_REASON = (
     "Keep-alive pings do not apply to Bob. Bob's model call is OpenAI chat/completions, and the "
     "proxy pings only Anthropic and OpenAI Responses caches. Also, Bob has no SessionEnd event, "
@@ -368,6 +375,61 @@ def find_binary(reasons=None):
     return None
 
 
+def update_hint():
+    return (f"update the proxy to {STRATEGIES_RELEASE} or later (run the context-guru-update skill; "
+            "for a proxy the plugin did not install, for example with brew, update it the way it "
+            "was installed, or remove it so setup downloads the latest release)")
+
+
+def load_strategy_table(binary):
+    """Read the cache strategy table from the proxy binary. Raise RuntimeError if it cannot.
+
+    The proxy owns the table. A binary older than v0.7.1 does not know `strategies`: it starts
+    serving instead. So the command gets a loopback port 0 and a short time limit, and anything that
+    is not valid JSON counts as an old binary.
+    """
+    hint = update_hint()
+    if not binary:
+        raise RuntimeError(f"no proxy binary found to list cache strategies; {hint}")
+    # A v0.7.0 binary serves instead. The probe must not open the user's dashboard DB, session
+    # state, control DB, record dirs or store. So scrub every setting that turns one on, and run in
+    # a fresh directory so a relative default path cannot land in the user's folder.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(PROBE_SCRUBBED_PREFIXES) and k not in PROBE_SCRUBBED_NAMES}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as scratch:
+            run = subprocess.run([binary, "strategies"], capture_output=True, text=True,
+                                 timeout=STRATEGIES_TIMEOUT, env=env, cwd=scratch,
+                                 stdin=subprocess.DEVNULL)
+        table, code = json.loads(run.stdout), run.returncode
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # ValueError includes UnicodeDecodeError from output that is not UTF-8.
+        table, code = None, 1
+    rows = table.get("strategies") if isinstance(table, dict) else None
+    valid = (code == 0 and isinstance(rows, list) and rows
+             and all(isinstance(r, dict) and isinstance(r.get("name"), str)
+                     and isinstance(r.get("providers"), list) and isinstance(r.get("spends"), bool)
+                     and isinstance(r.get("desc"), str) for r in rows))
+    if not valid:
+        raise RuntimeError(f"{binary} cannot list cache strategies; {hint}")
+    # No check of table["presets"], unlike the Codex plugin: Bob writes its own pipeline body
+    # (BOB_PRESETS), and lossless is not a registered preset.
+    return table
+
+
+def offered_strategies(table):
+    """The names of the strategies that fit Bob's route, in table order."""
+    return [row["name"] for row in table["strategies"]
+            if any(p in PROVIDERS for p in row["providers"])]
+
+
+def plugin_applies(name):
+    # The plugin writes no cache strategy into its config, so it can apply only none. A strategy
+    # that needs one must teach write_proxy_config first.
+    return name == "none"
+
+
 def release_platform():
     machines = {"x86_64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
     if platform.system() != "Darwin" or platform.machine() not in machines:
@@ -419,7 +481,8 @@ def install_release_binary(version=None, destination=None):
     """
     version = version or os.environ.get("CONTEXT_GURU_VERSION") or latest_release_tag()
     if release_version(version) < MINIMUM_BOB_RELEASE:
-        raise RuntimeError(f"release {version} has no Bob region fix; v0.3.1 or newer is needed")
+        raise RuntimeError(f"release {version} cannot list its cache strategies; "
+                           f"{STRATEGIES_RELEASE} or newer is needed")
     os_name, arch = release_platform()
     archive_name = f"context-guru_{version.removeprefix('v')}_{os_name}_{arch}.tar.gz"
     base = f"{RELEASE_BASE}/download/{version}"
@@ -980,9 +1043,15 @@ def configure(args):
         facts(result="refused", reason="unmanaged_config", detail=error)
         return 2
     if args.show:
+        # The preset is always reported. A table error replaces only the strategy list.
+        try:
+            fits = offered_strategies(load_strategy_table(record.get("binary")))
+            strategies = {"allowed_cache_strategies": ",".join(filter(plugin_applies, fits))}
+        except RuntimeError as error:
+            strategies = {"cache_strategy_error": "strategy_table_unreadable",
+                          "cache_strategy_detail": error}
         facts(result="ok", preset=current, cache_strategy="none",
-              allowed_presets=",".join(BOB_PRESETS),
-              allowed_cache_strategies=",".join(BOB_CACHE_STRATEGIES),
+              allowed_presets=",".join(BOB_PRESETS), **strategies,
               cache_note=NO_KEEPALIVE_REASON)
         return 0
     if args.preset and args.preset not in BOB_PRESETS:
@@ -1000,10 +1069,23 @@ def configure(args):
                   detail=f"{args.preset} needs context-guru-proxy v{'.'.join(map(str, need))} or "
                          f"newer; this one is {version}. Run the update skill first.")
             return 2
-    if args.cache_strategy and args.cache_strategy not in BOB_CACHE_STRATEGIES:
-        facts(result="refused", reason="cache_strategy_not_allowed_for_bob",
-              cache_strategy=args.cache_strategy, detail=NO_KEEPALIVE_REASON)
-        return 2
+    # none is always valid on Bob, so it needs no table: it works on an older proxy too.
+    if args.cache_strategy and args.cache_strategy != "none":
+        try:
+            fits = offered_strategies(load_strategy_table(record.get("binary")))
+        except RuntimeError as error:
+            facts(result="error", reason="strategy_table_unreadable", detail=error)
+            return 1
+        if args.cache_strategy not in fits:
+            facts(result="refused", reason="cache_strategy_not_allowed_for_bob",
+                  cache_strategy=args.cache_strategy, detail=NO_KEEPALIVE_REASON)
+            return 2
+        if not plugin_applies(args.cache_strategy):
+            facts(result="refused", reason="cache_strategy_not_supported_by_plugin",
+                  cache_strategy=args.cache_strategy,
+                  detail="The Bob plugin writes no cache strategy into its config, so it can "
+                         "apply only none.")
+            return 2
     if not args.preset and current == "custom":
         facts(result="unchanged", preset=current, cache_strategy="none",
               preset_note=f"{proxy_config(port)} was edited by hand. It is kept as it is. "

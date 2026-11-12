@@ -54,10 +54,12 @@ type Strategy struct {
 	Spends bool
 	// Desc is the one-line text for a picker.
 	Desc string
-	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" or "any".
-	// A strategy for both providers lists both. The proxy does not enforce it. A picker uses it to
-	// hide a name that does not fit: the Claude Code plugin offers a row that lists anthropic or any,
-	// the Codex plugin only a row whose list is exactly openai or any.
+	// Providers says which provider(s) the strategy is meant for: "anthropic", "openai" (the
+	// OpenAI Responses route), "openai-chat" (the OpenAI Chat Completions route, for example IBM
+	// Bob) or "any". No row uses "openai-chat" yet. A strategy for both Anthropic and OpenAI lists
+	// both. The proxy does not enforce it. A picker uses it to hide a name that does not fit: the
+	// Claude Code plugin offers a row that lists anthropic or any, the Codex plugin only a row
+	// whose list is exactly openai or any.
 	Providers []string
 	Cache     []StrategyKey
 }
