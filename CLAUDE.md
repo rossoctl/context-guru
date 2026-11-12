@@ -62,6 +62,22 @@ reference — port its *logic*, re-implement its transport in Go.
 - Observability: every exported metric is `cg_*` / `cg_tenant_*`. OpenTelemetry **GenAI
   semantic conventions** (`gen_ai.*`) are the intended direction and are not yet emitted.
 
+## Branches, worktrees and force-push
+
+Owner rule (David Amid, 2026-11-12): "subagents should work on their own worktree and own
+branch and then they can do any force push they want, no?"
+
+- Every agent works in its own worktree, at `.claude/worktrees/<topic>`, on its own branch. It
+  never touches the main checkout.
+- On its own branch, with no other writer, an agent may force-push.
+- Use the explicit lease: `--force-with-lease=refs/heads/<branch>:<expected-sha>`. The bare flag
+  fails when the remote is a URL.
+- After a force-push on a PR that already has approvals, run a new `offload-review` round. An
+  approval names one commit.
+- Never force-push a branch that another person or session writes. Merge `origin/main` into it,
+  without force.
+- If a tool or a permission check blocks a push, stop and report. Do not route around it.
+
 ## How to write for me: ASD-STE100 style
 
 Applies to every project and every message I must read: chat replies, issues, PRs, PR
