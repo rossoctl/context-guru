@@ -1,15 +1,22 @@
 # Bob's prices for the context-guru proxy, used only with the bob-ultrahigh preset (MODEL_PRICES).
 #
-# Bob bills every input token at one flat rate: fresh input, a cache read and a cache write cost the
-# same (measured from IBM's own `credits` field on 20 calls, 2026-11-10; #1030). The sweep's warm cost
-# gate needs that, or it prices a cache rewrite at Claude rates and refuses every warm cut.
+# THE UNIT IS BOBCOINS, not US dollars: Bob bills in Bobcoins, and that is what a Bob user sees. The
+# proxy has no unit field, so every "in", "out", "cache_read" and "cache_write" below is Bobcoins per
+# million tokens, and every cost the proxy computes from this file is in Bobcoins.
 #
-# The in/out dollar rates are ESTIMATES, copied from deploy/service/prices.example.yaml. Only the
-# ratio (read = write = input) is measured. Bob names a tier, not a model, so each tier is listed.
+# Bob bills every token at one flat rate: fresh input, a cache read, a cache write and output all cost
+# the same. Measured from IBM's own per-call `credits` field: credits = 2.0 x (prompt + completion) /
+# 1,000,000, on 20 calls, with 0.0000% error, and the account total moved by exactly their sum
+# (2026-11-04; #1030). The sweep's warm cost gate needs the flat rate, or it prices a cache rewrite at
+# Claude rates and refuses every warm cut. The gate uses only ratios, so the unit does not change its
+# answer.
+#
+# Bob names a tier, not a model, so each tier is listed. The 20 calls did not separate the tiers, and
+# no per-tier rate is known, so every tier has the same measured rate.
 models:
-  - {match: "premium",      in: 3.00, out: 15.00, cache_read: 3.00, cache_write: 3.00, cache_write_1h_frac: 1.0}
-  - {match: "premium-ide",  in: 3.00, out: 15.00, cache_read: 3.00, cache_write: 3.00, cache_write_1h_frac: 1.0}
-  - {match: "standard",     in: 0.76, out: 3.80, cache_read: 0.76, cache_write: 0.76, cache_write_1h_frac: 1.0}
-  - {match: "standard-ide", in: 0.76, out: 3.80, cache_read: 0.76, cache_write: 0.76, cache_write_1h_frac: 1.0}
-  - {match: "fast",         in: 0.15, out: 0.60, cache_read: 0.15, cache_write: 0.15, cache_write_1h_frac: 1.0}
-  - {match: "fast-ide",     in: 0.15, out: 0.60, cache_read: 0.15, cache_write: 0.15, cache_write_1h_frac: 1.0}
+  - {match: "premium",      in: 2.0, out: 2.0, cache_read: 2.0, cache_write: 2.0, cache_write_1h_frac: 1.0}
+  - {match: "premium-ide",  in: 2.0, out: 2.0, cache_read: 2.0, cache_write: 2.0, cache_write_1h_frac: 1.0}
+  - {match: "standard",     in: 2.0, out: 2.0, cache_read: 2.0, cache_write: 2.0, cache_write_1h_frac: 1.0}
+  - {match: "standard-ide", in: 2.0, out: 2.0, cache_read: 2.0, cache_write: 2.0, cache_write_1h_frac: 1.0}
+  - {match: "fast",         in: 2.0, out: 2.0, cache_read: 2.0, cache_write: 2.0, cache_write_1h_frac: 1.0}
+  - {match: "fast-ide",     in: 2.0, out: 2.0, cache_read: 2.0, cache_write: 2.0, cache_write_1h_frac: 1.0}
