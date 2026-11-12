@@ -61,5 +61,5 @@ func (c *capture) observeMetrics(res accountant.Result, usage accountant.Usage) 
 			slog.Error("metrics: Observe panicked; this request books no metric", "panic", p)
 		}
 	}()
-	c.metrics.Observe(acmetrics.Observation{Meta: c.accReq.Meta, Usage: usage, Result: res})
+	c.metrics.Observe(acmetrics.Observation{Meta: c.accMeta, Usage: usage, Result: res})
 }

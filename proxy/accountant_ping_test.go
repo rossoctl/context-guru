@@ -202,6 +202,62 @@ func TestThePingRescueIsCreditedFromTheUsage(t *testing.T) {
 	}
 }
 
+// Issue #1079. Two threads of one session: the main thread is pinged, and a sub-agent thread sends a
+// request that shares the main thread's first message inside the TTL. That prefix was warm without the
+// ping, so the rescue credits only the part past it (accountant R54). The shared prefix comes from
+// accountant.SharedWarmFrom through siblingStore, end to end: no hand-set EntryFacts.SharedWarm.
+func TestARescueLeavesOutThePrefixASiblingKeptWarm(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	user := func(c byte) string {
+		return `{"role":"user","content":[{"type":"text","text":"` + strings.Repeat(string(c), 2000) +
+			`","cache_control":{"type":"ephemeral"}}]}`
+	}
+	asst := `{"role":"assistant","content":"ok"}`
+	body := func(msgs ...string) []byte {
+		return []byte(`{"model":"m","system":[{"type":"text","text":"sys"}],"messages":[` + strings.Join(msgs, ",") + `]}`)
+	}
+	mainBody := body(user('x'), asst, user('y'))
+	grown := body(user('x'), asst, user('y'), asst, user('z'))
+	subBody := body(user('x'), asst, user('q')) // shares the system block and message 0 with the main thread
+
+	rescueAfter := func(withSibling bool) accountant.CacheEffect {
+		st, pings := newSavingsTracker(), NewPingStore()
+		turn := func(thread string, at time.Time, b []byte, u Usage) accountant.Result {
+			req := st.begin(accountant.RequestMeta{RequestID: thread + at.String(), Session: "s", Model: "m", At: at}, b)
+			th := accountant.Thread{ID: thread}
+			f := entryFacts(bschemas.Anthropic, "m", b, pings, "s", th)
+			st.end(req, th, b, nil, f)
+			return st.compute(req, u)
+		}
+		turn("main", t0, mainBody, Usage{CacheWrite: int64(len(mainBody))})
+		r := okReport()
+		r.Session, r.Thread, r.TS, r.Window = "s", "", t0.Add(4*time.Minute).UnixMilli(), t0
+		r.FreshInput, r.CacheRead, r.CacheWrite, r.Output = 0, int64(len(mainBody)), 0, 1
+		if _, ok := PingSavings(r, pings); !ok {
+			t.Fatal("the ping was not converted")
+		}
+		if withSibling {
+			turn("sub", t0.Add(5*time.Minute), subBody, Usage{CacheWrite: int64(len(subBody))})
+		}
+		res := turn("main", t0.Add(8*time.Minute), grown,
+			Usage{CacheRead: int64(len(mainBody)), CacheWrite: int64(len(grown) - len(mainBody))})
+		for _, e := range res.CacheEffects {
+			if e.Kind == accountant.EffectRescue {
+				return e
+			}
+		}
+		return accountant.CacheEffect{}
+	}
+	alone, shared := rescueAfter(false), rescueAfter(true)
+	if alone.Saved.CacheWrite5m <= 0 {
+		t.Fatalf("control: no rescue without a sibling: %+v", alone)
+	}
+	if shared.Saved.CacheWrite5m <= 0 || shared.Saved.CacheWrite5m >= alone.Saved.CacheWrite5m {
+		t.Fatalf("rescue with a warm sibling = %d tokens, alone = %d: want a smaller credit, the part past the shared prefix",
+			shared.Saved.CacheWrite5m, alone.Saved.CacheWrite5m)
+	}
+}
+
 // The facts carry the lifetime the cold gate uses, per provider.
 func TestEntryFactsTakeTheLifetimeFromTheProvider(t *testing.T) {
 	th := accountant.Thread{ID: "main"}
@@ -350,8 +406,8 @@ func TestTheEntryTTLFollowsTheBilledTier(t *testing.T) {
 			c.accBegin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "claude-sonnet-5", At: at}, body)
 			c.accEnd(thread.Result{}, body, nil)
 			c.accWait()
-			if c.accReq.Facts.TTL != time.Hour {
-				t.Fatalf("asked 1h on every breakpoint, facts TTL = %v", c.accReq.Facts.TTL)
+			if c.accFacts.TTL != time.Hour {
+				t.Fatalf("asked 1h on every breakpoint, facts TTL = %v", c.accFacts.TTL)
 			}
 			c.accBilledTTL(u)
 			return st.compute(c.accReq, u)
@@ -369,6 +425,37 @@ func TestTheEntryTTLFollowsTheBilledTier(t *testing.T) {
 	}
 	if got := phaseAfter(Usage{CacheRead: n}); got != accountant.PhaseHot {
 		t.Errorf("wrote nothing, gap 20m: phase = %q, want hot (no tier billed: the asked 1h stands)", got)
+	}
+}
+
+// Issue #1078: a read-only turn bills no tier, so the entry keeps the tier of the thread's last
+// write, as keepalive.ResolveTier decides. A gateway that bills 1h as 5m on turn 1 must not look
+// like a 1h cache on turn 2 because turn 2 only read: the entry the read found is a 5m one, and
+// the library would call a 20-minute gap after it hot and overstate a rescue.
+func TestAReadOnlyTurnKeepsTheLastBilledTier(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	body := []byte(`{"model":"claude-sonnet-5","system":[{"type":"text","text":"` + strings.Repeat("x", 4000) +
+		`","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`)
+	n := int64(len(body))
+	phaseAfter := func(first Usage) accountant.CachePhase {
+		st, pings := newSavingsTracker(), NewPingStore()
+		step := func(at time.Time, u Usage) accountant.Result {
+			c := &capture{savings: st, pings: pings, provider: string(bschemas.Anthropic)}
+			c.accBegin(accountant.RequestMeta{RequestID: at.String(), Session: "s", Model: "claude-sonnet-5", At: at}, body)
+			c.accEnd(thread.Result{}, body, nil)
+			c.accWait()
+			c.accBilledTTL(u)
+			return st.compute(c.accReq, u)
+		}
+		step(t0, first)
+		step(t0.Add(2*time.Minute), Usage{CacheRead: n}) // reads only: no tier billed
+		return step(t0.Add(22*time.Minute), Usage{CacheWrite: n, CacheWrite1h: n}).Phase
+	}
+	if got := phaseAfter(Usage{CacheWrite: n, CacheWrite1h: 0}); got == accountant.PhaseHot {
+		t.Errorf("billed 5m, then a read-only turn, gap 20m: phase = %q, want not hot", got)
+	}
+	if got := phaseAfter(Usage{CacheWrite: n, CacheWrite1h: n}); got != accountant.PhaseHot {
+		t.Errorf("billed 1h, then a read-only turn, gap 20m: phase = %q, want hot", got)
 	}
 }
 

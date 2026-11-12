@@ -35,8 +35,8 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	}))
 	defer up.Close()
 	h, rec, tap := accHandlerYAML(t, up.URL, "pipeline: [extract, extract_llm_sweep]\n")
-	var got atomic.Pointer[accountant.Request]
-	h.savings.onEnd = func(r *accountant.Request) { got.Store(r) }
+	var got atomic.Pointer[endRecord]
+	h.savings.onEnd = func(_ *accountant.Request, e endRecord) { got.Store(&e) }
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	body := `{"model":"claude-sonnet-5","max_tokens":64,` +

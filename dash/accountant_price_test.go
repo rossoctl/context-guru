@@ -279,3 +279,67 @@ func TestFigure_BreakCausedAsOneHourWrite(t *testing.T) {
 		t.Fatalf("got %v want %v", f.ByComponent["mask"], want)
 	}
 }
+
+// Issue #1076: Event.CostUSD (modelinfo) and the accountant figure (tierUSD) must price the same
+// 1h-written tokens alike, for every price shape: derived, a flat 1h rate (cache_write_1h_frac:
+// 1.0, as prices.example.yaml ships) and a stated 5m rate above the derived 1h one.
+func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
+	for name, p := range map[string]modelinfo.Price{
+		"derived":     accTestPrice,
+		"flat 1h":     {Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Write1hFrac: 1.0},
+		"5m above 1h": {Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 9e-6},
+	} {
+		const n = 1000
+		got := tierUSD(p, accountant.TierTokens{CacheWrite1h: n})
+		want := p.CostWithCacheWrite1h(0, 0, n, 0, n)
+		if !accNear(got, want) {
+			t.Errorf("%s: tierUSD = %v, CostWithCacheWrite1h = %v", name, got, want)
+		}
+	}
+}
+
+// NextRequestUSD names the 1h tier by the modelinfo TTL, not by a literal.
+func TestNextRequestUSDColdAtTheOneHourRate(t *testing.T) {
+	_, cold := NextRequestUSD(accTestPrice, 1000, 3600)
+	if want := 1000 * accTestPrice.CacheWrite1h(); !accNear(cold, want) {
+		t.Errorf("1h cold = %v, want %v", cold, want)
+	}
+	_, cold = NextRequestUSD(accTestPrice, 1000, 300)
+	if want := 1000 * accTestPrice.CacheWrite; !accNear(cold, want) {
+		t.Errorf("5m cold = %v, want %v", cold, want)
+	}
+}
+
+// Issue #1077: dash.TierTokens carries the stored JSON names, and the library owns the arithmetic. A
+// tier the library adds must reach dash.TierTokens, or add and less would drop it without an error:
+// set every library tier to 1 and require the round trip to keep them all.
+func TestTierTokensCarryEveryLibraryTier(t *testing.T) {
+	var lib accountant.TierTokens
+	v := reflect.ValueOf(&lib).Elem()
+	for i := range v.NumField() {
+		v.Field(i).SetInt(1)
+	}
+	if got := tiersOf(lib).lib(); got != lib {
+		t.Fatalf("a library tier is lost between accountant.TierTokens and dash.TierTokens: %+v -> %+v", lib, got)
+	}
+	var sum TierTokens
+	sum.add(tiersOf(lib))
+	sum.add(tiersOf(lib))
+	if got := sum.less(tiersOf(lib)); got != tiersOf(lib) {
+		t.Fatalf("add then less = %+v, want %+v", got, tiersOf(lib))
+	}
+}
+
+// A fatal library check this host has no name for still gates the figure (issue #1077). The library
+// decides which checks are fatal; a non-fatal one does not gate.
+func TestAnUnnamedFatalCheckStillGates(t *testing.T) {
+	if got := fatalCheckFallback("some_future_check"); got != FallbackCheckOther {
+		t.Errorf("fatalCheckFallback = %q, want %q", got, FallbackCheckOther)
+	}
+	e := switchEvent()
+	e.accRes.Checks = []accountant.CheckFailure{{Check: accountant.CheckConservation}}
+	e.PriceMode(accTestPrice, true)
+	if got := e.AccountantFallback(); got != "" {
+		t.Errorf("an informational check gated the figure: fallback %q", got)
+	}
+}

@@ -34,7 +34,7 @@ func TestAccEndDoesNotWaitForTheAccountantWork(t *testing.T) {
 	c := asyncCapture()
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	c.savings.onEnd = func(*accountant.Request) {
+	c.savings.onEnd = func(_ *accountant.Request, _ endRecord) {
 		entered <- struct{}{}
 		<-release
 	}
@@ -82,7 +82,7 @@ func TestRequestPathCostDoesNotGrowWithBodySize(t *testing.T) {
 	for i := 0; i < runs; i++ {
 		c := asyncCapture()
 		done := make(chan struct{})
-		c.savings.onEnd = func(*accountant.Request) { close(done) }
+		c.savings.onEnd = func(_ *accountant.Request, _ endRecord) { close(done) }
 		start := time.Now()
 		c.accBegin(asyncMeta(), body)
 		c.accEnd(thread.Result{ID: thread.Primary}, body, nil)
@@ -104,7 +104,7 @@ func TestRequestPathCostDoesNotGrowWithBodySize(t *testing.T) {
 func TestAccountantPanicOffThePathCostsTheSavingOnly(t *testing.T) {
 	c := asyncCapture()
 	done := make(chan struct{})
-	c.savings.onEnd = func(*accountant.Request) {
+	c.savings.onEnd = func(_ *accountant.Request, _ endRecord) {
 		defer close(done)
 		panic("boom")
 	}
@@ -143,7 +143,7 @@ func TestUpstreamIsReachedBeforeTheAccountantFinishes(t *testing.T) {
 	defer up.Close()
 	h, _, tap := accHandlerYAML(t, up.URL, "pipeline: [extract]\n")
 	var accountantDone atomic.Int64 // unix nanos at which the accountant's work ended
-	h.savings.onEnd = func(*accountant.Request) {
+	h.savings.onEnd = func(_ *accountant.Request, _ endRecord) {
 		time.Sleep(accountantDelay)
 		accountantDone.Store(time.Now().UnixNano())
 	}

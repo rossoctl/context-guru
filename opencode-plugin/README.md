@@ -115,3 +115,5 @@ These Claude Code plugin features do not exist here:
 - `statusline` and the session signal hooks
 - the `x-context-guru-ping` header for manual pings
 - the keep-alive plan from `cache-campaign`
+
+See the [matrix of plugins, providers and settings](../docs/reference/plugins-matrix.md) for what each plugin offers per provider.

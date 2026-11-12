@@ -26,12 +26,18 @@ var (
 	warmBase = agent.Usage{FreshInput: 103, CacheRead: 20315, Output: 12}
 )
 
+// counts is u without its backend label, which the backend tests read apart from the token counts.
+func counts(u agent.Usage) agent.Usage {
+	u.Backend = ""
+	return u
+}
+
 func jsonReply(usage string) []byte {
 	return []byte(`{"id":"c1","object":"chat.completion","choices":[],"usage":` + usage + `}`)
 }
 
 func TestReadUsageReadsTheColdWriteFromJSON(t *testing.T) {
-	got := Bob{}.ReadUsage("application/json", jsonReply(coldUsage), coldBase)
+	got := counts(Bob{}.ReadUsage("application/json", jsonReply(coldUsage), coldBase))
 	want := agent.Usage{FreshInput: 4, CacheWrite: 20315, CacheWrite1h: 20157, Output: 12}
 	if got != want {
 		t.Fatalf("ReadUsage(cold) = %+v, want %+v", got, want)
@@ -39,7 +45,7 @@ func TestReadUsageReadsTheColdWriteFromJSON(t *testing.T) {
 }
 
 func TestReadUsageReadsTheWarmWriteFromJSON(t *testing.T) {
-	got := Bob{}.ReadUsage("application/json", jsonReply(warmUsage), warmBase)
+	got := counts(Bob{}.ReadUsage("application/json", jsonReply(warmUsage), warmBase))
 	want := agent.Usage{FreshInput: 4, CacheRead: 20315, CacheWrite: 99, Output: 12}
 	if got != want {
 		t.Fatalf("ReadUsage(warm) = %+v, want %+v", got, want)
@@ -52,7 +58,7 @@ func TestReadUsageReadsTheLastUsageChunkOfAStream(t *testing.T) {
 		`data: {"id":"c1","choices":[],"usage":` + warmUsage + `}` + "\n\n" +
 		`data: {"id":"c1","choices":[],"usage":` + coldUsage + `}` + "\n\n" +
 		"data: [DONE]\n\n")
-	got := Bob{}.ReadUsage("text/event-stream; charset=utf-8", stream, coldBase)
+	got := counts(Bob{}.ReadUsage("text/event-stream; charset=utf-8", stream, coldBase))
 	want := agent.Usage{FreshInput: 4, CacheWrite: 20315, CacheWrite1h: 20157, Output: 12}
 	if got != want {
 		t.Fatalf("ReadUsage(stream) = %+v, want %+v", got, want)
@@ -66,7 +72,7 @@ func TestReadUsageIgnoresAnEmptyUsageChunkAfterTheRealOne(t *testing.T) {
 		stream := []byte(`data: {"id":"c1","choices":[],"usage":` + coldUsage + `}` + "\n\n" +
 			`data: {"id":"c1","choices":[],"usage":` + tail + `}` + "\n\n" +
 			"data: [DONE]\n\n")
-		got := Bob{}.ReadUsage("text/event-stream", stream, coldBase)
+		got := counts(Bob{}.ReadUsage("text/event-stream", stream, coldBase))
 		want := agent.Usage{FreshInput: 4, CacheWrite: 20315, CacheWrite1h: 20157, Output: 12}
 		if got != want {
 			t.Errorf("%s usage chunk last: ReadUsage = %+v, want the real block %+v", name, got, want)
@@ -80,7 +86,7 @@ func TestReadUsageFallsBackToCacheCreationFields(t *testing.T) {
 		"cache_creation_tokens":       `{"prompt_tokens":100,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":10,"cache_creation_tokens":60}}`,
 		"cache_creation_input_tokens": `{"prompt_tokens":100,"completion_tokens":1,"cache_creation_input_tokens":60,"prompt_tokens_details":{"cached_tokens":10}}`,
 	} {
-		got := Bob{}.ReadUsage("application/json", jsonReply(raw), base)
+		got := counts(Bob{}.ReadUsage("application/json", jsonReply(raw), base))
 		want := agent.Usage{FreshInput: 30, CacheRead: 10, CacheWrite: 60, Output: 1}
 		if got != want {
 			t.Errorf("%s: got %+v, want %+v", name, got, want)
@@ -101,7 +107,7 @@ func TestReadUsageReturnsBaseForAReplyItCannotRead(t *testing.T) {
 		"stream, no usage":  {"text/event-stream", "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"},
 		"empty":             {"application/json", ``},
 	} {
-		if got := (Bob{}).ReadUsage(tc.ct, []byte(tc.reply), base); got != base {
+		if got := counts((Bob{}).ReadUsage(tc.ct, []byte(tc.reply), base)); got != base {
 			t.Errorf("%s: ReadUsage = %+v, want base %+v", name, got, base)
 		}
 	}

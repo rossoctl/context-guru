@@ -137,7 +137,7 @@ What the library prices:
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
-`check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
+`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `size_unknown`, `implausible_size`,
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
 measured is not shown.
 

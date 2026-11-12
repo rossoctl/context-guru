@@ -188,6 +188,8 @@ type capture struct {
 	accPreDefer []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
 	accThread string
+	// accFacts is the entry facts accEnd gave the library, kept for accBilledTTL: the library keeps its record private.
+	accFacts accountant.EntryFacts
 	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a
 	// newer ping that arrived while the request was in flight.
 	accPingWindow string
@@ -699,6 +701,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
+	e.Backend = usage.Backend
 
 	// context-guru's own model spend attributable to THIS request: what this request's
 	// OWN sink recorded, never a delta of the process-wide counters. The delta was
@@ -858,7 +861,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 				c.savings.noteRescueFactsMissing()
 			}
 			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
+			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}
 	}
 	endAcc()

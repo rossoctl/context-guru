@@ -121,3 +121,5 @@ plugin registration only; it does not remove the existing proxy routing or state
 
 Restart Codex after installing or refreshing plugin code. Routing or proxy changes made by setup
 take effect for model traffic in the next Codex process.
+
+See the [matrix of plugins, providers and settings](../../../docs/reference/plugins-matrix.md) for what each plugin offers per provider.
