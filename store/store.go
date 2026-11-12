@@ -676,14 +676,17 @@ func NewMemory(o Options) *Memory {
 	}
 }
 
-// SetStateTTL sets the lifetime of the session state keys (Options.StateTTLSeconds) after the
-// store is built. Zero or less leaves it as it is. Call it before serving.
+// SetStateTTL gives the session state keys a lifetime after the store is built, but only when
+// the store has none: a value set in Options.StateTTLSeconds wins. Zero or less changes nothing.
+// Call it before serving.
 func (m *Memory) SetStateTTL(d time.Duration) {
 	if d <= 0 {
 		return
 	}
 	m.mu.Lock()
-	m.stateTTL = d
+	if m.stateTTL <= 0 {
+		m.stateTTL = d
+	}
 	m.mu.Unlock()
 }
 

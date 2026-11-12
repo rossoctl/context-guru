@@ -162,6 +162,60 @@ func OpenDisk(db *sql.DB, o DiskOptions) (*Disk, error) {
 	return d, nil
 }
 
+// DeleteTenantState deletes every session-state row of one hosted tenant (#1104): in each
+// namespace, the keys that start with the tenant-scoped session id "<tenant>:" (session.Scoped).
+// The range is "<tenant>:" up to "<tenant>;", so tenant "t1" never takes the rows of "t10". The
+// host calls it when it purges a tenant. The namespaces with no session id in the key (the
+// global ones) carry no tenant and stay. A missing table is not an error. It returns the rows
+// deleted.
+func DeleteTenantState(ctx context.Context, db *sql.DB, tenantID string) (int64, error) {
+	if db == nil || tenantID == "" {
+		return 0, nil
+	}
+	var n int64
+	for _, p := range StatePrefixes {
+		if hasAnyPrefix(p, globalPrefixes) {
+			continue
+		}
+		lo := p + tenantID + ":"
+		hi := p + tenantID + ";" // ':' + 1
+		res, err := db.ExecContext(ctx, `DELETE FROM session_state WHERE key >= ? AND key < ?`, []byte(lo), []byte(hi))
+		if err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				return n, nil
+			}
+			return n, err
+		}
+		c, _ := res.RowsAffected()
+		n += c
+	}
+	return n, nil
+}
+
+// TenantStateRows counts the rows DeleteTenantState would delete.
+func TenantStateRows(ctx context.Context, db *sql.DB, tenantID string) (int64, error) {
+	if db == nil || tenantID == "" {
+		return 0, nil
+	}
+	var n int64
+	for _, p := range StatePrefixes {
+		if hasAnyPrefix(p, globalPrefixes) {
+			continue
+		}
+		var c int64
+		err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_state WHERE key >= ? AND key < ?`,
+			[]byte(p+tenantID+":"), []byte(p+tenantID+";")).Scan(&c)
+		if err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				return n, nil
+			}
+			return n, err
+		}
+		n += c
+	}
+	return n, nil
+}
+
 // DeleteSessionState deletes one session's rows from db's session_state table (every thread, and
 // the drop records). The host calls it when it deletes or archives the session. A missing table is
 // not an error. Rows of a session whose id continues the given one after a ':' go too: the key

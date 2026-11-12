@@ -694,10 +694,7 @@ func Main(hooks Hooks) {
 		// Hosted (#1104): ONE metadata-only table copy for every tenant store, whatever
 		// --session-state-metadata-only says. A tenant's summary text and other content keys
 		// never reach the file. Keys are tenant-scoped (session.Scoped), so tenants do not meet.
-		if d, err := store.OpenDisk(stateDB, store.DiskOptions{
-			MetadataOnly: true, Retention: *sessionStateRetention}); err != nil {
-			slog.Warn("context-guru: session state table unusable; hosted state stays in memory only", "err", err)
-		} else {
+		if d := openHostedSessionState(stateDB, *sessionStateRetention); d != nil {
 			tenants.SetSessionState(d, store.DefaultStateTTL)
 			defer d.Close()
 			slog.Info("context-guru: hosted session state in the dashboard database, metadata only",
@@ -1667,4 +1664,17 @@ func accountantStatePath(dashDB string, dashboard bool) string {
 		return ""
 	}
 	return dashDB + ".accountant-state.json"
+}
+
+// openHostedSessionState opens the session-state table for a hosted proxy (#1104). It is ALWAYS
+// metadata-only, whatever --session-state-metadata-only says: a tenant's summary text and other
+// content keys must never reach the file. It returns nil, after a warning, when the table is
+// unusable; hosted state then stays in memory.
+func openHostedSessionState(db *sql.DB, retention time.Duration) *store.Disk {
+	d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, Retention: retention})
+	if err != nil {
+		slog.Warn("context-guru: session state table unusable; hosted state stays in memory only", "err", err)
+		return nil
+	}
+	return d
 }
