@@ -114,7 +114,7 @@ func TestSharedParserStillIgnoresBobWrites(t *testing.T) {
 // cold block, as JSON or as an OpenAI chat event stream.
 func bobUsageHandler(t *testing.T, sse bool) (*httptest.Server, *dash.Recorder) {
 	t.Helper()
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return bobUpstreamHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		if sse {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Write([]byte(`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}` + "\n\n"))
@@ -125,7 +125,13 @@ func bobUsageHandler(t *testing.T, sse bool) (*httptest.Server, *dash.Recorder) 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":` + bobColdUsage + `}`))
-	}))
+	})
+}
+
+// bobUpstreamHandler is a proxy with a dashboard whose every upstream is serve.
+func bobUpstreamHandler(t *testing.T, serve http.HandlerFunc) (*httptest.Server, *dash.Recorder) {
+	t.Helper()
+	up := httptest.NewServer(serve)
 	t.Cleanup(up.Close)
 	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
 	if err != nil {

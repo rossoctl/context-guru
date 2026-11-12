@@ -466,6 +466,10 @@ type Event struct {
 	// so on a priced request PriceMode sets DeferNetUSD to the library's tooldefer row minus this cost, and takes
 	// that row out of the baseline. Not stored.
 	DeferSearchUSD float64 `json:"-"`
+	// Backend is which of Bob's backends answered: "A", "B", "other" (the reply's marks match
+	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
+	// reply's id shape and usage fields. The id itself is never stored.
+	Backend string `json:"backend,omitempty"`
 
 	// Limits are the subscription limit values the provider's answer carried in its
 	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.
