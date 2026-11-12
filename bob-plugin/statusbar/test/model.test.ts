@@ -265,3 +265,19 @@ test('the menu has Status, Doctor, Open dashboard and Preset, and runs only read
 test('the dashboard url is the loopback proxy', () => {
   assert.equal(loopbackUrl('127.0.0.1', 8891, '/dashboard/'), 'http://127.0.0.1:8891/dashboard/')
 })
+
+test('saved reads USD and mixed in any case and after a trim', () => {
+  const money = { main: { saved_usd: 1.25 }, others: { saved_usd: 0.5 } }
+  for (const currency of [' USD ', 'usd', 'Usd']) {
+    assert.equal(formatSaved(3_100, cache({ priced: true, money, currency })), 'saved 3.1k tok · $1.75')
+  }
+  for (const currency of ['Mixed', 'MIXED', ' mixed ']) {
+    assert.equal(formatSaved(3_100, cache({ priced: true, money, currency })), 'saved 3.1k tok')
+  }
+})
+
+test('saved rounds a unit amount of 1000 or more to a whole number, as the dashboard does', () => {
+  const big = { main: { saved_usd: 1234.567 }, others: { saved_usd: 0 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money: big, currency: 'Bobcoins' })),
+    'saved 3.1k tok · 1,235 Bobcoins')
+})

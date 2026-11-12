@@ -106,20 +106,22 @@ export function formatSaved(saved: number | undefined, cache: CacheState | undef
   if (cache?.priced !== true || !cache.money) return tokens
   const amount = (num(cache.money.main?.saved_usd) ?? 0) +
     (num(cache.money.others?.saved_usd) ?? 0)
-  if (cache.currency === undefined || cache.currency === 'USD') {
+  const unit = typeof cache.currency === 'string' ? cache.currency.trim() : ''
+  if (cache.currency === undefined || unit.toUpperCase() === 'USD') {
     return `${tokens} · $${amount.toFixed(2)}`
   }
   // "mixed", or a name the status bar cannot show safely: tokens only.
-  const unit = typeof cache.currency === 'string' ? cache.currency.trim() : ''
-  if (unit === 'mixed' || !UNIT.test(unit)) return tokens
+  if (unit.toLowerCase() === 'mixed' || !UNIT.test(unit)) return tokens
   return `${tokens} · ${formatAmount(amount)} ${unit}`
 }
 
-// The dashboard's rule: 0 as 0, 4 decimals below 0.01, else 2.
+// The dashboard's rule (usd in dash/ui/app.js): 0 as 0, 4 decimals below 0.01, 2 below 1000,
+// else a whole number with a thousands separator.
 function formatAmount(value: number): string {
   const abs = Math.abs(value)
   if (abs === 0) return '0'
-  return value.toFixed(abs < 0.01 ? 4 : 2)
+  if (abs < 1000) return value.toFixed(abs < 0.01 ? 4 : 2)
+  return (value < 0 ? '-' : '') + Math.round(abs).toLocaleString('en-US')
 }
 
 export function parsePort(text: string | undefined): number {
