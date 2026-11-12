@@ -382,6 +382,152 @@ for (const warm of [true, false]) {
   })
 }
 
+// The learned 5-hour weights as `cg.py cachestate` passes them (#1095). On the 90k prefix: a read is 0.09% (≈0.1%),
+// a 5-minute write 1.44% (≈1.4%), a 1-hour write 2.7%.
+const WEIGHTS = {
+  ok: true,
+  weights: { input: 2e-7, cache_read: 1e-8, cache_write_5m: 1.6e-7, cache_write_1h: 3e-7, output: 9e-7 },
+  learned: { input: false, cache_read: true, cache_write_5m: true, cache_write_1h: false, output: true },
+  requests: 1234,
+}
+const withWeights = (w: object | undefined, main: object = {}) => (d: any) => ({
+  ...d,
+  ...main,
+  threads: d.threads.map((t: any) => (t.main ? { ...t, ...main } : t)),
+  ...(w === undefined ? {} : { fivehour_weights: w }),
+})
+
+for (const cols of [140, 60]) {
+  test(`on a subscription with learned weights a warm band shows the 5-hour share, warm and cold (${cols} columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(WEIGHTS)
+    await boot($, on, true)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(cols < 80 ? /^◆ next 5h ≈0\.1% · ≈1\.4% cold\s/ : /^◆ next message ≈0\.1% of 5h · ≈1\.4% if cold\s/)
+    expect(row1).not.toMatch(/\b(rd|wr)\b|\$/)
+    expect(row1.length, row1).toBeLessThanOrEqual(cols - 4)
+    expect((await ui.find({ type: 'Text', text: /^≈0\.1%$/ }) as any)?.props?.color).toBe('success')
+    expect(await ui.find({ type: 'Text', text: /^≈1\.4%$/ })).toBeUndefined() // the cold share is in the dim text, not a figure of its own
+    await ui.unmount()
+  })
+
+  test(`on a subscription with learned weights a cold band shows the cold share in the warning color (${cols} columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(WEIGHTS)
+    await boot($, on, false)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(/^◆ ○ cache cold · next message ≈1\.4% of 5h\s/)
+    expect(row1).not.toMatch(/≈0\.1%|\b(rd|wr)\b/)
+    expect(row1.length, row1).toBeLessThanOrEqual(cols - 4)
+    expect((await ui.find({ type: 'Text', text: /^≈1\.4%$/ }) as any)?.props?.color).toBe('warning')
+    await ui.unmount()
+  })
+}
+
+test('on a subscription with learned weights row 1 fits 60 columns with the longest next-ping hint', async ($, on) => {
+  usage = FIVE_HOUR
+  docOverride = withWeights(WEIGHTS, { pings_left: 2, next_ping_ms: NOW + 3_599_000, ttl_s: 3600, end_ts: NOW, last_ts: NOW })
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[0]
+  expect(row).toMatch(/^◆ next 5h ≈0\.1% · ≈2\.7% cold  ↻ ping 59:5\d/)
+  expect(row.length, row).toBeLessThanOrEqual(60 - 4)
+  expect(row).toMatch(/hide  dash ↗$/)
+  await ui.unmount()
+})
+
+test('the cold share uses the write tier of the entry: the 1-hour weight on a 1-hour entry, the learned one when unknown', async ($, on) => {
+  usage = FIVE_HOUR
+  docOverride = withWeights(WEIGHTS, { ttl_s: 3600 })
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/≈0\.1% of 5h · ≈2\.7% if cold/) // 90k × 3e-7: the 1-hour weight, though not learned
+  await ui.unmount()
+  // No tier on the entry (then no clock either: the band draws it cold), and the fit learned only the 1-hour write: that one.
+  docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_5m: false, cache_write_1h: true } }, { ttl_s: undefined })
+  await clock.advance(16_000)
+  usage = docOverride = null
+  const ui2 = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui2)).split('\n')[0]).toMatch(/next message ≈2\.7% of 5h/)
+  await ui2.unmount()
+})
+
+test('a tiny share reads <0.1%, and a large one has no decimals', async ($, on) => {
+  usage = FIVE_HOUR
+  docOverride = withWeights({ ...WEIGHTS, weights: { ...WEIGHTS.weights, cache_read: 1e-10, cache_write_5m: 2e-6 } })
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message <0\.1% of 5h · ≈18% if cold\s/)
+  await ui.unmount()
+})
+
+for (const [name, w] of [
+  ['missing', undefined],
+  ['below the gate (ok false)', { ...WEIGHTS, ok: false }],
+  ['no learned read weight', { ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_read: false } }],
+  ['no learned write weight', { ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_5m: false } }],
+  ['a read weight that is not a number', { ...WEIGHTS, weights: { ...WEIGHTS.weights, cache_read: 'x' } }],
+] as const) {
+  test(`on a subscription with weights ${name} the band and the pane keep the one token figure`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(w)
+    await boot($, on, true)
+    usage = docOverride = null
+    const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+    const row1 = (await dump(band)).split('\n')[0]
+    expect(row1).toMatch(/^◆ next message 90\.0k rd\s/)
+    expect(row1).not.toMatch(/%|of 5h/)
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await dump(pane)).toMatch(/NEXT MESSAGE\nnext message 90\.0k rd\n/)
+    await pane.unmount()
+  })
+}
+
+test('with an API key the weights change nothing: the band keeps the dollar pair', async ($, on) => {
+  docOverride = withWeights(WEIGHTS)
+  await boot($, on, true)
+  docOverride = null
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(band)).split('\n')[0]).toMatch(/^◆ next message \$0\.06 · \$0\.78 if cold\s/)
+  await band.unmount()
+})
+
+for (const warm of [true, false]) {
+  test(`on a subscription with learned weights the pane shows the share warm and cold (${warm ? 'warm' : 'cold'} cache, 60 columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(WEIGHTS)
+    await boot($, on, warm)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = await dump(ui)
+    expect(text).toMatch(/NEXT MESSAGE\nif the cache is warm ≈0\.1% of 5h\nif it is cold +≈1\.4% of 5h  \(90k tokens cached\)\nat learned 5-hour weights \(1,234 requests\)\n/)
+    for (const l of text.split('\n')) expect(l.length, l).toBeLessThanOrEqual(60)
+    expect((await ui.find({ type: 'Text', text: /^≈1\.4%$/ }) as any)?.props?.color).toBe(warm ? undefined : 'warning')
+    await ui.unmount()
+  })
+}
+
+test('the band redraws when the learned weights arrive on a later poll', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, true)
+  let ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message 90\.0k rd\s/)
+  await ui.unmount()
+  docOverride = withWeights(WEIGHTS)
+  await clock.advance(16_000)
+  usage = docOverride = null
+  ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message ≈0\.1% of 5h · ≈1\.4% if cold\s/)
+  await ui.unmount()
+})
+
 test('with an API key the band and the pane keep the dollar pair, warm and cold', async ($, on) => {
   await boot($, on, true)
   const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })

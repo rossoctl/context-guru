@@ -641,6 +641,9 @@ the dashboard learns it from the stored 5-hour share and token counts (#1047).
 - **`window_ping`.** With `since` (the open window's start, unix ms) and `ok: true`: the tokens the
   cache strategy's pings billed since then, for the Overview estimate.
 - **Cache.** One fit per account for 15 minutes. A page load never fits again.
+- **The plugin's band.** On a subscription the Claude Code band and pane price the next message as a share of the
+  5-hour limit with these weights (#1095). `cg.py` reads the endpoint at most once a minute. See
+  [the band](plugin/statusline.md#the-band).
 - **Fail open.** An error in the read or the fit gives `ok: false`. The pages then show the
   API-price figures.
 
