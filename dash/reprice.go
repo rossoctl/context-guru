@@ -107,9 +107,9 @@ func (d *DB) applyReprice(e *Event) error {
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 	res, err := tx.Exec(`UPDATE requests SET cost_usd = ?, baseline_cost_usd = ?, cache_saved_usd = ?,
-		billed_token_factor = ?, token_accounting = ?
+		billed_token_factor = ?, token_accounting = ?, currency = ?
 		WHERE id = ? AND token_accounting IN (?, ?) AND cost_usd = 0`,
-		e.CostUSD, e.BaselineCostUSD, e.CacheSavedUSD, e.BilledTokenFactor, AccountingComplete,
+		e.CostUSD, e.BaselineCostUSD, e.CacheSavedUSD, e.BilledTokenFactor, AccountingComplete, rowCurrency(e.Currency),
 		e.ID, AccountingPartial, AccountingMissing)
 	if err != nil {
 		return err

@@ -2,6 +2,7 @@ package dash
 
 import (
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -151,5 +152,40 @@ func TestEveryMoneyRouteSaysTheUnit(t *testing.T) {
 		if w.Code != http.StatusOK || body["currency"] != "Bobcoins" {
 			t.Errorf("%s -> %d, currency %v; want 200 and Bobcoins", p, w.Code, body["currency"])
 		}
+	}
+}
+
+// A row priced late (the price was unknown at write time, #920) takes the unit of the price that
+// finally costed it. Left at the USD default, one such Bob row made the whole Bob view mixed.
+func TestRepricedRowTakesTheCurrencyOfItsPrice(t *testing.T) {
+	src := &lateLoader{p: bobPrice}
+	rec, err := NewRecorder(Options{DBPath: filepath.Join(t.TempDir(), "d.db"), FlushInterval: time.Millisecond,
+		BatchSize: 1, Prices: src, RepriceInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	priced := pricedEvent(time.Now().UnixMilli(), "s1", "bob", bobPrice)
+	late := partialEvent(time.Now().UnixMilli(), "s2", 100)
+	late.Agent = "bob"
+	rec.Record(priced)
+	rec.Record(late)
+	waitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
+	src.loaded.Store(true)
+	var cost float64
+	waitFor(t, "the late row priced", func() bool {
+		_ = rec.db.sql.QueryRow(`SELECT cost_usd FROM requests WHERE session_id = 's2'`).Scan(&cost)
+		return cost > 0
+	})
+	p, err := rec.DB().Requests(Filter{Session: "s2"}, 0, 1)
+	if err != nil || len(p.Requests) != 1 {
+		t.Fatalf("requests: %v, %v", p, err)
+	}
+	if got := p.Requests[0].Currency; got != "Bobcoins" {
+		t.Errorf("repriced row currency = %q, want Bobcoins", got)
+	}
+	_, body := get(t, NewAPI(rec), "/api/stats?agent=bob", "127.0.0.1:1")
+	if body["currency"] != "Bobcoins" {
+		t.Errorf("/api/stats currency = %v, want Bobcoins", body["currency"])
 	}
 }
