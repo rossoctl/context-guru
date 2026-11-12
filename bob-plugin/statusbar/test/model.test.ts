@@ -87,6 +87,60 @@ test('saved shows money only when priced is true', () => {
   assert.equal(formatSaved(3_100, cache({ priced: true, money })), 'saved 3.1k tok · $1.75')
 })
 
+test('saved shows $ as today when currency is USD or absent (an old proxy)', () => {
+  const money = { main: { saved_usd: 1.5 }, others: { saved_usd: 0.25 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money, currency: 'USD' })),
+    'saved 3.1k tok · $1.75')
+  assert.equal(formatSaved(3_100, cache({ priced: true, money })), 'saved 3.1k tok · $1.75')
+  // Dollars keep today's 2 decimals, also below 0.01.
+  const small = { main: { saved_usd: 0.0042 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money: small, currency: 'USD' })),
+    'saved 3.1k tok · $0.00')
+})
+
+test('saved shows a unit name after the number, with 2 decimals', () => {
+  const money = { main: { saved_usd: 1.5 }, others: { saved_usd: 0.25 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money, currency: 'Bobcoins' })),
+    'saved 3.1k tok · 1.75 Bobcoins')
+})
+
+test('saved shows a unit with 4 decimals below 0.01, and 0 for 0, as the dashboard does', () => {
+  const small = { main: { saved_usd: 0.0042 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money: small, currency: 'Bobcoins' })),
+    'saved 3.1k tok · 0.0042 Bobcoins')
+  const none = { main: { saved_usd: 0 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money: none, currency: 'Bobcoins' })),
+    'saved 3.1k tok · 0 Bobcoins')
+})
+
+test('saved trims the unit name', () => {
+  const money = { main: { saved_usd: 2 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money, currency: '  Bobcoins \n' })),
+    'saved 3.1k tok · 2.00 Bobcoins')
+})
+
+test('saved shows tokens only when currency is mixed', () => {
+  const money = { main: { saved_usd: 1.5 }, others: { saved_usd: 0.25 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money, currency: 'mixed' })),
+    'saved 3.1k tok')
+})
+
+test('saved shows tokens only for a unit name it cannot show safely', () => {
+  const money = { main: { saved_usd: 1.5 } }
+  for (const currency of ['', '   ', 'Bob coins', 'Bob$', 'coins·x', '$(alert)', 'Bobcoins2',
+    'A'.repeat(17), 'Bobcöins', 42, null, { name: 'x' }]) {
+    assert.equal(formatSaved(3_100, cache({ priced: true, money, currency })), 'saved 3.1k tok',
+      `currency ${JSON.stringify(currency)}`)
+  }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money, currency: 'A'.repeat(16) })),
+    `saved 3.1k tok · 1.50 ${'A'.repeat(16)}`)
+})
+
+test('saved shows tokens only for currency Bobcoins when priced is not true', () => {
+  const money = { main: { saved_usd: 1.5 } }
+  assert.equal(formatSaved(3_100, cache({ money, currency: 'Bobcoins' })), 'saved 3.1k tok')
+})
+
 test('port comes from install.json, else 0', () => {
   assert.equal(parsePort('{"port": 8891, "complete": true}'), 8891)
   assert.equal(parsePort(undefined), 0)
@@ -181,6 +235,14 @@ test('render shows money with priced true and hides it with priced false', () =>
   assert.equal(unpriced.text, 'CG ✓ ctx 21k/270k · cache 1h 59:00 · saved 500 tok')
 })
 
+test('render shows Bobcoins with no $ in the text or the tooltip', () => {
+  const money = { main: { saved_usd: 2 }, others: { saved_usd: 0.5 } }
+  const view = render(snap({ session: 's1', saved: 500,
+    cache: cache({ priced: true, money, currency: 'Bobcoins' }) }), 0)
+  assert.equal(view.text, 'CG ✓ ctx 21k/270k · cache 1h 59:00 · saved 500 tok · 2.50 Bobcoins')
+  assert.doesNotMatch(view.text + view.tooltip, /\$|dollar/i)
+})
+
 test('no snapshot (a failed poll) renders CG ✗, not the old text', () => {
   const view = renderView(undefined, 0)
   assert.equal(view.text, 'CG ✗')
@@ -202,4 +264,20 @@ test('the menu has Status, Doctor, Open dashboard and Preset, and runs only read
 
 test('the dashboard url is the loopback proxy', () => {
   assert.equal(loopbackUrl('127.0.0.1', 8891, '/dashboard/'), 'http://127.0.0.1:8891/dashboard/')
+})
+
+test('saved reads USD and mixed in any case and after a trim', () => {
+  const money = { main: { saved_usd: 1.25 }, others: { saved_usd: 0.5 } }
+  for (const currency of [' USD ', 'usd', 'Usd']) {
+    assert.equal(formatSaved(3_100, cache({ priced: true, money, currency })), 'saved 3.1k tok · $1.75')
+  }
+  for (const currency of ['Mixed', 'MIXED', ' mixed ']) {
+    assert.equal(formatSaved(3_100, cache({ priced: true, money, currency })), 'saved 3.1k tok')
+  }
+})
+
+test('saved rounds a unit amount of 1000 or more to a whole number, as the dashboard does', () => {
+  const big = { main: { saved_usd: 1234.567 }, others: { saved_usd: 0 } }
+  assert.equal(formatSaved(3_100, cache({ priced: true, money: big, currency: 'Bobcoins' })),
+    'saved 3.1k tok · 1,235 Bobcoins')
 })
