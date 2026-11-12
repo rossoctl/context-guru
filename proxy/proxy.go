@@ -655,7 +655,7 @@ func (h *Handler) Mux() *http.ServeMux {
 			// straight through. In hosted mode upstreamFor always injects, because the
 			// client's header holds OUR token, which must not leave the box.
 		}, pickBob, ""))
-		m.HandleFunc("/", h.passthrough(h.opts.BobUpstream))
+		m.HandleFunc("/", h.passthrough(h.opts.BobUpstream, h.agentFor(bobModelPath)))
 	}
 	return m
 }
@@ -664,8 +664,10 @@ func (h *Handler) Mux() *http.ServeMux {
 // for Bob's control-plane calls that must not be rewritten. Bob's own auth
 // header passes straight through (no key injection); the response is streamed
 // back as-is. Only the model route is reduced; everything else Bob calls lands
-// here and is proxied verbatim.
-func (h *Handler) passthrough(base string) http.HandlerFunc {
+// here and is proxied verbatim. The one exception is a call the route's agent a
+// wants to read (agent.ControlPlane): its 200 reply is read whole, and a may
+// change it.
+func (h *Handler) passthrough(base string, a agent.Agent) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		up := upstream{base: base}
 		// Hosted mode: authenticate and resolve the tenant's Bob endpoint, then inject
@@ -707,9 +709,11 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		}
 		copyHeaders(req.Header, r.Header)
 		setUpstreamAuth(req.Header, up)
-		// The model-info half below is local-only. Bob is not deployed on hosted for now (owner,
-		// 2026-11-12), so this rule was not designed for hosted Bob. See docs/reference/hosted-vs-local.md.
-		if isBobProfile(r) || (h.opts.Tenants == nil && isBobModelInfo(r)) {
+		// The agent picks the calls it reads (Bob: its profile, and its model info when not hosted).
+		call := agent.ControlCall{Method: r.Method, Path: r.URL.Path, Hosted: h.opts.Tenants != nil}
+		cp, _ := a.(agent.ControlPlane)
+		wants := cp != nil && agentWantsReply(r.Context(), cp, call)
+		if wants {
 			// We have to read this one response, so do not let it arrive compressed.
 			req.Header.Del("Accept-Encoding")
 		}
@@ -722,17 +726,43 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 			http.Error(w, "upstream request failed", http.StatusBadGateway)
 			return
 		}
-		if isBobProfile(r) && h.forwardBobProfile(w, resp) {
-			return
-		}
-		if h.opts.Tenants == nil && isBobModelInfo(r) && h.forwardBobModelInfo(w, resp) {
+		if wants && h.forwardAgentReply(w, r, resp, cp, call) {
 			return
 		}
 		h.stream(w, resp)
 	}
 }
 
-// bobProfilePath is bob.ProfilePath. See forwardBobProfile.
+// forwardAgentReply sends the 200 reply to a call the agent reads: the agent's Body, or the
+// original bytes when it gives none. It stores the agent's Windows when not hosted. It reports
+// whether it answered the request. A non-200 or unreadable reply is not answered here: the caller
+// then streams the response as before.
+func (h *Handler) forwardAgentReply(w http.ResponseWriter, r *http.Request, resp *http.Response, cp agent.ControlPlane, call agent.ControlCall) bool {
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	// The agent gets a copy, so a panic after it wrote into the bytes still sends the original.
+	rep := agentReply(r.Context(), cp, call, bytes.Clone(body))
+	out := body
+	if rep.Body != nil {
+		out = rep.Body
+	}
+	if !call.Hosted {
+		h.noteBobWindows(rep.Windows)
+	}
+	copyHeaders(w.Header(), resp.Header)
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.WriteHeader(resp.StatusCode)
+	w.Write(out)
+	return true
+}
+
+// bobProfilePath is bob.ProfilePath. See bob.Bob.Reply.
 const bobProfilePath = bob.ProfilePath
 
 // bobModelPath is Bob's model route.
@@ -771,62 +801,6 @@ func agentSessionID(r *http.Request, a agent.Agent) (id string) {
 }
 
 func isBobProfile(r *http.Request) bool { return bob.IsProfile(r.Method, r.URL.Path) }
-
-// forwardBobProfile forwards Bob's profile with the per-instance REGION fields removed,
-// and reports whether it answered the request.
-//
-// Bob's client does not keep the base URL it was configured with. Having fetched the
-// profile, `Pc.resolveBaseUrl` (bobshell 1.0.6) replaces the HOSTNAME of that URL with
-// `api.<region_domain>` from the profile — keeping the scheme and, fatally, the PORT.
-// Pointed at a context-guru instance on 127.0.0.1:4111, its very next call goes to
-// http://api.example.com:4111, where nothing listens: observed live as
-// "Request failed after 6 attempts: fetch failed", with not one model request ever
-// reaching the proxy while the profile call itself succeeded — the confusing shape,
-// because the proxy looks half-working and its log is empty.
-//
-// The rewrite is skipped when the instance carries no region (`hasRegion` false), so
-// dropping those two fields is all it takes for the client to keep talking to the
-// endpoint its operator configured. Nothing else in the document is touched, and a
-// body we cannot parse is passed through unchanged rather than mangled.
-func (h *Handler) forwardBobProfile(w http.ResponseWriter, resp *http.Response) bool {
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	out, ok := stripProfileRegion(body)
-	if !ok {
-		out = body
-	}
-	copyHeaders(w.Header(), resp.Header)
-	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
-	w.WriteHeader(resp.StatusCode)
-	w.Write(out)
-	return true
-}
-
-// forwardBobModelInfo forwards Bob's model list unchanged and keeps one number for each model, the
-// window Bob will compact against (#963). It reports whether it answered the request. A body it
-// cannot read is not answered here: the caller then streams the response as before.
-func (h *Handler) forwardBobModelInfo(w http.ResponseWriter, resp *http.Response) bool {
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	h.noteBobModelInfo(body)
-	copyHeaders(w.Header(), resp.Header)
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
-	return true
-}
 
 // stripProfileRegion is bob.StripProfileRegion.
 func stripProfileRegion(b []byte) ([]byte, bool) { return bob.StripProfileRegion(b) }
