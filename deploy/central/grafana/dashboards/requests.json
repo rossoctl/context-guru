@@ -1,0 +1,929 @@
+{
+  "uid": "central-requests",
+  "title": "Requests",
+  "description": "How many requests, how many fail, how long do they take, how big are they?",
+  "tags": [
+    "central",
+    "requests"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "proxy",
+        "label": "Proxy",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "central-prom"
+        },
+        "query": {
+          "query": "label_values(llm_proxy_info, proxy)",
+          "refId": "v"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "machine",
+        "label": "Machine",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "central-prom"
+        },
+        "query": {
+          "query": "label_values(llm_proxy_info{proxy=~\"$proxy\"}, machine)",
+          "refId": "v"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Requests",
+      "description": "Requests that reached the proxies in the selected range. Keep-alive pings and /compact are not counted.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "no data",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "2xx",
+      "description": "Share of requests the provider answered with success.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",status_class=\"2xx\"}[$__range])) / clamp_min(sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 2,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#73BF69"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "4xx",
+      "description": "Share of requests that failed because of the request itself: bad key, too large, rate limited.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",status_class=\"4xx\"}[$__range])) / clamp_min(sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 2,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FF9830"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "5xx",
+      "description": "Share of requests that failed on the provider or the proxy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",status_class=\"5xx\"}[$__range])) / clamp_min(sum(increase(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 2,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#F2495C"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Median duration",
+      "description": "p50 of total time, from request to last byte, over the selected range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(llm_inference_duration_seconds_bucket{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])))",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no data",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "p95 duration",
+      "description": "p95 of total time over the selected range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(llm_inference_duration_seconds_bucket{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])))",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no data",
+          "decimals": 2,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FADE2A"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Requests per hour, by status",
+      "description": "Requests per hour. 'none' is a request with no status: the client left or the connection broke.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 16,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sum by (status_class)(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{status_class}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "2xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "3xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "4xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F2495C"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "none"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8E8E8E"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Failed requests per hour",
+      "description": "The two error classes alone, so a small number is visible next to a large success count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 4,
+        "w": 8,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",status_class=\"4xx\"}[$__rate_interval])) * 3600",
+          "legendFormat": "4xx",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        },
+        {
+          "expr": "sum(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",status_class=\"5xx\"}[$__rate_interval])) * 3600",
+          "legendFormat": "5xx",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "4xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F2495C"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Duration (seconds)",
+      "description": "Total time from request to last byte. A streamed answer is slow by nature, so read this with the stream split below.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(llm_inference_duration_seconds_bucket{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(llm_inference_duration_seconds_bucket{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(llm_inference_duration_seconds_bucket{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FADE2A"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F2495C"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Duration p95 by model (seconds)",
+      "description": "Which model is slow.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(llm_inference_duration_seconds_bucket{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])))",
+          "legendFormat": "{{model}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Request size (bytes per request)",
+      "description": "Body bytes sent upstream, as forwarded, divided by requests. NO DATA YET: the proxy does not count body sizes on every path, so llm_inference_request_bytes_total is not built (design 5.1). The panel fills when it is.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_inference_request_bytes_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) / clamp_min(sum(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "request",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "request"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794F2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Response size (bytes per request)",
+      "description": "Body bytes received from the upstream, divided by requests. NO DATA YET: llm_inference_response_bytes_total is not built.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_inference_response_bytes_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) / clamp_min(sum(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "response",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "response"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B877D9"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Requests per hour, by model",
+      "description": "Who is busy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (model)(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
+          "legendFormat": "{{model}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Streamed or not",
+      "description": "Streamed answers per hour against whole answers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 29,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (stream)(rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
+          "legendFormat": "stream={{stream}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    }
+  ]
+}

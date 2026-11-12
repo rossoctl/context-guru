@@ -100,6 +100,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
+github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624 h1:/pfhva2bnjY8GanZIUoiqy0KQ1RbspWN0kG0gapnNrQ=
+github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624/go.mod h1:OtEYvVnZhMepTLXLTAXTFxf8fRAib/41vehHWKYO99o=
 github.com/rossoctl/accountant v0.1.1 h1:nODLHC3wcI1Xv/CxX+54xU4f8dDAIteDFaRrpdQzjvc=
 github.com/rossoctl/accountant v0.1.1/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
 github.com/spf13/cast v1.10.0 h1:h2x0u2shc1QuLHfxi+cTJvs30+ZAHOGRic8uyGTDWxY=
@@ -176,6 +178,8 @@ go.opentelemetry.io/otel/log v1.47.0 h1:cOTS1CcLbSQeZKanGJ+0JpF/+t4PELi3O3bbl2lq
 go.opentelemetry.io/otel/log v1.47.0/go.mod h1:9byitSQ5pLC6PpqwGXjqdMKya6ZTswHRZh2vvXT33nw=
 go.opentelemetry.io/otel/metric v1.47.0 h1:4PptaldXx3Eat1XjMZ68pPJEs5wrhlemctZE9a3UdWY=
 go.opentelemetry.io/otel/metric v1.47.0/go.mod h1:ADGSXxRrXM6bjbvLo535EstVFlPpPYZm4LBKixjDHwU=
+go.opentelemetry.io/otel/metric/x v0.69.0 h1:DjRLr15H83v+hCW7JA9NoJvOkYTtmq5YoDRbe9deYpM=
+go.opentelemetry.io/otel/metric/x v0.69.0/go.mod h1:uVvsMPMFFyj/HUQfrUnH3JjnOQ1dwFDorgFLRBasM0k=
 go.opentelemetry.io/otel/sdk v1.47.0 h1:zWXEr4j2lFefG87TU6Yg8a7ngfohIKFZHKp0Hf5hC6I=
 go.opentelemetry.io/otel/sdk v1.47.0/go.mod h1:VUc24kiOeoGsxG8G9ULx3fWKvB7jMhnGE8Oi607lgR0=
 go.opentelemetry.io/otel/sdk/metric v1.47.0 h1:lfISg2j93VT6yqdk9OfUaZmw/GfcZqCCV3jdXtsPnKw=

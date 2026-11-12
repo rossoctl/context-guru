@@ -40,6 +40,8 @@ require (
 	modernc.org/sqlite v1.56.0
 )
 
+require github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624
+
 require (
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
@@ -76,7 +78,8 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
-	go.opentelemetry.io/otel/metric v1.47.0 // indirect
+	go.opentelemetry.io/otel/metric v1.47.0
+	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/proto/otlp v1.11.1 // indirect
 	golang.org/x/arch v0.23.0 // indirect
 	golang.org/x/net v0.62.0 // indirect

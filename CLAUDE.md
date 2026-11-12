@@ -59,7 +59,8 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Commits: DCO sign-off is mandatory** — `git commit -s`. Author as the repo owner.
   AI attribution uses `Assisted-By:` — never `Co-Authored-By`, never a "Generated with"
   line. Conventional-commit titles.
-- Observability: every exported metric is `cg_*` / `cg_tenant_*`. OpenTelemetry **GenAI
+- Observability: every exported metric is `cg_*` / `cg_tenant_*`, except the common set the proxies
+  push to the central collector: those are `llm_*` (metrics spec, #886). OpenTelemetry **GenAI
   semantic conventions** (`gen_ai.*`) are the intended direction and are not yet emitted.
 
 ## Branches, worktrees and force-push

@@ -1,0 +1,606 @@
+{
+  "uid": "central-savings",
+  "title": "Savings",
+  "description": "Where does the saving come from, and where does it leak?",
+  "tags": [
+    "central",
+    "savings"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "proxy",
+        "label": "Proxy",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "central-prom"
+        },
+        "query": {
+          "query": "label_values(llm_proxy_info, proxy)",
+          "refId": "v"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "machine",
+        "label": "Machine",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "central-prom"
+        },
+        "query": {
+          "query": "label_values(llm_proxy_info{proxy=~\"$proxy\"}, machine)",
+          "refId": "v"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "bargauge",
+      "title": "Net by component (USD, selected range)",
+      "description": "Saved minus added for each component. A red bar is a component that costs more than it saves.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 9,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "(((sum by (component)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (component)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0) - ((sum by (component)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) or (sum by (component)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))) * 0))",
+          "legendFormat": "{{component}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Net by kind (USD per hour)",
+      "description": "rewrite, spend and setting. A spend is a component's own model call and is always a cost.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 9,
+        "y": 0,
+        "w": 15,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "(((sum by (kind)(rate(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) or (sum by (kind)(rate(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) * 0) - ((sum by (kind)(rate(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) or (sum by (kind)(rate(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) * 0)) * 3600",
+          "legendFormat": "{{kind}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Saved tokens by tier (selected range)",
+      "description": "Tokens the provider did not bill. The tier decides the price of each token.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 7,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (tier)(increase(llm_savings_saved_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))",
+          "legendFormat": "{{tier}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "vertical",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Cache effects (USD per day)",
+      "description": "A breakdown of how the cache changed the bill, saved above zero and added below. It is never added to saved or added.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 7,
+        "y": 9,
+        "w": 9,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (effect)(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",direction=\"saved\"}[1d]))",
+          "legendFormat": "{{effect}} saved",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "interval": "1d"
+        },
+        {
+          "expr": "-sum by (effect)(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",direction=\"added\"}[1d]))",
+          "legendFormat": "{{effect}} added",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "interval": "1d"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Break cost by cause",
+      "description": "What cache breaks cost, by why they happened.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 9,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (cause)(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"break\",direction=\"added\"}[$__range]))",
+          "legendFormat": "{{cause}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F2495C",
+                "value": null
+              },
+              {
+                "color": "#73BF69",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Estimated share",
+      "description": "Share of requests whose figure is an estimate. Above 20 percent, read the headline as a range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 4,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(llm_savings_estimated_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) / clamp_min(sum(increase(llm_savings_requests_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FADE2A"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Unpriced requests by reason (per minute)",
+      "description": "Operations the accountant did not price, and why.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 17,
+        "w": 9,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason)(rate(llm_savings_unpriced_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Components with a negative net",
+      "description": "Read this table first: a component here costs more than it saves. A component with no saved series at all shows no row; it appears in Net by component.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 13,
+        "y": 17,
+        "w": 11,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (component)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "sum by (component)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range]))",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          },
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "component",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "alias": "net",
+            "binary": {
+              "left": "Value #A",
+              "operator": "-",
+              "right": "Value #B"
+            },
+            "replaceFields": false
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "type": "include",
+            "match": "all",
+            "filters": [
+              {
+                "fieldName": "net",
+                "config": {
+                  "id": "lower",
+                  "options": {
+                    "value": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "saved",
+              "Value #B": "added"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "saved"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "added"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "net"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    }
+  ]
+}

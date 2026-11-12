@@ -29,6 +29,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
@@ -72,8 +73,14 @@ type Options struct {
 	ClaudeCompact compactionpoint.ClaudeCode
 	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
 	// start-up in local mode. BobCompact also gives Bob's own default. The zero value changes nothing.
-	BobCompact        compactionpoint.Bob
-	CodexCompact      compactionpoint.Codex
+	BobCompact   compactionpoint.Bob
+	CodexCompact compactionpoint.Codex
+	// MetricsSink, when set, receives each priced request for the push metrics (R46: it must only
+	// add to in-memory counters). Nil means no metrics. Build it with NewMetricsSink.
+	MetricsSink acmetrics.Observer
+	// InferenceMetrics, when set, books each finished request into the common inference set. Nil
+	// means off. Build it with NewInferenceMetrics.
+	InferenceMetrics  *InferenceMetrics
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's
