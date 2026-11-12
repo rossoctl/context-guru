@@ -193,14 +193,16 @@ func TestEstRangeShowsANegativeFloor(t *testing.T) {
 	}
 }
 
-// TestMoneyUnitFormatting runs moneyunit.test.mjs: usd() keeps `$` for USD, writes "1.75 Bobcoins" for
-// Bob's unit, and shows no figure for a mixed view. Without this wrapper the node test never runs in CI.
+// TestMoneyUnitFormatting runs the money-unit node tests: usd() keeps `$` for USD, writes "1.75 Bobcoins"
+// for Bob's unit and shows no figure for a mixed view (moneyunit.test.mjs); the Cache detail tab's
+// kvFetch applies the reply's unit (kvfetch.test.mjs). Without this wrapper they never run in CI.
 func TestMoneyUnitFormatting(t *testing.T) {
+	files := []string{"moneyunit.test.mjs", "kvfetch.test.mjs"}
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node is not on PATH, so moneyunit.test.mjs did not run; run `node --test dash/moneyunit.test.mjs`")
+		t.Skipf("node is not on PATH, so %v did not run; run `node --test` on them in dash/", files)
 	}
-	if out, err := exec.Command(node, "--test", "moneyunit.test.mjs").CombinedOutput(); err != nil {
-		t.Fatalf("node --test moneyunit.test.mjs failed: %v\n%s", err, out)
+	if out, err := exec.Command(node, append([]string{"--test"}, files...)...).CombinedOutput(); err != nil {
+		t.Fatalf("node --test %v failed: %v\n%s", files, err, out)
 	}
 }

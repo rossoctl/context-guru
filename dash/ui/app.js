@@ -390,8 +390,15 @@ async function api(path, extra) {
   // says how old in the Age header. Keep it per endpoint so a page can show the age of its DATA.
   const age = Number(res.headers.get('Age')) || 0;
   (state.ageMs ||= {})[path] = age * 1000;
-  const body = await res.json();
-  // A money reply says the unit of its figures (dash/currency.go). Set it before the caller renders.
+  return readMoneyUnit(await res.json());
+}
+
+/**
+ * readMoneyUnit applies the unit a money reply states (dash/currency.go) and returns the reply. Every
+ * fetch of a money route goes through it, before the caller renders. A reply read with a filter that
+ * is not the page's (a count with one filter dropped) must not use it.
+ */
+function readMoneyUnit(body) {
   if (body && typeof body === 'object' && 'currency' in body) applyMoneyUnit(body.currency);
   return body;
 }
