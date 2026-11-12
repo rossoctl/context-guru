@@ -1,6 +1,6 @@
 # Metrics reporting: design
 
-Status: draft, updated to match the build (accountant#59, context-guru#974, context-guru#1086). Spec: [spec.md](spec.md). Issue: #886.
+Status: draft, updated to match the build (accountant#59, context-guru#974 (open), context-guru#1086 (open)). Spec: [spec.md](spec.md). Issue: #886.
 
 This design says how to build the requirements in the spec. It covers the code path from the `accountant` result to the central collector. It does not change the requirements. If the two disagree, the spec wins.
 
@@ -128,7 +128,7 @@ Fix these in the spec, or map them in the module, before the work starts.
 
 ## 8. Central stack
 
-This part runs on the central server, not on the user machines. The spec gives the requirements (R15, R17, R19, R44, R11, sections 5.6 and 5.7). It is built in `deploy/central/` (context-guru#1086). Sections 8.2 to 8.6 say what was built, and 8.8 says what the real stack showed.
+This part runs on the central server, not on the user machines. The spec gives the requirements (R15, R17, R19, R44, R11, sections 5.6 and 5.7). It is built in `deploy/central/` (context-guru#1086, open). Sections 8.2 to 8.6 say what was built, and 8.8 says what the real stack showed.
 
 ### 8.1 Pipeline
 
@@ -158,7 +158,7 @@ The SDK sends cumulative totals (section 5). The remote-write exporter needs cum
 
 1. Start with `--web.enable-remote-write-receiver`.
 2. Set the retention to 30 days (open question 9 in the spec). Set a size limit too.
-3. Load one rules file with the recording rules (spec section 8) and one with the alert rules (spec section 9).
+3. Load one rules file with the recording rules (spec section 7) and one with the alert rules (spec section 8, Alerts).
 4. Scrape three targets only: the collector, Prometheus itself, and Alertmanager. It no longer scrapes any proxy (R22).
 5. Do not open the port to the internet. Grafana and the collector are the only clients.
 
@@ -170,7 +170,7 @@ The SDK sends cumulative totals (section 5). The remote-write exporter needs cum
 
 ### 8.5 Alertmanager
 
-1. Route the alerts in spec section 9 to the on-call channel.
+1. Route the alerts in spec section 8 (Alerts) to the on-call channel.
 2. Add two alerts about the pipeline: no push from a machine that pushed last week, and a rising `llm_proxy_export_failures_total`.
 
 ### 8.6 How it is installed
@@ -205,17 +205,17 @@ Today `deploy/service/install.sh grafana` installs Prometheus, Grafana, Loki and
 4. **Revoke needs a restart.** The collector reads the token files once, at start. `token add` and `token revoke` restart it (about 1.5 s). A push in that gap fails, and the next push repairs it, because the totals are cumulative.
 5. **Atomic token list.** A failed `chown` in a first version of `token revoke` removed the whole list. The new file is now written beside the old one and renamed over it.
 6. **Keep-alive value.** The rule counted only the saved side of a rescue. It now nets the read cost: `saved - added`.
-7. **Cardinality.** The whole machine measured 1,325 series (budget 1,700, R42). A histogram is about 15 series for each label set.
+7. **Cardinality.** The whole machine measured 1,325 series (budget under 2,000, R42; the spec estimate is about 1,700). A histogram is 14 series for each label set.
 8. **Loss.** A push lost during a collector outage is repaired by the next one. The total ended at the expected value.
 
 ## 9. Order of work
 
-1. `accountant`: add `Sink`, `Observation`, `Multi` and `PricedOp.Kind`, with tests. No OTel.
+1. `accountant`: add `PricedOp.Kind`, with tests. No OTel. Add `Observer`, `Observation` and `Multi` in the `accountant/metrics` module.
 2. `accountant/metrics`: the savings set, with an in-memory reader test.
 3. In the first proxy: the push setup (section 3.3), the failure counter and the off switch.
 4. One proxy: wire it, add the inference and health sets, run the latency benchmark.
 5. The second proxy: wire it with its own `Pricer`.
-6. Central stack (section 8), including `deploy/central/` and `install.sh central`: collector, Prometheus, recording rules, Grafana dashboards, Alertmanager and alerts. Start this at step 3, because step 4 needs a collector to test against.
+6. Central stack (section 8), including `deploy/central/` and `deploy/central/install.sh`: collector, Prometheus, recording rules, Grafana dashboards, Alertmanager and alerts. Start this at step 3, because step 4 needs a collector to test against.
 7. Remove the pull path (R22).
 
 This follows the delivery plan in the spec.
@@ -226,11 +226,11 @@ Status:
 |---|---|
 | 1 | Built and merged: accountant#59 (merge commit 541e0fe). context-guru pins 6085d46, a commit on accountant `main` with no tag. It needs a tag (the nested module `metrics/` needs its own, for example `metrics/v0.1.0`) before a release. |
 | 2 | Built and merged: accountant#59. |
-| 3, 4 | Built for context-guru: #974. Cortex is not wired. |
+| 3, 4 | Built for context-guru: #974 (open). Cortex is not wired. |
 | 5 | Not started. |
-| 6 | Built: #1086. Depends on #974 for its end-to-end tests. |
+| 6 | Built: #1086 (open). Depends on #974 for its end-to-end tests. |
 | 7 | Not started. Waits until the dashboards are in use. |
 
-Step 4 showed that the in-process version meets R46 (section 2), so no separate process is built.
+Step 4 measured p50 at 12 to 35 microseconds. p99 is not measured, because the noise is too large, so R46 is not proven. No separate process is built for now. Keep that option open until a p99 is measured against a chosen budget.
 
-Not built: request and response byte counters, `source=client` on errors, ping outcomes `timeout` and `skipped`, a saving rate (there is no baseline counter), shared-warm tokens (#853).
+Not built: request and response byte counters, `source=client` on errors, ping outcomes `timeout` and `skipped`, shared-warm tokens (#853).

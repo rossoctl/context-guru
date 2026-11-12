@@ -185,7 +185,7 @@ Three needs drive these requirements.
 
 ### 3.6 Documentation
 
-- R41. The PR adds a row to `docs/data-dependence.md`. The row says: metadata only, works at every storage level.
+- R41. The PR edits the existing row file `docs/data-dependence/features/metrics.md` ("Metrics (`/stats`, `/metrics`)", which R22 changes) and runs `go run ./cmd/gen-datadep`. Never edit `docs/data-dependence.md` by hand. The row says: metadata only, works at every storage level.
 
 ### 3.7 Privacy and access
 
@@ -239,7 +239,7 @@ Open choices:
 
 ## 5. Proposed metrics
 
-OTel metric names use dots and units. The Prometheus names below are what you see after the collector converts them. Counters get `_total`. A unit suffix such as `_usd` stays. Check the final names in Prometheus. Put the unit in the name, as `usd` or `tokens`, and never set an OTel unit of `USD` on a counter: the exporter appends the unit as written, and the series becomes `_USD_total`. A test compares the names Prometheus shows with the tables.
+OTel metric names use dots and units. The Prometheus names below are what you see after the collector converts them. Counters get `_total`. A unit suffix such as `_usd` stays. Check the final names in Prometheus. In the Unit column of the tables, `none` means set no OTel unit. Put the unit in the name, as `usd` or `tokens`, and never set an OTel unit of `USD` on a counter: the exporter appends the unit as written, and the series becomes `_USD_total`. A test compares the names Prometheus shows with the tables.
 
 Prefix `llm_` is for the common set. It is neutral, so both proxies can emit it, and it keeps the names clear of other tools on the same central server.
 
@@ -267,8 +267,8 @@ Labels in this section:
 | `llm_inference_ttfb_seconds` | histogram | s | `model`, `provider` | Time to first byte for streamed answers. |
 | `llm_inference_added_seconds` | histogram | s | `model` | Time the proxy added on top of the upstream time. |
 | `llm_inference_tokens_total` | counter | 1 | `model`, `provider`, `tier` | Provider-billed tokens. `tier` is from R34: read input (`cache_read`), write input (`cache_write_5m`, `cache_write_1h`), uncached `input`, and `output`. |
-| `llm_inference_cost_usd_total` | counter | USD | `model`, `provider`, `tier` | Provider cost at request time. |
-| `llm_inference_estimated_cost_usd_total` | counter | USD | `model`, `provider` | Part of the cost priced from a fallback rate. Sub-set of the line above. |
+| `llm_inference_cost_usd_total` | counter | none | `model`, `provider`, `tier` | Provider cost at request time. |
+| `llm_inference_estimated_cost_usd_total` | counter | none | `model`, `provider` | Part of the cost priced from a fallback rate. Sub-set of the line above. |
 
 The cache read ratio is not exported. Query it: `cache_read / (cache_read + cache_write_* + input)` on `llm_inference_tokens_total`.
 
@@ -295,10 +295,10 @@ Labels in this section:
 |---|---|---|---|---|
 | `llm_savings_saved_tokens_total` | counter | 1 | `kind`, `tier`, `component` | Tokens the provider did not bill, by tier. |
 | `llm_savings_added_tokens_total` | counter | 1 | `kind`, `tier`, `component` | Tokens the provider billed because of a change. |
-| `llm_savings_saved_usd_total` | counter | USD | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. |
-| `llm_savings_added_usd_total` | counter | USD | `kind`, `tier`, `component` | `tokens_added` priced the same way. |
-| `llm_savings_cache_effect_usd_total` | counter | USD | `effect`, `cause`, `direction` | Cache effects: `effect` is `break`, `rescue`, `split`, `ttl_premium`, `ttl_rescue`. `direction` is `saved` or `added`. `cause` is `model_changed`, `ended_change` or `none`. |
-| `llm_savings_baseline_usd_total` | counter | USD | `model` | What the traffic would have cost with no change. |
+| `llm_savings_saved_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. |
+| `llm_savings_added_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_added` priced the same way. |
+| `llm_savings_cache_effect_usd_total` | counter | none | `effect`, `cause`, `direction` | Cache effects: `effect` is `break`, `rescue`, `split`, `ttl_premium`, `ttl_rescue`. `direction` is `saved` or `added`. `cause` is `model_changed`, `ended_change` or `none`. |
+| `llm_savings_baseline_usd_total` | counter | none | `model` | What the traffic would have cost with no change. |
 | `llm_savings_requests_total` | counter | 1 | `result` | `result` is `priced`, `unpriced`, `skipped`. |
 | `llm_savings_unpriced_total` | counter | 1 | `reason` | Why a request was not priced. Values come from the library: `penalty_unknown`, `unknown_kind`, `operator_not_allowed` and others. |
 | `llm_savings_estimated_total` | counter | 1 | none | Requests whose figure is marked estimated. |
@@ -329,8 +329,8 @@ Labels in this section:
 | Metric | Type | Unit | Labels | Meaning |
 |---|---|---|---|---|
 | `llm_keepalive_pings_total` | counter | 1 | `model`, `outcome` | `outcome` is `ok`, `failed`, `timeout`, `skipped`. |
-| `llm_keepalive_cost_usd_total` | counter | USD | `model` | What pings cost. |
-| `llm_keepalive_rescue_usd_total` | counter | USD | `model` | Saving from rescues (`rescue` effect). |
+| `llm_keepalive_cost_usd_total` | counter | none | `model` | What pings cost. |
+| `llm_keepalive_rescue_usd_total` | counter | none | `model` | Saving from rescues (`rescue` effect). |
 | `llm_keepalive_shared_warm_tokens_total` | counter | 1 | `model` | Tokens not credited because a sibling thread kept them warm (#853). |
 
 Net keep-alive value is `rescue_usd - cost_usd`.
@@ -340,7 +340,7 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 | Metric | Type | Unit | Labels | Meaning |
 |---|---|---|---|---|
 | `llm_cache_misses_total` | counter | 1 | `model`, `cause` | Misses by cause from `cache_miss_cause`: `ttl_expiry`, `prefix_change`, `model_changed`, `compaction_after_rewrite`, `bypass_flip`, `cold_start`, `other`. |
-| `llm_cache_miss_cost_usd_total` | counter | USD | `model`, `cause` | Extra cost of those misses. |
+| `llm_cache_miss_cost_usd_total` | counter | none | `model`, `cause` | Extra cost of those misses. |
 
 ### 5.5 Proxy health
 
@@ -425,7 +425,7 @@ Order, top to bottom: the money tiles (net saved and saving rate first), the dai
 | Net saved per day | bar | One bar per day for 30 days, whatever the dashboard range. |
 | Saved vs added | time series | both rates, per hour |
 | Net saved by machine | bar gauge | the best 8 machines |
-| Silent machines | stat | `max_over_time(llm_proxy_info[1d]) unless llm_proxy_info`, the same logic as the `MachineSilent` alert. |
+| Silent machines | stat | `max by (proxy, machine) (max_over_time(llm_proxy_info[1d])) unless on (proxy, machine) llm_proxy_info`, the same logic as the `MachineSilent` alert. Match on the machine only: a change of `version` or `preset` starts a new `llm_proxy_info` series, and a match on all labels would call an upgraded machine silent for a day. A `promtool` test covers a preset change. |
 | 5xx error rate | stat | 5xx requests / requests |
 | Requests per minute | stat | `sum(rate(llm_inference_requests_total[...])) * 60` |
 | Alerts firing | stat | `count(ALERTS{alertstate="firing"})` |
@@ -495,7 +495,7 @@ Question: is context-guru itself working?
 | Fail-open count | time series | by `reason` |
 | Component time p95 | time series | `component_duration_seconds` |
 | Export failures | time series | by `reason` |
-| Machines silent | table | `last_over_time(llm_proxy_info[1d]) unless llm_proxy_info`. Prometheus writes no stale marker for pushed data, so use a query that compares with the last day. |
+| Machines silent | table | `max by (proxy, machine) (last_over_time(llm_proxy_info[1d])) unless on (proxy, machine) llm_proxy_info`. Prometheus writes no stale marker for pushed data, so use a query that compares with the last day. |
 | Check failures | time series | `llm_savings_check_failures_total` by `check` |
 
 ### 6.6 Machine comparison
@@ -582,7 +582,7 @@ Alerts go to Alertmanager. Thresholds are proposals.
 5. **Collector and Prometheus config.** Add the collector config, the remote-write receiver flag, and the recording rules file.
 6. **Dashboards and alerts** (sections 6 and 8).
 7. **Retire the pull path** (R22). Remove `/metrics` (`proxy/promexport.go`, `dash/metrics_export.go`) and the local Prometheus and Grafana install. Move or delete the dashboards and alert rules in `deploy/grafana/`. Do this after the central dashboards (item 6) work.
-8. **Docs.** Convention file in `accountant/docs/`, row in `docs/data-dependence.md` (the "Metrics (`/stats`, `/metrics`)" row changes), a section in `docs/hosted.md` (the Grafana section changes).
+8. **Docs.** Convention file in `accountant/docs/`, row file `docs/data-dependence/features/metrics.md` (the "Metrics (`/stats`, `/metrics`)" row changes), then `go run ./cmd/gen-datadep`, a section in `docs/hosted.md` (the Grafana section changes).
 
 Version one: items 1 to 3, and the savings dashboard (6.2). Tokens and money both. **Open:** confirm that tokens-only is not the first step.
 
