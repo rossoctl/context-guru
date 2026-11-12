@@ -167,7 +167,9 @@ Without it, the gate prices a cache rewrite at Claude rates and cuts nothing on 
 this preset the dashboard's and the status bar's Bob cost figures are Bobcoins. The file says
 `currency: Bobcoins`, so the proxy sends that unit and the dashboard shows Bobcoins. Leaving the preset, `uninstall` and the reset script remove the prices.
 
-It needs context-guru-proxy v0.7.4 or newer. On an older release, `configure` refuses it and says
+It needs context-guru-proxy v0.7.4 or newer. Rows written before the upgrade are stored as dollars,
+so a dashboard range that covers the upgrade says the costs are in more than one unit and shows no
+money until those rows leave the range. On an older release, `configure` refuses it and says
 to update first.
 
 The model sees 3 more tools: `context_guru_tools` (the tool search), `context_guru_expand` (gets cut

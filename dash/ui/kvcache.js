@@ -781,7 +781,7 @@ function renderKVPricing() {
   const table = el('table', { class: 'tbl compact', 'data-testid': 'kv-pricing-table' },
     el('thead', {}, el('tr', {},
       el('th', {}, 'Model'),
-      ...KV_RATE_FIELDS.map(([, label]) => el('th', { class: 'num' }, label + ' $/MTok')),
+      ...KV_RATE_FIELDS.map(([, label]) => el('th', { class: 'num' }, label + ' ' + moneySym() + '/MTok')),
       el('th', { class: 'num' }, 'Uncached'),
       el('th', { class: 'num' }, 'One read'),
       el('th', { class: 'num' }, 'Write 5m'),

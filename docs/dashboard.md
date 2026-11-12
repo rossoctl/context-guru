@@ -102,8 +102,8 @@ runs with no persistence at all.
 Every `*_usd` field is in the row's `currency`: the unit of the price that costed it. That is USD,
 unless the price file names another unit (Bob's says `currency: Bobcoins`). The field names stay
 `*_usd`. Every money reply (`/api/stats`, `/api/series`, `/api/sessions`, `/api/requests`,
-`/api/cachestate`, and the Components, Keep-alive, Tools, KV-cache, Insights and spend replies; the
-list is `currencyRoutes` in `dash/currency.go`) also says `currency`: the one unit of the priced
+`/api/cachestate`, and the Components, Keep-alive, Tools, KV-cache, Insights, spend and adapt
+replies; the list is `currencyRoutes` in `dash/currency.go`) also says `currency`: the one unit of the priced
 rows in its filter, `USD` when there are none, or `mixed` when there is more than one. The UI then
 shows costs in that unit, with a coins icon on the tiles. For `mixed` it shows no money figure and
 says why.
