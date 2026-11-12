@@ -41,7 +41,9 @@ the session (`CLAUDE_CODE_SESSION_ID`), which is also the name of the session's 
   `<session>.wire.jsonl`. It writes no later call of that session.
 - The marker keeps the session off after a proxy restart. An operator can see it.
 - The caller is authenticated like the Ping button, for its own account only. A `?tenant=`
-  override other than `me` is refused. Calls are rate-limited per account.
+  override other than `me` is refused. An opt-out from a recorded account is never refused for
+  rate, so a session-start hook can call it in every session, also on resume. Calls from an
+  account that is not recorded are rate-limited per account.
 - The answer is `200 {"recording": <bool>, "deleted": <bool>}`. `recording` tells whether the
   account is recorded: false when the proxy has no recorder, and false for an account that did
   not opt in.

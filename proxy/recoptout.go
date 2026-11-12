@@ -17,8 +17,9 @@ import (
 //
 // It can only narrow consent: it never starts a recording. The same principal as the Ping
 // button (adaptPrincipal), but for the caller's OWN account only: a ?tenant= override other
-// than "me" is refused. Calls are rate-limited per account, like the other writes on this
-// principal.
+// than "me" is refused. Calls from an account that is not recorded are rate-limited per account,
+// like the other writes on this principal; an opt-out from a recorded account is never refused
+// for rate (see recordOff).
 //
 // The answer is 200 {"recording": <the account is recorded>, "deleted": <a file was deleted>}.
 // "recording" is the account's consent, not only "a recorder exists", so a client never tells a
@@ -65,17 +66,26 @@ func (h *Handler) recordOff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"recording": false, "deleted": false})
 		return
 	}
-	if !h.adaptAllow("record-off:" + tenantID) {
-		code, msg := statusOf(errAdaptRate)
-		ctlErr(w, code, msg)
-		return
-	}
 	// An account that is not recorded has nothing to stop. Write nothing for it, so a caller cannot
 	// fill the record directory with markers for ids that were never recorded. A file that exists
-	// (the account opted out of recording after this session began) is still deleted.
-	if !consent && !h.recorder.HasSession(tenantID, id) {
-		writeJSON(w, http.StatusOK, map[string]any{"recording": false, "deleted": false})
-		return
+	// (the account opted out of recording after this session began) is still deleted. Only this
+	// path is rate-limited: it costs a file lookup and stops nothing.
+	//
+	// A recorded account is never limited. A refused opt-out would leave the session recorded
+	// against the person's request, and parallel sessions, scripted runs and a session-start hook
+	// that also fires on resume, /clear and compaction can all reach any small limit. Its markers
+	// add nothing it cannot already do: each request with a new session id already creates a
+	// recording file in the same directory, and a marker is an empty file.
+	if !consent {
+		if !h.adaptAllow("record-off:" + tenantID) {
+			code, msg := statusOf(errAdaptRate)
+			ctlErr(w, code, msg)
+			return
+		}
+		if !h.recorder.HasSession(tenantID, id) {
+			writeJSON(w, http.StatusOK, map[string]any{"recording": false, "deleted": false})
+			return
+		}
 	}
 	stopped, deleted, err := h.recorder.Decline(tenantID, id)
 	if err != nil {
