@@ -19,6 +19,7 @@
  ],
  "addressable_misses": 204,
  "coverage_seconds": 860,
+ "currency": "USD",
  "daily": [
   {
    "all_usd": 0.186,

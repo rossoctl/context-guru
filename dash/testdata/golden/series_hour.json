@@ -3403,5 +3403,6 @@
   }
  ],
  "cap_correction_usd": 0,
- "cap_not_applied": true
+ "cap_not_applied": true,
+ "currency": "USD"
 }

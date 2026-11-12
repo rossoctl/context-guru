@@ -94,6 +94,10 @@ type API struct {
 	// routeCache backs cachedRoute: the response cache for the remaining heavy GET routes, keyed by
 	// path as well as by principal and query because it is shared between them.
 	routeCache jsonCache
+	// currencyCache holds each view's unit (withCurrency), keyed by principal and query. The query
+	// reads the whole window (about 0.2 s on 200,000 rows), and /api/stats answers a cache hit in
+	// well under that, so the unit is cached for the same TTL as the replies.
+	currencyCache jsonCache
 	// promptCache holds the UNSTRIPPED prompt view; see (*API).prompt for why that is safe to share.
 	promptCache jsonCache
 	// spendCache covers /api/spend/explain, a whole-window pass over requests.
@@ -824,6 +828,10 @@ func (a *API) routes() []route {
 func (a *API) Mount(m *http.ServeMux) {
 	for _, rt := range a.routes() {
 		h := rt.h
+		// Inside the cache, so a cached body carries the unit it was computed with.
+		if currencyRoutes[rt.pattern] {
+			h = a.withCurrency(h)
+		}
 		if cachedRoutes[rt.pattern] {
 			h = a.cachedRoute(h)
 		}

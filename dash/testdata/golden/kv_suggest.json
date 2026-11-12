@@ -7418,6 +7418,7 @@
    "valued": true
   }
  ],
+ "currency": "USD",
  "min_requests": 5,
  "notes": [
   "Every timestamp and hour is UTC, matching the rest of this page. Friday and Saturday requests are not read at all, not down-weighted and not shown in a separate group.",
