@@ -1,8 +1,11 @@
 package offload
 
 import (
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -10,6 +13,7 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	_ "modernc.org/sqlite"
 )
 
 func dedupFor(t *testing.T) *Dedup {
@@ -217,3 +221,63 @@ func TestTheDedupMarkerIsByteStableAsTheTranscriptGrows(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// #1097: dedup leaves an expanded output in full (GateKeptVerbatim), also when the mark comes from
+// another store that was carried over (a rebuilt tenant pipeline) or reloaded from session state
+// (a restart).
+func dedupGates(t *testing.T, st store.Store, dump string) map[string]int {
+	t.Helper()
+	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(dump), tool(dump)}}
+	c := &components.Ctx{Session: "s", Store: st}
+	var rep components.Report
+	if _, err := dedupFor(t).Offload(req, &rep, c); err != nil {
+		t.Fatal(err)
+	}
+	return rep.Gates
+}
+
+func TestDedupKeepsAnExpandedOutputAfterTheMarkIsCarriedToANewStore(t *testing.T) {
+	dump := strings.Repeat("verbose tool output line\n", 30)
+	old := store.NewMemory(store.Options{})
+	MarkKeptVerbatim(old, "s", dump)
+	fresh := store.NewMemory(store.Options{})
+	if g := dedupGates(t, fresh, dump); g[GateKeptVerbatim] != 0 {
+		t.Fatalf("a fresh thread must compact as before: %v", g)
+	}
+	fresh = store.NewMemory(store.Options{})
+	if n := store.CarryPrefix(old, fresh, store.KeptPrefix); n != 1 {
+		t.Fatalf("carried %d marks, want 1", n)
+	}
+	if g := dedupGates(t, fresh, dump); g[GateKeptVerbatim] == 0 {
+		t.Fatalf("the carried mark must keep the output in full: %v", g)
+	}
+}
+
+func TestDedupKeepsAnExpandedOutputAfterARestart(t *testing.T) {
+	dump := strings.Repeat("verbose tool output line\n", 30)
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	open := func() (*store.Memory, *store.Disk) {
+		d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, FlushEvery: time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := store.NewMemory(store.Options{})
+		m.AttachDisk(d)
+		return m, d
+	}
+	m1, d1 := open()
+	MarkKeptVerbatim(m1, "s", dump)
+	d1.Flush()
+	defer d1.Close()
+	// The restart: a new memory store over the same database.
+	m2, d2 := open()
+	defer d2.Close()
+	m2.LoadSession("s")
+	if g := dedupGates(t, m2, dump); g[GateKeptVerbatim] == 0 {
+		t.Fatalf("the mark must survive a restart, even with metadata-only session state: %v", g)
+	}
+}

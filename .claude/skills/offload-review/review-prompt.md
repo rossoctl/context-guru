@@ -34,6 +34,10 @@ cannot read something, say so in the review and use `Verdict: blocking`.
 
 - **Fail open.** Any component error must revert that component only, and the original request
   must still go out. Every lossy change must be reversible.
+- **Data dependence.** A PR that adds or changes a component or feature must add or edit its row
+  file under `docs/data-dependence/` and rebuild `docs/data-dependence.md` with
+  `go run ./cmd/gen-datadep`. A hand edit to the generated page, or a page that differs from the
+  row files, is a finding. Read the row for a change of Kind or of a level, as `CLAUDE.md` says.
 - Report real defects: wrong behavior, data loss, a broken fail-open path, a missing test for
   new behavior, a security problem.
 - Leave out style nitpicks. If a small point is worth noting, put it under "Non-blocking".

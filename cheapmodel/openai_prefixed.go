@@ -90,8 +90,8 @@ func (o OpenAI) CompletePrefixedResponses(ctx context.Context, prefixBody []byte
 // declaration. The cache READ is judged by the caller from the returned usage
 // (prompt_tokens_details.cached_tokens).
 //
-// The path and credential are the incoming client's own (o.Ref and /v1/chat/completions). A route
-// with another path or auth scheme fails here with a non-200 and the caller fails open.
+// The path and credential are the incoming client's own (o.Ref and o.Path). A wrong path or auth
+// scheme fails here with a non-200, and the caller fails open.
 func (o OpenAI) CompletePrefixedChat(ctx context.Context, prefixBody []byte, ask string) (string, PrefixUsage, error) {
 	var usage PrefixUsage
 	if !gjson.GetBytes(prefixBody, "messages").IsArray() {
@@ -116,7 +116,7 @@ func (o OpenAI) CompletePrefixedChat(ctx context.Context, prefixBody []byte, ask
 	}
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
-	respBody, err := send(ctx, o.D, o.Ref, bschemas.OpenAI, "/v1/chat/completions", "prefixed Chat ",
+	respBody, err := send(ctx, o.D, o.Ref, bschemas.OpenAI, o.chatPath(), "prefixed Chat ",
 		http.Header{"Content-Type": {"application/json"}}, body)
 	if err != nil {
 		return "", usage, err

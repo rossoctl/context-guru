@@ -31,7 +31,7 @@ type toolfilterConfig struct {
 	// own history says are unused, with `defer_loading` and the API's search tool, so none is
 	// removed. On a model that ignores `defer_loading` (GPT, GLM, Kimi; #825) the tool is removed
 	// and comes back through our own search tool. `off` (the default, and the account opt-out)
-	// defers nothing. Only the `ultrahigh` preset sets `auto`.
+	// defers nothing. The `ultrahigh` preset and the Bob plugin's `bob-ultrahigh` preset set `auto`.
 	Defer string `yaml:"defer"`
 	// Keep names tools deferral must never touch (the account keep list).
 	Keep []string `yaml:"keep"`

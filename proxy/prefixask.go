@@ -408,10 +408,10 @@ func (h *Handler) prefixAskerForAPI(provider bschemas.ModelProvider, api string,
 // chatPrefixAsker is the asker for the OpenAI Chat Completions wire. It is shared core and holds no
 // route-specific code.
 //
-// THE CLIENT is the incoming one as built: path /v1/chat/completions and Bearer auth. A route that
-// needs another path or auth scheme (IBM Bob: /inference/v1/chat/completions and Apikey) is not
-// served yet, so the ask there gets a non-200, the sweep declines, and the request goes on
-// unchanged (fail open). #1030 item 4 and #1029 give the incoming client those two values.
+// THE CLIENT is the incoming one as built, so its path and auth scheme are the route agent's
+// ModelTarget (IBM Bob: /inference/v1/chat/completions and Apikey), or /v1/chat/completions and
+// Bearer by default. A wrong target gets a non-200, the sweep declines, and the request goes on
+// unchanged (fail open).
 //
 // THE CACHE CHECK stays the sweep's: prefixAskCacheOK reads prompt_tokens_details.cached_tokens and
 // refuses a read of 0 (#725). Both IBM Bob backends report cache reads (#975 captures).

@@ -55,3 +55,9 @@ func TestEmbeddingBaseKeepsNeutralResultForEveryMethodNotOverridden(t *testing.T
 		t.Errorf("ReadUsage() = %+v, want %+v", got, base)
 	}
 }
+
+func TestBaseModelTargetIsTheHostDefault(t *testing.T) {
+	if got := (Base{}).ModelTarget(); got != (ModelTarget{}) {
+		t.Fatalf("ModelTarget() = %+v, want the zero target (the host default)", got)
+	}
+}

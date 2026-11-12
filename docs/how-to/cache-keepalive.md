@@ -62,6 +62,7 @@ cache:
   keepalive_max_pings: 2               # K
   keepalive_min_prefix_tokens: 80000   # the gate for a main thread that waits for a person or for an unknown cause
   keepalive_max_usd_per_ping: 0.50
+  keepalive_max_body_bytes: 33554432   # largest request body held per thread (memory guard); 8388608 restores the limit before #1100
   keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
   keepalive_max_pings_1h: 1            # K for a 1-hour cache
   keepalive_terminal_tools: [StructuredOutput]  # default; [] sends pings after the final answer, as before #857
@@ -274,7 +275,7 @@ it or supply the byte-identical prefix a cache read requires, and pinging on the
 key would bill the wrong party.
 
 **The body is conversation content, and enabling the keep-alive is what consents to holding
-it.** It is up to 8 MiB of that session's last request — system prompt, tools, and the
+it.** It is up to 32 MiB (`keepalive_max_body_bytes`) of that session's last request — system prompt, tools, and the
 message history — held for the length of the idle gap. This is deliberately *not* covered by
 the transcript-storage consent, which is a different promise about a different thing: that
 one governs writing content to **disk**, where a manager can read it and a retention window
@@ -300,8 +301,8 @@ of a request:
 | **Failed pings stop** | a 401 is about the key: it stops every session pinging with that credential, and only those (a teammate on the same account pings on), for an hour; a 403 (often a per-model permission or a gateway policy) does the same for that credential on that model only. A ping refused with any other non-retryable 4xx or answered 2xx with no usage at all (a translating gateway that hid an error) is counted `failed` and stops that session; 3 in a row for the same account, upstream and model switch the keep-alive off for that route, for that account only, for an hour (`route_trips` in `/stats`). A 429 or 5xx (an overload) is transient: counted `skipped`, and the next ping slot retries. A ping that lands after expiry and reads nothing is a real miss (`missed`): it re-wrote the prefix, so pinging goes on; a second miss in a row is a prefix that does not match and stops the session. |
 | **Claude models only through a relay** | native Anthropic, Bedrock, Bedrock Mantle and Vertex upstreams are eligible by type, whatever the deployment is called. The Anthropic route forwarded to anything else (LiteLLM, a corporate gateway) may serve another family (an OpenAI or Azure model, with no explicit cache control), so there the model name must contain `claude`, `opus`, `sonnet` or `haiku`; `CONTEXT_GURU_KEEPALIVE_MODELS=alias1,alias2` adds names for aliases that do not. |
 
-Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is not
-held. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
+Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 32 MiB
+(`keepalive_max_body_bytes`) is not held. For a model with no price the limit stays 8 MiB. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
 `/proc` read) — it does not stop an attacker with code execution in this process.
 
 ## Gating pings on stop_reason (opt-in, per strategy)

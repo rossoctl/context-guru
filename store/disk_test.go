@@ -106,12 +106,12 @@ func TestStateTTLAppliesOnlyToStateKeys(t *testing.T) {
 	m := NewMemory(Options{StateTTLSeconds: 24 * 3600})
 	m.SetClock(func() time.Time { return now })
 	m.Put(SumPrefix+"s", []byte("x"))
-	m.Put("cg:keep:s:abc", []byte("x"))
+	m.Put("cg:other:s:abc", []byte("x"))
 	now = now.Add(5 * time.Hour) // past DefaultTTL (2.8 h), inside 24 h
 	if _, ok := m.Get(SumPrefix + "s"); !ok {
 		t.Fatal("state key must live 24 h")
 	}
-	if _, ok := m.Get("cg:keep:s:abc"); ok {
+	if _, ok := m.Get("cg:other:s:abc"); ok {
 		t.Fatal("a non-state key keeps the base lifetime")
 	}
 }
@@ -244,7 +244,7 @@ func TestStashNeverWritten(t *testing.T) {
 	if !m.PutStash("deadbeefdeadbeef", []byte("ORIGINAL TOOL OUTPUT")) {
 		t.Fatal("stash refused")
 	}
-	m.Put("cg:keep:s:abc", []byte("x"))
+	m.Put("cg:other:s:abc", []byte("x"))
 	m.Put("cg:own:s:abc", []byte("x"))
 	m.Put("cafe", []byte("plain payload via Put"))
 	m.Put(SumPrefix+"s", []byte("x"))

@@ -32,9 +32,12 @@
 // package. Its surface is small and host-agnostic on purpose — wire format only, no transport, no
 // credential — so promoting it is a promise this project can keep.
 //
-// WHAT THIS IS NOT. It is not a plugin system and it does not run the proxy for you. A host still
-// writes its own main(), and proxy.Options remains the contract. This only unblocks the parts a
-// root cannot reach today.
+// THE STARTUP ITSELF IS HERE TOO. The facade alone was not enough: a host still had to copy the
+// whole composition root to add its own parts, and then copy every later step by hand. One host
+// missed proxy.PingSavings that way and booked $0 of keep-alive saving. So the root moved here as
+// Main, and cmd/context-guru-proxy calls it with no hooks. A host calls it with its Hooks (hooks.go)
+// and writes only its own parts. It is not a plugin system: the hooks run at fixed points, and
+// proxy.Options remains the contract.
 package proxyapp
 
 import (
