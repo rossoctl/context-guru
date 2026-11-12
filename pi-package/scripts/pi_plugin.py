@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shlex
 import shutil
 import socket
@@ -54,43 +55,18 @@ NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
 PRESETS = ("off", "conservative", "medium", "high", "xhigh", "ultrahigh")
 DEFAULT_PRESET = "off"
 DEFAULT_STRATEGY = "auto"
-# From this release the proxy owns the strategy table (#987): `cache: strategy: <name>` in its config
-# fills the cache keys. The config is strict YAML, so an older binary refuses the `strategy` key.
+# The proxy owns the cache strategy table (#987). This package keeps no copy of it: it asks the proxy
+# binary (`context-guru-proxy strategies`) and writes `cache: strategy: <name>` in the proxy config.
+# A proxy older than STRATEGY_MIN_PROXY cannot list a strategy, and its strict config refuses the
+# `strategy` key. So on that proxy only `none` works, and `none` needs no table.
+NONE_STRATEGY = "none"
 NAMED_STRATEGY_RELEASE = (0, 7, 1)
-
-# The same strategies, keys and values as the proxy's table (config/strategy.go; pi-package/strategies_test.go
-# checks it), so one name means one behaviour on every client. `none` writes no cache keys at all.
-#
-# For a binary of NAMED_STRATEGY_RELEASE or later, the config names the strategy and the proxy's own
-# table applies. This copy then gives only the names, the consent text and the `desc` lines. The keys
-# here are written only for an older binary.
-#
-# The same keys also drive the proxy's OpenAI keep-alive; no OpenAI-only key is needed. On an OpenAI
-# Responses request the proxy uses `keepalive`, `keepalive_max_pings`, `keepalive_max_usd_per_ping` and
-# `keepalive_min_prefix_tokens`, and replaces the idle time with its OpenAI default (28 minutes, under
-# the 30-minute cache of GPT-5.6 and later). The `_1h` keys are Anthropic only. Earlier OpenAI models
-# get no pings. The Codex plugin writes `keepalive: true` alone, which gives the same OpenAI behaviour.
-STRATEGIES = {
-    "none": {"cache": {}, "spends": False,
-             "desc": "no keep-alive pings. Pi's own cache warming runs as it would without context-guru."},
-    "auto": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 2,
-                       "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
-                       "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1},
-             "spends": True,
-             "desc": "idle pings that follow the cache lifetime of each session. Anthropic 5-minute cache: "
-                     "first ping at 240 s, at most 2. Anthropic 1-hour cache: 1 ping at 59 minutes. "
-                     "OpenAI (GPT-5.6 and later): a ping at 28 minutes, at most 2. Uses your quota."},
-    "1-ping": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 1,
-                         "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
-                         "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 1},
-               "spends": True, "desc": "at most 1 idle ping per idle gap, on Anthropic and on OpenAI. "
-                                       "Uses your quota."},
-    "2-ping": {"cache": {"keepalive": True, "keepalive_idle_seconds": 240, "keepalive_max_pings": 2,
-                         "keepalive_max_usd_per_ping": 0.50, "keepalive_min_prefix_tokens": 80000,
-                         "keepalive_idle_seconds_1h": 3540, "keepalive_max_pings_1h": 2},
-               "spends": True, "desc": "at most 2 idle pings per idle gap, on both Anthropic cache lifetimes "
-                                       "and on OpenAI. Uses your quota."},
-}
+STRATEGY_MIN_PROXY = "v0.7.1"
+STRATEGIES_TIMEOUT = 5.0
+STRATEGY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# Settings of the proxy that open files or switch on hosted mode. The probe must not inherit them.
+PROBE_SCRUBBED_PREFIXES = ("DASHBOARD_", "SESSION_STATE", "CG_RECORD_", "ARCHIVE_")
+PROBE_SCRUBBED_NAMES = {"CONTROL_DB", "UPSTREAMS", "STORE", "IDLE_EXIT"}
 
 
 # ---------------------------------------------------------------------------------------------- paths
@@ -296,19 +272,109 @@ def binary_version_text(executable):
     return out[1] if len(out) >= 2 and out[0] == "context-guru-proxy" else None
 
 
-def names_strategies(executable):
-    """True when the binary reads `cache: strategy: <name>`. A version we cannot read is False, so
-    the config gets the literal keys, which every binary accepts. A pre-release (`0.7.1-rc1`) counts
-    as older than its release: it may have been cut before #987."""
+def proxy_version_state(executable):
+    """`named` (v0.7.1 or later: it reads `cache: strategy: <name>`), `older` (a release before that), or
+    `unknown` (no readable version, or a dev build). A pre-release (`0.7.1-rc1`) counts as older than its
+    release: it may have been cut before #987."""
     text = binary_version_text(executable) if executable else None
     if text is None:
-        return False
+        return "unknown"
     try:
         version = release_version(text)
     except RuntimeError:  # a dev build, for example
-        return False
+        return "unknown"
     prerelease = "-" in text.removeprefix("v")
-    return version > NAMED_STRATEGY_RELEASE or (version == NAMED_STRATEGY_RELEASE and not prerelease)
+    return "named" if version > NAMED_STRATEGY_RELEASE or (version == NAMED_STRATEGY_RELEASE and not prerelease) \
+        else "older"
+
+
+def names_strategies(executable):
+    """True only when the binary is known to read `cache: strategy: <name>`. A version we cannot read is
+    False, so a config that is already on disk stays as it is."""
+    return proxy_version_state(executable) == "named"
+
+
+class StrategyError(RuntimeError):
+    def __init__(self, message, reason="strategy_unavailable"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def update_hint():
+    return f"update the proxy to {STRATEGY_MIN_PROXY} or later (/context-guru update); nothing was changed"
+
+
+_TABLES = {}
+
+
+def load_strategy_table(executable):
+    """The strategy table the proxy binary prints. Raises StrategyError with a plain reason.
+
+    The trap (#483): a binary older than v0.7.1 does NOT fail on `strategies`. It ignores the word and
+    starts serving. So the probe has a short time limit, a loopback port 0, and no config, and "no valid
+    JSON" means an old binary. It must write nothing: the env drops every setting that opens a database,
+    a record dir or hosted mode, and it runs in a fresh empty directory so a relative default path cannot
+    land in the user's folder. The result is kept for this process, by binary path and mtime."""
+    if not executable:
+        raise StrategyError("no context-guru-proxy binary was found, so the cache strategies cannot be "
+                            "read; run /context-guru setup", "no_proxy_binary")
+    try:
+        key = (executable, os.stat(executable).st_mtime_ns)
+    except OSError as error:
+        raise StrategyError(f"cannot read {executable}: {error}", "proxy_unrunnable") from error
+    if key in _TABLES:
+        return _TABLES[key]
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(PROBE_SCRUBBED_PREFIXES) and k not in PROBE_SCRUBBED_NAMES}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as scratch:
+            run = subprocess.run([executable, "strategies"], capture_output=True, timeout=STRATEGIES_TIMEOUT,
+                                 env=env, cwd=scratch, stdin=subprocess.DEVNULL)
+        table, code = json.loads(run.stdout.decode("utf-8")), run.returncode
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError includes UnicodeDecodeError from output that is not UTF-8. A time-out is an old
+        # binary that started serving; subprocess has killed it.
+        table, code = None, 1
+    rows = table.get("strategies") if isinstance(table, dict) else None
+    aliases = table.get("aliases", {}) if isinstance(table, dict) else None
+    valid = (code == 0 and isinstance(rows, list) and rows and isinstance(aliases, dict)
+             and all(isinstance(k, str) and isinstance(v, str) for k, v in aliases.items())
+             and all(isinstance(r, dict) and isinstance(r.get("name"), str)
+                     and STRATEGY_NAME.match(r["name"]) and isinstance(r.get("providers"), list)
+                     and all(isinstance(x, str) for x in r["providers"]) and isinstance(r.get("spends"), bool)
+                     and isinstance(r.get("desc"), str) for r in rows))
+    if not valid:
+        raise StrategyError(f"{executable} cannot list cache strategies; {update_hint()}", "proxy_too_old")
+    table["aliases"] = aliases
+    _TABLES[key] = table
+    return table
+
+
+def offered_strategies(table):
+    """The rows Pi may offer. One strategy drives every provider Pi routes, so a row is offered only when
+    it serves all of them: it is tagged `any`, or names each of PROVIDERS."""
+    return [row for row in table["strategies"]
+            if "any" in row["providers"] or all(p in row["providers"] for p in PROVIDERS)]
+
+
+def resolve_strategy(name, executable):
+    """(canonical name, table row or None) for a strategy name, or raise StrategyError.
+
+    `none` always works and needs no table, so a person can turn pings off on any proxy. Any other name
+    needs a proxy of STRATEGY_MIN_PROXY or later."""
+    if name == NONE_STRATEGY:
+        return NONE_STRATEGY, None
+    if executable and proxy_version_state(executable) == "older":
+        raise StrategyError(f"cache strategy {name} needs a newer proxy: {update_hint()}", "proxy_too_old")
+    table = load_strategy_table(executable)
+    name = table["aliases"].get(name, name)
+    offered = offered_strategies(table)
+    for row in offered:
+        if row["name"] == name:
+            return name, row
+    raise StrategyError(f"cache strategy {name!r} is not offered for Pi (offered: "
+                        f"{', '.join(r['name'] for r in offered)})", "unknown_strategy")
 
 
 def install_release_binary(version=None):
@@ -356,38 +422,32 @@ def install_release_binary(version=None):
 
 # --------------------------------------------------------------------------------------- proxy config
 
-def render_config(preset, strategy, upstreams=None, by_name=False):
-    """The proxy config. `by_name`: name the strategy and let the proxy fill its keys from its own
-    table (a binary with #987), so a new binary brings new values. Otherwise write Pi's literal keys.
-    `none` writes no cache block either way: it has no keys, and every binary accepts that."""
+def render_config(preset, strategy, upstreams=None):
+    """The proxy config. A strategy other than `none` is written by name: the proxy fills its cache keys
+    from its own table. `none` writes no cache block."""
     lines = [MARKER, f"# strategy={strategy}. Change it with /context-guru preset or /context-guru cache-strategy."]
     # The proxy config has no upstream key (and refuses an unknown one), so a chained upstream is
     # written here as a comment for a person, and passed to the proxy as a flag on the service command.
     for provider, upstream in sorted((upstreams or {}).items()):
         lines.append(f"# chained: {provider} -> proxy -> {upstream} ({UPSTREAM_FLAGS[provider]} on the service command)")
     lines.append(f"preset: {preset}")
-    cache = STRATEGIES[strategy]["cache"]
-    if cache and by_name:
+    if strategy != NONE_STRATEGY:
         lines += ["# The proxy fills the cache keys of this strategy from its own table.", "cache:",
                   f"  strategy: {strategy}"]
-    elif cache:
-        lines.append("cache:")
-        for key, value in cache.items():
-            lines.append(f"  {key}: {str(value).lower() if isinstance(value, bool) else value}")
     return "\n".join(lines) + "\n"
 
 
-def write_proxy_config(preset, strategy, upstreams=None, by_name=False):
+def write_proxy_config(preset, strategy, upstreams=None):
     if preset not in PRESETS:
         raise RuntimeError(f"unknown preset: {preset}")
-    if strategy not in STRATEGIES:
+    if not STRATEGY_NAME.match(strategy):
         raise RuntimeError(f"unknown cache strategy: {strategy}")
     path = proxy_config()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not owned(path):
         raise RuntimeError(f"refusing to overwrite a proxy config we did not write: {path}")
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(render_config(preset, strategy, upstreams, by_name))
+    temporary.write_text(render_config(preset, strategy, upstreams))
     temporary.chmod(0o600)
     os.replace(temporary, path)
     return path
@@ -397,7 +457,7 @@ def rerender_config(record, executable):
     """Re-render the proxy config from the install record before a start, the same rule as the Claude
     Code plugin's `strategy sync`. Only a file with our marker is written; a hand-written file stays.
     Never raises: on a problem the proxy starts with the file as it is. Returns rendered | unchanged |
-    missing | not_owned | invalid_record | failed. A missing file is not created here: setup and
+    missing | not_owned | invalid_record | old_proxy | failed. A missing file is not created here: setup and
     configure write it, after a yes."""
     path = proxy_config()
     if not path.exists():
@@ -406,13 +466,18 @@ def rerender_config(record, executable):
         return "not_owned"
     preset = record.get("preset", DEFAULT_PRESET)
     strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
-    if preset not in PRESETS or strategy not in STRATEGIES:
+    if preset not in PRESETS or not isinstance(strategy, str) or not STRATEGY_NAME.match(strategy):
         return "invalid_record"
-    upstreams, by_name = recorded_upstreams(record), names_strategies(executable)
     try:
-        if path.read_text() == render_config(preset, strategy, upstreams, by_name):
+        if strategy != NONE_STRATEGY:
+            # Only a proxy that reads the name gets the name. An older one keeps the file as it is.
+            if not names_strategies(executable):
+                return "old_proxy"
+            strategy, _ = resolve_strategy(strategy, executable)
+        upstreams = recorded_upstreams(record)
+        if path.read_text() == render_config(preset, strategy, upstreams):
             return "unchanged"
-        write_proxy_config(preset, strategy, upstreams, by_name)
+        write_proxy_config(preset, strategy, upstreams)
     except Exception:
         return "failed"
     return "rendered"
@@ -601,9 +666,9 @@ def install_escape_hatch():
 
 # ------------------------------------------------------------------------------------------- commands
 
-def consent_question(port, strategy, upstreams=None, replaced=None):
+def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
     """`upstreams`: {provider: chained upstream}. `replaced`: {provider: the baseUrl that replace
-    mode stops using}."""
+    mode stops using}. `row`: the proxy's table row of the strategy (None for `none`)."""
     upstreams, replaced = upstreams or {}, replaced or {}
 
     def route(p):
@@ -624,13 +689,12 @@ def consent_question(port, strategy, upstreams=None, replaced=None):
                      f"key or headers go to {', '.join(UPSTREAMS[p] for p in replaced)} instead.")
     if upstreams or replaced:
         question += " Uninstall puts the old baseUrl back."
-    if STRATEGIES[strategy]["spends"]:
+    if row and row["spends"]:
         chained = " and ".join(NAMES[p] for p in PROVIDERS if p in upstreams)
         spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
                   if upstreams else "using your own quota on each provider")
         question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
-                     f"{spends}: Anthropic after 4 minutes idle (59 "
-                     "minutes on a 1-hour cache), OpenAI GPT-5.6 and later after 28 minutes idle. "
+                     f"{spends}. What it does, from the proxy: {row['desc']} "
                      "Pi's own cache warming stops for routed models.")
         headered = [p for p in PROVIDERS if p in upstreams and has_headers(p)]
         if headered:
@@ -673,8 +737,19 @@ def setup(args):
     port = choose_port(record)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
     preset = record.get("preset") or DEFAULT_PRESET
-    if strategy not in STRATEGIES:
-        facts(result="refused", reason="unknown_strategy", note=",".join(STRATEGIES))
+    executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
+    executable = executable or find_binary()
+    try:
+        # No binary yet: setup downloads the latest release, which has the table. The name is checked
+        # again below, once that binary exists.
+        if executable or strategy == NONE_STRATEGY:
+            strategy, row = resolve_strategy(strategy, executable)
+        elif STRATEGY_NAME.match(strategy):
+            row = {"spends": True, "desc": ""}
+        else:
+            raise StrategyError(f"cache strategy {strategy!r} is not a valid name", "unknown_strategy")
+    except StrategyError as error:
+        facts(result="refused", reason=error.reason, detail=error)
         return 2
     try:
         clash = models_route.conflicts(models_path(), port, PROVIDERS, earlier)
@@ -694,12 +769,12 @@ def setup(args):
             pairs = {}
             if not unchainable:
                 pairs.update(consent_question_chain=consent_question(
-                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}),
+                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}, row=row),
                     confirm_command_chain=confirm_command("chain", extra))
             else:
                 pairs["chain_refused"] = ",".join(f"{p}:{r}" for p, r in sorted(unchainable.items()))
             others = {p: u for p, u in upstreams.items() if p not in clash}
-            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash),
+            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash, row=row),
                          confirm_command_replace=confirm_command("replace", extra))
             facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
                   existing_base_url=clash, conflicts=",".join(sorted(clash)), port=port, preset=preset,
@@ -708,7 +783,7 @@ def setup(args):
         facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy,
               service=service_kind() or "unsupported", already_routed=str(
                   all(models_route.is_routed(models_path(), port, p) for p in PROVIDERS)).lower(),
-              consent_question=consent_question(port, strategy, upstreams))
+              consent_question=consent_question(port, strategy, upstreams, row=row))
         return 0
     if not args.i_consent_to_traffic_interception:
         facts(result="refused", reason="consent_required")
@@ -738,8 +813,6 @@ def setup(args):
         facts(result="error", reason="config_conflict", config=proxy_config(),
               detail=f"refusing to overwrite a proxy config we did not write: {proxy_config()}")
         return 2
-    executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
-    executable = executable or find_binary()
     if not executable:
         try:
             executable, version = install_release_binary()
@@ -747,7 +820,11 @@ def setup(args):
         except Exception as error:
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
-    by_name = names_strategies(executable)
+    try:
+        strategy, _ = resolve_strategy(strategy, executable)
+    except StrategyError as error:
+        facts(result="refused", reason=error.reason, detail=error)
+        return 2
     # The config, the start and the record happen under the restart lock: a session-start restart
     # cannot re-render an older record over the new config between them.
     try:
@@ -759,9 +836,8 @@ def setup(args):
         # Read again under the lock, so the fields setup does not set are not an old copy. The preset
         # and the strategy stay the ones the consent question named.
         record = read_record()
-        # After the binary is known: the config names the strategy only for a binary that reads the name.
         try:
-            write_proxy_config(preset, strategy, upstreams, by_name)
+            write_proxy_config(preset, strategy, upstreams)
         except Exception as error:
             facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
             return 2
@@ -908,8 +984,19 @@ def configure(args):
     preset = record.get("preset", DEFAULT_PRESET)
     strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
     if args.list:
-        facts(presets=",".join(PRESETS), strategies=",".join(STRATEGIES),
-              **{f"strategy_{name}": spec["desc"] for name, spec in STRATEGIES.items()})
+        # The names and texts come from the proxy. On a proxy that cannot list them, only `none` is
+        # offered, and `strategy_error` says why.
+        executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
+        executable = executable or find_binary()
+        try:
+            if executable and proxy_version_state(executable) == "older":
+                raise StrategyError(f"this proxy cannot list cache strategies; {update_hint()}", "proxy_too_old")
+            rows = offered_strategies(load_strategy_table(executable))
+        except StrategyError as error:
+            facts(presets=",".join(PRESETS), strategies=NONE_STRATEGY, strategy_error=error)
+            return 0
+        facts(presets=",".join(PRESETS), strategies=",".join(row["name"] for row in rows),
+              **{f"strategy_{row['name'].replace('-', '_')}": row["desc"] for row in rows})
         return 0
     if args.show:
         facts(result="ok", preset=preset, cache_strategy=strategy)
@@ -931,9 +1018,12 @@ def configure(args):
         preset = args.preset or record.get("preset", DEFAULT_PRESET)
         strategy = args.cache_strategy or record.get("cache_strategy", DEFAULT_STRATEGY)
         upstreams = recorded_upstreams(record)
-        by_name = names_strategies(record.get("binary"))
         try:
-            write_proxy_config(preset, strategy, upstreams, by_name)
+            strategy, _ = resolve_strategy(strategy, record.get("binary"))
+            write_proxy_config(preset, strategy, upstreams)
+        except StrategyError as error:
+            facts(result="refused", reason=error.reason, detail=error)
+            return 2
         except Exception as error:
             facts(result="refused", detail=error)
             return 2
@@ -1032,7 +1122,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("setup")
     install.add_argument("--plan", action="store_true")
-    install.add_argument("--cache-strategy", choices=tuple(STRATEGIES))
+    install.add_argument("--cache-strategy")
     install.add_argument("--i-consent-to-traffic-interception", action="store_true")
     install.add_argument("--on-conflict", choices=CONFLICT_CHOICES,
                          help="when models.json already sends a provider elsewhere: chain behind it, "
@@ -1044,7 +1134,7 @@ def main():
     group.add_argument("--show", action="store_true")
     group.add_argument("--list", action="store_true")
     settings.add_argument("--preset", choices=PRESETS)
-    settings.add_argument("--cache-strategy", choices=tuple(STRATEGIES))
+    settings.add_argument("--cache-strategy")
     upgrade = commands.add_parser("update")
     mode = upgrade.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
