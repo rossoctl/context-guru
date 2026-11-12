@@ -46,7 +46,7 @@ Notes:
 - **Pi** uses one strategy for both providers. It offers only a row that serves both.
 - **Bob** has no row for `openai-chat`, so only `none` fits. The plugin writes no strategy into its
   config, so it can apply only `none`.
-- **Codex** keeps its own default. The proxy default (`auto`) is an Anthropic strategy.
+- **Codex** keeps its own default. Its filter takes only a row whose tags are all `openai` or `any`. The proxy default (`auto`) also lists `anthropic`, so Codex does not offer it.
 - **Claude Code** (`PLUGIN_PROVIDERS` in `context-guru-plugin/scripts/settings.py`) offers
   `1-hour-head` only for Anthropic.
 
