@@ -431,7 +431,7 @@ func TestRecordSessionIDInObserveMode(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	// A Tenancy with no session id, as observe mode leaves it.
-	rc := h.newRecCtx(bschemas.Anthropic, ccBody("hello"), &Tenancy{}, "")
+	rc := h.newRecCtx(nil, bschemas.Anthropic, ccBody("hello"), &Tenancy{}, "")
 
 	if rc.traceID != testSessionUUID {
 		t.Fatalf("trace id = %q, want Claude Code's own session UUID %q\n"+
@@ -450,7 +450,7 @@ func TestRecordSessionIDFallbackIsNeverEmptyAndIsMarked(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	body := []byte(`{"model":"aws/claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}`)
-	rc := h.newRecCtx(bschemas.Anthropic, body, &Tenancy{}, "")
+	rc := h.newRecCtx(nil, bschemas.Anthropic, body, &Tenancy{}, "")
 
 	if rc.traceID == "" {
 		t.Fatal("trace id is empty: the file would be named .otel.json and merge unrelated sessions")
@@ -469,7 +469,7 @@ func TestRecordSessionIDUsesTheExplicitID(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	body := []byte(`{"model":"gpt-x","messages":[{"role":"system","content":"You are Bob."},{"role":"user","content":"hi"}]}`)
-	rc := h.newRecCtx(bschemas.OpenAI, body, &Tenancy{}, bobIDETask)
+	rc := h.newRecCtx(nil, bschemas.OpenAI, body, &Tenancy{}, bobIDETask)
 
 	if want := "cg-derived-" + bobIDETask; rc.traceID != want {
 		t.Fatalf("trace id = %q, want %q", rc.traceID, want)
@@ -524,7 +524,7 @@ func TestRecordBobIDECallIsKeyedOnXTaskID(t *testing.T) {
 // Recording off: no recorder, no clone, no work.
 func TestRecCtxIsZeroWhenRecordingOff(t *testing.T) {
 	h := &Handler{} // recorder nil
-	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{}, "")
+	rc := h.newRecCtx(nil, bschemas.Anthropic, ccBody("x"), &Tenancy{}, "")
 	if rc.traceID != "" || rc.pristine != nil {
 		t.Fatalf("recording off must yield the zero recCtx, got %+v", rc)
 	}
@@ -586,13 +586,13 @@ func TestRecordNeedsTheTenantsConsentInHostedMode(t *testing.T) {
 	defer r.Close()
 	h := &Handler{recorder: r, opts: Options{Tenants: &TenantSource{}}}
 
-	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}, ""); rc.traceID != "" || rc.pristine != nil {
+	if rc := h.newRecCtx(nil, bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}, ""); rc.traceID != "" || rc.pristine != nil {
 		t.Fatalf("recorded a tenant who never opted in: %+v", rc)
 	}
-	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), nil, ""); rc.traceID != "" {
+	if rc := h.newRecCtx(nil, bschemas.Anthropic, ccBody("x"), nil, ""); rc.traceID != "" {
 		t.Fatalf("recorded an unauthenticated request in hosted mode: %+v", rc)
 	}
-	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true}, "")
+	rc := h.newRecCtx(nil, bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true}, "")
 	if rc.traceID != testSessionUUID || rc.tenantID != "t1" {
 		t.Fatalf("opted-in tenant: got trace %q tenant %q, want %q and t1", rc.traceID, rc.tenantID, testSessionUUID)
 	}
@@ -991,5 +991,36 @@ func TestDerivedTurnsFailOpenWithoutAnAnchor(t *testing.T) {
 	if got := len(derivedTurnSpans(t, spans)); got != 0 {
 		t.Errorf("want no derived turns without an anchor, got %d; an unanchored call is a "+
 			"helper call (a title generator, a WebFetch-fed thread), not a human turn", got)
+	}
+}
+
+// The per-session opt-out can only narrow consent. "off" stops recording even for a tenant who
+// opted in; anything else, including a typo, changes nothing; and it can never turn recording on.
+func TestRecordHeaderCanOnlyDecline(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	defer r.Close()
+	h := &Handler{recorder: r, opts: Options{Tenants: &TenantSource{}}}
+	optedIn := &Tenancy{ID: "t1", RecordTraces: true}
+	notOptedIn := &Tenancy{ID: "t2"}
+
+	mk := func(v string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+		if v != "" {
+			req.Header.Set("x-context-guru-record", v)
+		}
+		return req
+	}
+	for _, v := range []string{"off", "OFF", " off ", "false", "no", "0"} {
+		if rc := h.newRecCtx(mk(v), bschemas.Anthropic, ccBody("x"), optedIn, ""); rc.traceID != "" || rc.pristine != nil {
+			t.Errorf("header %q: still recorded an opted-in tenant: %+v", v, rc)
+		}
+	}
+	for _, v := range []string{"", "on", "of", "yes", "true"} {
+		if rc := h.newRecCtx(mk(v), bschemas.Anthropic, ccBody("x"), optedIn, ""); rc.traceID != testSessionUUID {
+			t.Errorf("header %q: an opted-in tenant was not recorded: %+v", v, rc)
+		}
+		if rc := h.newRecCtx(mk(v), bschemas.Anthropic, ccBody("x"), notOptedIn, ""); rc.traceID != "" {
+			t.Errorf("header %q: recorded a tenant who never opted in: %+v", v, rc)
+		}
 	}
 }
