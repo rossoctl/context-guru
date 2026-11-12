@@ -3,7 +3,7 @@
 #   docker compose -f deploy/central/compose.yaml up -d
 #
 # Production uses install.sh (see README.md): the same images and the same config files. This file
-# differs in two ways. It has no TLS, and it mounts the example token files. Do not expose it.
+# differs in one way: it has no TLS. Do not expose it.
 #
 # Only the collector's two receiver ports, Prometheus and Grafana are published, all on loopback.
 # Alertmanager stays on the private network.
@@ -16,7 +16,6 @@ services:
     command: ["--config=/etc/otelcol/config.yml"]
     volumes:
       - ./otel-collector.yml:/etc/otelcol/config.yml:ro
-      - ./tokens.example:/etc/otelcol/tokens:ro
     ports:
       - "127.0.0.1:4318:4318"   # Cortex proxies push here
       - "127.0.0.1:4319:4319"   # context-guru proxies push here

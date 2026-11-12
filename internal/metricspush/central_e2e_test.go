@@ -26,8 +26,11 @@ import (
 // through the real collector into Prometheus and read them back. They are skipped unless
 // CENTRAL_COLLECTOR and CENTRAL_PROMETHEUS are set:
 //
-//	CENTRAL_COLLECTOR=http://127.0.0.1:4319 CENTRAL_TOKEN=dev-contextguru-token \
-//	CENTRAL_PROMETHEUS=http://127.0.0.1:9090 go test ./internal/metricspush -run Central -v
+//	CENTRAL_COLLECTOR=http://127.0.0.1:4319 CENTRAL_PROMETHEUS=http://127.0.0.1:9090 \
+//	go test ./internal/metricspush -run Central -v
+//
+// Authentication is off on the central (rossoctl/context-guru#1130), so no token is needed. The one test
+// that checks a token is refused runs only with CENTRAL_AUTH=on.
 //
 // A unit test cannot catch what these catch: a unit suffix that the exporter appends as written
 // (llm_inference_cost_USD_total), labels the collector adds or drops, and a rule that reads a
@@ -185,8 +188,11 @@ func TestCentralLabelsAreTheSpecSet(t *testing.T) {
 	}
 }
 
-// A wrong token gets nothing in.
+// A wrong token gets nothing in. Only meaningful when the central checks tokens (CENTRAL_AUTH=on).
 func TestCentralRefusesAWrongToken(t *testing.T) {
+	if os.Getenv("CENTRAL_AUTH") != "on" {
+		t.Skip("authentication is off on the central (rossoctl/context-guru#1130); set CENTRAL_AUTH=on to run this")
+	}
 	collector, _, _ := central(t)
 	req, _ := http.NewRequest(http.MethodPost, collector+"/v1/metrics", strings.NewReader(`{"resourceMetrics":[]}`))
 	req.Header.Set("Content-Type", "application/json")

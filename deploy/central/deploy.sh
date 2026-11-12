@@ -5,14 +5,13 @@
 #   ./deploy.sh USER@HOST stage                                    only copy the folder and move `current` (no install)
 #   ./deploy.sh USER@HOST nginx                                    TLS front end (needs CENTRAL_HOST, TLS_CERT, TLS_KEY)
 #   ./deploy.sh USER@HOST status                                   containers, targets, rules, who pushed
-#   ./deploy.sh USER@HOST check                                    from HERE: does https://CENTRAL_HOST answer (expect 401)?
-#   ./deploy.sh USER@HOST token add|revoke|list cortex|context-guru NAME
+#   ./deploy.sh USER@HOST check                                    from HERE: does https://CENTRAL_HOST accept an empty push (expect 200)?
 #   ./deploy.sh USER@HOST logs [collector|prometheus|alertmanager|grafana]
 #   ./deploy.sh USER@HOST remove                                   drop the containers, KEEP the data
 #
 # What it does on the server: install.sh does the work (see its header). This script only copies the
 # folder to $HOME/central-metrics-src/releases/<time>, points `current` at it, and runs install.sh with sudo.
-# It never deletes data. A release folder holds config and scripts, never a token.
+# It never deletes data. A release folder holds config and scripts only.
 #
 # Settings (environment), all optional except for `nginx` and `check`:
 #   CENTRAL_HOST   the name proxies use in their URL, for example metrics.example.com
@@ -107,10 +106,10 @@ stage_release() {
   local ts; ts=$(date +%Y%m%d-%H%M%S)
   local rel="$SRC_ROOT/releases/$ts"
   if [ "$DRY" = 1 ]; then
-    printf '  [dry-run] tar (%s, without compose.yaml, tokens.example, tests) | ssh %s "mkdir -p %s && tar -xzf - -C %s"\n' "$HERE" "$TARGET" "$rel" "$rel"
+    printf '  [dry-run] tar (%s, without compose.yaml and the tests) | ssh %s "mkdir -p %s && tar -xzf - -C %s"\n' "$HERE" "$TARGET" "$rel" "$rel"
   else
     # shellcheck disable=SC2029  # on purpose: $rel is built here and expanded there
-    tar -C "$HERE" --exclude=./tokens.example --exclude=./compose.yaml --exclude=./prometheus/tests --exclude='*.pyc' --exclude=__pycache__ -czf - . \
+    tar -C "$HERE" --exclude=./compose.yaml --exclude=./prometheus/tests --exclude='*.pyc' --exclude=__pycache__ -czf - . \
       | ssh "$TARGET" "mkdir -p $rel && tar -xzf - -C $rel"
   fi
   run_remote "ln -sfn $rel $SRC_ROOT/current && cd $SRC_ROOT/releases && ls -1d ./* | sort -r | tail -n +6 | xargs -r rm -rf"
@@ -137,10 +136,7 @@ case "$CMD" in
   stage) validate_local; stage_release ;;
   status) install_sh status ;;
   remove) install_sh remove ;;
-  token)
-    [ $# -ge 1 ] || die "usage: $0 $TARGET token add|revoke|list [cortex|context-guru NAME]"
-    install_sh token "$@"
-    ;;
+  token) die "token commands are off: the collector does not check tokens today (see README.md)" ;;
   logs)
     c="${1:-collector}"
     case "$c" in collector|prometheus|alertmanager|grafana) ;; *) die "logs: one of collector, prometheus, alertmanager, grafana" ;; esac
@@ -150,8 +146,9 @@ case "$CMD" in
     [ -n "${CENTRAL_HOST:-}" ] || die "set CENTRAL_HOST"
     say "From this machine to https://$CENTRAL_HOST"
     for p in cortex context-guru; do
-      code=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 "https://$CENTRAL_HOST/$p/v1/metrics" 2>&1) || { printf '  ✗ %s: %s\n' "$p" "$code"; continue; }
-      if [ "$code" = 401 ]; then ok "/$p answers 401 without a token (the collector is behind TLS and checks tokens)"; else printf '  ✗ /%s answered %s (expected 401)\n' "$p" "$code"; fi
+      # An empty OTLP request carries no data, so it changes nothing; the collector answers 200.
+      code=$(curl -sS -o /dev/null -w '%{http_code}' -m 10 -X POST -H 'content-type: application/json' -d '{}' "https://$CENTRAL_HOST/$p/v1/metrics" 2>&1) || { printf '  ✗ %s: %s\n' "$p" "$code"; continue; }
+      if [ "$code" = 200 ]; then ok "/$p accepts a push over TLS (answered 200)"; else printf '  ✗ /%s answered %s (expected 200)\n' "$p" "$code"; fi
     done
     ;;
   *) usage ;;

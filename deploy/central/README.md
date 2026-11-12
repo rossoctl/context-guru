@@ -19,16 +19,17 @@ No machine opens a port. Each proxy pushes out. Prometheus scrapes no proxy.
 
 | File | What it does |
 |---|---|
-| `otel-collector.yml` | Receives pushes. Checks the token. Sets the labels. Sends to Prometheus. |
+| `otel-collector.yml` | Receives pushes. Sets the labels. Sends to Prometheus. Checks no token (authentication is off). |
 | `prometheus/prometheus.yml` | Receives remote write. Scrapes the stack's own parts only. |
 | `prometheus/rules/recording.yml` | Pre-computed sums: net saving, 5xx ratio, cache read ratio, keep-alive net. |
 | `prometheus/rules/alerts.yml` | The alerts of the spec, plus two that watch the pipeline itself. |
 | `prometheus/tests/alerts_test.yml` | Unit tests for the rules, in simulated time. |
 | `alertmanager/alertmanager.yml` | Routes alerts. Ships no delivery method. |
-| `grafana/gen_dashboards.py` | Generates the three dashboards. Each panel is one line with its query. |
-| `grafana/dashboards/*.json` | Fleet overview, Savings, Cache and keep-alive. Generated. |
+| `grafana/gen_dashboards.py` | Generates the four dashboards. Each panel is one line with its query. |
+| `grafana/dashboards/*.json` | Fleet overview, Savings, Cache and keep-alive, Machine comparison. Generated. |
 | `compose.yaml` | The whole stack on one machine, for development and the end-to-end test. |
-| `install.sh` | Installs the stack on a server. Also makes and revokes tokens. |
+| `install.sh` | Installs the stack on a server (also `status`, `nginx`, `remove`). |
+| `deploy.sh` | Runs `install.sh` on the server from your laptop, over ssh. |
 | `nginx.example.conf` | The TLS front end. |
 
 ## What is stored
@@ -37,8 +38,8 @@ Prometheus keeps metadata only, for 30 days by default: counters and histograms 
 `proxy`, `machine`, `preset`, `service_version`, `model`, `provider`, `tier`, `component` and a few
 reason codes. It keeps no prompt, no response, no session ID and no host name. `machine` is a random
 install ID. Anyone with Grafana access can read it. To stop the storage, remove the stack
-(`install.sh remove`) and delete `/var/lib/central-metrics`. To stop one install from sending, revoke
-its token or turn its push off.
+(`install.sh remove`) and delete `/var/lib/central-metrics`. To stop one install from sending, turn its push off
+(`--metrics-push=false`).
 
 ## Deploy from your laptop
 
@@ -51,7 +52,7 @@ with sudo for the ssh user.
 CENTRAL_HOST=metrics.example.com TLS_CERT=/etc/ssl/central/fullchain.pem TLS_KEY=/etc/ssl/central/privkey.pem \
   ./deploy.sh alice@metrics-host nginx               # TLS front end with your company certificate
 CENTRAL_HOST=metrics.example.com ./deploy.sh alice@metrics-host check
-./deploy.sh alice@metrics-host token add context-guru alice-laptop
+./deploy.sh alice@metrics-host status
 ```
 
 The certificate and key paths are paths on the server. `nginx` checks that the certificate is valid, matches the
@@ -62,22 +63,20 @@ the old ones back if not. The Claude Code skill `central` (`.claude/skills/centr
 
 1. Copy this repository to the server. Install `podman` or `docker`.
 2. Run `sudo ./install.sh install`.
-3. Make one token for each install: `sudo ./install.sh token add cortex alice-laptop`. The token is
-   printed **once**. Give it to that install. It is not stored in a readable form.
-4. Put TLS in front (see below).
-5. Run `sudo ./install.sh status`.
+3. Put TLS in front (see below).
+4. Run `sudo ./install.sh status`.
 
-Each proxy needs a collector URL and its token. The proxy side arrives with #974; the flags below are its flags. The URL has no default. A proxy with no URL logs one
-warning and sends nothing.
+Each proxy needs a collector URL. The URL has no default. A proxy with no URL logs one warning and
+sends nothing. Authentication is off (see below), so no token is needed.
 
-| Proxy | URL | Settings |
+| Proxy | URL | Setting |
 |---|---|---|
-| context-guru | `https://metrics.example.com/context-guru` | `--metrics-push-url`, `--metrics-push-token` |
-| Cortex | `https://metrics.example.com/cortex` | the same two settings |
+| context-guru | `https://metrics.example.com/context-guru` | `--metrics-push-url` or `METRICS_PUSH_URL` |
+| Cortex | `https://metrics.example.com/cortex` | the same setting (the Cortex side is not built yet) |
 
 ## TLS is required, and the installer does not do it
 
-A proxy refuses to send a token over plain `http` to a remote host. Only `https`, or `http` to a
+A proxy refuses to push over plain `http` to a remote host. Only `https`, or `http` to a
 loopback address, works. The collector speaks plain HTTP. So any remote proxy needs a TLS front end.
 `nginx.example.conf` is one. Copy it, set the server name and the two certificate paths, and install
 `central-proxy.inc` beside it. A proxy also needs to trust the certificate. A proxy never skips the
@@ -86,18 +85,21 @@ check.
 The installer binds the collector to loopback by default (`BIND=127.0.0.1`), so the front end must run
 on the same host. Set `BIND=0.0.0.0` only if the front end is on another machine.
 
-## What a token does, and what it does not
+## Authentication is off
 
-- A token lets one install push. Each proxy has its own list, on its own port, so a Cortex token does
-  not work for context-guru. The `proxy` label is set by the collector. A sender cannot choose it.
-- You can revoke one install without touching the others: `sudo ./install.sh token revoke cortex alice-laptop`.
-- **A token does not tie a sender to one machine.** The `machine` label is what the sender says it is.
-  A holder of a Cortex token can write under another Cortex machine's name. The token proves "a
-  Cortex install". It does not prove "this Cortex install". For tens of machines you trust, that may be
-  enough. Do not read `machine` as proof of identity.
-- The collector reads the token files when it starts. A change takes effect after a restart, which
-  `token add` and `token revoke` do for you. A restart takes about 1.5 seconds. A push that lands in that
-  time fails, and the next push repairs it, because proxies send running totals and not changes.
+The collector accepts any push that reaches it. A proxy may still send an `Authorization` header
+(`--metrics-push-token`), and the collector ignores it. Today the protection is TLS in front of the
+collector and the private network.
+
+What this means:
+- Anyone who can reach the host can write metrics, under any `machine` name. The data is metadata only,
+  so the harm is wrong dashboards and wrong alerts.
+- The collector cannot say which install sent a push. The `machine` label is the sender's own claim.
+- Do not expose the front end beyond the network you trust.
+
+The work to switch authentication on is tracked in rossoctl/context-guru#1130: a token for each install,
+how to make and hand out tokens, binding a token to a machine or using mutual TLS, and the setup on the
+consumer. `otel-collector.yml` keeps the old token blocks, commented out.
 
 ## What is lost when something fails
 
@@ -108,7 +110,6 @@ Nothing is queued anywhere. Proxies send running totals every 30 seconds.
 | Collector or Prometheus down for a while | The next push after it returns carries the totals. No count is lost. The time of the increase is the time of that push, so a graph shows one step and not a slope. |
 | A proxy stops without a clean exit | The counts since its last push are lost. At most about 30 seconds. |
 | A machine is off for a day | Its totals resume when it is back. The days between are not in the graph. |
-| A token is revoked | That install is refused from then on. Its old data stays. |
 
 ## The Grafana admin password
 
@@ -142,7 +143,7 @@ exists.
 | Rule syntax | `promtool check rules prometheus/rules/*.yml` | The rules parse. |
 | Alert and rule logic | `promtool test rules prometheus/tests/alerts_test.yml` | Each alert fires when it should and stays quiet when it should not. |
 | Collector config | `otelcol-contrib validate --config=otel-collector.yml` | The config is valid. |
-| Names, labels, tokens | `internal/metricspush` end-to-end tests (see `central_e2e_test.go`). They arrive with #974, not with this folder. | A real push arrives under the names and labels of the spec. |
+| Names and labels | `internal/metricspush` end-to-end tests (see `central_e2e_test.go`) | A real push arrives under the names and labels of the spec. |
 | Recording rules | the same package, with `CENTRAL_SLOW=1` (about 6 minutes) | The rules compute the right number from traffic at a known rate. |
 
 Start the stack for the end-to-end tests with `docker compose -f compose.yaml up -d`. If port 3001 is
@@ -153,6 +154,7 @@ taken on your machine, set `GRAFANA_PORT`.
 - The request and response byte counters. The proxies do not count them on every path.
 - `source=client` on errors. The proxies do not record a client that hung up.
 - Ping outcomes `timeout` and `skipped`. Those pings leave no record.
-- A saving rate (net over baseline). There is no baseline counter.
+- The exact baseline counter (`llm_savings_baseline_usd_total`). The saving rate tiles use spend plus net saved instead.
+- Authentication (rossoctl/context-guru#1130).
 - Shared-warm tokens (#853).
 - Retiring the old pull path and the local Grafana (R22). That waits until these dashboards are in use.

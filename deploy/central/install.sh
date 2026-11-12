@@ -4,9 +4,7 @@
 #
 #   sudo ./install.sh install            write the config, make the state, start the stack
 #   sudo ./install.sh status             containers, scrape targets, rule health, who pushed
-#   sudo ./install.sh token add NAME     make a token for one install; prints it ONCE
-#   sudo ./install.sh token revoke NAME  remove that install's token (restarts the collector)
-#   sudo ./install.sh token list         the names of the tokens, never the tokens
+#   (token add|revoke|list are OFF: the collector does not check tokens today. See README.md.)
 #   sudo ./install.sh remove             drop the containers, KEEP the data
 #   sudo CENTRAL_HOST=metrics.example.com ./install.sh nginx
 #                                        install the TLS front end (needs nginx and a certificate)
@@ -132,20 +130,11 @@ cmd_install() {
   fi
   ok "$ETC"
 
-  say "Tokens"
-  # The token files are secrets. The collector image runs as uid 10001 and must read them, so they
-  # belong to that uid and to nobody else can read them: 0600, folder 0700. A world-readable token
-  # file would hand every install's token to any local user. An empty file means NO push is accepted.
-  install -d -m0700 -o "$COLLECTOR_UID" -g "$COLLECTOR_UID" "$ETC/tokens"
-  for f in cortex.txt context-guru.txt; do
-    [ -f "$ETC/tokens/$f" ] || install -m0600 -o "$COLLECTOR_UID" -g "$COLLECTOR_UID" /dev/null "$ETC/tokens/$f"
-    chown "$COLLECTOR_UID:$COLLECTOR_UID" "$ETC/tokens/$f"; chmod 0600 "$ETC/tokens/$f"
-  done
-  for p in cortex context-guru; do
-    n=$(grep -c . "$(tokens_file "$p")" || true)
-    ok "$p: $n token(s)"
-    [ "$n" -gt 0 ] || warn "no $p proxy can push until you run: $0 token add $p NAME"
-  done
+  say "Authentication"
+  # OFF on purpose, to keep the first deployment simple. The collector accepts any push that reaches
+  # it, so the protection is TLS and the private network only. See README.md for what this means and
+  # for the issue that tracks real authentication.
+  warn "authentication is OFF: the collector accepts any push that reaches it"
 
   say "State"
   # The images run as fixed unprivileged users and none will chown its own volume.
@@ -225,7 +214,6 @@ cmd_install() {
   fi
 
   say "Next"
-  echo "  sudo $0 token add cortex <install-name>       # one token for each install"
   echo "  sudo $0 status"
   echo "  Put TLS in front of $BIND:$CORTEX_PORT and $BIND:$CG_PORT (nginx.example.conf)."
   return_fails
@@ -239,12 +227,11 @@ start_collector() {
   $OCI run -d --name cm-collector --network "$NET" --network-alias otel-collector --restart=unless-stopped \
     -p "$BIND:$CORTEX_PORT:4318" -p "$BIND:$CG_PORT:4319" \
     -v "$ETC/otel-collector.yml:/etc/otelcol/config.yml:ro,Z" \
-    -v "$ETC/tokens:/etc/otelcol/tokens:ro,Z" \
     "$OTELCOL_IMAGE" --config=/etc/otelcol/config.yml >/dev/null
   ok "cm-collector on $BIND:$CORTEX_PORT (Cortex) and $BIND:$CG_PORT (context-guru)"
 }
 
-# --- tokens ----------------------------------------------------------------------------------
+# --- tokens (dormant: kept for the authentication issue; the dispatcher does not call this) ----------------------------------------------------------------------------------
 
 # A token file holds one token on each line and nothing else: the collector reads the whole line, so
 # a name must not be on it. The name lives in a side file, tokens/<proxy>.names, as "<name> <sha256 of the token>".
@@ -460,7 +447,7 @@ cmd_remove() {
 case "${1:-}" in
   install) cmd_install ;;
   status)  cmd_status ;;
-  token)   shift; cmd_token "$@" ;;
+  token)   echo "token commands are off: the collector does not check tokens today (see README.md)." >&2; exit 1 ;;
   nginx)   cmd_nginx ;;
   remove)  cmd_remove ;;
   *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2 ;;
