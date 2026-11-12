@@ -102,7 +102,13 @@ func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("proxy returned %d", resp.StatusCode)
 	}
-	waitForDetachedSummaries(t)
+	// summarize sends the summary call in the background, after the proxy answers, so calls read now
+	// can miss it: a summary call a test wants, or an operator's key a test must not see. The call
+	// is in flight from before the response until the upstream has answered it. The registry is
+	// process-wide, so a summary another test leaves running also holds this wait.
+	if !offload.WaitForAllSummariesForTest(10 * time.Second) {
+		t.Fatal("a detached summary call was still running after 10s")
+	}
 	var summaries []seenCall
 	for _, c := range calls() {
 		if gjson.GetBytes(c.body, "max_tokens").Exists() {
@@ -110,22 +116,6 @@ func postSummarizable(t *testing.T, h *Handler, path, model, auth string, calls 
 		}
 	}
 	return summaries
-}
-
-// waitForDetachedSummaries polls until no summary call that summarize started in the background is
-// still running. The proxy answers before that call is sent, so calls read right after the response
-// can miss it: a summary call a test wants, or an operator's key a test must not see. summarize
-// counts the call as unresolved before the response, and stops counting it after the upstream has
-// answered it, so after this returns the fake upstream has recorded every summary call.
-func waitForDetachedSummaries(t *testing.T) {
-	t.Helper()
-	for i := 0; i < 2000; i++ {
-		if _, _, _, _, _, unresolved, _ := offload.AsyncSummaryStats(); unresolved == 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("a detached summary call was still running after 10s")
 }
 
 // On Bob's route, the summary call goes to Bob's model path with Bob's auth scheme. Before the
