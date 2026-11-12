@@ -24,9 +24,9 @@ export const FAKE_STRATEGIES = {
   presets: ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"],
   strategies: [
     { name: "none", spends: false, desc: "no cache strategy", providers: ["any"], cache: {} },
-    { name: "auto", spends: true, desc: "idle pings that follow the cache lifetime", providers: ["anthropic"], cache: { keepalive: true } },
-    { name: "1-ping", spends: true, desc: "at most 1 idle ping", providers: ["anthropic"], cache: { keepalive: true } },
-    { name: "2-ping", spends: true, desc: "at most 2 idle pings", providers: ["anthropic"], cache: { keepalive: true } },
+    { name: "auto", spends: true, desc: "idle pings that follow the cache lifetime", providers: ["anthropic", "openai"], cache: { keepalive: true } },
+    { name: "1-ping", spends: true, desc: "at most 1 idle ping", providers: ["anthropic", "openai"], cache: { keepalive: true } },
+    { name: "2-ping", spends: true, desc: "at most 2 idle pings", providers: ["anthropic", "openai"], cache: { keepalive: true } },
     { name: "1-hour-head", spends: false, desc: "asks for the 1-hour tier", providers: ["anthropic"], cache: { head_ttl_1h: true } },
     { name: "30-min-ping", spends: true, desc: "refreshes OpenAI caches", providers: ["openai"], cache: { keepalive: true } },
   ],
