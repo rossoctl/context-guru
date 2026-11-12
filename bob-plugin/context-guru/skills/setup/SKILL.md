@@ -34,8 +34,10 @@ description: Set up context-guru for IBM Bob on this Mac. Use when asked to inst
      the status bar needs `make bob-statusbar` in the context-guru repo before setup, until the
      install script ships it. Then copy the plugin folder again and run setup again. The rest of
      setup still worked.
-   - `binary_skipped=`: setup did not use that proxy (it is too old) and downloaded the latest
-     release. Say so, and say why from the line.
+   - `binary_skipped=`: setup did not use that proxy (it is too old: v0.7.1 is needed to list cache
+     strategies, and v0.7.2 for `bob-ultrahigh`) and downloaded the latest release. Say so, and
+     say why from the line. If the download failed too (`result=binary_install_failed`), say that
+     setup needs the network once, or a newer proxy on PATH.
 6. Always end with the two steps setup printed: **quit and reopen Bob from the Dock**, then **log in
    to Bob once**. Bob keeps its login per backend address, so the new address needs one new login.
    This is expected and is not a fault.
