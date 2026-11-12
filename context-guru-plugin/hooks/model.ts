@@ -37,28 +37,84 @@ export const usd = (x: number): string => {
 /** A token count as the status line writes it (statusline.py `_human`): `85.0k`, `1.2M`, `593`. */
 export const tokens = (n: number): string => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : Math.abs(n) >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${Math.round(n)}`)
 
+/** The learned 5-hour weights (`cg.py cachestate` `fivehour_weights`, from GET /api/me/fivehour-weights, #1047): the
+ * share of the 5-hour limit (0..1) that one token of each tier uses. A tier the fit did not learn carries the API
+ * price, scaled to the account's spend (`learned` false). */
+export type FiveHourWeights = {
+  read: number
+  write5m?: number
+  write1h?: number
+  learned5m: boolean
+  learned1h: boolean
+  /** How many requests the fit used. */
+  requests: number
+}
+
+const pos = (x: unknown): number | undefined => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : undefined)
+
+/** The weights from a `fivehour_weights` document, or undefined unless the fit passed its gate (`ok`) with a learned
+ * cache-read weight and at least one learned cache-write weight, each a positive number. cg.py checks the same: either
+ * side failing gives the token figure (fail open). */
+export function fiveHourWeights(x: unknown): FiveHourWeights | undefined {
+  const f = x as { ok?: unknown; weights?: Record<string, unknown>; learned?: Record<string, unknown>; requests?: unknown } | null | undefined
+  if (!f || typeof f !== 'object' || f.ok !== true || !f.weights || typeof f.weights !== 'object' || !f.learned || typeof f.learned !== 'object') return undefined
+  const read = pos(f.weights.cache_read)
+  const write5m = pos(f.weights.cache_write_5m)
+  const write1h = pos(f.weights.cache_write_1h)
+  const learned5m = f.learned.cache_write_5m === true && write5m !== undefined
+  const learned1h = f.learned.cache_write_1h === true && write1h !== undefined
+  if (read === undefined || f.learned.cache_read !== true || (!learned5m && !learned1h)) return undefined
+  return { read, write5m, write1h, learned5m, learned1h, requests: num(f.requests) ?? 0 }
+}
+
+/** The LEARNED write weight for this entry's tier (ttl_s 3600 is the 1-hour tier, 300 the 5-minute one), or undefined
+ * when the fit did not learn that tier. A weight the fit did not learn is the API price scaled to the account's spend,
+ * a guess, so the band does not show it as a share (owner's decision, David Amid, #1135, 2026-11-12). With the tier
+ * unknown: the tier the fit learned (5-minute when it learned both). */
+function writeWeight(w: FiveHourWeights, tier: '5m' | '1h' | undefined): number | undefined {
+  if (tier === '1h') return w.learned1h ? w.write1h : undefined
+  if (tier === '5m') return w.learned5m ? w.write5m : undefined
+  return w.learned5m ? w.write5m : w.write1h
+}
+
+/** A share of the 5-hour limit in percent, as the band writes it: `≈0.1%`, `≈1.5%`, `≈12%`, and `<0.1%` for a tiny
+ * one. `≈` because the weights are an estimate. */
+export function sharePct(pct: number): string {
+  if (!(pct >= 0.05)) return '<0.1%'
+  return pct < 9.95 ? `≈${pct.toFixed(1)}%` : `≈${Math.round(pct)}%`
+}
+
 /** The next message's price in the unit the user pays in.
  *
  * - `usd` (API key): the price if the cache is warm and the price if it is cold.
- * - `tokens` (Claude subscription): ONE figure, for the state the cache is in now. A warm cache reads the cached
- *   prefix (`90.0k rd`, success color). A cold one writes it again (`90.0k wr`, warning color). The two counts are
- *   the same prefix, so a `rd · wr if cold` pair says nothing about the cost (#1095).
- *
- * Hook for later (#1095 point 1, not built): when the 5-hour limit's learned weights (#1068) pass their checks, add
- * a third kind here, such as `{ kind: 'share'; warm?: string; cold?: string }` with the share of the 5-hour limit for
- * each case (`≈0.1% of 5h · ≈1.5% if cold`). The band and the pane then draw it as they draw `usd`. Until then a
- * subscription always gets `tokens`. */
+ * - `share` (Claude subscription, learned 5-hour weights that pass their checks): the share of the 5-hour limit if the
+ *   cache is warm (the cached prefix read, times the read weight) and if it is cold (the prefix written, times the
+ *   write weight for this entry's tier). The band and the pane draw it as they draw `usd`, with `of 5h` (#1095).
+ * - `tokens` (Claude subscription, no weights): ONE figure, for the state the cache is in now. A warm cache reads the
+ *   cached prefix (`90.0k rd`, success color). A cold one writes it again (`90.0k wr`, warning color). The two counts
+ *   are the same prefix, so a `rd · wr if cold` pair says nothing about the cost (#1095). */
 export type NextPrice =
   | { kind: 'usd'; warm?: string; cold?: string }
+  | { kind: 'share'; warm?: string; cold?: string; coldIsTokens: boolean }
   | { kind: 'tokens'; now?: string; color: 'success' | 'warning' }
 
-export function nextPrice(m: ThreadView, isSubscription: boolean): NextPrice {
+export function nextPrice(m: ThreadView, isSubscription: boolean, weights?: FiveHourWeights): NextPrice {
   if (!isSubscription) return { kind: 'usd', warm: m.warmUsd === undefined ? undefined : usd(m.warmUsd), cold: m.coldUsd === undefined ? undefined : usd(m.coldUsd) }
   const color = m.isWarm ? 'success' : 'warning'
+  const n = m.tokens
+  if (n === undefined || n < 1) return { kind: 'tokens', color }
   // The proxy priced this state (as before): without its price there is no figure.
+  if (weights) {
+    // The cold figure stays in tokens (`90.0k wr`, `coldIsTokens`) when the fit did not learn this tier's write weight.
+    const ww = writeWeight(weights, m.writeTier)
+    const warm = m.warmUsd === undefined ? undefined : sharePct(100 * n * weights.read)
+    const cold = m.coldUsd === undefined ? undefined : ww === undefined ? `${tokens(n)} wr` : sharePct(100 * n * ww)
+    // With no price for either state there is no share: fall through to the one token figure (or `unknown`).
+    if (warm !== undefined || cold !== undefined) return { kind: 'share', warm, cold, coldIsTokens: ww === undefined }
+  }
   const priced = m.isWarm ? m.warmUsd !== undefined : m.coldUsd !== undefined
-  if (m.tokens === undefined || m.tokens < 1 || !priced) return { kind: 'tokens', color }
-  return { kind: 'tokens', now: `${tokens(m.tokens)} ${m.isWarm ? 'rd' : 'wr'}`, color }
+  if (!priced) return { kind: 'tokens', color }
+  return { kind: 'tokens', now: `${tokens(n)} ${m.isWarm ? 'rd' : 'wr'}`, color }
 }
 
 /** "4m", "<1m", "1h05m": coarse on purpose, so the band redraws when the words change, not every poll. */
@@ -140,6 +196,7 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
     warmUsd: num(e.next_warm_usd),
     coldUsd: cold && cold > 0 ? cold : undefined,
     tokens: num(e.prefix_tokens),
+    writeTier: e.ttl_s === 3600 ? '1h' : e.ttl_s === 300 ? '5m' : undefined,
     saved: num(e.saved_usd),
     isHeld: num(e.held_until_ms) !== undefined,
     // What the per-second clock is computed from: a newer document that moves it must replace the stored one.
@@ -319,6 +376,7 @@ export function view(snap: Snapshot | null, nowLocal: number): View | null {
     pingable,
     pingReason: pingable === false && typeof reason === 'string' && reason !== '' ? reason : undefined,
     tip: [...(snap.tip ?? [])],
+    weights: fiveHourWeights(doc.fivehour_weights),
   }
 }
 
@@ -351,6 +409,7 @@ export const signature = (v: View | null): string =>
         v.pingable,
         v.pingReason,
         v.tip,
+        v.weights,
         v.subs.map(t => [t.id, t.name, t.isWarm, t.left, t.isPinged, t.isLastMinute, t.saved]),
       ])
 

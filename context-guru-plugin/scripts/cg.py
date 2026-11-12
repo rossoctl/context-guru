@@ -279,6 +279,60 @@ def band_tokens_text(stats: dict | None, human) -> str | None:
     return " · ".join(parts) or None
 
 
+# The learned 5-hour weights (GET /api/me/fivehour-weights, #1047) for the band's next-message share (#1095). The
+# endpoint fits once per 15 minutes; one read a minute here keeps the band at most a minute behind it. A failed read
+# serves the last copy only while it is younger than the endpoint's own 15 minutes, then gives none.
+FIVEHOUR_WEIGHTS_TTL_SECONDS = 60.0
+FIVEHOUR_WEIGHTS_MAX_AGE_SECONDS = 15 * 60.0
+FIVEHOUR_TIERS = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
+
+
+def share_weights(fit: dict | None) -> dict | None:
+    """The part of a /api/me/fivehour-weights answer the band reads: {"ok", "weights", "learned", "requests"}, numbers
+    and flags only. None unless the fit passed its gate (`ok`) and has a learned cache-read weight and at least one
+    learned cache-write weight, each a positive number. The mod checks the same again: either side failing gives the
+    token figure."""
+    if not isinstance(fit, dict) or fit.get("ok") is not True:
+        return None
+    w, learned = fit.get("weights"), fit.get("learned")
+    if not isinstance(w, dict) or not isinstance(learned, dict):
+        return None
+    good = lambda k: isinstance(w.get(k), (int, float)) and not isinstance(w.get(k), bool) and math.isfinite(w[k]) and w[k] > 0  # noqa: E731
+    if not (good("cache_read") and learned.get("cache_read") is True):
+        return None
+    if not any(good(k) and learned.get(k) is True for k in ("cache_write_5m", "cache_write_1h")):
+        return None
+    req = fit.get("requests")
+    return {
+        "ok": True,
+        "weights": {k: float(w[k]) for k in FIVEHOUR_TIERS if good(k)},
+        "learned": {k: learned.get(k) is True for k in FIVEHOUR_TIERS},
+        "requests": int(req) if isinstance(req, (int, float)) and not isinstance(req, bool) else 0,
+    }
+
+
+def fivehour_weights(base: str, fetch=None) -> dict | None:
+    """The account's learned 5-hour weights (share_weights of /api/me/fivehour-weights), through an on-disk cache:
+    one read a minute at most, single flight, backed off after a failure. A failure serves the last answer while it
+    is under 15 minutes old. None for an API key (the endpoint answers {}), an old proxy (404), a fit below its gate,
+    or no answer. `fetch` replaces the network in tests: it answers a document or None."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    path = os.path.join(cgcache.cache_dir(), f"context-guru-band-{port}-fivehour-weights.json")
+    cached, age = cgcache.read_json(path), cgcache.age_of(path)
+    if cached is not None and age is not None and age < FIVEHOUR_WEIGHTS_TTL_SECONDS:
+        return share_weights(cached)
+    if not cgcache.backoff(path) and (cached is None or cgcache.take_slot(path, FIVEHOUR_WEIGHTS_TTL_SECONDS)):
+        doc = fetch() if fetch else Api(base).get("/api/me/fivehour-weights", timeout=3)
+        if isinstance(doc, dict):
+            cgcache.write_atomic(path, json.dumps(doc).encode())
+            cgcache.clear_failure(path)
+            return share_weights(doc)
+        cgcache.record_failure(path, "error")
+    if cached is not None and age is not None and age < FIVEHOUR_WEIGHTS_MAX_AGE_SECONDS:
+        return share_weights(cached)
+    return None
+
+
 def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -> None:
     """What the status line drew beside the money, the clock and the context, now that the mod draws it (the line is no
     longer installed): `▲ update v0.6.1` from the local update-check record, the session's manual pings (`↻ $0.27`,
@@ -302,6 +356,20 @@ def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -
             saved = band_tokens_text(mine, sl._human) if has_tokens else sl._saved_tokens_text(mine)
             if saved:
                 doc["window_saved"] = saved
+    except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
+        pass
+    add_weights(base, doc, window_start_ms)
+
+
+def add_weights(base: str, doc: dict, window_start_ms: int | None) -> None:
+    """On a subscription (the mod sends the window's start only then), `fivehour_weights`: the learned weights that
+    price the next message as a share of the 5-hour limit. Fail open: no weights, and the band keeps its token figure."""
+    if not window_start_ms:
+        return
+    try:
+        w = fivehour_weights(base)
+        if w:
+            doc["fivehour_weights"] = w
     except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
         pass
 
