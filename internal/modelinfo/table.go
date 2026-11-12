@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -20,7 +21,8 @@ import (
 // route name, or a server-resolved TIER like Bob's `premium`, which is not a model
 // id at all and left every Bob request's cost reading "unknown".
 //
-// Rates in the file are USD per MILLION tokens, because that is the unit every
+// Rates in the file are per MILLION tokens, in the file's currency (US dollars unless the file's
+// currency key names another unit, such as Bob's Bobcoins), because that is the unit every
 // vendor's price page and every gateway's admin UI uses; storing per-token floats
 // in a hand-edited file invites a factor-of-a-thousand typo that nothing would
 // catch. They are converted once, here.
@@ -56,15 +58,18 @@ type tableFile struct {
 	//
 	// CacheReadFrac is a pointer: nil (key unset) means "per model", and a value, even 0.1,
 	// is the operator's gateway multiple and wins for every entry.
-	CacheReadFrac  *float64         `yaml:"cache_read_frac"`
-	CacheWriteFrac float64          `yaml:"cache_write_frac"`
-	Models         []tableFileModel `yaml:"models"`
+	CacheReadFrac  *float64 `yaml:"cache_read_frac"`
+	CacheWriteFrac float64  `yaml:"cache_write_frac"`
+	// Currency names the unit of every rate in the file. Empty means USD. It reaches the dashboard
+	// as a label, so it must be a short name of letters (see currencyName).
+	Currency string           `yaml:"currency"`
+	Models   []tableFileModel `yaml:"models"`
 }
 
 type tableFileModel struct {
 	// Match is a gateway model id, optionally ending in `*` to match a family.
 	Match string `yaml:"match"`
-	// In/Out/CacheRead/CacheWrite are USD per MILLION tokens.
+	// In/Out/CacheRead/CacheWrite are per MILLION tokens, in the file's currency.
 	In         float64 `yaml:"in"`
 	Out        float64 `yaml:"out"`
 	CacheRead  float64 `yaml:"cache_read"`
@@ -86,6 +91,10 @@ type tableFileModel struct {
 }
 
 const perMTok = 1e6
+
+// currencyName is what a currency key may hold. The name is shown on the dashboard, so a typo, a
+// symbol or markup must stop the load rather than reach the screen.
+var currencyName = regexp.MustCompile(`^[A-Za-z]{1,16}$`)
 
 // LoadTable reads a price list. An empty path returns a nil *Table, which prices
 // nothing and is safe to put in a Chain.
@@ -116,6 +125,12 @@ func ParseTable(b []byte) (*Table, error) {
 	}
 	if f.CacheWriteFrac == 0 {
 		f.CacheWriteFrac = AnthropicCacheWrite5mFrac
+	}
+	if f.Currency == "" {
+		f.Currency = USD
+	}
+	if !currencyName.MatchString(f.Currency) {
+		return nil, fmt.Errorf("model price list: currency must be 1 to 16 ASCII letters, got %q", f.Currency)
 	}
 	t := &Table{}
 	seen := map[string]bool{}
@@ -150,7 +165,7 @@ func ParseTable(b []byte) (*Table, error) {
 		p := Price{
 			Input: m.In / perMTok, Output: m.Out / perMTok,
 			CacheRead: m.CacheRead / perMTok, CacheWrite: m.CacheWrite / perMTok,
-			Write1hFrac: m.CacheWrite1hFrac,
+			Write1hFrac: m.CacheWrite1hFrac, Currency: f.Currency,
 		}
 		// A blank tier is filled at lookup, when the model is known (Price.CacheReadFor). The
 		// file-level multiples travel with the entry. A cache_read_frac the file leaves unset
