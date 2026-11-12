@@ -121,8 +121,17 @@ function usd(v) {
 }
 // moneySym is the unit for a column head: `$` for dollars, else the unit's name.
 function moneySym() { return moneyUnit === 'USD' || moneyUnit === 'mixed' ? '$' : moneyUnit; }
-// moneyWord is the unit in prose: "dollars", else the unit's name.
-function moneyWord() { return moneyUnit === 'USD' || moneyUnit === 'mixed' ? 'dollars' : moneyUnit; }
+// moneyWord is the unit in prose: "dollars", the unit's name, or "mixed units", never "dollars" for a
+// view that adds two units.
+function moneyWord() { return moneyUnit === 'USD' ? 'dollars' : moneyUnit === 'mixed' ? 'mixed units' : moneyUnit; }
+// noMoneyChart draws the empty state in place of a money chart when the view has more than one unit,
+// and says whether it did. Such a chart would plot Bobcoins and dollars added into one line.
+function noMoneyChart(host) {
+  if (moneyUnit !== 'mixed') return false;
+  emptyState(host, 'Money is not charted',
+    'Costs are in more than one unit, so money is not charted. Token figures are correct.');
+  return true;
+}
 const MIXED_UNIT_NOTE = 'Costs are in more than one unit (for example Bobcoins and dollars), so money '
   + 'totals are not shown. Token figures are correct.';
 // applyMoneyUnit sets the page's unit from an API reply, shows the note a mixed view needs, and
@@ -2192,6 +2201,7 @@ const DIM_LABELS = {
 function dailyColumns(host, totalHost, buckets) {
   clear(host);
   if (!buckets.length) { totalHost.textContent = ''; emptyState(host, 'No days in this window', 'Send traffic through the proxy, or widen the time range.'); return; }
+  if (noMoneyChart(host)) { totalHost.textContent = ''; return; }
   const spent = (b) => b.cost_usd + b.cg_llm_cost_usd;
   const sum = (f) => buckets.reduce((n, b) => n + f(b), 0);
   const priced = buckets.some((b) => !(b.baseline_cost_usd === 0 && b.cost_usd === 0));
@@ -9785,7 +9795,8 @@ async function loadKABehaviour() {
   lineChart(misses, [{ name: 'Cache expiries', color: SERIES[0], points: days, area: true }],
     { yFmt: num, xFmt: whenAxis });
   // In tokens: one line per tier, on one token scale. The tiers are never added into one line.
-  lineChart($('#ka-chart-usd'), sub
+  // On a subscription the line is in tokens, so a mixed view still draws it.
+  if (sub || !noMoneyChart($('#ka-chart-usd'))) lineChart($('#ka-chart-usd'), sub
     ? tierSeries(b.daily).map((t, i) => ({ name: t.name, color: SERIES[i], points: t.points }))
     : [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
   { yFmt: sub ? compact : usd, xFmt: whenAxis });
