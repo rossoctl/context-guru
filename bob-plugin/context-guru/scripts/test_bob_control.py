@@ -495,6 +495,47 @@ class UpdateTest(TempHome):
         self.assertIn("reason=binary_not_managed", out)
 
 
+class SetupSkipsOldProxyTest(TempHome):
+    """Setup never settles on a proxy that cannot list its cache strategies."""
+
+    def test_an_old_proxy_on_path_is_skipped_and_setup_downloads_the_latest_release(self):
+        self.rc.write_bytes(b"x\n")
+        proxy = FakeProxy().__enter__()
+        self.addCleanup(proxy.__exit__, None, None, None)
+        folder = self.root / "brew"
+        folder.mkdir()
+        old = fake_binary(folder, "context-guru-proxy v0.7.0", lists_strategies=False)
+        os.environ["CONTEXT_GURU_BIN"] = str(old)
+        release = FakeRelease("v9.9.9", GOOD_BINARY)
+        self.addCleanup(release.close)
+        with mock.patch.object(PLUGIN, "RELEASE_BASE", release.base), \
+             mock.patch.object(PLUGIN, "release_platform", return_value=("darwin", "arm64")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"binary_skipped={old} cannot list cache strategies "
+                      "(needs v0.7.1 or later)\n", out)
+        self.assertIn("binary=installed\nbinary_version=v9.9.9\n", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(PLUGIN.managed_binary()))
+        self.assertEqual(PLUGIN.managed_binary().read_text(), GOOD_BINARY)
+
+    def test_a_proxy_on_path_that_lists_strategies_is_used(self):
+        self.rc.write_bytes(b"x\n")
+        proxy = FakeProxy().__enter__()
+        self.addCleanup(proxy.__exit__, None, None, None)
+        folder = self.root / "brew"
+        folder.mkdir()
+        new = fake_binary(folder, "context-guru-proxy v0.7.1")
+        os.environ["CONTEXT_GURU_BIN"] = str(new)
+        with mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=AssertionError("no download expected")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=proxy.port):
+            code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(new.resolve()))
+
+
 # ---------------------------------------------------------------------------- doctor
 
 EXTENSION_JS = ('var a="VITE_GATEWAY_BASE_URL",b="region_domain",c="X-Task-Id",'

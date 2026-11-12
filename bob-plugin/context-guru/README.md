@@ -53,6 +53,10 @@ python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --plan
 python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --i-consent-to-traffic-interception
 ```
 
+Setup uses a `context-guru-proxy` on your PATH, or the plugin's own copy, only if it has the Bob
+gateway and can list its cache strategies (v0.7.1 or later). It skips any other one, says why in
+`binary_skipped=`, and downloads the latest release.
+
 ### Status bar
 
 Setup also installs a status bar item in Bob: `CG ✓ ctx 21k/270k · cache 1h 54:10 · saved 0`. It

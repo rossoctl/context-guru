@@ -302,7 +302,8 @@ def binary_problem(path):
 
 
 def find_binary(reasons=None):
-    """The first context-guru-proxy that has the Bob gateway. Say why each other one is skipped."""
+    """The first context-guru-proxy that has the Bob gateway and can list its cache strategies.
+    Say why each other one is skipped."""
     candidates = []
     found = shutil.which(os.environ.get("CONTEXT_GURU_BIN", "context-guru-proxy"))
     if found:
@@ -311,8 +312,14 @@ def find_binary(reasons=None):
         candidates.append(str(managed_binary().resolve()))
     for candidate in dict.fromkeys(candidates):
         problem = binary_problem(candidate)
+        # The strategy check is here, not in binary_problem: doctor and update also call that.
         if problem is None:
-            return candidate
+            try:
+                load_strategy_table(candidate)
+                return candidate
+            except RuntimeError:
+                problem = (f"{candidate} cannot list cache strategies "
+                           f"(needs {STRATEGIES_RELEASE} or later)")
         if reasons is not None:
             reasons.append(problem)
     return None
