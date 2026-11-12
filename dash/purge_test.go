@@ -220,8 +220,8 @@ func TestPurgeTenantClearsToolDeferral(t *testing.T) {
 		left = append(left, string(k))
 	}
 	rows.Close()
-	// cg:sum: is not tool deferral's (the session-state purge is another change); t10 is another tenant.
-	if strings.Join(left, ",") != "cg:sum:t1:s,cg:tdf:t10:s,cg:tdf:t2:s" {
+	// cg:sum:t1:s goes with the session-state purge (#1104); t10 is another tenant.
+	if strings.Join(left, ",") != "cg:tdf:t10:s,cg:tdf:t2:s" {
 		t.Errorf("session_state after the purge = %v", left)
 	}
 	var n int
