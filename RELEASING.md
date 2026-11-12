@@ -169,27 +169,23 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 1. Note the parent's head SHA **before** you merge the parent.
 2. Merge the parent.
 3. **Retarget the child to `main` first.** CI may not start for a push made while the PR targets another branch.
-4. Rebase only the child's own commits: `git rebase --onto origin/main <old-parent-head> <child>`.
-5. Push with a lease, so you never overwrite work the author pushed in the meantime: `git push --force-with-lease=refs/heads/<branch>:<sha-you-rebased> ...`.
+4. Merge `origin/main` into the child. Do not rebase, so there is no force-push. Do not push yet.
+5. Push the merge commit, without force.
 6. Wait for green CI, then merge.
 7. If CI did not start on the new head, close and reopen the PR.
 
-**Conflicts during a rebase:**
+**Conflicts during the merge:**
 - **Mechanical** (both sides add a line to the same list): resolve it, and say how in the merge body.
-- **Semantic** (the code was restructured under the PR): stop and hand the rebase to the author. Then review the author's conflict resolution before you merge.
+- **Semantic** (the code was restructured under the PR): stop and hand the merge to the author. Then review the author's conflict resolution before you merge.
 
 **A PR that another PR is stacked on** (GitHub's stack feature) cannot merge with `gh pr merge` or `PUT /pulls/<n>/merge`. Use `PUT /repos/<owner>/<repo>/pulls/<n>/merge-async` with `merge_method: squash`, `merge_action: direct_merge`, `sha`, `commit_title` and `commit_message`. It merges that PR only, not the PRs stacked on top.
 - **Use it on the bottom PR of the stack only.** On a child, it also merges every open PR below it.
 - **Add `bypass_rules: true` only if a rule blocks the merge.** It is the same bypass as `--admin`. The rules in [Merge](#3-merge) apply: the owner's yes for any failed rule other than the review rule, `check-ready.sh` first, and the rule suite read after the merge.
 - **A `202` is not a merge.** Read the PR state back from GitHub.
 
-**To bring a stacked child onto `main` after its parent squash-merged,** you may use a merge instead of a rebase:
-1. Merge `origin/main` into the child. There is no rebase, so there is no force-push. Do not push yet.
-2. PATCH the child's base to `main`.
-3. Push the merge commit.
-4. The child's own change is unchanged when the added and removed lines of `git diff origin/main...<head>` match the approved change.
+**Check that the child's own change is unchanged:** the added and removed lines of `git diff origin/main...<head>` match the approved change.
 
-This section is about a stacked PR rebase. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
+This section is about a stacked PR. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
 ### Defects found on the way
 
