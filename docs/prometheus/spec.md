@@ -393,8 +393,6 @@ All dashboards use the central Prometheus. They are Grafana JSON files in `deplo
 
 Filters on every dashboard: `proxy`, `machine`, time range. The default range is the last 7 days. There is no `model` filter: the savings metrics carry no `model` label (section 5.2). A tile such as "Net saved" covers the selected range.
 
-The pictures below are **fictive screenshots**. Every number in them is invented. They show layout and wording, not results. `docs/prometheus/mockups/gen_mockups.py` draws them, so they can change with the design.
-
 ### 6.0 Design rules
 
 1. **Money first.** The first screen answers "do we save money?" in 5 seconds. The largest tile, at the top left, is **Net saved** over the selected range. Health comes below it.
@@ -410,8 +408,6 @@ The pictures below are **fictive screenshots**. Every number in them is invented
 ### 6.1 Fleet overview
 
 Question: do we save money, and is the fleet healthy?
-
-![Fleet overview (fictive data)](img/dash-fleet.png)
 
 Order, top to bottom: the money tiles (net saved and saving rate first), the daily net saved, the hourly trend with the best machines, then a health strip. The tiles use the colors of rule 3.
 
@@ -435,8 +431,6 @@ Order, top to bottom: the money tiles (net saved and saving rate first), the dai
 
 Question: where does the saving come from, and where does it leak?
 
-![Savings (fictive data)](img/dash-savings.png)
-
 The left column ranks components. The table at the bottom right is the one to read first: it lists the components that cost more than they save.
 
 | Panel | Type | Query idea |
@@ -454,8 +448,6 @@ The left column ranks components. The table at the bottom right is the one to re
 ### 6.3 Cache and keep-alive
 
 Question: does the cache pay, and do pings pay?
-
-![Cache and keep-alive (fictive data)](img/dash-cache.png)
 
 The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
 
@@ -501,8 +493,6 @@ Question: is context-guru itself working?
 ### 6.6 Machine comparison
 
 Question: which machines or configs save the most?
-
-![Machine comparison (fictive data)](img/dash-machines.png)
 
 The **saving rate** column is net saved / (spend + net saved). The exact baseline counter (`llm_savings_baseline_usd_total`) is not built, so spend plus net stands in for it. "Net saved per 1,000 requests" gives a fair comparison between a busy machine and a quiet one.
 
