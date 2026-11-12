@@ -416,12 +416,13 @@ const stopAll = async (state) => {
   await waitUntilUnhealthy(record.port)
 }
 
-test("OpenAI-only: a preset switch with restart keeps the resolved strategy none, not the raw default auto", async () => {
+test("OpenAI-only: a preset switch with restart keeps the resolved strategy none, not the raw option 1-hour-head", async () => {
   const directory = "/tmp/context-guru-r2-openai-restart"
   const state = stateDirectory(directory)
   process.env.CONTEXT_GURU_BIN = pickyProxyBinary()
   try {
-    const hooks = await plugin.server(context(directory))
+    // 1-hour-head is Anthropic only, so an OpenAI-only setup still falls back to none (auto fits since #1062).
+    const hooks = await plugin.server(context(directory), { cacheStrategy: "1-hour-head" })
     await hooks.config({ provider: openai() })
     assert.match(readFileSync(join(state, "proxy.yaml"), "utf8"), /strategy: none/)
     const done = await run(join(state, "context-guru-preset"), ["set", "high", "--restart"])
@@ -429,7 +430,7 @@ test("OpenAI-only: a preset switch with restart keeps the resolved strategy none
     const yaml = readFileSync(join(state, "proxy.yaml"), "utf8")
     assert.match(yaml, /preset: high/)
     assert.match(yaml, /strategy: none/, `the restart wrote an unfit strategy:\n${yaml}`)
-    assert.ok(!yaml.includes("strategy: auto"))
+    assert.ok(!yaml.includes("strategy: 1-hour-head"))
     await stopAll(state)
   } finally {
     delete process.env.CONTEXT_GURU_BIN

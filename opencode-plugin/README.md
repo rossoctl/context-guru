@@ -34,7 +34,7 @@ first startup downloads release v0.7.3 when `context-guru-proxy` is not already 
 verifies its SHA-256 checksum, and stores it under `~/.local/state/context-guru-opencode/`.
 
 The default is `preset: off` with the `auto` cache strategy. These match the Claude Code plugin.
-If `auto` does not fit the routed providers (an OpenAI-only setup), the plugin runs `none` and logs why.
+`auto` fits Anthropic and OpenAI. If a chosen strategy does not fit the routed providers (for example `1-hour-head` on an OpenAI-only setup), the plugin runs `none` and logs why.
 Set other values with the tuple form:
 
 ```json

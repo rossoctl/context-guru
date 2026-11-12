@@ -47,15 +47,19 @@ func TestCodexPickerPresetsAreRegistered(t *testing.T) {
 	}
 }
 
-// The Codex picker offers the strategies whose providers include openai or any.
+// The Codex picker offers a strategy only when ALL its providers are openai or any. A row for
+// anthropic + openai is not offered. This mirrors offered_strategies in codex_plugin.py.
 func TestCodexOffersTheOpenAIAndAnyStrategies(t *testing.T) {
 	var got []string
 	for _, s := range Strategies {
+		ok := len(s.Providers) > 0
 		for _, p := range s.Providers {
-			if p == "openai" || p == "any" {
-				got = append(got, s.Name)
-				break
+			if p != "openai" && p != "any" {
+				ok = false
 			}
+		}
+		if ok {
+			got = append(got, s.Name)
 		}
 	}
 	if !reflect.DeepEqual(got, []string{"none", "30-min-ping"}) {

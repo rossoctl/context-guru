@@ -37,13 +37,28 @@ export const usd = (x: number): string => {
 /** A token count as the status line writes it (statusline.py `_human`): `85.0k`, `1.2M`, `593`. */
 export const tokens = (n: number): string => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : Math.abs(n) >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${Math.round(n)}`)
 
-/** The next message's price in the unit the user pays in. With an API key: dollars. On a Claude subscription: tokens,
- * the same unit as the band's saving. A warm cache reads the cached prefix (`rd`); a cold one writes it again (`wr`).
- * Anthropic does not publish how the 5-hour limit weights the two, so the band shows counts and does not convert. */
-export function nextPrice(m: ThreadView, isSubscription: boolean): { warm?: string; cold?: string } {
-  if (!isSubscription) return { warm: m.warmUsd === undefined ? undefined : usd(m.warmUsd), cold: m.coldUsd === undefined ? undefined : usd(m.coldUsd) }
-  if (m.tokens === undefined || m.tokens < 1) return {}
-  return { warm: m.warmUsd === undefined ? undefined : `${tokens(m.tokens)} rd`, cold: m.coldUsd === undefined ? undefined : `${tokens(m.tokens)} wr` }
+/** The next message's price in the unit the user pays in.
+ *
+ * - `usd` (API key): the price if the cache is warm and the price if it is cold.
+ * - `tokens` (Claude subscription): ONE figure, for the state the cache is in now. A warm cache reads the cached
+ *   prefix (`90.0k rd`, success color). A cold one writes it again (`90.0k wr`, warning color). The two counts are
+ *   the same prefix, so a `rd · wr if cold` pair says nothing about the cost (#1095).
+ *
+ * Hook for later (#1095 point 1, not built): when the 5-hour limit's learned weights (#1068) pass their checks, add
+ * a third kind here, such as `{ kind: 'share'; warm?: string; cold?: string }` with the share of the 5-hour limit for
+ * each case (`≈0.1% of 5h · ≈1.5% if cold`). The band and the pane then draw it as they draw `usd`. Until then a
+ * subscription always gets `tokens`. */
+export type NextPrice =
+  | { kind: 'usd'; warm?: string; cold?: string }
+  | { kind: 'tokens'; now?: string; color: 'success' | 'warning' }
+
+export function nextPrice(m: ThreadView, isSubscription: boolean): NextPrice {
+  if (!isSubscription) return { kind: 'usd', warm: m.warmUsd === undefined ? undefined : usd(m.warmUsd), cold: m.coldUsd === undefined ? undefined : usd(m.coldUsd) }
+  const color = m.isWarm ? 'success' : 'warning'
+  // The proxy priced this state (as before): without its price there is no figure.
+  const priced = m.isWarm ? m.warmUsd !== undefined : m.coldUsd !== undefined
+  if (m.tokens === undefined || m.tokens < 1 || !priced) return { kind: 'tokens', color }
+  return { kind: 'tokens', now: `${tokens(m.tokens)} ${m.isWarm ? 'rd' : 'wr'}`, color }
 }
 
 /** "4m", "<1m", "1h05m": coarse on purpose, so the band redraws when the words change, not every poll. */
