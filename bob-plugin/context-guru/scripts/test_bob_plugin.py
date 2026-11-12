@@ -8,6 +8,7 @@ records its arguments. A fake proxy (a local HTTP server) answers /healthz, /api
 
 The suite blocks the network (block_network, from setUpModule in each test file). A call to any
 host but 127.0.0.1, ::1 or localhost raises NetworkBlocked: point it at a fake on 127.0.0.1.
+Child processes are not guarded: do not start setup or update in a subprocess.
 """
 
 import contextlib
