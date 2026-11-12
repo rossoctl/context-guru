@@ -25,8 +25,8 @@ No machine opens a port. Each proxy pushes out. Prometheus scrapes no proxy.
 | `prometheus/rules/alerts.yml` | The alerts of the spec, plus two that watch the pipeline itself. |
 | `prometheus/tests/alerts_test.yml` | Unit tests for the rules, in simulated time. |
 | `alertmanager/alertmanager.yml` | Routes alerts. Ships no delivery method. |
-| `grafana/gen_dashboards.py` | Generates the four dashboards. Each panel is one line with its query. |
-| `grafana/dashboards/*.json` | Fleet overview, Savings, Cache and keep-alive, Machine comparison. Generated. |
+| `grafana/gen_dashboards.py` | Generates the dashboards. Each panel is one line with its query. |
+| `grafana/dashboards/*.json` | Fleet overview, Savings, Cache and keep-alive, Machine comparison, Requests, Inference. Generated. |
 | `compose.yaml` | The whole stack on one machine, for development and the end-to-end test. |
 | `install.sh` | Installs the stack on a server (also `status`, `nginx`, `remove`). |
 | `deploy.sh` | Runs `install.sh` on the server from your laptop, over ssh. |
