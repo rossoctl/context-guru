@@ -23,7 +23,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_bob_plugin import (  # noqa: E402
-    HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
+    HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary,
+    block_network)
+
+
+def setUpModule():
+    unittest.addModuleCleanup(block_network())
+
 
 LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
 # The proxy's own test runs this exact file through the real pipeline on Bob's route
