@@ -229,6 +229,11 @@ func (k *Keeper) evictManualLocked(tenant string) {
 		if oldest == nil || (n <= ManualHoldMaxPerTenant && bytes <= ManualHoldMaxBytesPerTenant) {
 			return
 		}
+		if n > ManualHoldMaxPerTenant {
+			k.mm.evictedCount++
+		} else {
+			k.mm.evictedBytes++
+		}
 		k.setReasonLocked(oldest.key, ReasonNoEntry)
 		k.bytes -= int64(len(oldest.body))
 		k.releaseLocked(oldest)

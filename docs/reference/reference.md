@@ -400,6 +400,17 @@ same snapshot.
     fall as a counter reset and extrapolate a spike at exactly the moment the value went
     down. For a per-second rate use the process-wide `cg_*` counters, which are monotonic.
 
+#### Manual-hold series (keep-alive)
+
+A manual hold keeps one body for the Ping button. These series count holds and sizes only. They carry no body, key or credential.
+
+- `cg_keepalive_manual_hold_evicted_total{reason="bytes"|"count"}`: holds the keeper released early because a tenant went over its cap (32 MiB of bodies, or 16 holds). The oldest hold of that tenant goes first.
+- `cg_keepalive_refused_total{reason="too_large"}`: requests the keeper did not hold because the body was over the per-body limit.
+- `cg_keepalive_manual_hold_body_bytes`: a histogram of body size when a hold starts. The buckets are 1, 4, 8, 16 and 32 MiB.
+- `cg_tenant_keepalive_manual_hold_bytes{tenant,label}`: bytes this tenant holds now. Only tenants that hold something appear.
+
+The counters and the histogram are process-wide, like the other `cg_keepalive_*` series. The gauge is per tenant, like `cg_tenant_refused_requests_total`. On a hosted proxy `/metrics` is open to loopback and to the `METRICS_TOKEN` bearer only, so the per-tenant gauge does not show to other tenants.
+
 #### Reading `acted: 0`
 
 Three families answer "this component ran and did nothing — is it broken?":

@@ -504,7 +504,8 @@ type Keeper struct {
 	// Counters, for /stats and for the honest question "is this thing spending money and
 	// getting nothing?". Every one of them is a way the mechanism can be useless.
 	pings    atomic.Int64
-	skipped  atomic.Int64 // due, but a limit or a cap or a gate refused
+	skipped  atomic.Int64  // due, but a limit or a cap or a gate refused
+	mm       manualMetrics // manual-hold measures (#1103); guarded by mu
 	failed   atomic.Int64
 	wrote    atomic.Int64  // pings that CREATED instead of refreshing — a bug, not a cost
 	missed   atomic.Int64  // pings that read nothing — a real cache miss, not a failure
@@ -879,6 +880,9 @@ func (k *Keeper) Record(r Record) {
 	}
 	if len(body) > limit {
 		refuse(ReasonTooLarge)
+		k.mu.Lock()
+		k.mm.tooLarge++
+		k.mu.Unlock()
 		k.retire(key)
 		k.skipped.Add(1)
 		return
@@ -1049,6 +1053,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	if e.manualOnly {
 		e.timer = time.AfterFunc(e.holdFor, func() { k.expireManual(key) })
+		k.recordManualHoldLocked(e)
 		k.evictManualLocked(r.Key.Tenant)
 		k.evictLocked()
 		return
