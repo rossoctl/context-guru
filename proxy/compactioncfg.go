@@ -204,7 +204,7 @@ func (h *Handler) bobWindow(model string) int {
 	return h.bobWin[model]
 }
 
-const bobWindowMax = 512
+const bobWindowMax = bob.MaxModelWindows
 
 // noteBobModelInfo records bob.ModelWindows(body). A body that is not that shape records nothing.
 func (h *Handler) noteBobModelInfo(body []byte) {
