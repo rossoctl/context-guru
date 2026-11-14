@@ -13,6 +13,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
@@ -203,25 +204,13 @@ func (h *Handler) bobWindow(model string) int {
 	return h.bobWin[model]
 }
 
-const bobWindowMax = 512
+const bobWindowMax = bob.MaxModelWindows
 
-// noteBobModelInfo records data[].model_name -> data[].model_info.max_input_tokens (the LiteLLM
-// shape Bob reads in getLiteLLMModels). A body that is not that shape records nothing.
+// noteBobModelInfo records bob.ModelWindows(body). A body that is not that shape records nothing.
 func (h *Handler) noteBobModelInfo(body []byte) {
-	data := gjson.GetBytes(body, "data")
-	if !data.IsArray() {
-		return
-	}
-	got := map[string]int{}
-	data.ForEach(func(_, v gjson.Result) bool {
-		name := v.Get("model_name").String()
-		w := v.Get("model_info.max_input_tokens")
-		if name != "" && len(name) <= 128 && w.Type == gjson.Number && w.Int() > 0 && w.Int() < 1<<40 && len(got) < bobWindowMax {
-			got[name] = int(w.Int())
-		}
-		return true
-	})
-	if len(got) == 0 {
+	got := bob.ModelWindows(body)
+	// bob.ModelWindows caps the map too; this host check keeps the cap if the parse changes.
+	if len(got) == 0 || len(got) > bobWindowMax {
 		return
 	}
 	h.bobWinMu.Lock()
@@ -229,9 +218,7 @@ func (h *Handler) noteBobModelInfo(body []byte) {
 	h.bobWin = got // the whole catalog replaces the old one: bounded, and never stale
 }
 
-func isBobModelInfo(r *http.Request) bool {
-	return r.Method == http.MethodGet && (r.URL.Path == "/inference/v1/model/info" || r.URL.Path == "/v1/model/info")
-}
+func isBobModelInfo(r *http.Request) bool { return bob.IsModelInfo(r.Method, r.URL.Path) }
 
 // ReadBobCompact reads Bob Shell's model.compressionThreshold (#963) from the user settings file
 // ~/.bob/settings.json and the system settings file, which wins in the client's merge. The project
