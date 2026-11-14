@@ -250,3 +250,27 @@ func msgText(t *testing.T, m bschemas.ChatMessage) string {
 	}
 	return *m.Content.ContentStr
 }
+
+// keep_identifiers: false sends the model no keep-list; the default sends the identifiers the
+// agent named.
+func TestKeepIdentifiersFalseSendsNoKeepList(t *testing.T) {
+	output := strings.Repeat("src/mod/file.py:12: def handler(request, context): # noise\n", 400)
+	for _, tc := range []struct {
+		yaml string
+		want bool
+	}{{"", true}, {"keep_identifiers: false\n", false}} {
+		model := &recordingModel{}
+		e := newCtxGuardComponent(t, model, tc.yaml)
+		e.strategy = "lines"
+		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
+			userMsg("Fix parse_config_value in src/mod/file.py"), toolResultMsg(output), userMsg("go on")}}
+		c := &components.Ctx{Session: "keepids" + tc.yaml, Store: store.NewMemory(store.Options{}), Ctx: context.Background(),
+			Model: components.ModelSpec{Static: model, Incoming: model}}
+		if _, err := e.Offload(req, &components.Report{}, c); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(model.lastPrompt(), "IDENTIFIERS THE AGENT REFERENCED"); got != tc.want {
+			t.Fatalf("%q: keep-list in prompt = %v, want %v", tc.yaml, got, tc.want)
+		}
+	}
+}
