@@ -25,7 +25,8 @@ description: Show or change how much context-guru trims IBM Bob's requests. Use 
      - It cuts long tool output. The model can get the cut part back when it needs it.
      - It can ask Bob's own model to summarize old tool output. Those calls go only to Bob's server,
        with the user's own Bob key, and use the user's Bob quota.
-     - It prices Bob's tokens at one flat rate on the dashboard, so its dollar figures change.
+     - It prices Bob's tokens in Bobcoins on the dashboard, at Bob's flat rate (2.0 per million
+       tokens), so its cost figures are Bobcoins, even where a `$` sign shows.
    - `off`: sends requests through as they are.
 3. Bob has only these three. The other context-guru presets (`conservative`, `medium`, `high`,
    `xhigh`, `ultrahigh`) are not tested on Bob. If the user asks for one of them, say this. Do not
