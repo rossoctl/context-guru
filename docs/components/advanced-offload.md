@@ -1153,6 +1153,45 @@ So on a cold return, sending the summary instead of the full history saves about
 warm turn it saves about **$0.16**. One summary call itself costs about **$0.20** (it reads the
 whole 900k conversation to write the new summary).
 
+#### Does the user come back? The return rate decides whether a reserve pays
+
+A `pre_expiry` reserve pays only if a request **arrives after the cache has gone cold**. Before the
+cache goes cold the reserve is not used, and if nobody comes back it is never used. So the
+summary call is a bet on one number: **p, the share of idle sessions that come back after the
+cache has expired.**
+
+Using the Sonnet 5 example above (900k tokens):
+
+| What happens after the summary call | Without a reserve | With a reserve |
+|---|---|---|
+| Nobody comes back | $0 | **$0.20** (the call, wasted) |
+| A request arrives while the cache is warm | a cache read | the same read, plus **$0.20** |
+| A request arrives after the cache has gone cold | **$2.25** (full rewrite) | **$0.20 + $0.20** (the call, plus the summary's write) |
+
+- **The reserve pays when `p × $2.05 > $0.20`, so when p is above about 10%.** At other sizes and
+  prices the break-even is `call cost ÷ (full rewrite − summary write)`.
+- **When the call takes the place of a keep-alive ping that would have run anyway,** the read was
+  going to be paid. The extra cost is then only the reply (about $0.02 here), and the break-even
+  falls to about 1%. The 10% holds when no ping would have run.
+- **The refresh rule above assumes that p = 1:** it counts the saving of a cold return as certain.
+  For a session that is likely never to come back, it pays for refreshes that are never used.
+- **p depends on the session.** On one developer's traffic (Nov 8–15, idle at least 54 minutes with a
+  prefix of at least 100k tokens), the main agent came back after the hour in **77%** of cases
+  (n = 80). Subagents came back in **29%** (n = 48), and **69%** never came back, because the
+  subagent's task had ended. Both are above 10% on this traffic, but the subagent margin is thin,
+  and it shrinks with a smaller prefix. **So the gate could use a per-session estimate of p** from
+  facts the proxy already records: main thread or subagent, the wait cause (`waiting_for`), the
+  prefix size, and the session's own past gaps. This is not built.
+
+**On a subscription, a saving is worth something to the user only near the plan limit.** The
+user pays a fixed price. Tokens that a summary saves count only as plan usage that the user did
+not spend. For a user who stays far below the limit, the summary saves the provider's GPU time,
+not the user's money, and the user still loses detail. For a user who reaches the limit, the same
+saving is more work in each window. On an API key every saved token is the user's money. This
+is likely also why Anthropic's own idle compaction in Claude Code needs the one-hour TTL, which
+is on by default only on a subscription: the saving is the provider's on a subscription, and the
+user's on an API key.
+
 #### Which to choose
 
 - **Use `any`** for a session that is being actively worked on. It saves money starting on the
