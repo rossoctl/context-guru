@@ -2309,8 +2309,8 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	at := plan.positions(pre, client)
 	nb, tokens, ok := plan.insertAt(wire, res.Body, at)
 	if !ok {
-		// The fallback forwards the pre-pipeline body: no operation describes it, and nothing was
-		// compacted on the wire.
+		// The fallback forwards the pre-pipeline body: no pipeline operation describes it, and nothing
+		// was compacted on the wire. The tail mark, added afterwards in BodyOpts, is reported there.
 		res.Trace.OpsDropped += len(res.Trace.Ops)
 		res.Trace.Ops = nil
 		if res.Trace.Run != nil {
