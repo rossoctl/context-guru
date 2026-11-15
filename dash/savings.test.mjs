@@ -486,6 +486,9 @@ test('the preset label names the running preset, and notes the old one until the
   assert.equal(presetLabel('ultrahigh', [{ key: 'off', requests: 10 }]), 'ultrahigh, was off before');
   // The old preset is under 90% but still ahead.
   assert.equal(presetLabel('ultrahigh', g(60, 40)), 'ultrahigh, mostly off before');
+  // Three presets, none above half: no "mostly" for a preset that ran under half the window.
+  assert.equal(presetLabel('ultrahigh', [{ key: 'off', requests: 40 }, { key: 'high', requests: 35 },
+    { key: 'ultrahigh', requests: 25 }]), 'ultrahigh');
   // The running preset holds at least as many requests: no note.
   assert.equal(presetLabel('ultrahigh', g(50, 50)), 'ultrahigh');
   assert.equal(presetLabel('ultrahigh', g(5, 95)), 'ultrahigh');

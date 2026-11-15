@@ -62,7 +62,7 @@ function strategyName(c) {
 // the page cannot know it: a hosted account). `groups` is the window's requests by preset
 // (/api/breakdown?dim=preset). The current preset is always named. A note follows while the window's
 // history says something else: "was X before" while X still holds 90% or more of the requests, then
-// "mostly X" while X holds more than the current preset, then nothing. With no current preset, the
+// "mostly X before" while X holds more than half, then nothing. With no current preset, the
 // name comes from the history alone, as before: X at 90% or more, else "mostly X".
 function presetLabel(current, groups) {
   const live = (groups || []).filter((x) => x.key && x.requests > 0).sort((a, b) => b.requests - a.requests);
@@ -73,9 +73,8 @@ function presetLabel(current, groups) {
   }
   const other = live.find((x) => x.key !== current);
   if (!other) return current;
-  const mine = (live.find((x) => x.key === current) || { requests: 0 }).requests;
   if (other.requests / total >= 0.9) return current + ', was ' + other.key + ' before';
-  if (other.requests > mine) return current + ', mostly ' + other.key + ' before';
+  if (other.requests / total > 0.5) return current + ', mostly ' + other.key + ' before';
   return current;
 }
 

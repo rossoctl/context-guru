@@ -1648,7 +1648,11 @@ function presetName() {
 }
 async function loadOverviewIdentity() {
   try {
-    const r = await api('breakdown', { dim: 'preset' });
+    // The running preset is read again on each refresh, with the history: a preset switch while the
+    // page is open must show, and a stale value would name the old preset as the running one.
+    const [r, who] = await Promise.all([api('breakdown', { dim: 'preset' }),
+      account.hosted ? null : ctl('/api/whoami').catch(() => null)]);
+    if (who) account.preset = who.preset || '';
     state.identity = { presets: r.groups || [] };
     if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
   } catch (e) { /* the rows read fine without the name */ }
