@@ -58,6 +58,27 @@ function strategyName(c) {
   return '';
 }
 
+// The preset name beside "Preset" on the Overview. `current` is the preset the proxy runs now ('' when
+// the page cannot know it: a hosted account). `groups` is the window's requests by preset
+// (/api/breakdown?dim=preset). The current preset is always named. A note follows while the window's
+// history says something else: "was X before" while X still holds 90% or more of the requests, then
+// "mostly X" while X holds more than the current preset, then nothing. With no current preset, the
+// name comes from the history alone, as before: X at 90% or more, else "mostly X".
+function presetLabel(current, groups) {
+  const live = (groups || []).filter((x) => x.key && x.requests > 0).sort((a, b) => b.requests - a.requests);
+  const total = live.reduce((n, x) => n + x.requests, 0);
+  if (!current) {
+    if (!live.length) return '';
+    return live[0].requests / total >= 0.9 || live.length === 1 ? live[0].key : 'mostly ' + live[0].key;
+  }
+  const other = live.find((x) => x.key !== current);
+  if (!other) return current;
+  const mine = (live.find((x) => x.key === current) || { requests: 0 }).requests;
+  if (other.requests / total >= 0.9) return current + ', was ' + other.key + ' before';
+  if (other.requests > mine) return current + ', mostly ' + other.key + ' before';
+  return current;
+}
+
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.
 // '' when there is nothing to say. `fmt` formats dollars; null leaves the dollars out (a subscription).
 function capNote(o, fmt) {
@@ -350,7 +371,7 @@ function tierSeries(rows) {
     .map(([k, l]) => ({ tier: l, name: TIER_NAMES[l], points: rs.map((r) => [r.ts, (r.tokens && r.tokens[k]) || 0]) }));
 }
 
-if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName,
+if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName, presetLabel,
   liveFiveHour, fiveHourStartMs, fiveHourSavedPct, fiveHourLearnedPct, weightsLabel, forecastView, readsLimits, isSubscription, subscriptionHeadline,
   tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, sessionTokenCells, kaTokenLines,
   kaSessionTokenCells, bandTokens, tierSeries };

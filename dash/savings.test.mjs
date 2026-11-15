@@ -477,3 +477,22 @@ test('the behaviour bands and the daily chart in tokens: by tier, never added (#
   ]);
   assert.deepEqual(tierSeries(undefined), []);
 });
+
+test('the preset label names the running preset, and notes the old one until the window catches up', () => {
+  const { presetLabel } = createRequire(import.meta.url)('./ui/savings.js');
+  const g = (off, ultra) => [{ key: 'off', requests: off }, { key: 'ultrahigh', requests: ultra }];
+  // Just after a switch: the window is nearly all the old preset.
+  assert.equal(presetLabel('ultrahigh', g(2898, 118)), 'ultrahigh, was off before');
+  assert.equal(presetLabel('ultrahigh', [{ key: 'off', requests: 10 }]), 'ultrahigh, was off before');
+  // The old preset is under 90% but still ahead.
+  assert.equal(presetLabel('ultrahigh', g(60, 40)), 'ultrahigh, mostly off before');
+  // The running preset holds at least as many requests: no note.
+  assert.equal(presetLabel('ultrahigh', g(50, 50)), 'ultrahigh');
+  assert.equal(presetLabel('ultrahigh', g(5, 95)), 'ultrahigh');
+  assert.equal(presetLabel('ultrahigh', []), 'ultrahigh');
+  // No running preset known (a hosted account): the history alone, as before.
+  assert.equal(presetLabel('', g(2898, 118)), 'off');
+  assert.equal(presetLabel('', g(60, 40)), 'mostly off');
+  assert.equal(presetLabel('', []), '');
+  assert.equal(presetLabel('', [{ key: '', requests: 9 }]), '');
+});

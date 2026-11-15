@@ -1640,14 +1640,11 @@ async function renderDiagnostics() {
  * for the waiting time); the only arithmetic here is a ratio of two of them. A lever with
  * nothing recorded says so in words instead of printing a zero that could be an absence.
  */
-/** The name a reader knows their preset by: the one the window's requests mostly ran under. The
- *  name stays empty until known, and the card title then reads without it. */
+/** The name a reader knows their preset by: the one the proxy runs now (/api/whoami, local proxy
+ *  only), with a note while the window's requests mostly ran under another. See presetLabel in
+ *  savings.js. The name stays empty until known, and the card title then reads without it. */
 function presetName() {
-  const g = (state.identity && state.identity.presets) || [];
-  const live = g.filter((x) => x.key).sort((a, b) => b.requests - a.requests);
-  if (!live.length) return '';
-  const total = live.reduce((n, x) => n + x.requests, 0);
-  return live[0].requests / total >= 0.9 || live.length === 1 ? live[0].key : 'mostly ' + live[0].key;
+  return presetLabel(account.preset || '', (state.identity && state.identity.presets) || []);
 }
 async function loadOverviewIdentity() {
   try {
@@ -5842,6 +5839,8 @@ const account = {
   // matters. Absent (an older server) is treated as closed, matching the server's own
   // default: guessing "open" would draw a form that 403s on submit.
   register: 'closed',
+  // preset is the preset the local proxy runs now, from /api/whoami. '' on a hosted proxy.
+  preset: '',
 };
 
 /** ctl() calls a control-plane route. Throws with the server's message, which is
@@ -6231,6 +6230,7 @@ async function probeAccount() {
     const who = await ctl('/api/whoami');
     account.hosted = !!who.hosted;
     account.tenant = who.authenticated ? who.tenant : null;
+    account.preset = who.preset || '';
     account.tokens = who.tokens || [];
     account.baseURL = who.base_url || location.origin;
     account.register = who.register || 'closed';
