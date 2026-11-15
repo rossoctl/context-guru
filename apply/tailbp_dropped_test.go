@@ -18,9 +18,9 @@ import (
 //
 // The drop here comes from opsFromRun (the read-only slot). giveUp and finishRestore also clear
 // Trace.Ops and raise OpsDropped, and the deferred hook only looks at the body, so it treats them the
-// same. They are not driven through BodyOpts here: their failure conditions (a splice the body's bytes
-// do not confirm, a restore copy that cannot be placed) are fail-open guards that a well-formed
-// request does not reach. finishRestore's own side is covered by TestOpsDroppedWhenRestoreInsertFallsBack.
+// same. They are not driven through BodyOpts here: that needs a splice the body's bytes do not confirm
+// or a restore copy that cannot be placed, which this test does not set up. finishRestore's own side
+// is covered by TestOpsDroppedWhenRestoreInsertFallsBack.
 func TestTheTailMarkIsReportedWhenThePipelineOpsWereDropped(t *testing.T) {
 	long := strings.Repeat("a long sibling text that the component rewrites to nothing\\n", 8)
 	res := traceOf(t, "usershrink", bschemas.Anthropic, `{"model":"claude-x","messages":[
