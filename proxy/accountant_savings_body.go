@@ -11,7 +11,9 @@ import (
 )
 
 // accBodies hashes a request body in the provider's order: tools, system, messages. A string
-// system prompt is one block. Raw JSON is hashed as sent, except for the cache marks (see below), so two
+// system prompt is one block. The OpenAI Responses wire names the last two instructions and input: a body
+// with no messages array is read that way, instructions as one block and each input item (or a string input)
+// as one position, so Position{messages, i} is the input item index (#899). Raw JSON is hashed as sent, except for the cache marks (see below), so two
 // hosts hash the same bytes alike. Each element of messages is one position, so Position{messages, i} is
 // the wire message index. A body without messages (or with invalid JSON) gives an empty Body.
 //
@@ -27,14 +29,16 @@ func accBodies(raw []byte) accountant.Body {
 }
 
 // accSections are the three top-level values accParse reads, found in one pass over the body. Like gjson.Get, the
-// first key of a name wins.
+// first key of a name wins. instructions and input are the Responses wire's system and messages; they are used only
+// when the body has no messages array (responsesSections).
 type accSections struct {
 	tools, system, messages gjson.Result
+	instructions, input     gjson.Result
 }
 
 func accScan(raw []byte) accSections {
 	var sec accSections
-	var seen [3]bool
+	var seen [5]bool
 	root := gjson.ParseBytes(raw)
 	if !root.IsObject() {
 		return sec
@@ -49,6 +53,10 @@ func accScan(raw []byte) accSections {
 			i, dst = 1, &sec.system
 		case "messages":
 			i, dst = 2, &sec.messages
+		case "instructions":
+			i, dst = 3, &sec.instructions
+		case "input":
+			i, dst = 4, &sec.input
 		default:
 			return true
 		}
@@ -57,6 +65,23 @@ func accScan(raw []byte) accSections {
 		}
 		return !(seen[0] && seen[1] && seen[2])
 	})
+	return sec.responsesSections()
+}
+
+// responsesSections reads a Responses body: with no messages array and an input (an array of items, or one
+// string), instructions is the system section and input the messages. A string input is one position, so it is
+// wrapped as a one-element array. A body with messages is returned as it is, whatever else it carries.
+func (sec accSections) responsesSections() accSections {
+	if sec.messages.IsArray() || !(sec.input.IsArray() || sec.input.Type == gjson.String) {
+		return sec
+	}
+	if !sec.system.Exists() {
+		sec.system = sec.instructions
+	}
+	sec.messages = sec.input
+	if sec.input.Type == gjson.String {
+		sec.messages = gjson.Parse("[" + sec.input.Raw + "]")
+	}
 	return sec
 }
 
