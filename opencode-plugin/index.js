@@ -297,15 +297,26 @@ function installScript(state) {
 # context-guru: idempotent repair — clear a disable marker and ensure the proxy is up.
 set -u
 STATE=${shQuote(state)}
+# One result only: after --purge the disable marker is present but install.env is gone,
+# so printing both re-enabled and never-installed would disagree with itself.
+reenabled=0
 if [ -f "$STATE/disabled" ]; then
   rm -f "$STATE/disabled"
-  printf '%s\\n' "result=re-enabled"
-  printf '%s\\n' "note=restart OpenCode so providers route through the proxy again"
+  reenabled=1
 fi
 if [ ! -f "$STATE/install.env" ]; then
-  printf '%s\\n' "result=never-installed"
-  printf '%s\\n' "note=restart OpenCode; the plugin downloads the binary and starts the proxy at startup"
+  if [ "$reenabled" -eq 1 ]; then
+    printf '%s\\n' "result=re-enabled"
+    printf '%s\\n' "note=the next OpenCode start downloads the proxy"
+  else
+    printf '%s\\n' "result=never-installed"
+    printf '%s\\n' "note=restart OpenCode; the plugin downloads the binary and starts the proxy at startup"
+  fi
   exit 0
+fi
+if [ "$reenabled" -eq 1 ]; then
+  printf '%s\\n' "result=re-enabled"
+  printf '%s\\n' "note=restart OpenCode so providers route through the proxy again"
 fi
 . "$STATE/install.env"
 if [ ! -f "\${binary:-}" ]; then
@@ -605,6 +616,19 @@ case "\${1:-}" in
       printf '%s\\n' "restart_needed=true" "note=the running proxy keeps its old setting until it restarts; a restart costs one cache rewrite in every open session of this project; it also happens at the next OpenCode start"
       exit 0
     fi
+    # The running proxy may already use the saved choice: with opencode run each
+    # answer starts a new OpenCode process, and the plugin applies the saved choice
+    # at startup before the agent asks. Restarting again would cost another cache
+    # rewrite for nothing. The install record holds what the running proxy was
+    # started with; the live /stats preset, when it answers, must agree with it.
+    if command -v curl >/dev/null 2>&1 && [ -n "\${port:-}" ] && curl -fsS --max-time 2 "http://127.0.0.1:\${port:-1}/healthz" >/dev/null 2>&1; then
+      if [ "$new_preset" = "\${preset:-}" ] && [ "$new_strategy" = "\${strategy:-}" ]; then
+        if [ -z "$running_preset" ] || [ "$running_preset" = "$new_preset" ]; then
+          printf '%s\\n' "result=already_applied" "note=the running proxy already uses the saved preset and strategy; no restart needed"
+          exit 0
+        fi
+      fi
+    fi
     if [ ! -f "$STATE/context-guru-start" ] || [ ! -f "\${binary:-}" ]; then printf '%s\\n' "result=not_applied" "reason=no-install" "note=restart OpenCode to start the proxy with the saved setting"; exit 1; fi
     # Both keys come from pick_preset / pick_strategy, which return only names the plugin accepts at
     # startup. The new file is rendered BEFORE the old proxy is touched.
@@ -692,7 +716,7 @@ const COMMAND_SPECS = [
     description: "Repair the context-guru proxy and routing for this project",
     script: "context-guru-install",
     intro: "Repair this project's context-guru install.",
-    outro: () => "That block ran just now and already did what it could; it is idempotent, so re-running it is safe. Report its result plainly. If it printed result=re-enabled or a note about restarting OpenCode, tell the user to restart OpenCode so providers route through the proxy again.",
+    outro: () => "That block is the output of the install script, which ran just now — it is not text the user pasted. It already did what it could; it is idempotent, so re-running it is safe. Report its result plainly. If it printed result=re-enabled or a note about restarting OpenCode, tell the user to restart OpenCode so providers route through the proxy again.",
   },
   {
     name: "context-guru-update",
@@ -713,14 +737,14 @@ const COMMAND_SPECS = [
     description: "Show the running context-guru preset and switch it",
     script: "context-guru-preset",
     intro: "Show and switch this project's context-guru preset.",
-    outro: (path) => "That block ran just now and only SHOWED the preset. Tell the user which preset is saved and which one runs now (a gap means a restart is pending). List the choices, one line each, from the block. Recommend conservative to someone who wants less context but has not asked for a model pass; medium, high, xhigh and ultrahigh are an escalating ladder. Do not suggest ultrahigh unless the user asks for it. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the new preset is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, the old preset runs until the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted or result=not_applied. Never restart without the yes. Never invent a preset name.",
+    outro: (path) => "That block ran just now and only SHOWED the preset. Tell the user which preset is saved and which one runs now (a gap means a restart is pending). List every choice from the block, one line each, including ultrahigh. Recommend conservative to someone who wants less context but has not asked for a model pass; medium, high, xhigh and ultrahigh are an escalating ladder. Do not recommend ultrahigh unless the user asks for it. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the new preset is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, the old preset runs until the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted, result=already_applied, or result=not_applied. Never restart without the yes. Never invent a preset name.",
   },
   {
     name: "context-guru-strategy",
     description: "Show the context-guru cache strategy and switch it",
     script: "context-guru-strategy",
     intro: "Show and switch this project's context-guru cache strategy.",
-    outro: (path) => "That block ran just now and only SHOWED the cache strategy. Tell the user which strategy is saved. List the choices, one line each, from the block. Before switching TO a strategy whose line says it spends the caller's credential (the spends= line names them), say once in one line that it spends the user's own credential while nobody is at the keyboard, on every session routed through this proxy. Be honest about 1-hour-head: on Sonnet and Opus the 1-hour tier is usually silently downgraded, so expect no benefit, and it only acts on prefixes of 50k tokens or more. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the strategy is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, it applies at the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted or result=not_applied. Never restart without the yes. Never invent a strategy name.",
+    outro: (path) => "That block ran just now and only SHOWED the cache strategy. Tell the user which strategy is saved. List the choices, one line each, from the block. Before switching TO a strategy whose line says it spends the caller's credential (the spends= line names them), say once in one line that it spends the user's own credential while nobody is at the keyboard, on every session routed through this proxy. Be honest about 1-hour-head: on Sonnet and Opus the 1-hour tier is usually silently downgraded, so expect no benefit, and it only acts on prefixes of 50k tokens or more. To switch, ask which name they want. Run sh " + path + " set NAME with your shell tool and report it. Then say plainly: the strategy is saved; a restart applies it now; a restart costs one cache rewrite in every open session of this project; if they say no, it applies at the next OpenCode start. Ask for a yes. Only after the yes, run sh " + path + " set NAME --restart and report result=restarted, result=already_applied, or result=not_applied. Never restart without the yes. Never invent a strategy name.",
   },
 ]
 
@@ -942,14 +966,20 @@ function savedSettings(state) {
 }
 
 // The names the user asked for. The proxy table decides later whether a strategy name is valid.
+// A requested preset that is not in PRESETS falls back to the default, and reports why —
+// the same as an unknown cache strategy, which resolveStrategy reports with a reason.
 export function effectiveSettings(state, options = {}) {
   const saved = savedSettings(state)
+  const requestedPreset = saved.preset ?? options.preset
   const preset = [saved.preset, options.preset].find((name) => PRESETS.includes(name)) ?? DEFAULT_PRESET
   const requestedStrategy = saved.strategy ?? options.cacheStrategy ?? options.cache_strategy
-  return { preset, requestedStrategy }
+  const presetReason = requestedPreset && !PRESETS.includes(requestedPreset)
+    ? `preset "${requestedPreset}" is not a known preset; using ${preset}`
+    : undefined
+  return { preset, requestedStrategy, ...(presetReason ? { presetReason } : {}) }
 }
 
-async function startProxy({ directory, preset, requestedStrategy, options, routes, client }) {
+async function startProxy({ directory, preset, presetReason, requestedStrategy, options, routes, client }) {
   const state = stateDirectory(directory)
   mkdirSync(state, { recursive: true, mode: 0o700 })
   // The download can take minutes. It runs before the lock: it writes a temp name and renames it, so
@@ -963,6 +993,7 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
     if (found) binary = { ...found, version: found.version || binary?.version }
     const dialects = [...new Set(routes.map((route) => route.dialect))]
     const table = loadStrategyTable(binary.path)
+    if (presetReason) await safeLog(client, "warn", presetReason)
     const resolved = resolveStrategy(table, requestedStrategy, dialects)
     if (resolved.reason) await safeLog(client, "warn", resolved.reason)
     const cacheStrategy = resolved.name
@@ -1063,7 +1094,7 @@ async function recoverProxy(state, record, client) {
 }
 
 async function ContextGuruPlugin({ directory, client }, options = {}) {
-  const { preset, requestedStrategy } = effectiveSettings(stateDirectory(directory), options)
+  const { preset, presetReason, requestedStrategy } = effectiveSettings(stateDirectory(directory), options)
   let routedIds = new Set()
   return {
     config: async (config) => {
@@ -1085,7 +1116,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
           await safeLog(client, "debug", "no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
           return
         }
-        const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client })
+        const proxy = await startProxy({ directory, preset, presetReason, requestedStrategy, options, routes, client })
         routeProviders(config, proxy.port, own)
         routedIds = new Set(routes.map((route) => route.id))
       } catch (error) {
@@ -1116,7 +1147,7 @@ async function setupV2(ctx) {
   if (!directory) throw new Error("no project directory in the plugin context")
   const options = ctx.options ?? {}
   const state = stateDirectory(directory)
-  const { preset, requestedStrategy } = effectiveSettings(state, options)
+  const { preset, presetReason, requestedStrategy } = effectiveSettings(state, options)
   // v2 has no client.app.log; the documented channel is the console.
   const log = { app: { log: async ({ body }) => { (body.level === "error" ? console.error : console.log)(body.message) } } }
   let routedIds = []
@@ -1179,7 +1210,7 @@ async function setupV2(ctx) {
         if (upstreams.size > 1) throw new Error(`multiple ${dialect} upstreams are configured; route them through one gateway first`)
       }
       if (!routes.length) return
-      const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client: log })
+      const proxy = await startProxy({ directory, preset, presetReason, requestedStrategy, options, routes, client: log })
       for (const target of targets) {
         editor.update(target.id, (provider) => {
           provider.settings = { ...provider.settings, baseURL: `http://127.0.0.1:${proxy.port}/${target.dialect}/v1` }
