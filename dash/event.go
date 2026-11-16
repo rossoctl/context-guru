@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"strings"
 
 	"github.com/rossoctl/accountant"
@@ -288,10 +289,15 @@ type Event struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
-	// CGCostUnpriced is set at capture when the request made compaction calls that could not be
-	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: it only keeps the
-	// reprice pass from marking such a row complete (issue #920).
+	// CGCostUnpriced is set by PriceCG when the request made compaction calls that could not be
+	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: the reprice pass
+	// prices such a row on both halves once the price map loads (issues #920, #1033).
 	CGCostUnpriced bool `json:"-"`
+	// CGModel and the four CG token counts are what the request's compaction calls billed, the
+	// input PriceCG prices. Not stored: the reprice pass needs them only for a row written by this
+	// process, and it keeps them on its in-memory copy (issue #1033).
+	CGModel                                      string `json:"-"`
+	CGFresh, CGCacheRead, CGCacheWrite, CGOutput int64  `json:"-"`
 	// CacheSavedUSD is what the provider's prompt cache saved on this request: its
 	// cache-read tokens priced at the fresh rate they would have cost with no cache,
 	// minus what they actually cost. A measurement of the PROVIDER's mechanism, kept
@@ -940,6 +946,30 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.EstimatedSavedUSD, e.EstimatedSavedLowUSD, e.EstimateHeld = 0, 0, false
 	e.clearAccTokens()
 	e.priceCost(p, accountingComplete)
+}
+
+// PriceCG prices the request's compaction calls into CGLLMCostUSD. main is the agent model's price
+// and mainPriced whether it is known. The compaction model's own rate is used when it differs from
+// the agent's model and prices knows it; otherwise the agent's rate, as it always was. With no rate,
+// CGCostUnpriced is set and CGLLMCostUSD stays 0. A request with no compaction tokens is left alone.
+//
+// The capture site and the reprice pass both call it, so one request gets one figure either way.
+func (e *Event) PriceCG(prices modelinfo.Pricer, main modelinfo.Price, mainPriced bool) {
+	if e.CGFresh <= 0 && e.CGOutput <= 0 && e.CGCacheWrite <= 0 && e.CGCacheRead <= 0 {
+		return
+	}
+	p, ok := main, mainPriced
+	if prices != nil && e.CGModel != "" && e.CGModel != e.Model {
+		if p2, ok2 := prices.Price(context.Background(), e.CGModel); ok2 {
+			p, ok = p2, true
+		}
+	}
+	if !ok {
+		e.CGLLMCostUSD, e.CGCostUnpriced = 0, true
+		return
+	}
+	e.CGLLMCostUSD = p.Cost(e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput)
+	e.CGCostUnpriced = false
 }
 
 // priceCost is Price without clearing the accountant state. It reports whether the cost was
