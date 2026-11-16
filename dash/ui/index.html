@@ -1038,6 +1038,21 @@
 
 <script defer src="savings.js"></script>
 <script defer src="app.js"></script>
+<!-- One file per tab (#1089). Each one registers its own loader. Keep this order:
+     app.js first, then the tabs. -->
+<script defer src="tabs/overview.js"></script>
+<script defer src="tabs/components.js"></script>
+<script defer src="tabs/usage.js"></script>
+<script defer src="tabs/sessions.js"></script>
+<script defer src="tabs/requests.js"></script>
+<script defer src="tabs/config.js"></script>
+<script defer src="tabs/setup.js"></script>
+<script defer src="tabs/settings.js"></script>
+<script defer src="tabs/tenants.js"></script>
+<script defer src="tabs/archive.js"></script>
+<script defer src="tabs/strategies.js"></script>
+<script defer src="tabs/feedback.js"></script>
+<script defer src="tabs/keepalive.js"></script>
 <!-- The Inventory view mounts itself: its tab, its section, its stylesheet and its loader
      registration all live in tools.js, so this feature is one line in the shared page. -->
 <script defer src="tools.js"></script>

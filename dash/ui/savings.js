@@ -8,6 +8,11 @@
 //   defer       tool deferral's net saving (ultrahigh); 0 on an account that never deferred
 'use strict';
 
+// forTests is how the Node tests (dash/savings.test.mjs) reach these helpers. Each helper
+// adds itself on the line after its own definition, so two PRs that add two helpers edit
+// two different places, and git merges them (#1089). In the browser it is a plain object.
+const forTests = typeof module !== 'undefined' ? module.exports : {};
+
 function savedParts(o) {
   const keepalive = o.keepalive_net_usd || 0;
   const reorder = (o.cachesplit_saved_usd || 0) + ((o.cachesplit_historical && o.cachesplit_historical.usd) || 0);
@@ -20,6 +25,7 @@ function savedParts(o) {
   const manual = (o.manual_pings && o.manual_pings.saved_usd) || 0;
   return { cache, keepalive, reorder, compaction, filter, defer, manual, total: cache + compaction + filter + defer + manual, serverTotal: o.total_saved_usd || 0 };
 }
+forTests.savedParts = savedParts;
 
 // The headline on the Overview: the parts added up, against what the same traffic would have cost
 // without context-guru. Every saving is already net of what context-guru spent to make it (our own
@@ -33,6 +39,7 @@ function overviewTotals(o) {
   const share = (v) => (without > 0 ? (100 * v) / without : 0);
   return { saved: p.total, spent, without, pct: share(p.total), share, parts: p };
 }
+forTests.overviewTotals = overviewTotals;
 
 // The cache writes context-guru prevented. `requests` is real requests that resumed after the cache
 // would have expired and read it anyway: a measured count, and what the waiting time multiplies.
@@ -41,6 +48,7 @@ function overviewTotals(o) {
 function writesPrevented(o) {
   return { requests: o.keepalive_misses_avoided || 0, manual: (o.manual_pings && o.manual_pings.writes_avoided) || 0 };
 }
+forTests.writesPrevented = writesPrevented;
 
 // The cache strategy's plugin name (the proxy's strategy table, config/strategy.go), read back from
 // the account's cache settings: they hold numbers, not the name. '' when the settings match no named
@@ -57,6 +65,7 @@ function strategyName(c) {
   if (k === 2 && k1h === 2) return '2-ping';
   return '';
 }
+forTests.strategyName = strategyName;
 
 // The preset name beside "Preset" on the Overview. `current` is the preset the proxy runs now ('' when
 // the page cannot know it: a hosted account). `groups` is the window's requests by preset
@@ -78,6 +87,8 @@ function presetLabel(current, groups) {
   return current;
 }
 
+forTests.presetLabel = presetLabel;
+
 // The note under "Your preset" when the replay cap changed the figure, or could not be applied.
 // '' when there is nothing to say. `fmt` formats dollars; null leaves the dollars out (a subscription).
 function capNote(o, fmt) {
@@ -90,6 +101,7 @@ function capNote(o, fmt) {
   }
   return '';
 }
+forTests.capNote = capNote;
 
 // ── Claude subscription (GET /api/me/limits) ──
 //
@@ -104,9 +116,11 @@ function liveFiveHour(limits, nowMs) {
   if (!f || !(f.reset_s > 0) || f.reset_s * 1000 <= nowMs) return null;
   return f;
 }
+forTests.liveFiveHour = liveFiveHour;
 
 // When the 5-hour window started, in unix ms: its reset less 5 hours.
 function fiveHourStartMs(f) { return (f.reset_s - 5 * 3600) * 1000; }
+forTests.fiveHourStartMs = fiveHourStartMs;
 
 // The share of the 5-hour limit context-guru saved in the window, in percent, or null when the
 // window has too little data to say (under $0.50 of spend, or under 2% used). Anthropic does not
@@ -124,6 +138,7 @@ function fiveHourSavedPct(f, w) {
   const room = Math.max(0, 100 - used);
   return { pct: Math.min(raw, room), hit: raw >= room };
 }
+forTests.fiveHourSavedPct = fiveHourSavedPct;
 
 // The same share at the learned 5-hour weights (#1047), or null when there are none: `fit` is
 // GET /api/me/fivehour-weights. It needs a fit that passed the gate (`ok`), the window's own token
@@ -146,12 +161,14 @@ function fiveHourLearnedPct(f, w, fit) {
   const room = Math.max(0, 100 - used);
   return { pct: Math.min(raw, room), hit: raw >= room };
 }
+forTests.fiveHourLearnedPct = fiveHourLearnedPct;
 
 // The words for where the weights came from: "learned 5-hour weights (from 1,234 requests)" for
 // `n` requests, or "API-price weights" without them.
 function weightsLabel(n) {
   return n > 0 ? 'learned 5-hour weights (from ' + Number(n).toLocaleString('en-US') + ' requests)' : 'API-price weights';
 }
+forTests.weightsLabel = weightsLabel;
 
 // The Cache strategy forecast on a subscription (#1042, #1047). `rec` is /api/keepalive/recommend.
 // Both panels that show it (the decision row and "Which setting should I use?") read it from here.
@@ -167,15 +184,18 @@ function forecastView(rec, sub) {
     max_pings: l.max_pings, lo_usd: l.lo_usd, hi_usd: l.hi_usd, fixed_k: undefined, alt_max_pings: undefined });
   return { rec: merged, label: 'Forecast at ' + weightsLabel(l.requests) + ', in API dollars. A subscription does not bill per token.' };
 }
+forTests.forecastView = forecastView;
 
 // A manager's Overview spans other accounts, and the limits are the signed-in account's own, so a
 // manager keeps the dollar view and the page does not ask. A local proxy has no tenant: it asks.
 function readsLimits(tenant) { return !(tenant && tenant.role === 'manager'); }
+forTests.readsLimits = readsLimits;
 
 // A Claude subscription: the auth kind says so (`subscription`), or a 5-hour window is open.
 function isSubscription(limits, nowMs) {
   return !!(limits && (limits.subscription === true || liveFiveHour(limits, nowMs)));
 }
+forTests.isSubscription = isSubscription;
 
 // ── Savings in tokens (/api/stats `tokens`, #998) ──
 //
@@ -190,6 +210,7 @@ const TOKEN_TIERS = [['cache_write_5m', 'wr'], ['cache_write_1h', 'wr1h'], ['cac
 function tierText(t, fmt) {
   return TOKEN_TIERS.filter(([k]) => t && t[k]).map(([k, l]) => fmt(t[k]) + ' ' + l).join(' · ');
 }
+forTests.tierText = tierText;
 
 // The sum of tier figures, tier by tier (never across tiers). A missing figure counts as 0.
 function addTiers(...ts) {
@@ -197,6 +218,7 @@ function addTiers(...ts) {
   for (const t of ts) if (t) for (const k of Object.keys(out)) out[k] += t[k] || 0;
   return out;
 }
+forTests.addTiers = addTiers;
 
 // One saving in tokens: `saved 85.0k wr · cost 40.0k rd`. '' when the flow has no tokens at all.
 function tokenLine(flow, fmt) {
@@ -204,9 +226,11 @@ function tokenLine(flow, fmt) {
   if (!s && !c) return '';
   return 'saved ' + (s || '0') + (c ? ' · cost ' + c : '');
 }
+forTests.tokenLine = tokenLine;
 
 // True when the flow has a token in any tier.
 function hasTokens(flow) { return tokenLine(flow, String) !== ''; }
+forTests.hasTokens = hasTokens;
 
 // One token figure, with the one rule for zero against "not measured" that every screen uses.
 // `flow` is the figure ({saved, caused}); `scope` is the stats object it came from, which carries
@@ -222,6 +246,7 @@ function tokenFigure(flow, scope, fmt) {
   const priced = !!(scope && scope.tokens) && !((scope.tokens_unmeasured_requests || 0) > 0);
   return priced ? { text: 'saved 0 tokens', measured: true } : { text: 'not measured', measured: false };
 }
+forTests.tokenFigure = tokenFigure;
 
 // The request-level cache effects (`cachesplit` is one entry: the split plus its component's own).
 const CACHE_FEATURES = ['keepalive', 'cachesplit', 'ttl'];
@@ -247,21 +272,25 @@ function featureTokens(o) {
     compaction: flow(...rest.map((k) => bf[k])),
   };
 }
+forTests.featureTokens = featureTokens;
 
 // The total in tokens: tokens.saved and tokens.caused. The pings are not in it (pingLine).
 function totalTokens(o) {
   const t = (o && o.tokens) || {};
   return { saved: addTiers(t.saved), caused: addTiers(t.caused) };
 }
+forTests.totalTokens = totalTokens;
 
 // What the cache strategy's keep-alive pings paid, on a line of its own: `cost 900 wr · 410.0k rd`,
 // or '' when they paid nothing. A ping is not agent traffic, so it is not in the total or in any
 // card's cost. Every screen follows this rule, because the band's lean read has no ping tokens.
 const PING_LABEL = 'Keep-alive pings (not in the total)';
+forTests.PING_LABEL = PING_LABEL;
 function pingLine(o, fmt) {
   const t = tierText(o && o.keepalive_ping_tokens, fmt);
   return t ? 'cost ' + t : '';
 }
+forTests.pingLine = pingLine;
 
 // The Overview headline on a subscription, or null for the dollar view. `o` is the Overview's own
 // stats, `w` the 5-hour window's (for the estimate), `fmt` formats a count. The estimate needs an
@@ -282,6 +311,7 @@ function subscriptionHeadline(limits, o, w, nowMs, fmt, filtered, fit) {
       : '≈ ' + (p.pct < 1 ? '< 1' : String(Math.round(p.pct))) + '% of the 5-hour limit' + tail;
   return { main, pings, estimate };
 }
+forTests.subscriptionHeadline = subscriptionHeadline;
 
 // One Sessions row in tokens, on a subscription (#1023), from /api/sessions' token fields. The
 // columns that show dollars elsewhere:
@@ -307,6 +337,7 @@ function sessionTokenCells(s, fmt) {
     unmeasured: (s && s.tokens_unmeasured_requests) || 0,
   };
 }
+forTests.sessionTokenCells = sessionTokenCells;
 
 // The Cache strategy tab in tokens (#1022), from the keep-alive ledger's `tokens` (the rescue) and
 // `keepalive_ping_tokens` (what the pings paid, read by pingLine). Two lines, never netted: the pings
@@ -327,6 +358,7 @@ function kaTokenLines(o, fmt) {
     rescuesText: measured ? 'The rescues: ' + rescue + '.' : 'The rescues are not measured in tokens.',
   };
 }
+forTests.kaTokenLines = kaTokenLines;
 
 // One row of the Cache strategy tab's session tables in tokens, on a subscription (#1048), from
 // /api/keepalive/sessions or /api/keepalive/live. The fields are the Sessions tab's own (#1023).
@@ -352,6 +384,7 @@ function kaSessionTokenCells(s, fmt) {
     ran: pinged || hasTokens(ka),
   };
 }
+forTests.kaSessionTokenCells = kaSessionTokenCells;
 
 // The expiries' billed tokens in a band of the behaviour panel (#1048): `1.2M wr · 30.0k rd`. A band
 // with no expiries reads `0 tokens`; a band from a server before #1048 (no `tokens`) `not measured`.
@@ -359,6 +392,7 @@ function bandTokens(b, fmt) {
   if (!b || !b.tokens) return 'not measured';
   return tierText(b.tokens, fmt) || '0 tokens';
 }
+forTests.bandTokens = bandTokens;
 
 // The behaviour panel's daily chart in tokens (#1048): one series per tier that is not 0 on any day,
 // in the display order. The tiers are never added into one line. `rows` is /api/keepalive/behaviour
@@ -369,8 +403,4 @@ function tierSeries(rows) {
   return TOKEN_TIERS.filter(([k]) => rs.some((r) => r.tokens && r.tokens[k]))
     .map(([k, l]) => ({ tier: l, name: TIER_NAMES[l], points: rs.map((r) => [r.ts, (r.tokens && r.tokens[k]) || 0]) }));
 }
-
-if (typeof module !== 'undefined') module.exports = { savedParts, capNote, overviewTotals, writesPrevented, strategyName, presetLabel,
-  liveFiveHour, fiveHourStartMs, fiveHourSavedPct, fiveHourLearnedPct, weightsLabel, forecastView, readsLimits, isSubscription, subscriptionHeadline,
-  tierText, addTiers, tokenLine, hasTokens, tokenFigure, featureTokens, totalTokens, pingLine, PING_LABEL, sessionTokenCells, kaTokenLines,
-  kaSessionTokenCells, bandTokens, tierSeries };
+forTests.tierSeries = tierSeries;

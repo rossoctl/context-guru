@@ -19,9 +19,10 @@ It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every e
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 !!! info "No CDN, no build step, no network"
-    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, `charts.js`,
-    `tools.js`, `kvcache.js`, `campaigns.js` and one bundled font) embedded in the
-    binary with `go:embed`. Charts are hand-drawn SVG — no chart library, no framework.
+    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, one file
+    per tab under `tabs/`, `charts.js`, `tools.js`, `kvcache.js`, `campaigns.js` and one
+    bundled font) embedded in the binary with `go:embed`. They are plain scripts that
+    `index.html` loads in order, with no bundler. Charts are hand-drawn SVG — no chart library, no framework.
     The page fetches nothing off-origin, so it works in a VPC or fully air-gapped.
 
 !!! tip "New to the dashboard?"
@@ -138,7 +139,7 @@ What the library prices:
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
 `check_sum`, `check_unique_change`, `check_spans`, `check_other`, `size_unknown`, `implausible_size`,
-`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `server_held_history`. A saving nothing
 measured is not shown.
 
 For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
@@ -149,13 +150,23 @@ For `unpriced` the line carries `why` too: `no_usage` (the request has no billed
 as `opID:reason` (or `reason` alone when the refusal is for the whole request, as `ratio_range` is). The
 cause is in the log line only. No stored column and no API field carries it.
 
-`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
-`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
-Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
-keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
+The three wires are priced: the Anthropic Messages API, Chat Completions and the OpenAI Responses API. On
+Responses the library reads `instructions` as the system section and each `input` item as one message
+position, so a change is placed on the item it changed.
+
+`server_held_history` is a Responses request that leaves part of its prompt on the provider's side: it
+carries `previous_response_id`, a `conversation`, or an `input` item of type `item_reference`. The provider
+adds stored items that the body does not carry, so the proxy cannot see the prefix the provider reads. Such
+a request books no saving. A Responses account that sends every turn in full is priced as the other wires
+are.
 
 Limits:
 
+- On Responses, a pipeline component that rewrites `instructions` books no saving for that request
+  (`ops_dropped`): the change is in the system section, and the proxy places component changes only on
+  `input` items. The tool filter's own edit of `instructions` (a skill taken out of the list) is priced
+  on the `toolfilter` row. When the skill list is in a leading `developer` item of `input` instead, that
+  edit has no operation, the sum check fails, and the request books no saving (`check_sum`).
 - A request with no history to classify a cache break against gets `penalty_unknown`. This is the
   first request of a thread, and a request after a gap longer than the cache lifetime when the
   provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net

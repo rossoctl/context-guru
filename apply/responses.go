@@ -95,6 +95,38 @@ func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 	return skills.LocateResponses(body) // the one rule, shared with dash's reader
 }
 
+// responsesWire is wireGroups for the Responses wire: for each slot, the index of its input item, which is
+// the accountant's message position (proxy accParse). A string input is one position, index 0. The
+// instructions slot is the system section, not an input item, and gets -1: no message operation may be
+// placed there.
+func responsesWire(slots []responseSlot) []int {
+	wire := make([]int, len(slots))
+	for i, s := range slots {
+		switch idx, ok := responseInputIndex(s.path); {
+		case ok:
+			wire[i] = idx
+		case s.path == "input":
+			wire[i] = 0
+		default:
+			wire[i] = -1
+		}
+	}
+	return wire
+}
+
+// responsesItems is the accountant's message positions of a Responses body: the items of input, or the
+// string input as one position.
+func responsesItems(body []byte) []gjson.Result {
+	in := gjson.GetBytes(body, "input")
+	switch {
+	case in.IsArray():
+		return in.Array()
+	case in.Type == gjson.String:
+		return []gjson.Result{in}
+	}
+	return nil
+}
+
 // responseInputIndex resolves a normalized slot to its containing wire item.
 // Instructions are not input items and must never be part of a summary span.
 func responseInputIndex(path string) (int, bool) {
@@ -595,14 +627,33 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	res.AttemptedTokens = schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm[start:]})
 	res.FrozenTokens = schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm[:start]})
+	// The accountant's operations, as on the Messages route: a req.Input index is mapped to its input
+	// item (responsesWire), and the sizes are the items' wire bytes (wireSizes). applied is false in
+	// observe mode, whose operations are computed and never sent.
+	wire, applied := responsesWire(slots), mode != components.ModeObserve
+	giveUp := func() {
+		ops, d := opsFromRun(*res.Run, wire, applied, nil)
+		res.Ops, res.OpsDropped = nil, len(ops)+d
+	}
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		if next, ok := rebuildResponsesCountChanged(o.Body, norm, slots, chat.Input); ok {
 			res.Body, res.Changed = next, true
+			if res.Run != nil {
+				res.Ops, res.OpsDropped = OpsFromRun(*res.Run, wire, applied)
+				in, out := responsesItems(o.Body), responsesItems(next)
+				if !wireSizes(res.Ops, rawLen(in), rawLen(out), rawTotal(in), rawTotal(out)) {
+					giveUp()
+				}
+			}
 			res = finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array(), mode == components.ModeObserve)
+		} else if res.Run != nil {
+			giveUp()
 		}
 		return res
 	}
 	body := o.Body
+	// written: the req.Input indices whose text really went onto the wire. Only those become operations.
+	written := map[int]bool{}
 	for i := range chat.Input {
 		now, err := json.Marshal(chat.Input[i])
 		if err != nil || bytes.Equal(now, slots[i].pre) {
@@ -617,10 +668,23 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		}
 		next, err := sjson.SetBytes(body, slots[i].path, text)
 		if err != nil {
+			// The original body goes upstream: no change is real, so the run's changes count as dropped.
+			if res.Run != nil {
+				giveUp()
+			}
 			return Result{Body: o.Body, Trace: res.Trace}
 		}
 		body, res.Changed = next, true
+		written[i] = true
 	}
 	res.Body = body
+	if res.Run != nil {
+		// An instructions change has no input item (wire -1): keep rejects it, so it is dropped, not misplaced.
+		res.Ops, res.OpsDropped = opsFromRun(*res.Run, wire, applied, func(idx int) bool { return written[idx] && wire[idx] >= 0 })
+		in, out := responsesItems(o.Body), responsesItems(body)
+		if len(in) != len(out) || shiftingSplice(res.Ops) || !wireSizes(res.Ops, rawLen(in), rawLen(out), rawTotal(in), rawTotal(out)) {
+			giveUp()
+		}
+	}
 	return finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array(), mode == components.ModeObserve)
 }

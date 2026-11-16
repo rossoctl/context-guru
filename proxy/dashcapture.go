@@ -172,8 +172,9 @@ type capture struct {
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
 	accReq *accountant.Request
-	// accUnsupportedWire is set for a request on a wire the accountant does not read (OpenAI Responses).
-	accUnsupportedWire bool
+	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
+	// holds its history, so the accountant has no record of it.
+	accServerHeldHistory bool
 	// accNoResult says why no Result was attached when Compute was reached and gave none.
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
@@ -866,11 +867,11 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	endAcc()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
-	if c.accUnsupportedWire {
-		e.SetAccountantUnsupportedWire()
+	if c.accServerHeldHistory {
+		e.SetAccountantServerHeldHistory()
 	}
 	e.PriceMode(price, usageOK && priced)
-	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
+	if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
 		logFallback(e, c.noResultWhy(usageOK))
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
