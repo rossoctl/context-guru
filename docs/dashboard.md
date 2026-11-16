@@ -141,6 +141,21 @@ When the library cannot price an event, the event books **no saving**, and the p
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
 measured is not shown.
 
+The same reason is stored in `requests.acc_fallback` for each request that logs the line. A request with no
+accountant record (`no_record`) logs no line and stores no reason: it had nothing to price. A bypassed request
+(`x-context-guru-bypass: true`) logs `size_unknown`, because bypass leaves the request size at 0, but stores no
+reason: the client asked for no context-guru, so its $0 is a measured $0. Overview reads the column:
+
+- `fallback_requests` is the count, `fallback` the count by reason, and `fallback_cost_usd` their `cost_usd`
+  plus `cg_llm_cost_usd`.
+- A fallback request books cost and no saving. So the hero's share leaves it out: "without context-guru" is
+  the spend less `fallback_cost_usd`, plus the saving. "You spent" is that same priced spend. A line under the
+  total names the requests and dollars left out. Cost totals elsewhere still include them.
+- Rows written before the column existed are back-filled once from their components: a request with a
+  `priced_by = 'none'` component reads `unrecorded`. A fallback request with no component row cannot be found
+  there, and stays unmarked.
+- The lean read (`/api/stats?lean=1`, the status line) does not carry these fields.
+
 For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
 `upstream_rounds=N` (an expand loop) or `compute_panicked`.
 

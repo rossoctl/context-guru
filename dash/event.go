@@ -470,6 +470,11 @@ type Event struct {
 	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
 	// reply's id shape and usage fields. The id itself is never stored.
 	Backend string `json:"backend,omitempty"`
+	// AccFallback is why the accountant library could not price this request (a Fallback* reason, or
+	// FallbackUnrecorded on a back-filled row). "" when it priced the request, or never ran on it. Set by
+	// RecordAccountantFallback. A row with a reason books its cost and no saving, so the Overview counts it
+	// and leaves it out of the saving share (#1004).
+	AccFallback string `json:"acc_fallback,omitempty"`
 
 	// Limits are the subscription limit values the provider's answer carried in its
 	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.

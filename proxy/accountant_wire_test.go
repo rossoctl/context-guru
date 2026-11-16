@@ -191,6 +191,9 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("the override must apply, fell back: %s", fb)
 	}
+	if e.AccFallback != "" {
+		t.Fatalf("a priced request stored acc_fallback %q, want none", e.AccFallback)
+	}
 	msgBytes := func(b []byte) int {
 		n := 0
 		for _, m := range gjson.GetBytes(b, "messages").Array() {
@@ -286,6 +289,10 @@ func TestResponsesWireBooksNoSavingAndSaysWhy(t *testing.T) {
 	for i, e := range tap.all() {
 		if fb := e.AccountantFallback(); fb != dash.FallbackUnsupportedWire {
 			t.Errorf("request %d: fallback %q, want %q", i+1, fb, dash.FallbackUnsupportedWire)
+		}
+		// Stored too, so the Overview counts it and leaves its cost out of the saving share (#1004).
+		if e.AccFallback != dash.FallbackUnsupportedWire {
+			t.Errorf("request %d: stored acc_fallback %q, want %q", i+1, e.AccFallback, dash.FallbackUnsupportedWire)
 		}
 		if _, ok := e.AccountantResult(); ok {
 			t.Errorf("request %d: a Responses request got a library Result", i+1)

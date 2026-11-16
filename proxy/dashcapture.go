@@ -871,6 +871,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e.PriceMode(price, usageOK && priced)
 	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
+		e.RecordAccountantFallback()
 		logFallback(e, c.noResultWhy(usageOK))
 	}
 	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {

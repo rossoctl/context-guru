@@ -41,6 +41,20 @@ test('a server from before the Ping button has no manual_pings: that is zero, no
   assert.equal(p.manual, 0); assert.equal(p.total, 5);
 });
 
+test('fallback requests leave the share alone: their cost is out of "without", and the bill keeps it (#1004)', () => {
+  const { overviewTotals } = createRequire(import.meta.url)('./ui/savings.js');
+  const priced = { net_saved_usd: 30, cost_usd: 60, cg_llm_cost_usd: 10, total_saved_usd: 30 };
+  const base = overviewTotals(priced);
+  assert.equal(base.without, 100); assert.equal(base.pct, 30);
+  assert.deepEqual(base.unpriced, { requests: 0, usd: 0 }); // an older server sends neither field
+  // 4 fallback requests that cost $20 in all: in cost_usd, and named in fallback_cost_usd
+  const t = overviewTotals({ ...priced, cost_usd: 80, fallback_requests: 4, fallback_cost_usd: 20 });
+  assert.equal(t.spent, 90); // the whole bill
+  assert.equal(t.pricedSpent, 70);
+  assert.equal(t.without, 100); assert.equal(t.pct, 30); // the share is the priced requests' share
+  assert.deepEqual(t.unpriced, { requests: 4, usd: 20 });
+});
+
 test('the headline adds the parts, and its percent is of what the traffic would have cost without us', () => {
   const { overviewTotals } = createRequire(import.meta.url)('./ui/savings.js');
   const o = { net_saved_usd: 30, keepalive_net_usd: 10, decl_filter_usd: 5, manual_pings: { ping_usd: 1, saved_usd: 5 },

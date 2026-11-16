@@ -25,13 +25,20 @@ function savedParts(o) {
 // without context-guru. Every saving is already net of what context-guru spent to make it (our own
 // model calls, the pings), so "without" is simply what was spent plus what was saved. The percent of
 // each part uses the same "without", so the parts' percents add up to the total's.
+//
+// A request the accountant could not price (a fallback) books its cost and no saving. Counted in
+// "without", it lowers the share although no saving changed (#1004). So "without" is the PRICED spend
+// plus the saving: `spent` is the whole bill, `pricedSpent` is the bill less the fallback requests'
+// cost, and `unpriced` says how many requests and dollars the share leaves out.
 function overviewTotals(o) {
   const p = savedParts(o);
   const spent = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0)
     + ((o.manual_pings && o.manual_pings.ping_usd) || 0);
-  const without = spent + p.total;
+  const unpriced = { requests: o.fallback_requests || 0, usd: o.fallback_cost_usd || 0 };
+  const pricedSpent = spent - unpriced.usd;
+  const without = pricedSpent + p.total;
   const share = (v) => (without > 0 ? (100 * v) / without : 0);
-  return { saved: p.total, spent, without, pct: share(p.total), share, parts: p };
+  return { saved: p.total, spent, pricedSpent, unpriced, without, pct: share(p.total), share, parts: p };
 }
 
 // The cache writes context-guru prevented. `requests` is real requests that resumed after the cache

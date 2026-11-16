@@ -1753,7 +1753,11 @@ function renderSavedLedger(o, ka, partial) {
       el('div', { class: 'ov-hero-of' }, 'saved, out of ', el('strong', { text: usd(t.without) }),
         ' without context-guru'),
       el('div', { class: 'ov-hero-pct', 'data-testid': 'saved-total-pct', text: share(t.saved, t.without) + ' saved' }),
-      el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.spent) + ' instead.' }));
+      el('div', { class: 'ov-hero-spent', text: 'You spent ' + usd(t.pricedSpent) + ' instead.' }),
+      t.unpriced.requests > 0 ? el('div', { class: 'ov-hero-spent', 'data-testid': 'saved-total-fallback',
+        text: num(t.unpriced.requests) + (t.unpriced.requests === 1 ? ' request (' : ' requests (')
+          + usd(t.unpriced.usd) + ') could not be priced. ' + (t.unpriced.requests === 1 ? 'It is' : 'They are')
+          + ' left out of this share.' }) : null);
   const subInfo = [
     'On a Claude subscription every saving is in tokens, not dollars. A subscription does not bill per token.',
     'The total is the sum of the parts below, kind by kind. wr is cache write (wr1h: the 1-hour cache), rd is cache read, in is fresh input.',
@@ -1774,6 +1778,7 @@ function renderSavedLedger(o, ka, partial) {
         'Each part is already net of what context-guru spent to make it: our own model calls and the cache pings.',
         'The cache part is the most it could have saved: another session can keep the same cache warm. The preset and filter parts are estimates.',
         '"Without context-guru" is what you spent plus what was saved. The percent is the saved share of that.',
+        'A request context-guru could not price books no saving. It is left out of "without context-guru" and of the percent, and the count is shown under the total.',
         'The provider’s own cache discount is not counted. You get it with or without context-guru.',
       ])),
     !ready
