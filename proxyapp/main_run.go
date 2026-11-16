@@ -878,6 +878,8 @@ func Main(hooks Hooks) {
 	if tenants == nil && rec != nil {
 		// Single-tenant: the removal list the running pipeline filters, for /api/adapt/tools.
 		h.API().SetToolFilterState(h.DashToolFilter())
+		// Single-tenant: /api/whoami names the preset the proxy runs, so the Overview can show it.
+		h.API().SetWhoami(h.LocalWhoami())
 	}
 
 	defer h.Close() // stop the off-path worker pool cleanly (no-op in sync mode)

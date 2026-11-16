@@ -2009,6 +2009,8 @@ const account = {
   // matters. Absent (an older server) is treated as closed, matching the server's own
   // default: guessing "open" would draw a form that 403s on submit.
   register: 'closed',
+  // preset is the preset the local proxy runs now, from /api/whoami. '' on a hosted proxy.
+  preset: '',
 };
 
 /** ctl() calls a control-plane route. Throws with the server's message, which is
@@ -2398,6 +2400,7 @@ async function probeAccount() {
     const who = await ctl('/api/whoami');
     account.hosted = !!who.hosted;
     account.tenant = who.authenticated ? who.tenant : null;
+    account.preset = who.preset || '';
     account.tokens = who.tokens || [];
     account.baseURL = who.base_url || location.origin;
     account.register = who.register || 'closed';

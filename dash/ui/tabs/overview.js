@@ -803,18 +803,19 @@ async function renderDiagnostics() {
  * for the waiting time); the only arithmetic here is a ratio of two of them. A lever with
  * nothing recorded says so in words instead of printing a zero that could be an absence.
  */
-/** The name a reader knows their preset by: the one the window's requests mostly ran under. The
- *  name stays empty until known, and the card title then reads without it. */
+/** The name a reader knows their preset by: the one the proxy runs now (/api/whoami, local proxy
+ *  only), with a note while the window's requests mostly ran under another. See presetLabel in
+ *  savings.js. The name stays empty until known, and the card title then reads without it. */
 function presetName() {
-  const g = (state.identity && state.identity.presets) || [];
-  const live = g.filter((x) => x.key).sort((a, b) => b.requests - a.requests);
-  if (!live.length) return '';
-  const total = live.reduce((n, x) => n + x.requests, 0);
-  return live[0].requests / total >= 0.9 || live.length === 1 ? live[0].key : 'mostly ' + live[0].key;
+  return presetLabel(account.preset || '', (state.identity && state.identity.presets) || []);
 }
 async function loadOverviewIdentity() {
   try {
-    const r = await api('breakdown', { dim: 'preset' });
+    // The running preset is read again on each refresh, with the history: a preset switch while the
+    // page is open must show, and a stale value would name the old preset as the running one.
+    const [r, who] = await Promise.all([api('breakdown', { dim: 'preset' }),
+      account.hosted ? null : ctl('/api/whoami').catch(() => null)]);
+    if (who) account.preset = who.preset || '';
     state.identity = { presets: r.groups || [] };
     if (state.overview) renderSavedLedger(state.overview, state.keepAliveLedger, !state.overviewFull);
   } catch (e) { /* the rows read fine without the name */ }

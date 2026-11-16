@@ -259,6 +259,19 @@ func (h *Handler) DashWhoami() func(*http.Request) any {
 	}
 }
 
+// LocalWhoami returns the body for /api/whoami on a single-tenant proxy. There are no accounts,
+// so nobody is signed in. It adds the preset the proxy runs now, the same value /stats reports,
+// so the Overview names the live preset and not only the one the window's requests ran under.
+func (h *Handler) LocalWhoami() func(*http.Request) any {
+	return func(*http.Request) any {
+		out := map[string]any{"hosted": false, "authenticated": false}
+		if tn := h.static.Load(); tn != nil && tn.Preset != "" {
+			out["preset"] = tn.Preset
+		}
+		return out
+	}
+}
+
 // DashAuth returns the authenticator to hand dash.API.SetAuth, so the dashboard's
 // read routes and these write routes agree on who the caller is. One resolver, so
 // there is no way for the two halves to disagree about identity.
