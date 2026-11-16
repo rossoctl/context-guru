@@ -21,16 +21,22 @@ const maxUnpriced = 4096
 func (r *Recorder) noteUnpriced(e *Event) {
 	// A bypassed request is written "missing" and becomes "partial" when the count worker fills in
 	// its token count, after this runs, so both labels are queued. A row whose compaction calls
-	// could not be priced is left alone: repricing it would mark it complete with
-	// cg_llm_cost_usd still an unknown 0.
+	// could not be priced either keeps its compaction model and tokens on the copy, so the pass
+	// prices both halves (issue #1033).
 	unpriced := e.TokenAccounting == AccountingPartial || e.TokenAccounting == AccountingMissing
-	if r.opts.Prices == nil || e.ID == 0 || e.Model == "" || !unpriced || e.CostUSD != 0 || e.CGCostUnpriced ||
+	if r.opts.Prices == nil || e.ID == 0 || e.Model == "" || !unpriced || e.CostUSD != 0 ||
 		e.FreshInput+e.CacheRead+e.CacheWrite+e.OutputTokens <= 0 {
 		return
 	}
 	c := &Event{ID: e.ID, TS: e.TS, TenantID: e.TenantID, Model: e.Model, KeepAlive: e.KeepAlive,
 		FreshInput: e.FreshInput, CacheRead: e.CacheRead, CacheWrite: e.CacheWrite,
 		CacheWrite1h: e.CacheWrite1h, OutputTokens: e.OutputTokens}
+	if e.CGCostUnpriced {
+		// Only an unpriced compaction cost travels. One priced at write time (its own model was
+		// known) is already on the row and in tenant_spend, and the copy's 0 adds nothing to it.
+		c.CGCostUnpriced, c.CGModel = true, e.CGModel
+		c.CGFresh, c.CGCacheRead, c.CGCacheWrite, c.CGOutput = e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput
+	}
 	r.unpricedMu.Lock()
 	defer r.unpricedMu.Unlock()
 	if len(r.unpriced) >= maxUnpriced {
@@ -58,9 +64,9 @@ func (r *Recorder) repriceLoop() {
 }
 
 // repricePass prices every waiting row whose model now has a price. The cost is the row's own
-// tokens at the current rate, the same arithmetic as at write time. It books no saving: the row
-// had none (acc_fallback unpriced), so baseline_cost_usd equals cost_usd. A row whose model is
-// still unknown waits for the next pass.
+// tokens at the current rate, the same arithmetic as at write time, and so is the cost of its
+// compaction calls (PriceCG). It books no saving: the row had none (acc_fallback unpriced), so
+// baseline_cost_usd equals cost_usd. A row whose model is still unknown waits for the next pass.
 func (r *Recorder) repricePass() {
 	r.unpricedMu.Lock()
 	waiting := r.unpriced
@@ -76,6 +82,10 @@ func (r *Recorder) repricePass() {
 		if !ok || p.Zero() || !e.priceCost(p, true) {
 			keep = append(keep, e)
 			continue
+		}
+		if e.CGCostUnpriced {
+			// The agent's rate is known now, and PriceCG falls back to it, so this always prices.
+			e.PriceCG(r.opts.Prices, p, true)
 		}
 		if err := r.db.applyReprice(e); err != nil {
 			slog.Warn("dash: could not price a row booked before the price map loaded", "id", e.ID, "err", err)
@@ -98,8 +108,10 @@ func (r *Recorder) repricePass() {
 }
 
 // applyReprice writes the cost priceCost computed on e into its stored row, and adds it to the
-// tenant's monthly spend in the same transaction. It changes only a row that is still partial at
-// $0 (partial, or missing for a bypassed row), so a row priced some other way is never overwritten and the rollup is never added twice.
+// tenant's monthly spend in the same transaction. e.CGLLMCostUSD is the compaction cost the pass
+// priced, 0 when there was none to price; it is added to the row's and to the spend. It changes
+// only a row that is still partial at $0 (partial, or missing for a bypassed row), so a row priced
+// some other way is never overwritten and the rollup is never added twice.
 func (d *DB) applyReprice(e *Event) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -107,9 +119,9 @@ func (d *DB) applyReprice(e *Event) error {
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 	res, err := tx.Exec(`UPDATE requests SET cost_usd = ?, baseline_cost_usd = ?, cache_saved_usd = ?,
-		billed_token_factor = ?, token_accounting = ?
+		billed_token_factor = ?, token_accounting = ?, cg_llm_cost_usd = cg_llm_cost_usd + ?
 		WHERE id = ? AND token_accounting IN (?, ?) AND cost_usd = 0`,
-		e.CostUSD, e.BaselineCostUSD, e.CacheSavedUSD, e.BilledTokenFactor, AccountingComplete,
+		e.CostUSD, e.BaselineCostUSD, e.CacheSavedUSD, e.BilledTokenFactor, AccountingComplete, e.CGLLMCostUSD,
 		e.ID, AccountingPartial, AccountingMissing)
 	if err != nil {
 		return err
@@ -123,7 +135,7 @@ func (d *DB) applyReprice(e *Event) error {
 	}
 	if _, err := tx.Exec(`INSERT INTO tenant_spend(tenant_id,month,usd) VALUES (?,?,?)
 		ON CONFLICT(tenant_id,month) DO UPDATE SET usd = usd + excluded.usd`,
-		e.TenantID, monthKey(e.TS), e.CostUSD); err != nil {
+		e.TenantID, monthKey(e.TS), e.CostUSD+e.CGLLMCostUSD); err != nil {
 		return err
 	}
 	return tx.Commit()

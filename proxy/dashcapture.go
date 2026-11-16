@@ -873,19 +873,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
 		logFallback(e, c.noResultWhy(usageOK))
 	}
-	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
-		cgPrice, cgPriced := price, priced
-		if c.pricer != nil && cgModel != "" && cgModel != c.model {
-			if p2, ok := c.pricer.Price(context.Background(), cgModel); ok {
-				cgPrice, cgPriced = p2, true
-			}
-		}
-		if cgPriced {
-			e.CGLLMCostUSD = cgPrice.Cost(cgIn, cgCacheRead, cgCacheWrite, cgOut)
-		} else {
-			e.CGCostUnpriced = true
-		}
-	}
+	e.CGModel = cgModel
+	e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
+	e.PriceCG(c.pricer, price, priced)
 
 	if !captureContent {
 		e.Content = nil
