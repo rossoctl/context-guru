@@ -29,6 +29,12 @@ func TestDashboardScriptsDeclareEachTopLevelNameOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The per-tab files split out of app.js (#1089) share the same global scope.
+	tabs, err := filepath.Glob(filepath.Join("ui", "tabs", "*.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, tabs...)
 	seen := map[string]string{}
 	checked := 0
 	for _, f := range files {
@@ -47,7 +53,7 @@ func TestDashboardScriptsDeclareEachTopLevelNameOnce(t *testing.T) {
 				continue
 			}
 			checked++
-			at := filepath.Base(f) + ":" + strconv.Itoa(line)
+			at := filepath.ToSlash(strings.TrimPrefix(f, "ui"+string(filepath.Separator))) + ":" + strconv.Itoa(line)
 			if prev, ok := seen[m[1]]; ok {
 				t.Errorf("%s is declared twice at the top level: %s and %s", m[1], prev, at)
 				continue

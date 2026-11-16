@@ -58,7 +58,7 @@ func nodeVersion() string {
 // pieces of the URL contract that are single strings in the source, and would each break a
 // documented or server-authored link if they went missing.
 func TestTheNavHashContractIsPinned(t *testing.T) {
-	app := readUI(t, "ui/app.js")
+	app := readApp(t)
 	for _, want := range []struct{ needle, why string }{
 		{"function legacyFrom(", "legacy range=<ms> bookmarks (docs/dashboard.md) map onto a relative window here"},
 		{"p.get('range')", "range=<ms> is no longer read, so every pre-from/to link widens to all time"},

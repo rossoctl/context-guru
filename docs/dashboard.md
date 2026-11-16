@@ -19,9 +19,10 @@ It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every e
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 !!! info "No CDN, no build step, no network"
-    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, `charts.js`,
-    `tools.js`, `kvcache.js`, `campaigns.js` and one bundled font) embedded in the
-    binary with `go:embed`. Charts are hand-drawn SVG — no chart library, no framework.
+    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, one file
+    per tab under `tabs/`, `charts.js`, `tools.js`, `kvcache.js`, `campaigns.js` and one
+    bundled font) embedded in the binary with `go:embed`. They are plain scripts that
+    `index.html` loads in order, with no bundler. Charts are hand-drawn SVG — no chart library, no framework.
     The page fetches nothing off-origin, so it works in a VPC or fully air-gapped.
 
 !!! tip "New to the dashboard?"

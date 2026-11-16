@@ -192,7 +192,7 @@ func TestNegativeSavingsAreShownAsNegative(t *testing.T) {
 // on it is "over this window", and a tab that ignored the picker above it would be answering a
 // different question from the one on screen.
 func TestTheKVCacheTabRespectsTheTimeRange(t *testing.T) {
-	app := readUI(t, "ui/app.js")
+	app := readApp(t)
 	i := strings.Index(app, "const UNFILTERED_VIEWS")
 	if i < 0 {
 		t.Fatal("UNFILTERED_VIEWS is gone; this check needs rewriting")
@@ -351,10 +351,12 @@ func TestAppendedViewsDeclareNoNameTheSharedScriptAlreadyOwns(t *testing.T) {
 		}
 		return out
 	}
-	shared := top("ui/app.js")
+	// app.js and the tab files split out of it (#1089) are the shared script.
 	seen := map[string]string{}
-	for k := range shared {
-		seen[k] = "ui/app.js"
+	for _, f := range appFiles(t) {
+		for k := range top(f) {
+			seen[k] = f
+		}
 	}
 	// In document order, which is the order a browser evaluates them in.
 	for _, view := range []string{"ui/tools.js", "ui/kvcache.js"} {
@@ -501,11 +503,11 @@ func TestTheTwoKindsOfCostlyPingAreNotOneNumber(t *testing.T) {
 // substring match, and a substring match cannot see an identifier that is no longer declared.
 //
 // Scoped to SCREAMING_SNAKE_CASE names because that is this codebase's module-constant
-// convention, and those are exactly the ones an appended view borrows from app.js (TILE_INFO,
+// convention, and those are exactly the ones an appended view borrows from app.js and its tab files (TILE_INFO,
 // SERIES, DIMS) or declares for itself. Comments and string literals are stripped first, or the
 // direction word 'MORE' and every data-testid would read as an undefined reference.
 func TestAppendedViewsReferenceNoConstantThatDoesNotExist(t *testing.T) {
-	shared := stripJSLiterals(readUI(t, "ui/app.js"))
+	shared := stripJSLiterals(readApp(t))
 	// Browser and language globals that happen to be all-caps. A NEW one appearing here should
 	// fail loudly and be added deliberately rather than silently allowed by a loose pattern.
 	globals := map[string]bool{"JSON": true, "NaN": true, "URL": true, "DOM": true}
@@ -522,7 +524,7 @@ func TestAppendedViewsReferenceNoConstantThatDoesNotExist(t *testing.T) {
 			if have[name] || globals[name] {
 				continue
 			}
-			t.Errorf("%s references %s, which nothing declares in it or in app.js. A reference to "+
+			t.Errorf("%s references %s, which nothing declares in it, in app.js or in a tab file. A reference to "+
 				"a removed constant parses fine and throws at run time, so the panel that touches "+
 				"it renders an error while the rest of the page looks perfect.", view, name)
 			have[name] = true // report each name once

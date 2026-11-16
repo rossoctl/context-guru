@@ -20,7 +20,7 @@ func TestSavingsPartsAddUp(t *testing.T) {
 // The Keep-alive (Cache strategy) ledger is shared between the Overview and its tab for a few seconds, and
 // that share is keyed by the whole query, so a change of tenant, window or filter cannot get the old ledger.
 func TestSharedKeepAliveLedgerIsKeyedByTheQuery(t *testing.T) {
-	src, err := uiFS.ReadFile("ui/app.js")
+	src, err := appSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestSharedKeepAliveLedgerIsKeyedByTheQuery(t *testing.T) {
 // the page asks for the limits, the headline uses the decision, and the dollar view stays for the
 // rest (`{}`, a failed call, a window that is over).
 func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
-	app := stripComments(readUI(t, "ui/app.js"))
+	app := stripComments(readApp(t))
 	for _, want := range []string{
 		"ctl('/api/me/limits')",
 		"ctl('/api/stats?lean=1&since=' + fiveHourStartMs(f))",
@@ -67,7 +67,7 @@ func TestOverviewSubscriptionHeadlineIsWired(t *testing.T) {
 // cells are tested in savings.test.mjs (sessionTokenCells). This checks the wiring: the tab asks for
 // the limits, a manager keeps dollars, each dollar cell has its token form, and the headers change.
 func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
-	app := stripComments(readUI(t, "ui/app.js"))
+	app := stripComments(readApp(t))
 	for _, want := range []string{
 		"if (!readsLimits(account && account.tenant)) return Promise.resolve(false);", // a manager keeps dollars
 		"() => { if (state.limitsP === p) state.limitsP = null; });",                  // a failed answer is not kept
@@ -104,7 +104,7 @@ func TestSessionsSubscriptionTokensAreWired(t *testing.T) {
 // asks for the limits, a manager keeps dollars, the token tiles replace the dollar ones, and the
 // forecast keeps dollars with its API-price label.
 func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
-	app := stripComments(readUI(t, "ui/app.js"))
+	app := stripComments(readApp(t))
 	for _, want := range []string{
 		"if (!readsLimits(account && account.tenant)) return false;", // a manager keeps dollars
 		"try { return isSubscription(await ctl('/api/me/limits'), Date.now()); } catch (e) { return false; }",
@@ -136,7 +136,7 @@ func TestKeepAliveTabSubscriptionTokensAreWired(t *testing.T) {
 // dollar cell has its token form, the pings keep a line or a column of their own, the price
 // what-ifs keep dollars with their API-price label, and the headers change.
 func TestKeepAliveTablesSubscriptionTokensAreWired(t *testing.T) {
-	app := stripComments(readUI(t, "ui/app.js"))
+	app := stripComments(readApp(t))
 	for _, want := range []string{
 		"subLabels($('#ka-downside-panel'), sub);",
 		"subLabels(panel, kaState.sub);",                           // the downside headers follow the units before the sessions land
