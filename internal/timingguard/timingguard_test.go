@@ -320,7 +320,9 @@ func compare(current, baseline map[string]Counts) (up, down []string) {
 			switch {
 			case cur > base:
 				up = append(up, fmt.Sprintf("%s: %s count is %d, baseline is %d. Fix: use testutil.WaitFor "+
-					"or testutil.WaitForCall, or add //timing:ok <reason> on the line or the line above.",
+					"or testutil.WaitForCall, or add //timing:ok <reason> on the line or the line above. "+
+					"Do not raise the baseline. To regenerate it after you lower a count: "+
+					"go test ./internal/timingguard -run TestTestTiming -update",
 					p, k, cur, base))
 			case cur < base:
 				down = append(down, fmt.Sprintf("%s: %s count is %d, baseline is %d. Lower the baseline.",
