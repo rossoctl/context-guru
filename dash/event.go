@@ -475,8 +475,9 @@ type Event struct {
 	// proxy sends the same verdict to the accountant (RequestMeta.Compaction). The replay cap
 	// closes an epoch on a row that carries one.
 	ClientCompaction string `json:"client_compaction,omitempty"`
-	// ClientCompactionKnown says the thread tracker ran on this request, so ClientCompaction is a
-	// verdict and "" means "no compaction". When false the row stores NULL: no verdict.
+	// ClientCompactionKnown says the thread tracker judged this request (by prefix or by header), so
+	// ClientCompaction is a verdict and "" means "no compaction". When false the row stores NULL: no
+	// verdict. That includes the tracker's session fallback: no session id, no message list, a panic.
 	ClientCompactionKnown bool `json:"-"`
 
 	// Limits are the subscription limit values the provider's answer carried in its

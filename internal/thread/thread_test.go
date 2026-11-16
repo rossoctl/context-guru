@@ -280,6 +280,36 @@ func TestOnlyTheRequestAfterACompactionIsMarked(t *testing.T) {
 	}
 }
 
+// #947 review: Claude Code's tool-less classifier thread can be marked compacting by mistake, when the
+// transcript it sends quotes the compaction prompt. Its next request matches no prefix and takes over
+// that thread's id. That is not the request after a client compaction, so it must not be marked.
+func TestAToolLessAuxiliaryThreadAfterACompactionIsNotMarked(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", ccBody(true, ccTurn{"user", []string{"fix the bug"}}), false)
+	first := tr.Resolve("t\x00s", "", ccBody(false, ccTurn{"user", []string{"<transcript> ... Your task is to create a detailed summary of the conversation so far ..."}}), true)
+	if first.ID == Primary {
+		t.Fatal("precondition: the classifier took the main thread's id")
+	}
+	next := tr.Resolve("t\x00s", "", ccBody(false, ccTurn{"user", []string{"<transcript> a later, different transcript"}}), false)
+	if next.ID != first.ID {
+		t.Fatalf("precondition: the next classifier request got %q, want the classifier thread %q", next.ID, first.ID)
+	}
+	if next.AfterCompaction {
+		t.Fatal("the classifier's next request is marked as the request after a client compaction")
+	}
+}
+
+// A client that never declares tools keeps its first thread as the primary. Its compaction is still
+// reported: the successor of the primary thread is the main agent.
+func TestAToolLessClientsCompactionIsMarked(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", conv("task", "a1", "u2"), false)
+	tr.Resolve("t\x00s", "", conv("task", "a1", "u2", "summarize this conversation"), true)
+	if r := tr.Resolve("t\x00s", "", conv("summary of everything", "continue"), false); r.ID != Primary || !r.AfterCompaction {
+		t.Fatalf("post-compaction request = %+v, want the primary thread, marked", r)
+	}
+}
+
 // Test 7 at the source: the OpenAI chat and Responses dialects group the same way.
 func TestOpenAIAndResponsesDialectsGroupByPrefix(t *testing.T) {
 	chat := func(n int, first string) []byte {

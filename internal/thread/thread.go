@@ -78,8 +78,9 @@ type Result struct {
 	Inherits string
 	// inherits is set when Inherits names the primary thread, whose id is "".
 	inherits bool
-	// AfterCompaction is set on the first request after the agent's own compaction: the request
-	// that matched no prefix and took over the compacting thread's id (newID). It is the request
+	// AfterCompaction is set on the first request after the main agent's own compaction: the request
+	// that matched no prefix and took over the compacting thread's id (newID), when that thread
+	// declares tools or is the primary. It is the request
 	// whose body holds the summary in place of the old transcript. The host reports it to the
 	// accountant (RequestMeta.Compaction) and on the dashboard row (#947).
 	AfterCompaction bool
@@ -298,9 +299,9 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 }
 
 // newID names a thread that matched nothing. The first thread of a session is the primary; the
-// successor of a compacting thread inherits its id, and newID reports that with true; anything
-// else is named after its own fingerprint, which differs from every other thread's (a fork has its
-// parent's prefix but not its parent's full message list).
+// successor of a compacting thread inherits its id, and newID reports true when that thread is the
+// main agent's; anything else is named after its own fingerprint, which differs from every other
+// thread's (a fork has its parent's prefix but not its parent's full message list).
 //
 // The primary goes to the main agent, told by METADATA, not order: the main agent declares tools
 // (Claude Code's 23, Codex's exec_command), while an auxiliary request (Claude Code's security
@@ -334,7 +335,11 @@ func (s *sessionState) newID(sums []uint64, hasTools bool, model string) (string
 	}
 	if succ != nil {
 		succ.compacting = false
-		return succ.id, true
+		// Only the main agent's hand-over is a client compaction (#947): the thread that declares tools,
+		// or the primary of a client that never declares any. A tool-less auxiliary thread (the
+		// auto-mode classifier above) can be marked compacting by mistake. It keeps its id, but its
+		// next request is not reported as the request after a compaction.
+		return succ.id, succ.tools || succ.id == Primary
 	}
 	// The same fingerprint as a thread that has since moved on is a resent request from that
 	// thread's past; the caller then joins it, which is right, since the prefix is the same.

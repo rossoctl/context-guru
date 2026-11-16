@@ -294,9 +294,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- reply id.
   backend                 TEXT    NOT NULL DEFAULT '',
   -- The client compaction verdict (#947, Event.ClientCompaction): 'unknown' on the first request
-  -- after the agent's own compaction, '' on a request the thread tracker saw with none. Nullable,
-  -- no default: NULL is a row the tracker did not see, which includes every row written before
-  -- the column. The replay cap reads NULL as "no verdict" and keeps the older drop detector for it.
+  -- after the main agent's own compaction, '' on a request the thread tracker judged with none.
+  -- Nullable, no default: NULL is a row the tracker did not judge (no session id, no message list),
+  -- which includes every row written before the column. The replay cap reads NULL as "no verdict" and keeps the older drop detector for it.
   client_compaction       TEXT,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter

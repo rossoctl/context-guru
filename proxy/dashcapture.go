@@ -111,7 +111,7 @@ type capture struct {
 	thread    string
 	agentComp bool
 	// compVerdict is the client compaction verdict of this request (#947), set by noteThread;
-	// compKnown says noteThread ran, so "" in compVerdict means none rather than unknown.
+	// compKnown says the tracker judged the request, so "" in compVerdict means none rather than unknown.
 	compVerdict string
 	compKnown   bool
 	// cpoint and cpointSrc are C for this request and where it came from (#948).
@@ -297,7 +297,9 @@ func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
-		c.compVerdict, c.compKnown = string(compactionVerdict(res)), true
+		// A "session" result is the tracker's fallback: no session id, no message list, or a recovered
+		// panic. It judged nothing, so the row keeps no verdict (NULL) and the old rule decides (#947).
+		c.compVerdict, c.compKnown = string(compactionVerdict(res)), res.Source != thread.SourceSession
 	}
 }
 
