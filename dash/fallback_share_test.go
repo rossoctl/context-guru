@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // fbEvent builds an event priced through PriceMode with one mask op. fallback makes the library report the op
@@ -38,11 +39,13 @@ func fbEvents(prefix string, base int64, n int, fallback, record bool) []*Event 
 }
 
 // pricedShare is the share the Overview hero shows (dash/ui/savings.js overviewTotals, with no keep-alive
-// pings): the saving over the priced spend plus the saving.
+// pings): the priced saving over the priced spend plus the priced saving. Both leave the fallback rows out.
 func pricedShare(o *Overview) float64 {
+	fb := o.FallbackSaved
+	saved := o.TotalSavedUSD - (fb.CompactionUSD + fb.DeferUSD + fb.KeepAliveUSD + fb.ReorderUSD + fb.FilterUSD)
 	spent := o.CostUSD + o.CGLLMCostUSD - o.FallbackCostUSD
-	if without := spent + o.TotalSavedUSD; without > 0 {
-		return 100 * o.TotalSavedUSD / without
+	if without := spent + saved; without > 0 {
+		return 100 * saved / without
 	}
 	return 0
 }
@@ -168,5 +171,65 @@ func TestBypassedRequestIsNotAFallback(t *testing.T) {
 	e.RecordAccountantFallback()
 	if e.AccountantFallback() == "" || e.AccFallback != "" {
 		t.Fatalf("AccountantFallback %q, AccFallback %q; want a reason and none stored", e.AccountantFallback(), e.AccFallback)
+	}
+}
+
+// Review of #1173: a fallback row is not always a $0 saving. It keeps the deferral ledger's net and the measured
+// filter credit, and its own model calls make its compaction net negative. Left in the numerator, these moved
+// the share either way, up to 100%. The reads return them by part, so the share is the priced requests' share.
+func TestFallbackSavingIsLeftOutToo(t *testing.T) {
+	db := openTestDB(t)
+	priced := fbEvents("p", 0, 10, false, false)
+	fell := fbEvents("f", 100, 10, true, false)
+	for _, e := range fell {
+		e.CGLLMCostUSD = 0.002
+		e.DeferNetUSD = 0.004 // the ledger net, set before PriceMode, which a fallback leaves alone
+		e.FilteredDeclTokens = 2000
+		e.RecordAccountantFallback()
+	}
+	all := append(append([]*Event(nil), priced...), fell...)
+	if err := db.insertBatch(all); err != nil {
+		t.Fatal(err)
+	}
+	var sessions []string
+	for _, e := range priced {
+		sessions = append(sessions, e.SessionID)
+	}
+	price := func(string) (modelinfo.Price, bool) { return accTestPrice, true }
+	full := func(f Filter) *Overview {
+		o, err := db.Overview(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := db.DeclCreditFor(f, price)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.SetDeclCredit(c)
+		return o
+	}
+	alone := full(Filter{TenantAll: true, SessionIn: sessions})
+	o := full(Filter{TenantAll: true})
+	fb := o.FallbackSaved
+	if math.Abs(fb.DeferUSD-0.04) > 1e-9 || math.Abs(fb.CompactionUSD+0.02) > 1e-9 || fb.FilterUSD <= 0 {
+		t.Fatalf("fallback_saved %+v: want defer 0.04, compaction -0.02 (the model calls), filter > 0", fb)
+	}
+	if math.Abs(fb.FilterUSD-o.DeclFilterUSD) > 1e-9 {
+		t.Fatalf("filter part %v, want the whole credit %v: only the fallback rows filtered", fb.FilterUSD, o.DeclFilterUSD)
+	}
+	if a, b := pricedShare(alone), pricedShare(o); a <= 0 || math.Abs(a-b) > 1e-9 {
+		t.Fatalf("share priced only %.4f%%, with fallback rows %.4f%%: want equal and > 0", a, b)
+	}
+	// The lean read (the hero's first paint) carries the same count, cost and SQL parts. It has no filter part,
+	// because it has no filter credit either.
+	lean, err := db.OverviewLean(Filter{TenantAll: true, Since: 1}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lean.FallbackRequests != o.FallbackRequests || math.Abs(lean.FallbackCostUSD-o.FallbackCostUSD) > 1e-9 ||
+		math.Abs(lean.FallbackSaved.DeferUSD-fb.DeferUSD) > 1e-9 || math.Abs(lean.FallbackSaved.CompactionUSD-fb.CompactionUSD) > 1e-9 ||
+		lean.FallbackSaved.FilterUSD != 0 {
+		t.Fatalf("lean fallback %d %v %+v, full %d %v %+v", lean.FallbackRequests, lean.FallbackCostUSD, lean.FallbackSaved,
+			o.FallbackRequests, o.FallbackCostUSD, fb)
 	}
 }

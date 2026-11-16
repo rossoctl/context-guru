@@ -965,8 +965,13 @@ var additiveColumns = []struct{ table, column, ddl string }{
 
 // backfillAccFallback marks, ONCE, the rows written before acc_fallback existed whose request fell back. Such a
 // row has a component with priced_by 'none' (PriceMode marks every component of a fallback request so). Its
-// reason was not stored, so it reads 'unrecorded'. A fallback request with no component row cannot be found,
-// and stays empty. Recorded in meta, so a later open skips the scan.
+// reason was not stored, so it reads 'unrecorded'. Recorded in meta, so a later open skips the scan.
+//
+// The rule is close to the live one, not the same. It cannot find a fallback with no component row, or one
+// PriceMode stopped before it marked the components (no usage or no price). And it marks a row the live code
+// leaves empty: one with components but no accountant record (the record panicked and was dropped). Both are
+// rare, and the old rows age out with the dashboard's retention. The update and the meta mark are one
+// transaction, so a stop between them cannot run the update again over rows the new code wrote.
 func backfillAccFallback(db *sql.DB) error {
 	var done string
 	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'acc_fallback_backfilled'`).Scan(&done); err == nil {
@@ -974,12 +979,19 @@ func backfillAccFallback(db *sql.DB) error {
 	} else if err != sql.ErrNoRows {
 		return err
 	}
-	if _, err := db.Exec(`UPDATE requests SET acc_fallback = '` + FallbackUnrecorded + `'
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE requests SET acc_fallback = '` + FallbackUnrecorded + `'
 		WHERE acc_fallback = '' AND id IN (SELECT request_id FROM request_components WHERE priced_by = '` + PricedByNone + `')`); err != nil {
 		return err
 	}
-	_, err := db.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('acc_fallback_backfilled','1')`)
-	return err
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('acc_fallback_backfilled','1')`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
