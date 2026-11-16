@@ -74,9 +74,6 @@ func TestSavings_ReplayedChangeIsPricedOnce(t *testing.T) {
 	fwd2 := body(m0, small, m2, mustMsg("user", "next"))
 	req := c.s.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, client2)
 	c.s.end(req, c.th, fwd2, []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, accFacts)
-	if len(req.Ops) != 1 {
-		t.Fatalf("replayed change must be added, req.Ops = %d", len(req.Ops))
-	}
 	res = c.s.compute(req, usage)
 	if len(res.Checks) != 0 {
 		t.Fatalf("checks = %+v (unique_change must not fire)", res.Checks)
@@ -115,9 +112,6 @@ func TestSavings_ReReportsAfterChangeEnded(t *testing.T) {
 	// Request 3 reports the same ChangeID again: it is added and priced (no filter).
 	req := c.s.begin(accountant.RequestMeta{RequestID: "r3", Session: "s", At: time.Unix(1030, 0), Billing: accountant.Billing{Mode: accountant.BillingAPI}}, body(m0b, big, m2))
 	c.s.end(req, c.th, body(m0b, small, m2), []accountant.Operation{rewriteOp(id, 1, nBig, nSmall)}, accFacts)
-	if len(req.Ops) != 1 {
-		t.Fatalf("ended change must be re-added, req.Ops = %d", len(req.Ops))
-	}
 	res := c.s.compute(req, usage)
 	if len(res.Checks) != 0 {
 		t.Fatalf("checks = %+v", res.Checks)
@@ -139,8 +133,15 @@ func TestSavings_DryRunAndNonRewriteAlwaysAdded(t *testing.T) {
 	spend := accountant.Operation{Kind: accountant.KindSpend, ChangeID: "c1"}
 	req := c.s.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", At: time.Unix(1020, 0)}, body(big))
 	c.s.end(req, c.th, body(big), []accountant.Operation{dry, spend}, accFacts)
-	if len(req.Ops) != 2 {
-		t.Fatalf("req.Ops = %d, want 2", len(req.Ops))
+	res := c.s.compute(req, Usage{FreshInput: 10})
+	dryOps := 0
+	for _, o := range res.Ops {
+		if o.DryRun {
+			dryOps++
+		}
+	}
+	if len(res.Ops) < 2 || dryOps != 1 {
+		t.Fatalf("both reported operations must be priced, the dry run marked: ops=%d dry=%d", len(res.Ops), dryOps)
 	}
 }
 

@@ -27,7 +27,6 @@ const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "p
 const SESSION_HEADER = "x-context-guru-session";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
-const STRATEGIES = ["auto", "1-ping", "2-ping", "none"];
 const SUBCOMMANDS = ["setup", "status", "preset", "cache-strategy", "update", "uninstall"];
 /** The time limit of each /healthz check at session start (the user's choice). */
 export const START_CHECK_TIMEOUT_MS = 5000;
@@ -235,6 +234,13 @@ export function conflictPrompt(f: Record<string, string>): { title: string; opti
   return { title: parts.join("\n\n"), options, answers };
 }
 
+/** The cache strategy names from the facts of `pi_plugin.py configure --list`. The proxy owns the table, so
+ *  the names come from it. On a proxy that cannot list them, only `none` is offered, and `error` says why. */
+export function strategyChoices(facts: Record<string, string>): { names: string[]; error?: string } {
+  const names = (facts.strategies ?? "").split(",").filter(Boolean);
+  return { names: names.length ? names : ["none"], error: facts.strategy_error || undefined };
+}
+
 /** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
 export function parseFacts(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -280,6 +286,9 @@ export default function contextGuru(pi: ExtensionAPI) {
   };
 
   const checks = new StartChecks();
+
+  /** The strategy names the proxy offered at the last `cache-strategy` command (for completion). */
+  let strategyNames: string[] = [];
 
   pi.on("session_start", (_event, ctx) => {
     install = readInstall();
@@ -466,7 +475,7 @@ export default function contextGuru(pi: ExtensionAPI) {
     getArgumentCompletions: (prefix) => {
       const [sub, rest] = prefix.split(/\s+/, 2);
       if (rest === undefined) return SUBCOMMANDS.filter((s) => s.startsWith(sub)).map((s) => ({ value: s, label: s }));
-      const values = sub === "preset" ? PRESETS : sub === "cache-strategy" ? STRATEGIES : [];
+      const values = sub === "preset" ? PRESETS : sub === "cache-strategy" ? strategyNames : [];
       return values.filter((v) => v.startsWith(rest)).map((v) => ({ value: `${sub} ${v}`, label: v }));
     },
     handler: async (args, ctx) => {
@@ -482,9 +491,19 @@ export default function contextGuru(pi: ExtensionAPI) {
           return say(ctx, `Presets: ${PRESETS.join(", ")}`);
         }
         case "cache-strategy": {
-          const name = await pick(ctx, "Cache strategy", STRATEGIES, value);
+          const listed = await run(["configure", "--list"], 30_000);
+          if (listed.facts.result === "not_installed") {
+            return say(ctx, "context-guru is not set up for Pi. Run /context-guru setup.");
+          }
+          const { names, error } = strategyChoices(listed.facts);
+          strategyNames = names;
+          if (error) say(ctx, `context-guru: only "none" can be set. ${error}`, "warning");
+          if (value && !names.includes(value)) {
+            return say(ctx, `context-guru: cache strategy ${value} cannot be set. ${error ?? `Offered: ${names.join(", ")}`}`, "error");
+          }
+          const name = await pick(ctx, "Cache strategy", names, value);
           if (name) return configure(ctx, "--cache-strategy", name);
-          return say(ctx, `Cache strategies: ${STRATEGIES.join(", ")}`);
+          return say(ctx, `Cache strategies: ${names.join(", ")}`);
         }
         case "update": {
           const check = (await run(["update", "--check"], 30_000)).facts;

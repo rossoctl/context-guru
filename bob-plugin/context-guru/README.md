@@ -55,6 +55,12 @@ python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --plan
 python3 ~/.bob/plugins/context-guru/scripts/bob_plugin.py setup --i-consent-to-traffic-interception
 ```
 
+Setup uses a `context-guru-proxy` on your PATH, or the plugin's own copy, only if it has the Bob
+gateway, can list its cache strategies (v0.7.1 or later) and is new enough for the preset setup
+writes (`bob-ultrahigh`, the default, needs v0.7.2 or later). It skips any other one, says why in
+`binary_skipped=`, and downloads the latest release. With no network, setup then stops with
+`result=binary_install_failed`; it does not fall back to the skipped proxy.
+
 ### Status bar
 
 Setup also installs a status bar item in Bob: `CG ✓ ctx 21k/270k · cache 1h 54:10 · saved 0`. It
@@ -313,3 +319,5 @@ The hooks always exit 0 within 5 seconds, so they never block Bob.
 
 Bob asks you to approve each command a skill runs. Approve the read-only `status` and
 `--plan`/`--dry-run` commands as you like. Keep setup and uninstall behind a per-run approval.
+
+See the [matrix of plugins, providers and settings](../../docs/reference/plugins-matrix.md) for what each plugin offers per provider.

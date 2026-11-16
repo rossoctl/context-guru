@@ -29,6 +29,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
@@ -72,8 +73,14 @@ type Options struct {
 	ClaudeCompact compactionpoint.ClaudeCode
 	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
 	// start-up in local mode. BobCompact also gives Bob's own default. The zero value changes nothing.
-	BobCompact        compactionpoint.Bob
-	CodexCompact      compactionpoint.Codex
+	BobCompact   compactionpoint.Bob
+	CodexCompact compactionpoint.Codex
+	// MetricsSink, when set, receives each priced request for the push metrics (R46: it must only
+	// add to in-memory counters). Nil means no metrics. Build it with NewMetricsSink.
+	MetricsSink acmetrics.Observer
+	// InferenceMetrics, when set, books each finished request into the common inference set. Nil
+	// means off. Build it with NewInferenceMetrics.
+	InferenceMetrics  *InferenceMetrics
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's
@@ -2307,6 +2314,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// two facts are independent (see Usage.StopReason), and dropping the reason
 				// here would blank stop_reason for exactly the rows already marked partial.
 				usage.StopReason = u.StopReason
+				usage.Backend = u.Backend // as StopReason: a label needs no usage
 			}
 			return
 		}
@@ -2398,6 +2406,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				usage, usageOK = u, true
 			} else {
 				usage.StopReason = u.StopReason // as on the other stream path
+				usage.Backend = u.Backend
 			}
 			return
 		default:
@@ -2412,11 +2421,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
-			u = readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
+		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		// The agent reads its backend label from any reply, with or without usage; its token
+		// reading counts only when the shared parser read usage too.
+		agentU := readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
+		if ok {
+			u = agentU
+		} else {
+			u.Backend = agentU.Backend
+		}
+		if ok {
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
+			usage.Backend = u.Backend       // a reply with no usage still has a backend label
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if di != nil {
@@ -2824,13 +2842,18 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
-	if ok {
+	{
 		// The request's context carries its logger. A test's hand-built response has no request.
 		ctx := context.Background()
 		if resp.Request != nil {
 			ctx = resp.Request.Context()
 		}
-		u = readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
+		agentU := readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
+		if ok {
+			u = agentU
+		} else {
+			u.Backend = agentU.Backend // a reply with no usage still has a backend label
+		}
 	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
@@ -3102,6 +3125,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.ToolDefer = h.deferStats()
 	snap.KeepAlivePingsPriced = h.opts.Pings.Priced()
 	snap.KeepAliveRescueFactsMissing = h.savings.RescueFactsMissing()
+	snap.BobBackend = bob.BackendCounts()
 	json.NewEncoder(w).Encode(snap)
 }
 

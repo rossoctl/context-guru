@@ -8,6 +8,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/proxy"
 )
 
@@ -33,14 +34,11 @@ func tapped(t *testing.T) dash.Event {
 	defer rec.Close()
 	em := &dashEmitter{rec: rec, pings: proxy.NewPingStore()}
 	em.KeepAlivePing(pingReport())
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+	testutil.WaitFor(t, "the recorder tap to see the ping event", func() bool {
 		mu.Lock()
-		n := len(got)
-		mu.Unlock()
-		if n == 1 {
-			break
-		}
-	}
+		defer mu.Unlock()
+		return len(got) == 1
+	})
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 {

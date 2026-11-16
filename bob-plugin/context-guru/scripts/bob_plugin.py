@@ -358,8 +358,9 @@ def binary_problem(path):
     return None
 
 
-def find_binary(reasons=None):
-    """The first context-guru-proxy that has the Bob gateway. Say why each other one is skipped."""
+def find_binary(reasons=None, preset=None):
+    """The first context-guru-proxy that has the Bob gateway, can list its cache strategies and is
+    new enough for `preset`. Say why each other one is skipped."""
     candidates = []
     found = shutil.which(os.environ.get("CONTEXT_GURU_BIN", "context-guru-proxy"))
     if found:
@@ -368,11 +369,38 @@ def find_binary(reasons=None):
         candidates.append(str(managed_binary().resolve()))
     for candidate in dict.fromkeys(candidates):
         problem = binary_problem(candidate)
+        # The strategy check is here, not in binary_problem: doctor and update also call that.
+        if problem is None:
+            try:
+                load_strategy_table(candidate)
+                if version := too_old_for_preset(candidate, preset):
+                    problem = (f"{candidate} is {version}; {preset} needs "
+                               f"{preset_minimum(preset)} or later")
+            except RuntimeError:
+                problem = (f"{candidate} cannot list cache strategies "
+                           f"(needs {STRATEGIES_RELEASE} or later)")
         if problem is None:
             return candidate
         if reasons is not None:
             reasons.append(problem)
     return None
+
+
+def preset_minimum(preset):
+    return "v" + ".".join(map(str, PRESET_MINIMUM_RELEASE[preset]))
+
+
+def too_old_for_preset(binary, preset):
+    """The binary's version when it is older than `preset` needs, else None. A dev build has no
+    release number, so it passes: for it, the restart check in change_and_restart is the guard."""
+    need = PRESET_MINIMUM_RELEASE.get(preset)
+    if not need:
+        return None
+    version = binary_version(binary or "")
+    try:
+        return version if release_version(version) < need else None
+    except RuntimeError:
+        return None
 
 
 def update_hint():
@@ -750,7 +778,13 @@ def _remove_old_rc_block(old_rc, created):
 def _setup_changes(args, shell, rc_file, advice):
     """The part of setup that changes files. Runs under the state lock."""
     skipped = []
-    executable = find_binary(skipped)
+    # The preset write_proxy_config will write: the current one on a re-run, else the default.
+    known_port = record_port(read_record())
+    try:
+        planned_preset = read_preset(known_port) if known_port else DEFAULT_PRESET
+    except RuntimeError:
+        planned_preset = None  # an unmanaged config: write_proxy_config refuses it below
+    executable = find_binary(skipped, planned_preset)
     for reason in skipped:
         facts(binary_skipped=reason)
     if not executable:
@@ -1058,17 +1092,11 @@ def configure(args):
         facts(result="refused", reason="preset_not_allowed_for_bob", preset=args.preset,
               detail=preset_refusal(args.preset))
         return 2
-    if need := PRESET_MINIMUM_RELEASE.get(args.preset):
-        version = binary_version(record.get("binary") or "")
-        try:
-            too_old = release_version(version) < need
-        except RuntimeError:
-            too_old = False
-        if too_old:
-            facts(result="refused", reason="proxy_too_old", preset=args.preset,
-                  detail=f"{args.preset} needs context-guru-proxy v{'.'.join(map(str, need))} or "
-                         f"newer; this one is {version}. Run the update skill first.")
-            return 2
+    if version := too_old_for_preset(record.get("binary"), args.preset):
+        facts(result="refused", reason="proxy_too_old", preset=args.preset,
+              detail=f"{args.preset} needs context-guru-proxy {preset_minimum(args.preset)} or "
+                     f"newer; this one is {version}. Run the update skill first.")
+        return 2
     # none is always valid on Bob, so it needs no table: it works on an older proxy too.
     if args.cache_strategy and args.cache_strategy != "none":
         try:

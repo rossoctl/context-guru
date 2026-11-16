@@ -290,6 +290,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- model asked back for, inserted as a message of its own and sent again on every later turn. 0 when
   -- none was inserted.
   restored_tokens INTEGER NOT NULL DEFAULT 0,
+  -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
+  -- reply id.
+  backend                 TEXT    NOT NULL DEFAULT '',
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -948,6 +951,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
 	// every earlier row: those were not recorded, so they read as no copy.
 	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	// Bob's backend label. Additive: an earlier row has none.
+	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was

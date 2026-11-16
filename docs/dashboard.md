@@ -137,7 +137,7 @@ What the library prices:
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
-`check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
+`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `size_unknown`, `implausible_size`,
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
 measured is not shown.
 
@@ -641,6 +641,9 @@ the dashboard learns it from the stored 5-hour share and token counts (#1047).
 - **`window_ping`.** With `since` (the open window's start, unix ms) and `ok: true`: the tokens the
   cache strategy's pings billed since then, for the Overview estimate.
 - **Cache.** One fit per account for 15 minutes. A page load never fits again.
+- **The plugin's band.** On a subscription the Claude Code band and pane price the next message as a share of the
+  5-hour limit with these weights (#1095). `cg.py` reads the endpoint at most once a minute. See
+  [the band](plugin/statusline.md#the-band).
 - **Fail open.** An error in the read or the fit gives `ok: false`. The pages then show the
   API-price figures.
 
