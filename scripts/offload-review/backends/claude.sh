@@ -61,5 +61,5 @@ backend_run() {
   fi
   [ -z "${OFFLOAD_CLAUDE_MODEL:-}" ] || model=(--model "$OFFLOAD_CLAUDE_MODEL")
   claude -p "$(cat "$prompt")" --permission-mode bypassPermissions \
-    --max-turns "${OFFLOAD_MAX_TURNS:-200}" "${model[@]}" "${sess[@]}" < /dev/null
+    --max-turns "${OFFLOAD_MAX_TURNS:-200}" ${model[@]+"${model[@]}"} "${sess[@]}" < /dev/null
 }
