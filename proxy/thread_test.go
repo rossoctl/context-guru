@@ -15,6 +15,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 )
@@ -273,6 +274,11 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			// The subagent's first request is a cold start of its own thread, never a prefix
 			// change of the session's (fakeUpstream reads 9000 from cache, so every row is a hit;
 			// the label check lives in dash.TestASubagentsFirstRequestIsAColdStart).
+			// The handler hands a finished request to the keeper in a deferred func, after the
+			// response is on the wire. The client can return before that runs, so wait for it.
+			testutil.WaitForState(t, "the keeper to hold one entry per thread",
+				func() bool { return h.keeper.Stats().Live == 2 },
+				func() string { return fmt.Sprintf("%d entries", h.keeper.Stats().Live) })
 			if got := h.keeper.Stats().Live; got != 2 {
 				t.Errorf("keeper holds %d entries after two threads of two turns each, want 2", got)
 			}

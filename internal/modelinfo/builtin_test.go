@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func bundledMap(t *testing.T) []byte {
@@ -113,11 +114,8 @@ func TestBuiltinBehindLoadedMap(t *testing.T) {
 
 func waitForBuiltinTest(t *testing.T, l *litellm.LiteLLM, model string) {
 	t.Helper()
-	for i := 0; i < 400; i++ {
-		if _, ok := l.Window(context.Background(), model); ok {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("litellm map never loaded (%s never resolved)", model)
+	testutil.WaitFor(t, "the litellm map to load ("+model+" resolved)", func() bool {
+		_, ok := l.Window(context.Background(), model)
+		return ok
+	})
 }
