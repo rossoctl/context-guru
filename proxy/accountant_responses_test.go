@@ -277,6 +277,28 @@ func TestResponsesServerHeldHistoryBooksNoSavingAndSaysWhy(t *testing.T) {
 	}
 }
 
+// A Responses request that falls back stores its reason: the row keeps acc_fallback, so the Overview can
+// count the request. previous_response_id makes the history server-held, which the proxy cannot price.
+func TestResponsesFallbackStoresItsReason(t *testing.T) {
+	up := respUpstream()
+	defer up.Close()
+	h, rec, tap := accHandler(t, up.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	tool := `{"type":"function_call_output","call_id":"c1","output":"` + strings.Repeat("Traceback line here\\n", 300) + `"}`
+	body := `{"model":"gpt-5","previous_response_id":"resp_0","instructions":"` + agentPrefix + `","input":[` + tool + `]}`
+	postN(t, srv, rec, "/openai/v1/responses", "sess-fallback-stored", []string{body, body})
+	evs := tap.all()
+	if len(evs) == 0 {
+		t.Fatal("no events")
+	}
+	for i, e := range evs {
+		if e.AccFallback != dash.FallbackServerHeldHistory {
+			t.Errorf("request %d: stored AccFallback %q, want %q", i+1, e.AccFallback, dash.FallbackServerHeldHistory)
+		}
+	}
+}
+
 // The rule itself: what marks a Responses body as one whose history the provider holds.
 func TestResponsesServerHeldHistoryRule(t *testing.T) {
 	for body, want := range map[string]bool{

@@ -971,7 +971,6 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "acc_fallback", "TEXT NOT NULL DEFAULT ''"},
 }
 
-
 // backfillAccFallback marks, ONCE, the rows written before acc_fallback existed whose request fell back. Such a
 // row has a component with priced_by 'none' (PriceMode marks every component of a fallback request so). Its
 // reason was not stored, so it reads 'unrecorded'. Recorded in meta, so a later open skips the scan.
