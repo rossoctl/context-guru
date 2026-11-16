@@ -307,3 +307,20 @@ func TestTheRequestAfterACompactionCarriesTheVerdict(t *testing.T) {
 		t.Errorf("setup: request 2 is not marked as the compaction request")
 	}
 }
+
+// A declined rebuild forwards the original body (#1179): the request line must show no saving.
+func TestLifecycleLoggerShowsNoSavingWhenTheRebuildIsDeclined(t *testing.T) {
+	var buf bytes.Buffer
+	lg := slog.New(slog.NewTextHandler(&buf, nil))
+	run := &components.RunReport{TokensBefore: 900, TokensAfter: 100}
+	lifecycleLogger(lg, apply.Trace{Run: run, Declined: true}, false, time.Millisecond).Info("x")
+	out := buf.String()
+	if !strings.Contains(out, "tokens_after=900") || !strings.Contains(out, "saved=0") || !strings.Contains(out, "rebuild_declined=true") {
+		t.Fatalf("log line = %q, want tokens_after=900 saved=0 rebuild_declined=true", out)
+	}
+	buf.Reset()
+	lifecycleLogger(lg, apply.Trace{Run: run}, false, time.Millisecond).Info("x")
+	if !strings.Contains(buf.String(), "tokens_after=100") || !strings.Contains(buf.String(), "saved=800") {
+		t.Fatalf("a normal run lost its saving: %q", buf.String())
+	}
+}
