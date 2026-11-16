@@ -355,6 +355,25 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
   type and wait cause. A sharp drop on the day a release goes in, at the same request volume, is
   the alert.
 
+## The summarizer's reserve (`cache_aware_summarizer`, `pre_expiry`)
+
+**Purpose:** on a 1-hour cache, write a summary checkpoint just before the cache expires. Then a user who returns after the cache is cold pays a cheaper prefix. The reserve pays only if a request finds the cache cold, and only if the user returns at all. Source: `docs/components/advanced-offload.md`, "Does the user come back?" (#1143).
+
+- **The cold point:** about minute 119 on a 1-hour cache, not minute 60, because the summary call and later pings renew the cache.
+- **Break-even return rate (#1143):** about **1%** when the summary call replaces a keep-alive ping (the usual case), about **10%** when no ping would have run.
+
+| # | Kind | Statement | Signal | Threshold (proposed) | Baseline |
+|---|---|---|---|---|---|
+| R1 | intent | The user comes back often enough after a long idle for the reserve to pay. | Per thread type: long idles (no real request on the thread for 119 min or more), and the share where the same thread sends another real request later | main or sub below the break-even: 1% (ping replaced) or 10% (no ping) | #1143 (one developer, Nov 8–15): main **39 of 80 (49%)**, sub **8 of 48 (17%)**. Laptop, Nov 8–16, counting a thread's last request as "never back": main 43 of 144 (30%), sub 18 of 147 (12%) |
+| R2 | intent | The reserve pays for itself. | Cost: `extraction_calls` with `component = 'cache_aware_summarizer'` (`cost_usd`). Saving: `request_components.saved_usd` for that component on the cold return | net below $0 over 7 days, per thread type | laptop Nov 8–16: the component acted 0 times in 7,881 runs; no summary calls |
+| R3 | side effect | The refresh rule does not refresh too seldom or too often. | `/stats` `keepalive.keepalive_summary_substitute_refresh_paid` against `..._refresh_not_worth_it`; `keepalive_summary_substituted`, `..._failed`, `..._over_budget` | the share of `refresh_not_worth_it` rising week over week. The known error (a) in #1143 makes the rule refresh too seldom | laptop: all 0 |
+| R4 | side effect | Reserves on subagents do not cost more than they return. | R2 split by thread type | subagent net below $0 over 7 days | #1143: 69% of subagents never came back |
+
+- **The definition of "came back" changes the rate.** #1143 counts only idles that a later request ends. The laptop baseline above also counts a thread that ended, which pulls the rate down. The monitor must use one definition. Proposal: the #1143 one, with "never back" counted apart, as a separate figure.
+- **On a subscription,** a saving is worth something to the user only near the plan limit (#1143). Report R2 apart for API-key and subscription accounts.
+- **Gap G13:** the dashboard does not record when a reserve was written, or which later request used it. R2 joins the summary call to the cold return by thread and time. A field on the cold-return row ("reserve used", with its age) would make R2 one query.
+- **Owner:** David Amid (proposed).
+
 ## Cross-component invariants
 
 | # | Statement | Signal | Threshold (proposed) | Baseline |
@@ -397,11 +416,12 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 | G6 | Tool deferral disables, by reason (T1, T2, T4). The signals are on main (#900, 44f8318d). This gap closes when the next release ships. T4 needs the log, because the dashboard database does not store a disable. | Ship the next release. Optional: a disable flag on the `requests` row, so T4 is one query. | No |
 | G11 | The proxy has no counter of pings that went out but were never priced. | An upstream counter, in a separate PR. | No |
 | G12 | **Partly closed by #1137** (the `too_large` refusals and the manual-hold evictions get counters). Still open: the other skip reasons. The keeper's skip reason (`too large`, `below limits`, `over budget`, `no entry`, and others). It lives only in the keeper's memory and the cache-state endpoint. `/stats` and the database do not show it by reason, so a thread that is never pinged shows only an empty `keepalive_strategy_id`. On a hosted deployment, one 875k-token thread went 2 days with no ping (`too large`, #1100), and it took 3 investigations to find the reason. | Count skips by reason in `/stats` and as `cg_keepalive_skipped_total{reason}`. Also write the reason on the real request row (for example `keepalive_skip_reason`), so K2 and K10 can split misses by reason. | No |
+| G13 | Which cold return used a summarizer reserve, and how old the reserve was (R2). | A field on the request row: reserve used, with its age. | No |
 
 ## Monitor spec (draft)
 
 - **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, K12, K13, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
-- **Weekly:** K2, K5, K14, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
+- **Weekly:** K2, K5, K14, R1, R2, R3, R4, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
   last run, and `OK` or `BREACH`.
