@@ -339,6 +339,7 @@ export const register: Register = on => {
     const isShare = price.kind === 'share'
     // A cold figure left in tokens (the fit did not learn that write tier) carries no `of 5h`.
     const coldShare = price.kind === 'share' && !price.coldIsTokens
+    // Below 80 columns `5h` leads the row only when a share follows it: a lone token figure gets plain `next`.
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -353,7 +354,7 @@ export const register: Register = on => {
           {m.isWarm && (warm !== undefined || cold !== undefined) && (
             // No figure, no label: a bare `next message` says nothing.
             <Text>
-              <Text dimColor>{narrow ? (isShare ? 'next 5h ' : 'next ') : 'next message '}</Text>
+              <Text dimColor>{narrow ? (isShare && (warm !== undefined || coldShare) ? 'next 5h ' : 'next ') : 'next message '}</Text>
               {warm !== undefined && <Text color={warmColor}>{warm}</Text>}
               {warm !== undefined && isShare && !narrow && <Text dimColor> of 5h</Text>}
               {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{coldShare && !narrow && warm === undefined ? ' of 5h' : ''}{narrow ? ' cold' : ' if cold'}</Text>}
