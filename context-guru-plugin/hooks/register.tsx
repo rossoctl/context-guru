@@ -336,6 +336,7 @@ export const register: Register = on => {
     const coldColor = price.kind === 'tokens' ? price.color : 'warning'
     // The share's unit. Below 80 columns it moves in front (`next 5h ≈0.1% · ≈1.5% cold`), so row 1 still fits 60
     // columns with the longest next-ping hint.
+    // Below 80 columns `5h` leads the row only when a share follows it: a lone token figure gets plain `next`.
     const isShare = price.kind === 'share'
     // A cold figure left in tokens (the fit did not learn that write tier) carries no `of 5h`.
     const coldShare = price.kind === 'share' && !price.coldIsTokens
@@ -353,7 +354,7 @@ export const register: Register = on => {
           {m.isWarm && (warm !== undefined || cold !== undefined) && (
             // No figure, no label: a bare `next message` says nothing.
             <Text>
-              <Text dimColor>{narrow ? (isShare ? 'next 5h ' : 'next ') : 'next message '}</Text>
+              <Text dimColor>{narrow ? (isShare && (warm !== undefined || coldShare) ? 'next 5h ' : 'next ') : 'next message '}</Text>
               {warm !== undefined && <Text color={warmColor}>{warm}</Text>}
               {warm !== undefined && isShare && !narrow && <Text dimColor> of 5h</Text>}
               {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{coldShare && !narrow && warm === undefined ? ' of 5h' : ''}{narrow ? ' cold' : ' if cold'}</Text>}
