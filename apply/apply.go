@@ -2019,7 +2019,8 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		bi, _, ok := splitSlotPath(slots[k].path)
 		return bi, ok
 	}
-	// byteMatch[i] is the slot that kept message i matches by bytes, or -1. It is chosen from the END of
+	// byteMatch[i] is the slot that kept message i matches by bytes, or -1 when no slot matches (a tool message, matched by
+	// its tool_call_id below, or a new message such as the summary). It is chosen from the END of
 	// the transcript back, each message taking the LAST unused slot with the same bytes at or before the
 	// body index of the kept message after it. A kept message therefore maps to the latest identical body
 	// message, never to an early removed one with the same bytes, and the kept order is the original
