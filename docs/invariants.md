@@ -384,6 +384,8 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 | X4 | A request labelled `hit` read its cache. | `cache_miss_reason = 'hit'` and `cache_write > cache_read + 10000` | 0, except a first request of a thread | **34 later requests; 3 in W2** (B2) |
 | X5 | A component's own action is not followed by another component's cost. | Q2 generalized: for each request kind, the miss rate of the next request in the thread | to define | to measure |
 | X6 | The savings share of each thread type does not fall after a release. | per week, by thread type (main or subagent): `1 − sum(cost_usd) / sum(baseline_cost_usd)` on real requests | a drop of more than 3 points against the week before the release | see the #1040 case |
+| X7 | **A saving that the pipeline claims is really sent** (#1179, fix #1181). | (1) The WARN log line `rebuilt messages break the wire order; forwarding the original`. (2) `acc_fallback ... reason=ops_dropped` on a request whose `cg.component` line has `verdict=acted` and saved > 0. (3) In the DB: a request where a component that changes the message count (`cache_aware_summarizer`, `summarize`, `extract_llm_sweep`, `collapse`, `agentdiet`) has `acted=1` and `tokens_after` < 50% of `tokens_before`, but the billed input (`fresh_input + cache_read + cache_write`) did not fall against the previous real request of the same session, thread and model. Any one signal is enough. | (1) or (2): any. (3): 2 or more a day | laptop 2026-11-16 (v0.7.3): (1) **27**, (2) **32**, (3) **18 of 19**. All other days: 0 |
+| X8 | A working summary makes the context smaller after one turn. | Per thread: the summarizer acts on 3 or more turns in a row while the billed input stays above 0.9 of the model's window | any thread | laptop: 0 threads. #1179 was not caught at 0.9, so the threshold needs tuning (try 0.8) |
 
 ## Suspected breaches
 
@@ -420,7 +422,7 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, K12, K13, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, K12, K13, X7, X8, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
 - **Weekly:** K2, K5, K14, R1, R2, R3, R4, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
