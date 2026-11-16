@@ -65,8 +65,8 @@ func TestEveryInventoryTileHasAnExplanation(t *testing.T) {
 	if len(keys) == 0 {
 		t.Fatal("found no tile() calls in tools.js; this check needs rewriting")
 	}
-	// The entries tools.js adds to app.js's registry, plus anything app.js defines itself —
-	// a key may legitimately be explained in either file.
+	// The entries tools.js adds to the registry, plus anything app.js or its tab files
+	// (TILE_INFO is in tabs/overview.js) define — a key may legitimately be explained in either.
 	registry := src + readApp(t)
 	for k := range keys {
 		if !strings.Contains(registry, "'"+k+"': {") {
@@ -194,20 +194,9 @@ func readUI(t *testing.T, name string) string {
 // A static check earns its keep here because the failure is invisible three ways at once: the
 // page renders, the tests pass, and the dead copy looks like the live one.
 func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
-	// KNOWN EXCEPTION — ui/app.js:kv. A pre-existing duplicate of exactly this shape, found by
-	// this check and deliberately not fixed here.
-	//
-	// app.js defines kv() at ~2929 and ~6644. The later wins; the two bodies differ only in how
-	// they pass their text (`text: k` vs a child node, `v` vs `String(v)`), so there is no visible
-	// defect today. It is recorded rather than repaired because it sits ~3,700 lines from anything
-	// this change touches, and a silent edit to a shared helper is how an unrelated regression gets
-	// attributed to the wrong commit.
-	//
-	// TO CLEAR IT: keep one definition, delete the other, drop this entry. Everything a tracking
-	// issue would need is in this comment on purpose — the change that found it could not file one
-	// (an outbound write it had no authorisation for), and a finding whose only record is a review
-	// thread is a finding that evaporates.
-	known := map[string]bool{"ui/app.js:kv": true}
+	// This check finds a duplicate inside one file. A function defined in two different files
+	// (for example two files under ui/tabs/) is caught by
+	// TestDashboardScriptsDeclareEachTopLevelNameOnce in uiglobals_test.go.
 	def := regexp.MustCompile(`(?m)^function ([A-Za-z_$][\w$]*)\s*\(`)
 	// Every classic script on the page, not just the two this check originally scanned.
 	// kvcache.js and campaigns.js were outside it while sharing ONE global scope with
@@ -223,7 +212,7 @@ func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
 		// holds only an async function, which this pattern does not match.
 		found += len(seen)
 		for fn, n := range seen {
-			if n > 1 && !known[name+":"+fn] {
+			if n > 1 {
 				t.Errorf("%s defines %s() %d times.\n"+
 					"The later definition silently wins and the earlier one becomes unreachable "+
 					"code that still reads as live. This is how the prompt-text reveal came to be "+

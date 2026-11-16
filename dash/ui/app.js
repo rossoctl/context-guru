@@ -2425,7 +2425,7 @@ async function loadOptions() {
   return account.options;
 }
 
-// ── wiring ─────────────────────────────────────────────────────────────────
+// ── account gate wiring ────────────────────────────────────────────────────
 
 function initAccounts() {
   $('#gate-tab-signin').addEventListener('click', () => {

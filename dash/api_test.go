@@ -561,7 +561,7 @@ func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
 	// renderSavedLedger reads the provider figure exactly once, to recover the input price for the
 	// keep-alive token estimate. It is never displayed; a second use would need a second look.
 	if n := strings.Count(src, "o.cache_saved_usd"); n != 1 {
-		t.Errorf("o.cache_saved_usd appears %d times in app.js, want the single read in renderSavedLedger", n)
+		t.Errorf("o.cache_saved_usd appears %d times in app.js and the tab files, want the single read in renderSavedLedger", n)
 	}
 }
 

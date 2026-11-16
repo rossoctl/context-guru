@@ -503,7 +503,7 @@ func TestTheTwoKindsOfCostlyPingAreNotOneNumber(t *testing.T) {
 // substring match, and a substring match cannot see an identifier that is no longer declared.
 //
 // Scoped to SCREAMING_SNAKE_CASE names because that is this codebase's module-constant
-// convention, and those are exactly the ones an appended view borrows from app.js (TILE_INFO,
+// convention, and those are exactly the ones an appended view borrows from app.js and its tab files (TILE_INFO,
 // SERIES, DIMS) or declares for itself. Comments and string literals are stripped first, or the
 // direction word 'MORE' and every data-testid would read as an undefined reference.
 func TestAppendedViewsReferenceNoConstantThatDoesNotExist(t *testing.T) {
@@ -524,7 +524,7 @@ func TestAppendedViewsReferenceNoConstantThatDoesNotExist(t *testing.T) {
 			if have[name] || globals[name] {
 				continue
 			}
-			t.Errorf("%s references %s, which nothing declares in it or in app.js. A reference to "+
+			t.Errorf("%s references %s, which nothing declares in it, in app.js or in a tab file. A reference to "+
 				"a removed constant parses fine and throws at run time, so the panel that touches "+
 				"it renders an error while the rest of the page looks perfect.", view, name)
 			have[name] = true // report each name once
