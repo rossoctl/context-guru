@@ -1527,7 +1527,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			// pricing it needs a.pricer — Overview() returns before this figure exists, the
 			// same reason DeclCreditFor's addition below happens out here too. Leaving it out
 			// was the actual inconsistency, not a deliberate scoping choice: the page's own
-			// "Prefix-cache savings" tile (dash/ui/app.js) already adds CachesplitSavedUSD and
+			// "Prefix-cache savings" tile (dash/ui/tabs/overview.js) already adds CachesplitSavedUSD and
 			// this historical figure together and calls the sum ours — the headline total
 			// should agree with the tile two inches to its right, not exclude half of it.
 			o.TotalSavedUSD += cachesplitHist.USD

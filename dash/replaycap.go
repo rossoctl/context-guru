@@ -214,6 +214,12 @@ type capRow struct {
 	// AgentCompaction marks the agent's own compaction request (isAgentCompaction). Either flag is
 	// the evidence that a drop in tokens_before is the client compacting.
 	AgentCompaction bool
+	// Verdict is the client compaction verdict the proxy stored (#947): "unknown" (later "manual" or
+	// "auto") on the first request after a compaction, "" for none. HasVerdict is false on a row
+	// that has none (NULL: written before the column, or not seen by the thread tracker). A row with
+	// a verdict closes the epoch by it alone. A row without one keeps the drop detector.
+	Verdict    string
+	HasVerdict bool
 	// CPoint and CPointSource are the user's own C on this row (#948); 0 and "" when the table set it.
 	CPoint       int
 	CPointSource string
@@ -229,9 +235,13 @@ func sameConv(a, b *capRow) bool {
 
 // walkReplayCap runs the rule over rows ordered by (tenant, session, model, ts, id).
 //
-// A drop in tokens_before is a client compaction only when the agent's compaction request went
-// by since the previous turn of that conversation and the transcript does not come back within a
-// few turns. A drop alone is not enough: a subagent shares
+// A row with a stored verdict (#947) is a client compaction when the verdict says so, and only then.
+// The proxy's thread tracker made it: it marks the request that takes over the compacting thread,
+// so a subagent's smaller transcript is never one (#585).
+//
+// For a row without a verdict, a drop in tokens_before is a client compaction only when the agent's
+// compaction request went by since the previous turn of that conversation and the transcript does
+// not come back within a few turns. A drop alone is not enough: a subagent shares
 // the session and the model, its transcript is smaller, and the turns interleave. On the
 // large real dataset most drops were that, not a compaction.
 func walkReplayCap(rows []capRow, window windowFn) *ReplayLedger {
@@ -360,8 +370,12 @@ func walkCapConversation(conv []capRow, window windowFn, point pointFn, compacti
 	}
 	var prevBefore, prevTS int64
 	for i, r := range conv {
-		if prevBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevBefore &&
-			compactionBetween(compactionTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore) {
+		compacted := r.HasVerdict && r.Verdict != ""
+		if !r.HasVerdict {
+			compacted = prevBefore > 0 && r.TokensBefore > 0 && r.TokensBefore < prevBefore &&
+				compactionBetween(compactionTS, prevTS, r.TS) && !recovers(conv[i+1:], prevBefore)
+		}
+		if compacted {
 			// A real compaction, from any state: both worlds carry the summary from here.
 			closeEpoch(capClientCompaction, r.TokensBefore)
 			out.ClosedClientCompaction++
@@ -449,7 +463,7 @@ func (l *ReplayLedger) addAvoided(model string, ceiling float64) { // its summar
 // or one with NULLs). summarize has its own ledger. The join is by request id, so a session-scoped
 // call touches only that session's component rows.
 const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypassed, r.agent_compaction, r.tokens_before,
-		r.compaction_point, r.compaction_point_source,
+		r.compaction_point, r.compaction_point_source, r.client_compaction,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
 		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> ''
@@ -546,12 +560,12 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		var id int64
 		var r capRow
 		var bypassed, agentComp int
-		var comp sql.NullString
+		var comp, verdict sql.NullString
 		var gross, unique sql.NullInt64
 		var usd, first sql.NullFloat64
 		var acc sql.NullBool
 		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &agentComp, &r.TokensBefore,
-			&r.CPoint, &r.CPointSource, &r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
+			&r.CPoint, &r.CPointSource, &verdict, &r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
 			&comp, &gross, &unique, &usd, &first, &acc); err != nil {
 			return nil, err
 		}
@@ -572,6 +586,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 			}
 			r.Bypassed = bypassed != 0
 			r.AgentCompaction = agentComp != 0
+			r.Verdict, r.HasVerdict = verdict.String, verdict.Valid
 			buf = append(buf, r)
 			lastID = id
 		}

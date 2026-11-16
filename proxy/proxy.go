@@ -1550,37 +1550,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
-			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
-			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
-			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
-			// sent. An empty session means the pipeline did not run (bypassed, observe, no
-			// messages): there are no operations to price, so the request is skipped.
-			//
-			// Not on the OpenAI Responses wire: it keeps the conversation in `input`, accBodies hashes
-			// `messages`, and apply reports no operations there. The record would price nothing and fail the
-			// library's sum check. The event is marked instead, so the dashboard says why it has no saving.
-			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) {
-				cp.accUnsupportedWire = true
-			} else if cp != nil && cp.savings != nil && tr.Session != "" {
-				cp.accBegin(accountant.RequestMeta{
-					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
-					Session:   tr.Session,
-					Model:     gjson.GetBytes(orig, "model").String(),
-					At:        cp.start,
-					// The proxy has no subscription detection, so every request is billed as api.
-					Billing: accountant.Billing{Mode: accountant.BillingAPI},
-				}, orig)
-			}
-			// A real request has arrived on this session: cancel any pending keep-alive
-			// (this request refreshes the entry itself, and a ping concurrent with it would
-			// be a second request against the tenant's budget for nothing), and pick up what
-			// the pings during the idle span it just ended actually did. Both facts are
-			// needed BEFORE the row is priced — the ping count and the tokens the last ping
-			// refreshed are inputs to a dollar figure, not just a label.
-			//
-			// Per THREAD of the session (#423): the main agent, each subagent and each fork
-			// have their own cache entry, and only this request's thread was refreshed. Read
-			// off `orig`, the request as the agent sent it — the pipeline's own rewrite would
+			// The thread is known before the savings tracker is told of the request: the first request
+			// after the agent's own compaction is found here (thread.Result.AfterCompaction, #947).
+			// Read off `orig`, the request as the agent sent it — the pipeline's own rewrite would
 			// break the prefix the fallback matches on.
 			th := tr.Thread
 			if !tr.ThreadResolved {
@@ -1590,6 +1562,32 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
+			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
+			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
+			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
+			// sent. An empty session means the pipeline did not run (bypassed, observe, no
+			// messages): there are no operations to price, so the request is skipped.
+			//
+			// Not for an OpenAI Responses request whose history the provider holds (previous_response_id,
+			// conversation, item_reference; see responsesServerHeldHistory): the body is only this turn. The record would compare that delta with the last full
+			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
+			// the dashboard says why it has no saving (#899).
+			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
+				responsesServerHeldHistory(orig) {
+				cp.accServerHeldHistory = true
+			} else if cp != nil && cp.savings != nil && tr.Session != "" {
+				cp.accBegin(accountant.RequestMeta{
+					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
+					Session:   tr.Session,
+					Model:     gjson.GetBytes(orig, "model").String(),
+					At:        cp.start,
+					// The proxy has no subscription detection, so every request is billed as api.
+					Billing: accountant.Billing{Mode: accountant.BillingAPI},
+					// The first request after the agent's own compaction (R55). The wire does not yet tell
+					// a manual /compact from an auto compaction, so the verdict is unknown.
+					Compaction: compactionVerdict(th),
+				}, orig)
+			}
 			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
 			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
 			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
@@ -1599,6 +1597,15 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// The alias derivation needs the pipeline that transforms THIS body, and the
 			// wire dialect and bypass flag it transforms under — see noteAliasSource.
 			cp.noteAliasSource(tn.Pipe, api, bypassed)
+			// A real request has arrived on this session: cancel any pending keep-alive
+			// (this request refreshes the entry itself, and a ping concurrent with it would
+			// be a second request against the tenant's budget for nothing), and pick up what
+			// the pings during the idle span it just ended actually did. Both facts are
+			// needed BEFORE the row is priced — the ping count and the tokens the last ping
+			// refreshed are inputs to a dollar figure, not just a label.
+			//
+			// Per THREAD of the session (#423): the main agent, each subagent and each fork
+			// have their own cache entry, and only this request's thread was refreshed.
 			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
 			if cp != nil {
 				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())

@@ -178,7 +178,7 @@ const (
 	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
 	FallbackDuplicateName      = "duplicate_name"       // two rows share a component name
 	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
-	FallbackUnsupportedWire    = "unsupported_wire"     // the request is on a wire the accountant does not read yet (OpenAI Responses)
+	FallbackServerHeldHistory  = "server_held_history"  // an OpenAI Responses request with previous_response_id: the provider holds the history
 )
 
 // FallbackUnrecorded is requests.acc_fallback on a row written before the column existed whose components say
@@ -187,7 +187,7 @@ const FallbackUnrecorded = "unrecorded"
 
 // RecordAccountantFallback stores AccountantFallback in AccFallback, so the Overview can count the request and
 // leave its cost out of the saving share (#1004). The host calls it only for a request the accountant ran on, or
-// one on a wire it does not read: the same requests it logs as acc_fallback. A request with no record (no
+// one whose history the provider holds (server_held_history): the same requests it logs as acc_fallback. A request with no record (no
 // session, or the pipeline did not run) has nothing to price, so it is not a fallback, and AccFallback stays "".
 //
 // A bypassed request is not a fallback either. The client asked for no context-guru, so its $0 saving is a
@@ -308,8 +308,8 @@ func (e *Event) PriceMode(p modelinfo.Price, accountingComplete bool) {
 // accOverride applies the accountant override, or returns the reason it cannot and changes nothing.
 func (e *Event) accOverride(p modelinfo.Price) string {
 	switch {
-	case e.accUnsupportedWire:
-		return FallbackUnsupportedWire // before no_result: say the real reason, not that nothing was attached
+	case e.accServerHeldHistory:
+		return FallbackServerHeldHistory // before no_result: say the real reason, not that nothing was attached
 	case e.accRes == nil:
 		return FallbackNoResult
 	case e.accOpsDropped != 0:

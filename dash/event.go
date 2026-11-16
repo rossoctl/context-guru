@@ -125,8 +125,8 @@ type Event struct {
 	// accOpsDropped and accObserve qualify accRes (see PriceMode). Unexported: not serialized.
 	accOpsDropped int
 	accObserve    bool
-	// accUnsupportedWire marks a request on a wire the accountant does not read (see SetAccountantUnsupportedWire).
-	accUnsupportedWire bool
+	// accServerHeldHistory marks a request whose history the provider holds (see SetAccountantServerHeldHistory).
+	accServerHeldHistory bool
 	// accFallback is why PriceMode booked no saving (see AccountantFallback).
 	accFallback string
 	// accUnpricedWhy names which cause lies behind accFallback == FallbackUnpriced (see UnpricedWhy).
@@ -470,6 +470,15 @@ type Event struct {
 	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
 	// reply's id shape and usage fields. The id itself is never stored.
 	Backend string `json:"backend,omitempty"`
+	// ClientCompaction is the client compaction verdict (#947): "unknown" on the first request after
+	// the agent's own compaction (thread.Result.AfterCompaction), "" on any other request. The
+	// proxy sends the same verdict to the accountant (RequestMeta.Compaction). The replay cap
+	// closes an epoch on a row that carries one.
+	ClientCompaction string `json:"client_compaction,omitempty"`
+	// ClientCompactionKnown says the thread tracker judged this request (by prefix or by header), so
+	// ClientCompaction is a verdict and "" means "no compaction". When false the row stores NULL: no
+	// verdict. That includes the tracker's session fallback: no session id, no message list, a panic.
+	ClientCompactionKnown bool `json:"-"`
 	// AccFallback is why the accountant library could not price this request (a Fallback* reason, or
 	// FallbackUnrecorded on a back-filled row). "" when it priced the request, or never ran on it. Set by
 	// RecordAccountantFallback. A row with a reason books its cost and no saving, so the Overview counts it

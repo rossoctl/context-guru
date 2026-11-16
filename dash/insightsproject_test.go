@@ -9,7 +9,7 @@ import (
 func TestTheProjectPickerIsAViewControlAndNotAFilterDimension(t *testing.T) {
 	js := readUI(t, "ui/insights.js")
 	code := stripJSComments(js)
-	app := readUI(t, "ui/app.js")
+	app := readApp(t)
 
 	// 1. It must not join the shared filter dimensions. DIMS drives the filter bar, the URL hash
 	//    and the removable chips, and navhash.test.mjs asserts that list is EXACTLY fourteen

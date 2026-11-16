@@ -293,6 +293,11 @@ CREATE TABLE IF NOT EXISTS requests (
   -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
   -- reply id.
   backend                 TEXT    NOT NULL DEFAULT '',
+  -- The client compaction verdict (#947, Event.ClientCompaction): 'unknown' on the first request
+  -- after the main agent's own compaction, '' on a request the thread tracker judged with none.
+  -- Nullable, no default: NULL is a row the tracker did not judge (no session id, no message list),
+  -- which includes every row written before the column. The replay cap reads NULL as "no verdict" and keeps the older drop detector for it.
+  client_compaction       TEXT,
   -- Why the accountant library could not price this request (Event.AccFallback): a Fallback* reason,
   -- 'unrecorded' on a row back-filled from its components (backfillAccFallback), or '' when the
   -- library priced it or never ran on it. A fallback row books cost and no saving, so the
@@ -958,10 +963,14 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	// Bob's backend label. Additive: an earlier row has none.
 	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
+	// The client compaction verdict (#947). Nullable, no default: NULL says the row has no verdict,
+	// which is true of every earlier row.
+	{"requests", "client_compaction", "TEXT"},
 	// Why the accountant could not price the request (#1004). '' on an earlier row; backfillAccFallback
 	// marks the earlier rows whose components say they fell back.
 	{"requests", "acc_fallback", "TEXT NOT NULL DEFAULT ''"},
 }
+
 
 // backfillAccFallback marks, ONCE, the rows written before acc_fallback existed whose request fell back. Such a
 // row has a component with priced_by 'none' (PriceMode marks every component of a fallback request so). Its

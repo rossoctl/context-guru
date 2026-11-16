@@ -1039,3 +1039,94 @@ func TestReplayCapASmallCompactionPointClosesAgainAfterItsSummaryGrowsToC(t *tes
 		t.Errorf("cf closes = %d, want 2", l.ClosedCounterfactual)
 	}
 }
+
+// verdictRow is capTestRow with the client compaction verdict the proxy stored (#947).
+func verdictRow(ts, before, removed, billed int64, comp string, usd float64, verdict string) capRow {
+	r := capTestRow(ts, before, removed, billed, comp, usd)
+	r.Verdict, r.HasVerdict = verdict, true
+	return r
+}
+
+// #947: a row with a verdict closes the epoch on that row. The drop detector is not asked: here the
+// transcript comes back within recoveryLookahead turns, which would rule the drop out, and no
+// compaction request is in the rows at all.
+func TestReplayCapClosesOnTheStoredVerdict(t *testing.T) {
+	rows := []capRow{
+		verdictRow(1, 100_000, 10_000, 100_000, "searchfold", 1, ""),
+		verdictRow(2, 120_000, 10_000, 120_000, "searchfold", 1, ""),
+		verdictRow(3, 30_000, 10_000, 30_000, "searchfold", 1, "unknown"), // the first request after it
+		verdictRow(4, 125_000, 10_000, 125_000, "searchfold", 1, ""),
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	if l.ClosedClientCompaction != 1 {
+		t.Fatalf("closed by client compaction = %d, want 1", l.ClosedClientCompaction)
+	}
+	nearEq(t, "past real", l.ByComponent["searchfold"].PastClientCompact, 2)
+}
+
+// #947: a row with a verdict of "" is not a compaction, even where the drop detector would read one:
+// a compaction request went by and the transcript does not come back. That is the #585 case, a
+// thread the tracker tells apart and the drop detector cannot.
+func TestReplayCapAnEmptyVerdictIsNotACompaction(t *testing.T) {
+	summary := verdictRow(3, 130_000, 0, 130_000, "", 0, "")
+	summary.AgentCompaction = true
+	rows := []capRow{
+		verdictRow(1, 100_000, 10_000, 100_000, "searchfold", 1, ""),
+		verdictRow(2, 120_000, 10_000, 120_000, "searchfold", 1, ""),
+		summary,
+		verdictRow(4, 30_000, 10_000, 30_000, "searchfold", 1, ""),
+		verdictRow(5, 40_000, 10_000, 40_000, "searchfold", 1, ""),
+	}
+	l := walkReplayCap(rows, fixedWindow(1_000_000))
+	if l.ClosedClientCompaction != 0 {
+		t.Fatalf("closed by client compaction = %d, want 0: the verdict said none", l.ClosedClientCompaction)
+	}
+	// Control: the same rows with no verdict (written before #947) still close on the drop detector.
+	for i := range rows {
+		rows[i].HasVerdict = false
+	}
+	if l := walkReplayCap(rows, fixedWindow(1_000_000)); l.ClosedClientCompaction != 1 {
+		t.Fatalf("control: rows without a verdict closed %d times, want 1", l.ClosedClientCompaction)
+	}
+}
+
+// #947 through SQL: the verdict is stored, read back, and NULL (a row the tracker did not see) stays
+// apart from "" (none).
+func TestReplayLedgerThroughSQLReadsTheVerdict(t *testing.T) {
+	db := openTestDB(t)
+	mk := func(ts int64, before, after int, known bool, verdict string) *Event {
+		e := mkEvent(ts, "s", "m1", before, after)
+		e.TenantID = "t1"
+		e.FreshInput, e.CacheRead = 1_000, int64(before)
+		e.CacheMissReason = CacheHit
+		e.TokenAccounting = AccountingComplete
+		e.ClientCompaction, e.ClientCompactionKnown = verdict, known
+		e.Components = []CompRow{{Component: "searchfold", Kind: "offload", Acted: true, Mutated: true,
+			SavedGross: before - after, SavedUSD: 1}}
+		return e
+	}
+	if err := db.insertBatch([]*Event{
+		mk(DayMs+1, 100_000, 90_000, true, ""),
+		mk(DayMs+2, 120_000, 110_000, true, ""),
+		mk(DayMs+3, 30_000, 20_000, true, "unknown"), // the first request after the compaction
+		mk(DayMs+4, 40_000, 30_000, false, ""),       // no verdict: NULL
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var null, empty, unknown int
+	if err := db.sql.QueryRow(`SELECT
+		SUM(client_compaction IS NULL), SUM(client_compaction = ''), SUM(client_compaction = 'unknown')
+		FROM requests`).Scan(&null, &empty, &unknown); err != nil {
+		t.Fatal(err)
+	}
+	if null != 1 || empty != 2 || unknown != 1 {
+		t.Fatalf("stored NULL/''/unknown = %d/%d/%d, want 1/2/1", null, empty, unknown)
+	}
+	l, err := db.ReplayLedgerFor(Filter{TenantAll: true}, testWindows{}, handPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.ClosedClientCompaction != 1 {
+		t.Fatalf("closed by client compaction = %d, want 1 (the client_compaction column was not read)", l.ClosedClientCompaction)
+	}
+}
