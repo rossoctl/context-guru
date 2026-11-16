@@ -251,6 +251,35 @@ func TestTheRequestAfterAnAgentCompactionKeepsItsThread(t *testing.T) {
 	}
 }
 
+// #947: only the request that takes over a compacting thread's id is marked AfterCompaction. The
+// compaction request itself, the turns before it, a subagent and the turn after are not.
+func TestOnlyTheRequestAfterACompactionIsMarked(t *testing.T) {
+	tr := testTracker()
+	steps := []struct {
+		agent string
+		body  []byte
+		comp  bool
+		want  bool
+	}{
+		{"", conv("task", "a1", "u2"), false, false},
+		{"agentS", conv("sub"), false, false},
+		{"", conv("task", "a1", "u2", "summarize this conversation"), true, false},
+		{"", conv("summary of everything", "continue"), false, true},
+		{"", conv("summary of everything", "continue", "a3", "u4"), false, false},
+	}
+	for i, s := range steps {
+		if got := tr.Resolve("t\x00s", s.agent, s.body, s.comp).AfterCompaction; got != s.want {
+			t.Fatalf("step %d: AfterCompaction = %v, want %v", i, got, s.want)
+		}
+	}
+	// Control: the same unrelated request with no compaction before it is a new thread, not marked.
+	tr2 := testTracker()
+	tr2.Resolve("t\x00s", "", conv("task", "a1", "u2"), false)
+	if tr2.Resolve("t\x00s", "", conv("summary of everything", "continue"), false).AfterCompaction {
+		t.Fatal("control: a new thread with no compaction before it was marked")
+	}
+}
+
 // Test 7 at the source: the OpenAI chat and Responses dialects group the same way.
 func TestOpenAIAndResponsesDialectsGroupByPrefix(t *testing.T) {
 	chat := func(n int, first string) []byte {

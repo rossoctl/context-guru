@@ -293,6 +293,11 @@ CREATE TABLE IF NOT EXISTS requests (
   -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
   -- reply id.
   backend                 TEXT    NOT NULL DEFAULT '',
+  -- The client compaction verdict (#947, Event.ClientCompaction): 'unknown' on the first request
+  -- after the agent's own compaction, '' on a request the thread tracker saw with none. Nullable,
+  -- no default: NULL is a row the tracker did not see, which includes every row written before
+  -- the column. The replay cap reads NULL as "no verdict" and keeps the older drop detector for it.
+  client_compaction       TEXT,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -953,6 +958,9 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	// Bob's backend label. Additive: an earlier row has none.
 	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
+	// The client compaction verdict (#947). Nullable, no default: NULL says the row has no verdict,
+	// which is true of every earlier row.
+	{"requests", "client_compaction", "TEXT"},
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
