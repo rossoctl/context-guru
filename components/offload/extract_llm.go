@@ -686,8 +686,8 @@ func (e *ExtractLLM) Offload(req *bschemas.BifrostChatRequest, rep *components.R
 	dbg := debugExtractLLM(c)
 	// THE FRACTION IS BEST-EFFORT HERE, and deliberately not held to summarize's standard.
 	//
-	// Trigger.Fires compares min_request_frac against Ctx.PrevBilledInput (the provider's own count
-	// for the session's previous turn) and SKIPS the conjunct when that is 0 — a session's first
+	// Trigger.Fires compares min_request_frac against Ctx.PrevBilledInputThread (the provider's own count
+	// for this thread's previous turn) and SKIPS the conjunct when that is 0 — a session's first
 	// turn, or a host that does not record it. summarize refuses such a turn outright via
 	// FracResolvable, because it is deciding "is this context nearly full" and a wrong answer there
 	// compacts at the wrong size.

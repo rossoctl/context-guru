@@ -393,7 +393,7 @@ func TestTriggerDefaultsUnchanged(t *testing.T) {
 		// whole window. A zero Trigger must fire in either case — it carries no fraction, so
 		// nothing about the fill can reach its decision.
 		for _, billed := range []int{0, window - 1} {
-			c := &components.Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: billed}
+			c := &components.Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: billed, PrevBilledInputThread: billed}
 			if !zero.Fires(&req, c) {
 				t.Fatalf("zero Trigger did not fire at window %d, billed %d; that breaks every "+
 					"config without a trigger: block", window, billed)

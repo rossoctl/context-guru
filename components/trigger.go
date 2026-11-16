@@ -32,7 +32,8 @@ type Trigger struct {
 	// When the window is unknown (0) fractions are ignored and only the absolute thresholds
 	// apply — fully backward compatible.
 	//
-	// MinRequestFrac is compared against Ctx.PrevBilledInput, NOT against
+	// MinRequestFrac is compared against Ctx.PrevBilledInputThread (the request's OWN thread),
+	// NOT against the session's last figure and NOT against
 	// schema.MessagesTokens: a window is stated in the provider's billed units and
 	// MessagesTokens counts message text only, a median 3.38x smaller. See Fires. The per-item
 	// fractions below are floors on a single tool output, where our own tokenizer is both sides
@@ -203,10 +204,12 @@ func (t Trigger) FracResolvable(c *Ctx) bool {
 	}
 	// Three facts, all required, and the third is the one this function was missing when it
 	// shipped. A fraction of the window has to be compared against a figure measured the way
-	// the window is measured — the provider's own billed input — and Ctx.PrevBilledInput is
-	// the only such figure available. 0 means this session has no earlier response to read
-	// from, so the fill is unknown and there is nothing honest to compare.
-	return c != nil && c.CtxWindowExact && c.CtxWindow > 0 && c.PrevBilledInput > 0
+	// the window is measured — the provider's own billed input — and Ctx.PrevBilledInputThread is
+	// the only such figure that belongs to THIS transcript. The session figure is whichever thread
+	// answered last, so a small subagent would read the main thread's fill (#1183). 0 means this
+	// thread has no earlier response to read from, so the fill is unknown and there is nothing
+	// honest to compare.
+	return c != nil && c.CtxWindowExact && c.CtxWindow > 0 && c.PrevBilledInputThread > 0
 }
 
 // frac converts a fraction of the window to an absolute token count (0 if either is unset).
@@ -243,7 +246,7 @@ func frac(f float64, window int) int {
 // way. For a config that sets only one (the common case, and every shipped default) this changes
 // nothing; for one that sets both it is stricter, and honestly so.
 //
-// The fraction is skipped when PrevBilledInput is 0 rather than treated as a zero fill — see
+// The fraction is skipped when PrevBilledInputThread is 0 rather than treated as a zero fill — see
 // FracResolvable, which is the conjunct a caller uses to tell "not full enough" from "cannot
 // tell", and which summarize counts separately.
 //
@@ -272,7 +275,7 @@ func (t Trigger) Fires(req *schemas.BifrostChatRequest, c *Ctx) bool {
 	}
 	denom, billed := 0, 0
 	if c != nil {
-		denom, billed = c.FillDenominator(), c.PrevBilledInput
+		denom, billed = c.FillDenominator(), c.PrevBilledInputThread
 	}
 	if f := frac(t.MinRequestFrac, denom); f > 0 && billed > 0 && billed < f {
 		return false
