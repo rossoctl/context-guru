@@ -419,6 +419,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				// would fail on the messages section. Report it here, as the last operation. Also when
 				// the pipeline's own operations were dropped: the mark is on the wire either way, and
 				// without its operation the sum check fails by the mark's bytes (accountant#70, case C).
+				// Where a dropped change did reach the wire (a wireSizes give-up, or restore copies
+				// whose operations cannot be placed), the report is incomplete with or without the mark;
+				// OpsDropped says so, and the sum check still fails by the dropped changes' bytes.
 				if op, ok := tailOp(res.Body, out); ok {
 					res.Trace.Ops = append(res.Trace.Ops, op)
 				}
@@ -829,7 +832,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// reached the forwarded body (Trace.Ops never describes a rewrite that is not on the wire).
 	// applied: the rewritten body is the one forwarded, which is every mode but observe.
 	wire, applied := wireGroups(slots), mode != components.ModeObserve
-	// giveUp is every return that forwards the original body: no operation is real.
+	// giveUp drops every operation. Most callers forward the original body, so no operation is real.
+	// After a wireSizes failure the rewritten body is forwarded but its sizes cannot be trusted, so no
+	// operation is published for it either; OpsDropped counts what the report leaves out.
 	giveUp := func() {
 		tr.Ops = nil
 		if rr != nil {
@@ -2330,6 +2335,8 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	// splices, which come last in pipeline order. If a copy cannot be placed, none can be trusted.
 	ro, placed := plan.ops(at, gjson.GetBytes(nb, expand.MessagesField(wire)).Array(), dryRun)
 	if !placed {
+		// Unlike the fallback above, the compaction and the copies are on the wire here, so the report
+		// (only the tail mark, added later in BodyOpts) is incomplete and OpsDropped says so.
 		res.Trace.OpsDropped += len(res.Trace.Ops)
 		res.Trace.Ops = nil
 		return res
