@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_bob_plugin import (  # noqa: E402
-    HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
+    FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
 
 LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
 # The proxy's own test runs this exact file through the real pipeline on Bob's route
@@ -474,7 +474,8 @@ class FakeRelease:
 
 
 GOOD_BINARY = ('#!/bin/sh\ncase "$1" in --version) echo "context-guru-proxy v9.9.9" ;; '
-               '--help) echo "  -bob-upstream string" ;; esac\nexit 0\n')
+               '--help) echo "  -bob-upstream string" ;; '
+               f"strategies) echo '{FAKE_STRATEGIES}' ;; esac\nexit 0\n")
 
 
 class UpdateTest(TempHome):
@@ -485,10 +486,14 @@ class UpdateTest(TempHome):
         self.addCleanup(self.proxy.__exit__, None, None, None)
         managed = PLUGIN.managed_binary()
         managed.parent.mkdir(parents=True)
-        fake_binary(managed.parent, "context-guru-proxy v0.5.1 (commit old)")
+        # The oldest proxy setup keeps for the default preset (bob-ultrahigh needs v0.7.2).
+        fake_binary(managed.parent, "context-guru-proxy v0.7.2 (commit old)")
         self.old_bytes = managed.read_bytes()
         os.environ["CONTEXT_GURU_BIN"] = "/nonexistent/context-guru-proxy"
-        with mock.patch.object(PLUGIN, "first_free_port", return_value=self.proxy.port):
+        # Never the real network: setup must keep the managed fake, not download a release.
+        with mock.patch.object(PLUGIN, "first_free_port", return_value=self.proxy.port), \
+             mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=AssertionError("setup must not download")):
             code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
         self.assertEqual(code, 0, out)
 
@@ -507,7 +512,7 @@ class UpdateTest(TempHome):
         before = self.tree()
         code, out, _ = self.run_main("update", "--check")
         self.assertEqual(code, 0, out)
-        self.assertIn("installed_version=v0.5.1\n", out)
+        self.assertIn("installed_version=v0.7.2\n", out)
         self.assertIn("latest_version=v9.9.9\n", out)
         self.assertIn("update_available=true\n", out)
         self.assertEqual(self.tree(), before)
@@ -572,6 +577,102 @@ class UpdateTest(TempHome):
         code, out, _ = self.run_main("update")
         self.assertEqual(code, 2)
         self.assertIn("reason=binary_not_managed", out)
+
+
+class SetupSkipsOldProxyTest(TempHome):
+    """Setup never settles on a proxy that cannot list its cache strategies, or that is too old
+    for the preset setup writes."""
+
+    def setUp(self):
+        super().setUp()
+        self.rc.write_bytes(b"x\n")
+        proxy = FakeProxy().__enter__()
+        self.addCleanup(proxy.__exit__, None, None, None)
+        self.port = proxy.port
+        self.folder = self.root / "brew"
+        self.folder.mkdir()
+
+    def on_path(self, version_line, **kwargs):
+        path = fake_binary(self.folder, version_line, **kwargs)
+        os.environ["CONTEXT_GURU_BIN"] = str(path)
+        return path
+
+    def setup_downloading(self):
+        release = FakeRelease("v9.9.9", GOOD_BINARY)
+        self.addCleanup(release.close)
+        with mock.patch.object(PLUGIN, "RELEASE_BASE", release.base), \
+             mock.patch.object(PLUGIN, "release_platform", return_value=("darwin", "arm64")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=self.port):
+            return self.run_main("setup", "--i-consent-to-traffic-interception")
+
+    def setup_without_download(self):
+        with mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=AssertionError("no download expected")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=self.port):
+            return self.run_main("setup", "--i-consent-to-traffic-interception")
+
+    def assert_downloaded(self, code, out):
+        self.assertEqual(code, 0, out)
+        self.assertIn("binary=installed\nbinary_version=v9.9.9\n", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(PLUGIN.managed_binary()))
+        self.assertEqual(PLUGIN.managed_binary().read_text(), GOOD_BINARY)
+
+    def test_an_old_proxy_on_path_is_skipped_and_setup_downloads_the_latest_release(self):
+        old = self.on_path("context-guru-proxy v0.7.0", lists_strategies=False)
+        code, out, _ = self.setup_downloading()
+        self.assertIn(f"binary_skipped={old} cannot list cache strategies "
+                      "(needs v0.7.1 or later)\n", out)
+        self.assert_downloaded(code, out)
+
+    def test_a_proxy_too_old_for_the_default_preset_is_skipped_and_setup_downloads(self):
+        old = self.on_path("context-guru-proxy v0.7.1")
+        code, out, _ = self.setup_downloading()
+        self.assertIn(f"binary_skipped={old} is v0.7.1; bob-ultrahigh needs v0.7.2 or later\n",
+                      out)
+        self.assert_downloaded(code, out)
+
+    def test_a_proxy_on_path_that_lists_strategies_is_used(self):
+        new = self.on_path("context-guru-proxy v0.7.2")
+        code, out, _ = self.setup_without_download()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(new.resolve()))
+
+    def test_a_dev_build_on_path_is_used(self):
+        new = self.on_path("context-guru-proxy dev")
+        code, out, _ = self.setup_without_download()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(new.resolve()))
+
+    def test_a_rerun_with_preset_lossless_keeps_a_v0_7_1_proxy(self):
+        self.on_path("context-guru-proxy v0.7.2")
+        self.assertEqual(self.setup_without_download()[0], 0)
+        self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
+        older = self.on_path("context-guru-proxy v0.7.1")
+        code, out, _ = self.setup_without_download()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("binary_skipped=", out)
+        self.assertIn("preset=lossless\n", out)
+        self.assertEqual(PLUGIN.read_record()["binary"], str(older.resolve()))
+
+    def test_offline_an_old_proxy_is_not_used_and_setup_fails_clearly(self):
+        old = self.on_path("context-guru-proxy v0.7.0", lists_strategies=False)
+        before = self.tree()
+        with mock.patch.object(PLUGIN, "install_release_binary",
+                               side_effect=RuntimeError("offline")), \
+             mock.patch.object(PLUGIN, "first_free_port", return_value=self.port):
+            code, out, _ = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual(code, 2)
+        self.assertIn(f"binary_skipped={old} cannot list cache strategies", out)
+        self.assertIn("result=binary_install_failed\ndetail=offline\n", out)
+        # Only the state folder and its lock are new; every file that was there is unchanged.
+        after = self.tree()
+        lock = str((PLUGIN.state_dir() / "lock").relative_to(self.root))
+        self.assertEqual({k: v for k, v in after.items() if k in before}, before)
+        self.assertEqual({k for k in after if k not in before and after[k] is not None}, {lock})
+        self.assertFalse(PLUGIN.record_path().exists())
+        self.assertFalse(PLUGIN.launchd_plist().exists())
 
 
 # ---------------------------------------------------------------------------- doctor

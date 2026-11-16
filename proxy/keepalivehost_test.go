@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/tenant"
@@ -175,26 +176,14 @@ func recordTurn(t *testing.T, k *keeper, pol CachePolicy, body string, at time.T
 // waitPings waits until n pings are counted. With the inline runner it returns at once.
 func waitPings(t *testing.T, k *keeper, n int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if k.Stats().Pings >= n {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("pings = %d after 2s, want %d", k.Stats().Pings, n)
+	testutil.WaitForState(t, fmt.Sprintf("%d pings", n), func() bool { return k.Stats().Pings >= n },
+		func() string { return fmt.Sprintf("pings = %d", k.Stats().Pings) })
 }
 
 func waitSkipped(t *testing.T, k *keeper, n int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if k.Stats().Skipped >= n {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("skipped = %d after 2s, want %d", k.Stats().Skipped, n)
+	testutil.WaitForState(t, fmt.Sprintf("%d skipped pings", n), func() bool { return k.Stats().Skipped >= n },
+		func() string { return fmt.Sprintf("skipped = %d", k.Stats().Skipped) })
 }
 
 // syncBuffer is a log sink a background goroutine may write while the test reads it.

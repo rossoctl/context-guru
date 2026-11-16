@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
@@ -251,11 +251,7 @@ func TestWaitAllIsOneBound(t *testing.T) {
 // The seed is made to start before the load (Open runs after it); the load must still win.
 func TestSeedAfterLoadKeepsTheLoadedUses(t *testing.T) {
 	dir := t.TempDir()
-	hdb, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "h.db")+"?_pragma=busy_timeout(5000)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer hdb.Close()
+	hdb := testdb.Open(t, filepath.Join(dir, "h.db"))
 	// The history table holds session a, which used Workflow.
 	m0 := tooldefer.NewMem(hdb)
 	stop0 := m0.Open(time.Hour, nil)
@@ -266,11 +262,7 @@ func TestSeedAfterLoadKeepsTheLoadedUses(t *testing.T) {
 	m0.Observe("t", "a", "/w", tdBody(use), time.Now().UnixMilli())
 	stop0()
 	// The dashboard's inventory has session a too, with no use.
-	sdb, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "d.db")+"?_pragma=busy_timeout(5000)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sdb.Close()
+	sdb := testdb.Open(t, filepath.Join(dir, "d.db"))
 	for _, q := range []string{
 		`CREATE TABLE tool_declarations (tenant_id TEXT, session_id TEXT, kind TEXT, name TEXT, ts INTEGER)`,
 		`CREATE TABLE tool_uses (tenant_id TEXT, session_id TEXT, project TEXT, name TEXT)`,

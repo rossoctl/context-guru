@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +35,16 @@ func TestCGCachestateCarriesTheStatusLinesExtras(t *testing.T) {
 	}
 	if doc["window_asked"] != fmt.Sprint(cachestateWindowStart) {
 		t.Errorf("the window read asked since=%v, want the window's start %d", doc["window_asked"], cachestateWindowStart)
+	}
+}
+
+// The learned 5-hour weights the band reads for its next-message share (#1095): the gate, the one-minute cache and
+// the fail-open rule, in the Python unit tests (scripts/test_cg_weights.py).
+func TestCGFiveHourWeightsPythonTests(t *testing.T) {
+	requireTool(t, "python3")
+	out, err := exec.Command("python3", "-I", "-W", "ignore", filepath.Join("scripts", "test_cg_weights.py")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("test_cg_weights.py: %v\n%s", err, out)
 	}
 }
 

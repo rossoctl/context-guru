@@ -17,7 +17,7 @@ func everyFieldSet(t *testing.T) Usage {
 	u := Usage{
 		Searches: 2, SearchLoaded: []string{"Read"}, SearchDropped: 1, Live: &LiveFacts{},
 		FreshInput: 11, CacheRead: 22, CacheWrite: 33, Output: 44, CacheWrite1h: 5,
-		StopReason: "stop", ToolUseNames: []string{"Bash"}, ToolUseIncomplete: true,
+		StopReason: "stop", Backend: "A", ToolUseNames: []string{"Bash"}, ToolUseIncomplete: true,
 	}
 	v := reflect.ValueOf(u)
 	for i := range v.NumField() {
@@ -48,15 +48,16 @@ type fixedTokens struct {
 
 func (f fixedTokens) ReadUsage(string, []byte, agent.Usage) agent.Usage { return f.u }
 
-// The agent owns the token counts only. Every other field stays as the shared parser read it.
+// The agent owns the token counts and the backend label only. Every other field stays as the shared parser read it.
 func TestReadAgentUsageTakesOnlyTheTokenCountsFromTheAgent(t *testing.T) {
 	base := everyFieldSet(t)
-	ag := fixedTokens{u: agent.Usage{FreshInput: 1, CacheRead: 2, CacheWrite: 3, CacheWrite1h: 4, Output: 5}}
+	ag := fixedTokens{u: agent.Usage{FreshInput: 1, CacheRead: 2, CacheWrite: 3, CacheWrite1h: 4, Output: 5, Backend: "B"}}
 
 	got := readAgentUsage(context.Background(), ag, "application/json", nil, base)
 
 	want := base
 	want.FreshInput, want.CacheRead, want.CacheWrite, want.CacheWrite1h, want.Output = 1, 2, 3, 4, 5
+	want.Backend = "B"
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("readAgentUsage = %+v, want %+v", got, want)
 	}

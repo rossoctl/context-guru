@@ -191,6 +191,7 @@ thing and is counted separately. See [when the tiers read zero](#when-the-tiers-
 |---|---|
 | `fresh_input_tokens` · `cache_read_tokens` · `cache_write_tokens` · `output_tokens` | The four billed tiers. |
 | `usage_unparsed` | Responses that carried a usage block in a **spelling this proxy does not recognise**, so the four tiers above were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider. Counts **responses**, not requests — one request can drive several upstream rounds through the expand loop — so do not read it as a fraction of `requests`. |
+| `bob_backend` | Replies on Bob's model route by backend: `{A, B, other, none, id_no_usage}`. `A` and `B` count tokens differently, so compare presets on one backend only. `other` means the reply's marks match neither backend, and the proxy logs `cg.bob_backend_unknown` once per new kind of shape. A new backend whose id does not start with `chatcmpl-` and that sends no cache-write fields reads as `B`, with no alarm. `none` is a reply with no id or no usage, or one of Bob's helper calls (model `security` or `router`), with or without usage. Each request row has the same label in `backend` on `/api/requests`. `id_no_usage` counts the `none` replies that have an id but no usage block, to measure how often that happens. |
 | `usage_unreadable` | Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window rather than an unrecognised dialect. Different fix; see below. |
 | `attempted_tokens` | What compaction was **allowed** to touch this window — the uncached tail when cache-aware. |
 | `frozen_tokens` | What cache-awareness deliberately left alone. Its benefit is the cache reads that stayed cheap; this is its cost. |
@@ -398,6 +399,17 @@ same snapshot.
     already reference it). **Never wrap them in `rate()` or `increase()`** — both read a
     fall as a counter reset and extrapolate a spike at exactly the moment the value went
     down. For a per-second rate use the process-wide `cg_*` counters, which are monotonic.
+
+#### Manual-hold series (keep-alive)
+
+A manual hold keeps one body for the Ping button. These series count holds and sizes only. They carry no body, key or credential.
+
+- `cg_keepalive_manual_hold_evicted_total{reason="bytes"|"count"}`: holds the keeper released early because a tenant went over its cap (32 MiB of bodies, or 16 holds). The oldest hold of that tenant goes first.
+- `cg_keepalive_refused_total{reason="too_large"}`: requests the keeper did not hold because the body was over the per-body limit.
+- `cg_keepalive_manual_hold_body_bytes`: a histogram of body size when a hold starts. The buckets are 1, 4, 8, 16 and 32 MiB.
+- `cg_tenant_keepalive_manual_hold_bytes{tenant,label}`: bytes this tenant holds now. Only tenants that hold something appear.
+
+The counters and the histogram are process-wide, like the other `cg_keepalive_*` series. The gauge is per tenant, like `cg_tenant_refused_requests_total`. On a hosted proxy `/metrics` is open to loopback and to the `METRICS_TOKEN` bearer only, so the per-tenant gauge does not show to other tenants.
 
 #### Reading `acted: 0`
 

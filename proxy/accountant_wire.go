@@ -11,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -52,7 +53,7 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	if c == nil || c.savings == nil || !c.accOpen || c.accJob != nil {
 		return
 	}
-	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer}
+	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer, accMeta: c.accMeta}
 	job := &accJob{done: make(chan struct{}), w: w}
 	meta, client := c.accMeta, c.accClient
 	ops = append([]accountant.Operation(nil), ops...)
@@ -74,7 +75,7 @@ func (c *capture) accWait() {
 	job := c.accJob
 	<-job.done
 	c.accJob = nil
-	c.accReq, c.accThread, c.accPingWindow = job.w.accReq, job.w.accThread, job.w.accPingWindow
+	c.accReq, c.accThread, c.accPingWindow, c.accFacts = job.w.accReq, job.w.accThread, job.w.accPingWindow, job.w.accFacts
 	if job.w.accNoResult != "" {
 		c.accNoResult = job.w.accNoResult
 	}
@@ -116,8 +117,8 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	// deferred with defer_loading is a stub in it. The sent bytes still decide the cache facts below.
 	billed := c.accBilled(forwarded)
 	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
-	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accReq.Meta.Model, forwarded, c.pings, c.accReq.Meta.Session, t)
-	c.accPingWindow = facts.PingWindow
+	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accMeta.Model, forwarded, c.pings, c.accMeta.Session, t)
+	c.accPingWindow, c.accFacts = facts.PingWindow, facts
 	c.savings.end(c.accReq, t, billed, ops, facts)
 }
 
@@ -226,32 +227,37 @@ func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 // thread id as the accountant sees it ("main" for the primary thread).
 func accPingKey(session, threadID string) string { return session + "\x00" + threadID }
 
-// accBilledTTL lowers the entry TTL from the tier the request asked for (1h) to the tier the response
-// billed, when a gateway downgraded it. It runs after the usage arrives and before Compute, which reads
-// the facts' TTL for the verdict and stores it as the entry's TTL. Without it the library treats a gap of
-// 5 to 60 minutes as hot and can overstate a rescue by up to 55 minutes of idle time.
+// accBilledTTL sets the entry TTL to the tier the response billed, when a gateway downgraded the tier
+// the request asked for (1h). It runs after the usage arrives and before Compute, which reads the facts'
+// TTL for the verdict and stores it as the entry's TTL. Without it the library treats a gap of 5 to 60
+// minutes as hot and can overstate a rescue by up to 55 minutes of idle time.
 //
-// The rule is keepalive.ResolveTier's: one hour needs every write billed at the one-hour tier. A request
-// that wrote nothing bills no tier, so the asked tier stands. Only an exact lifetime has a TTL that can be
-// lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd and is not
-// redone; it matters only when another thread of the session touched the entry. Nil-safe.
+// The rule is keepalive.BilledOneHour's, which ResolveTier uses: a write bills its tier on the tokens it
+// wrote; a turn that wrote nothing bills none and keeps the thread's last billed tier (issue #1078). A
+// thread with no earlier write has none to keep, so the asked tier stands. Only an exact lifetime has a TTL
+// that can be lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd
+// and is not redone; it matters only when another thread of the session touched the entry. Nil-safe.
 func (c *capture) accBilledTTL(u Usage) {
 	defer c.timed("accBilledTTL")()
 	if c == nil || c.accReq == nil {
 		return
 	}
-	f := &c.accReq.Facts
+	f := c.accFacts
 	if f.Lifetime != accountant.LifetimeExact || f.TTL <= 5*time.Minute {
 		return
 	}
-	if u.CacheWrite > 0 && u.CacheWrite1h < u.CacheWrite {
-		f.TTL = 5 * time.Minute
-		// The library judges each part of the entry by the TTL of the breakpoint that wrote it, so the
-		// breakpoints must say 5m too. A copy: the slice may be the one the client hash cache holds.
-		bps := append([]accountant.Breakpoint(nil), c.accReq.Breakpoints...)
-		for i := range bps {
-			bps[i].TTL = "5m"
-		}
-		c.accReq.Breakpoints = bps
+	key := accPingKey(c.accMeta.Session, c.accThread)
+	prev, known := c.savings.billed1h.get(key)
+	if !known {
+		prev = true // no earlier write: the asked tier stands on a read-only turn
+	}
+	oneHour := keepalive.BilledOneHour(u.CacheWrite, u.CacheWrite1h, prev)
+	if u.CacheWrite > 0 || oneHour {
+		c.savings.billed1h.set(key, oneHour) // a read-only turn leaves the remembered tier alone
+	}
+	if !oneHour {
+		c.accFacts.TTL = 5 * time.Minute
+		// The library lowers the facts' TTL and the TTL of every 1h breakpoint together, on a copy.
+		c.accReq.LowerTTL(5 * time.Minute)
 	}
 }

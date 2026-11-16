@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -1197,13 +1198,21 @@ class ResetScriptTest(TempHome):
 
 # ---------------------------------------------------------------------------- review fixes
 
-def fake_binary(folder, version_line, has_bob=True):
-    """A fake context-guru-proxy that answers --version and --help."""
+FAKE_STRATEGIES = json.dumps({"strategies": [
+    {"name": "none", "spends": False, "desc": "no pings", "providers": ["any"], "cache": {}}]})
+
+
+def fake_binary(folder, version_line, has_bob=True, lists_strategies=True):
+    """A fake context-guru-proxy that answers --version, --help and (v0.7.1+) strategies.
+
+    Without lists_strategies it acts like an older proxy: `strategies` prints no JSON."""
     path = Path(folder) / "context-guru-proxy"
     flag = "  -bob-upstream string" if has_bob else "  -openai-upstream string"
+    table = FAKE_STRATEGIES if lists_strategies else "listening on 127.0.0.1:0"
     path.write_text("#!/bin/sh\n"
                     f'case "$1" in --version) echo "{version_line}" ;; '
-                    f'--help|-h) echo "Usage:"; echo "{flag}" ;; esac\nexit 0\n')
+                    f'--help|-h) echo "Usage:"; echo "{flag}" ;; '
+                    f"strategies) echo '{table}' ;; esac\nexit 0\n")
     path.chmod(0o755)
     return path
 
@@ -1428,9 +1437,42 @@ class BinaryCheckTest(TempHome):
     def test_a_new_binary_is_accepted(self):
         folder = self.root / "newbin"
         folder.mkdir()
-        path = fake_binary(folder, "context-guru-proxy v0.5.1 (commit abc)")
+        path = fake_binary(folder, "context-guru-proxy v0.7.1 (commit abc)")
         os.environ["CONTEXT_GURU_BIN"] = str(path)
         self.assertEqual(PLUGIN.find_binary(), str(path))
+
+    def test_a_binary_on_path_that_cannot_list_strategies_is_skipped(self):
+        folder = self.root / "oldbin"
+        folder.mkdir()
+        fake_binary(folder, "context-guru-proxy v0.7.0", lists_strategies=False)
+        os.environ["CONTEXT_GURU_BIN"] = str(folder / "context-guru-proxy")
+        reasons = []
+        self.assertIsNone(PLUGIN.find_binary(reasons))
+        self.assertEqual(reasons, [f"{folder / 'context-guru-proxy'} cannot list cache "
+                                   "strategies (needs v0.7.1 or later)"])
+
+    def test_an_old_binary_that_serves_for_strategies_is_skipped_within_the_timeout(self):
+        folder = self.root / "oldbin"
+        folder.mkdir()
+        path = folder / "context-guru-proxy"
+        path.write_text('#!/bin/sh\ncase "$1" in --help) echo "  -bob-upstream string" ;; '
+                        'strategies) echo "listening"; exec sleep 30 ;; esac\nexit 0\n')
+        path.chmod(0o755)
+        os.environ["CONTEXT_GURU_BIN"] = str(path)
+        reasons, start = [], time.monotonic()
+        with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1):
+            self.assertIsNone(PLUGIN.find_binary(reasons))
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertIn("cannot list cache strategies", reasons[0])
+
+    def test_the_managed_binary_is_still_used_and_probed_once(self):
+        managed = PLUGIN.managed_binary()
+        managed.parent.mkdir(parents=True)
+        fake_binary(managed.parent, "context-guru-proxy v0.7.1")
+        with mock.patch.object(PLUGIN, "load_strategy_table",
+                               wraps=PLUGIN.load_strategy_table) as probe:
+            self.assertEqual(PLUGIN.find_binary(), str(managed.resolve()))
+        probe.assert_called_once_with(str(managed.resolve()))
 
     def test_setup_says_why_it_downloads(self):
         folder = self.root / "oldbin"

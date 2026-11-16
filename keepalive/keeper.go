@@ -275,8 +275,17 @@ func ResolveTier(body []byte, u Usage, usageOK, prev bool) bool {
 	if !usageOK || !apply.AllBreakpointsAskExtendedTTL(body) {
 		return false
 	}
-	if u.CacheWrite > 0 {
-		return u.CacheWrite1h >= u.CacheWrite
+	return BilledOneHour(u.CacheWrite, u.CacheWrite1h, prev)
+}
+
+// BilledOneHour is the response half of ResolveTier: whether the tier the response billed is the
+// one-hour one, once the request asked for it on every breakpoint. A response that wrote tokens bills
+// its tier on them: one hour needs every written token at the one-hour tier. A response that only
+// read the cache bills no tier, so it inherits prev, the thread's last billed one. The proxy's
+// accountant path calls this with its own record of prev, so the two decide a read-only turn alike.
+func BilledOneHour(cacheWrite, cacheWrite1h int64, prev bool) bool {
+	if cacheWrite > 0 {
+		return cacheWrite1h >= cacheWrite
 	}
 	return prev
 }
@@ -495,7 +504,8 @@ type Keeper struct {
 	// Counters, for /stats and for the honest question "is this thing spending money and
 	// getting nothing?". Every one of them is a way the mechanism can be useless.
 	pings    atomic.Int64
-	skipped  atomic.Int64 // due, but a limit or a cap or a gate refused
+	skipped  atomic.Int64  // due, but a limit or a cap or a gate refused
+	mm       manualMetrics // manual-hold measures (#1103); guarded by mu
 	failed   atomic.Int64
 	wrote    atomic.Int64  // pings that CREATED instead of refreshing — a bug, not a cost
 	missed   atomic.Int64  // pings that read nothing — a real cache miss, not a failure
@@ -870,6 +880,9 @@ func (k *Keeper) Record(r Record) {
 	}
 	if len(body) > limit {
 		refuse(ReasonTooLarge)
+		k.mu.Lock()
+		k.mm.tooLarge++
+		k.mu.Unlock()
 		k.retire(key)
 		k.skipped.Add(1)
 		return
@@ -1040,6 +1053,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	if e.manualOnly {
 		e.timer = time.AfterFunc(e.holdFor, func() { k.expireManual(key) })
+		k.recordManualHoldLocked(e)
 		k.evictManualLocked(r.Key.Tenant)
 		k.evictLocked()
 		return
