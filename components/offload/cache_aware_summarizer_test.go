@@ -569,3 +569,24 @@ func TestCacheAwareRegistersAKeepAliveCandidateEvenWhenTheStashIsRefused(t *test
 			"stash-capacity check — the candidate should have survived it")
 	}
 }
+
+func TestCacheAwareRefreshCostOption(t *testing.T) {
+	for _, tc := range []struct {
+		yaml    string
+		wantErr bool
+		full    bool
+	}{
+		{"{}", false, false},
+		{"refresh_cost: extra", false, false},
+		{"refresh_cost: full", false, true},
+		{"refresh_cost: fulll", true, false},
+	} {
+		c, err := newCacheAwareSummarizer([]byte(tc.yaml))
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%q: err = %v, wantErr %v", tc.yaml, err, tc.wantErr)
+		}
+		if err == nil && c.(*CacheAwareSummarizer).refreshFullCost != tc.full {
+			t.Errorf("%q: refreshFullCost = %v, want %v", tc.yaml, !tc.full, tc.full)
+		}
+	}
+}

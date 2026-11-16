@@ -1162,6 +1162,13 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
 }
 
+// projectedRefreshExtraUSD is what a refresh costs OVER the ping it replaces (#1144): the summary
+// call minus the ping that was due. Both read the same cached prefix, so the read cancels and what
+// is left is the reply. Never negative. Zero when the model is not priced, like its two siblings.
+func (k *Keeper) projectedRefreshExtraUSD(model, endpoint string, prefix int64, route string) float64 {
+	return max(0, k.projectedSummaryUSD(model, endpoint, prefix)-k.projectedPingUSD(model, prefix, route, endpoint))
+}
+
 // expectedRefreshSavingUSD is the dollar value a refresh folding tailTokens of new material into
 // a `cache_state: pre_expiry` reserve is expected to earn back: those tokens would otherwise be
 // written, at the model's cache-WRITE rate, on the cold return the reserve exists to cheapen.

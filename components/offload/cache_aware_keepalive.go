@@ -45,6 +45,8 @@ type keepAliveCandidate struct {
 	// KeepAliveCandidateInfo.
 	cacheState       string
 	preExpirySeconds int
+	// refreshFullCost carries the component's refresh_cost: full, for KeepAliveCandidateInfo.
+	refreshFullCost bool
 	// registeredAt is when THIS candidate was written, so ClearStaleKeepAliveCandidate can tell
 	// "a candidate left over from an EARLIER request" from "the one THIS request's own pipeline
 	// run just registered" without needing to know the session's resolved key before running the
@@ -73,7 +75,17 @@ type KeepAliveCandidateInfo struct {
 	// existing reserve already covers — the number the money gate weighs against its own
 	// projected cost. Meaningful only when IsRefresh is true.
 	RefreshTailTokens int
+	// RefreshFullCost is the component's refresh_cost: full. The keeper then weighs a refresh's
+	// saving against the whole summary call. False (the default) weighs it against the cost over
+	// the ping the refresh replaces (#1144).
+	RefreshFullCost bool
 }
+
+// Values of the cache_aware_summarizer option refresh_cost.
+const (
+	RefreshCostExtra = "extra"
+	RefreshCostFull  = "full"
+)
 
 // keepAliveCand is keyed by thread.Key(session, thread) (#423). Every exported function below that
 // takes a "session" takes that key: the session itself for the primary thread.
@@ -175,6 +187,7 @@ func (s *CacheAwareSummarizer) registerKeepAliveCandidate(c *components.Ctx, cal
 		ownCredential:    ownCredential,
 		cacheState:       s.trigger.CacheState,
 		preExpirySeconds: s.trigger.PreExpirySeconds,
+		refreshFullCost:  s.refreshFullCost,
 		registeredAt:     time.Now(),
 	}
 	// Keyed by THREAD, not session (#423): a candidate's span is one thread's conversation, and
@@ -325,7 +338,7 @@ func KeepAliveSubstitute(session string) (dispatch func(timeout time.Duration) K
 		isRefresh = true
 	}
 	info = KeepAliveCandidateInfo{CacheState: cand.cacheState, PreExpirySeconds: cand.preExpirySeconds,
-		IsRefresh: isRefresh, RefreshTailTokens: tailTokens}
+		IsRefresh: isRefresh, RefreshTailTokens: tailTokens, RefreshFullCost: cand.refreshFullCost}
 	// reserved: a pre_expiry candidate is only ever offered when the keeper's OWN clock agrees
 	// this ping is inside the pre-expiry window (fireSummarySubstitute's phase check), so a
 	// summary committed from here is exactly as "not yet applied" as one committed directly from
@@ -381,10 +394,19 @@ func RegisterConfigKeepAliveCandidateForTest(session string, st store.Store,
 	registerKeepAliveCandidateForTest(session, thread.Primary, st, call, path, span, coveredCount, "", 0, false)
 }
 
+// RegisterKeepAliveCandidateWithRefreshCostForTest is RegisterKeepAliveCandidateForTest for a
+// component configured with refresh_cost: full.
+func RegisterKeepAliveCandidateWithRefreshCostForTest(session string, st store.Store,
+	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int,
+	cacheState string, preExpirySeconds int) {
+	registerKeepAliveCandidateForTest(session, thread.Primary, st, call, path, span, coveredCount,
+		cacheState, preExpirySeconds, true, true)
+}
+
 func registerKeepAliveCandidateForTest(session, threadID string, st store.Store,
 	call func(ctx context.Context) (string, error), path string, span []bschemas.ChatMessage, coveredCount int,
-	cacheState string, preExpirySeconds int, ownCredential bool) {
-	(&CacheAwareSummarizer{mode: markerFull,
+	cacheState string, preExpirySeconds int, ownCredential bool, refreshFullCost ...bool) {
+	(&CacheAwareSummarizer{mode: markerFull, refreshFullCost: len(refreshFullCost) > 0 && refreshFullCost[0],
 		trigger: components.Trigger{CacheState: cacheState, PreExpirySeconds: preExpirySeconds},
 	}).registerKeepAliveCandidate(
 		&components.Ctx{Session: session, Thread: threadID, Store: st, Ctx: context.Background()},

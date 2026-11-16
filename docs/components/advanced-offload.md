@@ -1124,20 +1124,37 @@ covers the point it was written at. A later keep-alive ping can refresh it — w
 covering the larger conversation — instead of sending a plain ping.
 
 **That refresh is not free, so it only happens when it pays for itself.** The rule: refresh only
-when the money a cold return will save is at least as much as the refresh itself costs.
+when the money a cold return will save is at least as much as the refresh **adds** to the ping it
+replaces.
 
-- The refresh's own cost is a cache **read** of the whole conversation plus a short reply.
+- A refresh always takes the place of a due keep-alive ping. Both read the whole conversation from
+  the cache, so that read is paid either way.
+- What the refresh adds is the **reply**: about 2,000 output tokens instead of 1, about $0.02 on
+  Sonnet 5.
 - The money it saves is the new material it folds in, priced at what writing it on a cold return
   would have cost (the cache **write** rate).
 
 An earlier version of this used a fixed size instead — refresh once 6,000 new tokens had piled up.
 That number was borrowed from a different decision (`resummarize_tokens`, which still controls
-when a TURN re-derives its summary) and was far too small for a refresh: at Sonnet 5's prices,
-6,000 new tokens are worth about $0.015 on the eventual cold return, but the refresh itself costs
-about $0.20. Refreshing at 6,000 tokens meant paying $0.20 to save $0.015 — repeatedly, on an idle
-session, forever. The money rule fixes this: on Sonnet 5's prices it takes roughly **80,000** new
-tokens before a refresh earns itself back, and the number adjusts automatically for other models'
-prices.
+when a TURN re-derives its summary) and was too small for the cost it was weighed against then:
+6,000 new tokens are worth about $0.015 on a cold return at Sonnet 5's prices, and the rule
+counted the whole call, about $0.20 at 900,000 tokens, as the cost. A second version kept the
+whole call as the cost. That asked for roughly 80,000 new tokens at 900,000 tokens, and it asked
+for more as the conversation grew, although the read is paid by the ping anyway.
+
+**Today the rule weighs the saving against the extra cost only (#1144).** On Sonnet 5's prices a
+refresh pays after about **8,000** new tokens, whatever the size of the conversation:
+`$0.02 ÷ $2.50 per million`. The number adjusts automatically for other models' prices.
+
+| | Cost the rule weighs | New tokens needed (Sonnet 5, 900k prompt) |
+|---|---|---|
+| `refresh_cost: extra` (default) | about $0.02, the reply | about **8,000** |
+| `refresh_cost: full` | about $0.20, the read and the reply | about **80,000** |
+
+- **The per-ping spending cap does not change.** It still compares the whole call with the cap,
+  because it limits what one keep-alive request spends.
+- **To keep the old rule,** set `refresh_cost: full` on `cache_aware_summarizer`.
+- **The first reserve** has no cost test. That did not change.
 
 #### What it costs, at 900,000 tokens on Sonnet 5
 
@@ -1177,19 +1194,18 @@ $2.25 − $0.20 = $2.05.
 - Both are lower bounds on the value. After a cold return, every warm turn on the summary saves
   about $0.16 more.
 
-**The refresh rule has two errors, and they go in opposite directions.**
+**The refresh rule had two errors, and they go in opposite directions. #1144 fixed (a). (b) is still open.**
 
-- **(a) It counts the full call as the cost.** The code compares the saving with the read of the
+- **(a) It counted the full call as the cost (fixed by default; `refresh_cost: full` restores it).** The code compared the saving with the read of the
   whole conversation plus a reply (the "own cost" described above). A refresh always takes the place
   of a due ping, so the read is paid either way. The extra cost is only the reply, about 10 times
   less. This makes the rule refresh **too seldom**.
 - **(b) It counts the saving as certain (p = 1).** For a session that never comes back, this makes
   the rule refresh **too often**.
 - With the marginal cost, a refresh pays when `p × new tokens × $2.50 per million > $0.02`, so
-  after about `8,000 ÷ p` new tokens. That is about 16k tokens at p = 49% and about 48k at p = 17%,
-  against the roughly 80k the rule asks for today. **So for any p above about 10%, error (a) is the
-  larger one, and the rule today refreshes less often than it should.** A per-session p matters only
-  for sessions where p is below about 10%.
+  after about `8,000 ÷ p` new tokens. That is about 16k tokens at p = 49% and about 48k at p = 17%.
+  The rule today uses p = 1, so it asks for about 8k. **For a session with a low p, such as a
+  subagent, it refreshes at a small expected loss.** A per-session p would fix that.
 
 **Measured return rates.** One developer's traffic through one proxy, Nov 8–15 (the dashboard's
 `requests` table, real requests only, keep-alive pings left out). The sample is every gap of at
