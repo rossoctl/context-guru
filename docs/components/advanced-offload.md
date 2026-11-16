@@ -1153,6 +1153,73 @@ So on a cold return, sending the summary instead of the full history saves about
 warm turn it saves about **$0.16**. One summary call itself costs about **$0.20** (it reads the
 whole 900k conversation to write the new summary).
 
+#### Does the user come back? The return rate decides whether a reserve pays
+
+A `pre_expiry` reserve pays only if a request **arrives after the cache has gone cold**. Before the
+cache goes cold the reserve is not used, and if nobody comes back it is never used. So the
+summary call is a bet on one number: **p, the share of idle sessions whose next request finds the
+cache cold.**
+
+**The cold point is later than the last turn's TTL.** The summary call reads the cache, so it renews
+it, and later keep-alive pings renew it again (see Limits below: the reserve "gets used only after
+pinging stops"). On a 1-hour cache with a summary call near minute 59 and no more pings, a request
+finds the cache cold only after about minute 119.
+
+**The break-even.** Using the Sonnet 5 example above (900k tokens): a cold return saves
+$2.25 − $0.20 = $2.05.
+
+- **The usual case: the call takes the place of a keep-alive ping.** Real turns rarely land in the
+  last minute (see the table above), so the first `pre_expiry` call usually replaces a ping. The
+  ping's read was going to be paid. The extra cost is only the reply, about $0.02. **The reserve
+  pays when p is above about 1%.**
+- **The rare case: no ping would have run.** The extra cost is the whole call, $0.20 (the read and
+  the reply). The reserve pays when p is above about 10%.
+- Both are lower bounds on the value. After a cold return, every warm turn on the summary saves
+  about $0.16 more.
+
+**The refresh rule has two errors, and they go in opposite directions.**
+
+- **(a) It counts the full call as the cost.** The code compares the saving with the read of the
+  whole conversation plus a reply (the "own cost" described above). A refresh always takes the place
+  of a due ping, so the read is paid either way. The extra cost is only the reply, about 10 times
+  less. This makes the rule refresh **too seldom**.
+- **(b) It counts the saving as certain (p = 1).** For a session that never comes back, this makes
+  the rule refresh **too often**.
+- With the marginal cost, a refresh pays when `p × new tokens × $2.50 per million > $0.02`, so
+  after about `8,000 ÷ p` new tokens. That is about 16k tokens at p = 49% and about 48k at p = 17%,
+  against the roughly 80k the rule asks for today. **So for any p above about 10%, error (a) is the
+  larger one, and the rule today refreshes less often than it should.** A per-session p matters only
+  for sessions where p is below about 10%.
+
+**Measured return rates.** One developer's traffic through one proxy, Nov 8–15 (the dashboard's
+`requests` table, real requests only, keep-alive pings left out). The sample is every gap of at
+least 54 minutes after a request with a cached prefix of at least 100k tokens:
+
+| Thread | Gaps | Back at 54–60 min | Back at 60–119 min | Back after 119 min | Never came back |
+|---|---|---|---|---|---|
+| Main agent | 80 | 3 | 23 | **39 (49%)** | 15 (19%) |
+| Subagents | 48 | 1 | 6 | **8 (17%)** | 33 (69%) |
+
+- **p is the "after 119 min" column**, when the summary call is the last renewal. Each further ping
+  moves the cold point out by one TTL, so with more pings p is lower.
+- "Never came back" means that the thread sent no later request in the data. No such thread ended
+  within 24 hours of the end of the data, so the cut-off does not bias it much.
+- A subagent seldom comes back, because its task has ended.
+- **Both rates are far above the 1% break-even of the usual case.** The subagent rate is above the
+  10% break-even of the rare case too.
+- **p depends on the session.** The proxy already records facts that predict it: main thread or
+  subagent, the wait cause (`waiting_for`), the prefix size, and the session's own past gaps. A
+  per-session estimate is not built.
+
+#### Who keeps the saving: subscription or API key
+
+- **On an API key,** every token a summary saves is the user's money.
+- **On a subscription,** the user pays a fixed price. A saved token counts only as plan usage that
+  the user did not spend.
+  - For a user who stays far below the plan limit, the summary saves the provider's GPU time, not
+    the user's money. The user still loses detail.
+  - For a user who reaches the limit, the same saving is more work in each window.
+
 #### Which to choose
 
 - **Use `any`** for a session that is being actively worked on. It saves money starting on the
