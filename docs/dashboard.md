@@ -138,7 +138,7 @@ What the library prices:
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
 `check_sum`, `check_unique_change`, `check_spans`, `check_other`, `size_unknown`, `implausible_size`,
-`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `server_held_history`. A saving nothing
 measured is not shown.
 
 For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
@@ -149,13 +149,22 @@ For `unpriced` the line carries `why` too: `no_usage` (the request has no billed
 as `opID:reason` (or `reason` alone when the refusal is for the whole request, as `ratio_range` is). The
 cause is in the log line only. No stored column and no API field carries it.
 
-`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
-`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
-Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
-keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
+The three wires are priced: the Anthropic Messages API, Chat Completions and the OpenAI Responses API. On
+Responses the library reads `instructions` as the system section and each `input` item as one message
+position, so a change is placed on the item it changed.
+
+`server_held_history` is a Responses request that carries `previous_response_id`. The provider holds the
+earlier turns, so the body is only this turn and the proxy cannot see the prefix the provider reads. Such a
+request books no saving. A Responses account that sends every turn in full (no `previous_response_id`) is
+priced as the other wires are.
 
 Limits:
 
+- On Responses, a pipeline component that rewrites `instructions` books no saving for that request
+  (`ops_dropped`): the change is in the system section, and the proxy places component changes only on
+  `input` items. The tool filter's own edit of `instructions` (a skill taken out of the list) is reported
+  as an envelope operation. When the skill list is in a leading `developer` item of `input` instead, that
+  edit has no operation, the sum check fails, and the request books no saving (`check_sum`).
 - A request with no history to classify a cache break against gets `penalty_unknown`. This is the
   first request of a thread, and a request after a gap longer than the cache lifetime when the
   provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net

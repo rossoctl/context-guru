@@ -55,10 +55,10 @@ func envelopeOwner(name string, added, removed bool) string {
 }
 
 // envelopeOps lists the operations that explain the tools and system sections' difference between
-// the client body and the forwarded body. It returns nil when both bodies have no messages array
-// (accBodies gives an empty Body for them).
+// the client body and the forwarded body. It returns nil when either body has no conversation
+// (accBodies gives an empty Body for it). On the Responses wire the system section is instructions.
 func envelopeOps(client, forwarded []byte) []accountant.Operation {
-	if !gjson.GetBytes(client, "messages").IsArray() || !gjson.GetBytes(forwarded, "messages").IsArray() {
+	if !accScan(client).messages.IsArray() || !accScan(forwarded).messages.IsArray() {
 		return nil
 	}
 	ops := toolsOps(gjson.GetBytes(client, "tools").Array(), gjson.GetBytes(forwarded, "tools").Array())
@@ -150,7 +150,7 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 
 // systemBlocks is the system section as accBodies hashes it: a string system prompt is one block.
 func systemBlocks(raw []byte) []string {
-	s := gjson.GetBytes(raw, "system")
+	s := accScan(raw).system // system, or a Responses body's instructions
 	switch {
 	case s.IsArray():
 		var out []string
@@ -290,7 +290,8 @@ func accHex(v uint64) string { return strconv.FormatUint(v, 16) }
 // message. Any other change (a different length by more than one, or a non-insertion) returns nil, and the sum check says so. The operator is
 // the edit's own, so its row and its ChangeID do not collide with a pipeline component's.
 func messageOps(operator string, before, after []byte) []accountant.Operation {
-	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
+	// accScan's messages: a Responses body's input items, so the positions are accBodies' positions.
+	b, a := accScan(before).messages.Array(), accScan(after).messages.Array()
 	switch {
 	case len(a) == len(b)+1:
 		i := 0

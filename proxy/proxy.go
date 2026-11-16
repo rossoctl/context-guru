@@ -1556,11 +1556,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// sent. An empty session means the pipeline did not run (bypassed, observe, no
 			// messages): there are no operations to price, so the request is skipped.
 			//
-			// Not on the OpenAI Responses wire: it keeps the conversation in `input`, accBodies hashes
-			// `messages`, and apply reports no operations there. The record would price nothing and fail the
-			// library's sum check. The event is marked instead, so the dashboard says why it has no saving.
-			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) {
-				cp.accUnsupportedWire = true
+			// Not for an OpenAI Responses request with previous_response_id: the provider holds the earlier
+			// turns, so the body is only this turn. The record would compare that delta with the last full
+			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
+			// the dashboard says why it has no saving (#899).
+			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
+				gjson.GetBytes(orig, "previous_response_id").String() != "" {
+				cp.accServerHeldHistory = true
 			} else if cp != nil && cp.savings != nil && tr.Session != "" {
 				cp.accBegin(accountant.RequestMeta{
 					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
