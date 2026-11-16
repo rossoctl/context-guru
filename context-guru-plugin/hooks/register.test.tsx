@@ -63,6 +63,9 @@ function textOf(n: any, gap = 0): string {
 }
 function lines(n: any): string[] {
   if (n == null || typeof n !== 'object') return []
+  // Newer engines (Claude Code 2.1.325) draw every plugin's part side by side, each tagged with `part.plugin`, and the
+  // test harness adds its own default part (`engine`). Read only this plugin's part (#1175).
+  if (n.part?.plugin !== undefined && n.part.plugin !== 'context-guru') return []
   if (n.type === 'Box' && n.props?.flexDirection === 'column') return (n.children ?? []).flatMap(lines)
   const t = textOf(n, n.type === 'Box' ? (n.props?.columnGap ?? 0) : 0)
   return t.trim() === '' ? [] : [t.replace(/\s+$/, '')]
@@ -621,9 +624,11 @@ test('no data: the band is left to the engine', async ($, on) => {
   on('session.id', () => ({ value: 'sess-1' }))
   on('command.register', () => ({ value: { command: 'context-guru' } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  clock = mock.clock(on, { now: NOW }) // the band reads the clock before it knows there is no data (#1019)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined() // the engine's own band is what shows
   await ui.unmount()
 })
 
