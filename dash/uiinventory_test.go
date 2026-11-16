@@ -67,7 +67,7 @@ func TestEveryInventoryTileHasAnExplanation(t *testing.T) {
 	}
 	// The entries tools.js adds to app.js's registry, plus anything app.js defines itself —
 	// a key may legitimately be explained in either file.
-	registry := src + readUI(t, "ui/app.js")
+	registry := src + readApp(t)
 	for k := range keys {
 		if !strings.Contains(registry, "'"+k+"': {") {
 			t.Errorf("tile %q has no TILE_INFO entry.\n"+
@@ -213,14 +213,15 @@ func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
 	// kvcache.js and campaigns.js were outside it while sharing ONE global scope with
 	// app.js — so a name either of them redefined would win or lose by load order with
 	// nothing to catch it, which is the exact failure mode the comment above describes.
-	for _, name := range []string{"ui/tools.js", "ui/app.js", "ui/kvcache.js", "ui/campaigns.js"} {
+	found := 0
+	for _, name := range append(appFiles(t), "ui/tools.js", "ui/kvcache.js", "ui/campaigns.js") {
 		seen := map[string]int{}
 		for _, m := range def.FindAllStringSubmatch(readUI(t, name), -1) {
 			seen[m[1]]++
 		}
-		if len(seen) == 0 {
-			t.Fatalf("%s: found no top-level function definitions; this check needs rewriting", name)
-		}
+		// Counted over all files, not per file: a small tab file such as tabs/archive.js
+		// holds only an async function, which this pattern does not match.
+		found += len(seen)
 		for fn, n := range seen {
 			if n > 1 && !known[name+":"+fn] {
 				t.Errorf("%s defines %s() %d times.\n"+
@@ -230,6 +231,9 @@ func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
 					"rendered it sat in the file.", name, fn, n)
 			}
 		}
+	}
+	if found == 0 {
+		t.Fatal("found no top-level function definitions; this check needs rewriting")
 	}
 }
 
