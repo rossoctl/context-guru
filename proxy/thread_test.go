@@ -230,6 +230,7 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 
+			sent := int64(0)
 			send := func(agentID string, body []byte) {
 				req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(body)))
 				req.Header.Set("Content-Type", "application/json")
@@ -245,12 +246,16 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 				if resp.StatusCode != 200 {
 					t.Fatalf("proxy returned %d", resp.StatusCode)
 				}
+				// The handler records the row in a deferred func, after the response is on the
+				// wire. Wait for it before the next send, or two rows can take their IDs in the
+				// wrong order, and the sort by ID below then mixes up the threads.
+				sent++
+				waitForRows(t, rec, sent)
 			}
 			send("", threadBody("fix the bug"))
 			send("", threadBody("fix the bug", "spawning a subagent", "go on"))
 			send("agentS", threadBody("investigate file x"))
 			send("agentS", threadBody("investigate file x", "reading", "contents"))
-			waitForRows(t, rec, 4)
 
 			page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 			if err != nil {
