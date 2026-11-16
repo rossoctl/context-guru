@@ -470,6 +470,15 @@ type Event struct {
 	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
 	// reply's id shape and usage fields. The id itself is never stored.
 	Backend string `json:"backend,omitempty"`
+	// ClientCompaction is the client compaction verdict (#947): "unknown" on the first request after
+	// the agent's own compaction (thread.Result.AfterCompaction), "" on any other request. The
+	// proxy sends the same verdict to the accountant (RequestMeta.Compaction). The replay cap
+	// closes an epoch on a row that carries one.
+	ClientCompaction string `json:"client_compaction,omitempty"`
+	// ClientCompactionKnown says the thread tracker judged this request (by prefix or by header), so
+	// ClientCompaction is a verdict and "" means "no compaction". When false the row stores NULL: no
+	// verdict. That includes the tracker's session fallback: no session id, no message list, a panic.
+	ClientCompactionKnown bool `json:"-"`
 
 	// Limits are the subscription limit values the provider's answer carried in its
 	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.

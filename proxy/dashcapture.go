@@ -110,6 +110,10 @@ type capture struct {
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread    string
 	agentComp bool
+	// compVerdict is the client compaction verdict of this request (#947), set by noteThread;
+	// compKnown says the tracker judged the request, so "" in compVerdict means none rather than unknown.
+	compVerdict string
+	compKnown   bool
 	// cpoint and cpointSrc are C for this request and where it came from (#948).
 	cpoint     int
 	cpointSrc  string
@@ -294,6 +298,9 @@ func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
+		// A "session" result is the tracker's fallback: no session id, no message list, or a recovered
+		// panic. It judged nothing, so the row keeps no verdict (NULL) and the old rule decides (#947).
+		c.compVerdict, c.compKnown = string(compactionVerdict(res)), res.Source != thread.SourceSession
 	}
 }
 
@@ -617,6 +624,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.DropUnbilledSavings()
 	e.ThreadID = c.thread
 	e.AgentCompaction = c.agentComp
+	e.ClientCompaction, e.ClientCompactionKnown = c.compVerdict, c.compKnown
 	// Only a client-set C (the user's setting or the client's own default, #963) is stored: the table value scales with the window and is read back
 	// from the table, so an old row and a new table row read alike (compactionpoint.Recorded).
 	if compactionpoint.IsClientSource(c.cpointSrc) && c.cpoint > 0 {

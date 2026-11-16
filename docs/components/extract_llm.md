@@ -787,8 +787,10 @@ context-guru would have stopped carrying the content:
   billed plus what the pipeline removed (`tokens_before - tokens_after`, scaled to billed tokens
   by the measured tokenizer factor). When it reaches the client's compaction ceiling (the same
   ceiling `summarize`'s span uses), the client of that world compacts and the credit stops.
-- **Real client compaction.** A drop in `tokens_before` after the agent's own compaction request
-  went by ends it too: both worlds carry a summarized transcript from there on.
+- **Real client compaction.** The first request after the agent's own compaction ends it too:
+  both worlds carry a summarized transcript from there on. The proxy's thread tracker marks that
+  request, and the row stores the mark (`client_compaction`, #947). A row written before #947 has
+  no mark. For it, a drop in `tokens_before` after the agent's compaction request still decides.
 
 The cap does not read the real compaction to place the counterfactual one. Removals only make
 the real transcript smaller, so a rule that waited for the real client to compact would credit

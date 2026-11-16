@@ -253,7 +253,9 @@ Limits:
   sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
 - The replay cap works in epochs (#940). A close ends the replay credit of the removals made before it.
   A removal first made after a close earns credit until the next close. There are two kinds of close:
-  - A real client compaction. Both worlds pay for it, so there is no one-time credit.
+  - A real client compaction. Both worlds pay for it, so there is no one-time credit. The close is on
+    the first request after the compaction, which the thread tracker marks (`client_compaction`,
+    #947). A row from before #947 has no mark, and a drop in `tokens_before` decides for it.
   - A counterfactual compaction: the point where the baseline (the transcript that the provider billed
     plus what we removed) reaches the compaction point. The baseline then restarts from a summary of
     80,000 tokens. That size is an assumption: it is the median of the first turn after 34 real compactions.

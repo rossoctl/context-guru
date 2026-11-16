@@ -251,6 +251,65 @@ func TestTheRequestAfterAnAgentCompactionKeepsItsThread(t *testing.T) {
 	}
 }
 
+// #947: only the request that takes over a compacting thread's id is marked AfterCompaction. The
+// compaction request itself, the turns before it, a subagent and the turn after are not.
+func TestOnlyTheRequestAfterACompactionIsMarked(t *testing.T) {
+	tr := testTracker()
+	steps := []struct {
+		agent string
+		body  []byte
+		comp  bool
+		want  bool
+	}{
+		{"", conv("task", "a1", "u2"), false, false},
+		{"agentS", conv("sub"), false, false},
+		{"", conv("task", "a1", "u2", "summarize this conversation"), true, false},
+		{"", conv("summary of everything", "continue"), false, true},
+		{"", conv("summary of everything", "continue", "a3", "u4"), false, false},
+	}
+	for i, s := range steps {
+		if got := tr.Resolve("t\x00s", s.agent, s.body, s.comp).AfterCompaction; got != s.want {
+			t.Fatalf("step %d: AfterCompaction = %v, want %v", i, got, s.want)
+		}
+	}
+	// Control: the same unrelated request with no compaction before it is a new thread, not marked.
+	tr2 := testTracker()
+	tr2.Resolve("t\x00s", "", conv("task", "a1", "u2"), false)
+	if tr2.Resolve("t\x00s", "", conv("summary of everything", "continue"), false).AfterCompaction {
+		t.Fatal("control: a new thread with no compaction before it was marked")
+	}
+}
+
+// #947 review: Claude Code's tool-less classifier thread can be marked compacting by mistake, when the
+// transcript it sends quotes the compaction prompt. Its next request matches no prefix and takes over
+// that thread's id. That is not the request after a client compaction, so it must not be marked.
+func TestAToolLessAuxiliaryThreadAfterACompactionIsNotMarked(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", ccBody(true, ccTurn{"user", []string{"fix the bug"}}), false)
+	first := tr.Resolve("t\x00s", "", ccBody(false, ccTurn{"user", []string{"<transcript> ... Your task is to create a detailed summary of the conversation so far ..."}}), true)
+	if first.ID == Primary {
+		t.Fatal("precondition: the classifier took the main thread's id")
+	}
+	next := tr.Resolve("t\x00s", "", ccBody(false, ccTurn{"user", []string{"<transcript> a later, different transcript"}}), false)
+	if next.ID != first.ID {
+		t.Fatalf("precondition: the next classifier request got %q, want the classifier thread %q", next.ID, first.ID)
+	}
+	if next.AfterCompaction {
+		t.Fatal("the classifier's next request is marked as the request after a client compaction")
+	}
+}
+
+// A client that never declares tools keeps its first thread as the primary. Its compaction is still
+// reported: the successor of the primary thread is the main agent.
+func TestAToolLessClientsCompactionIsMarked(t *testing.T) {
+	tr := testTracker()
+	tr.Resolve("t\x00s", "", conv("task", "a1", "u2"), false)
+	tr.Resolve("t\x00s", "", conv("task", "a1", "u2", "summarize this conversation"), true)
+	if r := tr.Resolve("t\x00s", "", conv("summary of everything", "continue"), false); r.ID != Primary || !r.AfterCompaction {
+		t.Fatalf("post-compaction request = %+v, want the primary thread, marked", r)
+	}
+}
+
 // Test 7 at the source: the OpenAI chat and Responses dialects group the same way.
 func TestOpenAIAndResponsesDialectsGroupByPrefix(t *testing.T) {
 	chat := func(n int, first string) []byte {
