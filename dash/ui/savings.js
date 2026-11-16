@@ -31,13 +31,31 @@ forTests.savedParts = savedParts;
 // without context-guru. Every saving is already net of what context-guru spent to make it (our own
 // model calls, the pings), so "without" is simply what was spent plus what was saved. The percent of
 // each part uses the same "without", so the parts' percents add up to the total's.
+//
+// A request the accountant could not price (a fallback, #1004) is left out on BOTH sides. Its cost
+// would lower the share, and the saving it still books (the deferral ledger, the filter credit, minus
+// its own model calls) is not one the library priced. The server sends both: fallback_cost_usd, and
+// fallback_saved by part. Each part here is the server's part less its fallback share, `spent` is the
+// bill less the fallback cost, and `unpriced` says what was left out. `bill` is the whole bill.
 function overviewTotals(o) {
-  const p = savedParts(o);
-  const spent = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0)
+  const all = savedParts(o);
+  const fb = o.fallback_saved || {};
+  const off = (k) => fb[k] || 0;
+  const p = Object.assign({}, all);
+  p.keepalive = all.keepalive - off('keepalive_usd');
+  p.reorder = all.reorder - off('reorder_usd');
+  p.cache = p.keepalive + p.reorder;
+  p.compaction = all.compaction - off('compaction_usd');
+  p.filter = all.filter - off('filter_usd');
+  p.defer = all.defer - off('defer_usd');
+  p.total = p.cache + p.compaction + p.filter + p.defer + p.manual;
+  const bill = (o.cost_usd || 0) + (o.cg_llm_cost_usd || 0) + (o.keepalive_ping_usd || 0)
     + ((o.manual_pings && o.manual_pings.ping_usd) || 0);
+  const unpriced = { requests: o.fallback_requests || 0, usd: o.fallback_cost_usd || 0, saved: all.total - p.total };
+  const spent = bill - unpriced.usd;
   const without = spent + p.total;
   const share = (v) => (without > 0 ? (100 * v) / without : 0);
-  return { saved: p.total, spent, without, pct: share(p.total), share, parts: p };
+  return { saved: p.total, spent, bill, unpriced, without, pct: share(p.total), share, parts: p };
 }
 forTests.overviewTotals = overviewTotals;
 

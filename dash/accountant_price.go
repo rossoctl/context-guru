@@ -181,6 +181,26 @@ const (
 	FallbackServerHeldHistory  = "server_held_history"  // an OpenAI Responses request with previous_response_id: the provider holds the history
 )
 
+// FallbackUnrecorded is requests.acc_fallback on a row written before the column existed whose components say
+// it fell back (backfillAccFallback). Its real reason was not stored. PriceMode never returns it.
+const FallbackUnrecorded = "unrecorded"
+
+// RecordAccountantFallback stores AccountantFallback in AccFallback, so the Overview can count the request and
+// leave its cost out of the saving share (#1004). The host calls it only for a request the accountant ran on, or
+// one whose history the provider holds (server_held_history): the same requests it logs as acc_fallback. A request with no record (no
+// session, or the pipeline did not run) has nothing to price, so it is not a fallback, and AccFallback stays "".
+//
+// A bypassed request is not a fallback either. The client asked for no context-guru, so its $0 saving is a
+// measured $0, and its cost belongs in the share. It falls back only because bypass leaves TokensBefore at 0
+// (FallbackSizeUnknown). Stored, it would take bypassed spend out of the share and raise it.
+func (e *Event) RecordAccountantFallback() {
+	if e.Bypassed {
+		e.AccFallback = ""
+		return
+	}
+	e.AccFallback = e.accFallback
+}
+
 // fatalCheckFallback is the fallback reason of a fatal library check (accountant CheckFailure.Fatal):
 // one that means the operation list or its attribution is wrong. The library decides which checks are
 // fatal; this only names them. A fatal check this switch does not know gates all the same, as

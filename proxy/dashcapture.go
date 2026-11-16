@@ -880,6 +880,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e.PriceMode(price, usageOK && priced)
 	if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
+		e.RecordAccountantFallback()
 		logFallback(e, c.noResultWhy(usageOK))
 	}
 	e.CGModel = cgModel

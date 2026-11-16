@@ -191,6 +191,9 @@ func TestRealisticUsageMatchesHandDerivation(t *testing.T) {
 	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("the override must apply, fell back: %s", fb)
 	}
+	if e.AccFallback != "" {
+		t.Fatalf("a priced request stored acc_fallback %q, want none", e.AccFallback)
+	}
 	msgBytes := func(b []byte) int {
 		n := 0
 		for _, m := range gjson.GetBytes(b, "messages").Array() {

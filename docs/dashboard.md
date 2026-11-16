@@ -142,6 +142,28 @@ When the library cannot price an event, the event books **no saving**, and the p
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `server_held_history`. A saving nothing
 measured is not shown.
 
+The same reason is stored in `requests.acc_fallback` for each request that logs the line. A request with no
+accountant record (`no_record`) logs no line and stores no reason: it had nothing to price. A bypassed request
+(`x-context-guru-bypass: true`) logs `size_unknown`, because bypass leaves the request size at 0, but stores no
+reason: the client asked for no context-guru, so its $0 is a measured $0. Overview reads the column:
+
+- `fallback_requests` is the count, `fallback` the count by reason, and `fallback_cost_usd` their `cost_usd`
+  plus `cg_llm_cost_usd`.
+- A fallback request can still book some saving the library did not price: the deferral ledger's net, the
+  measured filter credit, and minus its own model calls. `fallback_saved` gives it by part (`compaction_usd`,
+  `defer_usd`, `keepalive_usd`, `reorder_usd`, `filter_usd`).
+- The hero and its part cards leave fallback requests out on both sides. Each part is the server's part less
+  its fallback share, and "You spent" is the spend less `fallback_cost_usd`. A line under the total names the
+  requests, the spend and the saving left out. Cost totals on other pages, and the token figures, still
+  count them.
+- The lean read (`/api/stats?lean=1`), which paints the hero first, carries the same fields except `fallback`
+  and `filter_usd`: it has no filter credit either.
+- Rows written before the column existed are back-filled once from their components: a request with a
+  `priced_by = 'none'` component reads `unrecorded`. That rule is close to the live one, not the same. It
+  cannot find a fallback with no component row, or one with no usage or no price (those components are not
+  marked). It also marks a row with components but no accountant record, which the live code leaves empty.
+  The old rows age out with the dashboard's retention.
+
 For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
 `upstream_rounds=N` (an expand loop) or `compute_panicked`.
 

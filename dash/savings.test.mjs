@@ -41,6 +41,28 @@ test('a server from before the Ping button has no manual_pings: that is zero, no
   assert.equal(p.manual, 0); assert.equal(p.total, 5);
 });
 
+test('fallback requests are left out on both sides: their cost and the saving they still booked (#1004)', () => {
+  const { overviewTotals } = createRequire(import.meta.url)('./ui/savings.js');
+  const priced = { net_saved_usd: 30, cost_usd: 60, cg_llm_cost_usd: 10, total_saved_usd: 30 };
+  const base = overviewTotals(priced);
+  assert.equal(base.without, 100); assert.equal(base.pct, 30);
+  assert.deepEqual(base.unpriced, { requests: 0, usd: 0, saved: 0 }); // an older server sends no fallback field
+  // 4 fallback requests: $20 cost and $2 of model calls (in cost_usd and cg_llm_cost_usd), a $3 deferral
+  // ledger net and a $1 filter credit. Compaction books baseline - cost - cg_llm = -$2 on them.
+  const o = { net_saved_usd: 28, cost_usd: 80, cg_llm_cost_usd: 12, defer_net_usd: 3, decl_filter_usd: 1, total_saved_usd: 32,
+    fallback_requests: 4, fallback_cost_usd: 22,
+    fallback_saved: { compaction_usd: -2, defer_usd: 3, keepalive_usd: 0, reorder_usd: 0, filter_usd: 1 } };
+  const t = overviewTotals(o);
+  assert.equal(t.bill, 92); assert.equal(t.spent, 70); // the whole bill, and the priced spend
+  assert.equal(t.saved, 30); assert.equal(t.without, 100); assert.equal(t.pct, 30); // the priced requests alone
+  assert.deepEqual([t.parts.compaction, t.parts.defer, t.parts.filter], [30, 0, 0]);
+  assert.deepEqual(t.unpriced, { requests: 4, usd: 22, saved: 2 });
+  // Fallback rows that carry only a filter credit can no longer push the share to 100% (review of #1173).
+  const only = overviewTotals({ cost_usd: 10, decl_filter_usd: 2, total_saved_usd: 2, fallback_requests: 10,
+    fallback_cost_usd: 10, fallback_saved: { filter_usd: 2 } });
+  assert.equal(only.without, 0); assert.equal(only.pct, 0);
+});
+
 test('the headline adds the parts, and its percent is of what the traffic would have cost without us', () => {
   const { overviewTotals } = createRequire(import.meta.url)('./ui/savings.js');
   const o = { net_saved_usd: 30, keepalive_net_usd: 10, decl_filter_usd: 5, manual_pings: { ping_usd: 1, saved_usd: 5 },

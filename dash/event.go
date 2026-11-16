@@ -485,6 +485,11 @@ type Event struct {
 	// ClientCompaction is a verdict and "" means "no compaction". When false the row stores NULL: no
 	// verdict. That includes the tracker's session fallback: no session id, no message list, a panic.
 	ClientCompactionKnown bool `json:"-"`
+	// AccFallback is why the accountant library could not price this request (a Fallback* reason, or
+	// FallbackUnrecorded on a back-filled row). "" when it priced the request, or never ran on it. Set by
+	// RecordAccountantFallback. A row with a reason books its cost and no saving, so the Overview counts it
+	// and leaves it out of the saving share (#1004).
+	AccFallback string `json:"acc_fallback,omitempty"`
 
 	// Limits are the subscription limit values the provider's answer carried in its
 	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.
