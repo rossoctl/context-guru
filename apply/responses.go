@@ -668,6 +668,10 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		}
 		next, err := sjson.SetBytes(body, slots[i].path, text)
 		if err != nil {
+			// The original body goes upstream: no change is real, so the run's changes count as dropped.
+			if res.Run != nil {
+				giveUp()
+			}
 			return Result{Body: o.Body, Trace: res.Trace}
 		}
 		body, res.Changed = next, true

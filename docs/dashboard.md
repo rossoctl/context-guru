@@ -153,17 +153,18 @@ The three wires are priced: the Anthropic Messages API, Chat Completions and the
 Responses the library reads `instructions` as the system section and each `input` item as one message
 position, so a change is placed on the item it changed.
 
-`server_held_history` is a Responses request that carries `previous_response_id`. The provider holds the
-earlier turns, so the body is only this turn and the proxy cannot see the prefix the provider reads. Such a
-request books no saving. A Responses account that sends every turn in full (no `previous_response_id`) is
-priced as the other wires are.
+`server_held_history` is a Responses request that leaves part of its prompt on the provider's side: it
+carries `previous_response_id`, a `conversation`, or an `input` item of type `item_reference`. The provider
+adds stored items that the body does not carry, so the proxy cannot see the prefix the provider reads. Such
+a request books no saving. A Responses account that sends every turn in full is priced as the other wires
+are.
 
 Limits:
 
 - On Responses, a pipeline component that rewrites `instructions` books no saving for that request
   (`ops_dropped`): the change is in the system section, and the proxy places component changes only on
-  `input` items. The tool filter's own edit of `instructions` (a skill taken out of the list) is reported
-  as an envelope operation. When the skill list is in a leading `developer` item of `input` instead, that
+  `input` items. The tool filter's own edit of `instructions` (a skill taken out of the list) is priced
+  on the `toolfilter` row. When the skill list is in a leading `developer` item of `input` instead, that
   edit has no operation, the sum check fails, and the request books no saving (`check_sum`).
 - A request with no history to classify a cache break against gets `penalty_unknown`. This is the
   first request of a thread, and a request after a gap longer than the cache lifetime when the

@@ -62,7 +62,9 @@ func TestAccBodies_MessagesWinOverInput(t *testing.T) {
 	}
 }
 
-// An envelope change of the instructions (the tool filter takes a skill out of them) is a system rewrite.
+// An envelope change of the instructions (the tool filter takes a skill out of them) is a system rewrite,
+// owned by toolfilter. It is not a head-TTL relabel: no cache mark changed, and a headttl: ChangeID would put
+// the saving on the headttl row of an OpenAI account, where that lever never acts (review of #1150).
 func TestEnvelopeOps_ResponsesInstructionsRewrite(t *testing.T) {
 	client := []byte(`{"instructions":"long instructions with a skill list","input":[{"role":"user","content":"x"}]}`)
 	fwd := []byte(`{"instructions":"long instructions","input":[{"role":"user","content":"x"}]}`)
@@ -75,6 +77,20 @@ func TestEnvelopeOps_ResponsesInstructionsRewrite(t *testing.T) {
 	if o.At != (accountant.Position{Section: accountant.SectionSystem, Index: 0}) ||
 		o.SizeBefore.Bytes != len(cl) || o.SizeAfter.Bytes != len(fw) {
 		t.Fatalf("op = %+v, want system 0, %d -> %d bytes", o, len(cl), len(fw))
+	}
+	if o.Operator != "context-guru.toolfilter" || !strings.HasPrefix(o.ChangeID, "cg:toolfilter:") {
+		t.Fatalf("op owned by %s (ChangeID %s), want context-guru.toolfilter with a cg:toolfilter: ChangeID", o.Operator, o.ChangeID)
+	}
+}
+
+// The head-TTL relabel of a system block keeps its headttl owner and ChangeID: the library books the 1h premium
+// only through a headttl: ChangeID.
+func TestEnvelopeOps_SystemRelabelStaysHeadTTL(t *testing.T) {
+	client := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"x"}]}`)
+	fwd := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"x"}]}`)
+	ops := envelopeOps(client, fwd)
+	if len(ops) != 1 || ops[0].Operator != "context-guru.headttl" || !strings.HasPrefix(ops[0].ChangeID, "headttl:") {
+		t.Fatalf("ops = %+v, want one headttl relabel", ops)
 	}
 }
 
@@ -227,24 +243,54 @@ func TestChatCompletionsWireBooksASaving(t *testing.T) {
 // A request with previous_response_id carries only this turn: the provider holds the history, and the
 // proxy cannot see it. The record would compare a short delta with the last full body, so the request
 // books no saving and says why.
-func TestResponsesPreviousResponseIDBooksNoSavingAndSaysWhy(t *testing.T) {
-	up := respUpstream()
-	defer up.Close()
-	h, rec, tap := accHandler(t, up.URL)
-	srv := httptest.NewServer(h.Mux())
-	defer srv.Close()
-	body := `{"model":"gpt-5","previous_response_id":"resp_0","instructions":"` + agentPrefix + `","input":[` +
-		`{"type":"function_call_output","call_id":"c1","output":"` + strings.Repeat("Traceback line here\\n", 300) + `"}]}`
-	postN(t, srv, rec, "/openai/v1/responses", "sess-prev", []string{body, body})
-	for i, e := range tap.all() {
-		if fb := e.AccountantFallback(); fb != dash.FallbackServerHeldHistory {
-			t.Errorf("request %d: fallback %q, want %q", i+1, fb, dash.FallbackServerHeldHistory)
-		}
-		if _, ok := e.AccountantResult(); ok {
-			t.Errorf("request %d: a previous_response_id request got a library Result", i+1)
-		}
-		if saved := e.BaselineCostUSD - e.CostUSD; saved > 1e-12 {
-			t.Errorf("request %d: booked a saving of %g", i+1, saved)
+//
+// conversation and an item_reference input item do the same: the provider adds stored items the body does not
+// carry (review of #1150).
+func TestResponsesServerHeldHistoryBooksNoSavingAndSaysWhy(t *testing.T) {
+	tool := `{"type":"function_call_output","call_id":"c1","output":"` + strings.Repeat("Traceback line here\\n", 300) + `"}`
+	for name, c := range map[string]struct{ field, item string }{
+		"previous_response_id": {`"previous_response_id":"resp_0",`, ""},
+		"conversation id":      {`"conversation":"conv_0",`, ""},
+		"conversation object":  {`"conversation":{"id":"conv_0"},`, ""},
+		"item_reference":       {"", `{"type":"item_reference","id":"msg_0"},`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			up := respUpstream()
+			defer up.Close()
+			h, rec, tap := accHandler(t, up.URL)
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+			body := `{"model":"gpt-5",` + c.field + `"instructions":"` + agentPrefix + `","input":[` + c.item + tool + `]}`
+			postN(t, srv, rec, "/openai/v1/responses", "sess-held", []string{body, body})
+			for i, e := range tap.all() {
+				if fb := e.AccountantFallback(); fb != dash.FallbackServerHeldHistory {
+					t.Errorf("request %d: fallback %q, want %q", i+1, fb, dash.FallbackServerHeldHistory)
+				}
+				if _, ok := e.AccountantResult(); ok {
+					t.Errorf("request %d: got a library Result", i+1)
+				}
+				if saved := e.BaselineCostUSD - e.CostUSD; saved > 1e-12 {
+					t.Errorf("request %d: booked a saving of %g", i+1, saved)
+				}
+			}
+		})
+	}
+}
+
+// The rule itself: what marks a Responses body as one whose history the provider holds.
+func TestResponsesServerHeldHistoryRule(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"input":[{"role":"user","content":"x"}]}`:                                    false,
+		`{"previous_response_id":"","input":"x"}`:                                      false,
+		`{"conversation":null,"input":"x"}`:                                            false,
+		`{"conversation":"","input":"x"}`:                                              false,
+		`{"previous_response_id":"resp_0","input":"x"}`:                                true,
+		`{"conversation":"conv_0","input":"x"}`:                                        true,
+		`{"conversation":{"id":"conv_0"},"input":"x"}`:                                 true,
+		`{"input":[{"role":"user","content":"x"},{"type":"item_reference","id":"a"}]}`: true,
+	} {
+		if got := responsesServerHeldHistory([]byte(body)); got != want {
+			t.Errorf("%s: %v, want %v", body, got, want)
 		}
 	}
 }

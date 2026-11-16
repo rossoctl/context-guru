@@ -198,10 +198,17 @@ func systemOps(cl, fw []string) []accountant.Operation {
 			j++
 			continue
 		}
-		if cl[i] != fw[j] {
+		switch {
+		case cl[i] == fw[j]:
+		case headTTLRelabelled(cl[i], fw[j]):
 			// The library finds the head by the prefix "headttl:" (design §4.4), not "cg:". Its state is per
 			// thread, so the thread part of the spelled-out form is not needed to keep two heads apart.
 			ops = append(ops, envelopeOpID("headttl", pos, len(cl[i]), len(fw[j]), "headttl:"+hashOf(textOf(cl[i]))))
+		default:
+			// An in-place edit that is no relabel: the declaration filter taking a skill out of the listing.
+			// Only the Responses wire keeps that listing in the system section (instructions, skills.LocateResponses);
+			// the other wires keep it in messages, so their system blocks change in place only by the relabel.
+			ops = append(ops, envelopeOp("toolfilter", pos, len(cl[i]), len(fw[j]), "system-rewritten:"+hashOf(textOf(cl[i]))))
 		}
 	}
 	return ops
