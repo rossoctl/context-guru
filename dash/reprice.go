@@ -84,7 +84,9 @@ func (r *Recorder) repricePass() {
 			continue
 		}
 		if e.CGCostUnpriced {
-			// The agent's rate is known now, and PriceCG falls back to it, so this always prices.
+			// The agent's rate is known now, and PriceCG falls back to it, so this always prices. It
+			// clears CGCostUnpriced, so a retry after a failed applyReprice skips this and writes
+			// the same CGLLMCostUSD: the failed transaction added nothing.
 			e.PriceCG(r.opts.Prices, p, true)
 		}
 		if err := r.db.applyReprice(e); err != nil {

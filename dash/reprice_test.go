@@ -197,13 +197,27 @@ func TestRecorderRepricesBothHalvesOfARowWithAnUnpricedCompactionCall(t *testing
 
 	same := withCompaction("same", "")                   // no compaction model named: the agent's rate
 	other := withCompaction("other", "claude-haiku-4-5") // a cheaper compaction model: its own rate
+	// The compaction model was priced at write time and the agent's model was not (a partial load).
+	// Its compaction cost is already on the row and in tenant_spend: the pass must keep it, and must
+	// not add it again.
+	early := partialEvent(0, "early", 29650)
+	early.CGModel = "claude-haiku-4-5"
+	early.CGFresh, early.CGCacheRead, early.CGCacheWrite, early.CGOutput = 2000, 500, 8000, 300
+	haikuOnly := &modelLoader{p: map[string]modelinfo.Price{"claude-haiku-4-5": haiku}}
+	haikuOnly.loaded.Store(true)
+	early.PriceCG(haikuOnly, modelinfo.Price{}, false)
+	if early.CGCostUnpriced || early.CGLLMCostUSD == 0 {
+		t.Fatalf("setup: a known compaction model has CGCostUnpriced %v cost %v, want false and > 0",
+			early.CGCostUnpriced, early.CGLLMCostUSD)
+	}
 	if !same.CGCostUnpriced || same.CGLLMCostUSD != 0 {
 		t.Fatalf("setup: an unpriced compaction call has CGCostUnpriced %v cost %v, want true and 0",
 			same.CGCostUnpriced, same.CGLLMCostUSD)
 	}
 	rec.Record(same)
 	rec.Record(other)
-	waitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
+	rec.Record(early)
+	waitFor(t, "rows written", func() bool { return rec.Stats().Written == 3 })
 
 	type row struct {
 		acct     string
@@ -218,13 +232,20 @@ func TestRecorderRepricesBothHalvesOfARowWithAnUnpricedCompactionCall(t *testing
 		return r
 	}
 	time.Sleep(60 * time.Millisecond) // several passes with no price: nothing changes
-	if r := get("same"); r.acct != AccountingPartial || r.cost != 0 || r.cg != 0 {
-		t.Fatalf("before the load: %+v, want partial at $0 on both halves", r)
+	for _, s := range []string{"same", "other"} {
+		if r := get(s); r.acct != AccountingPartial || r.cost != 0 || r.cg != 0 {
+			t.Fatalf("%s before the load: %+v, want partial at $0 on both halves", s, r)
+		}
+	}
+	earlyCG := haiku.Cost(2000, 500, 8000, 300)
+	if r := get("early"); r.acct != AccountingPartial || r.cost != 0 || math.Abs(r.cg-earlyCG) > earlyCG*1e-6 {
+		t.Fatalf("early before the load: %+v, want partial, cost_usd 0 and cg_llm_cost_usd %v", r, earlyCG)
 	}
 
 	src.loaded.Store(true)
-	waitFor(t, "both rows to be priced", func() bool {
-		return get("same").acct == AccountingComplete && get("other").acct == AccountingComplete
+	waitFor(t, "every row to be priced", func() bool {
+		return get("same").acct == AccountingComplete && get("other").acct == AccountingComplete &&
+			get("early").acct == AccountingComplete
 	})
 
 	wantCost := 10*3e-06 + 29650*3.75e-06 + 50*1.5e-05
@@ -232,7 +253,7 @@ func TestRecorderRepricesBothHalvesOfARowWithAnUnpricedCompactionCall(t *testing
 	cases := []struct {
 		session string
 		p       modelinfo.Price
-	}{{"same", sonnet}, {"other", haiku}}
+	}{{"same", sonnet}, {"other", haiku}, {"early", haiku}}
 	var wantSpend float64
 	for _, c := range cases {
 		wantCG := c.p.Cost(2000, 500, 8000, 300)
@@ -249,7 +270,7 @@ func TestRecorderRepricesBothHalvesOfARowWithAnUnpricedCompactionCall(t *testing
 		t.Fatal(err)
 	}
 	if !near(spend, wantSpend) {
-		t.Errorf("tenant_spend = %v, want %v: both halves of both rows, added once", spend, wantSpend)
+		t.Errorf("tenant_spend = %v, want %v: both halves of every row, each added once", spend, wantSpend)
 	}
 }
 
