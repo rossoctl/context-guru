@@ -12,12 +12,8 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/testutil"
-	"github.com/rossoctl/context-guru/metrics"
-	"github.com/rossoctl/context-guru/store"
-	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
 
@@ -69,23 +65,11 @@ func (u *bobSweepUpstream) questions() []bobSweepCall {
 // bobSweepHandler runs the plugin's bob-ultrahigh preset with the plugin's own Bob prices.
 func bobSweepHandler(t *testing.T, upstream string) *Handler {
 	t.Helper()
-	cfg, err := config.LoadBytes(bobPreset(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	agg := metrics.NewAggregator()
-	pipe, err := cfg.Build(agg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	prices, err := modelinfo.LoadTable(filepath.Join("..", "bob-plugin", "context-guru", "prices.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{BobUpstream: upstream,
-		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: prices})
-	t.Cleanup(h.Close)
-	return h
+	return bobHandlerPriced(t, bobPreset(t), upstream, prices)
 }
 
 // bobSweepGrep is a large grep result, every line different. It is fact-dense, so extract_llm leaves it
@@ -121,6 +105,7 @@ func TestBobUltrahighSweepAsksBobOnALongChat(t *testing.T) {
 	// Fails on main today, on 2 blockers, each one enough alone. The fix PRs of #1191 remove this skip.
 	//  1. No conversation copy: Ctx.CanKeepAlive is keeper.canPing, false on Bob (ping: not_registered).
 	//  2. Every Bob request is cold, so the warm count never reaches warm_every_n (no trigger check).
+	// #1191's blocker 3 (the 30-turn defaults) is not covered: the chat is long enough for the defaults.
 	t.Skip("#1191: the sweep cannot ask on Bob's route yet (no copy without a ping; every request cold)")
 	up := &bobSweepUpstream{}
 	us := httptest.NewServer(up)
@@ -152,11 +137,26 @@ func TestBobUltrahighSweepAsksBobOnALongChat(t *testing.T) {
 	testutil.WaitForState(t, "one sweep question sent to Bob", func() bool { return len(up.questions()) > 0 },
 		func() string {
 			w, p := offload.SweepWarmCounters(), offload.SweepPingCounters()
+			reasons := map[string]int64{}
+			for k, v := range w.TriggerReasons {
+				if d := v - before.TriggerReasons[k]; d != 0 {
+					reasons[k] = d
+				}
+			}
 			return fmt.Sprintf("warm: fired %d, asked %d, not_registered %d, trigger_reasons %v; ping: not_registered %d",
 				w.Fired-before.Fired, w.Asked-before.Asked, w.NotRegistered-before.NotRegistered,
-				w.TriggerReasons, p.NotRegistered-pingBefore.NotRegistered)
+				reasons, p.NotRegistered-pingBefore.NotRegistered)
 		})
-	q := up.questions()[0]
+	// No request follows, so no second question can start: one more would mean the trigger fired twice
+	// in 64 turns, while the next check is due at about turn 90.
+	qs := up.questions()
+	if len(qs) != 1 {
+		t.Fatalf("got %d sweep questions, want exactly 1", len(qs))
+	}
+	q := qs[0]
+	if m := gjson.GetBytes(q.body, "model").String(); m != "premium-ide" {
+		t.Errorf("question model = %q, want the chat's own model premium-ide (Bob picks its model)", m)
+	}
 	if q.path != bobModelPath {
 		t.Errorf("question path = %q, want Bob's model path %q", q.path, bobModelPath)
 	}
