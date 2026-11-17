@@ -14,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -88,6 +89,12 @@ func bobDeferHandler(t *testing.T, preset []byte, upstream string, used ...[]str
 // bobDeferHandlerBare is the handler with no history: only real requests build it.
 func bobDeferHandlerBare(t *testing.T, preset []byte, upstream string) *Handler {
 	t.Helper()
+	return bobHandlerPriced(t, preset, upstream, tdPrices{})
+}
+
+// bobHandlerPriced runs preset on Bob's route with the given prices.
+func bobHandlerPriced(t *testing.T, preset []byte, upstream string, prices modelinfo.Pricer) *Handler {
+	t.Helper()
 	cfg, err := config.LoadBytes(preset)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +105,7 @@ func bobDeferHandlerBare(t *testing.T, preset []byte, upstream string) *Handler 
 		t.Fatal(err)
 	}
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{BobUpstream: upstream,
-		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: tdPrices{}})
+		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: prices})
 	t.Cleanup(h.Close)
 	return h
 }
