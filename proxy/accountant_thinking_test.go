@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/thinkcount"
 )
 
@@ -94,20 +96,24 @@ func TestStreamReadsThinkingSignatures(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	h := &Handler{savings: newSavingsTracker()}
-	_, u, _, _ := h.streamRec(rec, resp, nil)
+	_, u, _, _ := h.streamRecOn(rec, resp, nil, agent.Base{}, h.thinkCollector(bschemas.Anthropic, resp))
 	if rec.Body.String() != stream {
 		t.Fatalf("the client got other bytes")
 	}
 	if th := u.Thinking; len(th.Opaques) != 1 || th.Opaques[0] != sig || th.Tokens != 62 || !th.HasTokens {
 		t.Fatalf("thinking = %d opaques, %d tokens, %v", len(th.Opaques), th.Tokens, th.HasTokens)
 	}
-	// With no savings tracker there is nothing to record, and nothing is collected.
+	// The catch-all route and /count_tokens use stream, which calls no finish: nothing is collected there
+	// (review of #1190, round 2). Nor with no accountant, or for another provider.
 	resp2, err := http.Get(up.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, u2, _, _ := (&Handler{}).streamRec(httptest.NewRecorder(), resp2, nil); len(u2.Thinking.Opaques) != 0 {
-		t.Fatalf("a proxy with no accountant collected signatures")
+	if _, u2, _, _ := h.stream(httptest.NewRecorder(), resp2); len(u2.Thinking.Opaques) != 0 {
+		t.Fatalf("the catch-all path collected signatures")
+	}
+	if (&Handler{}).thinkCollector(bschemas.Anthropic, resp) != nil || h.thinkCollector(bschemas.OpenAI, resp) != nil {
+		t.Fatalf("a collector was made with no accountant, or for OpenAI")
 	}
 }
 

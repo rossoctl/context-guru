@@ -2303,7 +2303,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, h.thinkCollector(provider, resp))
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2402,7 +2402,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see fillResponse.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, nil) // no Anthropic stream here: nothing to collect
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2815,12 +2815,25 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
-	return h.streamRecOn(w, resp, tee, agent.Base{})
+	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
 }
 
 // streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
 // the shared parser's usage reading (readAgentUsage).
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+// thinkCollector is the Collector for a chat response the accountant prices, or nil. The thinking signatures
+// sit in the middle of a stream, outside the sniffer's head and tail, so the collector reads them as the bytes
+// go by (issue #1187). A JSON response holds them too: the collector buffers it, within a bound. Only an
+// Anthropic response holds these blocks, and only the chat routes call finish, which records them.
+func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Response) *thinkcount.Collector {
+	if h.savings == nil || provider != bschemas.Anthropic {
+		return nil
+	}
+	return thinkcount.NewCollector(resp.Header.Get("Content-Type"))
+}
+
+// streamRecOn is streamRec with the request's agent and an optional thinking collector (thinkCollector),
+// which reads every byte the client gets.
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2829,13 +2842,6 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// missing clause here is latent there -- but a --record-only Handler (which every unit
 	// test builds) would get an off sniffer, zero usage, and a silently usage-free corpus.
 	sn := newSniffer(h.rec != nil || h.agg != nil || h.recorder != nil)
-	// The thinking signatures sit in the middle of a stream, outside the sniffer's head and tail, so a collector
-	// reads them as the bytes go by (issue #1187). A JSON response on this path holds them too: the collector
-	// buffers it, within a bound, and reads it at the end.
-	var think *thinkcount.Collector
-	if h.savings != nil {
-		think = thinkcount.NewCollector(resp.Header.Get("Content-Type"))
-	}
 	buf := make([]byte, 16*1024)
 	for {
 		n, rerr := resp.Body.Read(buf)
