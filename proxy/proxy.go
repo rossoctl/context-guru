@@ -739,9 +739,8 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 	}
 }
 
-// bobProfilePath is the profile route Bob's CLI calls before anything else, and the
-// one response the catch-all does not forward verbatim. See forwardBobProfile.
-const bobProfilePath = "/admin/v1/profile"
+// bobProfilePath is bob.ProfilePath. See forwardBobProfile.
+const bobProfilePath = bob.ProfilePath
 
 // bobModelPath is Bob's model route.
 const bobModelPath = bob.ModelPath
@@ -778,9 +777,7 @@ func agentSessionID(r *http.Request, a agent.Agent) (id string) {
 	return a.SessionID(r.Header)
 }
 
-func isBobProfile(r *http.Request) bool {
-	return r.Method == http.MethodGet && strings.EqualFold(r.URL.Path, bobProfilePath)
-}
+func isBobProfile(r *http.Request) bool { return bob.IsProfile(r.Method, r.URL.Path) }
 
 // forwardBobProfile forwards Bob's profile with the per-instance REGION fields removed,
 // and reports whether it answered the request.
@@ -838,31 +835,8 @@ func (h *Handler) forwardBobModelInfo(w http.ResponseWriter, resp *http.Response
 	return true
 }
 
-// stripProfileRegion removes region/region_domain from every instance in a Bob profile
-// document, reporting false when the body is not one (then it must be forwarded as-is).
-func stripProfileRegion(b []byte) ([]byte, bool) {
-	var doc map[string]any
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, false
-	}
-	insts, ok := doc["instances"].([]any)
-	if !ok {
-		return nil, false
-	}
-	for _, it := range insts {
-		m, ok := it.(map[string]any)
-		if !ok {
-			continue
-		}
-		delete(m, "region")
-		delete(m, "region_domain")
-	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, false
-	}
-	return out, true
-}
+// stripProfileRegion is bob.StripProfileRegion.
+func stripProfileRegion(b []byte) ([]byte, bool) { return bob.StripProfileRegion(b) }
 
 // compact runs the pipeline over the request body's messages and returns the
 // rewritten body — without forwarding upstream. This is the "compact a context,
