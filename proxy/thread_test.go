@@ -15,6 +15,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 )
@@ -229,6 +230,7 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 
+			sent := int64(0)
 			send := func(agentID string, body []byte) {
 				req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(body)))
 				req.Header.Set("Content-Type", "application/json")
@@ -244,12 +246,16 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 				if resp.StatusCode != 200 {
 					t.Fatalf("proxy returned %d", resp.StatusCode)
 				}
+				// The handler records the row in a deferred func, after the response is on the
+				// wire. Wait for it before the next send, or two rows can take their IDs in the
+				// wrong order, and the sort by ID below then mixes up the threads.
+				sent++
+				waitForRows(t, rec, sent)
 			}
 			send("", threadBody("fix the bug"))
 			send("", threadBody("fix the bug", "spawning a subagent", "go on"))
 			send("agentS", threadBody("investigate file x"))
 			send("agentS", threadBody("investigate file x", "reading", "contents"))
-			waitForRows(t, rec, 4)
 
 			page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 			if err != nil {
@@ -273,6 +279,11 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			// The subagent's first request is a cold start of its own thread, never a prefix
 			// change of the session's (fakeUpstream reads 9000 from cache, so every row is a hit;
 			// the label check lives in dash.TestASubagentsFirstRequestIsAColdStart).
+			// The handler hands a finished request to the keeper in a deferred func, after the
+			// response is on the wire. The client can return before that runs, so wait for it.
+			testutil.WaitForState(t, "the keeper to hold one entry per thread",
+				func() bool { return h.keeper.Stats().Live == 2 },
+				func() string { return fmt.Sprintf("%d entries", h.keeper.Stats().Live) })
 			if got := h.keeper.Stats().Live; got != 2 {
 				t.Errorf("keeper holds %d entries after two threads of two turns each, want 2", got)
 			}
