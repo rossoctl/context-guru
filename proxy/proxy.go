@@ -2818,8 +2818,6 @@ func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *rec
 	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
 }
 
-// streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
-// the shared parser's usage reading (readAgentUsage).
 // thinkCollector is the Collector for a chat response the accountant prices, or nil. The thinking signatures
 // sit in the middle of a stream, outside the sniffer's head and tail, so the collector reads them as the bytes
 // go by (issue #1187). A JSON response holds them too: the collector buffers it, within a bound. Only an
@@ -2831,8 +2829,9 @@ func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Res
 	return thinkcount.NewCollector(resp.Header.Get("Content-Type"))
 }
 
-// streamRecOn is streamRec with the request's agent and an optional thinking collector (thinkCollector),
-// which reads every byte the client gets.
+// streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
+// the shared parser's usage reading (readAgentUsage). think, when not nil, is the thinking collector
+// (thinkCollector), and it reads every byte the client gets.
 func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
