@@ -11,6 +11,10 @@ import (
 // priced BEFORE the change (fixture made on origin/main c2a06dd5) and fails if any value moves.
 // The four table/*/claude-sonnet-5 rows were re-baselined by #334, which
 // makes a bare id resolve to the qualified entry it is the tail of; every other row is unchanged.
+//
+// It also guards the FMA fix in Price.Cost and CostWithCacheWrite1h (#1128): without the explicit
+// float64 rounding of each product, the price/1h rows fail on arm64 only. CI runs on amd64, where
+// they pass either way, so run this test on an arm64 machine after a change to those functions.
 
 func TestRateFillTableAndPrice(t *testing.T) {
 	docs := map[string]string{

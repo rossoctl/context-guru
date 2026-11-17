@@ -121,8 +121,10 @@ func (p Price) Resolved(model string) Price {
 
 // Cost prices one request's four token tiers in USD.
 func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
-	return float64(fresh)*p.Input + float64(cacheRead)*p.CacheRead +
-		float64(cacheWrite)*p.CacheWrite + float64(output)*p.Output
+	// Each product is rounded on its own (an explicit float64 conversion), so no platform fuses a
+	// multiply and an add (FMA, as on arm64). Every platform then gives the same bits (#1128).
+	return float64(float64(fresh)*p.Input) + float64(float64(cacheRead)*p.CacheRead) +
+		float64(float64(cacheWrite)*p.CacheWrite) + float64(float64(output)*p.Output)
 }
 
 // CostWithCacheWrite1h is Cost plus the one-hour cache-write premium.
@@ -142,7 +144,7 @@ func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheW
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
 	if cacheWrite1h > 0 {
 		if premium := p.CacheWrite1hPremium(); premium > 0 {
-			cost += float64(cacheWrite1h) * premium
+			cost += float64(float64(cacheWrite1h) * premium) // no FMA; see Cost
 		}
 	}
 	return cost
