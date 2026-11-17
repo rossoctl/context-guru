@@ -134,9 +134,10 @@ it. Bob updates itself and restarts. A Bob started from a terminal or by its upd
 the variable. `result=no_bob_traffic` tells you this. The fix is to quit Bob and open it from the
 Dock.
 
-The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Dollar figures
-for Bob are not: Bob bills in Bobcoins, and the proxy does not price them yet. With `bob-ultrahigh`
-the proxy prices them with estimated dollar rates (see below).
+The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Bob bills in
+Bobcoins, not dollars. With `bob-ultrahigh`, the dashboard's and the status bar's Bob cost figures are
+Bobcoins (2.0 per million tokens, see below), even where they show a `$` sign. With another preset,
+the proxy does not price Bob.
 
 ## Presets
 
@@ -164,11 +165,12 @@ It is `ultrahigh` with 4 Bob changes:
 3. **The sweep may apply on a warm cache** (`warm: true`), behind its cost gate.
 4. **Tool deferral keeps Bob's core tools** (see below).
 
-It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`): every input token at one
-flat rate, a cache read and a cache write too. The sweep's cost gate needs that. Without it, the
-gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. The dollar rates are
-estimates; only the flat ratio is measured. So with this preset the dashboard's Bob dollar figures
-change. Leaving the preset, `uninstall` and the reset script remove the prices.
+It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`), **in Bobcoins, not
+dollars**: 2.0 Bobcoins per million tokens for fresh input, a cache read, a cache write and output
+alike. That is the rate IBM's own per-call credits show. The sweep's cost gate needs the flat rate.
+Without it, the gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. So with
+this preset the dashboard's and the status bar's Bob cost figures are Bobcoins, even where they
+still show a `$` sign. Leaving the preset, `uninstall` and the reset script remove the prices.
 
 It needs context-guru-proxy v0.7.2 or newer. On an older release, `configure` refuses it and says
 to update first.
