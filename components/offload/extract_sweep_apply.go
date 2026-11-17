@@ -800,6 +800,10 @@ func (s storeHeld) put(h heldAnswer)                     { putHeld(s.st, h) }
 // warmApply turns applyHeldFrom into the warm apply. gate decides, after the recheck and before any
 // message is changed, whether the valid drops pay; it returns the reason when they do not.
 type warmApply struct {
+	// liveByRead: the warm path found this request warm from the provider's cache read on the previous
+	// turn, though the phase is unknown (#1191). The apply then uses that verdict, not the cold rule,
+	// so the warm gate runs (#1196).
+	liveByRead bool
 	// rewriteBilled is set by the gate: the rewritten tokens, billed-scaled. The apply books it as an
 	// event on the request that paid it, so the dashboard can charge the rewrite there.
 	rewriteBilled int
@@ -887,7 +891,7 @@ func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bs
 	if c.RawInput != nil {
 		raw = c.RawInput
 	}
-	cold := sweepColdRequest(c)
+	cold := sweepColdRequest(c) && !(warm != nil && warm.liveByRead)
 	// warmGated: a warm apply on an UNCHANGED prefix, the one case the cold apply never touches. It is
 	// let through only by the economic gate below. A cold request, or a CHANGED prefix, is the cold
 	// apply's own case exactly as #695 defines it: the provider rewrites from there on anyway, so the

@@ -633,7 +633,7 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 }
 
 type v3In struct {
-	cold                               bool
+	cold, liveByRead                   bool
 	run, count                         int
 	growthFrom, growthTurns, prevLocal int
 	busy, hasHeld, heldTried           bool
@@ -796,7 +796,7 @@ type v3CutRec struct {
 
 func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
 	tkey string, in v3In, P, C int, cSource string) (keys []string, changed int) {
-	wa := &warmApply{}
+	wa := &warmApply{liveByRead: in.liveByRead}
 	inner := e.warmGate(c, req, in.run, in.growthFrom, in.growthTurns, in.prevLocal, wa)
 	var cut v3CutRec
 	wa.gate = e.v3Gate(inner, wa, c, tkey, in.prevLocal, P, C, cSource, src, &cut)

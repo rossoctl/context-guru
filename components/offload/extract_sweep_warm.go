@@ -832,7 +832,12 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	// cache_control (IBM Bob's) has an unknown phase on every request, which counts as cold, so the warm
 	// run would restart on every request. The provider's report on the thread's previous turn settles it:
 	// it read the cache, so the cache is live. Only the warm path reads this; the cold apply does not.
-	if cold && t.lastRead > 0 && c.CachePhase(0) == components.CachePhaseUnknown {
+	// The read is one turn old and has no age limit: after a long idle the first request still counts
+	// as warm. That is accepted on purpose. That request rewrites the cache, so a question after it reads
+	// a live cache, and a held answer meets the warm gate, the stricter one: the worst case is a missed
+	// cold apply, not a broken cache (#1196 review).
+	liveByRead := cold && t.lastRead > 0 && c.CachePhase(0) == components.CachePhaseUnknown
+	if liveByRead {
 		cold = false
 	}
 	if cold {
@@ -900,7 +905,7 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	}
 	// SWEEP V3 (extract_sweep_v3.go) replaces everything below when it is on.
 	if e.v3 {
-		return e.v3Dispatch(req, rep, c, tkey, v3In{cold: cold, run: run, count: count, growthFrom: growthFrom,
+		return e.v3Dispatch(req, rep, c, tkey, v3In{cold: cold, liveByRead: liveByRead, run: run, count: count, growthFrom: growthFrom,
 			growthTurns: growthTurns, prevLocal: prevLocal, busy: busy, hasHeld: hasHeld, heldTried: heldTried})
 	}
 	// A CARRIED set the gate already refused is not retried on every warm request: the trigger runs instead and
@@ -912,7 +917,7 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 			t.count = 0 // a refused or spent answer must not earn a new question at once
 		}
 		warmMu.Unlock()
-		wa := &warmApply{}
+		wa := &warmApply{liveByRead: liveByRead}
 		wa.gate = e.warmGate(c, req, run, growthFrom, growthTurns, prevLocal, wa)
 		wk, wn := e.applyHeldFrom(memHeld{tkey}, wa, req, rep, c, tkey)
 		if wn > 0 {

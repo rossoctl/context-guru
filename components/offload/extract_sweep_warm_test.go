@@ -820,6 +820,7 @@ func TestAnUnknownPhaseThreadThatReadTheCacheIsWarmForTheWarmPath(t *testing.T) 
 	}{
 		{"the previous turn read the cache: warm", 5000, true},
 		{"the previous turn read nothing: still cold", 0, false},
+		{"the previous turn failed: still cold", -1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newWarmRig(t, "w-unknown", warmCfg, payingTail(), 1.0)
@@ -830,13 +831,44 @@ func TestAnUnknownPhaseThreadThatReadTheCacheIsWarmForTheWarmPath(t *testing.T) 
 			for i := 0; i < 4; i++ {
 				r.request(bobLike(r))
 				if i < 3 {
-					ResolveWarmQuestion(r.session, "", true, tc.read)
+					if tc.read < 0 { // a failed forward read nothing, whatever the usage said
+						ResolveWarmQuestion(r.session, "", false, 5000)
+					} else {
+						ResolveWarmQuestion(r.session, "", true, tc.read)
+					}
 				}
 			}
 			if got := pending(r); got != tc.wantFired {
 				t.Fatalf("warm question due = %v, want %v", got, tc.wantFired)
 			}
 		})
+	}
+}
+
+// #1196 review. On the same Bob-like route, the apply of a held warm answer must see the phase the warm
+// path decided. The apply judged the phase again with the cold rule, so a held answer went in as a cold
+// drop with no cost gate, on a live cache.
+func TestAHeldWarmAnswerOnAnUnknownPhaseGoesThroughTheWarmGate(t *testing.T) {
+	bobLike := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3
+		return c
+	}
+	r := newWarmRig(t, "w-unknown-apply", warmCfg, payingTail(), 1.0)
+	for i := 0; i < 4; i++ {
+		r.request(bobLike(r))
+		if i < 3 {
+			ResolveWarmQuestion(r.session, "", true, 5000)
+		}
+	}
+	r.forward()
+	if !r.held() {
+		t.Fatalf("fixture: no answer is waiting after the question: %+v", SweepWarmCounters())
+	}
+	ResolveWarmQuestion(r.session, "", true, 5000) // the turn that asked read the cache too
+	_, rep := r.request(bobLike(r))
+	if rep.Events["sweep_warm_gate_accept"] != 1 || rep.Events[eventAppliedWarm] == 0 {
+		t.Fatalf("events = %v, want the warm gate's accept and warm drops: the cache is live", rep.Events)
 	}
 }
 
