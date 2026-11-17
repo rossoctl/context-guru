@@ -86,7 +86,7 @@ func TestServedUIVersionsEveryAssetItReferences(t *testing.T) {
 		// maybeLoadManagerScript — so app.js fetches it itself once a hosted manager signs in.
 		{"app.js", "campaigns.js"},
 		// The diagnostics plots are fetched when the fold opens.
-		{"app.js", "charts.js"},
+		{"tabs/overview.js", "charts.js"},
 		// The bundled serif face, named in the stylesheet's @font-face.
 		{"style.css", "fonts/source-serif-4-latin-wght-normal.woff2"},
 	}

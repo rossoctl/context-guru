@@ -95,6 +95,15 @@
  "expand_rate": 0,
  "expand_tokens": 0,
  "expands": 0,
+ "fallback_cost_usd": 0,
+ "fallback_requests": 0,
+ "fallback_saved": {
+  "compaction_usd": 0,
+  "defer_usd": 0,
+  "filter_usd": 0,
+  "keepalive_usd": 0,
+  "reorder_usd": 0
+ },
  "fresh_input": 9480,
  "frozen_tokens": 0,
  "invalid_config_recent": 0,

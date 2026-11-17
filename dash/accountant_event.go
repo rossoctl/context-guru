@@ -20,11 +20,11 @@ func (e *Event) AccountantResult() (accountant.Result, bool) {
 	return *e.accRes, true
 }
 
-// SetAccountantUnsupportedWire marks the request as one on a wire the accountant library does not read yet:
-// the OpenAI Responses API keeps its conversation in `input`, and the proxy hashes `messages` and reports no
-// operations there. PriceMode then books no saving and says why (fallback unsupported_wire), where it would
-// have said no_result, which reads as a request that was merely skipped (context-guru#768 B7).
-func (e *Event) SetAccountantUnsupportedWire() { e.accUnsupportedWire = true }
+// SetAccountantServerHeldHistory marks an OpenAI Responses request that carries previous_response_id: the
+// provider holds the earlier turns, so the body is only this turn and the proxy cannot see the prefix the
+// provider reads. PriceMode then books no saving and says why (fallback server_held_history), where it would
+// have said no_result, which reads as a request that was merely skipped (context-guru#899).
+func (e *Event) SetAccountantServerHeldHistory() { e.accServerHeldHistory = true }
 
 // SetAccountantContext records what qualifies the attached Result: how many of the request's
 // changes the trace could not place as operations, and whether the run was observe mode. Both

@@ -71,3 +71,5 @@ Codex has the same skills under the same names, invoked by name: `$context-guru-
 ## Next
 
 [Status line](statusline.md) · [Configuration and troubleshooting](configuration.md)
+
+See the [matrix of plugins, providers and settings](../reference/plugins-matrix.md) for what each plugin offers per provider.

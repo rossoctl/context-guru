@@ -579,6 +579,13 @@ screen_reader_detection_done = true
         with self.assertRaisesRegex(RuntimeError, "does not know preset.*ultrahigh"):
             self.real_table(binary)
 
+    def test_a_row_for_anthropic_and_openai_is_not_offered(self):
+        # The proxy tags auto, 1-ping and 2-ping for both providers (#1062). Codex must still offer
+        # exactly [none, 30-min-ping].
+        both = {"name": "auto", "spends": True, "desc": "d", "providers": ["anthropic", "openai"], "cache": {}}
+        table = {**TABLE, "strategies": [TABLE["strategies"][0], both, TABLE["strategies"][2]]}
+        self.assertEqual([r["name"] for r in PLUGIN.offered_strategies(table)], ["none", "30-min-ping"])
+
     def test_only_openai_and_any_strategies_are_offered(self):
         self.assertEqual([r["name"] for r in PLUGIN.offered_strategies(TABLE)], ["none", "30-min-ping"])
         self.assertEqual(PLUGIN.resolve_strategy(TABLE, "none"), "none")

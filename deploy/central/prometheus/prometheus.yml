@@ -1,0 +1,28 @@
+# Prometheus for the central metrics stack.
+#
+# It RECEIVES data by remote write from the collector (--web.enable-remote-write-receiver). It
+# scrapes no proxy: the proxies push, so no machine needs an open port (spec R15, R22). It scrapes
+# only the stack's own parts, so an alert can say that the pipeline itself is down.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+  - job_name: otel-collector
+    static_configs:
+      - targets: ['otel-collector:8888']
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['alertmanager:9093']

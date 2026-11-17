@@ -198,7 +198,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
 	r.compaction_point, r.compaction_point_source, r.defer_cost_usd,
 	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
-	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, r.restored_tokens, r.currency, ` + requestTokenSelect + ``
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, r.restored_tokens, r.currency, ` + requestTokenSelect + `, r.backend, r.client_compaction, r.acc_fallback`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -208,7 +208,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
 	var u5, u7 sql.NullFloat64
 	var r5, r7 sql.NullInt64
-	var s5, s7 sql.NullString
+	var s5, s7, compVerdict sql.NullString
 	var authSub int
 	err := rows.Scan(append([]any{&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
@@ -230,7 +230,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
 		&e.CompactionPoint, &e.CompactionPointSource, &e.DeferCostUSD,
-		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm, &e.RestoredTokens, &e.Currency}, requestTokenDest(&e.AccTokens)...)...)
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm, &e.RestoredTokens, &e.Currency}, append(requestTokenDest(&e.AccTokens), &e.Backend, &compVerdict, &e.AccFallback)...)...)
 	e.AuthSubscription = authSub != 0
 	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
 		e.Limits = &l
@@ -242,6 +242,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
 	e.AgentCompaction = agentComp != 0
+	e.ClientCompaction, e.ClientCompactionKnown = compVerdict.String, compVerdict.Valid
 	e.KeepAlive = keepAlive != 0
 	e.ManualPing = manual != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one

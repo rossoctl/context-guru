@@ -145,8 +145,17 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 		t.Fatalf("bad json: %s", b)
 	}
 	for _, s := range v.Strategies {
-		if len(s.Providers) != 1 {
-			t.Errorf("%s: providers %v", s.Name, s.Providers)
+		want := []string{"anthropic"}
+		switch s.Name {
+		case "none":
+			want = []string{"any"}
+		case "auto", "1-ping", "2-ping":
+			want = []string{"anthropic", "openai"}
+		case "30-min-ping":
+			want = []string{"openai"}
+		}
+		if !reflect.DeepEqual(s.Providers, want) {
+			t.Errorf("%s: providers %v, want %v", s.Name, s.Providers, want)
 		}
 	}
 }
@@ -188,5 +197,23 @@ func TestToolWaitMinPrefixDefaultAndOverride(t *testing.T) {
 	}
 	if _, err := LoadBytes([]byte("cache:\n  keepalive_tool_wait_min_prefix_tokens: -1\n")); err == nil {
 		t.Error("a negative tool-wait floor was accepted")
+	}
+}
+
+// The Claude Code plugin offers a row that lists anthropic or any. The tag fix for OpenAI (#1062)
+// must not change that offer.
+func TestClaudeCodeOfferIsUnchangedByTheOpenAITags(t *testing.T) {
+	var got []string
+	for _, s := range Strategies {
+		for _, p := range s.Providers {
+			if p == "anthropic" || p == "any" {
+				got = append(got, s.Name)
+				break
+			}
+		}
+	}
+	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Claude Code would offer %v, want %v", got, want)
 	}
 }

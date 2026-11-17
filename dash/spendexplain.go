@@ -226,7 +226,7 @@ func classify(p modelinfo.Price, r spendRow) SpendUSD {
 		Output:     float64(r.out) * p.Output,
 	}
 	if r.write1h > 0 {
-		if prem := p.CacheWrite1h() - p.CacheWrite; prem > 0 {
+		if prem := p.CacheWrite1hPremium(); prem > 0 {
 			u.CacheWrite += float64(r.write1h) * prem
 		}
 	}
@@ -385,7 +385,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		if isRewrite {
 			excess := float64(r.write) * (p.CacheWrite - p.CacheRead)
 			if r.write1h > 0 {
-				if prem := p.CacheWrite1h() - p.CacheWrite; prem > 0 {
+				if prem := p.CacheWrite1hPremium(); prem > 0 {
 					excess += float64(r.write1h) * prem
 				}
 			}
@@ -402,7 +402,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			rc.USD += excess
 			rc.WriteUSD += float64(r.write) * p.CacheWrite
 			if r.write1h > 0 {
-				if prem := p.CacheWrite1h() - p.CacheWrite; prem > 0 {
+				if prem := p.CacheWrite1hPremium(); prem > 0 {
 					rc.WriteUSD += float64(r.write1h) * prem
 				}
 			}

@@ -363,7 +363,7 @@ func TestTheVerdictExplanationWrapsInsideItsTableCell(t *testing.T) {
 // `behaviour`, which the redesigned nav (#564) removed; merged together, both pages threw `mountTab: no such
 // group` on every load (found by the e2e harness on the merged branch).
 func TestEverySelfMountedViewNamesANavGroupThatExists(t *testing.T) {
-	app := readUI(t, "ui/app.js")
+	app := readApp(t)
 	decl := regexp.MustCompile(`(?s)const GROUPS = \[(.*?)\n\];`).FindStringSubmatch(app)
 	if decl == nil {
 		t.Fatal("no `const GROUPS = [...]` in app.js; update this test")

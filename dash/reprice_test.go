@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // lateLoader is a price source that knows nothing until load is called: the proxy's price map
@@ -30,18 +31,6 @@ func partialEvent(ts int64, session string, cacheWrite int64) *Event {
 		TokensBefore: 49, FreshInput: 10, CacheWrite: cacheWrite, OutputTokens: 50}
 	e.PriceMode(modelinfo.Price{}, true) // the price map has not loaded: partial at $0
 	return e
-}
-
-func waitFor(t *testing.T, what string, ok func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if ok() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
 }
 
 // A request that was booked at $0 because the price map had not loaded is priced once it loads
@@ -72,7 +61,7 @@ func TestRecorderRepricesRowsBookedBeforeThePriceMapLoaded(t *testing.T) {
 	noTokens.PriceMode(modelinfo.Price{}, false) // no usage: stays partial, there is nothing to price
 	rec.Record(first)
 	rec.Record(noTokens)
-	waitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
+	testutil.WaitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
 
 	var acct string
 	var cost float64
@@ -82,13 +71,13 @@ func TestRecorderRepricesRowsBookedBeforeThePriceMapLoaded(t *testing.T) {
 		}
 		return acct, cost
 	}
-	time.Sleep(60 * time.Millisecond) // several passes with no price: nothing changes
+	time.Sleep(60 * time.Millisecond) //timing:ok negative wait: several passes with no price, nothing changes
 	if a, c := row("s1"); a != AccountingPartial || c != 0 {
 		t.Fatalf("before the load: %q cost %v, want partial and 0", a, c)
 	}
 
 	src.loaded.Store(true)
-	waitFor(t, "the row to be priced", func() bool { a, _ := row("s1"); return a == AccountingComplete })
+	testutil.WaitFor(t, "the row to be priced", func() bool { a, _ := row("s1"); return a == AccountingComplete })
 
 	want := 10*3e-06 + 29650*3.75e-06 + 50*1.5e-05
 	a, c := row("s1")
@@ -135,7 +124,7 @@ func TestRecorderRepricesABypassedRowBookedBeforeThePriceMapLoaded(t *testing.T)
 		t.Fatalf("setup: a bypassed row with no price is %q, want %q", e.TokenAccounting, AccountingMissing)
 	}
 	rec.Record(e)
-	waitFor(t, "row written", func() bool { return rec.Stats().Written == 1 })
+	testutil.WaitFor(t, "row written", func() bool { return rec.Stats().Written == 1 })
 	// The count worker flips the label after the write, before the price lands.
 	if err := rec.db.setBypassTokens(1, 49, 49, 0); err != nil {
 		t.Fatal(err)
@@ -144,7 +133,7 @@ func TestRecorderRepricesABypassedRowBookedBeforeThePriceMapLoaded(t *testing.T)
 	src.loaded.Store(true)
 	var acct string
 	var cost float64
-	waitFor(t, "the bypassed row to be priced", func() bool {
+	testutil.WaitFor(t, "the bypassed row to be priced", func() bool {
 		if err := rec.db.sql.QueryRow(`SELECT token_accounting, cost_usd FROM requests WHERE session_id = 'b1'`).Scan(&acct, &cost); err != nil {
 			t.Fatal(err)
 		}
@@ -156,11 +145,38 @@ func TestRecorderRepricesABypassedRowBookedBeforeThePriceMapLoaded(t *testing.T)
 	}
 }
 
-// A row whose compaction call could not be priced is not repriced: its cg_llm_cost_usd would stay
-// 0 under a "complete" label, which readers take for "context-guru spent nothing". It stays
-// partial at $0, which they take for unknown (review of #1002, finding 2).
-func TestRecorderLeavesARowWithAnUnpricedCompactionCallUnknown(t *testing.T) {
-	src := &lateLoader{p: modelinfo.Price{Input: 3e-06, Output: 1.5e-05, CacheRead: 3e-07, CacheWrite: 3.75e-06}}
+// modelLoader is lateLoader with a price per model: the agent's model and the cheaper model the
+// compaction calls use.
+type modelLoader struct {
+	loaded atomic.Bool
+	p      map[string]modelinfo.Price
+}
+
+func (l *modelLoader) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	if !l.loaded.Load() {
+		return modelinfo.Price{}, false
+	}
+	p, ok := l.p[model]
+	return p, ok
+}
+
+// withCompaction is partialEvent for a request that also made compaction calls on model, which the
+// capture site could not price either (issue #1033).
+func withCompaction(session, model string) *Event {
+	e := partialEvent(0, session, 29650)
+	e.CGModel = model
+	e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = 2000, 500, 8000, 300
+	e.PriceCG(nil, modelinfo.Price{}, false)
+	return e
+}
+
+// A request that made compaction calls, booked before the price map loaded, is priced on both
+// halves once it loads: cost_usd and cg_llm_cost_usd. tenant_spend follows both, added once
+// (issue #1033).
+func TestRecorderRepricesBothHalvesOfARowWithAnUnpricedCompactionCall(t *testing.T) {
+	sonnet := modelinfo.Price{Input: 3e-06, Output: 1.5e-05, CacheRead: 3e-07, CacheWrite: 3.75e-06}
+	haiku := modelinfo.Price{Input: 1e-06, Output: 5e-06, CacheRead: 1e-07, CacheWrite: 1.25e-06}
+	src := &modelLoader{p: map[string]modelinfo.Price{"claude-sonnet-4-5": sonnet, "claude-haiku-4-5": haiku}}
 	rec, err := NewRecorder(Options{DBPath: filepath.Join(t.TempDir(), "d.db"), FlushInterval: time.Millisecond,
 		BatchSize: 1, Prices: src, RepriceInterval: 10 * time.Millisecond})
 	if err != nil {
@@ -168,25 +184,119 @@ func TestRecorderLeavesARowWithAnUnpricedCompactionCallUnknown(t *testing.T) {
 	}
 	defer rec.Close()
 
-	withCG := partialEvent(0, "cg", 29650)
-	withCG.CGCostUnpriced = true // the capture site had compaction tokens and no price for them
-	plain := partialEvent(0, "plain", 29650)
-	rec.Record(withCG)
-	rec.Record(plain)
-	waitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
+	same := withCompaction("same", "")                   // no compaction model named: the agent's rate
+	other := withCompaction("other", "claude-haiku-4-5") // a cheaper compaction model: its own rate
+	// The compaction model was priced at write time and the agent's model was not (a partial load).
+	// Its compaction cost is already on the row and in tenant_spend: the pass must keep it, and must
+	// not add it again.
+	early := partialEvent(0, "early", 29650)
+	early.CGModel = "claude-haiku-4-5"
+	early.CGFresh, early.CGCacheRead, early.CGCacheWrite, early.CGOutput = 2000, 500, 8000, 300
+	haikuOnly := &modelLoader{p: map[string]modelinfo.Price{"claude-haiku-4-5": haiku}}
+	haikuOnly.loaded.Store(true)
+	early.PriceCG(haikuOnly, modelinfo.Price{}, false)
+	if early.CGCostUnpriced || early.CGLLMCostUSD == 0 {
+		t.Fatalf("setup: a known compaction model has CGCostUnpriced %v cost %v, want false and > 0",
+			early.CGCostUnpriced, early.CGLLMCostUSD)
+	}
+	if !same.CGCostUnpriced || same.CGLLMCostUSD != 0 {
+		t.Fatalf("setup: an unpriced compaction call has CGCostUnpriced %v cost %v, want true and 0",
+			same.CGCostUnpriced, same.CGLLMCostUSD)
+	}
+	rec.Record(same)
+	rec.Record(other)
+	rec.Record(early)
+	testutil.WaitFor(t, "rows written", func() bool { return rec.Stats().Written == 3 })
 
-	src.loaded.Store(true)
-	get := func(session string) string {
-		var a string
-		if err := rec.db.sql.QueryRow(`SELECT token_accounting FROM requests WHERE session_id = ?`, session).Scan(&a); err != nil {
+	type row struct {
+		acct     string
+		cost, cg float64
+	}
+	get := func(session string) row {
+		var r row
+		if err := rec.db.sql.QueryRow(`SELECT token_accounting, cost_usd, cg_llm_cost_usd FROM requests WHERE session_id = ?`,
+			session).Scan(&r.acct, &r.cost, &r.cg); err != nil {
 			t.Fatal(err)
 		}
-		return a
+		return r
 	}
-	waitFor(t, "the plain row to be priced", func() bool { return get("plain") == AccountingComplete })
-	time.Sleep(60 * time.Millisecond) // a few more passes
-	if a := get("cg"); a != AccountingPartial {
-		t.Errorf("a row with an unpriced compaction call is %q, want it left partial (unknown)", a)
+	time.Sleep(60 * time.Millisecond) // several passes with no price: nothing changes
+	for _, s := range []string{"same", "other"} {
+		if r := get(s); r.acct != AccountingPartial || r.cost != 0 || r.cg != 0 {
+			t.Fatalf("%s before the load: %+v, want partial at $0 on both halves", s, r)
+		}
+	}
+	earlyCG := haiku.Cost(2000, 500, 8000, 300)
+	if r := get("early"); r.acct != AccountingPartial || r.cost != 0 || math.Abs(r.cg-earlyCG) > earlyCG*1e-6 {
+		t.Fatalf("early before the load: %+v, want partial, cost_usd 0 and cg_llm_cost_usd %v", r, earlyCG)
+	}
+
+	src.loaded.Store(true)
+	testutil.WaitFor(t, "every row to be priced", func() bool {
+		return get("same").acct == AccountingComplete && get("other").acct == AccountingComplete &&
+			get("early").acct == AccountingComplete
+	})
+
+	wantCost := 10*3e-06 + 29650*3.75e-06 + 50*1.5e-05
+	near := func(got, want float64) bool { return math.Abs(got-want) <= want*1e-6 }
+	cases := []struct {
+		session string
+		p       modelinfo.Price
+	}{{"same", sonnet}, {"other", haiku}, {"early", haiku}}
+	var wantSpend float64
+	for _, c := range cases {
+		wantCG := c.p.Cost(2000, 500, 8000, 300)
+		r := get(c.session)
+		if !near(r.cost, wantCost) || !near(r.cg, wantCG) {
+			t.Errorf("%s: cost_usd %v cg_llm_cost_usd %v, want %v and %v", c.session, r.cost, r.cg, wantCost, wantCG)
+		}
+		wantSpend += wantCost + wantCG
+	}
+
+	time.Sleep(60 * time.Millisecond) //timing:ok negative wait: more passes, nothing is added twice
+	var spend float64
+	if err := rec.db.sql.QueryRow(`SELECT COALESCE(SUM(usd),0) FROM tenant_spend`).Scan(&spend); err != nil {
+		t.Fatal(err)
+	}
+	if !near(spend, wantSpend) {
+		t.Errorf("tenant_spend = %v, want %v: both halves of every row, each added once", spend, wantSpend)
+	}
+}
+
+// PriceCG uses the agent's rate when the compaction calls name no model, or the agent's own model,
+// and the compaction model's rate when the price source knows it. It books nothing for a request
+// with no compaction tokens. The capture site and the reprice pass both price through it, so the
+// two give one figure for one request.
+func TestPriceCG(t *testing.T) {
+	sonnet := modelinfo.Price{Input: 3e-06, Output: 1.5e-05, CacheRead: 3e-07, CacheWrite: 3.75e-06}
+	haiku := modelinfo.Price{Input: 1e-06, Output: 5e-06, CacheRead: 1e-07, CacheWrite: 1.25e-06}
+	src := &modelLoader{p: map[string]modelinfo.Price{"claude-haiku-4-5": haiku}}
+	src.loaded.Store(true)
+	cg := func(model string) *Event {
+		e := &Event{Model: "claude-sonnet-4-5", CGModel: model}
+		e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = 2000, 500, 8000, 300
+		return e
+	}
+	for _, c := range []struct {
+		name       string
+		e          *Event
+		main       modelinfo.Price
+		mainPriced bool
+		want       float64
+		unpriced   bool
+	}{
+		{"no model, agent priced", cg(""), sonnet, true, sonnet.Cost(2000, 500, 8000, 300), false},
+		{"agent's model", cg("claude-sonnet-4-5"), sonnet, true, sonnet.Cost(2000, 500, 8000, 300), false},
+		{"own model known", cg("claude-haiku-4-5"), sonnet, true, haiku.Cost(2000, 500, 8000, 300), false},
+		{"own model known, agent not", cg("claude-haiku-4-5"), modelinfo.Price{}, false, haiku.Cost(2000, 500, 8000, 300), false},
+		{"own model unknown: the agent's rate", cg("other-model"), sonnet, true, sonnet.Cost(2000, 500, 8000, 300), false},
+		{"nothing priced", cg(""), modelinfo.Price{}, false, 0, true},
+		{"no compaction tokens", &Event{Model: "claude-sonnet-4-5"}, modelinfo.Price{}, false, 0, false},
+	} {
+		c.e.PriceCG(src, c.main, c.mainPriced)
+		if math.Abs(c.e.CGLLMCostUSD-c.want) > 1e-12 || c.e.CGCostUnpriced != c.unpriced {
+			t.Errorf("%s: cost %v unpriced %v, want %v and %v", c.name, c.e.CGLLMCostUSD, c.e.CGCostUnpriced, c.want, c.unpriced)
+		}
 	}
 }
 

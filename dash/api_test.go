@@ -297,7 +297,7 @@ func TestUIHasTestIDsForEveryStatTile(t *testing.T) {
 	// The visual layer is regression-tested by asserting the testids the Playwright
 	// checks and the docs screenshots depend on. If a tile is renamed, this fails
 	// before the screenshots silently go stale.
-	js, err := uiFS.ReadFile("ui/app.js")
+	js, err := appSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,24 +433,30 @@ func TestTrustedRejectsMalformedRemoteAddr(t *testing.T) {
 // source with strings and comments stripped, which is enough to catch this class
 // of typo without a JS engine.
 func TestUIScriptParses(t *testing.T) {
-	src, err := uiFS.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatal(err)
+	// Each file on its own: the browser parses them one by one, so a file that parses only
+	// when joined to its neighbour is still a blank page.
+	node, lookErr := exec.LookPath("node")
+	if lookErr != nil {
+		t.Log("node not found; falling back to a bracket-balance check")
 	}
-	if node, lookErr := exec.LookPath("node"); lookErr == nil {
-		f := filepath.Join(t.TempDir(), "app.js")
-		if err := os.WriteFile(f, src, 0o600); err != nil {
+	for _, name := range appFiles(t) {
+		src, err := uiFS.ReadFile(name)
+		if err != nil {
 			t.Fatal(err)
 		}
-		out, err := exec.Command(node, "--check", f).CombinedOutput()
-		if err != nil {
-			t.Fatalf("app.js does not parse:\n%s", out)
+		if lookErr == nil {
+			f := filepath.Join(t.TempDir(), filepath.Base(name))
+			if err := os.WriteFile(f, src, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(node, "--check", f).CombinedOutput(); err != nil {
+				t.Errorf("%s does not parse:\n%s", name, out)
+			}
+			continue
 		}
-		return
-	}
-	t.Log("node not found; falling back to a bracket-balance check")
-	if line, ok := unbalancedAt(string(src)); !ok {
-		t.Errorf("app.js brackets do not balance (first imbalance around line %d)", line)
+		if line, ok := unbalancedAt(string(src)); !ok {
+			t.Errorf("%s brackets do not balance (first imbalance around line %d)", name, line)
+		}
 	}
 }
 
@@ -532,7 +538,7 @@ func unbalancedAt(s string) (int, bool) {
 // replaced by `cachesplit_saved_usd`, which is measured, and the provider figure stays in the
 // API as a diagnostic only. A revert that puts either back on the page fails here.
 func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
-	js, err := uiFS.ReadFile("ui/app.js")
+	js, err := appSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +561,7 @@ func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
 	// renderSavedLedger reads the provider figure exactly once, to recover the input price for the
 	// keep-alive token estimate. It is never displayed; a second use would need a second look.
 	if n := strings.Count(src, "o.cache_saved_usd"); n != 1 {
-		t.Errorf("o.cache_saved_usd appears %d times in app.js, want the single read in renderSavedLedger", n)
+		t.Errorf("o.cache_saved_usd appears %d times in app.js and the tab files, want the single read in renderSavedLedger", n)
 	}
 }
 
@@ -581,7 +587,7 @@ func TestUIClaimsOnlyTheCacheSavingWeMeasure(t *testing.T) {
 // number input's floor. The per-field RENDERING is checked by driving the real page under
 // jsdom; what a Go test can pin is that nothing here is hand-copied.
 func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
-	js, err := uiFS.ReadFile("ui/app.js")
+	js, err := appSource()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +805,7 @@ func TestSettingsFormSpeaksTheSameFieldNamesAsTheServer(t *testing.T) {
 // figure, with no saving and no net anywhere near it — and concluded the product was
 // worthless. Every one of these fields is half of a pair that has to appear together.
 func TestUINeverShowsABareCost(t *testing.T) {
-	js, err := uiFS.ReadFile("ui/app.js")
+	js, err := appSource()
 	if err != nil {
 		t.Fatal(err)
 	}

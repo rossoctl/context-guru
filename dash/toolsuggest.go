@@ -132,6 +132,9 @@ type DeclFilterSaving struct {
 	// "unpriced" mark rather than a dollar.
 	USD    float64 `json:"usd"`
 	Priced bool    `json:"priced"`
+	// FallbackUSD is the part of USD on requests the accountant could not price (requests.acc_fallback).
+	// The Overview share leaves those requests out, their saving with them (#1004).
+	FallbackUSD float64 `json:"fallback_usd,omitempty"`
 }
 
 // ExcludedDecl is one declaration the account has opted out of, in the shape the inventory
@@ -177,10 +180,14 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	for rows.Next() {
 		var session, model string
 		var tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
-		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline); err != nil {
+		var fallback bool
+		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline, &fallback); err != nil {
 			return nil, err
 		}
-		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
+		usd := accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
+		if fallback {
+			out.FallbackUSD += usd
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -211,7 +218,7 @@ const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM req
 func declFilterSavingsQuery(f Filter) (string, []any) {
 	where, args := f.where()
 	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.cache_write_1h, r.ts, ` + declFilterInBaseline + ` FROM requests r
+		r.cache_read, r.cache_write, r.cache_write_1h, r.ts, ` + declFilterInBaseline + `, r.acc_fallback <> '' FROM requests r
 		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
 }
 
@@ -221,7 +228,7 @@ func declFilterSavingsQuery(f Filter) (string, []any) {
 // drift on how a row is priced. skipUSD keeps the row's requests, tokens and dates and adds no dollars:
 // the accountant already booked them (declFilterInBaseline).
 func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
-	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, skipUSD bool, price func(string) (modelinfo.Price, bool)) {
+	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, skipUSD bool, price func(string) (modelinfo.Price, bool)) float64 {
 	out.Requests++
 	sessions[session] = true
 	out.Reads += tok
@@ -256,13 +263,14 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		rate = p.Input
 	}
 	if skipUSD {
-		return
+		return 0
 	}
-	if priced {
-		out.USD += float64(tok) * rate
-	} else {
+	if !priced {
 		out.Priced = false
+		return 0
 	}
+	out.USD += float64(tok) * rate
+	return float64(tok) * rate
 }
 
 // DeclFilterSavingsByTenant is DeclFilterSavings for every tenant since a given time, in one

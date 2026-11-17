@@ -3,6 +3,7 @@ package keepalive
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/tidwall/gjson"
 )
 
@@ -556,10 +558,8 @@ func TestCredentialRetentionRules(t *testing.T) {
 		if k.Stats().Live != 1 {
 			t.Fatal("nothing held to expire")
 		}
-		deadline := time.Now().Add(2 * time.Second)
-		for k.Stats().Live != 0 && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
+		testutil.WaitForState(t, "the held session to expire", func() bool { return k.Stats().Live == 0 },
+			func() string { return fmt.Sprintf("%d sessions held", k.Stats().Live) })
 		if got := k.Stats().Live; got != 0 {
 			t.Fatalf("%d sessions still held past the hard deadline with nothing else running", got)
 		}
@@ -697,11 +697,14 @@ func TestKillSwitch(t *testing.T) {
 	recordOne(t, k, kaPolicy(), kaBody, clock.now())
 	// The sweep loop never starts, so nothing is ever due. Sweep itself is still callable —
 	// the switch stops the timer, and the test asserts the timer is what is stopped.
-	select {
-	case <-k.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the sweep goroutine is running with the kill switch set")
-	}
+	testutil.WaitFor(t, "the sweep goroutine to stop (the kill switch is set)", func() bool {
+		select {
+		case <-k.done:
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 // waitPings waits for the sweep's fire goroutines to finish n pings. The sweep dispatches
@@ -711,26 +714,14 @@ func TestKillSwitch(t *testing.T) {
 // because the entry's own fields are written after the counter.
 func waitPings(t *testing.T, k *Keeper, n int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if k.pings.Load() >= n {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("pings = %d after 2s, want %d", k.pings.Load(), n)
+	testutil.WaitForState(t, fmt.Sprintf("%d pings", n), func() bool { return k.pings.Load() >= n },
+		func() string { return fmt.Sprintf("pings = %d", k.pings.Load()) })
 }
 
 func waitSkipped(t *testing.T, k *Keeper, n int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if k.skipped.Load() >= n {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("skipped = %d after 2s, want %d", k.skipped.Load(), n)
+	testutil.WaitForState(t, fmt.Sprintf("%d skipped pings", n), func() bool { return k.skipped.Load() >= n },
+		func() string { return fmt.Sprintf("skipped = %d", k.skipped.Load()) })
 }
 
 // waitRefreshed waits until one session's entry carries the cache-read its ping saw.
@@ -740,20 +731,16 @@ func waitSkipped(t *testing.T, k *Keeper, n int64) {
 // (issue #206). Correct under the inline runner and the default goroutine runner both.
 func waitRefreshed(t *testing.T, k *Keeper, key Key, want int64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	var got int64
+	testutil.WaitForState(t, fmt.Sprintf("refreshed for session %s to reach %d", key.Session, want), func() bool {
 		k.mu.Lock()
-		var got int64
+		defer k.mu.Unlock()
+		got = 0
 		if e := k.live[key.id()]; e != nil {
 			got = e.refreshed
 		}
-		k.mu.Unlock()
-		if got == want {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("refreshed for session %s never reached %d", key.Session, want)
+		return got == want
+	}, func() string { return fmt.Sprintf("refreshed = %d", got) })
 }
 
 // Deletion, token revocation and disablement each end an account's authority, and the keeper is

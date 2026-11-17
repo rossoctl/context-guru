@@ -50,6 +50,10 @@ type Usage struct {
 	// CacheWrite1h is the part of CacheWrite billed at the one-hour write tier.
 	CacheWrite1h int64
 	Output       int64
+	// Backend is a short label of which backend of the agent's upstream served the reply (for
+	// example "A" or "B"), or "" for none. The agent sets it from marks it reads in the reply and
+	// never returns the marks themselves. It is set whether or not the reply has usage.
+	Backend string
 }
 
 // Base is the neutral agent: it changes nothing on the shared path. An agent embeds it and

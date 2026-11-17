@@ -9,6 +9,9 @@ import { readFileSync } from 'node:fs';
 
 const app = readFileSync(new URL('./ui/app.js', import.meta.url), 'utf8');
 const charts = readFileSync(new URL('./ui/charts.js', import.meta.url), 'utf8');
+// dailyColumns and the keep-alive cost line moved into the tab files (#1151).
+const usage = readFileSync(new URL('./ui/tabs/usage.js', import.meta.url), 'utf8');
+const keepalive = readFileSync(new URL('./ui/tabs/keepalive.js', import.meta.url), 'utf8');
 // A function's source, at any indent: from its header to the first closing brace at the same indent.
 const body = (src, name) => {
   const m = src.match(new RegExp('\\n( *)(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\1\\}'));
@@ -50,9 +53,9 @@ test('a money chart in a mixed view is an empty state with the reason', () => {
 });
 
 test('every money chart asks noMoneyChart first', () => {
-  for (const [src, name] of [[charts, 'netSaving'], [charts, 'savingsBars'], [app, 'dailyColumns']]) {
+  for (const [src, name] of [[charts, 'netSaving'], [charts, 'savingsBars'], [usage, 'dailyColumns']]) {
     assert.match(body(src, name), /noMoneyChart\(/, name + ' draws money without checking the unit');
   }
   // The keep-alive tab's cost line. On a subscription it is in tokens, so it is drawn.
-  assert.match(app, /sub \|\| !noMoneyChart\(\$\('#ka-chart-usd'\)\)\) lineChart\(\$\('#ka-chart-usd'\)/, '#ka-chart-usd draws money without checking the unit');
+  assert.match(keepalive, /sub \|\| !noMoneyChart\(\$\('#ka-chart-usd'\)\)\) lineChart\(\$\('#ka-chart-usd'\)/, '#ka-chart-usd draws money without checking the unit');
 });

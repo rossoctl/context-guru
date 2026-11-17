@@ -29,6 +29,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
@@ -72,8 +73,14 @@ type Options struct {
 	ClaudeCompact compactionpoint.ClaudeCode
 	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
 	// start-up in local mode. BobCompact also gives Bob's own default. The zero value changes nothing.
-	BobCompact        compactionpoint.Bob
-	CodexCompact      compactionpoint.Codex
+	BobCompact   compactionpoint.Bob
+	CodexCompact compactionpoint.Codex
+	// MetricsSink, when set, receives each priced request for the push metrics (R46: it must only
+	// add to in-memory counters). Nil means no metrics. Build it with NewMetricsSink.
+	MetricsSink acmetrics.Observer
+	// InferenceMetrics, when set, books each finished request into the common inference set. Nil
+	// means off. Build it with NewInferenceMetrics.
+	InferenceMetrics  *InferenceMetrics
 	OpenAIUpstream    string // e.g. https://api.openai.com
 	AnthropicUpstream string
 	// BobUpstream, when set, enables the Bob (BobShell) gateway: Bob's
@@ -707,6 +714,8 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 		}
 		copyHeaders(req.Header, r.Header)
 		setUpstreamAuth(req.Header, up)
+		// The model-info half below is local-only. Bob is not deployed on hosted for now (owner,
+		// 2026-11-12), so this rule was not designed for hosted Bob. See docs/reference/hosted-vs-local.md.
 		if isBobProfile(r) || (h.opts.Tenants == nil && isBobModelInfo(r)) {
 			// We have to read this one response, so do not let it arrive compressed.
 			req.Header.Del("Accept-Encoding")
@@ -730,9 +739,8 @@ func (h *Handler) passthrough(base string) http.HandlerFunc {
 	}
 }
 
-// bobProfilePath is the profile route Bob's CLI calls before anything else, and the
-// one response the catch-all does not forward verbatim. See forwardBobProfile.
-const bobProfilePath = "/admin/v1/profile"
+// bobProfilePath is bob.ProfilePath. See forwardBobProfile.
+const bobProfilePath = bob.ProfilePath
 
 // bobModelPath is Bob's model route.
 const bobModelPath = bob.ModelPath
@@ -769,9 +777,7 @@ func agentSessionID(r *http.Request, a agent.Agent) (id string) {
 	return a.SessionID(r.Header)
 }
 
-func isBobProfile(r *http.Request) bool {
-	return r.Method == http.MethodGet && strings.EqualFold(r.URL.Path, bobProfilePath)
-}
+func isBobProfile(r *http.Request) bool { return bob.IsProfile(r.Method, r.URL.Path) }
 
 // forwardBobProfile forwards Bob's profile with the per-instance REGION fields removed,
 // and reports whether it answered the request.
@@ -829,31 +835,8 @@ func (h *Handler) forwardBobModelInfo(w http.ResponseWriter, resp *http.Response
 	return true
 }
 
-// stripProfileRegion removes region/region_domain from every instance in a Bob profile
-// document, reporting false when the body is not one (then it must be forwarded as-is).
-func stripProfileRegion(b []byte) ([]byte, bool) {
-	var doc map[string]any
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, false
-	}
-	insts, ok := doc["instances"].([]any)
-	if !ok {
-		return nil, false
-	}
-	for _, it := range insts {
-		m, ok := it.(map[string]any)
-		if !ok {
-			continue
-		}
-		delete(m, "region")
-		delete(m, "region_domain")
-	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, false
-	}
-	return out, true
-}
+// stripProfileRegion is bob.StripProfileRegion.
+func stripProfileRegion(b []byte) ([]byte, bool) { return bob.StripProfileRegion(b) }
 
 // compact runs the pipeline over the request body's messages and returns the
 // rewritten body — without forwarding upstream. This is the "compact a context,
@@ -1541,37 +1524,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)
 			cp.noteTrace(tr)
-			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
-			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
-			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
-			// sent. An empty session means the pipeline did not run (bypassed, observe, no
-			// messages): there are no operations to price, so the request is skipped.
-			//
-			// Not on the OpenAI Responses wire: it keeps the conversation in `input`, accBodies hashes
-			// `messages`, and apply reports no operations there. The record would price nothing and fail the
-			// library's sum check. The event is marked instead, so the dashboard says why it has no saving.
-			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) {
-				cp.accUnsupportedWire = true
-			} else if cp != nil && cp.savings != nil && tr.Session != "" {
-				cp.accBegin(accountant.RequestMeta{
-					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
-					Session:   tr.Session,
-					Model:     gjson.GetBytes(orig, "model").String(),
-					At:        cp.start,
-					// The proxy has no subscription detection, so every request is billed as api.
-					Billing: accountant.Billing{Mode: accountant.BillingAPI},
-				}, orig)
-			}
-			// A real request has arrived on this session: cancel any pending keep-alive
-			// (this request refreshes the entry itself, and a ping concurrent with it would
-			// be a second request against the tenant's budget for nothing), and pick up what
-			// the pings during the idle span it just ended actually did. Both facts are
-			// needed BEFORE the row is priced — the ping count and the tokens the last ping
-			// refreshed are inputs to a dollar figure, not just a label.
-			//
-			// Per THREAD of the session (#423): the main agent, each subagent and each fork
-			// have their own cache entry, and only this request's thread was refreshed. Read
-			// off `orig`, the request as the agent sent it — the pipeline's own rewrite would
+			// The thread is known before the savings tracker is told of the request: the first request
+			// after the agent's own compaction is found here (thread.Result.AfterCompaction, #947).
+			// Read off `orig`, the request as the agent sent it — the pipeline's own rewrite would
 			// break the prefix the fallback matches on.
 			th := tr.Thread
 			if !tr.ThreadResolved {
@@ -1581,6 +1536,32 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			}
 			threadID = th.ID
 			cp.noteThread(th)
+			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
+			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
+			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
+			// sent. An empty session means the pipeline did not run (bypassed, observe, no
+			// messages): there are no operations to price, so the request is skipped.
+			//
+			// Not for an OpenAI Responses request whose history the provider holds (previous_response_id,
+			// conversation, item_reference; see responsesServerHeldHistory): the body is only this turn. The record would compare that delta with the last full
+			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
+			// the dashboard says why it has no saving (#899).
+			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
+				responsesServerHeldHistory(orig) {
+				cp.accServerHeldHistory = true
+			} else if cp != nil && cp.savings != nil && tr.Session != "" {
+				cp.accBegin(accountant.RequestMeta{
+					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
+					Session:   tr.Session,
+					Model:     gjson.GetBytes(orig, "model").String(),
+					At:        cp.start,
+					// The proxy has no subscription detection, so every request is billed as api.
+					Billing: accountant.Billing{Mode: accountant.BillingAPI},
+					// The first request after the agent's own compaction (R55). The wire does not yet tell
+					// a manual /compact from an auto compaction, so the verdict is unknown.
+					Compaction: compactionVerdict(th),
+				}, orig)
+			}
 			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
 			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
 			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
@@ -1590,6 +1571,15 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// The alias derivation needs the pipeline that transforms THIS body, and the
 			// wire dialect and bypass flag it transforms under — see noteAliasSource.
 			cp.noteAliasSource(tn.Pipe, api, bypassed)
+			// A real request has arrived on this session: cancel any pending keep-alive
+			// (this request refreshes the entry itself, and a ping concurrent with it would
+			// be a second request against the tenant's budget for nothing), and pick up what
+			// the pings during the idle span it just ended actually did. Both facts are
+			// needed BEFORE the row is priced — the ping count and the tokens the last ping
+			// refreshed are inputs to a dollar figure, not just a label.
+			//
+			// Per THREAD of the session (#423): the main agent, each subagent and each fork
+			// have their own cache entry, and only this request's thread was refreshed.
 			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
 			if cp != nil {
 				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
@@ -1732,8 +1722,13 @@ func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.
 	lg = lg.With("session", tr.Session, "messages", tr.Messages, "bypassed", bypassed,
 		"cache_aware", tr.CacheAware, "frozen_tokens", tr.FrozenTokens)
 	if tr.Run != nil {
-		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", tr.Run.TokensAfter,
-			"saved", tr.Run.Saved(), "components_ms", tr.Run.DurationMs)
+		after, saved := tr.Run.TokensAfter, tr.Run.Saved()
+		if tr.Declined {
+			after, saved = tr.Run.TokensBefore, 0 // the original went upstream (#1179)
+			lg = lg.With("rebuild_declined", true)
+		}
+		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", after,
+			"saved", saved, "components_ms", tr.Run.DurationMs)
 	}
 	// cg_ms is everything this proxy did before forwarding (normalizing, counting, the
 	// components): the figure the dashboard's cg_latency_ms and /stats already carry. It used to
@@ -2305,6 +2300,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// two facts are independent (see Usage.StopReason), and dropping the reason
 				// here would blank stop_reason for exactly the rows already marked partial.
 				usage.StopReason = u.StopReason
+				usage.Backend = u.Backend // as StopReason: a label needs no usage
 			}
 			return
 		}
@@ -2396,6 +2392,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				usage, usageOK = u, true
 			} else {
 				usage.StopReason = u.StopReason // as on the other stream path
+				usage.Backend = u.Backend
 			}
 			return
 		default:
@@ -2410,11 +2407,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		if u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false); ok {
-			u = readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
+		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		// The agent reads its backend label from any reply, with or without usage; its token
+		// reading counts only when the shared parser read usage too.
+		agentU := readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
+		if ok {
+			u = agentU
+		} else {
+			u.Backend = agentU.Backend
+		}
+		if ok {
 			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
+			usage.Backend = u.Backend       // a reply with no usage still has a backend label
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if di != nil {
@@ -2822,13 +2828,18 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
 	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
-	if ok {
+	{
 		// The request's context carries its logger. A test's hand-built response has no request.
 		ctx := context.Background()
 		if resp.Request != nil {
 			ctx = resp.Request.Context()
 		}
-		u = readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
+		agentU := readAgentUsage(ctx, ag, resp.Header.Get("Content-Type"), win, u)
+		if ok {
+			u = agentU
+		} else {
+			u.Backend = agentU.Backend // a reply with no usage still has a backend label
+		}
 	}
 	// Tool deferral's ledger (#485) reads the server-side searches off the same window: a search
 	// opens its response, so the head holds it. A byte check first, so other responses pay nothing.
@@ -3100,6 +3111,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	snap.ToolDefer = h.deferStats()
 	snap.KeepAlivePingsPriced = h.opts.Pings.Priced()
 	snap.KeepAliveRescueFactsMissing = h.savings.RescueFactsMissing()
+	snap.BobBackend = bob.BackendCounts()
 	json.NewEncoder(w).Encode(snap)
 }
 

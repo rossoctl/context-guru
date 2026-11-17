@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -165,14 +166,12 @@ func (fixedPricer) Price(context.Context, string) (modelinfo.Price, bool) {
 // waitForRows polls until the writer goroutine has persisted n rows.
 func waitForRows(t *testing.T, rec *dash.Recorder, n int64) {
 	t.Helper()
-	for i := 0; i < 400; i++ {
-		if rec.Stats().Written >= n {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("only %d of %d rows persisted (dropped %d, errors %d)",
-		rec.Stats().Written, n, rec.Stats().Dropped, rec.Stats().Errors)
+	testutil.WaitForState(t, fmt.Sprintf("%d rows persisted", n),
+		func() bool { return rec.Stats().Written >= n },
+		func() string {
+			s := rec.Stats()
+			return fmt.Sprintf("%d written, %d dropped, %d errors", s.Written, s.Dropped, s.Errors)
+		})
 }
 
 func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {

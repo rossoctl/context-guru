@@ -1,7 +1,8 @@
 // Context Guru mod: a calm band above the prompt and a pane (/context-guru).
 //
 // The mod is the whole display: the status line is no longer installed, so what it drew lives here, the same way:
-//   band row 1  next-message price (warm vs cold), Ping or why it is off, hide, the dashboard link
+//   band row 1  next-message price (dollars: warm vs cold; subscription: the share of the 5-hour limit warm vs cold with
+//               learned weights, else one token figure for now), Ping or why it is off, hide, the dashboard link
 //   band row 2  the status line's row: `▲ update`, `saved $x of $y session · saved $z of $q subagents ↻ $p pings`
 //               (on a subscription `5h 34% · this session saved 85.0k wr · cost 40.0k rd` instead of money),
 //               the cache clock (`cache ● ████░░ 4:12`, dim `cache ○ cold 1:07:04` once cold), `ctx ████░░░░ 41%`
@@ -323,8 +324,22 @@ export const register: Register = on => {
     const chips = v.subs.slice(0, AGENT_CHIPS)
     const figures = await read($, context)
     const status = statusRow(v, figures, cols)
-    // On a subscription the next message is priced in tokens, the unit of the saving; with an API key in dollars.
-    const { warm, cold } = nextPrice(m, figures?.fiveHour !== undefined)
+    // On a subscription with learned 5-hour weights the next message is priced as a share of the 5-hour limit, warm and
+    // cold (`next message ≈0.1% of 5h · ≈1.5% if cold`). Without them it is ONE token figure for the cache's state now
+    // (`next message 90.0k rd` warm, `○ cache cold · next message 90.0k wr` cold). With an API key it is priced in
+    // dollars, warm and cold.
+    const price = nextPrice(m, figures?.fiveHour !== undefined, v.weights)
+    const warm = price.kind === 'tokens' ? (m.isWarm ? price.now : undefined) : price.warm
+    const cold = price.kind === 'tokens' ? (m.isWarm ? undefined : price.now) : price.cold
+    // The colors come from the model on a subscription without weights; the share is drawn as the dollars are.
+    const warmColor = price.kind === 'tokens' ? price.color : 'success'
+    const coldColor = price.kind === 'tokens' ? price.color : 'warning'
+    // The share's unit. Below 80 columns it moves in front (`next 5h ≈0.1% · ≈1.5% cold`), so row 1 still fits 60
+    // columns with the longest next-ping hint.
+    // Below 80 columns `5h` leads the row only when a share follows it: a lone token figure gets plain `next`.
+    const isShare = price.kind === 'share'
+    // A cold figure left in tokens (the fit did not learn that write tier) carries no `of 5h`.
+    const coldShare = price.kind === 'share' && !price.coldIsTokens
     const cmd = rotatingTip(now)
     // Rows by priority, as the old band kept one spare row: row 1 always, then the status line's row, the agents, the
     // tip. A row is drawn while the band has a row more than it uses.
@@ -336,18 +351,21 @@ export const register: Register = on => {
       <Box flexDirection="column" paddingX={1} marginTop={1}>
         <Box flexWrap="wrap">
           <Text bold color="claude">{'◆'} </Text>
-          {m.isWarm && (
+          {m.isWarm && (warm !== undefined || cold !== undefined) && (
+            // No figure, no label: a bare `next message` says nothing.
             <Text>
-              <Text dimColor>{narrow ? 'next ' : 'next message '}</Text>
-              {warm !== undefined && <Text color="success">{warm}</Text>}
-              {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{narrow ? ' cold' : ' if cold'}</Text>}
+              <Text dimColor>{narrow ? (isShare && (warm !== undefined || coldShare) ? 'next 5h ' : 'next ') : 'next message '}</Text>
+              {warm !== undefined && <Text color={warmColor}>{warm}</Text>}
+              {warm !== undefined && isShare && !narrow && <Text dimColor> of 5h</Text>}
+              {cold !== undefined && <Text dimColor>{warm !== undefined ? ' · ' : ''}{cold}{coldShare && !narrow && warm === undefined ? ' of 5h' : ''}{narrow ? ' cold' : ' if cold'}</Text>}
             </Text>
           )}
           {!m.isWarm && (
             <Text>
               <Text dimColor>○ cache cold</Text>
               {cold !== undefined && <Text dimColor> · next message </Text>}
-              {cold !== undefined && <Text color="warning">{cold}</Text>}
+              {cold !== undefined && <Text color={coldColor}>{cold}</Text>}
+              {cold !== undefined && coldShare && <Text dimColor> of 5h</Text>}
             </Text>
           )}
           {nextPingWords(v, narrow) !== undefined && <Text dimColor>{'  '}{nextPingWords(v, narrow)}</Text>}
@@ -489,7 +507,10 @@ export const register: Register = on => {
     const tip = weeklyTip(v.tip)
     const head = (label: string) => <Text dimColor bold>{label}</Text>
     const nameWidth = Math.max(8, Math.min(20, cols - 34))
-    const next = nextPrice(m, (await read($, context))?.fiveHour !== undefined)
+    const next = nextPrice(m, (await read($, context))?.fiveHour !== undefined, v.weights)
+    // The share carries its unit; the dollars do not need one.
+    const unit = next.kind === 'share' ? ' of 5h' : ''
+    const coldUnit = next.kind === 'share' && !next.coldIsTokens ? ' of 5h' : ''
 
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -506,15 +527,34 @@ export const register: Register = on => {
 
         <Box flexDirection="column" paddingTop={1}>
           {head('NEXT MESSAGE')}
-          <Text>
-            <Text dimColor>if the cache is warm </Text>
-            {next.warm !== undefined ? <Text color="success">{next.warm}</Text> : <Text dimColor>unknown</Text>}
-          </Text>
-          <Text>
-            <Text dimColor>if it is cold      </Text>
-            {next.cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{next.cold}</Text> : <Text dimColor>unknown</Text>}
-            {m.tokens !== undefined && <Text dimColor>  ({Math.round(m.tokens / 1000)}k tokens in the cached prefix)</Text>}
-          </Text>
+          {next.kind !== 'tokens' && (
+            <Text>
+              <Text dimColor>if the cache is warm </Text>
+              {next.warm !== undefined ? <Text color="success">{next.warm}</Text> : <Text dimColor>unknown</Text>}
+              {next.warm !== undefined && unit !== '' && <Text dimColor>{unit}</Text>}
+            </Text>
+          )}
+          {next.kind !== 'tokens' && (
+            <Text>
+              <Text dimColor>if it is cold      </Text>
+              {next.cold !== undefined ? <Text color={m.isWarm ? undefined : 'warning'}>{next.cold}</Text> : <Text dimColor>unknown</Text>}
+              {next.cold !== undefined && coldUnit !== '' && <Text dimColor>{coldUnit}</Text>}
+              {m.tokens !== undefined && (
+                // At 60 columns the share's line has room for the short words only.
+                <Text dimColor>{next.kind === 'share' ? `  (${Math.round(m.tokens / 1000)}k tokens cached)` : `  (${Math.round(m.tokens / 1000)}k tokens in the cached prefix)`}</Text>
+              )}
+            </Text>
+          )}
+          {next.kind === 'share' && v.weights && (
+            <Text dimColor>at learned 5-hour weights ({v.weights.requests.toLocaleString('en-US')} requests)</Text>
+          )}
+          {next.kind === 'tokens' && (
+            // On a subscription: one figure, for the cache's state now (see nextPrice).
+            <Text>
+              <Text dimColor>next message </Text>
+              {next.now !== undefined ? <Text color={next.color}>{next.now}</Text> : <Text dimColor>unknown</Text>}
+            </Text>
+          )}
           {m.isWarm ? (
             <Text color={state(m).color}>
               {state(m).glyph} cache warm, about {m.left} left{state(m).mark ? ' · kept warm by pings ↻' : ''}

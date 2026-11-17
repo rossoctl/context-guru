@@ -122,7 +122,7 @@ A review without this block does not count toward the 2.
   6. If the remerge-diff shows a hand resolution in code, the integrator starts one more `offload-review` round on the new head.
   7. A resolution that needs a design choice goes back to the PR owner.
   8. Code fixes stay with the PR owner.
-  9. **A semantic conflict that a file-overlap check cannot see.** A test can read a table that another PR removes. In v0.7.2, the pi-package test read `STRATEGIES` from `settings.py` after #1055 removed it. Only CI on the PR catches this. Wait for CI after every merge of `main`.
+  9. **A semantic conflict that a file-overlap check cannot see.** A test can read a table that another PR removes. In v0.7.2, the pi-package test read `STRATEGIES` from `settings.py` after #1055 removed it. Only CI catches this. The CI of a clean merge of `main` runs on the push. Do not wait for it only because another PR merged. The watch on `main` after each merge (see [Merge](#3-merge)) catches it.
   10. **A conflict in `docs/data-dependence.md`** is not a hand resolution. That page is generated from the row files in `docs/data-dependence/`. The subagent takes either side and runs `go run ./cmd/gen-datadep`. A row-file conflict (two PRs edited the same row) still goes to the PR owner. The remerge-diff may show the page; check that it equals the generator's output.
 
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
@@ -154,6 +154,13 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   Write the body to a file first. A shell can change text that is passed inline. If `gh pr merge` fails with a GraphQL error, use `gh api -X PUT repos/<org>/<repo>/pulls/<n>/merge` with `sha`, `merge_method=squash`, `commit_title` and `commit_message`.
 - **Never merge past a failed DCO check.** Only the author can sign off a commit. If a merge past it seems needed, stop and ask the release owner for that PR.
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
+- **Merge each PR on its own green CI, then watch `main`** (owner rule, David Amid, 2026-11-16: "what is the benefit of waiting for each to be green, and wasting wallclock instead of just merging one and then waiting to see if the other one remains green. if it isn't we fix it?").
+  - Merge a PR when it has its 2 approvals at its head, green CI at its head, and git can merge it cleanly. Do not re-run a PR's CI only because another PR merged first.
+  - After each merge, watch the CI of `main`. If it turns red, fix forward with a fix PR. Do not revert a good PR, unless the fix is not clear.
+  - **Why:** a serial re-run costs about one full CI run (about 40 minutes) for each pair of PRs. A break between 2 green PRs is rare: about 1 in 30 merges in the v0.7.4 cycle. A fix PR is cheap.
+  - **Exception 1:** a merge of `main` that the integrator resolved by hand in code gets its CI first. In v0.7.4, a hand merge lost a SQL placeholder (#1173).
+  - **Exception 2:** the tag. `main` must be green at the tagged commit.
+  - **Note:** GitHub's merge queue does this automatically. It tests each PR on top of the PRs ahead of it. Turning it on is a repo setting for the owner.
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
   - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
   - **Any other failed rule needs the owner's yes for that PR.** Before a bypass, read which rules fail: `gh api repos/<org>/<repo>/rulesets/rule-suites?ref=refs/heads/main` lists recent merges, and `.../rule-suites/<id>` shows each rule's result.
@@ -169,27 +176,23 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 1. Note the parent's head SHA **before** you merge the parent.
 2. Merge the parent.
 3. **Retarget the child to `main` first.** CI may not start for a push made while the PR targets another branch.
-4. Rebase only the child's own commits: `git rebase --onto origin/main <old-parent-head> <child>`.
-5. Push with a lease, so you never overwrite work the author pushed in the meantime: `git push --force-with-lease=refs/heads/<branch>:<sha-you-rebased> ...`.
+4. Merge `origin/main` into the child. Do not rebase, so there is no force-push. Do not push yet.
+5. Push the merge commit, without force.
 6. Wait for green CI, then merge.
 7. If CI did not start on the new head, close and reopen the PR.
 
-**Conflicts during a rebase:**
+**Conflicts during the merge:**
 - **Mechanical** (both sides add a line to the same list): resolve it, and say how in the merge body.
-- **Semantic** (the code was restructured under the PR): stop and hand the rebase to the author. Then review the author's conflict resolution before you merge.
+- **Semantic** (the code was restructured under the PR): stop and hand the merge to the author. Then review the author's conflict resolution before you merge.
 
 **A PR that another PR is stacked on** (GitHub's stack feature) cannot merge with `gh pr merge` or `PUT /pulls/<n>/merge`. Use `PUT /repos/<owner>/<repo>/pulls/<n>/merge-async` with `merge_method: squash`, `merge_action: direct_merge`, `sha`, `commit_title` and `commit_message`. It merges that PR only, not the PRs stacked on top.
 - **Use it on the bottom PR of the stack only.** On a child, it also merges every open PR below it.
 - **Add `bypass_rules: true` only if a rule blocks the merge.** It is the same bypass as `--admin`. The rules in [Merge](#3-merge) apply: the owner's yes for any failed rule other than the review rule, `check-ready.sh` first, and the rule suite read after the merge.
 - **A `202` is not a merge.** Read the PR state back from GitHub.
 
-**To bring a stacked child onto `main` after its parent squash-merged,** you may use a merge instead of a rebase:
-1. Merge `origin/main` into the child. There is no rebase, so there is no force-push. Do not push yet.
-2. PATCH the child's base to `main`.
-3. Push the merge commit.
-4. The child's own change is unchanged when the added and removed lines of `git diff origin/main...<head>` match the approved change.
+**Check that the child's own change is unchanged:** the added and removed lines of `git diff origin/main...<head>` match the approved change.
 
-This section is about a stacked PR rebase. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
+This section is about a stacked PR. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
 ### Defects found on the way
 

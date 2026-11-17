@@ -98,6 +98,16 @@ func sourceOf(s string) string {
 	return ""
 }
 
+// backendOf keeps only a known Bob backend label (agent/bob/usage.go bobBackend). Anything else is
+// stored as "", so a bug upstream can never put an id or other text in the column.
+func backendOf(s string) string {
+	switch s {
+	case "A", "B", "other":
+		return s
+	}
+	return ""
+}
+
 // ProjectPath sanitizes an agent's launch directory for storage.
 //
 // THE TRUST BOUNDARY FOR THE PROJECT DIMENSION. A launch directory is a value the CLIENT chose, so

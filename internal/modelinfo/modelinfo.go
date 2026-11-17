@@ -128,8 +128,10 @@ func (p Price) Resolved(model string) Price {
 
 // Cost prices one request's four token tiers in USD.
 func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
-	return float64(fresh)*p.Input + float64(cacheRead)*p.CacheRead +
-		float64(cacheWrite)*p.CacheWrite + float64(output)*p.Output
+	// Each product is rounded on its own (an explicit float64 conversion), so no platform fuses a
+	// multiply and an add (FMA, as on arm64). Every platform then gives the same bits (#1128).
+	return float64(float64(fresh)*p.Input) + float64(float64(cacheRead)*p.CacheRead) +
+		float64(float64(cacheWrite)*p.CacheWrite) + float64(float64(output)*p.Output)
 }
 
 // CostWithCacheWrite1h is Cost plus the one-hour cache-write premium.
@@ -144,15 +146,25 @@ func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
 // bookkeeping (proxy/keepalive.go's record1) price the SAME request shape identically instead
 // of each inlining this formula — the two had drifted apart once already (see issue #382's
 // review) when the keep-alive mechanism was decoupled from dash's event type.
-// dash.tierUSD (dash/accountant_price.go) mirrors the 1h rule (2x Input); change both together.
+// dash.tierUSD (dash/accountant_price.go) reads the same premium (CacheWrite1hPremium).
 func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheWrite1h int64) float64 {
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
 	if cacheWrite1h > 0 {
-		if premium := p.CacheWrite1h() - p.CacheWrite; premium > 0 {
-			cost += float64(cacheWrite1h) * premium
+		if premium := p.CacheWrite1hPremium(); premium > 0 {
+			cost += float64(float64(cacheWrite1h) * premium) // no FMA; see Cost
 		}
 	}
 	return cost
+}
+
+// CacheWrite1hPremium is what a token written at the 1-hour tier costs on top of the 5-minute
+// write rate: CacheWrite1h minus CacheWrite, never below zero. It is the one place the premium is
+// taken, so every figure that prices a 1-hour write adds the same amount.
+func (p Price) CacheWrite1hPremium() float64 {
+	if premium := p.CacheWrite1h() - p.CacheWrite; premium > 0 {
+		return premium
+	}
+	return 0
 }
 
 // CacheWrite1h is the per-token rate of a ONE-HOUR cache write. No gateway publishes it, so it is

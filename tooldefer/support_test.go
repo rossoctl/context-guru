@@ -15,9 +15,9 @@ import (
 
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
-	_ "modernc.org/sqlite"
 )
 
 // ── probe ────────────────────────────────────────────────────────────────
@@ -201,12 +201,7 @@ func near(a, b float64) bool { return math.Abs(a-b) < 1e-12 }
 // ── history ──────────────────────────────────────────────────────────────
 
 func openDB(t *testing.T) *sql.DB {
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "h.db")+"?_pragma=busy_timeout(5000)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return testdb.Open(t, filepath.Join(t.TempDir(), "h.db"))
 }
 
 func waitReady(t *testing.T, m *Mem) {
@@ -297,6 +292,15 @@ func TestHistoryPersistsAcrossRestart(t *testing.T) {
 		m.Observe("t", sid, "/w", body(catalogue(), ""), int64(i+1))
 	}
 	stop() // flushes
+	// Read the table directly, so a failure names its cause (#1114): the flush wrote nothing, or
+	// the load read nothing.
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_defer_history`).Scan(&rows); err != nil {
+		t.Fatalf("count rows after stop: %v", err)
+	}
+	if rows == 0 {
+		t.Fatal("stop() flushed no rows to tool_defer_history")
+	}
 	m2 := NewMem(db)
 	stop2 := m2.Open(time.Hour, nil)
 	defer stop2()

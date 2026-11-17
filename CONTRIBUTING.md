@@ -31,6 +31,19 @@ make build    # build ./bin/lab-cx
 - Every reduction must be reversible and fail-open. Add tests for both the happy path and
   the fault-injection (fail-open) path.
 
+## Waiting in tests
+
+A test must not wait for a fixed time. A fixed wait fails on a slow CI runner.
+
+- Wait for a condition: `testutil.WaitFor(t, what, cond)` or `testutil.WaitForState`.
+- Wait for a request to a fake upstream: `testutil.NewUpstream(...).WaitForCall(...)`.
+- Do not use `time.Sleep`, a loop with a `time.Now().Add(...)` deadline, or a `select` on `time.After(...)` as a test timeout.
+- A real case (an injected fake delay, or a sleep that is the thing under test) takes a line comment, on the line or the line above: `//timing:ok <reason>`. The reason must not be empty.
+
+The test `internal/timingguard` fails when a test file gains one of these patterns. It also fails when a count falls below its baseline, so the baseline only shrinks. Regenerate the baseline with:
+
+    go test ./internal/timingguard -run TestTestTiming -update
+
 ## Pull requests
 
 Use conventional-commit titles (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).

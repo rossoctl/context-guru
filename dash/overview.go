@@ -473,6 +473,16 @@ type Overview struct {
 	// Accounting counts rows by token_accounting so a viewer can see how much of
 	// the window is exactly measured versus estimated.
 	Accounting map[string]int64 `json:"accounting"`
+	// FallbackRequests counts the requests the accountant library could not price (requests.acc_fallback).
+	// Counted in the share, each would move it although no priced saving changed (#1004). FallbackCostUSD is
+	// their cost_usd + cg_llm_cost_usd, and FallbackSaved the saving they still booked, by part (see
+	// fallback.go). The UI takes both off, so the hero and its parts describe the priced requests only, and
+	// it says what it left out. Fallback is the count by reason (full read only). All are over the non-ping
+	// rows the main aggregate reads.
+	FallbackRequests int64            `json:"fallback_requests"`
+	FallbackCostUSD  float64          `json:"fallback_cost_usd"`
+	FallbackSaved    FallbackSaving   `json:"fallback_saved"`
+	Fallback         map[string]int64 `json:"fallback,omitempty"`
 	// CacheMiss buckets requests by attribution, cold_start included as a
 	// non-failure.
 	CacheMiss map[string]int64 `json:"cache_miss"`
@@ -586,7 +596,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o := &Overview{
 		Since: f.Since, Until: f.Until,
 		Accounting: map[string]int64{}, CacheMiss: map[string]int64{}, Uncompressed: map[string]int64{},
-		CacheTTL: map[string]int64{},
+		CacheTTL: map[string]int64{}, Fallback: map[string]int64{},
 	}
 	var cgAvg, upAvg, ttfbAvg, upBufAvg sql.NullFloat64
 	var restoredTok int64
@@ -802,11 +812,34 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		manualPings                            manualAgg
 		keepAlivePingUSD                       float64
 		accountingM, cacheMissM, uncompressedM map[string]int64
+		fallbackM                              = map[string]int64{}
+		fallback                               fallbackAgg
 		p95cg, p95up                           float64
 		invalidConfigRequests                  int64
 		invalidConfigRecent                    int64
 	)
 	var g errgroup.Group
+	// The requests the accountant could not price, by reason, with their cost and booked saving (#1004). Few
+	// rows carry a reason, and cond scopes the read to the window the main aggregate reads, so this is a
+	// filter over a narrow row set.
+	g.Go(func() error {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.acc_fallback, `+fallbackTerms("", f.Since)+`
+			FROM requests r WHERE `+cond+` AND r.acc_fallback <> '' GROUP BY 1`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var why string
+			var a fallbackAgg
+			if err := rows.Scan(append([]any{&why}, a.dest()...)...); err != nil {
+				return err
+			}
+			fallbackM[why] = a.n
+			fallback.add(a)
+		}
+		return rows.Err()
+	})
 	g.Go(func() error {
 		t, err := d.AccTokens(f)
 		if err != nil {
@@ -1139,6 +1172,8 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// caller that does not attach the credit — reads a total that is short rather than one that
 	// is absent. SetDeclCredit moves it.
 	o.Accounting = accountingM
+	o.Fallback = fallbackM
+	fallback.apply(o)
 	o.CacheMiss = cacheMissM
 	o.Uncompressed = uncompressedM
 	o.CGLatencyMsP95, o.UpstreamMsP95 = p95cg, p95up
@@ -1256,6 +1291,7 @@ func (o *Overview) SetDeclCredit(c *DeclCredit) {
 		return
 	}
 	o.DeclFilterUSD, o.DeclFilterReads = c.FilterUSD, c.FilterReads
+	o.FallbackSaved.FilterUSD = c.FilterFallbackUSD
 	o.DeclFilterRequests = int64(c.FilterRequests)
 	o.DeclCreditPriced = c.Priced
 	o.TotalSavedUSD += c.FilterUSD

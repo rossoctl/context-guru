@@ -298,6 +298,10 @@ type Trace struct {
 	// order, with wire positions. OpsDropped counts changes that could not be placed.
 	Ops        []accountant.Operation
 	OpsDropped int
+	// Declined says a component changed the message count, the rebuild of the shortened messages
+	// failed, and the proxy forwards the ORIGINAL body. The run report still shows what the
+	// components did, but none of it reached the provider, so no saving may be booked (#1179).
+	Declined bool
 	// Changes lists each rewritten message's before/after text (clipped).
 	Changes []Change
 }
@@ -416,8 +420,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if out, ok := markTail(res.Body); ok {
 				// The mark makes the last message longer (a string content becomes one block, and
 				// the block carries the mark). No pipeline component reports that, so the sum check
-				// would fail on the messages section. Report it here, as the last operation.
-				if op, ok := tailOp(res.Body, out); ok && res.Trace.OpsDropped == 0 {
+				// would fail on the messages section. Report it here, as the last operation. Also when
+				// the pipeline's own operations were dropped: the mark is on the wire either way, and
+				// without its operation the sum check fails by the mark's bytes (accountant#70, case C).
+				// Where a dropped change did reach the wire (a wireSizes give-up, or restore copies
+				// whose operations cannot be placed), the report is incomplete with or without the mark;
+				// OpsDropped says so, and the sum check still fails by the dropped changes' bytes.
+				if op, ok := tailOp(res.Body, out); ok {
 					res.Trace.Ops = append(res.Trace.Ops, op)
 				}
 				res.Body, res.Changed = out, true
@@ -827,7 +836,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// reached the forwarded body (Trace.Ops never describes a rewrite that is not on the wire).
 	// applied: the rewritten body is the one forwarded, which is every mode but observe.
 	wire, applied := wireGroups(slots), mode != components.ModeObserve
-	// giveUp is every return that forwards the original body: no operation is real.
+	// giveUp drops every operation. Most callers forward the original body, so no operation is real.
+	// After a wireSizes failure the rewritten body is forwarded but its sizes cannot be trusted, so no
+	// operation is published for it either; OpsDropped counts what the report leaves out.
 	giveUp := func() {
 		tr.Ops = nil
 		if rr != nil {
@@ -851,6 +862,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// tool_result) and marshaling only genuinely new messages (the summary).
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		nb, ok := rebuildCountChanged(body, msgs, slots, chat.Input)
+		tr.Declined = !ok
 		if ok && explicitBreakpointProvider(provider) {
 			// The splicing component's kept tool_result, marked so the next turn can read the cache
 			// up to it (#723). Only on this path: nothing else sets the anchor. Only where the body
@@ -2012,6 +2024,82 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		bi, _, ok := splitSlotPath(slots[k].path)
 		return bi, ok
 	}
+	// byteMatch[i] is the slot that kept message i matches by bytes, or -1 when no slot matches (a tool message, matched by
+	// its tool_call_id below, or a new message such as the summary). It is chosen from the END of
+	// the transcript back, each message taking the LAST unused slot with the same bytes at or before the
+	// body index of the kept message after it. A kept message therefore maps to the latest identical body
+	// message, never to an early removed one with the same bytes, and the kept order is the original
+	// order (#1179). Normalization drops a thinking block's signature, so such copies are common. A
+	// message with no slot in that range takes the last slot overall, and wireOrderValid refuses a
+	// rebuild that this breaks.
+	byteMatch := make([]int, len(out))
+	{
+		taken := make([]bool, len(slots))
+		bound := len(orig)
+		for i := len(out) - 1; i >= 0; i-- {
+			byteMatch[i] = -1
+			if out[i].Role == bschemas.ChatMessageRoleTool && out[i].ChatToolMessage != nil &&
+				out[i].ChatToolMessage.ToolCallID != nil {
+				if k, ok := toolSlotByID[*out[i].ChatToolMessage.ToolCallID]; ok && !taken[k] {
+					taken[k] = true // matched by id in the loop below; it only sets the bound here
+					if bi, _, ok := splitSlotPath(slots[k].path); ok {
+						bound = bi
+					}
+					continue
+				}
+			}
+			mb, err := json.Marshal(out[i])
+			if err != nil {
+				return body, false
+			}
+			// The wire messages of the kept tool messages next to this one: a sibling text sits before or
+			// after the tool_result block of its own wire message.
+			prevWire, hasPrev := keptWireOf(i - 1)
+			nextWire, hasNext := keptWireOf(i + 1)
+			inRange, inRangeWhole, sibling, anyK := -1, -1, -1, -1
+			for k := range slots {
+				if taken[k] || !bytes.Equal(mb, slots[k].pre) {
+					continue
+				}
+				bi, _, ok := splitSlotPath(slots[k].path)
+				if !ok {
+					continue
+				}
+				anyK = k
+				if bi > bound {
+					continue
+				}
+				inRange = k
+				if slots[k].kind == wholeMessage {
+					inRangeWhole = k
+				}
+				if slots[k].kind == anthropicSiblingText && ((hasPrev && bi == prevWire) || (hasNext && bi == nextWire)) {
+					sibling = k // the sibling text of the kept tool message beside it
+				}
+			}
+			// Without a tool message beside it, a message is a standalone one: it takes a whole-message
+			// slot. A sibling text slot would emit the wire message of a tool_result, which has the
+			// same bytes as the text beside it (#910).
+			k := sibling
+			if k < 0 {
+				k = inRangeWhole
+			}
+			if k < 0 {
+				k = inRange
+			}
+			if k < 0 {
+				k = anyK
+			}
+			if k < 0 {
+				continue
+			}
+			byteMatch[i] = k
+			taken[k] = true
+			if bi, _, ok := splitSlotPath(slots[k].path); ok {
+				bound = bi
+			}
+		}
+	}
 	var parts [][]byte
 	// emitted guards against emitting one body message TWICE: several normalized
 	// messages can share a body index (an Anthropic user message with several
@@ -2035,24 +2123,7 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 			}
 		}
 		if matched < 0 {
-			// The wire messages of the kept tool messages next to this one: a sibling text sits before or
-			// after the tool_result block of its own wire message.
-			prevWire, hasPrev := keptWireOf(i - 1)
-			nextWire, hasNext := keptWireOf(i + 1)
-			for k := range slots {
-				if used[k] || !bytes.Equal(mb, slots[k].pre) {
-					continue
-				}
-				if slots[k].kind == anthropicSiblingText {
-					if bi, _, ok := splitSlotPath(slots[k].path); ok && ((hasPrev && bi == prevWire) || (hasNext && bi == nextWire)) {
-						matched = k // the sibling text of the kept tool message beside it
-						break
-					}
-				}
-				if matched < 0 {
-					matched = k
-				}
-			}
+			matched = byteMatch[i]
 		}
 		if matched < 0 {
 			parts = append(parts, mb) // new message (e.g. the summary) — fresh, lossless (plain text)
@@ -2307,8 +2378,8 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	at := plan.positions(pre, client)
 	nb, tokens, ok := plan.insertAt(wire, res.Body, at)
 	if !ok {
-		// The fallback forwards the pre-pipeline body: no operation describes it, and nothing was
-		// compacted on the wire.
+		// The fallback forwards the pre-pipeline body: no pipeline operation describes it, and nothing
+		// was compacted on the wire. The tail mark, added afterwards in BodyOpts, is reported there.
 		res.Trace.OpsDropped += len(res.Trace.Ops)
 		res.Trace.Ops = nil
 		if res.Trace.Run != nil {
@@ -2328,6 +2399,8 @@ func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, c
 	// splices, which come last in pipeline order. If a copy cannot be placed, none can be trusted.
 	ro, placed := plan.ops(at, gjson.GetBytes(nb, expand.MessagesField(wire)).Array(), dryRun)
 	if !placed {
+		// Unlike the fallback above, the compaction and the copies are on the wire here, so the report
+		// (only the tail mark, added later in BodyOpts) is incomplete and OpsDropped says so.
 		res.Trace.OpsDropped += len(res.Trace.Ops)
 		res.Trace.Ops = nil
 		return res

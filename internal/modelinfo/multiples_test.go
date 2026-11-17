@@ -2,6 +2,7 @@ package modelinfo
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -61,6 +62,24 @@ func TestCacheWrite1hMatchesTheOldBareLiteral(t *testing.T) {
 		}
 		if got, want := p.CacheWrite1h()-p.CacheWrite, 2*in-p.CacheWrite; got != want {
 			t.Errorf("input %v: premium = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// The premium is the one amount every figure adds for a 1-hour write. It is never negative, even
+// when an operator states a 5m write rate above the derived 1h one.
+func TestCacheWrite1hPremium(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    Price
+		want float64
+	}{
+		{"derived", Price{Input: 3e-6, CacheWrite: 3.75e-6}, 2.25e-6},
+		{"flat 1h", Price{Input: 3e-6, CacheWrite: 3.75e-6, Write1hFrac: 1.0}, 0},
+		{"5m above 1h", Price{Input: 3e-6, CacheWrite: 9e-6}, 0},
+	} {
+		if got := tc.p.CacheWrite1hPremium(); math.Abs(got-tc.want) > 1e-15 {
+			t.Errorf("%s: premium = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

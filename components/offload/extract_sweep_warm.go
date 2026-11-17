@@ -606,16 +606,16 @@ func (e *ExtractSweep) warmTurnsLeftAfter(c *components.Ctx, run, growthFrom, gr
 	soFar := func(why string) turnsEstimate {
 		return turnsEstimate{N: capN(float64(run)), Raw: float64(run), Model: turnsModelSoFar, Why: why}
 	}
-	if c == nil || c.PrevBilledInput <= 0 {
+	if c == nil || c.PrevBilledInputThread <= 0 {
 		return soFar(turnsWhyNoBilled)
 	}
 	if !c.CtxWindowExact || c.CtxWindow <= 0 {
 		return soFar(turnsWhyWindowNotExact)
 	}
-	if growthTurns <= 0 || c.PrevBilledInput <= growthFrom {
+	if growthTurns <= 0 || c.PrevBilledInputThread <= growthFrom {
 		return soFar(turnsWhyNoGrowth)
 	}
-	growth := float64(c.PrevBilledInput-growthFrom) / float64(growthTurns)
+	growth := float64(c.PrevBilledInputThread-growthFrom) / float64(growthTurns)
 	if growth <= 0 {
 		return soFar(turnsWhyNoGrowth)
 	}
@@ -624,15 +624,15 @@ func (e *ExtractSweep) warmTurnsLeftAfter(c *components.Ctx, run, growthFrom, gr
 	if c.CutFrac > 0 {
 		cut = int(c.CutFrac * float64(denom))
 	}
-	if cut <= c.PrevBilledInput {
+	if cut <= c.PrevBilledInputThread {
 		est := soFar(turnsWhyBeyondCut)
 		est.Cut, est.GrowthPerTurn = cut, growth
 		return est
 	}
-	raw := float64(cut-c.PrevBilledInput) / growth
+	raw := float64(cut-c.PrevBilledInputThread) / growth
 	est := turnsEstimate{N: capN(raw), Raw: raw, Model: turnsModelCut, Cut: cut, GrowthPerTurn: growth}
 	if removedBilled > 0 {
-		est.RawAfter = turnsUntilCut(float64(cut), float64(c.PrevBilledInput-removedBilled), growth)
+		est.RawAfter = turnsUntilCut(float64(cut), float64(c.PrevBilledInputThread-removedBilled), growth)
 		est.NAfter = capN(est.RawAfter)
 	}
 	return est
@@ -743,7 +743,7 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 			}
 			return false, "no_valid_drop"
 		}
-		content, full, bok := warmRatios(c.ModelName, c.PrevBilledInput, prevLocal)
+		content, full, bok := warmRatios(c.ModelName, c.PrevBilledInputThread, prevLocal)
 		if !bok {
 			return false, "no_billed_size"
 		}
@@ -831,7 +831,7 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	} else {
 		t.run++
 		t.count++
-		t.noteBilledGrowth(c.PrevBilledInput)
+		t.noteBilledGrowth(c.PrevBilledInputThread)
 	}
 	run, count := t.run, t.count
 	growthFrom, growthTurns := t.growthFrom, t.growthTurns
@@ -943,7 +943,7 @@ func (e *ExtractSweep) warmWorthAsking(c *components.Ctx, req *bschemas.BifrostC
 		d.Accept = worth
 		noteWarmDecision(thread.Key(c.Session, c.Thread), d)
 	}()
-	content, full, ok := warmRatios(c.ModelName, c.PrevBilledInput, prevLocal)
+	content, full, ok := warmRatios(c.ModelName, c.PrevBilledInputThread, prevLocal)
 	if !ok {
 		sweepWarmNoBilled.Add(1)
 		noteWarmTrigger("no_billed_size")

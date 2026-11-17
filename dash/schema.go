@@ -293,6 +293,19 @@ CREATE TABLE IF NOT EXISTS requests (
   -- The unit of every *_usd column on this row: the currency of the price that costed it (the price
   -- file's currency key, USD by default; Bob's file says Bobcoins). Configuration, not user data.
   currency TEXT NOT NULL DEFAULT 'USD',
+  -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
+  -- reply id.
+  backend                 TEXT    NOT NULL DEFAULT '',
+  -- The client compaction verdict (#947, Event.ClientCompaction): 'unknown' on the first request
+  -- after the main agent's own compaction, '' on a request the thread tracker judged with none.
+  -- Nullable, no default: NULL is a row the tracker did not judge (no session id, no message list),
+  -- which includes every row written before the column. The replay cap reads NULL as "no verdict" and keeps the older drop detector for it.
+  client_compaction       TEXT,
+  -- Why the accountant library could not price this request (Event.AccFallback): a Fallback* reason,
+  -- 'unrecorded' on a row back-filled from its components (backfillAccFallback), or '' when the
+  -- library priced it or never ran on it. A fallback row books cost and no saving, so the
+  -- Overview counts it and leaves it out of the saving share (context-guru#1004).
+  acc_fallback            TEXT    NOT NULL DEFAULT '',
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -955,6 +968,45 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// a unit, the dashboard read every cost as dollars. A row a Bobcoins price file costed before this
 	// column existed also reads USD, so a view across the upgrade can say mixed.
 	{"requests", "currency", "TEXT NOT NULL DEFAULT 'USD'"},
+	// Bob's backend label. Additive: an earlier row has none.
+	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
+	// The client compaction verdict (#947). Nullable, no default: NULL says the row has no verdict,
+	// which is true of every earlier row.
+	{"requests", "client_compaction", "TEXT"},
+	// Why the accountant could not price the request (#1004). '' on an earlier row; backfillAccFallback
+	// marks the earlier rows whose components say they fell back.
+	{"requests", "acc_fallback", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// backfillAccFallback marks, ONCE, the rows written before acc_fallback existed whose request fell back. Such a
+// row has a component with priced_by 'none' (PriceMode marks every component of a fallback request so). Its
+// reason was not stored, so it reads 'unrecorded'. Recorded in meta, so a later open skips the scan.
+//
+// The rule is close to the live one, not the same. It cannot find a fallback with no component row, or one
+// PriceMode stopped before it marked the components (no usage or no price). And it marks a row the live code
+// leaves empty: one with components but no accountant record (the record panicked and was dropped). Both are
+// rare, and the old rows age out with the dashboard's retention. The update and the meta mark are one
+// transaction, so a stop between them cannot run the update again over rows the new code wrote.
+func backfillAccFallback(db *sql.DB) error {
+	var done string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'acc_fallback_backfilled'`).Scan(&done); err == nil {
+		return nil
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE requests SET acc_fallback = '` + FallbackUnrecorded + `'
+		WHERE acc_fallback = '' AND id IN (SELECT request_id FROM request_components WHERE priced_by = '` + PricedByNone + `')`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('acc_fallback_backfilled','1')`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
@@ -1217,6 +1269,9 @@ func migrate(db *sql.DB) error {
 		if err := backfillDeferCost(db); err != nil {
 			return err
 		}
+		if err := backfillAccFallback(db); err != nil {
+			return err
+		}
 		warnPurge(purgeImportedHistory(db))
 		return nil
 	}
@@ -1227,6 +1282,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := backfillDeferCost(db); err != nil {
+		return err
+	}
+	if err := backfillAccFallback(db); err != nil {
 		return err
 	}
 	warnPurge(purgeImportedHistory(db))

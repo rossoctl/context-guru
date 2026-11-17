@@ -5,6 +5,10 @@ Run: python3 -m unittest discover -s bob-plugin/context-guru/scripts -p 'test_*.
 Nothing here touches the real HOME, the real launchd or a real Bob. A fake `launchctl` on PATH
 records its arguments. A fake proxy (a local HTTP server) answers /healthz, /api/requests and
 /signal.
+
+The suite blocks the network (block_network, from setUpModule in each test file). A call to any
+host but 127.0.0.1, ::1 or localhost raises NetworkBlocked: point it at a fake on 127.0.0.1.
+Child processes are not guarded: do not start setup or update in a subprocess.
 """
 
 import contextlib
@@ -24,8 +28,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
+import urllib.parse
+import urllib.request
 
 HERE = Path(__file__).resolve().parent
 PLUGIN_ROOT = HERE.parent
@@ -124,6 +131,68 @@ def dead_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+class NetworkBlocked(BaseException):
+    """A test tried to leave the machine. BaseException, so the plugin's `except Exception` does
+    not hide it."""
+
+
+def block_network():
+    """Make every call off the machine raise NetworkBlocked. Returns the function that undoes it.
+
+    It blocks the plugin's urllib calls by URL, before any proxy or DNS lookup. As a backstop it
+    blocks socket.create_connection by host and socket.connect by address.
+    """
+    real_open = urllib.request.OpenerDirector.open
+    real_create = socket.create_connection
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def check(host, what):
+        if host not in LOOPBACK_HOSTS:
+            raise NetworkBlocked(f"a test tried to reach the network: {what}. "
+                                 "Use a fake on 127.0.0.1 (FakeProxy, FakeRelease).")
+
+    def guarded_open(self, fullurl, *args, **kwargs):
+        url = fullurl.full_url if isinstance(fullurl, urllib.request.Request) else fullurl
+        parts = urllib.parse.urlsplit(url)
+        # Scheme, host and port only: the user info, path and query can hold a credential.
+        host = parts.hostname or ""
+        check(host, f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else ""))
+        return real_open(self, fullurl, *args, **kwargs)
+
+    def guarded_create(address, *args, **kwargs):
+        check(address[0], f"host {address[0]} port {address[1]}")
+        return real_create(address, *args, **kwargs)
+
+    def socket_check(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            check(address[0], f"address {address[0]} port {address[1]}")
+
+    def guarded_connect(self, address):
+        socket_check(self, address)
+        return real_connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        socket_check(self, address)
+        return real_connect_ex(self, address)
+
+    urllib.request.OpenerDirector.open = guarded_open
+    socket.create_connection = guarded_create
+    socket.socket.connect, socket.socket.connect_ex = guarded_connect, guarded_connect_ex
+
+    def undo():
+        urllib.request.OpenerDirector.open = real_open
+        socket.create_connection = real_create
+        socket.socket.connect, socket.socket.connect_ex = real_connect, real_connect_ex
+    return undo
+
+
+def setUpModule():
+    unittest.addModuleCleanup(block_network())
 
 
 class TempHome(unittest.TestCase):
@@ -1197,13 +1266,21 @@ class ResetScriptTest(TempHome):
 
 # ---------------------------------------------------------------------------- review fixes
 
-def fake_binary(folder, version_line, has_bob=True):
-    """A fake context-guru-proxy that answers --version and --help."""
+FAKE_STRATEGIES = json.dumps({"strategies": [
+    {"name": "none", "spends": False, "desc": "no pings", "providers": ["any"], "cache": {}}]})
+
+
+def fake_binary(folder, version_line, has_bob=True, lists_strategies=True):
+    """A fake context-guru-proxy that answers --version, --help and (v0.7.1+) strategies.
+
+    Without lists_strategies it acts like an older proxy: `strategies` prints no JSON."""
     path = Path(folder) / "context-guru-proxy"
     flag = "  -bob-upstream string" if has_bob else "  -openai-upstream string"
+    table = FAKE_STRATEGIES if lists_strategies else "listening on 127.0.0.1:0"
     path.write_text("#!/bin/sh\n"
                     f'case "$1" in --version) echo "{version_line}" ;; '
-                    f'--help|-h) echo "Usage:"; echo "{flag}" ;; esac\nexit 0\n')
+                    f'--help|-h) echo "Usage:"; echo "{flag}" ;; '
+                    f"strategies) echo '{table}' ;; esac\nexit 0\n")
     path.chmod(0o755)
     return path
 
@@ -1428,9 +1505,42 @@ class BinaryCheckTest(TempHome):
     def test_a_new_binary_is_accepted(self):
         folder = self.root / "newbin"
         folder.mkdir()
-        path = fake_binary(folder, "context-guru-proxy v0.5.1 (commit abc)")
+        path = fake_binary(folder, "context-guru-proxy v0.7.1 (commit abc)")
         os.environ["CONTEXT_GURU_BIN"] = str(path)
         self.assertEqual(PLUGIN.find_binary(), str(path))
+
+    def test_a_binary_on_path_that_cannot_list_strategies_is_skipped(self):
+        folder = self.root / "oldbin"
+        folder.mkdir()
+        fake_binary(folder, "context-guru-proxy v0.7.0", lists_strategies=False)
+        os.environ["CONTEXT_GURU_BIN"] = str(folder / "context-guru-proxy")
+        reasons = []
+        self.assertIsNone(PLUGIN.find_binary(reasons))
+        self.assertEqual(reasons, [f"{folder / 'context-guru-proxy'} cannot list cache "
+                                   "strategies (needs v0.7.1 or later)"])
+
+    def test_an_old_binary_that_serves_for_strategies_is_skipped_within_the_timeout(self):
+        folder = self.root / "oldbin"
+        folder.mkdir()
+        path = folder / "context-guru-proxy"
+        path.write_text('#!/bin/sh\ncase "$1" in --help) echo "  -bob-upstream string" ;; '
+                        'strategies) echo "listening"; exec sleep 30 ;; esac\nexit 0\n')
+        path.chmod(0o755)
+        os.environ["CONTEXT_GURU_BIN"] = str(path)
+        reasons, start = [], time.monotonic()
+        with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1):
+            self.assertIsNone(PLUGIN.find_binary(reasons))
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertIn("cannot list cache strategies", reasons[0])
+
+    def test_the_managed_binary_is_still_used_and_probed_once(self):
+        managed = PLUGIN.managed_binary()
+        managed.parent.mkdir(parents=True)
+        fake_binary(managed.parent, "context-guru-proxy v0.7.1")
+        with mock.patch.object(PLUGIN, "load_strategy_table",
+                               wraps=PLUGIN.load_strategy_table) as probe:
+            self.assertEqual(PLUGIN.find_binary(), str(managed.resolve()))
+        probe.assert_called_once_with(str(managed.resolve()))
 
     def test_setup_says_why_it_downloads(self):
         folder = self.root / "oldbin"
@@ -1944,6 +2054,40 @@ class ManifestTest(unittest.TestCase):
         self.assertIn("setup --plan", text)
         self.assertIn("--i-consent-to-traffic-interception", text)
         self.assertIn("log in", text)
+
+
+class NetworkGuardTest(unittest.TestCase):
+    """The suite blocks every call that leaves the machine, and keeps 127.0.0.1 working."""
+
+    def test_a_download_from_a_real_host_fails_with_the_guard_error(self):
+        with self.assertRaises(NetworkBlocked) as caught:
+            PLUGIN.fetch("https://example.invalid/releases/latest")
+        self.assertIn("example.invalid", str(caught.exception))
+
+    def test_the_guard_error_names_no_credential(self):
+        with self.assertRaises(NetworkBlocked) as caught:
+            PLUGIN.fetch("https://user:SECRET-pw@example.invalid/x?token=SECRET-tok")
+        self.assertIn("example.invalid", str(caught.exception))
+        self.assertNotIn("SECRET", str(caught.exception))
+
+    def test_a_raw_socket_to_a_real_address_fails_with_the_guard_error(self):
+        with socket.socket() as sock, self.assertRaises(NetworkBlocked) as caught:
+            sock.settimeout(1)
+            sock.connect(("192.0.2.1", 80))  # TEST-NET-1, RFC 5737: never routed
+        self.assertIn("192.0.2.1", str(caught.exception))
+
+    def test_create_connection_to_a_real_host_fails_before_the_dns_lookup(self):
+        with mock.patch.object(socket, "getaddrinfo", side_effect=AssertionError("DNS lookup")):
+            with self.assertRaises(NetworkBlocked) as caught:
+                socket.create_connection(("example.invalid", 443), timeout=1)
+        self.assertIn("example.invalid", str(caught.exception))
+
+    def test_loopback_calls_still_reach_a_fake_server(self):
+        with FakeProxy() as proxy:
+            self.assertTrue(PLUGIN.healthy(proxy.port))
+            self.assertEqual(PLUGIN.fetch(f"http://127.0.0.1:{proxy.port}/healthz"), b"ok")
+            self.assertEqual(PLUGIN.fetch(f"http://localhost:{proxy.port}/healthz"), b"ok")
+        self.assertEqual(proxy.paths, ["/healthz"] * 3)
 
 
 if __name__ == "__main__":
