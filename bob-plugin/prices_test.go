@@ -36,6 +36,9 @@ func TestBobPricesFileIsAFlatRateForEveryTier(t *testing.T) {
 			t.Errorf("%s: input %v, output %v per million; Bob bills both at %v Bobcoins per million",
 				tier, p.Input*1e6, p.Output*1e6, bobcoinsPerMillion)
 		}
+		if p.Unit() != "Bobcoins" {
+			t.Errorf("%s: unit %q; Bob's file prices in Bobcoins, so its costs must say so", tier, p.Unit())
+		}
 		if p.Write1hFrac != 1.0 {
 			t.Errorf("%s: 1-hour write = %vx input, Bob bills it at 1x", tier, p.Write1hFrac)
 		}

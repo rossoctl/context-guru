@@ -54,6 +54,7 @@ function subLabels(host, sub) {
     if (!n.usdNodes) { n.usdNodes = [...n.childNodes].map((c) => c.cloneNode(true)); n.dataset.usdTitle = n.title; }
     if (sub) n.textContent = n.dataset.subLabel;
     else n.replaceChildren(...n.usdNodes.map((c) => c.cloneNode(true)));
+    for (const s of $$('.money-sym', n)) s.textContent = moneySym(); // the copy may predate the unit
     n.title = sub && n.dataset.subTitle !== undefined ? n.dataset.subTitle : n.dataset.usdTitle;
   }
 }

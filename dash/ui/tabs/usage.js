@@ -21,6 +21,7 @@ const DIM_LABELS = {
 function dailyColumns(host, totalHost, buckets) {
   clear(host);
   if (!buckets.length) { totalHost.textContent = ''; emptyState(host, 'No days in this window', 'Send traffic through the proxy, or widen the time range.'); return; }
+  if (noMoneyChart(host)) { totalHost.textContent = ''; return; }
   const spent = (b) => b.cost_usd + b.cg_llm_cost_usd;
   const sum = (f) => buckets.reduce((n, b) => n + f(b), 0);
   const priced = buckets.some((b) => !(b.baseline_cost_usd === 0 && b.cost_usd === 0));

@@ -27,6 +27,7 @@
   "window_unknown": 60,
   "with_episode": 0
  },
+ "currency": "USD",
  "episodes": null,
  "first_ts": 1767603620000,
  "last_ts": 1768249460000,
