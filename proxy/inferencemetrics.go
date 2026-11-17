@@ -95,7 +95,7 @@ func NewInferenceMetrics(m metric.Meter, prices modelinfo.Pricer, components ...
 	hist(&im.compDuration, "llm.proxy.component_duration", "Time spent in each component.", addedBuckets)
 	i64(&im.compFailures, "llm.proxy.component_failures", "A component error or panic, or a change the pipeline reverted.")
 	i64(&im.failOpen, "llm.proxy.fail_open", "Requests the proxy forwarded unchanged because its own work failed.")
-	i64(&im.pings, "llm.keepalive.pings", "Keep-alive pings the proxy sent, by outcome.")
+	i64(&im.pings, "llm.keepalive.pings", "Keep-alive pings the proxy sent, by outcome (ok, failed, timeout).")
 	f64(&im.pingCost, "llm.keepalive.cost.usd", "What the pings cost.")
 	if err != nil {
 		return nil, err
@@ -203,12 +203,16 @@ func (im *InferenceMetrics) component(name string) string {
 	return "other"
 }
 
-// observePing books one keep-alive ping row. Only ok and failed are visible: a ping that timed out
-// or was skipped leaves no row, so those two outcomes are not reported here, and a count that
-// leaves them out says so in its help text rather than guessing.
+// observePing books one keep-alive ping row as ok, failed or timeout. A ping that ran to the
+// keeper's timeout writes a row marked dash.StopTimeoutEstimated (#754), so it is reported as
+// timeout, and its cost is the keeper's projection, not a measured figure. A skipped ping leaves no
+// row, so skipped is not reported here.
 func (im *InferenceMetrics) observePing(ctx context.Context, e *dash.Event, model string) {
 	outcome := "ok"
-	if e.Status < 200 || e.Status > 299 {
+	switch {
+	case e.StopReason == dash.StopTimeoutEstimated:
+		outcome = "timeout"
+	case e.Status < 200 || e.Status > 299:
 		outcome = "failed"
 	}
 	im.pings.Add(ctx, 1, metric.WithAttributes(attribute.String("model", model), attribute.String("outcome", outcome)))

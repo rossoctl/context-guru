@@ -21,6 +21,7 @@
  "losers": 15,
  "misses_avoided": 0,
  "net_usd": -0.006,
+ "ping_timed_out_usd": 0,
  "ping_usd": 0.006,
  "pings": 15,
  "pings_per_day": 2.0066889632107023,

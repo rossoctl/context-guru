@@ -47,8 +47,9 @@ func TestDashEmitterBooksATimedOutPingAsEstimatedSpend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if led.Pings != 1 || led.PingUSD != 0.015 || led.PingsTimedOut != 1 || led.PingsThatReadNothing != 0 {
-		t.Errorf("ledger pings %d ping_usd %v timed_out %d read_nothing %d, want 1, 0.015, 1, 0",
-			led.Pings, led.PingUSD, led.PingsTimedOut, led.PingsThatReadNothing)
+	if led.Pings != 1 || led.PingUSD != 0.015 || led.PingsTimedOut != 1 || led.PingTimedOutUSD != 0.015 ||
+		led.PingsThatReadNothing != 0 {
+		t.Errorf("ledger pings %d ping_usd %v timed_out %d timed_out_usd %v read_nothing %d, want 1, 0.015, 1, 0.015, 0",
+			led.Pings, led.PingUSD, led.PingsTimedOut, led.PingTimedOutUSD, led.PingsThatReadNothing)
 	}
 }

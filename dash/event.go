@@ -367,8 +367,9 @@ type Event struct {
 	//
 	// proxy/keepalive.go increments it under the sweep's lock, before dispatch. Three paths then
 	// return without a request reaching the provider and without writing a ping row: the tenant
-	// limiter refusing spare headroom, an unusable body, and a transport error on send. All three
-	// bump skipped/failed and leave this count already raised. Measured consequence on a
+	// limiter refusing spare headroom, an unusable body, and a fast transport error on send. All
+	// three bump skipped/failed and leave this count already raised. (A ping that runs to its
+	// timeout does write a row since #754, marked StopTimeoutEstimated, with status 0.) Measured consequence on a
 	// 133,064-row production corpus: 7 of 105 credited rows carry KeepAlivePings >= 1 with no ping
 	// row anywhere in the span, two with none within 16.7 hours.
 	//

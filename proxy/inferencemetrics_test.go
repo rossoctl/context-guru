@@ -267,15 +267,21 @@ func TestPingBooksKeepAliveAndNoRequest(t *testing.T) {
 	ok.KeepAlive, ok.CostUSD = true, 0.003
 	bad := goodEvent()
 	bad.KeepAlive, bad.Status, bad.CostUSD = true, 529, 0 // a refused ping costs nothing
+	// #754: a ping that ran to its timeout has status 0 and a projected cost. It is a timeout, not
+	// a failure the provider returned.
+	slow := goodEvent()
+	slow.KeepAlive, slow.Status, slow.CostUSD = true, 0, 0.002
+	slow.StopReason = dash.StopTimeoutEstimated
 	im.Observe(ok, time.Second)
 	im.Observe(bad, time.Second)
+	im.Observe(slow, time.Second)
 	all := collectAll(t, r)
 	got := intByLabel(all["llm.keepalive.pings"], "outcome")
-	if got["ok"] != 1 || got["failed"] != 1 {
-		t.Errorf("pings = %v, want one ok and one failed", got)
+	if got["ok"] != 1 || got["failed"] != 1 || got["timeout"] != 1 {
+		t.Errorf("pings = %v, want one ok, one failed and one timeout", got)
 	}
-	if c := sumFloat(all["llm.keepalive.cost.usd"]); c < 0.0029 || c > 0.0031 {
-		t.Errorf("ping cost = %v, want 0.003", c)
+	if c := sumFloat(all["llm.keepalive.cost.usd"]); c < 0.0049 || c > 0.0051 {
+		t.Errorf("ping cost = %v, want 0.005 (the timeout's projected cost included)", c)
 	}
 	for _, name := range []string{"llm.inference.requests", "llm.inference.tokens", "llm.inference.cost.usd"} {
 		if _, has := all[name]; has {

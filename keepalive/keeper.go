@@ -1536,9 +1536,10 @@ func (k *Keeper) fire(j pingJob) {
 		slog.Debug("context-guru: cache keep-alive ping failed",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err,
 			"retry", retry)
-		// A ping that ran to pingTimeout was sent, and the provider bills it whether or not we
-		// wait for the answer (#532, #754). Book it at the keeper's own projection, marked as an
-		// estimate. A fast failure (EOF, reset, refused) probably never reached the provider, so
+		// A ping that ran to pingTimeout was probably sent, and the provider bills it whether or
+		// not we wait for the answer (#532, #754). Book it at the keeper's own projection, marked
+		// as an estimate. "Probably": a 60 s dial or TLS hang also ends here, and never reached
+		// the provider. A fast failure (EOF, reset, refused) probably never reached it either, so
 		// it books nothing, as before.
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctxErr, context.DeadlineExceeded) {
 			k.timedOut.Add(1)
