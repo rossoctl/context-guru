@@ -797,6 +797,49 @@ func TestAnExpandOfAWarmDropIsMarkedWarm(t *testing.T) {
 	}
 }
 
+// #1191 blocker 2. IBM Bob's route sends no cache_control and has no known cache lifetime, so every
+// request's phase is unknown, and an unknown phase counted as cold: the warm run reset on every request
+// and the trigger never fired. The provider's own report settles it: a thread whose previous turn read
+// the cache is warm for the warm path.
+func TestAnUnknownPhaseThreadThatReadTheCacheIsWarmForTheWarmPath(t *testing.T) {
+	bobLike := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3 // phase unknown, as on Bob's route
+		return c
+	}
+	pending := func(r *warmRig) bool {
+		warmMu.Lock()
+		defer warmMu.Unlock()
+		th := warmThreads[r.key()]
+		return th != nil && th.warmPending()
+	}
+	for _, tc := range []struct {
+		name      string
+		read      int
+		wantFired bool
+	}{
+		{"the previous turn read the cache: warm", 5000, true},
+		{"the previous turn read nothing: still cold", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newWarmRig(t, "w-unknown", warmCfg, payingTail(), 1.0)
+			if p := bobLike(r).CachePhase(0); p != components.CachePhaseUnknown {
+				t.Fatalf("fixture: phase = %v, want unknown", p)
+			}
+			// warm_every_n is 3: the first request has no earlier turn, so 3 more must count as warm.
+			for i := 0; i < 4; i++ {
+				r.request(bobLike(r))
+				if i < 3 {
+					ResolveWarmQuestion(r.session, "", true, tc.read)
+				}
+			}
+			if got := pending(r); got != tc.wantFired {
+				t.Fatalf("warm question due = %v, want %v", got, tc.wantFired)
+			}
+		})
+	}
+}
+
 // ⭐ OPTION B. The warm path keeps no conversation copy of its own. A thread the keep-alive cannot ping,
 // or one with no registry entry, never asks, and that is counted.
 func TestAThreadTheKeepAliveCannotPingNeverAsksAWarmQuestion(t *testing.T) {

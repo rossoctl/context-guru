@@ -96,6 +96,9 @@ type warmThread struct {
 	count, run int
 	// lastLocal is the local token count of the previous request, the other half of the billed ratio.
 	lastLocal int
+	// lastRead is the cache read the provider reported for the thread's previous forwarded turn (a
+	// count, set by ResolveWarmQuestion). It tells a live cache when the phase is unknown (#1191).
+	lastRead int
 	// Growth of the billed prompt per warm turn, as METADATA (three numbers): the billed size at the start
 	// of the current growth run, the turns since then, and the last billed size seen. A shrink (a client
 	// compaction, our own sweep, a rewind) restarts the run, so the average is over the turns since.
@@ -825,6 +828,13 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	}
 	prevLocal := t.lastLocal
 	t.lastLocal = local
+	// AN UNKNOWN PHASE WITH A MEASURED READ (#1191). A route with no known cache lifetime and no
+	// cache_control (IBM Bob's) has an unknown phase on every request, which counts as cold, so the warm
+	// run would restart on every request. The provider's report on the thread's previous turn settles it:
+	// it read the cache, so the cache is live. Only the warm path reads this; the cold apply does not.
+	if cold && t.lastRead > 0 && c.CachePhase(0) == components.CachePhaseUnknown {
+		cold = false
+	}
 	if cold {
 		t.run, t.count = 0, 0
 		t.growthFrom, t.growthTurns, t.growthLast = 0, 0, 0
@@ -1117,6 +1127,14 @@ func ResolveWarmQuestion(session, threadID string, forwarded bool, turnRead int)
 func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 	warmMu.Lock()
 	t, ok := warmThreads[tkey]
+	if ok {
+		// The provider's cache read on this turn, for the next request's phase (warmStep). A request
+		// that failed read nothing.
+		t.lastRead = 0
+		if forwarded {
+			t.lastRead = turnRead
+		}
+	}
 	if !ok || !t.warmPending() {
 		warmMu.Unlock()
 		return
