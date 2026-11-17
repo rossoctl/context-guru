@@ -748,7 +748,9 @@ type Ctx struct {
 	// HOST CONTRACT: a host that sets this must stash each request's forwarded body when its
 	// upstream answers, then call offload.ResolveDeferredCacheAwareSummary(session, thread) when
 	// the request ends. cache_aware_summarizer holds a prefix-ask commission until then, so it
-	// reads that request's body and not the previous one (#722).
+	// reads that request's body and not the previous one (#722). It must also call
+	// offload.ResolveWarmQuestion(session, thread, forwarded, cacheRead) when the request ends: the
+	// sweep's warm question runs from it, and it drops the copy kept for that question (#1193).
 	PrefixAsk PrefixAsker
 	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
 	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares

@@ -1127,6 +1127,12 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 	t, ok := warmThreads[tkey]
 	if !ok || !t.warmPending() {
 		warmMu.Unlock()
+		// No question starts for this request, also when its due window ended during a long forward.
+		// The warm question's own copy then has no reader (#1193 review round 2).
+		sweepPingMu.Lock()
+		reg := sweepPingCand[tkey]
+		sweepPingMu.Unlock()
+		dropWarmOnly(tkey, reg)
 		return
 	}
 	t.pendingAt = time.Time{}
@@ -1135,7 +1141,7 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 		sweepPingMu.Lock()
 		reg := sweepPingCand[tkey]
 		sweepPingMu.Unlock()
-		dropUnpingable(tkey, reg)
+		dropWarmOnly(tkey, reg)
 		return
 	}
 	t.asking = true
@@ -1164,14 +1170,14 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 	}
 	if latched {
 		release()
-		dropUnpingable(tkey, reg)
+		dropWarmOnly(tkey, reg)
 		sweepWarmAlreadyAsked.Add(1)
 		return
 	}
 	if _, ok := getHeld(reg.ctx.Store, tkey); ok {
 		reg.asked.Store(false) // no question was paid for; the registry copy stays askable at the ping
 		release()
-		dropUnpingable(tkey, reg)
+		dropWarmOnly(tkey, reg)
 		sweepWarmAlreadyAsked.Add(1)
 		return
 	}
@@ -1179,7 +1185,7 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 		registeredAt: reg.registeredAt, warm: true, minAge: reg.e.warmMinAge}
 	go func() {
 		defer release()
-		defer dropUnpingable(tkey, reg) // the warm question was its only reader
+		defer dropWarmOnly(tkey, reg) // the warm question was its only reader
 		// FAIL OPEN: a panic in collection, the ask or the hold ends this goroutine and nothing else.
 		defer func() {
 			if r := recover(); r != nil {

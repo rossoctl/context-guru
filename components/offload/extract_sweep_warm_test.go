@@ -874,6 +874,30 @@ func TestAnUnpingableWarmCopyLivesOnlyForItsQuestion(t *testing.T) {
 			t.Fatal("the copy outlived its warm question")
 		}
 	})
+	t.Run("question due: a ping claim picks no sweep", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-claim", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		claim := ClaimPing(r.key())
+		defer claim.Release()
+		if claim.Choice != PingNone {
+			t.Fatalf("ClaimPing chose %q, want %q: a ping never asks from the warm question's copy", claim.Choice, PingNone)
+		}
+	})
+	t.Run("due window ended before the host resolved: the copy is dropped", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-late", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		old := warmPendingMax
+		warmPendingMax = 0 // a forward longer than the due window (a long stream, expand rounds)
+		t.Cleanup(func() { warmPendingMax = old })
+		ResolveWarmQuestion(r.session, "", true, 0)
+		if held(r) {
+			t.Fatal("the copy outlived a due window that ended before the host resolved the request")
+		}
+	})
 	t.Run("request not forwarded: the copy is dropped", func(t *testing.T) {
 		r := newWarmRig(t, "w-unping-fail", warmCfg, payingTail(), 1.0)
 		for i := 0; i < 3; i++ {
