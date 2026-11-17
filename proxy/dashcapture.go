@@ -20,7 +20,9 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -156,6 +158,10 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaPlan is the ping plan the keeper built for the wait this response starts (#1198); nil when none
+	// was built. hosted is true on a multi-tenant proxy, whose host clock says nothing about the user.
+	kaPlan *keepalive.PlanInForce
+	hosted bool
 	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
 	kaRefreshedAt time.Time
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
@@ -231,6 +237,15 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
 		observe: tn.Mode == components.ModeObserve,
 		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
+		hosted:  h.opts.Tenants != nil,
+	}
+}
+
+// noteKeepAlivePlan records the ping plan the keeper built for the wait this response starts (#1198).
+func (c *capture) noteKeepAlivePlan(p *keepalive.PlanInForce) {
+	defer c.timed("noteKeepAlivePlan")()
+	if c != nil {
+		c.kaPlan = p
 	}
 }
 
@@ -660,6 +675,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// that case as WaitingUnknown rather than WaitingRetry.
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
+	toolParams, spawn := usage.ToolParams, usage.Spawn
 	if usage.ToolUseIncomplete {
 		terminal = []string{} // the name list may miss the true last call: never "done" (#857)
 	}
@@ -688,11 +704,34 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
 			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
-		return dash.WaitCauseResult{
+		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
 			MonitorExpiryMs: obs.MonitorExpiryMs,
 		}
+		// The metadata that predicts when the user returns (#1198). The wait tool's `timeout` and
+		// `run_in_background` are kept only for a wait on the tool's own result (waitTool is set).
+		if waitTool != "" {
+			if toolParams.HasTimeout {
+				v := toolParams.TimeoutMs
+				res.WaitToolTimeoutMs = &v
+			}
+			if toolParams.HasBackground {
+				v := toolParams.Background
+				res.WaitToolBackground = &v
+			}
+		}
+		// A prompt is known only for a response that was read: an unknown cause says nothing.
+		if waitingFor != waitcause.WaitingUnknown {
+			res.WaitPrompt = waitcause.PromptNone
+			if waitingFor == waitcause.WaitingHuman {
+				res.WaitPrompt = waitcause.PromptOf(toolUseNames)
+			}
+		}
+		// The person's id, raw, for the writer to hash. Read here, on the writer goroutine.
+		res.Fanout, res.SpawnType = spawn.N, spawn.Type
+		res.UserKey = session.UserKey(gjson.GetBytes(waitBody, "metadata.user_id").String())
+		return res
 	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
@@ -823,6 +862,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
+	c.fillStrategyMeta(e)
 
 	var price modelinfo.Price
 	priced := false
@@ -1023,4 +1063,52 @@ func (c *capture) noResultWhy(usageOK bool) string {
 		return "upstream_rounds=" + strconv.Itoa(c.rounds)
 	}
 	return ""
+}
+
+// fillStrategyMeta sets the strategy metadata that one request alone decides (#1198): the host's
+// UTC offset and the ping plan. The wait's tool parameters and prompt, the turn, the concurrency and
+// the person's hash are filled on the writer (WaitCause, dash.Recorder).
+//
+// The offset comes from the host's own time zone at the request time, and only on a local proxy,
+// where the host is the user's machine. A hosted proxy has no zone of its user, so it leaves the
+// field NULL (unknown).
+func (c *capture) fillStrategyMeta(e *dash.Event) {
+	if !c.hosted {
+		_, off := c.start.Zone()
+		v := off / 60
+		e.TZOffsetMin = &v
+	}
+	e.ClientEntrypoint = clientEntrypoint(c.agent)
+	if p := c.kaPlan; p != nil {
+		e.KAPlannedPings, e.KAMinPrefixTokens, e.KAIdleS = &p.MaxPings, &p.MinPrefixTokens, &p.IdleSeconds
+	}
+}
+
+// clientEntrypoint classifies how the client was started from its User-Agent: cli (interactive),
+// headless (`-p`, which Claude Code reports as sdk-cli), sdk, or other. "" for an empty agent.
+// Claude Code sends "claude-cli/<ver> (external, <entrypoint>)"; Codex sends "codex_cli_rs/<ver> ...".
+func clientEntrypoint(ua string) string {
+	l := strings.ToLower(strings.TrimSpace(ua))
+	if l == "" {
+		return ""
+	}
+	if i := strings.LastIndex(l, "("); i >= 0 && strings.HasPrefix(l, "claude-") {
+		inner := strings.TrimSuffix(strings.TrimSpace(l[i+1:]), ")")
+		if j := strings.LastIndex(inner, ","); j >= 0 {
+			inner = inner[j+1:]
+		}
+		switch inner = strings.TrimSpace(inner); {
+		case inner == "cli":
+			return "cli"
+		case inner == "sdk-cli":
+			return "headless"
+		case strings.HasPrefix(inner, "sdk"):
+			return "sdk"
+		}
+		return "other"
+	}
+	if strings.HasPrefix(l, "codex") {
+		return "cli"
+	}
+	return "other"
 }

@@ -114,6 +114,34 @@ const (
 // every tool's answer the same way, human or not) means WakeHuman, never WakeToolResult.
 var askHumanTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": true}
 
+// WaitPrompt values: whether the turn ends on a prompt that a person must answer (#1198).
+const (
+	PromptNone       = "none"
+	PromptPermission = "permission"
+	PromptQuestion   = "question"
+	PromptOther      = "other"
+)
+
+// PromptOf reads the prompt a response ends on from its tool names alone. It uses the same set of
+// tools as ClassifyWaitingFor (askHumanTools): any call to one of them means a person must answer,
+// as in a WaitingHuman response. A question tool is "question" and wins over the others; any other
+// tool of the set (a plan approval) is "other"; with none, "none". A permission prompt is not in
+// the response (the client raises it after the response ends), so the client's Notification signal
+// sets that value later. A name list that missed a call (a spliced window) can only under-report.
+func PromptOf(toolUseNames []string) string {
+	out := PromptNone
+	for _, n := range toolUseNames {
+		if !askHumanTools[n] {
+			continue
+		}
+		if n == "AskUserQuestion" {
+			return PromptQuestion
+		}
+		out = PromptOther
+	}
+	return out
+}
+
 // teammateWaitCap is how long an open SendMessage wait is still counted as "open" for
 // Observation.OpenTeammate. Issue #424: "An open teammate wait expires at the ping cap (about
 // 56 min after the send)... Without an expiry, one unanswered SendMessage would mark every

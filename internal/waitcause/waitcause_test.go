@@ -730,3 +730,22 @@ func TestDefaultTerminalToolsIsACopy(t *testing.T) {
 		t.Error("changing the returned list changed the shipped list")
 	}
 }
+
+func TestPromptOf(t *testing.T) {
+	for _, tc := range []struct {
+		names []string
+		want  string
+	}{
+		{nil, PromptNone},
+		{[]string{"Bash"}, PromptNone},
+		{[]string{"Read", "AskUserQuestion"}, PromptQuestion},
+		{[]string{"ExitPlanMode"}, PromptOther},
+		{[]string{"ExitPlanMode", "AskUserQuestion"}, PromptQuestion},
+		{[]string{"AskUserQuestion", "Bash"}, PromptQuestion},
+		{[]string{"ExitPlanMode", "Bash"}, PromptOther},
+	} {
+		if got := PromptOf(tc.names); got != tc.want {
+			t.Errorf("PromptOf(%v) = %q, want %q", tc.names, got, tc.want)
+		}
+	}
+}

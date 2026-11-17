@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/session"
 )
 
@@ -146,6 +147,7 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		Reason           string `json:"reason"`
 		Source           string `json:"source"`
 		NotificationType string `json:"notification_type"`
+		PermissionMode   string `json:"permission_mode"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
@@ -165,7 +167,11 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
 		return
 	}
-	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, h.keeper.now())
+	now := h.keeper.now()
+	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, now)
+	// Kept in the dashboard database too (#1198), with the dashboard's own switch: enums and ids only.
+	// A Notification that raises a prompt also marks the request it interrupted.
+	h.rec.RecordSignal(dash.ClientSignal{TS: now.UnixMilli(), TenantID: tn.ID, Session: scoped, Event: in.Event, Reason: in.Kind, PermissionMode: permissionModeOf(in.PermissionMode)})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -279,4 +285,16 @@ func (h *Handler) toolDeferProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	h.askProbe(tn.ID)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// permissionModeOf keeps the client's permission mode only from a closed set. A value a newer client
+// adds reads "other"; no value reads "".
+func permissionModeOf(v string) string {
+	switch v {
+	case "":
+		return ""
+	case "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk":
+		return v
+	}
+	return "other"
 }
