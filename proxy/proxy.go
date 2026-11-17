@@ -51,6 +51,7 @@ import (
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
+	"github.com/rossoctl/context-guru/thinkcount"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -2429,6 +2430,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		if h.savings != nil {
+			u.Thinking = thinkcount.FromBody(resp.Header.Get("Content-Type"), respBody) // issue #1187
+		}
 		// The agent reads its backend label from any reply, with or without usage; its token
 		// reading counts only when the shared parser read usage too.
 		agentU := readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
@@ -2825,6 +2829,12 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// missing clause here is latent there -- but a --record-only Handler (which every unit
 	// test builds) would get an off sniffer, zero usage, and a silently usage-free corpus.
 	sn := newSniffer(h.rec != nil || h.agg != nil || h.recorder != nil)
+	// The thinking signatures sit in the middle of a stream, outside the sniffer's head and tail, so a collector
+	// reads them as the bytes go by (issue #1187). Only an event stream can hold them on this path.
+	var think *thinkcount.Collector
+	if h.savings != nil && strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		think = &thinkcount.Collector{}
+	}
 	buf := make([]byte, 16*1024)
 	for {
 		n, rerr := resp.Body.Read(buf)
@@ -2834,6 +2844,9 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 			}
 			w.Write(buf[:n])
 			sn.write(buf[:n])
+			if think != nil {
+				think.Write(buf[:n])
+			}
 			tee.write(buf[:n]) // nil-safe; no-op when --record is off
 			if flush != nil {
 				flush.Flush()
@@ -2873,6 +2886,9 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 			sr = tooldefer.ReadSearches(win)
 		}
 		u.Searches, u.SearchLoaded, u.SearchDropped = sr.Searches, sr.Loaded, sr.Dropped()
+	}
+	if think != nil {
+		u.Thinking = think.Result()
 	}
 	return firstByte, u, why, ok
 }

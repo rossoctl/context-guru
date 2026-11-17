@@ -873,6 +873,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}
 	}
+	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
+	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
+	// the client keeps.
+	if usageOK && !c.rejected() {
+		c.savings.recordThinking(usage.Thinking)
+	}
 	endAcc()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accServerHeldHistory {

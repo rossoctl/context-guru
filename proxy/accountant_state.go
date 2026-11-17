@@ -32,6 +32,9 @@ const (
 type accStateFile struct {
 	Version  int             `json:"cgStateVersion"`
 	Snapshot json.RawMessage `json:"snapshot"`
+	// Thinking is the count of each thinking block (savingsTracker.thinking): a key and a number each. A file
+	// written before it has none, and restores with an empty table.
+	Thinking json.RawMessage `json:"thinking,omitempty"`
 }
 
 // lastSaved holds the bytes of the last file written, so a save with no change skips the write.
@@ -48,7 +51,11 @@ func (s *savingsTracker) save(path string) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap})
+	thinking, err := json.Marshal(s.thinking)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking})
 	if err != nil {
 		return err
 	}
@@ -120,6 +127,12 @@ func (s *savingsTracker) restore(path string, now time.Time) bool {
 			err = errors.New("state file has proxy version " + strconv.Itoa(f.Version) + ", this proxy uses " + strconv.Itoa(accStateVersion))
 		default:
 			err = s.trackers.Restore(f.Snapshot)
+			if err == nil && len(f.Thinking) > 0 {
+				// The counts only refine a price, so a bad table is logged and dropped, and the snapshot stays.
+				if terr := json.Unmarshal(f.Thinking, s.thinking); terr != nil {
+					slog.Warn("accountant: thinking counts not restored", "path", path, "err", terr)
+				}
+			}
 		}
 	}
 	if err != nil {
