@@ -1108,6 +1108,11 @@ type Snapshot struct {
 	// side is not wired or its pings keep failing (see the keeper's pings, failed and skipped). Counts only; Missing moves only with the dashboard on.
 	KeepAlivePingsPriced        int64 `json:"keepalive_pings_priced"`
 	KeepAliveRescueFactsMissing int64 `json:"keepalive_rescue_facts_missing"`
+	// BobBackend counts the replies on Bob's model route by backend label: A, B, other (the
+	// reply's marks match neither) and none (no id or no usage), plus id_no_usage (the none
+	// replies that have an id). Filled by the host. Always present, so a reader sees 0 and not a
+	// missing key before any Bob traffic.
+	BobBackend map[string]int64 `json:"bob_backend"`
 
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,

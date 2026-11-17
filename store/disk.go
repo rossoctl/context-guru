@@ -33,6 +33,7 @@ import (
 type Disk struct {
 	db        *sql.DB
 	metaOnly  bool
+	hosted    bool
 	retention time.Duration
 	now       func() time.Time
 
@@ -70,6 +71,11 @@ type DiskOptions struct {
 	// MetadataOnly keeps content keys (summary text, results, freeze decisions, held answers) off
 	// the disk. Only the metadata keys are written.
 	MetadataOnly bool
+	// Hosted is the shared table of a multi-tenant proxy (#1104). It is always metadata-only, and
+	// it refuses the namespaces with no session id in the key (globalPrefixes): their rows are
+	// keyed by a content hash, so two tenants would share one row, and a tenant purge could not
+	// find it. Those keys stay in memory, per tenant, as before.
+	Hosted bool
 	// Retention is how long a row lives after its last write. Zero => DefaultDiskRetention.
 	Retention time.Duration
 	// FlushEvery is how often pending writes go to the file. Zero => 1 s.
@@ -110,6 +116,9 @@ func hasAnyPrefix(key string, ps []string) bool {
 func isStateKey(key string) bool { return hasAnyPrefix(key, StatePrefixes) }
 
 func (d *Disk) allowed(key string) bool {
+	if d.hosted && hasAnyPrefix(key, globalPrefixes) {
+		return false
+	}
 	if d.metaOnly {
 		return hasAnyPrefix(key, metadataPrefixes)
 	}
@@ -153,13 +162,67 @@ func OpenDisk(db *sql.DB, o DiskOptions) (*Disk, error) {
 		fe = defaultFlushEvery
 	}
 	d := &Disk{
-		db: db, metaOnly: o.MetadataOnly, retention: ret, now: time.Now,
+		db: db, metaOnly: o.MetadataOnly || o.Hosted, hosted: o.Hosted, retention: ret, now: time.Now,
 		pending: map[string]pendingRow{}, flushEvery: fe,
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	d.sweep()
 	go d.run()
 	return d, nil
+}
+
+// DeleteTenantState deletes every session-state row of one hosted tenant (#1104): in each
+// namespace, the keys that start with the tenant-scoped session id "<tenant>:" (session.Scoped).
+// The range is "<tenant>:" up to "<tenant>;", so tenant "t1" never takes the rows of "t10". The
+// host calls it when it purges a tenant. The namespaces with no session id in the key (the
+// global ones) carry no tenant and stay. A missing table is not an error. It returns the rows
+// deleted.
+func DeleteTenantState(ctx context.Context, db *sql.DB, tenantID string) (int64, error) {
+	if db == nil || tenantID == "" {
+		return 0, nil
+	}
+	var n int64
+	for _, p := range StatePrefixes {
+		if hasAnyPrefix(p, globalPrefixes) {
+			continue
+		}
+		lo := p + tenantID + ":"
+		hi := p + tenantID + ";" // ':' + 1
+		res, err := db.ExecContext(ctx, `DELETE FROM session_state WHERE key >= ? AND key < ?`, []byte(lo), []byte(hi))
+		if err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				return n, nil
+			}
+			return n, err
+		}
+		c, _ := res.RowsAffected()
+		n += c
+	}
+	return n, nil
+}
+
+// TenantStateRows counts the rows DeleteTenantState would delete.
+func TenantStateRows(ctx context.Context, db *sql.DB, tenantID string) (int64, error) {
+	if db == nil || tenantID == "" {
+		return 0, nil
+	}
+	var n int64
+	for _, p := range StatePrefixes {
+		if hasAnyPrefix(p, globalPrefixes) {
+			continue
+		}
+		var c int64
+		err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_state WHERE key >= ? AND key < ?`,
+			[]byte(p+tenantID+":"), []byte(p+tenantID+";")).Scan(&c)
+		if err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				return n, nil
+			}
+			return n, err
+		}
+		n += c
+	}
+	return n, nil
 }
 
 // DeleteSessionState deletes one session's rows from db's session_state table (every thread, and

@@ -167,9 +167,28 @@ if [ "$round" -gt "$max_rounds" ]; then
   exit 2
 fi
 
+# lock / unlock: one git write at a time, through one lock directory. Two `git worktree add` calls
+# at the same time can fail on a git lock file. So can two fetches: both update
+# refs/remotes/origin/$base_ref. With fallback the reviewers may also need a new worktree at the
+# same moment.
+lockdir="$(git rev-parse --path-format=absolute --git-common-dir)/offload-review-worktree.lock"
+lock() {
+  local n=0
+  until mkdir "$lockdir" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 600 ] || { echo "The worktree lock $lockdir is held for over 60 s. Remove it if no review is running." >&2; return 1; }
+    sleep 0.1
+  done
+}
+unlock() { rmdir "$lockdir"; }
+
 # Fetch the head through the PR ref: a fork PR's branch is not on origin, but refs/pull/N/head
 # exists for every PR. The plain base_ref fetch keeps origin/$base_ref current for the merge base.
-git -C "$main" fetch -q origin "refs/pull/$pr/head" "$base_ref"
+lock || exit 1
+rc=0
+git -C "$main" fetch -q origin "refs/pull/$pr/head" "$base_ref" || rc=$?
+unlock
+[ "$rc" -eq 0 ] || exit "$rc"
 # The PR ref can lag the head that gh reported (a push in between). Do not review another commit.
 git -C "$main" cat-file -e "$sha^{commit}" 2>/dev/null || {
   echo "Head $sha of PR #$pr is not in refs/pull/$pr/head yet. Run again in a minute." >&2
@@ -178,25 +197,18 @@ git -C "$main" cat-file -e "$sha^{commit}" 2>/dev/null || {
 
 wt_of() { echo "$main/.claude/worktrees/review-pr$pr-$1-r$2"; } # <backend> <reviewer>
 
-# ensure_wt <backend> <reviewer>: create that worktree, or reset it to the head. One at a time:
-# two `git worktree add` calls at the same time can fail on a git lock file, and with fallback the
-# reviewers may need a new worktree at the same moment. The backends' own session folders
-# survive the clean, so round 2 can resume.
-lockdir="$(git rev-parse --path-format=absolute --git-common-dir)/offload-review-worktree.lock"
+# ensure_wt <backend> <reviewer>: create that worktree, or reset it to the head, under the lock.
+# The backends' own session folders survive the clean, so round 2 can resume.
 ensure_wt() {
-  local wt n=0 rc=0
+  local wt rc=0
   wt=$(wt_of "$1" "$2")
-  until mkdir "$lockdir" 2>/dev/null; do
-    n=$((n + 1))
-    [ "$n" -lt 600 ] || { echo "The worktree lock $lockdir is held for over 60 s. Remove it if no review is running." >&2; return 1; }
-    sleep 0.1
-  done
+  lock || return 1
   if [ -d "$wt" ]; then
     git -C "$wt" checkout -q --detach "$sha" && git -C "$wt" clean -qfd -e .glm-cc/ -e .claude-review-session || rc=1
   else
     git -C "$main" worktree add -q --detach "$wt" "$sha" || rc=1
   fi
-  rmdir "$lockdir"
+  unlock
   return "$rc"
 }
 

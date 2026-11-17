@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, type StartCheck,
+  stripsChatGPTFields, strategyChoices, type StartCheck,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -307,4 +307,13 @@ test("the ChatGPT field removal skips a chained openai provider only", () => {
   assert.equal(stripsChatGPTFields(undefined), true);
   assert.equal(stripsChatGPTFields({ ...install, upstreams: { anthropic: "https://gw.example" } }), true);
   assert.equal(stripsChatGPTFields({ ...install, upstreams: { openai: "https://gw.example" } }), false);
+});
+
+test("the strategy names come from the proxy's list, and an old proxy offers only none", () => {
+  assert.deepEqual(strategyChoices({ strategies: "none,auto,1-ping,2-ping" }),
+    { names: ["none", "auto", "1-ping", "2-ping"], error: undefined });
+  const old = strategyChoices({ strategies: "none", strategy_error: "update the proxy to v0.7.1 or later" });
+  assert.deepEqual(old.names, ["none"]);
+  assert.match(old.error ?? "", /v0\.7\.1/);
+  assert.deepEqual(strategyChoices({}).names, ["none"]);
 });

@@ -9,6 +9,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // dirtySample is the shape that broke production, minimised: a `sample_spec`
@@ -89,11 +91,8 @@ func TestLiteLLMDecodesTheRealDocument(t *testing.T) {
 
 func waitFor(t *testing.T, l *LiteLLM, model string) {
 	t.Helper()
-	for i := 0; i < 400; i++ {
-		if _, ok := l.Window(context.Background(), model); ok {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("litellm map never loaded (%s never resolved)", model)
+	testutil.WaitFor(t, "the litellm map to load ("+model+" resolved)", func() bool {
+		_, ok := l.Window(context.Background(), model)
+		return ok
+	})
 }

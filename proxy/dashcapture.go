@@ -10,6 +10,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -109,6 +110,10 @@ type capture struct {
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread    string
 	agentComp bool
+	// compVerdict is the client compaction verdict of this request (#947), set by noteThread;
+	// compKnown says the tracker judged the request, so "" in compVerdict means none rather than unknown.
+	compVerdict string
+	compKnown   bool
 	// cpoint and cpointSrc are C for this request and where it came from (#948).
 	cpoint     int
 	cpointSrc  string
@@ -161,14 +166,19 @@ type capture struct {
 	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
 	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
+	// metrics receives each priced request for the push metrics (Options.MetricsSink; nil = off).
+	metrics acmetrics.Observer
+	// inference is the common inference set (Options.InferenceMetrics; nil = off).
+	inference *InferenceMetrics
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
 	// and the accountant figure must not be booked.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
 	accReq *accountant.Request
-	// accUnsupportedWire is set for a request on a wire the accountant does not read (OpenAI Responses).
-	accUnsupportedWire bool
+	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
+	// holds its history, so the accountant has no record of it.
+	accServerHeldHistory bool
 	// accNoResult says why no Result was attached when Compute was reached and gave none.
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
@@ -183,6 +193,8 @@ type capture struct {
 	accPreDefer []byte
 	// accThread is the thread id accEnd gave the library, the second half of the ping store's key.
 	accThread string
+	// accFacts is the entry facts accEnd gave the library, kept for accBilledTTL: the library keeps its record private.
+	accFacts accountant.EntryFacts
 	// accPingWindow is the window of the ping facts accEnd read, so finish drops those and not a
 	// newer ping that arrived while the request was in flight.
 	accPingWindow string
@@ -216,7 +228,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		unique:   map[string]int{},
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
-		savings:  h.savings, pings: h.opts.Pings,
+		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
 		observe: tn.Mode == components.ModeObserve,
 		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
 	}
@@ -286,6 +298,9 @@ func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
+		// A "session" result is the tracker's fallback: no session id, no message list, or a recovered
+		// panic. It judged nothing, so the row keeps no verdict (NULL) and the old rule decides (#947).
+		c.compVerdict, c.compKnown = string(compactionVerdict(res)), res.Source != thread.SourceSession
 	}
 }
 
@@ -609,6 +624,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.DropUnbilledSavings()
 	e.ThreadID = c.thread
 	e.AgentCompaction = c.agentComp
+	e.ClientCompaction, e.ClientCompactionKnown = c.compVerdict, c.compKnown
 	// Only a client-set C (the user's setting or the client's own default, #963) is stored: the table value scales with the window and is read back
 	// from the table, so an old row and a new table row read alike (compactionpoint.Recorded).
 	if compactionpoint.IsClientSource(c.cpointSrc) && c.cpoint > 0 {
@@ -694,6 +710,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
 	e.CacheWrite, e.OutputTokens = usage.CacheWrite, usage.Output
 	e.CacheWrite1h = usage.CacheWrite1h
+	e.Backend = usage.Backend
 
 	// context-guru's own model spend attributable to THIS request: what this request's
 	// OWN sink recorded, never a delta of the process-wide counters. The delta was
@@ -842,6 +859,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
+				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
+					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
 			} else {
 				c.accNoResult = "compute_panicked"
 			}
@@ -851,31 +870,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 				c.savings.noteRescueFactsMissing()
 			}
 			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accReq.Meta.Session, c.accThread), c.accPingWindow)
+			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}
 	}
 	endAcc()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
-	if c.accUnsupportedWire {
-		e.SetAccountantUnsupportedWire()
+	if c.accServerHeldHistory {
+		e.SetAccountantServerHeldHistory()
 	}
 	e.PriceMode(price, usageOK && priced)
-	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
+	if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
+		e.RecordAccountantFallback()
 		logFallback(e, c.noResultWhy(usageOK))
 	}
-	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
-		cgPrice, cgPriced := price, priced
-		if c.pricer != nil && cgModel != "" && cgModel != c.model {
-			if p2, ok := c.pricer.Price(context.Background(), cgModel); ok {
-				cgPrice, cgPriced = p2, true
-			}
-		}
-		if cgPriced {
-			e.CGLLMCostUSD = cgPrice.Cost(cgIn, cgCacheRead, cgCacheWrite, cgOut)
-		} else {
-			e.CGCostUnpriced = true
-		}
-	}
+	e.CGModel = cgModel
+	e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
+	e.PriceCG(c.pricer, price, priced)
 
 	if !captureContent {
 		e.Content = nil
@@ -919,6 +929,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
 	// e.Project rides along: invocations are recorded per folder, because one session works in
 	// several and a per-session folder cannot scope a per-project report.
+	// After the response, on the handler's defer: counter adds only (R46). A panic costs the metric.
+	c.inference.Observe(e, time.Since(c.start))
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
 }

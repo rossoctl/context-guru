@@ -205,3 +205,37 @@ func TestToolDeferReportsItsNamesList(t *testing.T) {
 		})
 	}
 }
+
+// A bypassed request (x-context-guru-bypass) runs no pipeline, so it leaves TokensBefore at 0, and the proxy logs it
+// as an acc_fallback with size_unknown. But the client asked for no context-guru: its $0 saving is a measured $0. So
+// it stores no reason, and the Overview keeps its cost in the saving share (#1004).
+func TestBypassedRequestStoresNoFallback(t *testing.T) {
+	up := billedUpstream(t)
+	defer up.Close()
+	h, rec, tap := accHandlerYAML(t, up.URL, "preset: codesafe\n")
+	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}}})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-bypass")
+	req.Header.Set("x-context-guru-bypass", "true")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	waitForRows(t, rec, 1)
+	evs := tap.all()
+	if len(evs) != 1 {
+		t.Fatalf("events = %d, want 1", len(evs))
+	}
+	e := evs[0]
+	if !e.Bypassed || e.AccountantFallback() != dash.FallbackSizeUnknown {
+		t.Fatalf("setup: bypassed %v, fallback %q; want true, %q", e.Bypassed, e.AccountantFallback(), dash.FallbackSizeUnknown)
+	}
+	if e.AccFallback != "" {
+		t.Fatalf("stored acc_fallback %q on a bypassed request, want none", e.AccFallback)
+	}
+}

@@ -3,7 +3,6 @@ package dash
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -77,7 +76,7 @@ func TestServeJSONComputesWhenPastTheCap(t *testing.T) {
 // The page must show the age of the data. These are source checks like the neighbouring UI tests:
 // the Age header is read into state.ageMs and Overview subtracts it from "Updated N ago".
 func TestOverviewFreshnessUsesTheAgeOfTheData(t *testing.T) {
-	js, err := os.ReadFile("ui/app.js")
+	js, err := appSource()
 	if err != nil {
 		t.Fatal(err)
 	}

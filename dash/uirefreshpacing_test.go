@@ -23,7 +23,7 @@ import (
 
 // The timer must pace on the last ATTEMPT and must not stack overlapping loads.
 func TestOverviewRefreshPacesOnAttemptsNotSuccesses(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 
 	// The tick body, from the interval callback to its 5000ms period. Scoping the assertions to
 	// it matters: `loadedAt` legitimately appears elsewhere (paintFreshness reports it to the
@@ -63,7 +63,7 @@ func TestOverviewRefreshPacesOnAttemptsNotSuccesses(t *testing.T) {
 // (aborted(err)) return;`) and any future early return recording no attempt — and one uncounted
 // exit is enough to restore the 5s hammer.
 func TestLoadOverviewRecordsEveryAttempt(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	body := regexp.MustCompile(`(?s)async function loadOverview\(opts = \{\}\) \{.*?\n\}\n`).FindString(src)
 	if body == "" {
 		t.Fatal("could not find loadOverview(); this check needs rewriting against whatever replaced it")

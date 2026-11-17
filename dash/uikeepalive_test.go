@@ -20,7 +20,7 @@ import (
 // this is the tab whose numbers authorise SPENDING somebody's money, so a figure nobody can
 // interpret is worse here than anywhere else on the dashboard.
 func TestEveryKeepAliveTileHasAnExplanation(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	keys := map[string]bool{}
 	for _, m := range regexp.MustCompile(`tile\('(ka-[a-z0-9-]+)'`).FindAllStringSubmatch(src, -1) {
 		keys[m[1]] = true
@@ -81,7 +81,7 @@ func TestTheLosingMajorityIsOnThePage(t *testing.T) {
 			"downside second, deliberately: 85 of the 119 sessions this touched lost money, " +
 			"and a page that leads with what it could buy you is selling.")
 	}
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	// The renderer must not gate the panel on the sign of the net. It may add a banner when the
 	// net is negative — that is the extra — but the split and the worst session are not behind
 	// that branch.
@@ -116,7 +116,7 @@ func TestTheLosingMajorityIsOnThePage(t *testing.T) {
 // render: the payload does not carry one (TestRecommendationPayloadCarriesNoPointEstimate) and
 // the renderer reads a RANGE.
 func TestTheRecommendationRendersARangeAndRefusesThinHistory(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	i := strings.Index(src, "async function loadKARecommend(")
 	if i < 0 {
 		t.Fatal("loadKARecommend is gone; this check needs rewriting")
@@ -160,7 +160,7 @@ func TestTheRecommendationRendersARangeAndRefusesThinHistory(t *testing.T) {
 // every figure on it is "over this window" and a tab that ignored the picker above it would be
 // answering a different question from the one on screen.
 func TestTheKeepAliveTabRespectsTheTimeRange(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	i := strings.Index(src, "const UNFILTERED_VIEWS")
 	if i < 0 {
 		t.Fatal("UNFILTERED_VIEWS is gone; this check needs rewriting")
@@ -182,7 +182,7 @@ func TestTheKeepAliveTabRespectsTheTimeRange(t *testing.T) {
 // categorical order, a status palette and two chart primitives; a fifth series colour means a
 // chart needs splitting, not a new colour.
 func TestTheKeepAliveTabAddsNoNewChartVocabulary(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	i := strings.Index(src, "async function loadKeepAlive(")
 	if i < 0 {
 		t.Fatal("loadKeepAlive is gone; this check needs rewriting")
@@ -272,7 +272,7 @@ func TestNoUIScriptShadowsAWindowMethod(t *testing.T) {
 	// property "in any load order", so a file left out of the loop is a file that can
 	// introduce one freely. campaigns.js is the pointed case — it calls bare confirm() and
 	// alert(), both on the list below.
-	for _, f := range []string{"ui/app.js", "ui/tools.js", "ui/kvcache.js", "ui/campaigns.js"} {
+	for _, f := range append(appFiles(t), "ui/tools.js", "ui/kvcache.js", "ui/campaigns.js") {
 		src := stripJSComments(readUI(t, f))
 		for _, m := range decl.FindAllStringSubmatch(src, -1) {
 			for _, bad := range shadowable {
@@ -301,7 +301,7 @@ func TestNoUIScriptShadowsAWindowMethod(t *testing.T) {
 // only in a review: at X=280 the wrong arithmetic gives 4.7 and 9.3 minutes where the right one
 // gives 9.7 and 14.3.
 func TestTheKRuleCopyStatesItsReachAndNotTheRefutedNumbers(t *testing.T) {
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	for _, dead := range []string{"4.7 minute", "$71 worse", "71 worse than"} {
 		if strings.Contains(src, dead) {
 			t.Errorf("the refuted figure %q is back in the tab's copy. Coverage is K*X + TTL; "+
@@ -349,7 +349,7 @@ func TestTheLivePanelSaysWhatItsNumbersAre(t *testing.T) {
 			"this whole feature, and a countdown that gets it wrong is over-optimistic by the " +
 			"length of the response")
 	}
-	src := readUI(t, "ui/app.js")
+	src := readApp(t)
 	i := strings.Index(src, "function renderKALive(")
 	if i < 0 {
 		t.Fatal("renderKALive is gone; this check needs rewriting")
@@ -394,7 +394,7 @@ func TestTheLivePanelSaysWhatItsNumbersAre(t *testing.T) {
 // The attribute name is EXTRACTED from showScopeCol rather than written down here, so renaming it
 // in app.js cannot leave this check asserting a stale spelling.
 func TestEveryScopeColumnUsesTheAttributeShowScopeColReads(t *testing.T) {
-	app, html := readUI(t, "ui/app.js"), readUI(t, "ui/index.html")
+	app, html := readApp(t), readUI(t, "ui/index.html")
 	m := regexp.MustCompile(`thead th\[([a-z-]+)\]`).FindStringSubmatch(app)
 	if m == nil {
 		t.Fatal("showScopeCol's selector no longer looks like `thead th[attr]`; this check needs " +

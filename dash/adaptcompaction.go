@@ -55,7 +55,7 @@ import (
 // Gross, per request, at the deployed rates. A block's size change under an arm is priced at
 // the rate the request actually paid for that position: its FIRST appearance in the session is
 // the uncached tail (the write rate, 5m and 1h tiers blended by what the request wrote, or
-// fresh where nothing was written), every later appearance at Event.repeatRate — the rule
+// fresh where nothing was written), every later appearance at estimateRepeatRate — the rule
 // request_components.saved_usd already uses. An arm that rewrites a block it had already sent
 // differently busts the prefix on a turn that read from cache, and is charged that turn's whole
 // cache read re-billed as a write (an upper bound, charged against the arm). An arm whose
@@ -1025,7 +1025,7 @@ func synthBody(r *adaptReq) []byte {
 }
 
 // adaptRates are the per-token rates a size change is priced at on r: the tail rate for a
-// block's first appearance and Event.repeatRate for a re-sent one, both with the write rate
+// block's first appearance and estimateRepeatRate for a re-sent one, both with the write rate
 // blended across the 5m and 1h tiers by what r actually wrote.
 func adaptRates(r *adaptReq) (tail, repeat, write float64) {
 	p := r.price
@@ -1036,8 +1036,7 @@ func adaptRates(r *adaptReq) (tail, repeat, write float64) {
 	}
 	pw := p
 	pw.CacheWrite = write
-	e := Event{FreshInput: r.fresh, CacheRead: r.read, CacheWrite: r.write}
-	repeat = e.repeatRate(pw)
+	repeat = estimateRepeatRate(pw, r.fresh, r.read, r.write)
 	// The tail is the newest write, and with a mixed-TTL request that is the 5m entry at the end;
 	// the 1h part is the head. Only a request that wrote everything at 1h wrote its tail there.
 	tail = p.Input

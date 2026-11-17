@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -35,17 +35,13 @@ const longComment = "Compaction has been invisible in day-to-day use, which is t
 // exists — this waits for the background send rather than assuming it already happened.
 func waitForSink(t *testing.T, want string) string {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	var got string
+	testutil.WaitForState(t, fmt.Sprintf("the mail sink to contain %q", want), func() bool {
 		b, err := os.ReadFile(os.Getenv(envMailDevSink))
-		if err == nil && strings.Contains(string(b), want) {
-			return string(b)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("mail sink never contained %q; it holds:\n%s", want, b)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		got = string(b)
+		return err == nil && strings.Contains(got, want)
+	}, func() string { return "the sink holds:\n" + got })
+	return got
 }
 
 func TestFeedbackIsStoredAndMailedToTheManager(t *testing.T) {
@@ -83,20 +79,15 @@ func TestFeedbackIsStoredAndMailedToTheManager(t *testing.T) {
 
 	// And the delivery was recorded against the row, so the manager's view can tell a
 	// delivered notification from a lost one.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		all, err := f.reg.FeedbackList("", 0)
+	var all []*tenant.Feedback
+	testutil.WaitForState(t, "mailed_at recorded on the feedback row", func() bool {
+		var err error
+		all, err = f.reg.FeedbackList("", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(all) == 1 && !all[0].MailedAt.IsZero() {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("mailed_at was never recorded: %+v", all)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return len(all) == 1 && !all[0].MailedAt.IsZero()
+	}, func() string { return fmt.Sprintf("%+v", all) })
 }
 
 // The 50-character minimum is the SERVER's rule. The form counts too, but a hand-rolled

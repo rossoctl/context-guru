@@ -29,6 +29,8 @@ type DeclCredit struct {
 	FilterUSD      float64 `json:"filter_usd"`
 	FilterRequests int     `json:"filter_requests"`
 	FilterSince    int64   `json:"filter_since,omitempty"`
+	// FilterFallbackUSD is the part of FilterUSD on requests the accountant could not price (#1004).
+	FilterFallbackUSD float64 `json:"filter_fallback_usd,omitempty"`
 	// Priced is false when any contributing model had no rates, in which case the dollar
 	// figures are the priced subset only and a consumer must show the token counts instead.
 	Priced bool `json:"priced"`
@@ -43,7 +45,7 @@ func (d *DB) DeclCreditFor(f Filter, price func(string) (modelinfo.Price, bool))
 	if err != nil {
 		return nil, err
 	}
-	out.FilterReads, out.FilterUSD = realized.Reads, realized.USD
+	out.FilterReads, out.FilterUSD, out.FilterFallbackUSD = realized.Reads, realized.USD, realized.FallbackUSD
 	out.FilterRequests, out.FilterSince = realized.Requests, realized.Since
 	if !realized.Priced {
 		out.Priced = false

@@ -3,7 +3,10 @@ package proxy
 import (
 	"strings"
 
+	"github.com/rossoctl/accountant"
 	"github.com/tidwall/gjson"
+
+	"github.com/rossoctl/context-guru/internal/thread"
 )
 
 // agentCompactionPhrases are the VERBATIM prompt openings agents use when they ask the
@@ -89,4 +92,15 @@ func lastTurn(arr []gjson.Result) (gjson.Result, bool) {
 		return arr[i], true
 	}
 	return gjson.Result{}, false
+}
+
+// compactionVerdict is what the proxy tells the accountant about a client compaction (R55) and
+// stores on the dashboard row (#947): "unknown" on the first request after the agent's own
+// compaction, "" on any other request. The wire does not yet tell a manual /compact from an
+// auto compaction, so the verdict is never "manual" or "auto".
+func compactionVerdict(th thread.Result) accountant.CompactionTrigger {
+	if th.AfterCompaction {
+		return accountant.CompactionUnknown
+	}
+	return ""
 }

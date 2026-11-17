@@ -689,7 +689,7 @@ func TestProviderCacheSavingIsNeverOurs(t *testing.T) {
 	}
 	// And every place the page renders it says whose it is. Checked over a window of lines
 	// rather than one, because the label is often on the line after the value.
-	for _, name := range []string{"ui/app.js", "ui/index.html"} {
+	for _, name := range append(appFiles(t), "ui/index.html") {
 		b, err := uiFS.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)

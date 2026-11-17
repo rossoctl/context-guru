@@ -19,9 +19,10 @@ It is **off by default**. Turning it on adds `/dashboard/` and `/api/*`; every e
 route, including [`/stats`](reference/reference.md), is byte-for-byte unchanged.
 
 !!! info "No CDN, no build step, no network"
-    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, `charts.js`,
-    `tools.js`, `kvcache.js`, `campaigns.js` and one bundled font) embedded in the
-    binary with `go:embed`. Charts are hand-drawn SVG — no chart library, no framework.
+    The whole UI is a handful of static files (`index.html`, `style.css`, `app.js`, one file
+    per tab under `tabs/`, `charts.js`, `tools.js`, `kvcache.js`, `campaigns.js` and one
+    bundled font) embedded in the binary with `go:embed`. They are plain scripts that
+    `index.html` loads in order, with no bundler. Charts are hand-drawn SVG — no chart library, no framework.
     The page fetches nothing off-origin, so it works in a VPC or fully air-gapped.
 
 !!! tip "New to the dashboard?"
@@ -137,9 +138,31 @@ What the library prices:
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
-`check_sum`, `check_unique_change`, `check_spans`, `size_unknown`, `implausible_size`,
-`figure_without_row`, `duplicate_name`, `acted_without_figure` or `unsupported_wire`. A saving nothing
+`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `size_unknown`, `implausible_size`,
+`figure_without_row`, `duplicate_name`, `acted_without_figure` or `server_held_history`. A saving nothing
 measured is not shown.
+
+The same reason is stored in `requests.acc_fallback` for each request that logs the line. A request with no
+accountant record (`no_record`) logs no line and stores no reason: it had nothing to price. A bypassed request
+(`x-context-guru-bypass: true`) logs `size_unknown`, because bypass leaves the request size at 0, but stores no
+reason: the client asked for no context-guru, so its $0 is a measured $0. Overview reads the column:
+
+- `fallback_requests` is the count, `fallback` the count by reason, and `fallback_cost_usd` their `cost_usd`
+  plus `cg_llm_cost_usd`.
+- A fallback request can still book some saving the library did not price: the deferral ledger's net, the
+  measured filter credit, and minus its own model calls. `fallback_saved` gives it by part (`compaction_usd`,
+  `defer_usd`, `keepalive_usd`, `reorder_usd`, `filter_usd`).
+- The hero and its part cards leave fallback requests out on both sides. Each part is the server's part less
+  its fallback share, and "You spent" is the spend less `fallback_cost_usd`. A line under the total names the
+  requests, the spend and the saving left out. Cost totals on other pages, and the token figures, still
+  count them.
+- The lean read (`/api/stats?lean=1`), which paints the hero first, carries the same fields except `fallback`
+  and `filter_usd`: it has no filter credit either.
+- Rows written before the column existed are back-filled once from their components: a request with a
+  `priced_by = 'none'` component reads `unrecorded`. That rule is close to the live one, not the same. It
+  cannot find a fallback with no component row, or one with no usage or no price (those components are not
+  marked). It also marks a row with components but no accountant record, which the live code leaves empty.
+  The old rows age out with the dashboard's retention.
 
 For `no_result` the line also carries `why`: `no_record` (no session, or the pipeline did not run), `no_usage`,
 `upstream_rounds=N` (an expand loop) or `compute_panicked`.
@@ -149,13 +172,23 @@ For `unpriced` the line carries `why` too: `no_usage` (the request has no billed
 as `opID:reason` (or `reason` alone when the refusal is for the whole request, as `ratio_range` is). The
 cause is in the log line only. No stored column and no API field carries it.
 
-`unsupported_wire` is the OpenAI Responses API. It keeps the conversation in `input`, and the proxy hashes
-`messages` and reports no operations there, so **every saving on that wire is $0**. Chat Completions and the
-Anthropic Messages API are priced. Until Responses is read, a Responses account sees no saving and the
-keep-alive tab on it can read negative: the pings still cost, and no rescue is credited.
+The three wires are priced: the Anthropic Messages API, Chat Completions and the OpenAI Responses API. On
+Responses the library reads `instructions` as the system section and each `input` item as one message
+position, so a change is placed on the item it changed.
+
+`server_held_history` is a Responses request that leaves part of its prompt on the provider's side: it
+carries `previous_response_id`, a `conversation`, or an `input` item of type `item_reference`. The provider
+adds stored items that the body does not carry, so the proxy cannot see the prefix the provider reads. Such
+a request books no saving. A Responses account that sends every turn in full is priced as the other wires
+are.
 
 Limits:
 
+- On Responses, a pipeline component that rewrites `instructions` books no saving for that request
+  (`ops_dropped`): the change is in the system section, and the proxy places component changes only on
+  `input` items. The tool filter's own edit of `instructions` (a skill taken out of the list) is priced
+  on the `toolfilter` row. When the skill list is in a leading `developer` item of `input` instead, that
+  edit has no operation, the sum check fails, and the request books no saving (`check_sum`).
 - A request with no history to classify a cache break against gets `penalty_unknown`. This is the
   first request of a thread, and a request after a gap longer than the cache lifetime when the
   provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
@@ -242,7 +275,9 @@ Limits:
   sum the stored split on the rows the library priced. A window that spans the switch mixes the two.
 - The replay cap works in epochs (#940). A close ends the replay credit of the removals made before it.
   A removal first made after a close earns credit until the next close. There are two kinds of close:
-  - A real client compaction. Both worlds pay for it, so there is no one-time credit.
+  - A real client compaction. Both worlds pay for it, so there is no one-time credit. The close is on
+    the first request after the compaction, which the thread tracker marks (`client_compaction`,
+    #947). A row from before #947 has no mark, and a drop in `tokens_before` decides for it.
   - A counterfactual compaction: the point where the baseline (the transcript that the provider billed
     plus what we removed) reaches the compaction point. The baseline then restarts from a summary of
     80,000 tokens. That size is an assumption: it is the median of the first turn after 34 real compactions.
@@ -641,6 +676,9 @@ the dashboard learns it from the stored 5-hour share and token counts (#1047).
 - **`window_ping`.** With `since` (the open window's start, unix ms) and `ok: true`: the tokens the
   cache strategy's pings billed since then, for the Overview estimate.
 - **Cache.** One fit per account for 15 minutes. A page load never fits again.
+- **The plugin's band.** On a subscription the Claude Code band and pane price the next message as a share of the
+  5-hour limit with these weights (#1095). `cg.py` reads the endpoint at most once a minute. See
+  [the band](plugin/statusline.md#the-band).
 - **Fail open.** An error in the read or the fit gives `ok: false`. The pages then show the
   API-price figures.
 

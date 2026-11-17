@@ -85,6 +85,8 @@ validation:
 # refuted it — useful in review, actively confusing on a page a user reaches looking for how to
 # configure something. Excluded rather than added to the nav so `mkdocs build --strict` stays
 # green without publishing internal argument, and so a proposal can be added without a nav edit.
+# docs/metrics/ is the same category: the metrics reporting spec and its design record,
+# addressed to whoever builds the reporting path, with mockups and a generator script beside them.
 # docs/data-dependence/ holds the row files and the template that cmd/gen-datadep turns into
 # docs/data-dependence.md (the page the site shows).
 exclude_docs: |
@@ -93,6 +95,7 @@ exclude_docs: |
   proposals/
   plans/
   data-dependence/
+  metrics/
 
 # Nav mirrors how people arrive: install it the easy way and see what it saves
 # (Get started) → run it yourself instead of the plugin (Advanced /
@@ -125,6 +128,7 @@ nav:
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md
       - Pi package and Claude Code plugin compared: reference/pi-vs-claude-code.md
+      - Plugins, providers and settings: reference/plugins-matrix.md
       - Test a subscription login in a sandbox: how-to/test-subscription-sandbox.md
       - How it saves money: get-started/how-it-saves.md
       - Technical overview: get-started/overview.md
