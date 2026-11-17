@@ -105,6 +105,10 @@ func push(t *testing.T, collector, token, machine string) {
 	inf.Observe(bad, time.Second)
 	ping := &dash.Event{Model: "claude-sonnet-5-5", Provider: "anthropic", Status: 200, KeepAlive: true, CostUSD: 0.001}
 	inf.Observe(ping, 0)
+	// #754: a ping that ran to its timeout, booked at its projected cost.
+	slow := &dash.Event{Model: "claude-sonnet-5-5", Provider: "anthropic", Status: 0, KeepAlive: true, CostUSD: 0.001,
+		Meta: dash.Meta{StopReason: dash.StopTimeoutEstimated}}
+	inf.Observe(slow, 0)
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := stop(stopCtx); err != nil {
@@ -140,7 +144,7 @@ func TestCentralNamesMatchTheSpec(t *testing.T) {
 		"llm_cache_miss_cost_usd_total", "llm_cache_misses_total",
 		"llm_inference_cost_usd_total", "llm_inference_errors_total", "llm_inference_estimated_cost_usd_total",
 		"llm_inference_requests_total", "llm_inference_tokens_total",
-		"llm_keepalive_cost_usd_total", "llm_keepalive_pings_total",
+		"llm_keepalive_cost_usd_total", "llm_keepalive_estimated_cost_usd_total", "llm_keepalive_pings_total",
 		"llm_proxy_component_failures_total", "llm_proxy_fail_open_total",
 		"llm_savings_cache_effect_usd_total", "llm_savings_check_failures_total", "llm_savings_interaction_usd_total",
 		"llm_savings_requests_total", "llm_savings_saved_tokens_total", "llm_savings_saved_usd_total",

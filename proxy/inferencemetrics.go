@@ -32,7 +32,9 @@ type InferenceMetrics struct {
 	cacheMissCost metric.Float64Counter
 	pings         metric.Int64Counter
 	pingCost      metric.Float64Counter
-	prices        modelinfo.Pricer // nil: no money for a miss
+	// pingEstimatedCost is the part of pingCost that is a projection, not a billed figure (#754).
+	pingEstimatedCost metric.Float64Counter
+	prices            modelinfo.Pricer // nil: no money for a miss
 	// Proxy health (spec 5.5). The info gauge and the export-failure counter live with the push.
 	compDuration metric.Float64Histogram
 	compFailures metric.Int64Counter
@@ -97,6 +99,8 @@ func NewInferenceMetrics(m metric.Meter, prices modelinfo.Pricer, components ...
 	i64(&im.failOpen, "llm.proxy.fail_open", "Requests the proxy forwarded unchanged because its own work failed.")
 	i64(&im.pings, "llm.keepalive.pings", "Keep-alive pings the proxy sent, by outcome (ok, failed, timeout).")
 	f64(&im.pingCost, "llm.keepalive.cost.usd", "What the pings cost.")
+	f64(&im.pingEstimatedCost, "llm.keepalive.estimated_cost.usd",
+		"Part of the ping cost that is the keeper's projection, for pings that timed out with no answer.")
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +221,11 @@ func (im *InferenceMetrics) observePing(ctx context.Context, e *dash.Event, mode
 	}
 	im.pings.Add(ctx, 1, metric.WithAttributes(attribute.String("model", model), attribute.String("outcome", outcome)))
 	if e.CostUSD > 0 {
-		im.pingCost.Add(ctx, e.CostUSD, metric.WithAttributes(attribute.String("model", model)))
+		attrs := metric.WithAttributes(attribute.String("model", model))
+		im.pingCost.Add(ctx, e.CostUSD, attrs)
+		if outcome == "timeout" {
+			im.pingEstimatedCost.Add(ctx, e.CostUSD, attrs) // a sub-set of pingCost, never added to it
+		}
 	}
 }
 

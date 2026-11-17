@@ -323,17 +323,22 @@ Labels in this section:
 | Label | Values | Meaning |
 |---|---|---|
 | `model` | As in 5.1 | The model whose cache the ping kept warm. |
-| `outcome` | `ok`, `failed`, `timeout`, `skipped` | `ok`: the ping succeeded. `failed`: the provider returned an error. `timeout`: no answer in time. `skipped`: the proxy chose not to ping, for example because a sibling thread kept the cache warm. |
+| `outcome` | `ok`, `failed`, `timeout`, `skipped` | `ok`: the ping succeeded. `failed`: the provider returned an error. `timeout`: no answer in time; the ping ran to the keeper's 60 s timeout (#754). `skipped`: the proxy chose not to ping, for example because a sibling thread kept the cache warm. |
 
 
 | Metric | Type | Unit | Labels | Meaning |
 |---|---|---|---|---|
 | `llm_keepalive_pings_total` | counter | 1 | `model`, `outcome` | `outcome` is `ok`, `failed`, `timeout`, `skipped`. |
-| `llm_keepalive_cost_usd_total` | counter | none | `model` | What pings cost. |
+| `llm_keepalive_cost_usd_total` | counter | none | `model` | What pings cost. Includes the projected cost of each `timeout` ping (see below). |
+| `llm_keepalive_estimated_cost_usd_total` | counter | none | `model` | Part of the ping cost that is a projection, not a billed figure: the `timeout` pings. Sub-set of the line above. |
 | `llm_keepalive_rescue_usd_total` | counter | none | `model` | Saving from rescues (`rescue` effect). |
 | `llm_keepalive_shared_warm_tokens_total` | counter | 1 | `model` | Tokens not credited because a sibling thread kept them warm (#853). |
 
 Net keep-alive value is `rescue_usd - cost_usd`.
+
+**A `timeout` ping is booked at an estimated cost (#754).** No answer came back, so the proxy has no usage to price. But the request probably reached the provider, which bills it whether or not the proxy waits. So the proxy books the keeper's projection of one ping: the prompt prefix at the model's cache-read rate. The ping counts in `llm_keepalive_pings_total{outcome="timeout"}`. Its cost counts in both `llm_keepalive_cost_usd_total` and `llm_keepalive_estimated_cost_usd_total`. It is not a refresh, so it never adds to `llm_keepalive_rescue_usd_total`. A fast failure (EOF, reset, refused) probably never reached the provider. It is `failed` only if the provider answered with an error; a fast transport error books no metric.
+
+`skipped` is in the label set but is not emitted yet: a skipped ping writes no row, and the push books pings from rows.
 
 ### 5.4 Cache health
 
@@ -458,6 +463,7 @@ The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
 | Miss cost by cause | bar | `llm_cache_miss_cost_usd_total` |
 | Ping outcomes | stacked bars | by `outcome` |
 | Ping cost vs rescue | time series | cost, rescue and net |
+| Estimated ping cost | stat | `llm_keepalive_estimated_cost_usd_total / llm_keepalive_cost_usd_total` (rule 6) |
 | Pings that paid | stat | `rescue_usd / cost_usd` |
 | Shared-warm tokens | time series | credit not given (#853) |
 

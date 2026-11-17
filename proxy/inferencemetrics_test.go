@@ -283,6 +283,9 @@ func TestPingBooksKeepAliveAndNoRequest(t *testing.T) {
 	if c := sumFloat(all["llm.keepalive.cost.usd"]); c < 0.0049 || c > 0.0051 {
 		t.Errorf("ping cost = %v, want 0.005 (the timeout's projected cost included)", c)
 	}
+	if c := sumFloat(all["llm.keepalive.estimated_cost.usd"]); c < 0.0019 || c > 0.0021 {
+		t.Errorf("estimated ping cost = %v, want 0.002 (the timeout's projection only)", c)
+	}
 	for _, name := range []string{"llm.inference.requests", "llm.inference.tokens", "llm.inference.cost.usd"} {
 		if _, has := all[name]; has {
 			t.Errorf("a ping reached %s: it is not a request the user made", name)
