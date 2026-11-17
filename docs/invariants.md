@@ -374,6 +374,29 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 - **Gap G13:** the dashboard does not record when a reserve was written, or which later request used it. R2 joins the summary call to the cold return by thread and time. A field on the cold-return row ("reserve used", with its age) would make R2 one query.
 - **Owner:** David Amid (proposed).
 
+## Isolation: one thread, or one tenant, never steers another
+
+**The rule (owner, 2026-11-17):** threads are isolated from each other. One thread's state, decisions or figures must never change another thread's. The same holds for tenants.
+
+- **The example, #1183 (fix #1184, open):**
+  - **The cause:** the summary trigger compared a window share with the session's last billed input (`PrevBilledInput`). It is stored per session (`apply/apply.go:1561`), so it holds whichever thread answered last.
+  - **The effect:** a subagent thread could start, or block, a summary because of the main thread's size, and the main thread because of a subagent's. On the laptop, a 37k subagent was summarized while its main thread was at about 950k.
+  - **The fix:** each thread reads its own figure, `PrevBilledInputThread`.
+- **The same figure fed the sweep.** `extract_sweep_v3.go` and `extract_sweep_warm.go` read `PrevBilledInput` for their ratios and growth horizon, as do `summarize` and `extract_llm`. #1184 moves all of them to the per-thread figure.
+- **The earlier kin, #1064:** one tenant's rows changed another tenant's per-session figures, archives and seeds.
+
+| # | Kind | Statement | Signal | Threshold (proposed) | Baseline (laptop, to 2026-11-17) |
+|---|---|---|---|---|---|
+| I1 | contract | A summary fires only from its own thread's size. | X9: a fresh act of `cache_aware_summarizer` or `summarize` whose own thread's previous billed input is below the trigger | any, after #1184 | **1 of 1** fresh subagent act (#1183) |
+| I2 | contract | A sweep cut fires only from its own thread's size. | a warm sweep cut (`events.sweep_applied_warm > 0`) whose own thread's previous billed input is below the warm cut point, while the session's last answer is above it | any, after #1184 | 0 warm cuts on the laptop, so not yet measurable |
+| I3 | side effect | How often today's session-level figure belongs to another thread. This is the exposure, not a breach. | subagent requests whose session `PrevBilledInput` came from a different thread | report only; should not matter after #1184 | **16 of 83 subagent requests (19%)** |
+| I4 | contract | A tenant's rows never change another tenant's figures (#1064). | a `session_id` seen under 2 or more `tenant_id`s, and per-tenant `/stats` and dashboard figures that move on another tenant's traffic | any | 0 sessions under 2 tenants |
+| I5 | contract | No component reads a figure that spans threads, to decide for one thread. | A code check: no component in `components/` reads `Ctx.PrevBilledInput` after #1184 (only `PrevBilledInputThread`) | any reader | before #1184: `components/trigger.go:209`, `:275`; `extract_sweep_v3.go:727`, `:762`, `:849`; `extract_sweep_warm.go:609-635`, `:746`, `:834`, `:946` |
+
+- **I5 runs on the code, not on traffic.** It fits a CI test, for example a grep in `components/all/` that fails when a component reads a session-wide field.
+- **Other figures kept per session** must be checked the same way: the keep-alive ping facts (keyed by session and thread, so OK); `cg:seen:<alias>`, the cold clock (#902), which is keyed by an alias of the first two messages, so check that two threads never share it; and the session-state keys (#770).
+- **Owner:** David Amid (proposed).
+
 ## Cross-component invariants
 
 | # | Statement | Signal | Threshold (proposed) | Baseline |
@@ -423,7 +446,7 @@ proxy, 2026-11-01 to 11-10. It is not fleet data.
 
 ## Monitor spec (draft)
 
-- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, K12, K13, X7, X8, X9, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
+- **Daily:** K1, K3, K4, K7, K8, K9, K10, K11, K12, K13, X7, X8, X9, I1, I2, I4, S1, S6, X1, X4, T1, T2, D2, D5, D6, D8. These catch a new defect fast, and each costs little to run.
 - **Weekly:** K2, K5, K14, R1, R2, R3, R4, S2, S4, X2, X3, X6, D1, D3, D7, E1, E1b, E1c, E3, E4, and the per-component activity table.
 - **Before each release:** the #778 tables, with 3 or more working days of data.
 - **The report:** one table per run. For each invariant: value, threshold, the change since the
