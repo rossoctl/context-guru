@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // bobPrice is Bob's flat rate from bob-plugin/context-guru/prices.yaml: 2.0 Bobcoins per million.
@@ -170,10 +171,10 @@ func TestRepricedRowTakesTheCurrencyOfItsPrice(t *testing.T) {
 	late.Agent = "bob"
 	rec.Record(priced)
 	rec.Record(late)
-	waitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
+	testutil.WaitFor(t, "rows written", func() bool { return rec.Stats().Written == 2 })
 	src.loaded.Store(true)
 	var cost float64
-	waitFor(t, "the late row priced", func() bool {
+	testutil.WaitFor(t, "the late row priced", func() bool {
 		_ = rec.db.sql.QueryRow(`SELECT cost_usd FROM requests WHERE session_id = 's2'`).Scan(&cost)
 		return cost > 0
 	})
