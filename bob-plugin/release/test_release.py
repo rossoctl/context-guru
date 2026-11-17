@@ -47,6 +47,11 @@ if "--help" in args:
     print("  {flag} string")
     print("fake-arch={arch}")
     sys.exit(0)
+# setup lists the cache strategies (#1111). Without this answer it skips the fake as too old and
+# downloads the real latest release from GitHub in the middle of the test.
+if args[:1] == ["strategies"]:
+    print('{{"strategies": [{{"name": "none", "providers": ["any"], "spends": false, "desc": "fake"}}]}}')
+    sys.exit(0)
 if {dies}:
     sys.exit(1)
 import time
