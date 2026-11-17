@@ -87,6 +87,13 @@ func (sec accSections) responsesSections() accSections {
 
 // accParse is accBodies and accBreakpoints on one parse of the body.
 func accParse(raw []byte) (accountant.Body, []accountant.Breakpoint) {
+	return accParseCounted(raw, nil)
+}
+
+// accParseCounted is accParse with the token count of each thinking block the proxy saw a model make
+// (thinkcount, accountant design D16). count is looked up by each signature's accountant.OpaqueKey; a nil
+// count gives the fixed price to every block, as accParse does. The hashes and sizes do not depend on it.
+func accParseCounted(raw []byte, count accountant.OpaqueCount) (accountant.Body, []accountant.Breakpoint) {
 	sec := accScan(raw)
 	if !sec.messages.IsArray() {
 		return accountant.NewBody(nil, nil, nil), nil
@@ -104,7 +111,7 @@ func accParse(raw []byte) (accountant.Body, []accountant.Breakpoint) {
 		add(&system, sec.system)
 	}
 	sec.messages.ForEach(func(_, v gjson.Result) bool { add(&msgs, v); return true })
-	built := accountant.NewBody(tools, system, msgs)
+	built := accountant.NewBodyCounted(tools, system, msgs, count)
 	for i := range built.Pos {
 		built.Pos[i].Bytes = int32(sizes[i])
 	}

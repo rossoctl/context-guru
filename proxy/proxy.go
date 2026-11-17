@@ -51,6 +51,7 @@ import (
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
+	"github.com/rossoctl/context-guru/thinkcount"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -2255,7 +2256,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, h.thinkCollector(provider, resp))
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2354,7 +2355,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see fillResponse.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag)
+			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, nil) // no Anthropic stream here: nothing to collect
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2382,6 +2383,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// it off mid-message.
 		}
 		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		if h.savings != nil {
+			u.Thinking = thinkcount.FromBody(resp.Header.Get("Content-Type"), respBody) // issue #1187
+		}
 		// The agent reads its backend label from any reply, with or without usage; its token
 		// reading counts only when the shared parser read usage too.
 		agentU := readAgentUsage(r.Context(), ag, resp.Header.Get("Content-Type"), respBody, u)
@@ -2764,12 +2768,24 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
-	return h.streamRecOn(w, resp, tee, agent.Base{})
+	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
+}
+
+// thinkCollector is the Collector for a chat response the accountant prices, or nil. The thinking signatures
+// sit in the middle of a stream, outside the sniffer's head and tail, so the collector reads them as the bytes
+// go by (issue #1187). A JSON response holds them too: the collector buffers it, within a bound. Only an
+// Anthropic response holds these blocks, and only the chat routes call finish, which records them.
+func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Response) *thinkcount.Collector {
+	if h.savings == nil || provider != bschemas.Anthropic {
+		return nil
+	}
+	return thinkcount.NewCollector(resp.Header.Get("Content-Type"))
 }
 
 // streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
-// the shared parser's usage reading (readAgentUsage).
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+// the shared parser's usage reading (readAgentUsage). think, when not nil, is the thinking collector
+// (thinkCollector), and it reads every byte the client gets.
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2787,6 +2803,9 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 			}
 			w.Write(buf[:n])
 			sn.write(buf[:n])
+			if think != nil {
+				think.Write(buf[:n])
+			}
 			tee.write(buf[:n]) // nil-safe; no-op when --record is off
 			if flush != nil {
 				flush.Flush()
@@ -2826,6 +2845,9 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 			sr = tooldefer.ReadSearches(win)
 		}
 		u.Searches, u.SearchLoaded, u.SearchDropped = sr.Searches, sr.Loaded, sr.Dropped()
+	}
+	if think != nil {
+		u.Thinking = think.Result()
 	}
 	return firstByte, u, why, ok
 }
