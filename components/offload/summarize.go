@@ -220,7 +220,7 @@ func newSummarize(raw []byte) (components.Component, error) {
 //     for the one-time ~32k above.
 //
 // WHAT THE CACHE-AWARE WORK WAS ACTUALLY WORTH is the other half of the same release, and it
-// stands: Fires resolves the fraction against Ctx.PrevBilledInput (the provider's ruler) rather
+// stands: Fires resolves the fraction against Ctx.PrevBilledInputThread (the provider's ruler) rather
 // than schema.MessagesTokens, and against C (the client's own compaction point) rather than the
 // raw window. Those are what made "0.9" denote anything. The gate on top of them did not.
 //

@@ -23,7 +23,7 @@ import (
 func sumCtx(st store.Store, phase string, window int, exact bool, billed int) *components.Ctx {
 	c := &components.Ctx{
 		Ctx: context.Background(), Session: "s", Store: st, MaxCachedIdx: -1,
-		CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed,
+		CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, PrevBilledInputThread: billed,
 	}
 	const ttl = 5 * 60 * 1000 // a bare `ephemeral` mark: five minutes
 	switch phase {

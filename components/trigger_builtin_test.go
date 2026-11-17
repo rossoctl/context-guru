@@ -18,7 +18,7 @@ func TestFracResolvableWithoutMapForListedModel(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: no window", id)
 		}
-		ctx := &Ctx{CtxWindow: w, CtxWindowExact: exact, PrevBilledInput: 1000}
+		ctx := &Ctx{CtxWindow: w, CtxWindowExact: exact, PrevBilledInput: 1000, PrevBilledInputThread: 1000}
 		if !(Trigger{MinRequestFrac: 0.9}).FracResolvable(ctx) {
 			t.Errorf("%s: FracResolvable false (window=%d exact=%v)", id, w, exact)
 		}

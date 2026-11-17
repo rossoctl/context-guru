@@ -604,9 +604,10 @@ type Ctx struct {
 	PrevBilledInput int
 	// PrevBilledInputThread is PrevBilledInput for THIS request's thread only: the billed input of the
 	// previous turn of the same thread, or 0 when the thread has none (unknown). A session holds the main
-	// agent, subagents and side requests, and PrevBilledInput is whichever answered last. Use this one to
-	// measure how a thread GROWS (the billed-growth horizon). Use PrevBilledInput to ask how full the
-	// session's context is.
+	// agent, subagents and side requests, and PrevBilledInput is whichever answered last. Use this one for
+	// every question about THIS transcript: how full it is (the window-fraction trigger, Trigger.Fires) and
+	// how it GROWS (the billed-growth horizon). PrevBilledInput describes no single transcript, so do not
+	// use it to ask how full this request's context is (#1183).
 	PrevBilledInputThread int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/

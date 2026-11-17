@@ -125,7 +125,7 @@ func (r *warmRig) request(c *components.Ctx) (*bschemas.BifrostChatRequest, *com
 		c.PrefixAsk = r.asker
 	}
 	if c.PrevBilledInput == 0 && r.ratio > 0 {
-		c.PrevBilledInput = int(r.ratio * float64(localTokens(prev.Input)))
+		c.PrevBilledInput, c.PrevBilledInputThread = int(r.ratio*float64(localTokens(prev.Input))), int(r.ratio*float64(localTokens(prev.Input)))
 	}
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	if _, err := r.e.Offload(req, rep, c); err != nil {
@@ -468,7 +468,7 @@ func TestAChangedPrefixBehavesAsTheColdApplyDefinesIt(t *testing.T) {
 	req.Input[0] = userMsg("a different first message") // an edited turn: the prefix changed at 0
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.PrevBilledInput = 6 * localTokens(warmConv(r.step-1, r.tail).Input)
+	c.PrevBilledInput, c.PrevBilledInputThread = 6*localTokens(warmConv(r.step-1, r.tail).Input), 6*localTokens(warmConv(r.step-1, r.tail).Input)
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	if _, err := r.e.Offload(req, rep, c); err != nil {
 		t.Fatal(err)
@@ -596,7 +596,7 @@ func TestAWarmQuestionAndAPingQuestionNeverRunTogetherOnAThread(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			c := warmCtx(r.session, r.st)
 			c.PrefixAsk = blk
-			c.PrevBilledInput = localTokens(warmConv(r.step-1, r.tail).Input)
+			c.PrevBilledInput, c.PrevBilledInputThread = localTokens(warmConv(r.step-1, r.tail).Input), localTokens(warmConv(r.step-1, r.tail).Input)
 			req := warmConv(r.step, r.tail)
 			r.step++
 			if _, err := r.e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
@@ -964,7 +964,7 @@ func TestTheGateRefusesADeepDropTheOldModelAccepted(t *testing.T) {
 	e := shippedSweep(t, warmCfg)
 	c := warmCtx("w-model", newMemStore())
 	c.ModelName = "claude-sonnet-5"
-	c.PrevBilledInput = localTokens(req.Input) // ratio 1
+	c.PrevBilledInput, c.PrevBilledInputThread = localTokens(req.Input), localTokens(req.Input) // ratio 1
 	res := recheckResult{Valid: []heldOutput{{ToolUseID: "toolu_d0", Saves: rm[0].saves}}}
 	_, read, write := agentRates(c)
 	oldRewrite := 0
@@ -987,7 +987,7 @@ func TestTheGateRefusesADeepDropTheOldModelAccepted(t *testing.T) {
 	near, nrm, _ := deepFixture(3)
 	nres := recheckResult{Valid: []heldOutput{{ToolUseID: "toolu_d0", Saves: nrm[0].saves}}}
 	nc := warmCtx("w-model", newMemStore())
-	nc.ModelName, nc.PrevBilledInput = "claude-sonnet-5", localTokens(near.Input)
+	nc.ModelName, nc.PrevBilledInput, nc.PrevBilledInputThread = "claude-sonnet-5", localTokens(near.Input), localTokens(near.Input)
 	if ok, reason := e.warmGate(nc, near, 3, 0, 0, localTokens(near.Input), &warmApply{})(nres, near.Input); !ok {
 		t.Fatalf("a shallow drop was refused (%q), so the fixture does not isolate the depth", reason)
 	}
@@ -1245,7 +1245,7 @@ func TestTheGatePriceModelGivesAZeroPricedModelRealDecisions(t *testing.T) {
 	decide := func(cfg string) (bool, string) {
 		e := shippedSweep(t, warmCfg+cfg)
 		c := gateCtx(t, "glm-test")
-		c.PrevBilledInput = localTokens(req.Input) // ratio 1
+		c.PrevBilledInput, c.PrevBilledInputThread = localTokens(req.Input), localTokens(req.Input) // ratio 1
 		return e.warmGate(c, req, 10, 0, 0, localTokens(req.Input), &warmApply{})(res, req.Input)
 	}
 	// Without the override: the model's own skewed ratio makes the rewrite look dear, refused.
@@ -1261,7 +1261,7 @@ func TestTheGatePriceModelGivesAZeroPricedModelRealDecisions(t *testing.T) {
 	dres := recheckResult{Valid: []heldOutput{{ToolUseID: "toolu_d0", Saves: drm[0].saves}}}
 	e := shippedSweep(t, warmCfg+"warm_gate_price_model: claude-opus-5\n")
 	c := gateCtx(t, "glm-test")
-	c.PrevBilledInput = localTokens(deep.Input)
+	c.PrevBilledInput, c.PrevBilledInputThread = localTokens(deep.Input), localTokens(deep.Input)
 	if ok, _ := e.warmGate(c, deep, 3, 0, 0, localTokens(deep.Input), &warmApply{})(dres, deep.Input); ok {
 		t.Fatal("a deep drop with few turns was accepted under the override")
 	}
@@ -1330,14 +1330,14 @@ func TestAMissingCacheWriteDoesNotMakeTheGateRefuseForNoBilledSize(t *testing.T)
 	c := gateCtx(t, "glm-test")
 	// PrevBilledInput as the host records it: fresh + cache_read + cache_write, with cache_write = 0.
 	fresh, read, write := 500, localTokens(req.Input)*2-500, 0
-	c.PrevBilledInput = fresh + read + write
+	c.PrevBilledInput, c.PrevBilledInputThread = fresh+read+write, fresh+read+write
 	ok, reason := e.warmGate(c, req, 10, 0, 0, localTokens(req.Input), &warmApply{})(res, req.Input)
 	if reason == "no_billed_size" {
 		t.Fatalf("a missing cache_write made the gate refuse for no_billed_size")
 	}
 	_ = ok
 	// And a billed size of exactly 0 is still the honest "unknown".
-	c.PrevBilledInput = 0
+	c.PrevBilledInput, c.PrevBilledInputThread = 0, 0
 	if _, reason := e.warmGate(c, req, 10, 0, 0, localTokens(req.Input), &warmApply{})(res, req.Input); reason != "no_billed_size" {
 		t.Fatalf("reason = %q, want no_billed_size for an unknown billed size", reason)
 	}
@@ -1370,7 +1370,7 @@ func TestTheTriggerCountsAnOutputThatOnlyQuotesMarkerSyntaxAsRemovable(t *testin
 		if real {
 			r.st.Put("deadbeefdeadbeefdeadbeef", []byte("the original"))
 		}
-		c.PrevBilledInput = localTokens(req.Input)
+		c.PrevBilledInput, c.PrevBilledInputThread = localTokens(req.Input), localTokens(req.Input)
 		return r.e.warmWorthAsking(c, req, localTokens(req.Input), 60, 0, 0)
 	}
 	quote := "\nsee <<cg:deadbeefdeadbeefdeadbeef>> in the docs\n"
@@ -1482,7 +1482,7 @@ func TestTheDecisionLogKeepsTheLastFiftyAndOneInfoLineEach(t *testing.T) {
 // The turns-left model (#491, David)
 
 func turnsCtx(window int, exact bool, billed int, cutFrac float64) *components.Ctx {
-	return &components.Ctx{CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, CutFrac: cutFrac}
+	return &components.Ctx{CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, PrevBilledInputThread: billed, CutFrac: cutFrac}
 }
 
 // (a) warm_expected_turns: N = max(expected - turns so far, 0).
@@ -1630,7 +1630,7 @@ func TestTheDecisionRecordsWhichTurnsModelProducedN(t *testing.T) {
 	res := recheckResult{Valid: []heldOutput{{ToolUseID: "toolu_d0", Saves: rm[0].saves}}}
 	e := shippedSweep(t, "warm: true\nwarm_max_turns: 1000\n")
 	c := warmCtx("w-model-dec", newMemStore())
-	c.ModelName, c.PrevBilledInput = "claude-sonnet-5", localTokens(req.Input)
+	c.ModelName, c.PrevBilledInput, c.PrevBilledInputThread = "claude-sonnet-5", localTokens(req.Input), localTokens(req.Input)
 	c.CtxWindow, c.CtxWindowExact, c.CutFrac = 10_000_000, true, 0.9
 	resetWarmForTest()
 	t.Cleanup(resetWarmForTest)
@@ -1649,7 +1649,7 @@ func TestTheTriggerRecordsAndUsesTheSameTurnsModel(t *testing.T) {
 	e := shippedSweep(t, "warm: true\nwarm_max_turns: 1000\nwarm_min_age_turns: 5\nwarm_min_mass_frac: 0.01\n")
 	req := warmConv(8, payingTail())
 	c := warmCtx("w-trig-model", newMemStore())
-	c.ModelName, c.PrevBilledInput = "claude-sonnet-5", localTokens(req.Input)
+	c.ModelName, c.PrevBilledInput, c.PrevBilledInputThread = "claude-sonnet-5", localTokens(req.Input), localTokens(req.Input)
 	c.CtxWindow, c.CtxWindowExact, c.CutFrac = 10_000_000, true, 0.9
 	e.warmWorthAsking(c, req, localTokens(req.Input), 4, c.PrevBilledInput/2, 4)
 	ds := decisionsOf("trigger")
@@ -1729,13 +1729,13 @@ func TestAWindowFromMODELPRICESMakesTheCutModelRunForANonClaudeModel(t *testing.
 
 	e := shippedSweep(t, "warm: true\nwarm_max_turns: 1000\n")
 	// The context as apply builds it from the resolver: the window and its exactness.
-	c := &components.Ctx{CtxWindow: w, CtxWindowExact: exact, PrevBilledInput: 100_000}
+	c := &components.Ctx{CtxWindow: w, CtxWindowExact: exact, PrevBilledInput: 100_000, PrevBilledInputThread: 100_000}
 	te := e.warmTurnsLeft(c, 20, 40_000, 20) // grew 40,000 -> 100,000 over 20 turns = 3,000 per turn
 	if te.Model != turnsModelCut || te.Cut != 400_000 || te.GrowthPerTurn != 3_000 || te.N != 100 {
 		t.Fatalf("estimate = %+v, want the cut model: cut 400,000 (the table's window), 3,000 a turn, N 100", te)
 	}
 	// And the same model WITHOUT an exact window falls back and says why.
-	c2 := &components.Ctx{CtxWindow: 200_000, CtxWindowExact: false, PrevBilledInput: 100_000}
+	c2 := &components.Ctx{CtxWindow: 200_000, CtxWindowExact: false, PrevBilledInput: 100_000, PrevBilledInputThread: 100_000}
 	if te := e.warmTurnsLeft(c2, 20, 40_000, 20); te.Model != turnsModelSoFar || te.Why != turnsWhyWindowNotExact {
 		t.Fatalf("estimate = %+v, want the fallback with window_not_exact", te)
 	}
@@ -1973,7 +1973,7 @@ func (r *warmRig) requestReferencingOutputs(n int) (*bschemas.BifrostChatRequest
 	req.Input = append(req.Input, assistantMsg("I will raise "+strings.Join(refs, " and ")+" now"), userMsg("ok"))
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.PrevBilledInput = int(r.ratio * float64(localTokens(prev.Input)))
+	c.PrevBilledInput, c.PrevBilledInputThread = int(r.ratio*float64(localTokens(prev.Input))), int(r.ratio*float64(localTokens(prev.Input)))
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	if _, err := r.e.Offload(req, rep, c); err != nil {
 		r.t.Fatal(err)
@@ -2069,7 +2069,7 @@ func TestAHeldAnswerIsDroppedWhenTheConversationShrinks(t *testing.T) {
 	req.Provider, req.Model = bschemas.Anthropic, "claude-sonnet-5"
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.PrevBilledInput = 1000
+	c.PrevBilledInput, c.PrevBilledInputThread = 1000, 1000
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	if _, err := r.e.Offload(req, rep, c); err != nil {
 		t.Fatal(err)
@@ -2170,7 +2170,7 @@ func TestAHeldAnswerIsKeptWhenTheRequestHasExactlyAsManyMessagesAsItJudged(t *te
 	}
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.PrevBilledInput = int(r.ratio * float64(localTokens(req.Input)))
+	c.PrevBilledInput, c.PrevBilledInputThread = int(r.ratio*float64(localTokens(req.Input))), int(r.ratio*float64(localTokens(req.Input)))
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	if _, err := r.e.Offload(req, rep, c); err != nil {
 		t.Fatal(err)
@@ -2371,7 +2371,7 @@ func TestAConversationShrinkClearsTheCarriedSet(t *testing.T) {
 	req.Provider, req.Model = bschemas.Anthropic, "claude-sonnet-5"
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.PrevBilledInput = 1000
+	c.PrevBilledInput, c.PrevBilledInputThread = 1000, 1000
 	if _, err := r.e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
 		t.Fatal(err)
 	}
@@ -2717,7 +2717,7 @@ func TestTheShrinkVoidLeavesAFreshAnswerThatLandedInBetween(t *testing.T) {
 	req.Provider, req.Model = bschemas.Anthropic, "claude-sonnet-5"
 	c := warmCtx(r.session, r.st)
 	c.PrefixAsk = r.asker
-	c.PrevBilledInput = 1000
+	c.PrevBilledInput, c.PrevBilledInputThread = 1000, 1000
 	if _, err := r.e.Offload(req, &components.Report{Component: "extract_llm_sweep"}, c); err != nil {
 		t.Fatal(err)
 	}
@@ -2767,7 +2767,7 @@ func TestTheSameWarmCutPassesAtAFlatRateAndIsRefusedAtOpusRates(t *testing.T) {
 		e := shippedSweep(t, warmCfg)
 		c := warmCtx("w-flat", newMemStore())
 		c.ModelName, c.SelfRates = "premium-ide", rates
-		c.PrevBilledInput = localTokens(deep.Input) // ratio 1
+		c.PrevBilledInput, c.PrevBilledInputThread = localTokens(deep.Input), localTokens(deep.Input) // ratio 1
 		return e.warmGate(c, deep, 3, 0, 0, localTokens(deep.Input), &warmApply{})(res, deep.Input)
 	}
 	if ok, reason := decide(flat); !ok {
@@ -2804,7 +2804,7 @@ func TestTheGateSavingIsPricedAtTheReadRateNotTheWriteRate(t *testing.T) {
 	e := shippedSweep(t, warmCfg)
 	c := warmCtx("w-sav", newMemStore())
 	c.ModelName, c.SelfRates = "claude-opus-5", opusRates
-	c.PrevBilledInput = localTokens(deep.Input) // ratio 1
+	c.PrevBilledInput, c.PrevBilledInputThread = localTokens(deep.Input), localTokens(deep.Input) // ratio 1
 	if ok, reason := e.warmGate(c, deep, 60, 0, 0, localTokens(deep.Input), &warmApply{})(res, deep.Input); ok {
 		t.Fatalf("a deep cut was accepted at Opus rates over 60 turns (%q): the saving must be priced at READ", reason)
 	}
@@ -2817,5 +2817,27 @@ func TestTheGateSavingIsPricedAtTheReadRateNotTheWriteRate(t *testing.T) {
 	in := warmEconIn{Removed: 1000, Rewritten: 0, RatioContent: 1, RatioFull: 1, Read: 1, Write: 12.5, Turns: 1}
 	if s, _ := warmEcon(in); s != 1000 {
 		t.Fatalf("saving = %v, want 1000 (removed x read x turns)", s)
+	}
+}
+
+// #1183: the warm sweep reads the request's OWN thread. A small subagent must plan from its own billed
+// figure while the main thread (0.95 of the window) answered last in the session.
+func TestTheWarmDecisionForASmallSubagentIgnoresTheMainThreadsFill(t *testing.T) {
+	resetWarmForTest()
+	t.Cleanup(resetWarmForTest)
+	e := shippedSweep(t, "warm: true\nwarm_max_turns: 1000\nwarm_min_age_turns: 5\nwarm_min_mass_frac: 0.01\n")
+	req := warmConv(8, payingTail())
+	c := warmCtx("w-sub-1183", newMemStore())
+	c.ModelName = "claude-sonnet-5"
+	c.PrevBilledInputThread = localTokens(req.Input) // this subagent's own previous turn
+	c.PrevBilledInput = 9_500_000                    // the main thread answered last: 0.95 of the window
+	c.CtxWindow, c.CtxWindowExact, c.CutFrac = 10_000_000, true, 0.9
+	e.warmWorthAsking(c, req, localTokens(req.Input), 4, c.PrevBilledInputThread/2, 4)
+	ds := decisionsOf("trigger")
+	if len(ds) != 1 || ds[0].TurnsModel != turnsModelCut || ds[0].Cut != 9_000_000 || ds[0].Turns <= 4 {
+		t.Fatalf("decision = %+v, want the cut model planned from the subagent's own figure (the session figure is beyond the cut)", ds)
+	}
+	if _, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, localTokens(req.Input)); ok {
+		t.Fatalf("fixture: the session figure must be an impossible ratio against this thread's local size")
 	}
 }
