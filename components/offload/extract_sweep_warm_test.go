@@ -827,6 +827,65 @@ func TestAWarmThreadTheKeepAliveCannotPingStillAsks(t *testing.T) {
 	}
 }
 
+// #1193 review. A copy kept for a thread the keep-alive cannot ping is the warm question's only: the
+// ping path never reads it, and it lives only while a question is due or running, so it never outlives
+// the 30-minute bound on a route the keeper never tracks (IBM Bob's).
+func TestAnUnpingableWarmCopyLivesOnlyForItsQuestion(t *testing.T) {
+	noPing := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CanKeepAlive = func() bool { return false }
+		return c
+	}
+	held := func(r *warmRig) bool {
+		sweepPingMu.Lock()
+		defer sweepPingMu.Unlock()
+		_, ok := sweepPingCand[r.key()]
+		return ok
+	}
+	t.Run("no question due: no copy", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-idle", warmCfg, payingTail(), 1.0)
+		r.request(noPing(r)) // warm_every_n is 3: the first request fires nothing
+		if held(r) {
+			t.Fatal("a copy was kept for a thread that cannot be pinged and has no question due")
+		}
+	})
+	t.Run("question due: the ping path cannot read the copy", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-due", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		if !held(r) {
+			t.Fatal("no copy for the due warm question")
+		}
+		if HasSweepPingCandidate(r.key()) {
+			t.Fatal("HasSweepPingCandidate = true for a thread the keep-alive cannot ping")
+		}
+		if _, _, _, ok := SweepPingSubstitute(r.key()); ok {
+			t.Fatal("SweepPingSubstitute offered a ping question on a thread the keep-alive cannot ping")
+		}
+	})
+	t.Run("question done: the copy is dropped", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-done", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		r.forward()
+		if held(r) {
+			t.Fatal("the copy outlived its warm question")
+		}
+	})
+	t.Run("request not forwarded: the copy is dropped", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-fail", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		ResolveWarmQuestion(r.session, "", false, 0)
+		if held(r) {
+			t.Fatal("the copy outlived a request that was not forwarded")
+		}
+	})
+}
+
 // ⭐ OPTION B. The warm path keeps no conversation copy of its own. A thread with no registry entry
 // never asks, and that is counted.
 func TestAThreadWithNoRegistryCopyNeverAsksAWarmQuestion(t *testing.T) {

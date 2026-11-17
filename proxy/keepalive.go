@@ -430,7 +430,9 @@ func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschema
 	}
 	// The wait cause is not known yet, so the windows count, as before #858: for an unknown wait the
 	// pessimistic answer is the safe one. A tool wait outside a window then registers no conversation copy
-	// and still gets its plain ping; it loses only the sweep substitute. A copy is content kept in memory.
+	// for the ping and still gets its plain ping; it loses only the sweep substitute. A copy is content kept
+	// in memory. (With the sweep's warm on, a copy may exist for the warm question alone; a ping never
+	// reads it.)
 	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
 	if !pol.On() {
 		return false

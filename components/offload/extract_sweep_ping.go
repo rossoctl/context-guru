@@ -245,6 +245,9 @@ type sweepPingCandidate struct {
 	// asked is set once a question has been sent for this conversation, so a second ping in the same
 	// idle span sends a plain ping instead of paying for the same answer twice.
 	asked atomic.Bool
+	// pingable is what CanKeepAlive said at registration. A copy that is not pingable belongs to the warm
+	// question alone: SweepPingSubstitute and HasSweepPingCandidate do not see it (#1193).
+	pingable bool
 	// warm marks a question asked on the WARM path (#491). Its answer is held in process memory only
 	// and never written to the Store, its counters are the warm path's own, and its cost is deferred
 	// onto the next real request (there is no ping row to book it on).
@@ -263,7 +266,22 @@ var (
 // from it at a ping; the warm path asks from it after a forwarded request, so with warm on it needs no
 // ping (#1191: IBM Bob's route is never pinged). No host hook means no keep-alive.
 func (e *ExtractSweep) keepsCopy(c *components.Ctx) bool {
-	return e.warm || (c.CanKeepAlive != nil && c.CanKeepAlive())
+	return e.warm || pingable(c)
+}
+
+func pingable(c *components.Ctx) bool { return c.CanKeepAlive != nil && c.CanKeepAlive() }
+
+// dropUnpingable removes reg when it is the warm question's own copy (not pingable) and still the
+// thread's registration. Such a copy has no other reader, so it goes when its question ends.
+func dropUnpingable(threadKey string, reg *sweepPingCandidate) {
+	if reg == nil || reg.pingable {
+		return
+	}
+	sweepPingMu.Lock()
+	if sweepPingCand[threadKey] == reg {
+		delete(sweepPingCand, threadKey)
+	}
+	sweepPingMu.Unlock()
 }
 
 // registerPing snapshots this request's conversation for the keeper. Deferred from Offload so it sees
@@ -277,10 +295,15 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		c.Mode == components.ModeObserve || req == nil || len(req.Input) == 0 {
 		return
 	}
-	// A conversation copy is kept only for a thread that can be asked: one the keep-alive can ping, or
-	// any thread when the warm path is on (#1191). The copies are content, held in memory for up to
-	// maxSweepPingAge; a thread that will never be asked must not pay them.
-	if !e.keepsCopy(c) {
+	// A conversation copy is kept only for a thread that can be asked. The copies are content, held in
+	// memory for up to maxSweepPingAge; a thread that will never be asked must not pay them. A thread the
+	// keep-alive can ping keeps one for the ping. One it cannot ping keeps one only while a warm question
+	// is due (#1191): no ping ever reads it, and no keeper would clear it, so it lives only as long as
+	// that question (dropUnpingable).
+	key := thread.Key(c.Session, c.Thread)
+	canPing := pingable(c)
+	if !canPing && !(e.warm && warmDue(key)) {
+		clearSweepPing(key)
 		sweepPingNotRegistered.Add(1)
 		return
 	}
@@ -294,7 +317,7 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		return
 	}
 	cand := e.snapshotCandidate(c, req)
-	key := thread.Key(c.Session, c.Thread)
+	cand.pingable = canPing
 	sweepPingMu.Lock()
 	defer sweepPingMu.Unlock()
 	// Pruned on EVERY registration, not only at the cap: an idle thread's copy goes after
@@ -406,6 +429,9 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 	sweepPingMu.Lock()
 	cand := sweepPingCand[threadKey]
 	sweepPingMu.Unlock()
+	if cand != nil && !cand.pingable {
+		cand = nil // the warm question's own copy: a ping never asks from it
+	}
 	// FAIL OPEN. This runs on the keeper's own goroutine, which no pipeline recover covers, and it now
 	// carries candidate collection, the co-reference index and the hold. A panic must leave the ping a
 	// plain ping and the process up. The conversation is marked asked, so the next ping is plain too.

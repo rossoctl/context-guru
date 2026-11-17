@@ -752,9 +752,10 @@ type Ctx struct {
 	PrefixAsk PrefixAsker
 	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
 	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares
-	// something for a ping (extract_llm_sweep's question) registers only when it returns true, so a
-	// thread that will never be pinged keeps nothing for it. nil => false: a host with no keep-alive
-	// leaves it unset and such a component keeps nothing.
+	// something for a ping (extract_llm_sweep's question) registers for the ping only when it returns
+	// true, so a thread that will never be pinged keeps nothing for a ping. nil => false: a host with no
+	// keep-alive leaves it unset. (extract_llm_sweep with warm on keeps a copy for its warm question
+	// alone, only while that question is due; no ping reads it.)
 	CanKeepAlive func() bool
 	// CacheTTLMs is a known cache lifetime in milliseconds: Anthropic's explicit
 	// expiry tier or GPT-5.6+'s documented 30-minute minimum. The latter has

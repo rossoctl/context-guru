@@ -79,8 +79,8 @@ func (c *PingClaim) Release() {
 func HasSweepPingCandidate(threadKey string) bool {
 	sweepPingMu.Lock()
 	defer sweepPingMu.Unlock()
-	_, ok := sweepPingCand[threadKey]
-	return ok
+	cand, ok := sweepPingCand[threadKey]
+	return ok && cand.pingable // a copy that is not pingable is the warm question's alone (#1193)
 }
 
 // KeepAliveCandidateState reports the cache_state and pre_expiry_seconds of the summarizer's keep-alive

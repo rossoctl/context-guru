@@ -22,13 +22,14 @@ import (
 //
 // The cold apply (extract_sweep_apply.go) removes old outputs only when the cache is gone anyway. A
 // session that never goes idle never has such a request. The warm path gives it a way, behind an
-// economic gate, and it is OFF by default and in no preset.
+// economic gate. It is OFF by default; only the Bob plugin's bob-ultrahigh turns it on.
 //
 //	WHEN to ask   a rule: on a warm request, at most once every warm_every_n requests of a thread, and
 //	              only when old outputs could pay back a rewrite even if every one were dropped.
 //	WHAT to drop  the model: the same question as the ping's, with a file clause for file reads.
 //	FROM WHERE   the ping registry's existing copy of the conversation. The warm path keeps no copy of
-//	              its own, so it asks only on threads the keep-alive can ping (the 80k floor applies).
+//	              its own. On a thread the keep-alive cannot ping, the registry keeps one only while a
+//	              warm question is due, and only the warm question reads it (#1191, #1193).
 //	WHERE it runs AFTER the request is forwarded, in the background. The agent sees no added delay.
 //	WHERE it waits IN PROCESS MEMORY ONLY (warmThreads). The owner's rule: the waiting answer is never
 //	              written to the Store. A restart loses it, and that fails open: nothing is dropped.
@@ -1083,6 +1084,14 @@ func noteWarmTrigger(reason string) {
 // The question, after the forward.
 
 // warmPending reports whether a trigger is waiting for its request to be forwarded.
+// warmDue reports whether a warm question is due on the thread: registered and not yet started.
+func warmDue(key string) bool {
+	warmMu.Lock()
+	defer warmMu.Unlock()
+	t := warmThreads[key]
+	return t != nil && t.warmPending()
+}
+
 func (t *warmThread) warmPending() bool {
 	return !t.pendingAt.IsZero() && time.Since(t.pendingAt) < warmPendingMax
 }
@@ -1123,6 +1132,10 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 	t.pendingAt = time.Time{}
 	if !forwarded {
 		warmMu.Unlock()
+		sweepPingMu.Lock()
+		reg := sweepPingCand[tkey]
+		sweepPingMu.Unlock()
+		dropUnpingable(tkey, reg)
 		return
 	}
 	t.asking = true
@@ -1151,12 +1164,14 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 	}
 	if latched {
 		release()
+		dropUnpingable(tkey, reg)
 		sweepWarmAlreadyAsked.Add(1)
 		return
 	}
 	if _, ok := getHeld(reg.ctx.Store, tkey); ok {
 		reg.asked.Store(false) // no question was paid for; the registry copy stays askable at the ping
 		release()
+		dropUnpingable(tkey, reg)
 		sweepWarmAlreadyAsked.Add(1)
 		return
 	}
@@ -1164,6 +1179,7 @@ func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 		registeredAt: reg.registeredAt, warm: true, minAge: reg.e.warmMinAge}
 	go func() {
 		defer release()
+		defer dropUnpingable(tkey, reg) // the warm question was its only reader
 		// FAIL OPEN: a panic in collection, the ask or the hold ends this goroutine and nothing else.
 		defer func() {
 			if r := recover(); r != nil {
