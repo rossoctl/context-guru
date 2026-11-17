@@ -1139,6 +1139,10 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	ev.CacheWrite, ev.OutputTokens = r.CacheWrite, r.Output
 	ev.CacheWrite1h = r.CacheWrite1h
 	ev.StopReason = r.StopReason
+	if r.TimedOut {
+		// No answer, so no provider stop reason: the row is marked as an estimate instead (#754).
+		ev.StopReason = dash.StopTimeoutEstimated
+	}
 	ev.UpstreamMs = r.DurationMs
 	// What the ping actually asked for, so the row says it rather than reading as a request
 	// with no output budget.

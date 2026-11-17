@@ -26,6 +26,7 @@
  "pings_per_day": 2.0066889632107023,
  "pings_that_read_nothing": 0,
  "pings_that_wrote": 0,
+ "pings_timed_out": 0,
  "requests": 591,
  "saved_usd": 0,
  "sessions_touched": 15,

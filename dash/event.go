@@ -631,8 +631,16 @@ type Meta struct {
 	// Anthropic `stop_reason` (end_turn|max_tokens|tool_use|stop_sequence|pause_turn|
 	// refusal|model_context_window_exceeded) or OpenAI `choices.0.finish_reason`
 	// (stop|length|tool_calls|content_filter). "" when the response carried none.
+	// StopTimeoutEstimated is the one value the proxy writes itself (#754).
 	StopReason string `json:"stop_reason"`
 }
+
+// StopTimeoutEstimated is the stop_reason of a keep-alive ping row that ran to the keeper's ping
+// timeout with no answer (#754). The provider probably billed it, so the row books the keeper's
+// projected cost of one ping, with every token column 0. It counts as keep-alive spend. It is not a
+// refresh (its cache_read is 0, so no refresh probe matches it) and not a cache miss either: nobody
+// knows what the provider did with it.
+const StopTimeoutEstimated = "timeout_estimated"
 
 // CacheBreakpoints is the total the provider's cap of four applies to.
 func (m Meta) CacheBreakpoints() int {
