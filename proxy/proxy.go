@@ -2830,10 +2830,11 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// test builds) would get an off sniffer, zero usage, and a silently usage-free corpus.
 	sn := newSniffer(h.rec != nil || h.agg != nil || h.recorder != nil)
 	// The thinking signatures sit in the middle of a stream, outside the sniffer's head and tail, so a collector
-	// reads them as the bytes go by (issue #1187). Only an event stream can hold them on this path.
+	// reads them as the bytes go by (issue #1187). A JSON response on this path holds them too: the collector
+	// buffers it, within a bound, and reads it at the end.
 	var think *thinkcount.Collector
-	if h.savings != nil && strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
-		think = &thinkcount.Collector{}
+	if h.savings != nil {
+		think = thinkcount.NewCollector(resp.Header.Get("Content-Type"))
 	}
 	buf := make([]byte, 16*1024)
 	for {

@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -106,5 +108,92 @@ func TestStreamReadsThinkingSignatures(t *testing.T) {
 	}
 	if _, u2, _, _ := (&Handler{}).streamRec(httptest.NewRecorder(), resp2, nil); len(u2.Thinking.Opaques) != 0 {
 		t.Fatalf("a proxy with no accountant collected signatures")
+	}
+}
+
+// The whole path, through the handler: a served response's blocks reach the table, on the JSON path and the
+// stream path. A rejected response records nothing (review of #1190, round 1).
+func TestServedResponseRecordsThinkingCounts(t *testing.T) {
+	sig := strings.Repeat(thinkSig, 2000)
+	jsonBody := `{"id":"m","type":"message","role":"assistant","model":"m","content":[{"type":"thinking","thinking":"",` +
+		`"signature":"` + sig + `"},{"type":"text","text":"ok"}],"stop_reason":"end_turn",` +
+		`"usage":{"input_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":90,` +
+		`"output_tokens_details":{"thinking_tokens":80}}}`
+	sseBody := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"output_tokens\":1}}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"" + sig + "\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"output_tokens\":90,\"output_tokens_details\":{\"thinking_tokens\":80}}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	for _, c := range []struct {
+		name, contentType, body string
+		status                  int
+		want                    bool
+	}{
+		{"json", "application/json", jsonBody, http.StatusOK, true},
+		{"stream", "text/event-stream", sseBody, http.StatusOK, true},
+		{"rejected", "application/json", jsonBody, http.StatusBadRequest, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", c.contentType)
+				w.WriteHeader(c.status)
+				w.Write([]byte(c.body))
+			}))
+			defer up.Close()
+			h, rec, _ := accHandler(t, up.URL)
+			accPost(t, h, "sess-think-"+c.name)
+			waitForRows(t, rec, 1)
+			n, ok := h.savings.thinking.Lookup(accountant.OpaqueKey(sig))
+			if ok != c.want || (c.want && n != 80) {
+				t.Fatalf("table has %d %v for the block, want recorded=%v at 80", n, ok, c.want)
+			}
+		})
+	}
+}
+
+// The counts outlive the snapshot: a file past the snapshot's hour, or one whose snapshot is refused, still
+// gives back its counts (review of #1190, round 1).
+func TestThinkingCountsRestoreOnTheirOwn(t *testing.T) {
+	sig := strings.Repeat(thinkSig, 1000)
+	path := filepath.Join(t.TempDir(), "state.json")
+	s := newSavingsTracker()
+	s.recordThinking(thinkcount.Response{Opaques: []string{sig}, Tokens: 1000, HasTokens: true})
+	if err := s.save(path); err != nil {
+		t.Fatal(err)
+	}
+	old := newSavingsTracker()
+	if old.restore(path, time.Now().Add(accStateMaxAge+time.Minute)) {
+		t.Fatal("a snapshot older than an hour was restored")
+	}
+	if _, ok := old.thinking.Lookup(accountant.OpaqueKey(sig)); !ok {
+		t.Fatal("the counts of a 1-hour-old file were not restored")
+	}
+	if r := newSavingsTracker(); r.restore(path, time.Now().Add(accThinkingMaxAge+time.Minute)) || r.thinking.Len() != 0 {
+		t.Fatal("a file older than the counts' limit gave something back")
+	}
+	// A refused snapshot: the counts are still read.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f map[string]json.RawMessage
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	f["snapshot"] = json.RawMessage(`{"version":999}`) // a library snapshot version Restore refuses
+	bad, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := newSavingsTracker()
+	if r.restore(path, time.Now()) {
+		t.Fatal("a refused snapshot was reported restored")
+	}
+	if _, ok := r.thinking.Lookup(accountant.OpaqueKey(sig)); !ok {
+		t.Fatal("the counts were dropped with the refused snapshot")
 	}
 }

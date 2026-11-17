@@ -150,3 +150,37 @@ func TestTableSurvivesJSON(t *testing.T) {
 		t.Fatalf("a malformed key must fail")
 	}
 }
+
+func TestCollectorReadsJSONInChunks(t *testing.T) {
+	js := []byte(`{"content":[{"type":"thinking","signature":"` + strings.Repeat("S", 900) + `"}],` +
+		`"usage":{"output_tokens_details":{"thinking_tokens":62}}}`)
+	c := NewCollector("application/json")
+	for i := 0; i < len(js); i += 50 {
+		c.Write(js[i:min(i+50, len(js))])
+	}
+	if r := c.Result(); len(r.Opaques) != 1 || r.Tokens != 62 {
+		t.Fatalf("JSON in chunks: %+v", r)
+	}
+	big := NewCollector("application/json")
+	big.Write(make([]byte, maxJSON+1))
+	if r := big.Result(); r.Countable() {
+		t.Fatalf("a body past the limit must give nothing")
+	}
+}
+
+// A count of 0 is a missing figure, and a response with more blocks than a real one makes is not kept.
+func TestCountableRefusesZeroAndTooManyBlocks(t *testing.T) {
+	if (Response{Opaques: []string{"a"}, Tokens: 0, HasTokens: true}).Countable() {
+		t.Fatalf("a count of 0 must not be recorded")
+	}
+	many := make([]string, maxRecord+1)
+	for i := range many {
+		many[i] = strings.Repeat("x", i+1)
+	}
+	if (Response{Opaques: many, Tokens: 1000, HasTokens: true}).Countable() {
+		t.Fatalf("%d blocks must not be recorded", len(many))
+	}
+	if !(Response{Opaques: many[:maxRecord], Tokens: 1000, HasTokens: true}).Countable() {
+		t.Fatalf("%d blocks must be recorded", maxRecord)
+	}
+}

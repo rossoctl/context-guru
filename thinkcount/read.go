@@ -13,6 +13,7 @@ const (
 	maxLine     = 4 << 20  // one SSE line
 	maxOpaque   = 16 << 20 // the opaque strings of one response, together
 	maxBlocks   = 4096     // the blocks of one response
+	maxJSON     = 8 << 20  // a JSON response the Collector buffers
 	eventStream = "event-stream"
 )
 
@@ -70,11 +71,14 @@ func thinkingTokens(u gjson.Result) (int, bool) {
 	return int(t.Int()), true
 }
 
-// Collector reads an Anthropic SSE stream as it goes by, with no copy of the stream: Write takes each
-// chunk as the proxy forwards it. It keeps the signature of each thinking block (from
-// content_block_start and its signature_delta events) and the last thinking_tokens a message_delta
-// or message_start reported. Its zero value is ready to use. It is not safe for concurrent use.
+// Collector reads a response as it goes by: Write takes each chunk as the proxy forwards it. On an
+// Anthropic SSE stream it keeps only the signature of each thinking block (from content_block_start
+// and its signature_delta events) and the last thinking_tokens a message_delta or message_start
+// reported. Its zero value reads a stream. NewCollector picks the mode from the content type: any
+// other body is buffered, up to 8 MiB, and read as JSON at the end. It is not safe for concurrent use.
 type Collector struct {
+	json   bool   // the body is JSON, not an event stream
+	body   []byte // the JSON body, in json mode
 	line   []byte
 	blocks map[int64]*strings.Builder // by content block index
 	order  []int64
@@ -84,8 +88,21 @@ type Collector struct {
 	broken bool // a limit was passed: the stream gives no count
 }
 
-// Write reads the next bytes of the stream. It never fails.
+// NewCollector makes a Collector for a response of this content type.
+func NewCollector(contentType string) *Collector {
+	return &Collector{json: !strings.Contains(contentType, eventStream)}
+}
+
+// Write reads the next bytes of the response. It never fails.
 func (c *Collector) Write(p []byte) {
+	if c.json {
+		if c.broken || len(c.body)+len(p) > maxJSON {
+			c.broken, c.body = true, nil
+			return
+		}
+		c.body = append(c.body, p...)
+		return
+	}
 	for len(p) > 0 && !c.broken {
 		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
@@ -169,6 +186,12 @@ func (c *Collector) add(b *strings.Builder, s string) {
 // Result is what the stream said. A stream that passed a limit gives an empty Response. A line with no
 // newline at the end of the stream is read too.
 func (c *Collector) Result() Response {
+	if c.json {
+		if c.broken {
+			return Response{}
+		}
+		return FromJSON(c.body)
+	}
 	if len(c.line) > 0 && !c.broken {
 		c.event(c.line)
 		c.line = c.line[:0]

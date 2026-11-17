@@ -32,8 +32,15 @@ type Response struct {
 	HasTokens bool
 }
 
-// Countable says whether the response gives a count to record.
-func (r Response) Countable() bool { return r.HasTokens && len(r.Opaques) > 0 }
+// maxRecord is the most blocks one response may record. A real response makes a few; more is a client
+// or an upstream that could push every other entry out of a shared table, so its counts are not kept.
+const maxRecord = 64
+
+// Countable says whether the response gives a count to record. A count of 0 is not one: a block with a
+// signature holds some thinking, so 0 means the figure is missing, not that the block is free.
+func (r Response) Countable() bool {
+	return r.HasTokens && r.Tokens > 0 && len(r.Opaques) > 0 && len(r.Opaques) <= maxRecord
+}
 
 // Table is a bounded map from accountant.OpaqueKey to a token count. It is safe for concurrent use.
 // When it is full, the oldest entry goes first.
