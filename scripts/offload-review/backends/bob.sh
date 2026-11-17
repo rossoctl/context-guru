@@ -44,5 +44,5 @@ backend_run() {
   [ "$2" = 1 ] && resume=(--resume latest)
   # -p, not a positional prompt: Bob 1.0.3 exits 1 on --resume plus a positional prompt.
   bob --accept-license --trust --yolo --max-coins "${OFFLOAD_MAX_COINS:-10}" \
-    "${resume[@]}" -p "$(cat "$prompt")"
+    ${resume[@]+"${resume[@]}"} -p "$(cat "$prompt")"
 }
