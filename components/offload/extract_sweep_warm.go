@@ -1088,12 +1088,11 @@ func (t *warmThread) warmPending() bool {
 }
 
 // registerWarm notes that a question should run once this request has been forwarded. It keeps no copy
-// of the conversation: a thread the keep-alive cannot ping has no registry copy to ask from, so it gets
-// no warm question, and that is counted (sweep_warm_not_registered). The host calls ResolveWarmQuestion
-// when the response is in; the question then reads the registry's copy, which this request's own
-// registerPing has just refreshed.
+// of the conversation: a thread with no registry copy to ask from gets no warm question, and that is
+// counted (sweep_warm_not_registered). The host calls ResolveWarmQuestion when the response is in; the
+// question then reads the registry's copy, which this request's own registerPing has just refreshed.
 func (e *ExtractSweep) registerWarm(c *components.Ctx, tkey string) {
-	if c.PrefixAsk == nil || c.CanKeepAlive == nil || !c.CanKeepAlive() {
+	if c.PrefixAsk == nil || !e.keepsCopy(c) {
 		sweepWarmNotRegistered.Add(1)
 		return
 	}

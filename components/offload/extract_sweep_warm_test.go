@@ -797,24 +797,39 @@ func TestAnExpandOfAWarmDropIsMarkedWarm(t *testing.T) {
 	}
 }
 
-// ⭐ OPTION B. The warm path keeps no conversation copy of its own. A thread the keep-alive cannot ping,
-// or one with no registry entry, never asks, and that is counted.
-func TestAThreadTheKeepAliveCannotPingNeverAsksAWarmQuestion(t *testing.T) {
-	t.Run("keep-alive cannot ping the thread", func(t *testing.T) {
-		r := newWarmRig(t, "w-nokeep", warmCfg, payingTail(), 1.0)
-		for i := 0; i < 3; i++ {
-			c := warmCtx(r.session, r.st)
-			c.CanKeepAlive = func() bool { return false }
-			r.request(c)
-		}
-		r.forward()
-		if n := atomic.LoadInt64(&r.asker.calls); n != 0 {
-			t.Fatalf("a thread the keep-alive cannot ping asked %d times", n)
-		}
-		if c := SweepWarmCounters(); c.NotRegistered == 0 || c.Fired != 0 {
-			t.Fatalf("counters = %+v, want not_registered counted and no question", c)
-		}
-	})
+// #1191. With warm on, a thread the keep-alive cannot ping still asks its warm question: the question
+// runs after a forwarded request, not at a ping. IBM Bob's route can never be pinged (an OpenAI
+// provider, cache strategy none), and bob-ultrahigh is the one preset with warm on. Still one copy only:
+// the ping registry's (option B, below).
+func TestAWarmThreadTheKeepAliveCannotPingStillAsks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hook func() bool
+	}{
+		{"keep-alive cannot ping the thread", func() bool { return false }},
+		{"no keep-alive hook at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newWarmRig(t, "w-nokeep", warmCfg, payingTail(), 1.0)
+			for i := 0; i < 3; i++ {
+				c := warmCtx(r.session, r.st)
+				c.CanKeepAlive = tc.hook
+				r.request(c)
+			}
+			r.forward()
+			if n := atomic.LoadInt64(&r.asker.calls); n != 1 {
+				t.Fatalf("a warm thread the keep-alive cannot ping asked %d times, want 1", n)
+			}
+			if c := SweepWarmCounters(); c.NotRegistered != 0 || c.Fired != 1 {
+				t.Fatalf("counters = %+v, want 1 question fired and nothing counted not_registered", c)
+			}
+		})
+	}
+}
+
+// ⭐ OPTION B. The warm path keeps no conversation copy of its own. A thread with no registry entry
+// never asks, and that is counted.
+func TestAThreadWithNoRegistryCopyNeverAsksAWarmQuestion(t *testing.T) {
 	t.Run("no registry entry (under the floor or cleared)", func(t *testing.T) {
 		r := newWarmRig(t, "w-noreg", warmCfg, payingTail(), 1.0)
 		for i := 0; i < 3; i++ {

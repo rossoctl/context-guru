@@ -259,6 +259,13 @@ var (
 	sweepPingCand = map[string]*sweepPingCandidate{}
 )
 
+// keepsCopy reports whether this thread may keep the registry's conversation copy. The keep-alive asks
+// from it at a ping; the warm path asks from it after a forwarded request, so with warm on it needs no
+// ping (#1191: IBM Bob's route is never pinged). No host hook means no keep-alive.
+func (e *ExtractSweep) keepsCopy(c *components.Ctx) bool {
+	return e.warm || (c.CanKeepAlive != nil && c.CanKeepAlive())
+}
+
 // registerPing snapshots this request's conversation for the keeper. Deferred from Offload so it sees
 // the conversation as the component leaves it, replays included.
 func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChatRequest) {
@@ -270,10 +277,10 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		c.Mode == components.ModeObserve || req == nil || len(req.Input) == 0 {
 		return
 	}
-	// A conversation copy is kept only for a thread the keep-alive can ping. The copies are content,
-	// held in memory for up to maxSweepPingAge; a thread that will never get a ping must not pay them.
-	// No host hook means no keep-alive: keep nothing.
-	if c.CanKeepAlive == nil || !c.CanKeepAlive() {
+	// A conversation copy is kept only for a thread that can be asked: one the keep-alive can ping, or
+	// any thread when the warm path is on (#1191). The copies are content, held in memory for up to
+	// maxSweepPingAge; a thread that will never be asked must not pay them.
+	if !e.keepsCopy(c) {
 		sweepPingNotRegistered.Add(1)
 		return
 	}
