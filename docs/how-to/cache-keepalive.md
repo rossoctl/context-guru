@@ -188,7 +188,10 @@ and at 10 to $54.04. The guard that works is the per-*ping* cost budget above.
   quarter of the rate and concurrency budget is reserved — and is skipped rather than
   queued when there is none.
 - **It will not retry.** A failed ping is logged and forgotten. A `4xx`, or a ping whose
-  usage reports more written than read, stops that session being pinged again.
+  usage reports more written than read, stops that session being pinged again. A ping that
+  runs to its 60 s timeout is the one failure that is still booked: the provider probably
+  billed it, so it gets a row at the keeper's projected cost, marked `timeout_estimated`,
+  with no tokens.
 
 ## Where the money shows up
 
@@ -242,7 +245,8 @@ CONTEXT_GURU_KEEPALIVE=off
 
 Set in the environment, read at startup. An environment variable rather than a control-plane
 route on purpose: the thing an operator needs at 3am is one that works when the control
-plane is what is broken. `/stats` publishes `keepalive` with `pings`, `skipped`, `failed`,
+plane is what is broken. `/stats` publishes `keepalive` with `pings`, `skipped`, `failed`, `timed_out` (the part of
+`failed` that ran to the timeout and was booked at its projected cost),
 `wrote_instead_of_read` and `spend_usd`; `wrote_instead_of_read` above zero is a bug, not an
 expense.
 

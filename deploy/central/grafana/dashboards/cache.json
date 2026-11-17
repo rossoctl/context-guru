@@ -226,7 +226,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Ping outcomes (per hour)",
-      "description": "Pings per hour. Only ok and failed are visible: a timed-out or skipped ping leaves no row.",
+      "description": "Pings per hour. A timeout is a ping that ran to its 60 s limit; it is booked at its projected cost (#754). A skipped ping leaves no row, so it does not show.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -343,7 +343,7 @@
         "x": 18,
         "y": 8,
         "w": 6,
-        "h": 8
+        "h": 4
       },
       "targets": [
         {
@@ -380,6 +380,55 @@
         "text": {
           "valueSize": 56
         }
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Estimated ping cost",
+      "description": "Share of the ping cost that is a projection: pings that timed out with no answer (#754). The provider probably billed them, so the cost is booked, but the figure is not measured.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "central-prom"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 12,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(llm_keepalive_estimated_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])) / clamp_min(sum(increase(llm_keepalive_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__range])), 1e-9)",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "central-prom"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#FF9830"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
       }
     },
     {

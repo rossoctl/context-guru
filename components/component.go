@@ -1254,6 +1254,11 @@ type KeepAliveReport struct {
 	// none). A sink reads only the metadata it needs from it,
 	// such as the subscription limit headers (#995), and must not change it.
 	Header http.Header
+	// TimedOut marks a ping that ran to the keeper's ping timeout with no answer (#754). The
+	// provider probably billed it, so CostUSD is the keeper's PROJECTED cost of one ping and every
+	// usage field is 0. A sink should count it as spend, mark it as an estimate, and not count it
+	// as a refresh: nobody knows whether the provider read the cached entry.
+	TimedOut bool
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

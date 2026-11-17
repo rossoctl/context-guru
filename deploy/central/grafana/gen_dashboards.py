@@ -240,11 +240,15 @@ def cache():
     P.append(series(4, "Ping outcomes (per hour)", [(f'{rate("llm_keepalive_pings_total", "outcome")} * 3600', "{{outcome}}")],
                     8, 8, 10, 8, stack=True, bars=True,
                     colors={"ok": GREEN, "skipped": BLUE, "failed": RED, "timeout": ORANGE},
-                    desc="Pings per hour. Only ok and failed are visible: a timed-out or skipped ping leaves no row."))
+                    desc="Pings per hour. A timeout is a ping that ran to its 60 s limit; it is booked at its projected cost (#754). A skipped ping leaves no row, so it does not show."))
     P.append(stat(5, "Pings that paid",
                   f'({inc("llm_savings_cache_effect_usd_total", extra=RESCUE_SAVED)} - {inc("llm_savings_cache_effect_usd_total", extra=RESCUE_ADDED)}) / clamp_min({inc("llm_keepalive_cost_usd_total")}, 1e-9)',
-                  18, 8, w=6, h=8, unit="suffix: x", decimals=1, c=GREEN, big=True,
+                  18, 8, w=6, h=4, unit="suffix: x", decimals=1, c=GREEN, big=True,
                   desc="Rescue value divided by ping cost over the selected range. Above 1, the pings paid."))
+    P.append(stat(8, "Estimated ping cost",
+                  f'{inc("llm_keepalive_estimated_cost_usd_total")} / clamp_min({inc("llm_keepalive_cost_usd_total")}, 1e-9)',
+                  18, 12, w=6, h=4, unit="percentunit", decimals=1, c=ORANGE,
+                  desc="Share of the ping cost that is a projection: pings that timed out with no answer (#754). The provider probably billed them, so the cost is booked, but the figure is not measured."))
     P.append(series(6, "Keep-alive: cost, rescue and net (USD per hour)", [
         (f'{rate("llm_keepalive_cost_usd_total")} * 3600', "ping cost"),
         (f'({rescue(RESCUE_SAVED)} - {rescue(RESCUE_ADDED)}) * 3600', "rescue (net of reads)"),
