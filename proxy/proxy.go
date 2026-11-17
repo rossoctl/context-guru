@@ -1748,8 +1748,13 @@ func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.
 	lg = lg.With("session", tr.Session, "messages", tr.Messages, "bypassed", bypassed,
 		"cache_aware", tr.CacheAware, "frozen_tokens", tr.FrozenTokens)
 	if tr.Run != nil {
-		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", tr.Run.TokensAfter,
-			"saved", tr.Run.Saved(), "components_ms", tr.Run.DurationMs)
+		after, saved := tr.Run.TokensAfter, tr.Run.Saved()
+		if tr.Declined {
+			after, saved = tr.Run.TokensBefore, 0 // the original went upstream (#1179)
+			lg = lg.With("rebuild_declined", true)
+		}
+		lg = lg.With("tokens_before", tr.Run.TokensBefore, "tokens_after", after,
+			"saved", saved, "components_ms", tr.Run.DurationMs)
 	}
 	// cg_ms is everything this proxy did before forwarding (normalizing, counting, the
 	// components): the figure the dashboard's cg_latency_ms and /stats already carry. It used to

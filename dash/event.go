@@ -877,6 +877,13 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 			Before: c.Before, After: c.After, Components: c.Components,
 		})
 	}
+	if tr.Declined {
+		// The rebuild failed and the original went upstream: book no saving, and no component acted (#1179).
+		e.dropSavings()
+		for i := range e.Components {
+			e.Components[i].Mutated = false
+		}
+	}
 	e.UncompressedReason = uncompressedReason(e, tr)
 }
 
@@ -893,6 +900,11 @@ func (e *Event) DropUnbilledSavings() {
 	if e.Status == 0 || (e.Status >= 200 && e.Status < 300) {
 		return
 	}
+	e.dropSavings()
+}
+
+// dropSavings is the shared part: tokens after equal tokens before, and no component saved or acted.
+func (e *Event) dropSavings() {
 	e.TokensAfter = e.TokensBefore
 	e.SavedUnique, e.AttemptedTokens = 0, 0
 	for i := range e.Components {
