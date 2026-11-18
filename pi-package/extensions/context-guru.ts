@@ -214,24 +214,40 @@ export function stripsChatGPTFields(install: Install | undefined): boolean {
 /** The one question for a models.json that already sends a provider elsewhere, built from the plan's
  *  paired answers. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
  *  offered only when the plan printed it (the proxy can reproduce that URL). */
-export function conflictPrompt(f: Record<string, string>): { title: string; options: string[]; answers: Record<string, string> } {
+/** The conflict question. The title is a short question (#1158); the consent text of each answer is
+ *  shown in a confirm dialog after the pick, so the person reads what they agree to. */
+export function conflictPrompt(f: Record<string, string>): {
+  title: string; options: string[]; answers: Record<string, string>; consent: Record<string, string>;
+} {
   const options: string[] = [];
   const answers: Record<string, string> = {};
+  const consent: Record<string, string> = {};
   const parts = [`models.json already sends a provider somewhere else: ${conflictWords(f.existing_base_url)}.`];
   if (f.consent_question_chain) {
     options.push(CHAIN);
     answers[CHAIN] = "chain";
-    parts.push(`Chain (usually right): ${f.consent_question_chain}`);
+    consent.chain = f.consent_question_chain;
   } else if (f.chain_refused) {
     parts.push(`Chain is not offered: context-guru cannot forward to that URL the way Pi does (${f.chain_refused}).`);
   }
   if (f.consent_question_replace) {
     options.push(REPLACE);
     answers[REPLACE] = "replace";
-    parts.push(`Replace: ${f.consent_question_replace}`);
+    consent.replace = f.consent_question_replace;
   }
   options.push(KEEP);
-  return { title: parts.join("\n\n"), options, answers };
+  return { title: parts.join("\n\n"), options, answers, consent };
+}
+
+/** The message after a setup that routed Pi. */
+export function setupDoneText(r: Record<string, string>): string {
+  return [
+    `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}: ${r.routes}.`,
+    `Preset ${r.preset}, cache strategy ${r.cache_strategy}. Dashboard: ${r.dashboard}`,
+    ...(r.cache_strategy_note ? [`${r.cache_strategy_note}.`] : []),
+    "Re-select the model with /model (or restart Pi) so this session uses the new route.",
+    `If Pi ever stops being able to talk, run: ${r.reset_hatch}`,
+  ].join("\n");
 }
 
 /** The cache strategy names from the facts of `pi_plugin.py configure --list`. The proxy owns the table, so
@@ -388,7 +404,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       }
       const choice = await ctx.ui.select(prompt.title, prompt.options);
       const answer = choice ? prompt.answers[choice] : undefined;
-      if (!answer) {
+      if (!answer || !(await ctx.ui.confirm("Route Pi through context-guru?", prompt.consent[answer]))) {
         say(ctx, `Nothing changed.${hatch}`);
         return;
       }
@@ -416,12 +432,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       return;
     }
     await reloadModels(ctx);
-    say(ctx, [
-      `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}: ${r.routes}.`,
-      `Preset ${r.preset}, cache strategy ${r.cache_strategy}. Dashboard: ${r.dashboard}`,
-      "Re-select the model with /model (or restart Pi) so this session uses the new route.",
-      `If Pi ever stops being able to talk, run: ${r.reset_hatch}`,
-    ].join("\n"));
+    say(ctx, setupDoneText(r));
   };
 
   const status = async (ctx: ExtensionCommandContext) => {

@@ -54,7 +54,8 @@ free port and moves both routes to it. It does not refuse because of its own old
 ## An existing baseUrl (a company gateway)
 
 If `models.json` already sends `anthropic` or `openai` to another endpoint, setup asks one question
-with three answers. Only a provider with its own `baseUrl` is affected. The other provider is routed
+with three answers. After you pick Chain or Replace, it shows what that answer changes and asks for
+your yes. Only a provider with its own `baseUrl` is affected. The other provider is routed
 as usual.
 
 | Answer | Route | Use it when |
@@ -105,9 +106,11 @@ mode (`pi -p`) there is no dialog, so these commands change nothing.
 The presets and the cache strategies are the same as in the Claude Code plugin. See
 [docs/reference/presets.md](../docs/reference/presets.md).
 
-The default preset is `off`: the proxy trims nothing. The default cache strategy is `auto`: the proxy
-sends small keep-alive requests while you are idle, which uses some of your own quota. Choose `none`
-to turn the pings off.
+The default preset is `off`: the proxy trims nothing. Setup asks for the cache strategy `auto`: the
+proxy sends small keep-alive requests while you are idle, which uses some of your own quota. If the
+proxy does not offer `auto` for Pi, setup uses `none` (no pings) and says so. Proxy v0.7.3 offers
+only `none` for Pi, because its ping strategies serve Anthropic only. A strategy you name with
+`--cache-strategy` is never replaced: setup refuses it if the proxy does not offer it.
 
 One cache strategy drives both providers. The package keeps no list of strategies. It asks the proxy
 (`context-guru-proxy strategies`) for the names and the texts, and offers the strategies that serve both

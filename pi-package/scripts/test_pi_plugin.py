@@ -1066,7 +1066,8 @@ class StrategiesFromTheProxy(Sandbox):
     def test_setup_on_a_proxy_that_cannot_list_refuses_a_named_strategy_and_writes_nothing(self):
         binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
         pi_plugin.write_record({"binary": binary})
-        for argv in (("setup", "--plan"), ("setup", "--i-consent-to-traffic-interception")):
+        for argv in (("setup", "--plan", "--cache-strategy", "auto"),
+                     ("setup", "--i-consent-to-traffic-interception", "--cache-strategy", "auto")):
             code, facts = self.run_main(*argv)
             self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
         self.assertFalse(pi_plugin.proxy_config().exists())
@@ -1074,6 +1075,14 @@ class StrategiesFromTheProxy(Sandbox):
         code, facts = self.run_main("setup", "--plan", "--cache-strategy", "none")
         self.assertEqual((code, facts["result"]), (0, "planned"))
         self.assertNotIn("quota", facts["consent_question"])
+
+    def test_setup_on_a_proxy_that_cannot_list_uses_none_for_its_own_default(self):
+        binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
+        pi_plugin.write_record({"binary": binary})
+        code, facts = self.run_main("setup", "--plan")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "planned", "none"))
+        self.assertIn("cache strategy auto cannot be used", facts["cache_strategy_note"])
+        self.assertIn("v0.7.1 or later", facts["cache_strategy_note"])
 
 
 GATEWAY = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}
@@ -1317,6 +1326,85 @@ class ChainMode(Sandbox):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("models_restore=restored", out.stdout)
         self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+
+# What proxy v0.7.3 really prints: every ping strategy serves Anthropic only, so Pi, which routes
+# Anthropic and OpenAI with one strategy, is offered only `none` (#1148).
+TABLE_0_7_3 = {
+    "default": "auto", "aliases": {"5-min-ping": "auto"}, "presets": list(pi_plugin.PRESETS),
+    "strategies": [_row("none", ["any"], False), _row("auto", ["anthropic"]), _row("1-ping", ["anthropic"])],
+}
+
+
+class DefaultStrategyFallback(Sandbox):
+    """A strategy setup picked itself (the default, or the recorded one) that the proxy does not offer
+    for Pi becomes `none`, and setup says so. A strategy the person named is still refused (#1148)."""
+
+    def setUp(self):
+        super().setUp()
+        self.table.stop()  # replace the sandbox's table, so tearDown stops this one
+        self.table = mock.patch.object(pi_plugin, "load_strategy_table", side_effect=lambda binary: TABLE_0_7_3)
+        self.table.start()
+
+    def setup(self, *argv, binary="/bin/true", download=None):
+        with mock.patch.object(pi_plugin, "find_binary", return_value=binary), \
+                mock.patch.object(pi_plugin, "install_release_binary", side_effect=download) as fetch, \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "start_service", return_value=True), \
+                mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=8800):
+            self.fetch = fetch
+            return self.run_main("setup", *argv)
+
+    def download(self):
+        """A download that really leaves the managed binary on disk, as install_release_binary does."""
+        path = pi_plugin.managed_binary()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return str(path), "v0.7.3"
+
+    def test_plan_with_the_default_falls_back_to_none_and_says_why(self):
+        code, facts = self.setup("--plan")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "planned", "none"))
+        self.assertIn("cache strategy auto is not offered for Pi", facts["cache_strategy_note"])
+        self.assertNotIn("quota", facts["consent_question"])
+
+    def test_setup_with_the_default_routes_with_none(self):
+        code, facts = self.setup("--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "routed", "none"))
+        self.assertIn("not offered for Pi", facts["cache_strategy_note"])
+        self.assertEqual(pi_plugin.read_record()["cache_strategy"], "none")
+
+    def test_a_recorded_strategy_that_is_no_longer_offered_falls_back_too(self):
+        pi_plugin.write_record({"cache_strategy": "1-ping"})
+        code, facts = self.setup("--plan")
+        self.assertEqual((code, facts["cache_strategy"]), (0, "none"))
+        self.assertIn("cache strategy 1-ping is not offered for Pi", facts["cache_strategy_note"])
+
+    def test_a_strategy_the_person_named_is_still_refused(self):
+        code, facts = self.setup("--plan", "--cache-strategy", "auto")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "unknown_strategy"))
+
+    def test_setup_with_no_binary_downloads_and_routes_with_none(self):
+        code, facts = self.setup("--i-consent-to-traffic-interception", binary=None, download=self.download)
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "routed", "none"))
+        self.assertIn("not offered for Pi", facts["cache_strategy_note"])
+
+    def test_plan_with_no_binary_says_none_is_used_if_the_download_does_not_offer_the_default(self):
+        code, facts = self.setup("--plan", binary=None)
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "planned", "auto"))
+        self.assertIn("If the proxy that setup downloads does not offer auto for Pi, setup uses none",
+                      facts["consent_question"])
+        self.fetch.assert_not_called()
+
+    def test_a_refusal_after_the_download_deletes_the_downloaded_binary(self):
+        code, facts = self.setup("--i-consent-to-traffic-interception", "--cache-strategy", "auto",
+                                 binary=None, download=self.download)
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "unknown_strategy"))
+        self.fetch.assert_called_once()
+        self.assertFalse(pi_plugin.managed_binary().exists())
 
 
 if __name__ == "__main__":
