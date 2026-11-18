@@ -21,6 +21,11 @@ Pi installs a package from a local path. Clone this repository, then:
 pi install /path/to/context-guru/pi-package
 ```
 
+Install from one clone only. A `pi install` from a second clone or worktree adds a second entry to
+`packages` in `~/.pi/agent/settings.json`; it does not replace the first one. If two copies are
+installed, only the first one runs, and Pi shows a warning that names both folders. To switch
+clones, remove the old entry from `packages`.
+
 Start Pi and run:
 
 ```text
