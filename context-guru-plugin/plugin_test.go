@@ -4570,7 +4570,7 @@ func runHatch(t *testing.T, state, home, cwd string, args ...string) (string, in
 // skill can tell the user, and a recovery copy of the file that was edited exists BESIDE it — not
 // in a shared, hashed ledger under the state directory. See recovery_dir_for() in settings.py.
 func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
-	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	path := filepath.Join(proj, "settings.json")
 	writeJSON(t, path, map[string]any{"theme": "dark"})
 
@@ -5334,7 +5334,7 @@ func TestStatuslineRefusesMachineWideWithoutTheFlag(t *testing.T) {
 // in a later, separate invocation reads it back — this is the mechanism the statusline skill and
 // `preset`'s fallback are supposed to consume instead of hardcoding or re-deriving scope.
 func TestResolveInstallScopeRoundTrips(t *testing.T) {
-	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
 	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
 		t.Fatal(err)
@@ -5375,7 +5375,7 @@ func TestResolveInstallScopeRoundTrips(t *testing.T) {
 
 	// A second, unrelated project directory that was never routed at all still says "ask" — the
 	// record is per-project, not global.
-	otherProj := t.TempDir()
+	otherProj := realTempDir(t)
 	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
 	cmd.Dir = otherProj
@@ -5654,7 +5654,7 @@ func TestProjectKeyFailsOpenWithoutGitBinary(t *testing.T) {
 // is actually routing the project must win, not the one that was resolved first.
 func TestMigrationTiebreakPrefersTheStillRoutingWorktree(t *testing.T) {
 	requireTool(t, "git")
-	state, home, root := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, root := realTempDir(t), realTempDir(t), realTempDir(t)
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
@@ -6690,9 +6690,9 @@ func TestDryRunAgreesWithARealRunAboutWhatIsLeft(t *testing.T) {
 // recovery_original despite `reset_hatch=unavailable`, which the old, single-state-dir design could
 // not have claimed.
 func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
-	home, proj := t.TempDir(), t.TempDir()
+	home, proj := realTempDir(t), realTempDir(t)
 	// A FILE where the state directory should be, so every path inside it is unusable.
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	blocked := filepath.Join(realTempDir(t), "not-a-dir")
 	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -8276,7 +8276,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	requireTool(t, "git")
 
 	t.Run("not a git repo: skipped, nothing written", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		path := filepath.Join(dir, ".claude", "settings.local.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -8292,7 +8292,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("a git repo with no .gitignore: the entry is added", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -8338,7 +8338,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("already covered by an existing .gitignore: reported unchanged, file untouched", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -8365,7 +8365,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("unwritable directory: skipped, never fails the caller", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -10704,7 +10704,7 @@ func waitPortClosed(t *testing.T, port string) {
 // legitimately share one port and the proxy-stop guard fires instead, is
 // TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy.
 func TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
 	sd := filepath.Join(state, "context-guru")
 
@@ -11440,7 +11440,7 @@ func TestUserScopeThenProjectKeepsTwoPorts(t *testing.T) {
 //
 // `scope` is the discriminator, in whatever row carries it, which is what install.sh already uses.
 func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	sd := filepath.Join(state, "context-guru")
 	userFile := filepath.Join(home, ".claude", "settings.json")
 	projReal, err := filepath.EvalSymlinks(proj)
@@ -11512,7 +11512,7 @@ func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
 
 	// And the symptom that makes losing the row worse than sharing a port: a SECOND project, which
 	// has no legacy row of its own and only ever sees the machine-wide `options.port`.
-	other := t.TempDir()
+	other := realTempDir(t)
 	f2, c2 := settingsInDir(t, sd, home, other, "port", "alloc", "--dry-run")
 	if c2 != 0 {
 		t.Fatalf("second project alloc exit %d %v", c2, f2)
@@ -11589,7 +11589,7 @@ func TestAddWithoutAllocDoesNotAdoptTheMachineWidePort(t *testing.T) {
 // project whose only routing IS the machine-wide one (`adopt` folded it in, or the machine never had
 // any other install) with the reason that says so; allow from anywhere when asked for explicitly.
 func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
-	home, state, proj, folded := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj, folded := realTempDir(t), realTempDir(t), realTempDir(t), realTempDir(t)
 	sd := filepath.Join(state, "context-guru")
 	userFile := filepath.Join(home, ".claude", "settings.json")
 	projFile := filepath.Join(proj, ".claude", "settings.local.json")
@@ -12513,6 +12513,15 @@ func evalSymlinks(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return real
+}
+
+// realTempDir is t.TempDir() with symlinks resolved. On macOS t.TempDir() is under /var, a link to
+// /private/var, and settings.py reports the resolved spelling. A test that compares a path from the
+// script with a path it built itself must use one spelling for both (#1217). On Linux the result is
+// the same as t.TempDir().
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	return evalSymlinks(t, t.TempDir())
 }
 
 // TestDefaultPortInOutputIgnoresLongerNumbers pins the matcher of
