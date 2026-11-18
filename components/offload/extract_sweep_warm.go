@@ -157,6 +157,17 @@ func warmFor(key string) *warmThread {
 	return t
 }
 
+// warmLastRead is the cache read the provider reported for the thread's previous forwarded turn, 0 when
+// none is recorded. It does not touch or create the thread.
+func warmLastRead(key string) int {
+	warmMu.Lock()
+	defer warmMu.Unlock()
+	if t := warmThreads[key]; t != nil {
+		return t.lastRead
+	}
+	return 0
+}
+
 // warmTriggerHook, set only by tests, runs at the top of the trigger so a test can make it panic and
 // prove the request still goes out unchanged.
 var warmTriggerHook func()
@@ -810,12 +821,11 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 // ---------------------------------------------------------------------------------------------------
 // The step, run on every request of the thread when warm is on.
 
-func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) (keys []string, changed int) {
+func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx, cold bool) (keys []string, changed int) {
 	if c == nil || c.Store == nil || c.Session == "" || req == nil || c.Bypass || c.Mode == components.ModeObserve {
 		return nil, 0
 	}
 	tkey := thread.Key(c.Session, c.Thread)
-	cold := sweepColdRequest(c)
 
 	// The thread's counters. prevLocal is the previous request's local size, the other half of the billed
 	// ratio, read BEFORE it is replaced by this request's.
@@ -828,18 +838,6 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	}
 	prevLocal := t.lastLocal
 	t.lastLocal = local
-	// AN UNKNOWN PHASE WITH A MEASURED READ (#1191). A route with no known cache lifetime and no
-	// cache_control (IBM Bob's) has an unknown phase on every request, which counts as cold, so the warm
-	// run would restart on every request. The provider's report on the thread's previous turn settles it:
-	// it read the cache, so the cache is live. Only the warm path reads this; the cold apply does not.
-	// The read is one turn old and has no age limit: after a long idle the first request still counts
-	// as warm. That is accepted on purpose. That request rewrites the cache, so a question after it reads
-	// a live cache, and a held answer meets the warm gate, the stricter one: the worst case is a missed
-	// cold apply, not a broken cache (#1196 review).
-	liveByRead := cold && t.lastRead > 0 && c.CachePhase(0) == components.CachePhaseUnknown
-	if liveByRead {
-		cold = false
-	}
 	if cold {
 		t.run, t.count = 0, 0
 		t.growthFrom, t.growthTurns, t.growthLast = 0, 0, 0
@@ -905,7 +903,7 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 	}
 	// SWEEP V3 (extract_sweep_v3.go) replaces everything below when it is on.
 	if e.v3 {
-		return e.v3Dispatch(req, rep, c, tkey, v3In{cold: cold, liveByRead: liveByRead, run: run, count: count, growthFrom: growthFrom,
+		return e.v3Dispatch(req, rep, c, tkey, v3In{cold: cold, run: run, count: count, growthFrom: growthFrom,
 			growthTurns: growthTurns, prevLocal: prevLocal, busy: busy, hasHeld: hasHeld, heldTried: heldTried})
 	}
 	// A CARRIED set the gate already refused is not retried on every warm request: the trigger runs instead and
@@ -917,9 +915,9 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 			t.count = 0 // a refused or spent answer must not earn a new question at once
 		}
 		warmMu.Unlock()
-		wa := &warmApply{liveByRead: liveByRead}
+		wa := &warmApply{}
 		wa.gate = e.warmGate(c, req, run, growthFrom, growthTurns, prevLocal, wa)
-		wk, wn := e.applyHeldFrom(memHeld{tkey}, wa, req, rep, c, tkey)
+		wk, wn := e.applyHeldFrom(memHeld{tkey}, wa, req, rep, c, tkey, cold)
 		if wn > 0 {
 			return wk, wn
 		}

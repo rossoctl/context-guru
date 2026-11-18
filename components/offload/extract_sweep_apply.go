@@ -603,6 +603,22 @@ func sweepColdRequest(c *components.Ctx) bool {
 	return !(p == components.CachePhaseUnknown && c.CacheAware && c.MaxCachedIdx >= 0)
 }
 
+// sweepColdFor is the request's one cache verdict (#1191 D4): sweepColdRequest, with one narrowing. On a
+// route with no known cache lifetime and no cache_control (IBM Bob's), the phase is unknown on every
+// request and counts as cold. The provider's report on the thread's previous turn settles it: a turn
+// that read the cache means the cache is live. The read is a token count, metadata only. It is recorded
+// only when warm is on (ResolveWarmQuestion), so with warm off the verdict is sweepColdRequest exactly.
+// The read is one turn old and has no age limit: after a long idle the first request still counts as
+// live. That is accepted on purpose. That request rewrites the cache, so a question after it reads a
+// live cache, and a held answer meets the warm gate, the stricter one: the worst case is a missed cold
+// apply, not a broken cache (#1196 review).
+func sweepColdFor(c *components.Ctx) bool {
+	if !sweepColdRequest(c) {
+		return false
+	}
+	return !(c.CachePhase(0) == components.CachePhaseUnknown && warmLastRead(thread.Key(c.Session, c.Thread)) > 0)
+}
+
 // maxApplyAttempts bounds how often a panicking cold apply gives the answer back.
 const maxApplyAttempts = 2
 
@@ -615,7 +631,7 @@ func SweepApplyPanics() int64 { return sweepApplyPanics.Load() }
 // coldStep runs at the top of every request of the sweep, outside shadow mode. It replays earlier
 // drops, scans for references to them, and applies a held answer when the request is cold or its
 // prefix changed. It returns the stash keys of the drops it wrote or replayed.
-func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) (keys []string, changed int) {
+func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx, cold bool) (keys []string, changed int) {
 	if c == nil || c.Store == nil || c.Session == "" || req == nil {
 		return nil, 0
 	}
@@ -633,7 +649,7 @@ func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *component
 	}
 
 	// 3. A held answer.
-	ak, ac := e.applyHeld(req, rep, c, tkey)
+	ak, ac := e.applyHeld(req, rep, c, tkey, cold)
 	keys, changed = append(keys, ak...), changed+ac
 	return keys, changed
 }
@@ -800,10 +816,6 @@ func (s storeHeld) put(h heldAnswer)                     { putHeld(s.st, h) }
 // warmApply turns applyHeldFrom into the warm apply. gate decides, after the recheck and before any
 // message is changed, whether the valid drops pay; it returns the reason when they do not.
 type warmApply struct {
-	// liveByRead: the warm path found this request warm from the provider's cache read on the previous
-	// turn, though the phase is unknown (#1191). The apply then uses that verdict, not the cold rule,
-	// so the warm gate runs (#1196).
-	liveByRead bool
 	// rewriteBilled is set by the gate: the rewritten tokens, billed-scaled. The apply books it as an
 	// event on the request that paid it, so the dashboard can charge the rewrite there.
 	rewriteBilled int
@@ -830,9 +842,9 @@ type warmApply struct {
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
 // drops after the change point). Anything else leaves the answer held and the request unchanged.
 func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
-	tkey string) (keys []string, changed int) {
+	tkey string, cold bool) (keys []string, changed int) {
 	if !e.v3 {
-		return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey)
+		return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey, cold)
 	}
 	var protected map[string]bool
 	var claimed []string
@@ -844,7 +856,7 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	}}
 	var before map[string]bool
 	src.onClaim = func() { before = v3MarkedIDs(c, req) }
-	keys, changed, dryDrops := e.applyHeldFromDry(src, nil, req, rep, c, tkey)
+	keys, changed, dryDrops := e.applyHeldFromDry(src, nil, req, rep, c, tkey, cold)
 	if dryDrops > 0 {
 		// DRY RUN: a cold or changed-prefix cut that was decided and not applied.
 		C, cs := e.v3CutPoint(c)
@@ -868,15 +880,15 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 // their place. Every other step is the same: claim, recheck, apply with a marker and a stash, commit
 // the drop records, restore on a panic.
 func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
-	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int) {
-	keys, changed, _ = e.applyHeldFromDry(src, warm, req, rep, c, tkey)
+	rep *components.Report, c *components.Ctx, tkey string, cold bool) (keys []string, changed int) {
+	keys, changed, _ = e.applyHeldFromDry(src, warm, req, rep, c, tkey, cold)
 	return keys, changed
 }
 
 // applyHeldFromDry is applyHeldFrom that also reports how many drops a DRY RUN decided and did not make. It is 0
 // unless sweep v3's dry_run is on. The cold apply (warm == nil) reads it back without becoming a warm apply.
 func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
-	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int, dry int) {
+	rep *components.Report, c *components.Ctx, tkey string, cold bool) (keys []string, changed int, dry int) {
 	dryCount := 0
 	defer func() { dry = dryCount }()
 
@@ -891,7 +903,6 @@ func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bs
 	if c.RawInput != nil {
 		raw = c.RawInput
 	}
-	cold := sweepColdRequest(c) && !(warm != nil && warm.liveByRead)
 	// warmGated: a warm apply on an UNCHANGED prefix, the one case the cold apply never touches. It is
 	// let through only by the economic gate below. A cold request, or a CHANGED prefix, is the cold
 	// apply's own case exactly as #695 defines it: the provider rewrites from there on anyway, so the

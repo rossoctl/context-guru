@@ -596,6 +596,9 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			rep.Skipped = true
 		}
 	}()
+	// ONE "LIVE" VERDICT for the whole request (#1191 D4): shadow, the cold apply and the warm path all
+	// read it, so they cannot disagree on whether the cache is gone.
+	cold := sweepColdFor(c)
 	// SHADOW MODE changes nothing: it reports what the apply would do (extract_sweep_shadow.go).
 	if e.shadow {
 		// Shadow stops NEW applies only. Drops this thread already made stay replayed, byte for byte,
@@ -606,17 +609,17 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 			keys, n = e.replayDrops(req, rep, c, thread.Key(c.Session, c.Thread), savedTokenValue(c))
 			changed += n
 		}
-		e.shadowStep(c, req, rep)
+		e.shadowStep(c, req, rep, cold)
 		return keys, nil
 	}
 	// THE COLD APPLY (#404 points 3 and 4). It replays the drops this thread already made, at any
 	// depth, and applies a held answer when this request is cold or its prefix changed. A warm request
 	// with an unchanged prefix gets only the replays, which are byte-identical to what it sent before.
-	keys, n := e.coldStep(req, rep, c)
+	keys, n := e.coldStep(req, rep, c, cold)
 	changed += n
 	// THE WARM PATH (#491), when switched on. It runs after the cold step so the replays are already in.
 	if e.warm {
-		wk, wn := e.warmStep(req, rep, c)
+		wk, wn := e.warmStep(req, rep, c, cold)
 		keys, changed = append(keys, wk...), changed+wn
 	}
 	return keys, nil

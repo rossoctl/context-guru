@@ -616,7 +616,7 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 	// The marked set is read when the claim wins, before the apply changes any message, and not before.
 	var before map[string]bool
 	src.onClaim = func() { before = v3MarkedIDs(c, req) }
-	keys, changed, dryDrops := e.applyHeldFromDry(src, &warmApply{}, req, rep, c, tkey)
+	keys, changed, dryDrops := e.applyHeldFromDry(src, &warmApply{}, req, rep, c, tkey, in.cold)
 	if dryDrops > 0 {
 		C, cs := e.v3CutPoint(c)
 		cut := v3CutRec{p: c.PrevBilledInputThread, c: C, cSource: cs, judge: dryDrops, set: true}
@@ -633,7 +633,7 @@ func (e *ExtractSweep) v3Dispatch(req *bschemas.BifrostChatRequest, rep *compone
 }
 
 type v3In struct {
-	cold, liveByRead                   bool
+	cold                               bool
 	run, count                         int
 	growthFrom, growthTurns, prevLocal int
 	busy, hasHeld, heldTried           bool
@@ -796,7 +796,7 @@ type v3CutRec struct {
 
 func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
 	tkey string, in v3In, P, C int, cSource string) (keys []string, changed int) {
-	wa := &warmApply{liveByRead: in.liveByRead}
+	wa := &warmApply{}
 	inner := e.warmGate(c, req, in.run, in.growthFrom, in.growthTurns, in.prevLocal, wa)
 	var cut v3CutRec
 	wa.gate = e.v3Gate(inner, wa, c, tkey, in.prevLocal, P, C, cSource, src, &cut)
@@ -808,7 +808,7 @@ func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, re
 		}
 		warmMu.Unlock()
 	}
-	wk, wn := e.applyHeldFrom(src, wa, req, rep, c, tkey)
+	wk, wn := e.applyHeldFrom(src, wa, req, rep, c, tkey, in.cold)
 	if wa.dryDrops > 0 {
 		// DRY RUN: the cut was decided and nothing was applied. It is booked as a would-be cut, with a real cut's
 		// numbers, and it does NOT start the growth wait (see the note on the dry run).
