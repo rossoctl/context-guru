@@ -4,6 +4,15 @@ This page describes how a context-guru release is cut. One person or agent sessi
 
 The process was first used for v0.5.1 and v0.5.2.
 
+## Where context-guru runs
+
+Owner decision, 2026-11-18.
+
+- **Production is the personal laptop.** Each user runs context-guru on their own laptop, as the owner does. A release reaches every user at once through `releases/latest`.
+- **One difference from a plain local install:** savings metrics and metadata go to a central location for analysis.
+- **The central store is not live yet.** Until it is live, measurements before a release run on the owner's laptop. Once it is live, the integrator and the production-monitor sessions may read the central metadata for measurements and for checks after a release.
+- **Hosted mode stays supported,** but it is not active inside IBM for now. The hosted-only checks (tenant isolation, hosted restart state) stay in the tests. They are not a release gate of their own.
+
 **A new integrator needs this page, the scripts in [`scripts/release/`](scripts/release/), and the maintainer's own private notes** (see [Private notes](#private-notes-of-the-integrator)). Nothing else. If you had to learn a step from a person or from an earlier session, add it here.
 
 ## Roles
@@ -35,6 +44,7 @@ Some releases need a measurement first: a re-measure of a feature on real traffi
 - **The integrator looks for them at the start of each release.** They are in the release list, in the private notes, and in open issues the owner named. Search the notes for "before the release", "re-measure" and "baseline".
 - **Each one keeps its own procedure and scripts in one place that survives a restart:** the issue, or the private notes for scripts that must stay internal. Never only in `/tmp`. A restart once removed the scripts for both #867 and #871.
 - **Run it on a copy of the data, metadata only.** Never on a live database.
+- **Where it runs:** on the owner's laptop until the central store is live (see [Where context-guru runs](#where-context-guru-runs)). After that, the integrator may read the central metadata.
 - **Report the result to the owner before the freeze,** against the baseline. Post it on the issue, unless the data is private.
 
 ## 2. Get each PR reviewed
@@ -59,6 +69,7 @@ A PR must not change behavior unless a human developer allows it. This holds mos
   - Put all the pending behavior changes in one table (PR, who it affects, old, new, how to turn it off), so the owner can answer them in one message.
   - Quote the yes, with its date, in the squash-merge body.
   - The owner may type in another keyboard layout by mistake. Say how you read such an answer, and wait if you are not sure.
+- **A change in what leaves the laptop** is a behavior change too. Metrics and metadata go to a central store. A feature's row in [docs/data-dependence.md](docs/data-dependence.md) must also say what leaves the laptop, at each storage level (off, metadata only, everything). The PR states it at the top. A PR that adds or widens what leaves the laptop needs the owner of that row to confirm it before the merge.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
 - **To revert a merged PR during a release** (as with #768):
   1. Try `git revert <merge-commit>` on a throwaway branch from `main`. Run vet, the build and the test suites there.
@@ -115,7 +126,7 @@ A review without this block does not count toward the 2.
 - **A flaky CI test.** The integrator may re-run once a flaky CI test that the PR does not touch.
 - **A merge of `main`** (owner rule, David Amid, 2026-11-11: "typically if the holding pattern is a merge of main, this should be under your responsibility"). This holds when a ready PR waits for nothing else. `main` moved after the approvals, often because of the integrator's own merge order. The integrator does the merge. It does not ask the PR owner and wait.
   1. The integrator starts a subagent with its own worktree.
-  2. The subagent merges `origin/main` with `git merge --signoff`, and tests the packages where `main` and the PR overlap (on the box).
+  2. The subagent merges `origin/main` with `git merge --signoff`, and tests the packages where `main` and the PR overlap (on a machine with Go and cgo).
   3. The subagent pushes without force.
   4. The integrator runs `scripts/release/approval-still-valid.sh <pr> <approved-sha>` and `git show --remerge-diff <merge-commit>`. It posts both outputs on the PR.
   5. The script may print `CHANGED` after a clean merge, because `main` can change lines near the PR's hunks. Then the remerge-diff decides. **Empty output** means nobody resolved a conflict by hand, so both approvals stay valid.
@@ -216,7 +227,7 @@ Merge nothing else until the tag, except the version bump (step 6) and fixes for
 
 Run it once, on the exact commit you plan to tag (or the commit before the version bump).
 
-**Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. It runs:
+**Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. The owner's laptop is one such machine. A test machine is not required. It runs:
 - `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`, with and without `-tags cg_record`;
 - the check that the default build links no OpenTelemetry, gRPC or protobuf;
 - `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...` (with `-timeout 25m`), `./context-guru-plugin`, then all the rest;
@@ -232,6 +243,7 @@ Notes:
 - If a test fails, run it on an unmodified `origin/main` on the same machine before you call it a defect of the release. Some tests fail because of the machine itself.
 
 **Part B: one live session through a proxy built from `main`.**
+- **Hosted mode** has no gate of its own (see [Where context-guru runs](#where-context-guru-runs)). Its tests still run in Part A.
 - **Setup.** A person runs `scripts/release/part-b-setup.sh <settings.json> <scratch-dir> <port> <upstream-var> [<model>]` (in an agent session, with the `!` prefix). `<upstream-var>` names the env-block variable that holds the plain model gateway; which gateway accepts the key differs per maintainer. The script copies the Claude Code env block without the context-guru base URL and header, points it at `http://127.0.0.1:<port>/anthropic` (the proxy's Anthropic route; the root URL gives a 404), sets a cheap model, and writes the gateway URL to `<scratch-dir>/upstream.url`. An AI agent must not copy credentials itself.
 - Build the proxy from the commit and run it on a free port, with the dashboard on and its own database: `-listen 127.0.0.1:<port> -anthropic-upstream "$(cat <scratch-dir>/upstream.url)" -dashboard-db <scratch-dir>/dash.db -control-db <scratch-dir>/control.db`.
 - Run an **isolated** Claude Code session against it: its own config directory (`CLAUDE_CONFIG_DIR=<scratch-dir>/cc`), the plugin from the same commit, its own state directory (`CONTEXT_GURU_STATE=<scratch-dir>/state`, `XDG_CACHE_HOME=<scratch-dir>/cache`, `CG_URL=http://127.0.0.1:<port>`). Never install anything at user scope on a shared machine.
@@ -262,6 +274,10 @@ Notes:
   - The status line prints nothing until a settings file records the routing: `settings.py add --file <work>/.claude/settings.local.json --url ...`, and run it with `CLAUDE_PROJECT_DIR=<work>`.
   - `sqlite3 "file:...?mode=ro"` fails once the proxy has stopped. Copy the database first.
   - `ps -o args=` shows the path the proxy was started with, often relative. A kill guard that matches the absolute path skips the kill.
+- **Checks for production on laptops.** A release reaches every laptop at once through `releases/latest`, so add these to the list:
+  1. **Upgrade on an existing database.** Start the previous release, let it write a database, then start the new build on a copy of that database. The schema migrations must run and the data must stay.
+  2. **Install and update through the plugins.** Install from `releases/latest` through the Claude Code and Codex plugins. Update from the previous release. The proxy, the status line and the version must all move to the new release.
+  3. **The central push, once it is in use.** Check three things: the push sends **metadata only** (read the payload, no transcript text, tool output or bodies); it **reaches the collector**; it **fails open** when the collector is down (the request still goes out and the user sees no error).
 - At the end, stop the proxy by its own pid and remove everything the check created. **Remove the credential copies right after the last run;** the rest may stay until the tag. Report any state the check changed outside its own directories.
 
 A failed check blocks the tag. Fix it in a PR (step 2), then run the failed check again.
@@ -284,6 +300,7 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
 - Mark with **[Notice]** each item a user will see or must act on: a new default, a removed tab or command, a figure that moves.
 - Use real numbers where they help.
 - A fix to a feature that is new in the same release goes into that feature's item, not into "Fixed".
+- **Rollback.** Every release notes page gives the way back: `CONTEXT_GURU_VERSION=<previous tag>`, with the install command. Name the real previous tag.
 - **Known limits** lists the open issues a user can meet, with their numbers. Check that each one is still open.
 - An optional section, **What we measured**, gives the results of the measurements before the release (step 1), with their baselines.
 - A mode that the owner marks experimental stays "opt-in, not recommended" in the notes.
@@ -296,14 +313,19 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
 ## 8. Tag and publish
 
 1. Check that `main` has nothing after the checked commit except the version bump.
-2. Create an annotated tag on that commit and push it:
+2. **Ask the release owner: is this a beta, or does it replace latest?** Wait for the answer. Do not tag before it.
+   - **A beta.** Name the tag `vX.Y.Z-beta.N`. Mark the release as a pre-release. The owner and others test it on their laptops. They install it with `CONTEXT_GURU_VERSION=<tag>`. Users who do not set this variable keep `latest`.
+   - **A beta that the owner makes latest.** The owner may ask for this later. GitHub never makes a pre-release `latest`. So edit the release and mark it as not a pre-release. The tag and the title keep "beta".
+   - **Not a beta.** The release replaces latest at once.
+3. Create an annotated tag on that commit and push it:
    ```sh
    git tag -a vX.Y.Z <sha> -m "context-guru vX.Y.Z"
    git push origin refs/tags/vX.Y.Z
    ```
-3. The tag starts the release workflow (`.github/workflows/release.yaml`, GoReleaser). It takes about 15 minutes. Wait for it to pass, and check the assets (5 for v0.6.7).
-4. Put the approved notes at the top of the release body, above the generated changelog. The release title is `vX.Y.Z`.
-5. Tell the people and sessions that wait for the release: every PR owner, and the owners of any metric or signal that the release removes or renames.
+   For a beta, use the beta tag name.
+4. The tag starts the release workflow (`.github/workflows/release.yaml`, GoReleaser). It takes about 15 minutes. Wait for it to pass, and check the assets (5 for v0.6.7).
+5. Put the approved notes at the top of the release body, above the generated changelog. The release title is the tag name.
+6. Tell the people and sessions that wait for the release: every PR owner, and the owners of any metric or signal that the release removes or renames.
 
 ## 9. After the release
 
