@@ -32,6 +32,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1462,9 +1463,10 @@ SWEEP_V3_FACT_PREFIXES = ("sweep_v3_dropped_", "sweep_v3_expanded_")
 
 
 def sweep_v3_facts(port):
-    """The sweep's per-rule drop and expand counts on Bob's route, over the dashboard's whole history.
+    """The sweep's per-rule drop and expand counts on Bob's route, over the history the dashboard keeps.
 
-    The dashboard keeps them per request, so they survive a proxy restart."""
+    The dashboard keeps them per request, so they survive a proxy restart. It prunes old rows, so
+    after a prune an expand can outlive the drop it counts against."""
     url = f"http://127.0.0.1:{port}/api/components?agent=bob"
     with LOOPBACK.open(url, timeout=5) as reply:
         rows = json.load(reply).get("components") or []
@@ -1508,8 +1510,11 @@ def status(_args):
             pass  # an older proxy, or /stats unreadable: the counts are extra, not a check
         try:
             values.update(sweep_v3_facts(port))
-        except Exception:
-            pass  # an older proxy, or no dashboard: the counts are extra, not a check
+        except urllib.error.HTTPError as error:
+            if error.code != 404:  # 404: a proxy with no dashboard, so no counts to show
+                values["sweep_v3_error"] = type(error).__name__
+        except Exception as error:  # the counts are extra, not a check: name the failure, go on
+            values["sweep_v3_error"] = type(error).__name__
     if record.get("complete") is False:
         values["result"] = "setup_incomplete"
         values["hint"] = (f"Setup did not finish. Run the context-guru-setup skill again, or "

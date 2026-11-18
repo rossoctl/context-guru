@@ -1,6 +1,7 @@
 package offload
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/rossoctl/context-guru/expand"
@@ -50,9 +51,33 @@ func TestTheExpandNoteNamesWhatChoseTheDrop(t *testing.T) {
 		if !note.First {
 			t.Fatalf("expand of %s: not a first expand: %+v", ids[0], note)
 		}
-		got[note.Rule]++
+		for rule, n := range note.Rules {
+			got[rule] += n
+		}
 	}
 	if got[sourceJudge] != 4 || got[ruleFileReread] != 1 || got[ruleBuildRerun] != 1 {
 		t.Fatalf("expand notes by rule = %v, want judge 4, file_reread 1, build_rerun 1", got)
+	}
+}
+
+// #1203 review: two threads that dropped the same bytes share one marker, and each raised its own
+// dropped event. The repair path expands with no thread, so both owners get a first expand. The note
+// must count both, per rule, or the dashboard shows dropped 2 and expanded 1 for one real expand.
+func TestAnExpandWithNoThreadCountsEveryOwnersFirstExpandPerRule(t *testing.T) {
+	resetSweepLedgerForTest()
+	t.Cleanup(resetSweepLedgerForTest)
+	st := newMemStore()
+	original := "the bytes both threads dropped"
+	SeedSweepDropRuleForTest(st, "parent", original, "HASH", sourceJudge)
+	SeedSweepDropRuleForTest(st, "child", original, "HASH", ruleFileReread)
+
+	note := NoteSweepExpand(st, "HASH", 100, "")
+
+	want := map[string]int{sourceJudge: 1, ruleFileReread: 1}
+	if !maps.Equal(note.Rules, want) {
+		t.Fatalf("note.Rules = %v, want %v", note.Rules, want)
+	}
+	if again := NoteSweepExpand(st, "HASH", 100, ""); len(again.Rules) != 0 {
+		t.Fatalf("a second expand counted again: %v", again.Rules)
 	}
 }

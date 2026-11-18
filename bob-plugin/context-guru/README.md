@@ -210,8 +210,9 @@ do not use:
 
 When the sweep runs v3, `status` also shows, per rule and for the judge, the outputs it dropped on
 Bob's route and how many of those the model expanded again: `sweep_v3_dropped_<rule>` and
-`sweep_v3_expanded_<rule>`. It reads them from the dashboard, so they count over all history, also
-across a proxy restart. Counts only.
+`sweep_v3_expanded_<rule>`. It reads them from the dashboard, so they count over the history the
+dashboard keeps (it prunes old rows), also across a proxy restart. Counts only. `sweep_v3_error=`
+names a failed read.
 
 The other context-guru presets (`conservative` to `ultrahigh`) are not tested on Bob, so the plugin
 refuses them. A change restarts the proxy. If the new proxy does not start, the plugin puts

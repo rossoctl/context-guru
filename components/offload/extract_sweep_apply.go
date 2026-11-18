@@ -426,9 +426,10 @@ type SweepExpandNote struct {
 	Overlap bool
 	// Warm: the first expand was of a drop applied on a warm request (#491).
 	Warm bool
-	// Rule: on a first expand, what chose the drop when sweep v3 was on: a rule name, or "judge". Empty
-	// otherwise. The host counts expands per rule with it (#1191, the expand rate per rule).
-	Rule string
+	// Rules counts the first expands of sweep v3 drops by what chose each one: a rule name, or "judge".
+	// One per owner thread that had a first expand: with no thread, every owner of the marker gets one,
+	// and each owner raised its own dropped event. The host counts expands per rule with it (#1191).
+	Rules map[string]int
 }
 
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the
@@ -465,11 +466,14 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 			putDrop(st, rec)
 			if rec.Rule != "" {
 				noteV3Expand(rec.Rule)
+				if note.Rules == nil {
+					note.Rules = map[string]int{}
+				}
+				note.Rules[rec.Rule]++
 			}
 			if !note.First {
 				note.First, note.Overlap = true, overlap
 				note.Warm = rec.Kind == dropKindWarm
-				note.Rule = rec.Rule
 			}
 		}
 		isWarm := rec.Kind == dropKindWarm

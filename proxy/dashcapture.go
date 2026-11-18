@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -564,11 +565,11 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 			c.sweepFalseExpWarm++
 		}
 	}
-	if note.First && note.Rule != "" {
+	for rule, n := range note.Rules {
 		if c.sweepExpandRules == nil {
 			c.sweepExpandRules = map[string]int{}
 		}
-		c.sweepExpandRules[note.Rule]++
+		c.sweepExpandRules[rule] += n
 	}
 }
 
@@ -583,9 +584,12 @@ func addSweepExpandEvents(e *dash.Event, rules map[string]int) {
 		if row.Component != "extract_llm_sweep" {
 			continue
 		}
-		if row.Events == nil {
-			row.Events = map[string]int{}
+		// A copy: the row shares the component report's own map (dash.Event.FromTrace).
+		events := maps.Clone(row.Events)
+		if events == nil {
+			events = map[string]int{}
 		}
+		row.Events = events
 		for rule, n := range rules {
 			row.Events["sweep_v3_expanded_"+rule] += n
 		}

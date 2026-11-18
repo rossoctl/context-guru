@@ -348,6 +348,10 @@ func TestTheRepairPathChargesASweepMarkerOnceNotOnEveryTurn(t *testing.T) {
 // restart. The first expand of a v3 drop is an event on the sweep's own component row of that request:
 // the dashboard keeps it, with the route on the request, and /api/components sums it.
 func TestAFirstExpandOfAV3DropIsAnEventPerRuleOnTheSweepsRow(t *testing.T) {
+	// The expand lands in the process-wide sweep ledger, which /stats publishes: clear it, or it leaks
+	// into later tests (TestStatsShapeIsUnchanged).
+	offload.ResetSweepLedgerForTest()
+	t.Cleanup(offload.ResetSweepLedgerForTest)
 	var calls atomic.Int64
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -396,4 +400,31 @@ func TestAFirstExpandOfAV3DropIsAnEventPerRuleOnTheSweepsRow(t *testing.T) {
 	if n := sweep.Events["sweep_v3_expanded_judge"]; n != 1 {
 		t.Fatalf("sweep_v3_expanded_judge = %d, want 1 (events %v)", n, sweep.Events)
 	}
+}
+
+// #1203 review. addSweepExpandEvents writes only to the sweep's row, never invents one, and does not
+// change the component report's own Events map, which the row shares (dash.Event.FromTrace).
+func TestSweepExpandEventsGoOnlyOnAnExistingSweepRowAndLeaveTheReportAlone(t *testing.T) {
+	t.Run("no sweep row: nothing is added", func(t *testing.T) {
+		e := &dash.Event{Components: []dash.CompRow{{Component: "extract", Events: map[string]int{"x": 1}}}}
+
+		addSweepExpandEvents(e, map[string]int{"judge": 1})
+
+		if len(e.Components) != 1 || len(e.Components[0].Events) != 1 {
+			t.Fatalf("components = %+v, want the extract row alone and unchanged", e.Components)
+		}
+	})
+	t.Run("a sweep row: the events are added to a copy", func(t *testing.T) {
+		report := map[string]int{"sweep_v3_dropped_judge": 2}
+		e := &dash.Event{Components: []dash.CompRow{{Component: "extract_llm_sweep", Events: report}}}
+
+		addSweepExpandEvents(e, map[string]int{"judge": 1})
+
+		if got := e.Components[0].Events["sweep_v3_expanded_judge"]; got != 1 {
+			t.Fatalf("row events = %v, want sweep_v3_expanded_judge 1", e.Components[0].Events)
+		}
+		if _, leaked := report["sweep_v3_expanded_judge"]; leaked {
+			t.Fatalf("the report's own Events map changed: %v", report)
+		}
+	})
 }
