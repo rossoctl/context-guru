@@ -550,6 +550,38 @@ def _systemd_quote(value, exec_line=True):
     return '"' + value + '"'
 
 
+def log_service_error(error):
+    """Append a failed service command and its stderr to the proxy log, which the failure facts name."""
+    stderr = (error.stderr or b"").decode("utf-8", "replace").strip()
+    with open(state_dir() / "proxy.log", "a", encoding="utf-8") as handle:
+        handle.write(f"context-guru-pi: {error.cmd[0]} {error.cmd[1 if error.cmd[0] == 'launchctl' else 2]} "
+                     f"failed (exit {error.returncode}): {stderr}\n")
+
+
+def wait_launchd_gone(target, seconds=5.0):
+    """`launchctl bootout` returns before launchd removes the job (#1146). Wait until it is gone."""
+    deadline = time.monotonic() + seconds
+    while subprocess.run(["launchctl", "print", target], capture_output=True).returncode == 0:
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.1)
+
+
+def launchd_bootstrap(domain, plist):
+    """Load the plist. RunAtLoad starts the proxy, so no kickstart follows: a `kickstart -k` here kills
+    the new process, and launchd then waits its 10 s throttle. Error 5 means the old job is still being
+    removed; try again."""
+    for attempt in range(3):
+        try:
+            subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
+                           timeout=30)
+            return
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 5 or attempt == 2:
+                raise
+            time.sleep(0.5)
+
+
 def start_service(executable, port, upstreams=None):
     """Install and start the user service. Returns True once /healthz answers."""
     root = state_dir()
@@ -572,9 +604,13 @@ def start_service(executable, port, upstreams=None):
         unit.chmod(0o600)
         try:
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True)
-            subprocess.run(["systemctl", "--user", "enable", "--now", unit.name], check=True, capture_output=True)
+            # `restart` starts a stopped unit too; `enable --now` before it would start the proxy twice.
+            subprocess.run(["systemctl", "--user", "enable", unit.name], check=True, capture_output=True)
             subprocess.run(["systemctl", "--user", "restart", unit.name], check=True, capture_output=True)
-        except (OSError, subprocess.CalledProcessError):
+        except subprocess.CalledProcessError as error:
+            log_service_error(error)
+            return False
+        except OSError:
             return False
     elif kind == "launchd":
         plist = launchd_plist()
@@ -589,10 +625,12 @@ def start_service(executable, port, upstreams=None):
         domain = f"gui/{os.getuid()}"
         subprocess.run(["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"], capture_output=True)
         try:
-            subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True)
-            subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{LAUNCHD_LABEL}"], check=True,
-                           capture_output=True)
-        except (OSError, subprocess.CalledProcessError):
+            wait_launchd_gone(f"{domain}/{LAUNCHD_LABEL}")
+            launchd_bootstrap(domain, plist)
+        except subprocess.CalledProcessError as error:
+            log_service_error(error)
+            return False
+        except (OSError, subprocess.TimeoutExpired):
             return False
     else:
         return False
@@ -623,10 +661,8 @@ def restart_service():
             target = f"{domain}/{LAUNCHD_LABEL}"
             kick = ["launchctl", "kickstart", "-k", target]
             if subprocess.run(kick, capture_output=True, timeout=30).returncode != 0:
-                # Not loaded (a bootout, or a failed login start): load the plist, then start it.
-                subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
-                               timeout=30)
-                subprocess.run(kick, check=True, capture_output=True, timeout=30)
+                # Not loaded (a bootout, or a failed login start): loading the plist starts it.
+                launchd_bootstrap(domain, plist)
             return "restarted"
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return "failed"
@@ -647,6 +683,8 @@ def stop_service():
         if not plist_owned(plist):
             return "not_owned"
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], capture_output=True)
+        # Wait, or a setup right after this finds the old proxy still on the port and picks another.
+        wait_launchd_gone(f"gui/{os.getuid()}/{LAUNCHD_LABEL}")
         plist.unlink()
         return "stopped"
     return "gone"
@@ -1033,6 +1071,8 @@ def configure(args):
     extra = {}
     if restarted and preset == "ultrahigh":
         extra["probe"] = ask_defer_probe(int(record["port"]))
+    if not restarted:
+        extra["log"] = state_dir() / "proxy.log"
     facts(result="configured" if restarted else "not_applied", preset=preset, cache_strategy=strategy,
           proxy_restarted=str(restarted).lower(), **extra)
     return 0 if restarted else 1
@@ -1092,8 +1132,11 @@ def update(args):
         # Re-render with the NEW binary: it decides whether the config names the strategy.
         config = rerender_config(record, executable)
     restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
-    facts(result="updated", version=version, config=config, restart="completed" if restarted else "failed")
-    return 0 if restarted else 1
+    if not restarted:
+        facts(result="updated", version=version, config=config, restart="failed", log=state_dir() / "proxy.log")
+        return 1
+    facts(result="updated", version=version, config=config, restart="completed")
+    return 0
 
 
 def uninstall(args):
