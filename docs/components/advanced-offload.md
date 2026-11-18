@@ -1127,8 +1127,10 @@ covering the larger conversation — instead of sending a plain ping.
 when the money a cold return will save is at least as much as the refresh **adds** to the ping it
 replaces.
 
-- A refresh always takes the place of a due keep-alive ping. Both read the whole conversation from
-  the cache, so that read is paid either way.
+- A refresh at a planned keep-alive ping takes the place of that ping. Both read the whole
+  conversation from the cache, so that read is paid either way. This holds when the summary call
+  reads the same cached bytes as the ping: the `prefix_ask` path, which is every Anthropic request
+  on the proxy.
 - What the refresh adds is the **reply**: about 2,000 output tokens instead of 1, about $0.02 on
   Sonnet 5.
 - The money it saves is the new material it folds in, priced at what writing it on a cold return
@@ -1142,14 +1144,21 @@ counted the whole call, about $0.20 at 900,000 tokens, as the cost. A second ver
 whole call as the cost. That asked for roughly 80,000 new tokens at 900,000 tokens, and it asked
 for more as the conversation grew, although the read is paid by the ping anyway.
 
-**Today the rule weighs the saving against the extra cost only (#1144).** On Sonnet 5's prices a
-refresh pays after about **8,000** new tokens, whatever the size of the conversation:
-`$0.02 ÷ $2.50 per million`. The number adjusts automatically for other models' prices.
+**Today the rule weighs the saving against the extra cost only (#1144), in the case above.** On
+Sonnet 5's prices a refresh pays after about **8,000** new tokens, whatever the size of the
+conversation: `$0.02 ÷ $2.50 per million`. The number adjusts automatically for other models' prices.
 
-| | Cost the rule weighs | New tokens needed (Sonnet 5, 900k prompt) |
+| | Cost the rule weighs | New tokens needed (Sonnet 5) |
 |---|---|---|
-| `refresh_cost: extra` (default) | about $0.02, the reply | about **8,000** |
-| `refresh_cost: full` | about $0.20, the read and the reply | about **80,000** |
+| `refresh_cost: extra` (default) | about $0.02, the reply | about **8,000**, at any prompt size |
+| `refresh_cost: full` | the whole call: the read and the reply | about **80,000** at a 900k prompt |
+
+**These cases still weigh the whole call**, because no ping is replaced or the read is not shared:
+
+- the **extra slot** (the one request after the planned pings are spent; a declined refresh sends
+  nothing there);
+- the `messages` path, where the pipeline builds the request itself;
+- `model.source: config`, where another model reads the conversation with its own cache.
 
 - **The per-ping spending cap does not change.** It still compares the whole call with the cap,
   because it limits what one keep-alive request spends.
@@ -1197,9 +1206,9 @@ $2.25 − $0.20 = $2.05.
 **The refresh rule had two errors, and they go in opposite directions. #1144 fixed (a). (b) is still open.**
 
 - **(a) It counted the full call as the cost (fixed by default; `refresh_cost: full` restores it).** The code compared the saving with the read of the
-  whole conversation plus a reply (the "own cost" described above). A refresh always takes the place
-  of a due ping, so the read is paid either way. The extra cost is only the reply, about 10 times
-  less. This makes the rule refresh **too seldom**.
+  whole conversation plus a reply (the "own cost" described above). A refresh at a planned ping takes
+  the place of that ping, so the read is paid either way. The extra cost is only the reply, about
+  10 times less. This makes the rule refresh **too seldom**.
 - **(b) It counts the saving as certain (p = 1).** For a session that never comes back, this makes
   the rule refresh **too often**.
 - With the marginal cost, a refresh pays when `p × new tokens × $2.50 per million > $0.02`, so

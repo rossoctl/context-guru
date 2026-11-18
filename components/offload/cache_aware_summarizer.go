@@ -470,6 +470,8 @@ func init() {
 				"cost over the ping it replaces (the reply, about $0.02), so a refresh pays after " +
 				"about 8,000 new tokens on Sonnet 5. full = the whole call, the read of the " +
 				"conversation too (the rule before #1144), about 80,000 new tokens at a 900k prompt. " +
+				"extra applies only where the refresh replaces a planned ping and the call reads the ping's own " +
+				"prefix (prefix_ask); the extra slot, the messages path and model.source: config use the whole call. " +
 				"Read only with trigger.cache_state: pre_expiry and keep-alive on."},
 	}
 	f = append(f, modelFields("model")...)

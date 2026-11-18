@@ -170,15 +170,20 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	// at all" (the full-rewrite cold return this whole mechanism exists to avoid), not against a
 	// slightly smaller one, so info.IsRefresh gates this block to the refresh case alone.
 	//
-	// WHAT THE REFRESH ADDS, NOT WHAT THE CALL COSTS (#1144). A refresh takes the place of a due
-	// ping that reads the same prefix, so that read is paid either way. The cost to weigh is the
+	// WHAT THE REFRESH ADDS, NOT WHAT THE CALL COSTS (#1144). A refresh at a planned ping takes
+	// the place of a due ping that reads the same prefix, so that read is paid either way. The cost to weigh is the
 	// extra over the ping: the reply. `cost` (the whole call) stays the figure for the spending cap
 	// above. refresh_cost: full keeps the old test, against `cost`.
 	if info.IsRefresh {
 		saving := k.expectedRefreshSavingUSD(model, endpoint, prefix, info.RefreshTailTokens)
-		extra := k.projectedRefreshExtraUSD(model, endpoint, prefix, route)
+		extra := k.projectedRefreshExtraUSD(model, prefix, route, endpoint)
+		// The extra cost is the right figure only when the refresh REPLACES a ping that reads the
+		// same bytes: a planned ping (not the extra slot, where a decline sends nothing, so the
+		// refresh adds the whole call) and a candidate on the prefix_ask path (messages and
+		// model.source: config read the prefix at their own price). Anything else weighs the
+		// whole call, as before #1144.
 		weighed := extra
-		if info.RefreshFullCost {
+		if info.RefreshFullCost || j.extra || !info.ReadsPingPrefix {
 			weighed = cost
 		}
 		if saving < weighed {
