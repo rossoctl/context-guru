@@ -1066,8 +1066,7 @@ class StrategiesFromTheProxy(Sandbox):
     def test_setup_on_a_proxy_that_cannot_list_refuses_a_named_strategy_and_writes_nothing(self):
         binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
         pi_plugin.write_record({"binary": binary})
-        for argv in (("setup", "--plan", "--cache-strategy", "auto"),
-                     ("setup", "--i-consent-to-traffic-interception", "--cache-strategy", "auto")):
+        for argv in (("setup", "--plan"), ("setup", "--i-consent-to-traffic-interception")):
             code, facts = self.run_main(*argv)
             self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
         self.assertFalse(pi_plugin.proxy_config().exists())
@@ -1075,14 +1074,6 @@ class StrategiesFromTheProxy(Sandbox):
         code, facts = self.run_main("setup", "--plan", "--cache-strategy", "none")
         self.assertEqual((code, facts["result"]), (0, "planned"))
         self.assertNotIn("quota", facts["consent_question"])
-
-    def test_setup_on_a_proxy_that_cannot_list_uses_none_for_its_own_default(self):
-        binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
-        pi_plugin.write_record({"binary": binary})
-        code, facts = self.run_main("setup", "--plan")
-        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "planned", "none"))
-        self.assertIn("cache strategy auto cannot be used", facts["cache_strategy_note"])
-        self.assertIn("v0.7.1 or later", facts["cache_strategy_note"])
 
 
 GATEWAY = {"anthropic": "https://gw.example/anthropic", "openai": "https://gw.example/openai/v1"}
@@ -1382,6 +1373,29 @@ class DefaultStrategyFallback(Sandbox):
         code, facts = self.setup("--plan")
         self.assertEqual((code, facts["cache_strategy"]), (0, "none"))
         self.assertIn("cache strategy 1-ping is not offered for Pi", facts["cache_strategy_note"])
+
+    def test_a_proxy_that_cannot_list_still_refuses_the_default_and_keeps_the_record(self):
+        pi_plugin.write_record({"cache_strategy": "1-ping"})
+        self.table.stop()
+        self.table = mock.patch.object(pi_plugin, "load_strategy_table", side_effect=pi_plugin.StrategyError(
+            "the strategies probe timed out", "proxy_too_old"))
+        self.table.start()
+        code, facts = self.setup("--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
+        self.assertEqual(pi_plugin.read_record()["cache_strategy"], "1-ping")
+
+    def test_a_busy_lock_after_the_download_keeps_the_binary_another_setup_may_use(self):
+        with mock.patch.object(pi_plugin, "restart_lock", side_effect=pi_plugin.LockBusy("held")):
+            code, facts = self.setup("--i-consent-to-traffic-interception", binary=None, download=self.download)
+        self.assertEqual((code, facts["reason"]), (2, "busy"))
+        self.assertTrue(pi_plugin.managed_binary().exists())
+
+    def test_a_config_conflict_after_the_download_deletes_the_downloaded_binary(self):
+        with mock.patch.object(pi_plugin, "write_proxy_config", side_effect=RuntimeError("not ours")), \
+                mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+            code, facts = self.setup("--i-consent-to-traffic-interception", binary=None, download=self.download)
+        self.assertEqual((code, facts["reason"]), (2, "config_conflict"))
+        self.assertFalse(pi_plugin.managed_binary().exists())
 
     def test_a_strategy_the_person_named_is_still_refused(self):
         code, facts = self.setup("--plan", "--cache-strategy", "auto")

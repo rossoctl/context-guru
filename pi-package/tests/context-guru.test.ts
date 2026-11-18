@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, setupDoneText,
+  stripsChatGPTFields, strategyChoices, type StartCheck, setupDoneText, consentText,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -331,4 +331,14 @@ test("a setup with no fallback has no note line", () => {
   const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "auto", dashboard: "d", reset_hatch: "h" });
   assert.doesNotMatch(text, /so setup uses/);
   assert.equal(text.split("\n").length, 4);
+});
+
+test("the consent dialog names a strategy fallback before the yes", () => {
+  assert.equal(consentText("ROUTE-TEXT", "cache strategy auto is not offered for Pi, so setup uses none"),
+    "ROUTE-TEXT cache strategy auto is not offered for Pi, so setup uses none.");
+  assert.equal(consentText("ROUTE-TEXT", undefined), "ROUTE-TEXT");
+  const p = conflictPrompt({ consent_question_chain: "C", consent_question_replace: "R", existing_base_url: "x",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none" });
+  assert.deepEqual(p.consent, { chain: "C cache strategy auto is not offered for Pi, so setup uses none.",
+    replace: "R cache strategy auto is not offered for Pi, so setup uses none." });
 });

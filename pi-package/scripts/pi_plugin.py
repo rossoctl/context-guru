@@ -380,14 +380,14 @@ def resolve_strategy(name, executable):
 def pick_strategy(name, executable, named_by_person):
     """resolve_strategy, plus a note. A name the person gave is refused as before. A name setup picked
     itself (the default, or the recorded one) that this proxy does not offer for Pi becomes `none`, so
-    setup never refuses its own default (#1148). The note says why."""
+    setup does not refuse its own default (#1148). The note says why. Every other error (an old proxy,
+    a probe that failed) is refused as before."""
     try:
         return (*resolve_strategy(name, executable), {})
     except StrategyError as error:
-        if named_by_person:
+        if named_by_person or error.reason != "unknown_strategy":
             raise
-        why = "is not offered for Pi" if error.reason == "unknown_strategy" else f"cannot be used ({error})"
-        return NONE_STRATEGY, None, {"cache_strategy_note": f"cache strategy {name} {why}, so setup uses none"}
+        return NONE_STRATEGY, None, {"cache_strategy_note": f"cache strategy {name} is not offered for Pi, so setup uses none"}
 
 
 def install_release_binary(version=None):
@@ -843,8 +843,9 @@ def setup(args):
             return 2
 
     def drop_download():
-        """A setup that stops before the start leaves no binary behind: the next setup would use it,
-        even when a newer release exists (#1157)."""
+        """A setup that stops under the lock and before the start leaves no binary behind: the next
+        setup would use it, even when a newer release exists (#1157). After a failed start the binary
+        stays, because the service names it."""
         if downloaded:
             managed_binary().unlink(missing_ok=True)
             facts(binary="removed")
@@ -861,7 +862,7 @@ def setup(args):
     try:
         lock = restart_lock()
     except LockBusy as error:
-        drop_download()
+        # The binary stays: the setup that holds the lock may have downloaded the same file.
         facts(result="error", reason="busy", detail=error)
         return 2
     with lock:

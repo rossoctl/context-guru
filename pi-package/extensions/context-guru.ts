@@ -211,11 +211,15 @@ export function stripsChatGPTFields(install: Install | undefined): boolean {
   return !install?.upstreams?.openai;
 }
 
-/** The one question for a models.json that already sends a provider elsewhere, built from the plan's
- *  paired answers. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
+/** The consent text with the plan's strategy note, so a fallback to `none` is named before the yes. */
+export function consentText(question: string, note: string | undefined): string {
+  return note ? `${question} ${note}.` : question;
+}
+
+/** The question for a models.json that already sends a provider elsewhere, built from the plan's paired
+ *  answers. The title is a short question (#1158); the consent text of each answer is shown in a confirm
+ *  dialog after the pick. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
  *  offered only when the plan printed it (the proxy can reproduce that URL). */
-/** The conflict question. The title is a short question (#1158); the consent text of each answer is
- *  shown in a confirm dialog after the pick, so the person reads what they agree to. */
 export function conflictPrompt(f: Record<string, string>): {
   title: string; options: string[]; answers: Record<string, string>; consent: Record<string, string>;
 } {
@@ -226,14 +230,14 @@ export function conflictPrompt(f: Record<string, string>): {
   if (f.consent_question_chain) {
     options.push(CHAIN);
     answers[CHAIN] = "chain";
-    consent.chain = f.consent_question_chain;
+    consent.chain = consentText(f.consent_question_chain, f.cache_strategy_note);
   } else if (f.chain_refused) {
     parts.push(`Chain is not offered: context-guru cannot forward to that URL the way Pi does (${f.chain_refused}).`);
   }
   if (f.consent_question_replace) {
     options.push(REPLACE);
     answers[REPLACE] = "replace";
-    consent.replace = f.consent_question_replace;
+    consent.replace = consentText(f.consent_question_replace, f.cache_strategy_note);
   }
   options.push(KEEP);
   return { title: parts.join("\n\n"), options, answers, consent };
@@ -418,7 +422,7 @@ export default function contextGuru(pi: ExtensionAPI) {
         say(ctx, `context-guru setup needs an interactive yes. Question: ${f.consent_question}`, "warning");
         return;
       }
-      const yes = await ctx.ui.confirm("Route Pi through context-guru?", f.consent_question);
+      const yes = await ctx.ui.confirm("Route Pi through context-guru?", consentText(f.consent_question, f.cache_strategy_note));
       if (!yes) {
         say(ctx, "Nothing changed.");
         return;
