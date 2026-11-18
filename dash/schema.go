@@ -290,6 +290,9 @@ CREATE TABLE IF NOT EXISTS requests (
   -- model asked back for, inserted as a message of its own and sent again on every later turn. 0 when
   -- none was inserted.
   restored_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The unit of every *_usd column on this row: the currency of the price that costed it (the price
+  -- file's currency key, USD by default; Bob's file says Bobcoins). Configuration, not user data.
+  currency TEXT NOT NULL DEFAULT 'USD',
   -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
   -- reply id.
   backend                 TEXT    NOT NULL DEFAULT '',
@@ -961,6 +964,10 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
 	// every earlier row: those were not recorded, so they read as no copy.
 	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	// The unit of the row's costs. Additive, USD on every earlier row: before the price file could name
+	// a unit, the dashboard read every cost as dollars. A row a Bobcoins price file costed before this
+	// column existed also reads USD, so a view across the upgrade can say mixed.
+	{"requests", "currency", "TEXT NOT NULL DEFAULT 'USD'"},
 	// Bob's backend label. Additive: an earlier row has none.
 	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
 	// The client compaction verdict (#947). Nullable, no default: NULL says the row has no verdict,

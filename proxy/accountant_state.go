@@ -32,6 +32,9 @@ const (
 type accStateFile struct {
 	Version  int             `json:"cgStateVersion"`
 	Snapshot json.RawMessage `json:"snapshot"`
+	// Thinking is the count of each thinking block (savingsTracker.thinking): a key and a number each. A file
+	// written before it has none, and restores with an empty table.
+	Thinking json.RawMessage `json:"thinking,omitempty"`
 }
 
 // lastSaved holds the bytes of the last file written, so a save with no change skips the write.
@@ -48,7 +51,11 @@ func (s *savingsTracker) save(path string) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap})
+	thinking, err := json.Marshal(s.thinking)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking})
 	if err != nil {
 		return err
 	}
@@ -95,8 +102,15 @@ func removeStaleTemps(path string) {
 	}
 }
 
+// accThinkingMaxAge is how old a state file may be and still give back its thinking counts. A count is
+// keyed by a signature's hash, not by a time, and a block can come back long after its cache entry expired
+// (it is billed as fresh input then), so the counts outlive the snapshot's hour.
+const accThinkingMaxAge = 24 * time.Hour
+
 // restore loads a snapshot saved by save. It fails open: a missing, stale or unreadable file is logged
-// and the proxy starts with empty state, as before. It reports whether it restored anything.
+// and the proxy starts with empty state, as before. It reports whether it restored the snapshot. The
+// thinking counts are restored on their own: from a file up to accThinkingMaxAge old, and also when the
+// snapshot is refused.
 func (s *savingsTracker) restore(path string, now time.Time) bool {
 	removeStaleTemps(path)
 	fi, err := os.Stat(path)
@@ -106,21 +120,33 @@ func (s *savingsTracker) restore(path string, now time.Time) bool {
 		}
 		return false
 	}
-	if age := now.Sub(fi.ModTime()); age > accStateMaxAge {
+	age := now.Sub(fi.ModTime())
+	if age > accThinkingMaxAge {
 		slog.Info("accountant: state file is older than any cache entry; starting empty", "path", path, "age", age.Round(time.Second))
 		return false
 	}
 	data, err := os.ReadFile(path)
+	var f accStateFile
 	if err == nil {
-		var f accStateFile
 		switch {
 		case json.Unmarshal(data, &f) != nil:
 			err = errors.New("not a state file")
 		case f.Version != accStateVersion:
 			err = errors.New("state file has proxy version " + strconv.Itoa(f.Version) + ", this proxy uses " + strconv.Itoa(accStateVersion))
-		default:
-			err = s.trackers.Restore(f.Snapshot)
 		}
+	}
+	if err == nil && len(f.Thinking) > 0 {
+		// The counts only refine a price, so a bad table is logged and dropped, and the snapshot is still read.
+		if terr := json.Unmarshal(f.Thinking, s.thinking); terr != nil {
+			slog.Warn("accountant: thinking counts not restored", "path", path, "err", terr)
+		}
+	}
+	if err == nil && age > accStateMaxAge {
+		slog.Info("accountant: state file is older than any cache entry; only the thinking counts are restored", "path", path, "age", age.Round(time.Second))
+		return false
+	}
+	if err == nil {
+		err = s.trackers.Restore(f.Snapshot)
 	}
 	if err != nil {
 		slog.Warn("accountant: state not restored; starting empty", "path", path, "err", err)

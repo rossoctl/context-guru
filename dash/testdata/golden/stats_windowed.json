@@ -41,6 +41,7 @@
  "compaction_resets": 0,
  "corrected_saving_rows": 0,
  "cost_usd": 1.12,
+ "currency": "USD",
  "decl_credit_priced": true,
  "decl_filter_reads": 0,
  "decl_filter_requests": 0,

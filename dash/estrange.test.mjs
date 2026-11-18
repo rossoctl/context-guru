@@ -18,7 +18,8 @@ const cut = (name) => {
   return m[1];
 };
 const nf = new Intl.NumberFormat('en-US');
-const { usd, estRange } = new Function('nf', cut('usd') + '\n' + cut('estUsd') + '\n' + cut('estRange') +
+// usd() reads the page's money unit (dash/moneyunit.test.mjs); these figures are dollars.
+const { usd, estRange } = new Function('nf', "let moneyUnit = 'USD';\n" + cut('usd') + '\n' + cut('estUsd') + '\n' + cut('estRange') +
   '\nreturn { usd, estRange };')(nf);
 
 test('a floor that is a cost is shown beside the ceiling', () => {

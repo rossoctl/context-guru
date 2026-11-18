@@ -9,6 +9,7 @@ import (
 
 	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/thinkcount"
 	"github.com/tidwall/gjson"
 )
 
@@ -68,6 +69,9 @@ type Usage struct {
 	ToolUseIncomplete bool
 	// Backend is which of Bob's backends answered (bobBackend). Set on Bob's model route only.
 	Backend string
+	// Thinking is the signature of each thinking block the response made and its thinking_tokens. finish
+	// records it in the accountant's count table (issue #1187). Empty when the response made no block.
+	Thinking thinkcount.Response
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things

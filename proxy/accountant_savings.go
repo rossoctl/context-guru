@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/rossoctl/accountant"
+
+	"github.com/rossoctl/context-guru/thinkcount"
 )
 
 // savingsTracker runs the accountant calls around one request. It holds the one Trackers
@@ -24,6 +26,16 @@ type savingsTracker struct {
 	billed1h *tierStore
 	// rescueFactsMissing counts priced requests that followed keep-alive pings but found no ping facts.
 	rescueFactsMissing atomic.Int64
+	// thinking holds the token count of each thinking block a response made, by its signature's key, so a block
+	// the client sends back is priced at its own count (issue #1187, accountant design D16). Saved with the state.
+	thinking *thinkcount.Table
+}
+
+// recordThinking stores the thinking counts of one billed response. Nil-safe.
+func (s *savingsTracker) recordThinking(r thinkcount.Response) {
+	if s != nil {
+		s.thinking.Record(r)
+	}
 }
 
 // noteRescueFactsMissing counts one priced request that followed pings and found no ping facts. Nil-safe.
@@ -66,13 +78,14 @@ func (s *savingsTracker) drop(req *accountant.Request) {
 }
 
 func newSavingsTracker() *savingsTracker {
-	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore(), billed1h: newTierStore()}
+	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore(), billed1h: newTierStore(),
+		thinking: thinkcount.NewTable(0)}
 }
 
 // begin opens the request record with the client body, before any component ran. The Trackers bound
 // their own memory (accountant design §6.1, Memory), so there is nothing to sweep here.
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
-	body, bps := accParse(client)
+	body, bps := accParseCounted(client, s.thinking.Lookup)
 	req := s.trackers.BeginRequest(meta, body, bps)
 	s.clients.Store(req, clientHash{meta: meta, raw: client, body: body, bps: bps})
 	return req
@@ -95,10 +108,10 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 		if bytes.Equal(v.(clientHash).raw, forwarded) {
 			fwd, bps = client, v.(clientHash).bps
 		} else {
-			fwd, bps = accParse(forwarded)
+			fwd, bps = accParseCounted(forwarded, s.thinking.Lookup)
 		}
 	} else {
-		fwd, bps = accParse(forwarded)
+		fwd, bps = accParseCounted(forwarded, s.thinking.Lookup)
 	}
 	facts.SharedWarm = s.siblings.sharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)
