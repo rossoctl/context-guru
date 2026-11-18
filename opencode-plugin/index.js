@@ -10,14 +10,15 @@ const DEFAULT_PRESET = "off"
 // The picker ladder is a plugin choice. The proxy lists every preset it registers, not this ladder.
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
 // The plugin downloads this release unless CONTEXT_GURU_VERSION says otherwise. `strategies` exists
-// from v0.7.1. An older binary cannot give the plugin its strategy table, so there is no fallback.
+// from MIN_VERSION. An older binary cannot give the plugin its strategy table, so there is no fallback.
 const PINNED_VERSION = "v0.7.3"
+const MIN_VERSION = "v0.7.1"
 
 // The strategy table has one owner: the proxy. `context-guru-proxy strategies` prints it as JSON.
 // The plugin keeps no copy. It runs the command with a short time limit. A binary that does not know
 // the word would start serving, so the command gets a loopback port 0 and is killed at the limit.
 export function loadStrategyTable(binaryPath) {
-  const update = `update the proxy to ${PINNED_VERSION} or later (/context-guru-update, or remove the binary so the plugin downloads ${PINNED_VERSION})`
+  const update = `update the proxy to ${MIN_VERSION} or later (/context-guru-update, or remove the binary so the plugin downloads ${PINNED_VERSION})`
   const run = spawnSync(binaryPath, ["strategies"], {
     encoding: "utf8",
     timeout: 5000,
@@ -181,13 +182,21 @@ async function downloadBinary(state) {
 
 export function findBinaryForTest(state) { return findBinary(state) }
 
+// The release tag a binary reports with --version ("context-guru-proxy 0.7.3 (commit …)" gives v0.7.3).
+// The binary is the source of truth: the update script swaps it and does not rewrite install.json.
+function reportedVersion(path) {
+  const run = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", env: { ...process.env, LISTEN_ADDR: "127.0.0.1:0", CONFIG: "" } })
+  const match = /^context-guru-proxy v?(\d[A-Za-z0-9._-]*)/.exec(run.stdout ?? "")
+  return match ? `v${match[1]}` : undefined
+}
+
 function findBinary(state) {
   const configured = process.env.CONTEXT_GURU_BIN
   if (configured && existsSync(configured)) return { path: configured, managed: false }
   const path = executableOnPath("context-guru-proxy")
   if (path) return { path, managed: false }
   const managed = join(state, "bin", "context-guru-proxy")
-  if (existsSync(managed)) return { path: managed, managed: true, version: readJSON(join(state, "install.json"))?.version }
+  if (existsSync(managed)) return { path: managed, managed: true, version: reportedVersion(managed) ?? readJSON(join(state, "install.json"))?.version }
   return undefined
 }
 
@@ -334,16 +343,24 @@ set -u
 REPO="\${CONTEXT_GURU_REPO:-rossoctl/context-guru}"
 RELEASES="\${CONTEXT_GURU_RELEASES_URL:-https://github.com/\$REPO/releases}"
 STATE=${shQuote(state)}
-if [ ! -f "$STATE/install.env" ]; then
+if [ -f "$STATE/install.env" ]; then
+  . "$STATE/install.env"
+elif [ -f "$STATE/bin/context-guru-proxy" ]; then
+  # A start that refused a too-old binary writes no install.env. The downloaded binary is still there.
+  binary="$STATE/bin/context-guru-proxy"
+  managed=yes
+else
   printf '%s\\n' "result=never-installed"
   exit 0
 fi
-. "$STATE/install.env"
 if [ "\${managed:-no}" != "yes" ]; then
   printf '%s\\n' "result=external" "binary=\${binary:-}"
   printf '%s\\n' "note=this binary was not downloaded by the plugin; update it where it came from"
   exit 0
 fi
+# The binary says what it is. install.env can be out of date.
+reported=$("$binary" --version 2>/dev/null | head -1 | sed -n 's/^context-guru-proxy v\\{0,1\\}\\([0-9][A-Za-z0-9._-]*\\).*/v\\1/p')
+if [ -n "$reported" ]; then version=$reported; fi
 latest=$(curl -fsSI --max-time 10 "$RELEASES/latest" 2>/dev/null | tr -d '\\r' | sed -n 's/^[Ll]ocation:.*\\/tag\\///p' | head -1)
 case "$latest" in
   ''|*[!A-Za-z0-9._-]*) printf '%s\\n' "result=lookup-failed" "reason=odd-tag"; exit 1 ;;
@@ -391,9 +408,11 @@ fi
 mv "$replacement" "$binary" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
 chmod 755 "$binary"
 if [ "$(uname -s)" = "Darwin" ]; then xattr -d com.apple.quarantine "$binary" 2>/dev/null || true; fi
-grep -v '^version=' "$STATE/install.env" > "$STATE/install.env.new" || true
-printf '%s\\n' "version=$latest" >> "$STATE/install.env.new"
-mv "$STATE/install.env.new" "$STATE/install.env"
+if [ -f "$STATE/install.env" ]; then
+  grep -v '^version=' "$STATE/install.env" > "$STATE/install.env.new" || true
+  printf '%s\\n' "version=$latest" >> "$STATE/install.env.new"
+  mv "$STATE/install.env.new" "$STATE/install.env"
+fi
 printf '%s\\n' "result=updated" "version=$latest"
 if [ -f "$STATE/context-guru-start" ]; then
   sh "$STATE/context-guru-start"
@@ -958,7 +977,7 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
   if (!binary) binary = await downloadBinary(state)
   return withLock(dirname(state), async () => {
     // Another instance may have put a binary in place while this one waited. Keep the version we
-    // know: the file on disk does not carry it until install.json is written.
+    // know when the file on disk does not report one.
     const found = findBinary(state)
     if (found) binary = { ...found, version: found.version || binary?.version }
     const dialects = [...new Set(routes.map((route) => route.dialect))]

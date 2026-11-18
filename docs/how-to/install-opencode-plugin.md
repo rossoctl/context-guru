@@ -68,7 +68,7 @@ credential while you are away. Set other values with the tuple form:
 - The default is the proxy default, `auto`. If `auto` does not fit the routed providers, the plugin runs `none` and logs why.
 - The old name `5-min-ping` still works. The proxy reads it as `auto`.
 - The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
-- **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy.
+- **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy. If the plugin downloaded that binary, `/context-guru-update` installs the latest release. Then restart OpenCode.
 - `none` sends no keep-alive requests.
 
 ## What the plugin stores
