@@ -57,8 +57,10 @@ const (
 	eventApplyPanic           = "sweep_apply_panic"
 	eventFalseRef             = "sweep_false_ref"
 	// The warm path (#491) applies through the same code and counts apart.
-	eventAppliedWarm  = "sweep_applied_warm"
-	eventFalseRefWarm = "sweep_false_ref_warm"
+	eventAppliedWarm = "sweep_applied_warm"
+	// eventV3DroppedPrefix + a rule name (or "judge") counts the v3 drops each one chose, on the request.
+	eventV3DroppedPrefix = "sweep_v3_dropped_"
+	eventFalseRefWarm    = "sweep_false_ref_warm"
 )
 
 // gateApplyAlreadyMarked: a held drop's output carries a marker one of our components made, so it is
@@ -424,6 +426,9 @@ type SweepExpandNote struct {
 	Overlap bool
 	// Warm: the first expand was of a drop applied on a warm request (#491).
 	Warm bool
+	// Rule: on a first expand, what chose the drop when sweep v3 was on: a rule name, or "judge". Empty
+	// otherwise. The host counts expands per rule with it (#1191, the expand rate per rule).
+	Rule string
 }
 
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the
@@ -464,6 +469,7 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 			if !note.First {
 				note.First, note.Overlap = true, overlap
 				note.Warm = rec.Kind == dropKindWarm
+				note.Rule = rec.Rule
 			}
 		}
 		isWarm := rec.Kind == dropKindWarm
@@ -1131,6 +1137,10 @@ func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bs
 		if e.v3 {
 			for _, p := range pending {
 				noteV3Dropped(p.rec.TKind)
+				if p.rec.Rule != "" {
+					// Per rule, on the request: the dashboard keeps it per route, across a restart (#1191).
+					rep.Event(eventV3DroppedPrefix + p.rec.Rule)
+				}
 			}
 		}
 		if warmGated {

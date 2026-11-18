@@ -208,6 +208,11 @@ do not use:
 `tool_defer_deferred_tokens`, `tool_defer_add_backs`, `tool_defer_wrong_guesses`,
 `tool_defer_turned_off`, `tool_defer_break`.
 
+When the sweep runs v3, `status` also shows, per rule and for the judge, the outputs it dropped on
+Bob's route and how many of those the model expanded again: `sweep_v3_dropped_<rule>` and
+`sweep_v3_expanded_<rule>`. It reads them from the dashboard, so they count over all history, also
+across a proxy restart. Counts only.
+
 The other context-guru presets (`conservative` to `ultrahigh`) are not tested on Bob, so the plugin
 refuses them. A change restarts the proxy. If the new proxy does not start, the plugin puts
 back the old config and the old service, and says if that failed (`rolled_back=false`). A config

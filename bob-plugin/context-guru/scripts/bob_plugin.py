@@ -1456,6 +1456,29 @@ def tool_defer_facts(block):
     return shown
 
 
+# The sweep's per-rule counts (#1191, Phase 7): what each v3 rule, and the judge, dropped and how many
+# of those drops the model expanded again. Counts only, never content.
+SWEEP_V3_FACT_PREFIXES = ("sweep_v3_dropped_", "sweep_v3_expanded_")
+
+
+def sweep_v3_facts(port):
+    """The sweep's per-rule drop and expand counts on Bob's route, over the dashboard's whole history.
+
+    The dashboard keeps them per request, so they survive a proxy restart."""
+    url = f"http://127.0.0.1:{port}/api/components?agent=bob"
+    with LOOPBACK.open(url, timeout=5) as reply:
+        rows = json.load(reply).get("components") or []
+    shown = {}
+    for row in rows:
+        if row.get("component") != "extract_llm_sweep":
+            continue
+        for name, count in (row.get("events") or {}).items():
+            if name.startswith(SWEEP_V3_FACT_PREFIXES) and isinstance(count, int) \
+                    and not isinstance(count, bool):
+                shown[name] = shown.get(name, 0) + count
+    return shown
+
+
 def status(_args):
     record = read_record()
     port = record_port(record)
@@ -1483,6 +1506,10 @@ def status(_args):
             values.update(tool_defer_facts(tool_defer_stats(port)))
         except Exception:
             pass  # an older proxy, or /stats unreadable: the counts are extra, not a check
+        try:
+            values.update(sweep_v3_facts(port))
+        except Exception:
+            pass  # an older proxy, or no dashboard: the counts are extra, not a check
     if record.get("complete") is False:
         values["result"] = "setup_incomplete"
         values["hint"] = (f"Setup did not finish. Run the context-guru-setup skill again, or "
