@@ -80,7 +80,8 @@ The plugin registers six commands:
 
 The two pickers save your choice first. A restart applies it. A restart costs one cache rewrite
 in every open session of this project, so the command asks first. If you say no, the choice
-applies at the next OpenCode start.
+applies at the next OpenCode start. `set NAME --restart` can answer `result=already_applied` and
+skip the restart when the running proxy already uses the saved choice.
 
 ### Native dialogs in the TUI
 

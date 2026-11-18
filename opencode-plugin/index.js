@@ -307,7 +307,7 @@ fi
 if [ ! -f "$STATE/install.env" ]; then
   if [ "$reenabled" -eq 1 ]; then
     printf '%s\\n' "result=re-enabled"
-    printf '%s\\n' "note=the next OpenCode start downloads the proxy"
+    printf '%s\\n' "note=the next OpenCode start sets up the proxy again"
   else
     printf '%s\\n' "result=never-installed"
     printf '%s\\n' "note=restart OpenCode; the plugin downloads the binary and starts the proxy at startup"
@@ -621,6 +621,8 @@ case "\${1:-}" in
     # at startup before the agent asks. Restarting again would cost another cache
     # rewrite for nothing. The install record holds what the running proxy was
     # started with; the live /stats preset, when it answers, must agree with it.
+    # /stats reports the preset but not the strategy, so the strategy half of this
+    # check trusts the install record only.
     if command -v curl >/dev/null 2>&1 && [ -n "\${port:-}" ] && curl -fsS --max-time 2 "http://127.0.0.1:\${port:-1}/healthz" >/dev/null 2>&1; then
       if [ "$new_preset" = "\${preset:-}" ] && [ "$new_strategy" = "\${strategy:-}" ]; then
         if [ -z "$running_preset" ] || [ "$running_preset" = "$new_preset" ]; then
