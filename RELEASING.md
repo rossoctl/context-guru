@@ -23,6 +23,7 @@ Owner decision, 2026-11-18.
 | **Integrator** | Keeps the release list. Starts reviews, merges, merges `main` into a ready PR that waits only for that, runs the integration check, writes the notes, tags. |
 | **PR author** | Writes the change and its tests. Fixes review findings. |
 | **Reviewer** | Gives one independent review of one PR. Never the author of that PR. Each PR has 2 reviewers. |
+| **Production monitor** | A session that checks production data and invariants, after a release and on request. Once the central store is live, it reads the central metadata. |
 
 The integrator and the reviewers can be people or AI agent sessions. The rules are the same.
 
@@ -69,7 +70,7 @@ A PR must not change behavior unless a human developer allows it. This holds mos
   - Put all the pending behavior changes in one table (PR, who it affects, old, new, how to turn it off), so the owner can answer them in one message.
   - Quote the yes, with its date, in the squash-merge body.
   - The owner may type in another keyboard layout by mistake. Say how you read such an answer, and wait if you are not sure.
-- **A change in what leaves the laptop** is a behavior change too. Metrics and metadata go to a central store. A feature's row in [docs/data-dependence.md](docs/data-dependence.md) must also say what leaves the laptop, at each storage level (off, metadata only, everything). The PR states it at the top. A PR that adds or widens what leaves the laptop needs the owner of that row to confirm it before the merge.
+- **A change in what leaves the laptop** is a behavior change too. Metrics and metadata go to a central store. A PR that adds or widens what leaves the laptop updates that feature's row in [docs/data-dependence.md](docs/data-dependence.md) to say so, at each storage level (off, metadata only, everything). The PR states it at the top. The owner of that row confirms it before the merge.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
 - **To revert a merged PR during a release** (as with #768):
   1. Try `git revert <merge-commit>` on a throwaway branch from `main`. Run vet, the build and the test suites there.
@@ -241,6 +242,7 @@ Notes:
 - Known flakes on a loaded machine: `SQLITE_BUSY` in `./dash/...`, and `TestDashEmitterKeepAlivePingCarriesNoWaitCause`.
 - **Known flake: `TestFailedLoadAllowsRetry`** (`store/disk_test.go:413`). It fails with `OpenDisk: context deadline exceeded` when the machine is under load. In v0.7.2 it passed on a re-run, and 3 times when run alone. Issue #1075 covers it. Check it with `gh issue view 1075`.
 - If a test fails, run it on an unmodified `origin/main` on the same machine before you call it a defect of the release. Some tests fail because of the machine itself.
+- **A failure that also fails on an unmodified `origin/main` on the same machine does not block the tag.** Post the proof, both runs, in the release notes draft or on the release issue.
 
 **Part B: one live session through a proxy built from `main`.**
 - **Hosted mode** has no gate of its own (see [Where context-guru runs](#where-context-guru-runs)). Its tests still run in Part A.
@@ -260,7 +262,7 @@ Notes:
   8. the dashboard loads every tab;
   9. a bypassed request gets its token count;
   10. **always, the cache strategy (#776, #867):** the number of planned pings depends on what the thread waits for. Read `waiting_for` of the turn to know the count: a person gets the base plus 1, a tool gets pings until its result comes back (at most 8). Every planned ping for that wait is plain and reads the full prefix. A keep-alive substitute comes only after the LAST planned ping.
-- Ask each PR owner for the check of each user-visible change. **Codex checks are the PR owner's job,** with proof posted on the PR, not part of Part B.
+- Ask each PR owner for the check of each user-visible change. **The checks of the other clients (Codex, Bob, Pi, OpenCode) are the PR owner's job,** with proof posted on the PR, not part of Part B.
 - Keep the session small. Report the spend.
 - Record the evidence for each check: request rows, API output, status-line output.
 - **Traps that make a check look broken:**
@@ -276,7 +278,7 @@ Notes:
   - `ps -o args=` shows the path the proxy was started with, often relative. A kill guard that matches the absolute path skips the kill.
 - **Checks for production on laptops.** A release reaches every laptop at once through `releases/latest`, so add these to the list:
   1. **Upgrade on an existing database.** Start the previous release, let it write a database, then start the new build on a copy of that database. The schema migrations must run and the data must stay.
-  2. **Install and update through the plugins.** Install from `releases/latest` through the Claude Code plugin, and update it from the previous release. The other clients' plugins (Codex, Bob, Pi, OpenCode) stay the PR owner's check, as above. The proxy, the status line and the version must all move to the new release.
+  2. **Install through the plugin.** Install the proxy from the current `releases/latest` through the Claude Code plugin, and run the plugin from the commit. The update to the new release is checked after the publish (step 8). The checks of the other clients' plugins are the PR owner's job (see above).
   3. **The central push, once it is in use.** Check three things: the push sends **metadata only** (read the payload, no transcript text, tool output or bodies); it **reaches the collector**; it **fails open** when the collector is down (the request still goes out and the user sees no error).
 - At the end, stop the proxy by its own pid and remove everything the check created. **Remove the credential copies right after the last run;** the rest may stay until the tag. Report any state the check changed outside its own directories.
 
@@ -286,7 +288,10 @@ A failed check blocks the tag. Fix it in a PR (step 2), then run the failed chec
 
 One PR that bumps each plugin that changed in this release:
 - `context-guru-plugin/.claude-plugin/plugin.json` (Claude Code);
-- `codex-marketplace/plugins/context-guru/.codex-plugin/plugin.json` (Codex).
+- `codex-marketplace/plugins/context-guru/.codex-plugin/plugin.json` (Codex);
+- `bob-plugin/context-guru/plugin.json` (Bob);
+- `pi-package/package.json` (Pi);
+- OpenCode has no version file. The bump moves `PINNED_VERSION` in `opencode-plugin/index.js` to the new proxy release, and the same version in `docs/how-to/install-opencode-plugin.md` and `opencode-plugin/README.md`. This is the practice in the last bump PR (#1136).
 
 Say in the PR body what changed in each plugin. A plugin that did not change keeps its version.
 
@@ -300,7 +305,7 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
 - Mark with **[Notice]** each item a user will see or must act on: a new default, a removed tab or command, a figure that moves.
 - Use real numbers where they help.
 - A fix to a feature that is new in the same release goes into that feature's item, not into "Fixed".
-- **Rollback.** Every release notes page gives the way back: `CONTEXT_GURU_VERSION=<previous tag>`, with the install command. Name the real previous tag.
+- **Rollback.** Every release notes page gives the way back: `CONTEXT_GURU_VERSION=<previous tag>`, with the install command from [docs/how-to/install-plugin.md](docs/how-to/install-plugin.md). Name the real previous tag.
 - **Known limits** lists the open issues a user can meet, with their numbers. Check that each one is still open.
 - An optional section, **What we measured**, gives the results of the measurements before the release (step 1), with their baselines.
 - A mode that the owner marks experimental stays "opt-in, not recommended" in the notes.
@@ -315,7 +320,7 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
 1. Check that `main` has nothing after the checked commit except the version bump.
 2. **Ask the release owner: is this a beta, or does it replace latest?** Wait for the answer. Do not tag before it.
    - **A beta.** Name the tag `vX.Y.Z-beta.N`. GoReleaser marks it as a pre-release by itself (`prerelease: auto`). The owner and others test it on their laptops. They install it with `CONTEXT_GURU_VERSION=<tag>`. Users who do not set this variable keep `latest`.
-   - **A beta that the owner makes latest.** The owner may ask for this later. GitHub never makes a pre-release `latest`. So edit the release and mark it as not a pre-release. The tag and the title keep "beta".
+   - **A beta that the owner makes latest.** The owner may ask for this later. GitHub never makes a pre-release `latest`. So mark the release as not a pre-release: `gh release edit <tag> --prerelease=false --latest`. The tag and the title keep "beta".
    - **Not a beta.** The release replaces latest at once.
 3. Create an annotated tag on that commit and push it:
    ```sh
@@ -325,7 +330,8 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
    For a beta, use the beta tag name.
 4. The tag starts the release workflow (`.github/workflows/release.yaml`, GoReleaser). It takes about 15 minutes. Wait for it to pass, and check the assets (5 for v0.6.7).
 5. Put the approved notes at the top of the release body, above the generated changelog. The release title is the tag name.
-6. Tell the people and sessions that wait for the release: every PR owner, and the owners of any metric or signal that the release removes or renames.
+6. **Check the update through the plugin.** Update from the previous release to the new one, through the plugin. For a beta, install with `CONTEXT_GURU_VERSION=<tag>`. Check that the proxy, the status line and the version move to the new release. A failure here means a fix release or the rollback.
+7. Tell the people and sessions that wait for the release: every PR owner, and the owners of any metric or signal that the release removes or renames.
 
 ## 9. After the release
 
