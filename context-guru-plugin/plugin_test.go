@@ -7598,13 +7598,15 @@ func fakeProxyDir(t *testing.T, port string, listen bool) string {
 		}
 	}
 	if listen {
+		// The trailing context-guru-proxy argument keeps the name in this process's command line,
+		// as in fakeProxyDirAnyPort: install.sh checks it before it stops a proxy by PID (#1217).
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +
 			"class H(http.server.BaseHTTPRequestHandler):\n" +
 			"    def do_GET(self):\n" +
 			"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
 			"    def log_message(self, *a): pass\n" +
-			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n' context-guru-proxy\n"
 	}
 	script := "#!/usr/bin/env bash\n" +
 		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
