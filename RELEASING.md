@@ -276,7 +276,7 @@ Notes:
   - `ps -o args=` shows the path the proxy was started with, often relative. A kill guard that matches the absolute path skips the kill.
 - **Checks for production on laptops.** A release reaches every laptop at once through `releases/latest`, so add these to the list:
   1. **Upgrade on an existing database.** Start the previous release, let it write a database, then start the new build on a copy of that database. The schema migrations must run and the data must stay.
-  2. **Install and update through the plugins.** Install from `releases/latest` through the Claude Code and Codex plugins. Update from the previous release. The proxy, the status line and the version must all move to the new release.
+  2. **Install and update through the plugins.** Install from `releases/latest` through the Claude Code plugin, and update it from the previous release. The other clients' plugins (Codex, Bob, Pi, OpenCode) stay the PR owner's check, as above. The proxy, the status line and the version must all move to the new release.
   3. **The central push, once it is in use.** Check three things: the push sends **metadata only** (read the payload, no transcript text, tool output or bodies); it **reaches the collector**; it **fails open** when the collector is down (the request still goes out and the user sees no error).
 - At the end, stop the proxy by its own pid and remove everything the check created. **Remove the credential copies right after the last run;** the rest may stay until the tag. Report any state the check changed outside its own directories.
 
@@ -314,7 +314,7 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
 
 1. Check that `main` has nothing after the checked commit except the version bump.
 2. **Ask the release owner: is this a beta, or does it replace latest?** Wait for the answer. Do not tag before it.
-   - **A beta.** Name the tag `vX.Y.Z-beta.N`. Mark the release as a pre-release. The owner and others test it on their laptops. They install it with `CONTEXT_GURU_VERSION=<tag>`. Users who do not set this variable keep `latest`.
+   - **A beta.** Name the tag `vX.Y.Z-beta.N`. GoReleaser marks it as a pre-release by itself (`prerelease: auto`). The owner and others test it on their laptops. They install it with `CONTEXT_GURU_VERSION=<tag>`. Users who do not set this variable keep `latest`.
    - **A beta that the owner makes latest.** The owner may ask for this later. GitHub never makes a pre-release `latest`. So edit the release and mark it as not a pre-release. The tag and the title keep "beta".
    - **Not a beta.** The release replaces latest at once.
 3. Create an annotated tag on that commit and push it:
