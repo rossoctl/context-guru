@@ -89,6 +89,39 @@ From a shell, `pi_plugin.py setup --plan` prints `consent_question_chain` with `
 and `consent_question_replace` with `confirm_command_replace`. Setup with a conflict and no
 `--on-conflict chain|replace` refuses and changes nothing.
 
+### A gateway on Bedrock: Opus 5 fails with `output_config`
+
+A LiteLLM gateway with a Bedrock model group can refuse Pi's built-in `claude-opus-5` with HTTP 400:
+
+```text
+litellm.BadRequestError: BedrockException - {"message":"messages.2.output_config: Extra inputs are not permitted"}
+```
+
+- **Why.** Pi's `claude-opus-5` has `compat.supportsMidConvoEffort: true`. With it, Pi puts the effort
+  setting (`output_config`) on messages inside `messages[]`. The Anthropic API accepts that. Bedrock
+  does not. context-guru does not add the field; it forwards it unchanged.
+- **Fix.** Turn the flag off for that model, in the `anthropic` entry of `~/.pi/agent/models.json`:
+
+  ```json
+  {
+    "providers": {
+      "anthropic": {
+        "modelOverrides": { "claude-opus-5": { "compat": { "supportsMidConvoEffort": false } } }
+      }
+    }
+  }
+  ```
+
+  Keep the other keys of that entry (`baseUrl`, `apiKey`, `headers`) as they are. Setup changes only
+  `baseUrl`, and uninstall puts back only `baseUrl`, so the override stays.
+- **Then restart Pi.** In the test for #1147, a Pi that was already running kept failing after
+  `/reload`.
+- **Not checked yet:** other built-in models with `supportsMidConvoEffort: true`, and Pi's other
+  mid-conversation flags (`supportsMidConvoSystemMessages`, `supportsMidConvoToolChanges`) on Bedrock.
+  If another model fails with the same error, add the same override for its id.
+
+Setup does not write this override: it is a change to your own model settings, so you make it.
+
 ## Commands
 
 | Command | What it does |
