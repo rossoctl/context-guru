@@ -245,6 +245,10 @@ type sweepPingCandidate struct {
 	// asked is set once a question has been sent for this conversation, so a second ping in the same
 	// idle span sends a plain ping instead of paying for the same answer twice.
 	asked atomic.Bool
+	// warmOnly marks a copy kept for a thread the keep-alive cannot ping (CanKeepAlive said no at
+	// registration). It belongs to the warm question alone: no ping, ping claim or extra request sees it
+	// (#1193). The zero value is an ordinary registration.
+	warmOnly bool
 	// warm marks a question asked on the WARM path (#491). Its answer is held in process memory only
 	// and never written to the Store, its counters are the warm path's own, and its cost is deferred
 	// onto the next real request (there is no ping row to book it on).
@@ -259,6 +263,28 @@ var (
 	sweepPingCand = map[string]*sweepPingCandidate{}
 )
 
+// keepsCopy reports whether this thread may keep the registry's conversation copy. The keep-alive asks
+// from it at a ping; the warm path asks from it after a forwarded request, so with warm on it needs no
+// ping (#1191: IBM Bob's route is never pinged). No host hook means no keep-alive.
+func (e *ExtractSweep) keepsCopy(c *components.Ctx) bool {
+	return e.warm || pingable(c)
+}
+
+func pingable(c *components.Ctx) bool { return c.CanKeepAlive != nil && c.CanKeepAlive() }
+
+// dropWarmOnly removes reg when it is the warm question's own copy (warmOnly) and still the thread's
+// registration. Such a copy has no other reader, so it goes when its question ends.
+func dropWarmOnly(threadKey string, reg *sweepPingCandidate) {
+	if reg == nil || !reg.warmOnly {
+		return
+	}
+	sweepPingMu.Lock()
+	if sweepPingCand[threadKey] == reg {
+		delete(sweepPingCand, threadKey)
+	}
+	sweepPingMu.Unlock()
+}
+
 // registerPing snapshots this request's conversation for the keeper. Deferred from Offload so it sees
 // the conversation as the component leaves it, replays included.
 func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChatRequest) {
@@ -270,10 +296,15 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		c.Mode == components.ModeObserve || req == nil || len(req.Input) == 0 {
 		return
 	}
-	// A conversation copy is kept only for a thread the keep-alive can ping. The copies are content,
-	// held in memory for up to maxSweepPingAge; a thread that will never get a ping must not pay them.
-	// No host hook means no keep-alive: keep nothing.
-	if c.CanKeepAlive == nil || !c.CanKeepAlive() {
+	// A conversation copy is kept only for a thread that can be asked. The copies are content, held in
+	// memory for up to maxSweepPingAge; a thread that will never be asked must not pay them. A thread the
+	// keep-alive can ping keeps one for the ping. One it cannot ping keeps one only while a warm question
+	// is due (#1191): no ping ever reads it, and no keeper would clear it, so it lives only as long as
+	// that question (dropWarmOnly).
+	key := thread.Key(c.Session, c.Thread)
+	canPing := pingable(c)
+	if !canPing && !(e.warm && warmDue(key)) {
+		clearSweepPing(key)
 		sweepPingNotRegistered.Add(1)
 		return
 	}
@@ -287,7 +318,7 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		return
 	}
 	cand := e.snapshotCandidate(c, req)
-	key := thread.Key(c.Session, c.Thread)
+	cand.warmOnly = !canPing
 	sweepPingMu.Lock()
 	defer sweepPingMu.Unlock()
 	// Pruned on EVERY registration, not only at the cap: an idle thread's copy goes after
@@ -399,6 +430,9 @@ func SweepPingSubstitute(threadKey string) (dispatch func(timeout time.Duration,
 	sweepPingMu.Lock()
 	cand := sweepPingCand[threadKey]
 	sweepPingMu.Unlock()
+	if cand != nil && cand.warmOnly {
+		cand = nil // the warm question's own copy: a ping never asks from it
+	}
 	// FAIL OPEN. This runs on the keeper's own goroutine, which no pipeline recover covers, and it now
 	// carries candidate collection, the co-reference index and the hold. A panic must leave the ping a
 	// plain ping and the process up. The conversation is marked asked, so the next ping is plain too.
