@@ -1020,6 +1020,11 @@ def configure(args):
         upstreams = recorded_upstreams(record)
         try:
             strategy, _ = resolve_strategy(strategy, record.get("binary"))
+            if (preset, strategy) == (record.get("preset", DEFAULT_PRESET),
+                                      record.get("cache_strategy", DEFAULT_STRATEGY)):
+                # The same setting: a restart would only cost a cache rewrite in every open session.
+                facts(result="unchanged", preset=preset, cache_strategy=strategy)
+                return 0
             write_proxy_config(preset, strategy, upstreams)
         except StrategyError as error:
             facts(result="refused", reason=error.reason, detail=error)

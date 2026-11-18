@@ -1,6 +1,6 @@
 // Unit tests for the extension's pure helpers. Run: node --test tests/*.test.ts (Node 22.18+ strips the types).
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck,
+  stripsChatGPTFields, strategyChoices, type StartCheck, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -316,4 +316,28 @@ test("the strategy names come from the proxy's list, and an old proxy offers onl
   assert.deepEqual(old.names, ["none"]);
   assert.match(old.error ?? "", /v0\.7\.1/);
   assert.deepEqual(strategyChoices({}).names, ["none"]);
+});
+
+test("each preset has the Claude Code plugin's text, without the markdown", () => {
+  const skill = readFileSync(new URL("../../context-guru-plugin/skills/preset-picker/SKILL.md", import.meta.url), "utf8");
+  const rows = [...skill.matchAll(/^\| `([a-z]+)` \| (.+) \|$/gm)];
+  const plain = (text: string) => text.replace(/\*\*|`/g, "");
+  assert.deepEqual(Object.fromEntries(rows.map(([, name, text]) => [name, plain(text)])), PRESET_TEXT);
+});
+
+test("a preset pick-list label carries the text and maps back to the name", () => {
+  assert.equal(presetLabel("off"), "off: nothing runs, requests go through untouched");
+  assert.equal(presetFromLabel(presetLabel("conservative")), "conservative");
+  assert.equal(presetFromLabel(undefined), undefined);
+});
+
+test("an unknown name is named as unknown, then the list", () => {
+  assert.deepEqual(choiceProblem("preset", "banana", ["off", "medium"], "off"),
+    { text: "Unknown preset 'banana'. Presets: off, medium", level: "error" });
+});
+
+test("the current value is already set, so nothing restarts", () => {
+  assert.deepEqual(choiceProblem("preset", "medium", ["off", "medium"], "medium"),
+    { text: "Already set: preset medium. Nothing changed.", level: "info" });
+  assert.equal(choiceProblem("cache strategy", "none", ["none"], "auto"), undefined);
 });

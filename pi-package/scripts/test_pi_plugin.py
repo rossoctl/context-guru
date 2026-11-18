@@ -1047,7 +1047,8 @@ class StrategiesFromTheProxy(Sandbox):
             self.assertFalse(pi_plugin.proxy_config().exists())
             self.assertEqual(pi_plugin.read_record()["cache_strategy"], "none")
             with mock.patch.object(pi_plugin, "start_service", return_value=True):
-                code, facts = self.run_main("configure", "--cache-strategy", "none")
+                # A real change (the preset), so configure writes the file: `none` alone is already set.
+                code, facts = self.run_main("configure", "--preset", "medium", "--cache-strategy", "none")
         self.assertEqual((code, facts["result"]), (0, "configured"))
         self.assertNotIn("cache:", pi_plugin.proxy_config().read_text())
 
@@ -1317,6 +1318,36 @@ class ChainMode(Sandbox):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("models_restore=restored", out.stdout)
         self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+
+class ConfigureUnchanged(Sandbox):
+    """#1156: choosing the setting that is already set does not restart the proxy. A restart costs one
+    cache rewrite in every open Pi session."""
+
+    def setUp(self):
+        super().setUp()
+        pi_plugin.write_record({"port": 8800, "preset": "medium", "cache_strategy": "auto", "binary": "/bin/true"})
+
+    def configure(self, *argv):
+        with mock.patch.object(pi_plugin, "start_service", return_value=True) as start, \
+                mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+            code, facts = self.run_main("configure", *argv)
+        return code, facts, start
+
+    def test_the_current_preset_is_unchanged_and_not_restarted(self):
+        code, facts, start = self.configure("--preset", "medium")
+        self.assertEqual((code, facts["result"], facts["preset"]), (0, "unchanged", "medium"))
+        start.assert_not_called()
+
+    def test_an_alias_of_the_current_strategy_is_unchanged(self):
+        code, facts, start = self.configure("--cache-strategy", "5-min-ping")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "unchanged", "auto"))
+        start.assert_not_called()
+
+    def test_a_new_preset_still_restarts(self):
+        code, facts, start = self.configure("--preset", "high")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        start.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -27,11 +27,25 @@ const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "p
 const SESSION_HEADER = "x-context-guru-session";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
+/** One line per preset, the Claude Code plugin's preset-picker text without its markdown. A test fails
+ *  when the two drift apart. */
+export const PRESET_TEXT: Record<string, string> = {
+  off: "nothing runs, requests go through untouched",
+  conservative: "trims obvious waste — the safe first step into \"carry less\"",
+  medium: "conservative plus a cheap model that keeps only what looks relevant in recent tool output, and a summary " +
+    "prepared in the background that is used only if you come back after the cache expired",
+  high: "medium, but the summary of older turns is used as soon as the context window is nearly full",
+  xhigh: "high plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut",
+  ultrahigh: "Experimental. xhigh plus tool deferral: tools your own last sessions never used are sent as names only, " +
+    "and the model loads one through search when it needs it. Opt-in. Turn it off for one session with " +
+    "ENABLE_TOOL_SEARCH=false",
+};
 const SUBCOMMANDS = ["setup", "status", "preset", "cache-strategy", "update", "uninstall"];
 /** The time limit of each /healthz check at session start (the user's choice). */
 export const START_CHECK_TIMEOUT_MS = 5000;
 
 interface Install {
+  preset?: string;
   port?: number;
   base_urls?: Record<string, string>;
   cache_strategy?: string;
@@ -252,6 +266,27 @@ export function parseFacts(text: string): Record<string, string> {
 }
 
 /** Split `/context-guru` arguments. A bare command (or only spaces) means `status`. */
+/** A preset pick-list option: the name, then what it does (#1156). */
+export function presetLabel(name: string): string {
+  return `${name}: ${PRESET_TEXT[name]}`;
+}
+
+export function presetFromLabel(label: string | undefined): string | undefined {
+  return label?.split(":", 1)[0];
+}
+
+/** Why a chosen name is not applied: it is unknown, or it is the current setting (a restart would only
+ *  cost a cache rewrite). Undefined when the change goes ahead. */
+export function choiceProblem(kind: "preset" | "cache strategy", value: string, names: string[], current?: string):
+  { text: string; level: "info" | "error" } | undefined {
+  if (!names.includes(value)) {
+    return { text: `Unknown ${kind} '${value}'. ${kind === "preset" ? "Presets" : "Cache strategies"}: ${names.join(", ")}`,
+      level: "error" };
+  }
+  if (value === current) return { text: `Already set: ${kind} ${value}. Nothing changed.`, level: "info" };
+  return undefined;
+}
+
 export function parseArgs(args: string): { sub: string; value: string } {
   const [sub = "status", value = ""] = args.trim().split(/\s+/).filter(Boolean);
   return { sub, value };
@@ -394,7 +429,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       }
       args.push("--on-conflict", answer);
     } else if (f.result !== "planned") {
-      say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}`, "error");
+      say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}${f.detail ? `: ${f.detail}` : ""}`, "error");
       return;
     } else {
       // Consent comes from a person. Print mode has no dialog, and no answer is a no.
@@ -465,6 +500,7 @@ export default function contextGuru(pi: ExtensionAPI) {
     const out = await run(["configure", flag, value], RESTART_TIMEOUT_MS);
     install = readInstall();
     const f = out.facts;
+    if (f.result === "unchanged") return say(ctx, `Already set: preset ${f.preset}, cache strategy ${f.cache_strategy}. Nothing changed.`);
     say(ctx, f.result === "configured"
       ? `context-guru now runs preset ${f.preset}, cache strategy ${f.cache_strategy}.` + (f.probe ? ` Tool deferral probe: ${f.probe}.` : "")
       : `context-guru: ${f.result ?? "error"} ${f.detail ?? out.stderr.trim()}`, f.result === "configured" ? "info" : "error");
@@ -486,9 +522,13 @@ export default function contextGuru(pi: ExtensionAPI) {
         case "status":
           return status(ctx);
         case "preset": {
-          const name = await pick(ctx, "Preset (each one includes the one above it)", PRESETS, value);
-          if (name) return configure(ctx, "--preset", name);
-          return say(ctx, `Presets: ${PRESETS.join(", ")}`);
+          if (!value && !ctx.hasUI) return say(ctx, `Presets: ${PRESETS.join(", ")}`);
+          const name = value || presetFromLabel(await ctx.ui.select("Preset (each one includes the one above it)",
+            PRESETS.map(presetLabel)));
+          if (!name) return say(ctx, "Nothing changed.");
+          const problem = choiceProblem("preset", name, PRESETS, install?.preset);
+          if (problem) return say(ctx, problem.text, problem.level);
+          return configure(ctx, "--preset", name);
         }
         case "cache-strategy": {
           const listed = await run(["configure", "--list"], 30_000);
@@ -501,9 +541,12 @@ export default function contextGuru(pi: ExtensionAPI) {
           if (value && !names.includes(value)) {
             return say(ctx, `context-guru: cache strategy ${value} cannot be set. ${error ?? `Offered: ${names.join(", ")}`}`, "error");
           }
+          if (!value && !ctx.hasUI) return say(ctx, `Cache strategies: ${names.join(", ")}`);
           const name = await pick(ctx, "Cache strategy", names, value);
-          if (name) return configure(ctx, "--cache-strategy", name);
-          return say(ctx, `Cache strategies: ${names.join(", ")}`);
+          if (!name) return say(ctx, "Nothing changed.");
+          const problem = choiceProblem("cache strategy", name, names, install?.cache_strategy);
+          if (problem) return say(ctx, problem.text, problem.level);
+          return configure(ctx, "--cache-strategy", name);
         }
         case "update": {
           const check = (await run(["update", "--check"], 30_000)).facts;
