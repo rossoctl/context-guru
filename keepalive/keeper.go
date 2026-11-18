@@ -427,6 +427,24 @@ type Record struct {
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
 	Hold func() dispatch.Ref
+	// Plan, when non-nil, receives the ping plan built for the wait this response starts (#1198). It
+	// is written only when the request passed every gate and got a schedule: a refused request leaves it
+	// untouched, which the host reads as "no plan".
+	Plan *PlanInForce
+}
+
+// PlanInForce is the ping plan Record built for one wait: the count of pings, the billed-prefix floor the
+// gate used and the spacing between pings. Numbers only.
+type PlanInForce struct {
+	// Built is true once Record filled the plan; false means no plan was built for the request.
+	Built bool
+	// MaxPings is the ping count after the per-wait plan (pol.MaxPings).
+	MaxPings int
+	// MinPrefixTokens is the prefix floor for this wait (Policy.WaitMinPrefix): 20k for a tool wait,
+	// 80k for a person or an unknown cause, with the plan on.
+	MinPrefixTokens int
+	// IdleSeconds is the spacing between pings (pol.Idle), after the one-hour schedule is applied.
+	IdleSeconds int
 }
 
 // EntryView is a read-only snapshot of one tracked entry. Exported for tests and replay tooling;
@@ -1045,6 +1063,13 @@ func (k *Keeper) Record(r Record) {
 		e.holdFor = k.holdFor(ttl1h)
 		e.ceiling = pol.Ceiling()
 		e.pol = Policy{ManualHold: true} // off: due, Plans, PendingPings and Sweep all read pol.On()
+	}
+	// The request passed every gate and got a schedule: report that plan (#1198). A refused or
+	// manual-only request leaves it unbuilt. e.pol is the policy the thread keeps, so a one-hour
+	// thread reports its own bounded count.
+	if r.Plan != nil && !e.manualOnly {
+		*r.Plan = PlanInForce{Built: true, MaxPings: e.pol.MaxPings,
+			MinPrefixTokens: e.pol.WaitMinPrefix(wait, IsSubagentThread(threadID)), IdleSeconds: int(e.pol.Idle / time.Second)}
 	}
 	k.clearReasonLocked(r.Key)
 	k.live[key] = e

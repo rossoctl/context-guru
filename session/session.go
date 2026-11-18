@@ -184,6 +184,40 @@ func metaSessionID(v string) string {
 	return m.SessionID
 }
 
+// UserKey names the PERSON behind a Claude Code `metadata.user_id`, not the conversation: the
+// account id when the client states one ("a:<uuid>"), else the device id ("d:<id>"), else, for the
+// older flat form "user_<hash>_account_<uuid>_session_<uuid>", the part before the session
+// ("l:user_<hash>_account_<uuid>"). The kind prefix keeps two kinds from ever colliding.
+// "" for anything else, including a plain id: a plain `user_id` may be a per-conversation id (see
+// Explicit), and a key that changes per conversation would name no one. The caller hashes the key
+// with a secret before it is stored; the raw id never leaves memory.
+func UserKey(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" || len(s) > maxMetadataLen {
+		return ""
+	}
+	if isJSONObject(s) {
+		var m struct {
+			AccountUUID string `json:"account_uuid"`
+			DeviceID    string `json:"device_id"`
+		}
+		if err := json.Unmarshal([]byte(s), &m); err != nil {
+			return ""
+		}
+		switch {
+		case m.AccountUUID != "":
+			return "a:" + m.AccountUUID
+		case m.DeviceID != "":
+			return "d:" + m.DeviceID
+		}
+		return ""
+	}
+	if head, _, ok := strings.Cut(s, "_session_"); ok && strings.HasPrefix(head, "user_") && len(head) > len("user_") {
+		return "l:" + head
+	}
+	return ""
+}
+
 // Scoped is Resolve namespaced by tenant, for a hosted multi-tenant deployment. An
 // empty tenant returns exactly what Resolve does, so single-tenant keys are
 // unchanged.

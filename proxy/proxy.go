@@ -2006,7 +2006,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
 		usage.Live = cp.liveFacts(ttfb)
-		h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK)
+		cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK))
 		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and

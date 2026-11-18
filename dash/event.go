@@ -114,6 +114,18 @@ type WaitCauseResult struct {
 	WaitingFor, WaitTool, WakeCause string
 	OpenBackground, OpenTeammate    int
 	MonitorExpiryMs                 int64
+	// The strategy metadata of issue #1198 that is read off the same body and response. All are
+	// "not computed" at their zero value: nil pointers and "".
+	WaitToolTimeoutMs  *int64
+	WaitToolBackground *bool
+	WaitPrompt         string
+	// UserKey is the person's id read off the request body (session.UserKey), still raw. The
+	// writer hashes it into Event.UserHash and drops it; it is never stored or published.
+	UserKey string
+	// SpawnType is the raw subagent_type of the last subagent call (hashed by the writer unless it is a
+	// built-in name); Fanout is how many subagent calls the response made.
+	SpawnType string
+	Fanout    int
 }
 
 // Event is one captured request, as handed to the capture channel. It is built on
@@ -200,6 +212,38 @@ type Event struct {
 	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
 	// fills are what reaches JSON and the database.
 	WaitCause func() WaitCauseResult `json:"-"`
+	// The metadata that predicts when a user returns (#1198). Each is NULL in the database when it was
+	// not computed (the zero value here): absent means unknown, never a guess.
+	//
+	// WaitToolTimeoutMs / WaitToolBackground are the `timeout` and `run_in_background` of the tool
+	// call the thread waits for (WaitTool); no other part of the call's input is read.
+	// WaitPrompt is none|permission|question|other: whether the turn ends on a prompt a person must
+	// answer. TZOffsetMin is the host's UTC offset in minutes (local proxy only; 0 is UTC and is a
+	// real value). Turn counts the thread's real requests from 1; ActiveThreads counts the session's
+	// threads with a real request in the last ActiveThreadsWindow, this one included. The KA*
+	// fields are the ping plan in force for the wait the response starts. UserHash is a keyed hash of
+	// the person's id; the raw id is never kept.
+	WaitToolTimeoutMs  *int64 `json:"wait_tool_timeout_ms,omitempty"`
+	WaitToolBackground *bool  `json:"wait_tool_background,omitempty"`
+	WaitPrompt         string `json:"wait_prompt,omitempty"`
+	TZOffsetMin        *int   `json:"tz_offset_min,omitempty"`
+	Turn               int    `json:"turn,omitempty"`
+	ActiveThreads      int    `json:"active_threads,omitempty"`
+	KAPlannedPings     *int   `json:"ka_planned_pings,omitempty"`
+	KAMinPrefixTokens  *int   `json:"ka_min_prefix_tokens,omitempty"`
+	KAIdleS            *int   `json:"ka_idle_s,omitempty"`
+	// UserHash stays out of the API and the live feed: it is a pseudonymous id, for analysis scans of
+	// the database only.
+	UserHash string `json:"-"`
+	// ClientEntrypoint and PermissionMode describe the session's mode: an unattended run (headless or
+	// bypassPermissions) has no person who waits. SubagentType and ParentFanout describe the subagent
+	// calls THIS response made: the type of the last one and their count.
+	ClientEntrypoint string `json:"client_entrypoint,omitempty"`
+	PermissionMode   string `json:"permission_mode,omitempty"`
+	SubagentType     string `json:"subagent_type,omitempty"`
+	ParentFanout     int    `json:"parent_fanout,omitempty"`
+	spawnRaw         string
+	promptMark       string
 	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
 	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
 	// there (it rescans the request body). Neither is part of the JSON event.

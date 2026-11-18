@@ -198,7 +198,10 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
 	r.compaction_point, r.compaction_point_source, r.defer_cost_usd,
 	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
-	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, r.restored_tokens, r.currency, ` + requestTokenSelect + `, r.backend, r.client_compaction, r.acc_fallback`
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, r.restored_tokens, r.currency, ` + requestTokenSelect + `, r.backend, r.client_compaction, r.acc_fallback,
+	r.wait_tool_timeout_ms, r.wait_tool_background, r.wait_prompt, r.tz_offset_min, r.turn, r.active_threads,
+	r.ka_planned_pings, r.ka_min_prefix_tokens, r.ka_idle_s,
+	r.client_entrypoint, r.permission_mode, r.subagent_type, r.parent_fanout`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
@@ -210,7 +213,8 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var r5, r7 sql.NullInt64
 	var s5, s7, compVerdict sql.NullString
 	var authSub int
-	err := rows.Scan(append([]any{&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
+	var sm strategyMetaScan
+	dest := append([]any{&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
@@ -230,8 +234,12 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
 		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
 		&e.CompactionPoint, &e.CompactionPointSource, &e.DeferCostUSD,
-		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm, &e.RestoredTokens, &e.Currency}, append(requestTokenDest(&e.AccTokens), &e.Backend, &compVerdict, &e.AccFallback)...)...)
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm, &e.RestoredTokens, &e.Currency}, requestTokenDest(&e.AccTokens)...)
+	dest = append(dest, &e.Backend, &compVerdict, &e.AccFallback)
+	dest = append(dest, sm.dest()...)
+	err := rows.Scan(dest...)
 	e.AuthSubscription = authSub != 0
+	sm.into(&e)
 	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
 		e.Limits = &l
 	}
