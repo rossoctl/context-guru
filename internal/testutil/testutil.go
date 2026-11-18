@@ -45,7 +45,7 @@ func WaitFor(t testing.TB, what string, cond func() bool) {
 func WaitForState(t testing.TB, what string, cond func() bool, state func() string) {
 	t.Helper()
 	start := time.Now()
-	limit, cut := effectiveBound(t)
+	limit, deadline, cut := effectiveBound(t)
 	for {
 		if cond() {
 			return
@@ -64,13 +64,22 @@ func WaitForState(t testing.TB, what string, cond func() bool, state func() stri
 		msg += "; state: " + describe(state)
 	}
 	if cut {
-		// The test binary's deadline, not the condition, set this limit. Say so: a wait of a few
-		// milliseconds otherwise looks like a flaky test (v0.7.4 Part A, race-record).
-		msg += fmt.Sprintf("; the wait was cut to %v because the test binary's -timeout is %v away "+
-			"(less the %v margin): the package ran out of time, not this condition. Raise -timeout "+
-			"or make the package faster", limit.Round(time.Millisecond), (limit + deadlineMargin).Round(time.Millisecond), deadlineMargin)
+		msg += cutNote(limit, time.Duration(bound.Load()), time.Until(deadline))
 	}
 	t.Fatalf("%s", msg)
+}
+
+// cutNote explains a wait that the test binary's -timeout cut short. A wait of a few milliseconds
+// otherwise reads like a flaky test (v0.7.4 Part A, race-record). It states facts only: the cut
+// does not prove the condition would have held with more time. left is measured at the failure.
+func cutNote(limit, full, left time.Duration) string {
+	when := fmt.Sprintf("ends in %v", left.Round(time.Millisecond))
+	if left <= 0 {
+		when = "has already passed"
+	}
+	return fmt.Sprintf("; the test binary's -timeout %s, so this wait got only %v of its %v bound. "+
+		"Re-run with a larger -timeout to tell a slow package from a condition that never holds",
+		when, limit.Round(time.Millisecond), full)
 }
 
 // deadlineMargin is the time kept before the test deadline, so the failure message of WaitFor
@@ -78,17 +87,18 @@ func WaitForState(t testing.TB, what string, cond func() bool, state func() stri
 const deadlineMargin = 5 * time.Second
 
 // effectiveBound is the safety bound, cut to the time left before the test deadline minus
-// deadlineMargin. It is never below one poll interval. cut says the deadline set the limit.
-func effectiveBound(t testing.TB) (limit time.Duration, cut bool) {
+// deadlineMargin. It is never below one poll interval. cut says the deadline set the limit, and
+// deadline is then the test binary's deadline.
+func effectiveBound(t testing.TB) (limit time.Duration, deadline time.Time, cut bool) {
 	limit = time.Duration(bound.Load())
 	if d, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
 		if dl, has := d.Deadline(); has {
 			if left := time.Until(dl) - deadlineMargin; left < limit {
-				return max(left, pollInterval), true
+				return max(left, pollInterval), dl, true
 			}
 		}
 	}
-	return limit, false
+	return limit, time.Time{}, false
 }
 
 // describe calls state. A panic inside state must not hide the timeout, so it becomes text.
