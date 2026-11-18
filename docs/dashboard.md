@@ -240,7 +240,10 @@ Limits:
   every minute and at a clean shutdown, and restores it at start, so a restart does not drop the active
   changes of a live session. The file holds hashes, sizes and ids, no message text, and is mode 0600.
   The file carries a proxy version (`cgStateVersion`) around the library snapshot. A file with another version is
-  ignored, because the hash of a body changed between versions. The save syncs the file before the rename, skips the
+  ignored, because the hash of a body changed between versions. The file also carries a hash of the configuration
+  (`config`: the pipeline's components and flags, the expand mode and the configuration document). A file from
+  another configuration is ignored too: its changes may be ones this proxy no longer makes, such as the expand
+  declaration, and each later request of the thread would fail the sum check and book no saving (#1169). The save syncs the file before the rename, skips the
   write when nothing changed, and the start removes temp files a crash left. The hash leaves out every `cache_control`
   mark, nested ones too.
   A file older than one hour is ignored (no cache entry lives longer), and so is a missing or unreadable

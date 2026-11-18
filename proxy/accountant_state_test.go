@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+
+	"github.com/rossoctl/context-guru/config"
 )
 
 // twoTurns runs turn 1 (the change is made and reported) on a tracker, saves it, and returns the bodies
@@ -72,6 +74,45 @@ func TestSavingsStateFailsOpen(t *testing.T) {
 	}
 	if newSavingsTracker().restore(path, time.Now()) {
 		t.Error("a corrupt file was restored")
+	}
+}
+
+// A snapshot is restored only by a proxy with the configuration that wrote it (#1169).
+func TestStateRestoresOnlyUnderTheSameConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	saved := newSavingsTracker()
+	saved.config = "conservative"
+	if err := saved.save(path); err != nil {
+		t.Fatal(err)
+	}
+	same, other := newSavingsTracker(), newSavingsTracker()
+	same.config, other.config = "conservative", "off"
+	if !same.restore(path, time.Now()) {
+		t.Error("the snapshot was not restored under the configuration that wrote it")
+	}
+	if other.restore(path, time.Now()) {
+		t.Error("the snapshot was restored under another configuration")
+	}
+}
+
+// The key changes with the pipeline, and is the same for the same pipeline.
+func TestAccConfigKeyFollowsThePipeline(t *testing.T) {
+	build := func(yaml string) string {
+		cfg, err := config.LoadBytes([]byte(yaml))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe, err := cfg.Build(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return accConfigKey(pipe, Options{})
+	}
+	if a, b := build("preset: conservative\n"), build("preset: conservative\n"); a != b {
+		t.Errorf("one pipeline gave two keys: %s, %s", a, b)
+	}
+	if a, b := build("preset: conservative\n"), build("preset: off\n"); a == b {
+		t.Errorf("conservative and off gave one key: %s", a)
 	}
 }
 

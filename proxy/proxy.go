@@ -455,6 +455,7 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// The tracker needs a dashboard: the Result is attached to the recorded event.
 	if opts.Dashboard != nil {
 		h.savings = newSavingsTracker()
+		h.savings.config = accConfigKey(pipe, opts)
 		if opts.AccountantState != "" {
 			h.savings.restore(opts.AccountantState, time.Now())
 			h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})

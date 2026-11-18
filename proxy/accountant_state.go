@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/rossoctl/context-guru/components"
 )
 
 // A thread's state lives in memory in the library. Without a save, every restart drops the active
@@ -35,6 +38,18 @@ type accStateFile struct {
 	// Thinking is the count of each thinking block (savingsTracker.thinking): a key and a number each. A file
 	// written before it has none, and restores with an empty table.
 	Thinking json.RawMessage `json:"thinking,omitempty"`
+	// Config is accConfigKey of the proxy that wrote the file. A snapshot from another configuration is not restored.
+	Config string `json:"config,omitempty"`
+}
+
+// accConfigKey names the configuration whose changes a snapshot holds: the pipeline's components and flags, the
+// expand mode and the configuration document, hashed. The library ends a change that ADDED content (the expand or
+// adjudicate declaration) only when the client edits before it. A proxy started with another configuration may no
+// longer add it, so the restored change stays active, and every later request of that thread fails the sum check
+// and books no saving (#1169). The key holds no request data.
+func accConfigKey(pipe *components.Pipeline, opts Options) string {
+	return docHash(fmt.Sprint(pipe.Names(), pipe.TailBreakpoint(), pipe.InBandBreakpoint(), pipe.FixedRestore(),
+		opts.InjectExpand, opts.BaseConfig))
 }
 
 // lastSaved holds the bytes of the last file written, so a save with no change skips the write.
@@ -55,7 +70,7 @@ func (s *savingsTracker) save(path string) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking})
+	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking, Config: s.config})
 	if err != nil {
 		return err
 	}
@@ -143,6 +158,10 @@ func (s *savingsTracker) restore(path string, now time.Time) bool {
 	}
 	if err == nil && age > accStateMaxAge {
 		slog.Info("accountant: state file is older than any cache entry; only the thinking counts are restored", "path", path, "age", age.Round(time.Second))
+		return false
+	}
+	if err == nil && f.Config != s.config {
+		slog.Info("accountant: state file is from another configuration; only the thinking counts are restored", "path", path)
 		return false
 	}
 	if err == nil {

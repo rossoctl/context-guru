@@ -239,3 +239,66 @@ func TestBypassedRequestStoresNoFallback(t *testing.T) {
 		t.Fatalf("stored acc_fallback %q on a bypassed request, want none", e.AccFallback)
 	}
 }
+
+// openCodeConversation is shaped like an OpenCode request through the Vercel AI SDK Anthropic provider (OpenCode
+// v1.19.5 provider/transform.ts applyCaching; @ai-sdk/anthropic convert-to-anthropic-prompt.ts): two system blocks
+// with a mark each, a mark on the last block of each of the last two messages, and no mark on a tool declaration.
+func openCodeConversation(turns int) []byte {
+	mark := func() map[string]any { return map[string]any{"type": "ephemeral"} }
+	var tools []any
+	for _, n := range []string{"bash", "read", "edit", "glob", "grep", "task", "todowrite"} {
+		tools = append(tools, map[string]any{"name": n, "description": strings.Repeat("Runs "+n+". ", 30),
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}},
+				"required": []any{"x"}, "additionalProperties": false}})
+	}
+	msgs := []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "fix the test"}}}}
+	for k := 0; k < turns; k++ {
+		id := "toolu_" + string(rune('a'+k))
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "Looking."},
+				map[string]any{"type": "tool_use", "id": id, "name": "bash", "input": map[string]any{"x": "ls"}}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": bigToolOutput()}}})
+	}
+	for _, m := range msgs[max(0, len(msgs)-2):] {
+		c := m.(map[string]any)["content"].([]any)
+		c[len(c)-1].(map[string]any)["cache_control"] = mark()
+	}
+	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64,
+		"system": []any{
+			map[string]any{"type": "text", "text": strings.Repeat("You are opencode. ", 200), "cache_control": mark()},
+			map[string]any{"type": "text", "text": "<env>dir: /x</env>" + strings.Repeat(" rules.", 100), "cache_control": mark()},
+		},
+		"messages": msgs, "tools": tools, "tool_choice": map[string]any{"type": "auto"}})
+	return b
+}
+
+// A session that runs on under another pipeline after a restart. The saved thread state holds the expand
+// declaration that the first pipeline added (a change with no bytes before). The second pipeline does not add it,
+// and the library ends such a change only when the client edits before it. It stayed active, so every later
+// request failed the sum check with ops=-340 (the declaration's size) and bodies=0, and booked no saving (#1169).
+func TestStateOfAnotherPipelineIsNotRestored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	up := billedUpstream(t)
+	defer up.Close()
+	run := func(yaml string, from, to int) []dash.Event {
+		h, rec, tap := accHandlerOpts(t, up.URL, yaml, func(o *Options) { o.AccountantState = path })
+		for k := from; k <= to; k++ {
+			accPostBody(t, h, "ses_opencode", openCodeConversation(k))
+		}
+		waitForRows(t, rec, int64(to-from+1))
+		h.Close() // saves the state
+		return tap.all()
+	}
+	run("preset: conservative\n", 1, 2)
+	evs := run("preset: off\n", 3, 4)
+	for i, e := range evs {
+		if res, ok := e.AccountantResult(); ok {
+			for _, c := range res.Checks {
+				t.Errorf("request %d after the restart: check failed: %s %s", i+1, c.Check, c.Detail)
+			}
+		}
+	}
+	if fb := evs[1].AccountantFallback(); fb != "" {
+		t.Errorf("second request after the restart fell back: %s", fb)
+	}
+}
