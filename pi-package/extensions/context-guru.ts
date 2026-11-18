@@ -370,7 +370,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, ctx) => signal(ctx, "SessionStart", "compact"));
 
   pi.on("session_shutdown", (event, ctx) => {
-    // A reload loads every copy again, so the first copy to load claims the marker again.
+    // A reload, /new, /resume or /fork loads every copy again, so the first copy to load claims it again.
     if (shared[LOADED] === PACKAGE_DIR) delete shared[LOADED];
     try {
       checks.end(ctx.sessionManager.getSessionId());

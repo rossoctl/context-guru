@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { createServer } from "node:http";
@@ -352,8 +353,8 @@ test("a second copy of the package registers nothing and warns once, naming both
     second.emit("session_start");
     assert.equal(second.notices.length, 1);
     assert.match(second.notices[0], /two copies/);
-    assert.match(second.notices[0], /\/clone-a\/pi-package/);
-    assert.match(second.notices[0], /pi-package/);
+    assert.ok(second.notices[0].includes("/clone-a/pi-package and "), second.notices[0]);
+    assert.ok(second.notices[0].includes(join(dirname(fileURLToPath(import.meta.url)), "..") + "."), second.notices[0]);
     assert.match(second.notices[0], /settings\.json/);
   } finally {
     delete g[LOADED];
@@ -366,10 +367,29 @@ test("the first copy registers its command, and a reload of it after shutdown re
     const first = fakePi();
     contextGuru(first.pi);
     assert.deepEqual(first.commands, ["context-guru"]);
+    assert.equal(g[LOADED], join(dirname(fileURLToPath(import.meta.url)), ".."));
     first.emit("session_shutdown", { reason: "reload" });
+    // Released, so a different copy that loads after the reload (the user removed this one) runs.
+    assert.equal(g[LOADED], undefined);
     const reloaded = fakePi();
     contextGuru(reloaded.pi);
     assert.deepEqual(reloaded.commands, ["context-guru"]);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("a shutdown releases only this copy's marker, for /new as for a reload", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    first.emit("session_shutdown", { reason: "new" });
+    assert.equal(g[LOADED], undefined);
+    contextGuru(fakePi().pi);
+    g[LOADED] = "/clone-a/pi-package"; // another copy holds it now
+    first.emit("session_shutdown", { reason: "reload" });
+    assert.equal(g[LOADED], "/clone-a/pi-package");
   } finally {
     delete g[LOADED];
   }
