@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,14 @@ func Open(path string) (*DB, error) {
 		// under-count), and a foreign -wal sitting next to the FRESH file is a
 		// recovery hazard nobody would ever diagnose.
 		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, serr := os.Stat(path + suffix); serr == nil {
+				_ = os.Rename(path+suffix, aside+suffix)
+			}
+		}
+		// The janitor's backup copies (backup.go) are copies of the OLD database. Move them aside
+		// with it. Left in place, the 24-hour rule would trust them as fresh copies of the new,
+		// empty database, and a restore by hand would bring back the old data under the new name.
+		for _, suffix := range []string{".bak", ".bak.1"} {
 			if _, serr := os.Stat(path + suffix); serr == nil {
 				_ = os.Rename(path+suffix, aside+suffix)
 			}
@@ -814,10 +823,60 @@ func gunzipText(b []byte) string {
 // ON DELETE CASCADE. Returns how many request rows were deleted.
 //
 // maxAge <= 0 disables the age rule; maxBytes <= 0 disables the size rule.
+//
+// This form has no size floor, no backup hook and no eviction hook; the janitor calls PruneWith.
+// The size rule keeps every session whose last request is newer than defaultActiveSessionWindow
+// (1 hour): it deletes rows of such a session only when that one session is over maxBytes by
+// itself. It deletes whole idle sessions, oldest last activity first, not single rows.
 func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, error) {
+	return d.PruneWith(now, PruneOptions{MaxAge: maxAge, MaxBytes: maxBytes, ActiveWindow: defaultActiveSessionWindow})
+}
+
+// defaultActiveSessionWindow is how recent a session's last request must be for the size rule to
+// call the session ACTIVE. The code had no earlier definition of "active session" for deletion
+// (ActiveThreadsWindow is 10 minutes and counts threads for the keep-alive plan, not sessions
+// for eviction), so this is new. One hour: a person who steps away for lunch keeps their session.
+const defaultActiveSessionWindow = time.Hour
+
+// PruneOptions holds the limits of one Prune pass.
+type PruneOptions struct {
+	// MaxAge drops rows older than this. <= 0 disables the age rule.
+	MaxAge time.Duration
+	// MaxBytes is the size limit. <= 0 disables the size rule.
+	MaxBytes int64
+	// FloorBytes is the size at which the size rule stops, even if the database is still over
+	// MaxBytes. 0 = no floor. It is the size rule's own `minKeepBytes`.
+	FloorBytes int64
+	// ActiveWindow marks a session as active when its last request is newer than now-ActiveWindow.
+	// The size rule keeps the rows of an active session unless that one session is over MaxBytes by
+	// itself. <= 0 means no session is active.
+	ActiveWindow time.Duration
+	// BeforeDelete runs before the first delete of the age rule and before the first delete of the
+	// size rule. The janitor uses it to take the backup. For the size rule, a false result
+	// means "do not delete in this pass". For the age rule the result is ignored: the age rule is a
+	// policy the operator set, and a failed copy must not keep rows past it.
+	BeforeDelete func() bool
+	// Evict, when set, deletes whole idle sessions for the size rule instead of the plain delete.
+	// The janitor sets it to its archive-then-delete migration when cold storage is configured, so
+	// the size rule loses no history the remote could hold. It returns how many request rows left
+	// the local database. nil means a plain delete.
+	Evict func([]coldCandidate) (int64, error)
+	// KeepActiveRows stops the size rule from trimming rows of an over-limit active session.
+	// The janitor sets it with --archive-required: that option means "never lose a row".
+	KeepActiveRows bool
+}
+
+// PruneWith is Prune with the full set of options. See PruneOptions.
+func (d *DB) PruneWith(now time.Time, o PruneOptions) (int64, error) {
 	var deleted int64
-	if maxAge > 0 {
-		cutoff := now.Add(-maxAge).UnixMilli()
+	if o.MaxAge > 0 {
+		cutoff := now.Add(-o.MaxAge).UnixMilli()
+		if o.BeforeDelete != nil {
+			var due int
+			if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE ts < ?)`, cutoff).Scan(&due); err == nil && due == 1 {
+				o.BeforeDelete()
+			}
+		}
 		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
 		if err != nil {
 			return deleted, err
@@ -825,55 +884,222 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 		n, _ := res.RowsAffected()
 		deleted += n
 	}
-	d.pruneClientSignals(now, maxAge)
-	if maxBytes <= 0 {
+	d.pruneClientSignals(now, o.MaxAge)
+	if o.MaxBytes <= 0 {
 		return deleted, nil
 	}
-	// Size rule. Loop because deleting a slice does not immediately shrink the
-	// file (SQLite reuses freed pages), so we bound the work: at most a few
-	// rounds, each dropping the oldest 10% of rows, and stop as soon as the
-	// estimated payload fits.
+	n, err := d.pruneBySize(now, o)
+	return deleted + n, err
+}
+
+// pruneBySize is the size rule. The design, and the reason for each part, is the 2026-11-16
+// incident (#1204): with the WAL checkpoint blocked, the old rule deleted 10,515 rows in 25
+// minutes and the file never got smaller.
+//
+//  1. It checkpoints BEFORE it deletes. A blocked checkpoint (busy=1) leaves the WAL as it is,
+//     and sizeBytes counts the WAL, so the measured size is not a size that deleting rows can
+//     reduce. The rule then does nothing in this pass and tries again in the next one.
+//  2. Each round must lower the measured size. A round that deleted rows and did not lower the
+//     size ends the pass with a WARN. The loop used to delete again, and again.
+//  3. It deletes whole SESSIONS, oldest last activity first, like the disk-pressure rule
+//     (relieveDiskPressure uses the same DropOldestSessions code). A round picks the sessions
+//     whose estimated bytes (rows x average bytes per row) cover the excess, and no more than
+//     what keeps the size above the floor.
+//  4. A session that is ACTIVE (last request inside o.ActiveWindow) is not touched. The one
+//     exception is a session that is over MaxBytes by itself: no other choice can meet the
+//     limit. Then the rule trims that session's oldest rows, not the whole session, so the
+//     conversation in progress keeps its recent turns.
+//  5. The floor ends the pass, so a bad measurement cannot empty the database.
+func (d *DB) pruneBySize(now time.Time, o PruneOptions) (int64, error) {
+	var deleted int64
+	size, err := d.sizeBytes()
+	if err != nil || size <= o.MaxBytes {
+		return 0, err
+	}
+	// Free the WAL first, so the size below is the size that deleting rows can change.
+	if !d.checkpoint() {
+		slog.Warn("dash: size rule skipped; the WAL checkpoint did not complete, so deleting rows cannot free space",
+			"size_bytes", size, "max_bytes", o.MaxBytes)
+		return 0, nil
+	}
+	if size, err = d.sizeBytes(); err != nil || size <= o.MaxBytes {
+		return 0, err
+	}
+	// The backup is taken only now, when rows are certain to go.
+	if o.BeforeDelete != nil && !o.BeforeDelete() {
+		slog.Warn("dash: size rule skipped; no backup copy could be made, and the rule does not delete without one",
+			"size_bytes", size, "max_bytes", o.MaxBytes)
+		return 0, nil
+	}
+	// A bounded number of rounds: this runs on the writer goroutine.
 	for round := 0; round < 8; round++ {
-		size, err := d.sizeBytes()
-		if err != nil || size <= maxBytes {
-			return deleted, err
-		}
-		var total int64
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests`).Scan(&total); err != nil {
-			return deleted, err
-		}
-		if total == 0 {
+		if size <= o.MaxBytes {
 			return deleted, nil
 		}
-		drop := total / 10
-		if drop < 1 {
-			drop = 1
+		if o.FloorBytes > 0 && size <= o.FloorBytes {
+			slog.Warn("dash: size rule stopped at its floor; the database is still over its limit",
+				"size_bytes", size, "max_bytes", o.MaxBytes, "floor_bytes", o.FloorBytes,
+				"deleted_requests", deleted)
+			return deleted, nil
 		}
-		// No tenant column, and there cannot be one — a byte budget is a property of
-		// the whole file. That is why the per-tenant row quota runs BEFORE this
-		// (Recorder.janitorPass): reached while one tenant's traffic is what put the
-		// database over budget, this statement evicts the QUIET tenants, because
-		// theirs are the oldest rows it selects.
-		//
-		// Row-granular, deliberately, and this is the ONE rule that is. The byte
-		// budget is a hard cap the operator asked to be honoured, and it has to be
-		// satisfiable even when everything in the database belongs to a single
-		// session — dropping whole sessions there means dropping all of it. The
-		// disk-pressure rule (Recorder.relieveDiskPressure) evicts whole sessions
-		// instead, because it has a floor to stop at and so never needs a last resort.
-		res, err := d.sql.Exec(
-			`DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY ts ASC LIMIT ?)`, drop)
+		n, err := d.sizeRound(now, o, size)
+		deleted += n
 		if err != nil {
 			return deleted, err
 		}
-		n, _ := res.RowsAffected()
-		deleted += n
-		// Reclaim the pages so the next sizeBytes reflects the deletion.
-		if err := d.reclaim(); err != nil {
+		if n == 0 {
+			// Only active sessions are left, and none is over the limit by itself, or the
+			// floor allows nothing more. Nothing to do; the next pass looks again.
+			slog.Info("dash: size rule found nothing it may delete",
+				"size_bytes", size, "max_bytes", o.MaxBytes, "floor_bytes", o.FloorBytes)
+			return deleted, nil
+		}
+		ok, err := d.reclaimWAL(true)
+		if err != nil {
 			return deleted, err
 		}
+		if !ok {
+			slog.Warn("dash: size rule stopped; the WAL checkpoint did not complete after a delete",
+				"max_bytes", o.MaxBytes, "deleted_requests", deleted)
+			return deleted, nil
+		}
+		after, err := d.sizeBytes()
+		if err != nil {
+			return deleted, err
+		}
+		if after >= size {
+			slog.Warn("dash: size rule stopped; a round deleted rows and the size did not go down",
+				"size_before", size, "size_after", after, "max_bytes", o.MaxBytes,
+				"deleted_requests", deleted)
+			return deleted, nil
+		}
+		size = after
 	}
 	return deleted, nil
+}
+
+// sizeRound runs one round of the size rule and returns how many request rows it deleted.
+func (d *DB) sizeRound(now time.Time, o PruneOptions, size int64) (int64, error) {
+	var total int64
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests`).Scan(&total); err != nil || total == 0 {
+		return 0, err
+	}
+	perRow := max(size/total, 1)
+	excess := size - o.MaxBytes
+	// Do not plan to go below the floor.
+	if o.FloorBytes > 0 && size-excess < o.FloorBytes {
+		excess = size - o.FloorBytes
+	}
+	cutoff := now.Add(-o.ActiveWindow).UnixMilli()
+	if o.ActiveWindow <= 0 {
+		cutoff = math.MinInt64
+	}
+	// Idle sessions, oldest last activity first. A round looks at a bounded batch.
+	// The floor check below uses the estimate, so one session much fatter than the average can
+	// take the real size under the floor in this round. The overshoot stops there: the next
+	// round measures the real size and ends the pass at the floor.
+	idle, err := d.idleSessions(cutoff, 500)
+	if err != nil {
+		return 0, err
+	}
+	var picked []sessCount
+	var est int64
+	for _, c := range idle {
+		bytes := c.rows * perRow
+		// The first session that would take the size under the floor ends the choice. It
+		// stays: the floor holds even when the next session is the one that is left.
+		if o.FloorBytes > 0 && size-est-bytes < o.FloorBytes {
+			break
+		}
+		picked = append(picked, c)
+		est += bytes
+		if est >= excess {
+			break
+		}
+	}
+	if len(picked) > 0 {
+		if o.Evict != nil {
+			cands := make([]coldCandidate, len(picked))
+			for i, c := range picked {
+				cands[i] = coldCandidate{SessionID: c.key.session, TenantID: c.key.tenant,
+					FirstTS: c.first, LastTS: c.last, Requests: c.rows}
+			}
+			return o.Evict(cands)
+		}
+		keys := make([]sessKey, len(picked))
+		for i, c := range picked {
+			keys[i] = c.key
+		}
+		return d.dropSessionKeys(keys)
+	}
+	if o.KeepActiveRows {
+		return 0, nil
+	}
+	// No idle session may go. Is one active session over the limit by itself?
+	// The over-limit test uses the estimate: its rows x average bytes per row.
+	rows, err := d.sql.QueryContext(d.readCtx(),
+		`SELECT tenant_id, session_id, COUNT(*) FROM requests GROUP BY tenant_id, session_id
+		 HAVING COUNT(*) * ? > ? ORDER BY COUNT(*) DESC LIMIT 1`, perRow, o.MaxBytes)
+	if err != nil {
+		return 0, err
+	}
+	var big sessCount
+	found := false
+	if rows.Next() {
+		found = rows.Scan(&big.key.tenant, &big.key.session, &big.rows) == nil
+	}
+	rows.Close()
+	if !found {
+		return 0, nil
+	}
+	// Rows of an active session are never archived: the remote holds whole sessions, and moving
+	// the conversation in progress would take it away from the person using it. So this trim
+	// deletes rows (the backup holds them), unless KeepActiveRows is set.
+	drop := max(big.rows/10, 1)
+	if o.FloorBytes > 0 {
+		// Stay above the floor, by the same estimate as the session pick.
+		if room := (size - o.FloorBytes) / perRow; room < drop {
+			drop = room
+		}
+		if drop < 1 {
+			return 0, nil
+		}
+	}
+	res, err := d.sql.Exec(
+		`DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE tenant_id = ? AND session_id = ? ORDER BY ts ASC LIMIT ?)`,
+		big.key.tenant, big.key.session, drop)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+type sessCount struct {
+	key         sessKey
+	rows        int64
+	first, last int64
+}
+
+// idleSessions lists sessions whose last request is older than cutoffMS, oldest last activity
+// first, with their row counts.
+func (d *DB) idleSessions(cutoffMS int64, limit int) ([]sessCount, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(),
+		`SELECT tenant_id, session_id, COUNT(*), MIN(ts), MAX(ts) FROM requests GROUP BY tenant_id, session_id
+		 HAVING MAX(ts) < ? ORDER BY MAX(ts) ASC LIMIT ?`, cutoffMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sessCount
+	for rows.Next() {
+		var c sessCount
+		if err := rows.Scan(&c.key.tenant, &c.key.session, &c.rows, &c.first, &c.last); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // sizeBytes reports the database's payload size. page_count*page_size is exact
@@ -904,23 +1130,41 @@ func (d *DB) sizeBytes() (int64, error) {
 // with auto_vacuum=NONE, incremental_vacuum is a silent no-op, so a full VACUUM is
 // the only thing that shrinks it.
 func (d *DB) reclaim() error {
+	_, err := d.reclaimWAL(false)
+	return err
+}
+
+// reclaimWAL is reclaim that also reports whether BOTH checkpoints completed. The size rule needs
+// the answer: when a checkpoint is blocked, the WAL keeps the deletes, the measured size does not
+// fall, and deleting more rows does not help (#1204). Other callers ignore it and keep their old
+// behavior.
+//
+// all=true frees EVERY free page in one call; false frees a bounded batch of 2000 pages (8 MiB at
+// 4 KiB). The size rule needs all: free pages still count in page_count, so with a bounded batch
+// the next round would read the rest as "still over the limit" and delete more sessions than it
+// has to.
+func (d *DB) reclaimWAL(all bool) (bool, error) {
 	// Checkpoint FIRST. In WAL mode a delete lands in the log, not the main file, so
 	// two things go wrong without this: incremental_vacuum finds no free pages to
 	// release (they are not in the main file yet), and sizeBytes — which counts the
 	// WAL, because it is real disk — reports the deletion as GROWTH. The size loop
 	// then reads its own progress backwards and deletes again.
-	d.checkpoint()
+	ok := d.checkpoint()
 	var mode int
 	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
-		if _, err := d.sql.Exec(`PRAGMA incremental_vacuum(2000)`); err != nil {
-			return err
+		q := `PRAGMA incremental_vacuum(2000)`
+		if all {
+			q = `PRAGMA incremental_vacuum`
+		}
+		if _, err := d.sql.Exec(q); err != nil {
+			return false, err
 		}
 	} else if _, err := d.sql.Exec(`VACUUM`); err != nil {
-		return err
+		return false, err
 	}
 	// And again, to truncate the WAL the reclaim itself just wrote.
-	d.checkpoint()
-	return nil
+	ok2 := d.checkpoint()
+	return ok && ok2, nil
 }
 
 // checkpoint folds the write-ahead log into the main database and truncates it.
@@ -942,17 +1186,22 @@ func (d *DB) reclaim() error {
 // one cause of it, and the attributes say which: a fact worth a log line rather
 // than silence — a WAL left to grow made one writer commit take 5.5s and blocked
 // /metrics for 5.2s, and nothing pointed here (#166).
-func (d *DB) checkpoint() {
+//
+// It returns true when the checkpoint completed, or when there is nothing to checkpoint (a
+// read-only handle, an in-memory database). It returns false when it did not complete. The size
+// rule reads the result (#1204); the other callers ignore it.
+func (d *DB) checkpoint() bool {
 	if d.readOnly || d.path == "" || d.path == ":memory:" {
-		return
+		return true
 	}
 	var busy, logFrames, checkpointed int
 	err := d.sql.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
 	if err == nil && busy == 0 {
-		return
+		return true
 	}
 	slog.Warn("dash: WAL checkpoint did not complete",
 		"busy", busy, "wal_frames", logFrames, "checkpointed", checkpointed, "err", err)
+	return false
 }
 
 // optimize refreshes the query planner's statistics for tables whose statistics are missing or
@@ -1020,6 +1269,13 @@ func (d *DB) DropOldestSessions(n int) (int64, error) {
 	if len(picked) == 0 {
 		return 0, nil
 	}
+	return d.dropSessionKeys(picked)
+}
+
+// dropSessionKeys deletes the given sessions and their state, and returns how many request rows
+// went. DropOldestSessions (the disk rule) and the size rule both use it, so there is one copy of
+// the delete (#1204).
+func (d *DB) dropSessionKeys(picked []sessKey) (int64, error) {
 	victims := make([]string, len(picked))
 	for i, k := range picked {
 		victims[i] = k.session
