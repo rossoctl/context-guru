@@ -12493,8 +12493,44 @@ func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
 	if b, err := os.ReadFile(log); err == nil && strings.Contains(string(b), "declined") {
 		t.Errorf("declined a project it is routed to: %s", b)
 	}
-	if strings.Contains(out, "8787") {
+	// The output also carries the fixture's t.TempDir() path, whose random digits can hold "8787"
+	// (#1214: a suffix 2672248787 failed CI). So take the path out first, in both spellings, and
+	// match 8787 only as a whole number.
+	scrubbed := out
+	for _, p := range []string{evalSymlinks(t, dir), dir} {
+		scrubbed = strings.ReplaceAll(scrubbed, p, "<dir>")
+	}
+	if defaultPortInOutput.MatchString(scrubbed) {
 		t.Errorf("output names 8787 for a project routed to 8841: %s", out)
+	}
+}
+
+// defaultPortInOutput matches 8787 as a whole number, not as digits inside a longer one.
+var defaultPortInOutput = regexp.MustCompile(`(^|[^0-9])8787([^0-9]|$)`)
+
+func evalSymlinks(t *testing.T, p string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
+// TestDefaultPortInOutputIgnoresLongerNumbers pins the matcher of
+// TestTheHooksResolveThePortWithoutTheOptionEnv (#1214).
+func TestDefaultPortInOutputIgnoresLongerNumbers(t *testing.T) {
+	for s, want := range map[string]bool{
+		"routed to http://127.0.0.1:8787/anthropic": true,
+		"port 8787":                      true,
+		"8787":                           true,
+		"/tmp/TestX2672248787/001/state": false,
+		"/tmp/TestX87871234/001":         false,
+		"routed to 8841":                 false,
+	} {
+		if got := defaultPortInOutput.MatchString(s); got != want {
+			t.Errorf("MatchString(%q) = %v, want %v", s, got, want)
+		}
 	}
 }
 
