@@ -302,6 +302,7 @@
   "time_zone": "UTC"
  },
  "baseline": "fixed-5m",
+ "currency": "USD",
  "feature_importance": {
   "gradient_boosted": [
    {

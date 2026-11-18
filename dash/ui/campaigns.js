@@ -878,8 +878,8 @@ async function renderCampaignTenantDrilldown(body, campaignID, tenantID) {
     el('thead', {}, el('tr', {},
       el('th', {}, 'Hour'), el('th', {}, 'Best strategy'), el('th', {}, 'State'),
       el('th', { class: 'num' }, 'Historical/predicted'), el('th', { class: 'num' }, 'Real saved'),
-      el('th', { class: 'num' }, 'Real net'), el('th', { class: 'num' }, '$/1k requests'),
-      el('th', { class: 'num' }, '$/active day'))));
+      el('th', { class: 'num' }, 'Real net'), el('th', { class: 'num' }, moneySym() + '/1k requests'),
+      el('th', { class: 'num' }, moneySym() + '/active day'))));
   const tbody = el('tbody');
   for (const cell of cells) {
     const hasReal = cell.real_requests > 0;

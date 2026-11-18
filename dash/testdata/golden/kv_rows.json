@@ -1,4 +1,5 @@
 {
+ "currency": "USD",
  "limit": 100,
  "offset": 0,
  "rows": [

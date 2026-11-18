@@ -722,7 +722,8 @@ async function loadKABehaviour() {
   lineChart(misses, [{ name: 'Cache expiries', color: SERIES[0], points: days, area: true }],
     { yFmt: num, xFmt: whenAxis });
   // In tokens: one line per tier, on one token scale. The tiers are never added into one line.
-  lineChart($('#ka-chart-usd'), sub
+  // On a subscription the line is in tokens, so a mixed view still draws it.
+  if (sub || !noMoneyChart($('#ka-chart-usd'))) lineChart($('#ka-chart-usd'), sub
     ? tierSeries(b.daily).map((t, i) => ({ name: t.name, color: SERIES[i], points: t.points }))
     : [{ name: 'What they cost', color: SERIES[0], points: usdPts, area: true }],
   { yFmt: sub ? compact : usd, xFmt: whenAxis });

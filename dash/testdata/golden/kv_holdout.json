@@ -4771,6 +4771,7 @@
   }
  ],
  "comparable_cells": 13,
+ "currency": "USD",
  "min_requests": 5,
  "notes": [
   "Train saving is IN-SAMPLE: each cell's arm was chosen by replaying every candidate over exactly these rows and taking the best, so the figure it wins with is a measure of fit, not a forecast. It is the same number the KV-cache page's suggestions and a campaign's frozen predicted saving already show.",

@@ -608,7 +608,7 @@ function tile(key, label, value, sub, cls) {
   // means the "i" is in the same place on every tile, which is what makes it findable.
   return el('div', { class: 'tile ' + (cls || ''), 'data-testid': 'tile-' + key },
     el('div', { class: 'k', text: label }),
-    el('div', { class: 'v', 'data-testid': 'tile-' + key + '-value', text: value }),
+    el('div', { class: 'v', 'data-testid': 'tile-' + key + '-value' }, moneyIcon(value), value),
     sub ? el('div', { class: 's', text: sub }) : null,
     info ? tileInfo(key, label, info) : null);
 }

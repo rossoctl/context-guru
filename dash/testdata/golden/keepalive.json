@@ -2,6 +2,7 @@
  "addressable_misses": 204,
  "addressable_usd": 0.848,
  "bytes_per_day": 802.6755852842809,
+ "currency": "USD",
  "keepalive_ping_tokens": {
   "cache_read": 720540,
   "cache_write_1h": 0,

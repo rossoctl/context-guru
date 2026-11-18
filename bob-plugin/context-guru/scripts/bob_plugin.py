@@ -101,9 +101,10 @@ PRESET_EFFECTS = ("This preset stores content on this Mac (originals, summaries 
 # cost gate needs them: without them it prices a cache rewrite at Claude rates and cuts nothing warm.
 PRICED_PRESETS = ("bob-ultrahigh",)
 # The oldest proxy release that accepts a preset's settings. An older proxy refuses unknown keys and
-# does not start (bob-ultrahigh's `warm: true` came in v0.7.2). A dev build has no release number;
+# does not start (bob-ultrahigh's prices.yaml says `currency: Bobcoins`, a key that came in v0.7.4;
+# its `warm: true` came in v0.7.2). A dev build has no release number;
 # for it, the restart check in change_and_restart is the guard.
-PRESET_MINIMUM_RELEASE = {"bob-ultrahigh": (0, 7, 2)}
+PRESET_MINIMUM_RELEASE = {"bob-ultrahigh": (0, 7, 4)}
 PRICES_SOURCE = Path(__file__).resolve().parent.parent / "prices.yaml"
 # The proxy's strategy table tags each row with the routes it fits. Bob's model call is OpenAI
 # Chat Completions ("openai-chat"). Not "openai": that tag is the OpenAI Responses route, which the
