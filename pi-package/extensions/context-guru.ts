@@ -5,7 +5,8 @@
 // It only:
 //   0. checks the proxy once when a session starts (a localhost /healthz, in the background, never
 //      awaited by Pi), restarts the service once if it does not answer, and warns once if it is still down.
-//      The session's end stops its own check, the restart child included;
+//      The session's end stops its own check, the restart child included. While it restarts, routed
+//      requests wait for it (at most 10 s), so the first one does not fail on a proxy that is starting;
 //   1. tags each routed request with Pi's own session id (header x-context-guru-session), so the proxy
 //      keeps one session across a compaction instead of splitting it in two;
 //   2. stops Pi's own cache warming for routed models while the proxy's keep-alive is on, so the cache
@@ -30,6 +31,8 @@ const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
 const SUBCOMMANDS = ["setup", "status", "preset", "cache-strategy", "update", "uninstall"];
 /** The time limit of each /healthz check at session start (the user's choice). */
 export const START_CHECK_TIMEOUT_MS = 5000;
+/** The longest a routed request waits for a start-check restart that is running (#1149). */
+export const FIRST_REQUEST_WAIT_MS = 10_000;
 
 interface Install {
   port?: number;
@@ -142,6 +145,30 @@ export class StartChecks {
   }
 }
 
+/** Holds routed requests while the session-start check restarts the proxy. Without it the first request
+ *  goes out before the proxy listens, fails 3 times, and Pi's retries make a 1 s prompt take 30 s (#1149).
+ *  Nothing is held while no restart runs, so a healthy proxy adds no wait. */
+export class RestartGate {
+  private held?: Promise<void>;
+
+  hold(): () => void {
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => { release = resolve; });
+    this.held = mine;
+    return () => {
+      release();
+      if (this.held === mine) this.held = undefined;
+    };
+  }
+
+  async wait(limitMs: number): Promise<void> {
+    if (!this.held) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([this.held, new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); })]);
+    clearTimeout(timer);
+  }
+}
+
 export interface StartCheck {
   port: number;
   /** The reset command to name when the restart does not report one. Undefined when it does not exist. */
@@ -152,6 +179,8 @@ export interface StartCheck {
   /** False once the session has ended: a check for an ended session restarts and says nothing. */
   active: () => boolean;
   notify: (text: string) => void;
+  /** Holds routed requests from the restart until the check after it; returns the release. */
+  hold?: () => () => void;
 }
 
 /** The session-start check: one check, at most one restart, one more check, at most one notice. No loop. */
@@ -159,12 +188,19 @@ export async function checkAtStart(check: StartCheck): Promise<"up" | "restarted
   if (await check.answers()) return "up";
   if (!check.active()) return "ended";
   let facts: Record<string, string> = {};
+  const release = check.hold?.();
+  let answered: boolean;
   try {
-    facts = await check.restart();
-  } catch {
-    // A failed restart is the same as a restart that did not help: check again, then warn.
+    try {
+      facts = await check.restart();
+    } catch {
+      // A failed restart is the same as a restart that did not help: check again, then warn.
+    }
+    answered = await check.answers();
+  } finally {
+    release?.();
   }
-  if (await check.answers()) return "restarted";
+  if (answered) return "restarted";
   if (!check.active()) return "ended";
   check.notify(downNotice(check.port, facts, facts.reset_hatch || check.hatch));
   return "down";
@@ -286,6 +322,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   };
 
   const checks = new StartChecks();
+  const gate = new RestartGate();
 
   /** The strategy names the proxy offered at the last `cache-strategy` command (for completion). */
   let strategyNames: string[] = [];
@@ -314,6 +351,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       // A restart can wait for another session's restart to finish (a lock in pi_plugin.py).
       restart: async () => restartFacts(await run(["restart"], RESTART_TIMEOUT_MS, current.signal)),
       active: current.active,
+      hold: () => gate.hold(),
       notify: (text) => {
         try {
           // Print and JSON modes have no UI. stdout carries the answer there, so the warning goes to stderr.
@@ -334,7 +372,8 @@ export default function contextGuru(pi: ExtensionAPI) {
 
   // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
   // to that same model. An API key (or any other provider) passes through unchanged.
-  pi.on("before_provider_request", (event, ctx) => {
+  pi.on("before_provider_request", async (event, ctx) => {
+    if (routed(ctx)) await gate.wait(FIRST_REQUEST_WAIT_MS);
     const model = ctx.model;
     if (!model || model.provider !== "openai" || model.api !== "openai-responses" || !routed(ctx)) return undefined;
     if (!stripsChatGPTFields(install)) return undefined;

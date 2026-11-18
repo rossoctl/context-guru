@@ -181,7 +181,9 @@ is installed and at least one Pi model goes to the proxy (the session's model or
    command only when that file exists.
 
 The check runs in the background. The session does not wait for it. It runs once per session start
-and never loops. When the session ends, Pi stops that session's check, the restart included. So
+and never loops. Only while the check restarts the proxy, a request to a routed model waits for the
+restart, at most 10 s. Without this wait, the first request fails while the proxy starts, and Pi
+retries it. A proxy that answers adds no wait. When the session ends, Pi stops that session's check, the restart included. So
 `pi -p` exits as soon as it has the answer, and an ended session gets no warning.
 
 One restart runs at a time. If two Pi sessions start together, the second one waits for the first
