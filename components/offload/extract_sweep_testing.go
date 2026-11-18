@@ -9,8 +9,14 @@ import (
 // and stashed it under the marker id `marker`. For the host's tests, which drive an expand through the
 // real proxy and cannot reach the unexported record.
 func SeedSweepDropForTest(st store.Store, threadKey, content, marker string) {
+	SeedSweepDropRuleForTest(st, threadKey, content, marker, "")
+}
+
+// SeedSweepDropRuleForTest is SeedSweepDropForTest for a drop sweep v3 made: rule names what chose it (a
+// rule name, or "judge").
+func SeedSweepDropRuleForTest(st store.Store, threadKey, content, marker, rule string) {
 	ck := extract.ContentKey(content)
-	putDrop(st, sweepDropRec{Thread: threadKey, ToolUseID: "toolu_seed", CK: ck, Marker: marker, Tokens: 1})
+	putDrop(st, sweepDropRec{Thread: threadKey, ToolUseID: "toolu_seed", CK: ck, Marker: marker, Tokens: 1, Rule: rule})
 	addToDropIndex(st, threadKey, []string{ck})
 	func() {
 		dropMu.Lock()
