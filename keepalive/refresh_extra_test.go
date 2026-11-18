@@ -2,6 +2,7 @@ package keepalive
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -124,7 +126,7 @@ func TestRefreshCapStillUsesTheFullCost(t *testing.T) {
 }
 
 // runExtraSlot records a text turn, lets both planned pings go out plain, then reaches the extra
-// slot (210 s after the last ping at Idle 240 s) and waits for the request there.
+// slot (Idle - extraSlotMargin after the last ping) and waits for the request there.
 func runExtraSlot(t *testing.T, k *Keeper, clock *testClock) {
 	t.Helper()
 	pol := kaPolicy()
@@ -134,12 +136,13 @@ func runExtraSlot(t *testing.T, k *Keeper, clock *testClock) {
 		k.Sweep(clock.advance(241 * time.Second))
 		waitPings(t, k, i)
 	}
-	k.Sweep(clock.advance(210 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) &&
-		k.summarySubstituted.Load()+k.summarySubstituteRefreshNotWorthIt.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	k.Sweep(clock.advance(pol.Idle - extraSlotMargin))
+	testutil.WaitForState(t, "the extra slot decides", func() bool {
+		return k.summarySubstituted.Load()+k.summarySubstituteRefreshNotWorthIt.Load()+k.sweepExtraSkipped.Load() > 0
+	}, func() string {
+		return fmt.Sprintf("substituted=%d notWorthIt=%d extraSkipped=%d", k.summarySubstituted.Load(),
+			k.summarySubstituteRefreshNotWorthIt.Load(), k.sweepExtraSkipped.Load())
+	})
 }
 
 // At the extra slot no ping is replaced: a declined refresh sends nothing. The refresh then adds

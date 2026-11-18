@@ -86,7 +86,8 @@ type KeepAliveCandidateInfo struct {
 	// replaces: the prefix_ask path, which sends the stashed body the ping resends. Only then does
 	// the ping's read cancel out of a refresh's cost. The messages path builds its request from the
 	// pipeline's own view of the conversation, which later components can change, and model.source:
-	// config sends it to another model with its own cache. Both read the prefix at their own price.
+	// config sends it to another model with its own cache. Those calls may still hit the same cache,
+	// but nothing guarantees it, so the gate stays conservative there and weighs the whole call.
 	ReadsPingPrefix bool
 }
 
