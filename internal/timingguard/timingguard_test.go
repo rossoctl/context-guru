@@ -107,32 +107,11 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 		return counts, nil, nil
 	}
 	dotImport := timeAlias == "."
-	// Limit of the dot-import check. Without type checking, the guard cannot see a name from
-	// another file of the package, or a local variable that shadows Sleep, After or Now. It sees
-	// only the names that this file declares at package level, and it skips those. A bare
-	// Sleep(...) that this file does not declare counts as time.Sleep.
-	shadowed := map[string]bool{}
-	if dotImport {
-		for _, d := range file.Decls {
-			switch dd := d.(type) {
-			case *ast.FuncDecl:
-				if dd.Recv == nil {
-					shadowed[dd.Name.Name] = true
-				}
-			case *ast.GenDecl:
-				for _, sp := range dd.Specs {
-					switch v := sp.(type) {
-					case *ast.ValueSpec:
-						for _, n := range v.Names {
-							shadowed[n.Name] = true
-						}
-					case *ast.TypeSpec:
-						shadowed[v.Name.Name] = true
-					}
-				}
-			}
-		}
-	}
+	// Limit of the dot-import check. Without type checking, the guard cannot see a function-local
+	// variable that shadows Sleep, After or Now, or a name from a dot-import of another package.
+	// A bare Sleep(...) in a file that dot-imports time counts as time.Sleep. The guard needs no
+	// check for a package-level Sleep, After or Now in that file: Go rejects such a file as a
+	// redeclaration of the dot-imported name.
 
 	// Lines that carry a valid //timing:ok.
 	okLines := map[int]bool{}
@@ -169,7 +148,7 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 		}
 		if dotImport {
 			id, ok := call.Fun.(*ast.Ident)
-			return call, ok && id.Name == name && !shadowed[name]
+			return call, ok && id.Name == name
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok || sel.Sel.Name != name {
@@ -286,12 +265,20 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 					record(s.Pos(), Sleep)
 				}
 			case *ast.AssignStmt:
-				if !inSelect[s] && isAfterRecv(s, isTimeCall) {
-					record(s.Pos(), Sleep)
+				if !inSelect[s] {
+					for _, v := range s.Rhs {
+						if isUnaryAfter(v, isTimeCall) {
+							record(v.Pos(), Sleep)
+						}
+					}
 				}
-			case *ast.DeclStmt:
-				if isAfterRecv(s, isTimeCall) {
-					record(s.Pos(), Sleep)
+			case *ast.ValueSpec:
+				// var x = <-time.After(d), in a function or at package level. A var is never a
+				// select case, so no inSelect check is needed.
+				for _, v := range s.Values {
+					if isUnaryAfter(v, isTimeCall) {
+						record(v.Pos(), Sleep)
+					}
 				}
 			case *ast.CallExpr:
 				if _, ok := isTimeCall(n, "Sleep"); ok {
@@ -315,8 +302,8 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 	return counts, malformed, nil
 }
 
-// isAfterRecv reports whether s is <-time.After(...), v := <-time.After(...) or
-// var v = <-time.After(...).
+// isAfterRecv reports whether a select comm statement is <-time.After(...) or
+// v := <-time.After(...).
 func isAfterRecv(s ast.Stmt, isTimeCall func(ast.Node, string) (*ast.CallExpr, bool)) bool {
 	var e ast.Expr
 	switch c := s.(type) {
@@ -326,15 +313,6 @@ func isAfterRecv(s ast.Stmt, isTimeCall func(ast.Node, string) (*ast.CallExpr, b
 		if len(c.Rhs) == 1 {
 			e = c.Rhs[0]
 		}
-	case *ast.DeclStmt:
-		if gd, ok := c.Decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
-			for _, sp := range gd.Specs {
-				if vs, ok := sp.(*ast.ValueSpec); ok && len(vs.Values) == 1 && isUnaryAfter(vs.Values[0], isTimeCall) {
-					return true
-				}
-			}
-		}
-		return false
 	}
 	return isUnaryAfter(e, isTimeCall)
 }
@@ -637,6 +615,22 @@ func TestTestTimingScanCountsAReceiveOutsideASelect(t *testing.T) {
 	}
 }
 
+func TestTestTimingScanCountsEveryReceiveOfAMultiValueForm(t *testing.T) {
+	cases := map[string]string{
+		"package var":      "package p\nimport \"time\"\nvar x = <-time.After(1)\n",
+		"package var list": "package p\nimport \"time\"\nvar x, y = <-time.After(1), <-time.After(2)\n",
+		"func assign list": "package p\nimport \"time\"\nfunc f() { x, y := <-time.After(1), <-time.After(2); _, _ = x, y }\n",
+		"func var list":    "package p\nimport \"time\"\nfunc f() { var x, y = <-time.After(1), <-time.After(2); _, _ = x, y }\n",
+	}
+	want := map[string]int{"package var": 1, "package var list": 2, "func assign list": 2, "func var list": 2}
+	for name, src := range cases {
+		c, _ := scanFile(t, src)
+		if c[Sleep] != want[name] || c.total() != want[name] {
+			t.Errorf("%s: counts %v, want sleep=%d only", name, c, want[name])
+		}
+	}
+}
+
 func TestTestTimingScanFollowsADotImport(t *testing.T) {
 	c, _ := scanFile(t, "package p\nimport . \"time\"\nfunc f() { Sleep(1); <-After(1); x := <-After(1); _ = x }\n")
 	if c[Sleep] != 3 {
@@ -653,11 +647,6 @@ func TestTestTimingScanSkipsALocalFuncNamedSleep(t *testing.T) {
 	c, _ := scanFile(t, "package p\nimport \"time\"\nvar _ = time.Second\nfunc Sleep(int) {}\nfunc f() { Sleep(1) }\n")
 	if c.total() != 0 {
 		t.Errorf("local Sleep counted: %v", c)
-	}
-	// Dot-import of time, and the file declares its own Sleep: it shadows the import.
-	c, _ = scanFile(t, "package p\nimport . \"time\"\nvar _ = Second\nfunc Sleep(int) {}\nfunc f() { Sleep(1) }\n")
-	if c.total() != 0 {
-		t.Errorf("shadowing Sleep counted: %v", c)
 	}
 }
 
