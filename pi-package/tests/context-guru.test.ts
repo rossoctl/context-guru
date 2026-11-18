@@ -320,9 +320,19 @@ test("the strategy names come from the proxy's list, and an old proxy offers onl
 
 test("a request does not wait when no restart is running", async () => {
   const gate = new RestartGate();
-  const start = Date.now();
-  await gate.wait(10_000);
-  assert.ok(Date.now() - start < 50);
+  // The wait settles before a 0 ms timer fires: no wait at all, whatever the machine's load.
+  const first = await Promise.race([gate.wait(10_000).then(() => "wait"), new Promise((r) => setTimeout(() => r("timer"), 0))]);
+  assert.equal(first, "wait");
+});
+
+test("Esc ends the wait at once", async () => {
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const stop = new AbortController();
+  const waiting = gate.wait(10_000, stop.signal).then(() => "ended");
+  stop.abort();
+  assert.equal(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("still waiting"), 1000))]), "ended");
+  assert.equal(await gate.wait(10_000, AbortSignal.abort()).then(() => "ended"), "ended", "an aborted signal waits not at all");
 });
 
 test("a request waits for a running restart and goes as soon as it ends", async () => {

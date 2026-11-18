@@ -161,11 +161,18 @@ export class RestartGate {
     };
   }
 
-  async wait(limitMs: number): Promise<void> {
-    if (!this.held) return;
+  /** Ends when the restart ends, at the limit, or when `signal` aborts (the user pressed Esc). */
+  async wait(limitMs: number, signal?: AbortSignal): Promise<void> {
+    if (!this.held || signal?.aborted) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([this.held, new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); })]);
+    let onAbort: (() => void) | undefined;
+    await Promise.race([
+      this.held,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); }),
+      new Promise<void>((resolve) => { onAbort = resolve; signal?.addEventListener("abort", resolve, { once: true }); }),
+    ]);
     clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -373,7 +380,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
   // to that same model. An API key (or any other provider) passes through unchanged.
   pi.on("before_provider_request", async (event, ctx) => {
-    if (routed(ctx)) await gate.wait(FIRST_REQUEST_WAIT_MS);
+    if (routed(ctx)) await gate.wait(FIRST_REQUEST_WAIT_MS, ctx.signal);
     const model = ctx.model;
     if (!model || model.provider !== "openai" || model.api !== "openai-responses" || !routed(ctx)) return undefined;
     if (!stripsChatGPTFields(install)) return undefined;
