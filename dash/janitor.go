@@ -48,13 +48,16 @@ func (r *Recorder) janitorPass() {
 	// The backup copy (backup.go) is made lazily, once per pass, by the first rule that is about
 	// to delete rows. The disk-pressure rule below never asks for one.
 	backup := sync.OnceValue(r.ensureBackup)
-	r.enforceQuotasWith(backup)
+	r.enforceQuotas(backup)
 	if n, err := r.db.PruneWith(time.Now(), PruneOptions{
 		MaxAge:       r.opts.RetentionAge,
 		MaxBytes:     r.opts.RetentionBytes,
 		FloorBytes:   r.retentionFloor(),
 		ActiveWindow: defaultActiveSessionWindow,
 		BeforeDelete: backup,
+		Evict:        r.sizeEvictor(),
+		// --archive-required means "never lose a row": no row trim of an active session either.
+		KeepActiveRows: r.opts.ArchiveRequired,
 	}); err != nil {
 		slog.Warn("dash: retention prune failed", "err", err)
 	} else if n > 0 {
@@ -136,6 +139,15 @@ func (r *Recorder) minKeepBytes() int64 {
 	return defaultMinKeepBytes
 }
 
+// sizeEvictor gives the size rule the same archive-then-delete migration the quota and disk rules
+// use. With no cold storage it returns nil and the size rule deletes directly, as before.
+func (r *Recorder) sizeEvictor() func([]coldCandidate) (int64, error) {
+	if r.remote == nil {
+		return nil
+	}
+	return r.evictSessions
+}
+
 // retentionFloor is the size at which the size rule stops (see Options.RetentionFloorBytes).
 func (r *Recorder) retentionFloor() int64 {
 	if r.opts.RetentionFloorBytes > 0 {
@@ -167,12 +179,9 @@ func (r *Recorder) quotaFor(tenantID string) int64 {
 }
 
 // enforceQuotas trims any tenant over its row quota back to it.
-func (r *Recorder) enforceQuotas() { r.enforceQuotasWith(r.ensureBackup) }
-
-// enforceQuotasWith is enforceQuotas with the backup step given. The janitor passes one shared
-// by the whole pass. backup is called before the first trim. A false result does not stop the trim: a row quota is a
+// The janitor passes a backup step shared by the whole pass. backup is called before the first trim. A false result does not stop the trim: a row quota is a
 // bound the operator set, and a failed copy must not keep a tenant over it.
-func (r *Recorder) enforceQuotasWith(backup func() bool) {
+func (r *Recorder) enforceQuotas(backup func() bool) {
 	// Nothing configured at all: skip the count query entirely, which is what a
 	// single-tenant proxy does on every pass.
 	if r.opts.MaxRowsPerTenant <= 0 && r.tenantQuota.Load() == nil {

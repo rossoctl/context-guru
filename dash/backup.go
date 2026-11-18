@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -35,16 +36,19 @@ func backupPath(path string) string { return path + ".bak" }
 // backupTo writes a consistent copy of the database to dst with VACUUM INTO. It writes to a temp
 // name and renames, so a copy that stopped half way never takes the place of a good one.
 func (d *DB) backupTo(dst string) error {
-	tmp := dst + ".tmp"
-	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+	// The copy is made inside a private directory (MkdirTemp creates it with mode 0700), so no
+	// other local user can read it while VACUUM INTO writes it with the default file mode. The
+	// directory is next to the database, so the final rename stays on one filesystem.
+	dir, err := os.MkdirTemp(filepath.Dir(dst), ".cg-backup-")
+	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(dir)
+	tmp := filepath.Join(dir, "copy.db")
 	if _, err := d.sql.Exec(`VACUUM INTO ?`, tmp); err != nil {
-		os.Remove(tmp)
 		return err
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
-		os.Remove(tmp)
 		return err
 	}
 	// Rotate: the current copy becomes <db>.bak.1 (replacing the older one) only now, when the new
@@ -53,7 +57,6 @@ func (d *DB) backupTo(dst string) error {
 	rotated := false
 	if _, err := os.Stat(dst); err == nil {
 		if err := os.Rename(dst, prev); err != nil {
-			os.Remove(tmp)
 			return err
 		}
 		rotated = true
@@ -62,7 +65,6 @@ func (d *DB) backupTo(dst string) error {
 		if rotated {
 			os.Rename(prev, dst) // put the current copy back
 		}
-		os.Remove(tmp)
 		return err
 	}
 	return nil

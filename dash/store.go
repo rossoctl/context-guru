@@ -152,6 +152,14 @@ func Open(path string) (*DB, error) {
 				_ = os.Rename(path+suffix, aside+suffix)
 			}
 		}
+		// The janitor's backup copies (backup.go) are copies of the OLD database. Move them aside
+		// with it. Left in place, the 24-hour rule would trust them as fresh copies of the new,
+		// empty database, and a restore by hand would bring back the old data under the new name.
+		for _, suffix := range []string{".bak", ".bak.1"} {
+			if _, serr := os.Stat(path + suffix); serr == nil {
+				_ = os.Rename(path+suffix, aside+suffix)
+			}
+		}
 		fresh, ferr := openDSN(dsn(path), path)
 		if ferr != nil {
 			return nil, ferr
@@ -816,7 +824,10 @@ func gunzipText(b []byte) string {
 //
 // maxAge <= 0 disables the age rule; maxBytes <= 0 disables the size rule.
 //
-// This form has no size floor and no backup hook; the janitor calls PruneWith.
+// This form has no size floor, no backup hook and no eviction hook; the janitor calls PruneWith.
+// The size rule keeps every session whose last request is newer than defaultActiveSessionWindow
+// (1 hour): it deletes rows of such a session only when that one session is over maxBytes by
+// itself. It deletes whole idle sessions, oldest last activity first, not single rows.
 func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, error) {
 	return d.PruneWith(now, PruneOptions{MaxAge: maxAge, MaxBytes: maxBytes, ActiveWindow: defaultActiveSessionWindow})
 }
@@ -845,6 +856,14 @@ type PruneOptions struct {
 	// means "do not delete in this pass". For the age rule the result is ignored: the age rule is a
 	// policy the operator set, and a failed copy must not keep rows past it.
 	BeforeDelete func() bool
+	// Evict, when set, deletes whole idle sessions for the size rule instead of the plain delete.
+	// The janitor sets it to its archive-then-delete migration when cold storage is configured, so
+	// the size rule loses no history the remote could hold. It returns how many request rows left
+	// the local database. nil means a plain delete.
+	Evict func([]coldCandidate) (int64, error)
+	// KeepActiveRows stops the size rule from trimming rows of an over-limit active session.
+	// The janitor sets it with --archive-required: that option means "never lose a row".
+	KeepActiveRows bool
 }
 
 // PruneWith is Prune with the full set of options. See PruneOptions.
@@ -976,11 +995,14 @@ func (d *DB) sizeRound(now time.Time, o PruneOptions, size int64) (int64, error)
 		cutoff = math.MinInt64
 	}
 	// Idle sessions, oldest last activity first. A round looks at a bounded batch.
+	// The floor check below uses the estimate, so one session much fatter than the average can
+	// take the real size under the floor in this round. The overshoot stops there: the next
+	// round measures the real size and ends the pass at the floor.
 	idle, err := d.idleSessions(cutoff, 500)
 	if err != nil {
 		return 0, err
 	}
-	var picked []sessKey
+	var picked []sessCount
 	var est int64
 	for _, c := range idle {
 		bytes := c.rows * perRow
@@ -989,14 +1011,29 @@ func (d *DB) sizeRound(now time.Time, o PruneOptions, size int64) (int64, error)
 		if o.FloorBytes > 0 && size-est-bytes < o.FloorBytes {
 			break
 		}
-		picked = append(picked, c.key)
+		picked = append(picked, c)
 		est += bytes
 		if est >= excess {
 			break
 		}
 	}
 	if len(picked) > 0 {
-		return d.dropSessionKeys(picked)
+		if o.Evict != nil {
+			cands := make([]coldCandidate, len(picked))
+			for i, c := range picked {
+				cands[i] = coldCandidate{SessionID: c.key.session, TenantID: c.key.tenant,
+					FirstTS: c.first, LastTS: c.last, Requests: c.rows}
+			}
+			return o.Evict(cands)
+		}
+		keys := make([]sessKey, len(picked))
+		for i, c := range picked {
+			keys[i] = c.key
+		}
+		return d.dropSessionKeys(keys)
+	}
+	if o.KeepActiveRows {
+		return 0, nil
 	}
 	// No idle session may go. Is one active session over the limit by itself?
 	// The over-limit test uses the estimate: its rows x average bytes per row.
@@ -1015,7 +1052,19 @@ func (d *DB) sizeRound(now time.Time, o PruneOptions, size int64) (int64, error)
 	if !found {
 		return 0, nil
 	}
+	// Rows of an active session are never archived: the remote holds whole sessions, and moving
+	// the conversation in progress would take it away from the person using it. So this trim
+	// deletes rows (the backup holds them), unless KeepActiveRows is set.
 	drop := max(big.rows/10, 1)
+	if o.FloorBytes > 0 {
+		// Stay above the floor, by the same estimate as the session pick.
+		if room := (size - o.FloorBytes) / perRow; room < drop {
+			drop = room
+		}
+		if drop < 1 {
+			return 0, nil
+		}
+	}
 	res, err := d.sql.Exec(
 		`DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE tenant_id = ? AND session_id = ? ORDER BY ts ASC LIMIT ?)`,
 		big.key.tenant, big.key.session, drop)
@@ -1027,15 +1076,16 @@ func (d *DB) sizeRound(now time.Time, o PruneOptions, size int64) (int64, error)
 }
 
 type sessCount struct {
-	key  sessKey
-	rows int64
+	key         sessKey
+	rows        int64
+	first, last int64
 }
 
 // idleSessions lists sessions whose last request is older than cutoffMS, oldest last activity
 // first, with their row counts.
 func (d *DB) idleSessions(cutoffMS int64, limit int) ([]sessCount, error) {
 	rows, err := d.sql.QueryContext(d.readCtx(),
-		`SELECT tenant_id, session_id, COUNT(*) FROM requests GROUP BY tenant_id, session_id
+		`SELECT tenant_id, session_id, COUNT(*), MIN(ts), MAX(ts) FROM requests GROUP BY tenant_id, session_id
 		 HAVING MAX(ts) < ? ORDER BY MAX(ts) ASC LIMIT ?`, cutoffMS, limit)
 	if err != nil {
 		return nil, err
@@ -1044,9 +1094,10 @@ func (d *DB) idleSessions(cutoffMS int64, limit int) ([]sessCount, error) {
 	var out []sessCount
 	for rows.Next() {
 		var c sessCount
-		if rows.Scan(&c.key.tenant, &c.key.session, &c.rows) == nil {
-			out = append(out, c)
+		if err := rows.Scan(&c.key.tenant, &c.key.session, &c.rows, &c.first, &c.last); err != nil {
+			return nil, err
 		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

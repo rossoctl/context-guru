@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // Tests for #1204: the size rule must not delete while the WAL checkpoint is blocked, must stop
@@ -298,11 +300,14 @@ func backupRecorder(t *testing.T, o Options) *Recorder {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	select {
-	case <-rec.migrationsDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the background migrations did not finish")
-	}
+	testutil.WaitFor(t, "the background migrations to finish", func() bool {
+		select {
+		case <-rec.migrationsDone:
+			return true
+		default:
+			return false
+		}
+	})
 	return rec
 }
 
@@ -423,9 +428,16 @@ func TestBackupCanBeTurnedOff(t *testing.T) {
 func TestSizeRuleDoesNotDeleteWhenTheBackupFails(t *testing.T) {
 	rec := backupRecorder(t, Options{RetentionAge: -1, RetentionBytes: 1, RetentionFloorBytes: 1})
 	seedFat(t, rec.db, idleSet("old", 4, 8))
-	// A non-empty directory at the temp name: the copy cannot start. No .bak exists, so one is due.
+	// An old .bak exists, so one is due, and a non-empty directory sits at .bak.1: the rotation fails.
 	bak := backupPath(rec.db.Path())
-	if err := os.MkdirAll(filepath.Join(bak+".tmp", "x"), 0o755); err != nil {
+	if err := os.WriteFile(bak, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(bak, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(bak+".1", "x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	before := countRows(t, rec.db, "requests")
@@ -448,5 +460,110 @@ func TestInMemoryDatabaseNeedsNoBackup(t *testing.T) {
 	defer rec.Close()
 	if !rec.ensureBackup() {
 		t.Fatal("an in-memory database must pass the backup step")
+	}
+}
+
+func TestBackupTempCopyIsNeverWorldReadable(t *testing.T) {
+	rec := backupRecorder(t, Options{})
+	dir := filepath.Dir(rec.db.Path())
+	// Make the copy fail after VACUUM INTO has written the temp file, and look at the temp dir
+	// mode through the Stat of its parent entries before cleanup: the directory is 0700.
+	d, err := os.MkdirTemp(dir, ".cg-backup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(d)
+	fi, _ := os.Stat(d)
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("MkdirTemp mode %v; the backup relies on 0700", fi.Mode().Perm())
+	}
+	if err := rec.db.backupTo(backupPath(rec.db.Path())); err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".cg-backup-") && filepath.Join(dir, e.Name()) != d {
+			t.Errorf("temp backup directory left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestSchemaMismatchMovesTheBackupCopiesAside(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "d.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.Exec(`UPDATE meta SET value='9999' WHERE key='schema_version'`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	for _, s := range []string{".bak", ".bak.1"} {
+		if err := os.WriteFile(path+s, []byte("old copy"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	for _, s := range []string{".bak", ".bak.1"} {
+		if _, err := os.Stat(path + s); err == nil {
+			t.Errorf("%s of the OLD database is still in place; it would pass as a fresh copy", s)
+		}
+	}
+}
+
+func TestSizeRuleUsesTheEvictHookAndKeepsActiveRowsWhenAsked(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	seedFat(t, db, idleSet("old", 6, 80))
+	size, _ := db.sizeBytes()
+	var got []coldCandidate
+	_, err = db.PruneWith(time.Now(), PruneOptions{MaxBytes: size / 2, ActiveWindow: time.Hour,
+		Evict: func(c []coldCandidate) (int64, error) { got = append(got, c...); return 0, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0].SessionID != "old00" || got[0].Requests != 80 || got[0].LastTS < got[0].FirstTS {
+		t.Fatalf("the hook did not get the oldest session first with its counts: %+v", got)
+	}
+	if sessionRows(t, db)["old00"] != 80 {
+		t.Error("the size rule deleted a session itself although a hook was set")
+	}
+
+	db2, err := Open(filepath.Join(t.TempDir(), "d2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	seedFat(t, db2, []fatSession{{"live", 0.1, 60}})
+	s2, _ := db2.sizeBytes()
+	d, err := db2.PruneWith(time.Now(), PruneOptions{MaxBytes: s2 / 3, ActiveWindow: time.Hour, KeepActiveRows: true})
+	if err != nil || d != 0 {
+		t.Fatalf("KeepActiveRows: deleted %d rows (err %v)", d, err)
+	}
+}
+
+func TestActiveTrimRespectsTheFloor(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	seedFat(t, db, []fatSession{{"live", 0.1, 100}})
+	size, _ := db.sizeBytes()
+	// The floor is just under the size: the trim may remove very little.
+	if _, err := db.PruneWith(time.Now(), PruneOptions{MaxBytes: size / 4, FloorBytes: size * 98 / 100,
+		ActiveWindow: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	if n := sessionRows(t, db)["live"]; n < 95 {
+		t.Fatalf("the trim cut the session to %d rows; the floor allows about 2%%", n)
 	}
 }
