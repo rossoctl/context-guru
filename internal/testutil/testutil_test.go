@@ -89,6 +89,27 @@ func TestWaitForGivesUpBeforeTheTestDeadlineWithItsOwnMessage(t *testing.T) {
 	if !strings.Contains(d.msg, "waiting for never") {
 		t.Fatalf("message = %q", d.msg)
 	}
+	// The deadline cut the wait, so the message must say the package ran out of time.
+	if !strings.Contains(d.msg, "the package ran out of time") || !strings.Contains(d.msg, "-timeout") {
+		t.Fatalf("message does not name the test deadline: %q", d.msg)
+	}
+}
+
+func TestWaitForDoesNotBlameTheDeadlineWhenItDidNotCutTheWait(t *testing.T) {
+	defer SetBoundForTest(30 * time.Millisecond)()
+	// A deadline far away: the 30 ms bound sets the limit, not the deadline.
+	d := &deadlineTB{dl: time.Now().Add(time.Hour)}
+	func() {
+		defer func() {
+			if p := recover(); p != nil && p != &d.recorder {
+				panic(p)
+			}
+		}()
+		WaitFor(d, "never", func() bool { return false })
+	}()
+	if !strings.Contains(d.msg, "waiting for never") || strings.Contains(d.msg, "ran out of time") {
+		t.Fatalf("message = %q", d.msg)
+	}
 }
 
 func TestWaitForStateSurvivesAPanickingStateFunc(t *testing.T) {

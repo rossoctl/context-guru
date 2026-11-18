@@ -45,7 +45,7 @@ func WaitFor(t testing.TB, what string, cond func() bool) {
 func WaitForState(t testing.TB, what string, cond func() bool, state func() string) {
 	t.Helper()
 	start := time.Now()
-	limit := effectiveBound(t)
+	limit, cut := effectiveBound(t)
 	for {
 		if cond() {
 			return
@@ -59,10 +59,18 @@ func WaitForState(t testing.TB, what string, cond func() bool, state func() stri
 	if cond() {
 		return
 	}
+	msg := fmt.Sprintf("timed out after %v waiting for %s", time.Since(start).Round(time.Millisecond), what)
 	if state != nil {
-		t.Fatalf("timed out after %v waiting for %s; state: %s", time.Since(start).Round(time.Millisecond), what, describe(state))
+		msg += "; state: " + describe(state)
 	}
-	t.Fatalf("timed out after %v waiting for %s", time.Since(start).Round(time.Millisecond), what)
+	if cut {
+		// The test binary's deadline, not the condition, set this limit. Say so: a wait of a few
+		// milliseconds otherwise looks like a flaky test (v0.7.4 Part A, race-record).
+		msg += fmt.Sprintf("; the wait was cut to %v because the test binary's -timeout is %v away "+
+			"(less the %v margin): the package ran out of time, not this condition. Raise -timeout "+
+			"or make the package faster", limit.Round(time.Millisecond), (limit + deadlineMargin).Round(time.Millisecond), deadlineMargin)
+	}
+	t.Fatalf("%s", msg)
 }
 
 // deadlineMargin is the time kept before the test deadline, so the failure message of WaitFor
@@ -70,17 +78,17 @@ func WaitForState(t testing.TB, what string, cond func() bool, state func() stri
 const deadlineMargin = 5 * time.Second
 
 // effectiveBound is the safety bound, cut to the time left before the test deadline minus
-// deadlineMargin. It is never below one poll interval.
-func effectiveBound(t testing.TB) time.Duration {
-	limit := time.Duration(bound.Load())
+// deadlineMargin. It is never below one poll interval. cut says the deadline set the limit.
+func effectiveBound(t testing.TB) (limit time.Duration, cut bool) {
+	limit = time.Duration(bound.Load())
 	if d, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
 		if dl, has := d.Deadline(); has {
 			if left := time.Until(dl) - deadlineMargin; left < limit {
-				limit = max(left, pollInterval)
+				return max(left, pollInterval), true
 			}
 		}
 	}
-	return limit
+	return limit, false
 }
 
 // describe calls state. A panic inside state must not hide the timeout, so it becomes text.
