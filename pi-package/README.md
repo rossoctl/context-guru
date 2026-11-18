@@ -89,36 +89,48 @@ From a shell, `pi_plugin.py setup --plan` prints `consent_question_chain` with `
 and `consent_question_replace` with `confirm_command_replace`. Setup with a conflict and no
 `--on-conflict chain|replace` refuses and changes nothing.
 
-### A gateway on Bedrock: Opus 5 fails with `output_config`
+### A gateway on Bedrock: `output_config` is refused
 
-A LiteLLM gateway with a Bedrock model group can refuse Pi's built-in `claude-opus-5` with HTTP 400:
+A LiteLLM gateway with a Bedrock model group can refuse Pi's newer built-in Claude models with HTTP 400:
 
 ```text
 litellm.BadRequestError: BedrockException - {"message":"messages.2.output_config: Extra inputs are not permitted"}
 ```
 
-- **Why.** Pi's `claude-opus-5` has `compat.supportsMidConvoEffort: true`. With it, Pi puts the effort
-  setting (`output_config`) on messages inside `messages[]`. The Anthropic API accepts that. Bedrock
-  does not. context-guru does not add the field; it forwards it unchanged.
-- **Fix.** Turn the flag off for that model, in the `anthropic` entry of `~/.pi/agent/models.json`:
+- **Why.** Pi 1.5.2 sets `compat.supportsMidConvoEffort: true` on 6 built-in models: `claude-opus-5`,
+  `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1` and
+  `claude-fable-5-2`. With it, and with thinking on, Pi puts the effort setting (`output_config`) on
+  messages inside `messages[]`. The Anthropic API accepts that. Bedrock does not. context-guru does
+  not add the field; it forwards it unchanged.
+- **Fix.** Turn the flag off for the models you use, in the `anthropic` entry of
+  `~/.pi/agent/models.json`:
 
   ```json
   {
     "providers": {
       "anthropic": {
-        "modelOverrides": { "claude-opus-5": { "compat": { "supportsMidConvoEffort": false } } }
+        "modelOverrides": {
+          "claude-opus-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-opus-5-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-sonnet-5-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-haiku-5-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-fable-5-1": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-fable-5-2": { "compat": { "supportsMidConvoEffort": false } }
+        }
       }
     }
   }
   ```
 
   Keep the other keys of that entry (`baseUrl`, `apiKey`, `headers`) as they are. Setup changes only
-  `baseUrl`, and uninstall puts back only `baseUrl`, so the override stays.
+  `baseUrl`, and uninstall puts back only `baseUrl`, so the overrides stay.
+- **The cost.** With the flag on, a change of the thinking level keeps the prompt cache. With it off,
+  a change of the thinking level in a session rewrites the cache for that turn.
 - **Then restart Pi.** In the test for #1147, a Pi that was already running kept failing after
   `/reload`.
-- **Not checked yet:** other built-in models with `supportsMidConvoEffort: true`, and Pi's other
-  mid-conversation flags (`supportsMidConvoSystemMessages`, `supportsMidConvoToolChanges`) on Bedrock.
-  If another model fails with the same error, add the same override for its id.
+- **Tested on Bedrock:** `claude-opus-5` only. The other 5 models use the same Pi code, so they are
+  expected to fail the same way. Pi's other mid-conversation flags (`supportsMidConvoSystemMessages`,
+  `supportsMidConvoToolChanges`) are not checked on Bedrock yet.
 
 Setup does not write this override: it is a change to your own model settings, so you make it.
 
