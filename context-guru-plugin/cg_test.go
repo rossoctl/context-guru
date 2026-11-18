@@ -155,6 +155,28 @@ func runCG(t *testing.T, base string, env []string, args ...string) string {
 	return out
 }
 
+// hostEnvWithoutClaude is the test process's environment without the variables that change what
+// cg.py reports: a Claude Code session that runs the tests sets some of them (for example
+// ANTHROPIC_DEFAULT_HAIKU_MODEL), and a golden would then show a settings card the fixture never set.
+// It keeps the suite's own CG_PLUGIN_TEST_* marks (leak_test.go). It does not drop other Claude Code
+// variables (CLAUDECODE, ENABLE_TOOL_SEARCH): cg.py reads none of them today.
+func hostEnvWithoutClaude() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "CG_PLUGIN_TEST_") {
+			out = append(out, kv)
+			continue
+		}
+		if strings.HasPrefix(name, "ANTHROPIC_") || strings.HasPrefix(name, "CLAUDE_CODE_") ||
+			strings.HasPrefix(name, "CG_") || strings.HasPrefix(name, "CONTEXT_GURU_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // runCGCode is runCG for a command whose exit code is part of what is tested.
 func runCGCode(t *testing.T, base string, env []string, args ...string) (string, int) {
 	t.Helper()
@@ -163,7 +185,7 @@ func runCGCode(t *testing.T, base string, env []string, args ...string) (string,
 		"--now", "2026-10-08T15:30:00Z", "--tz-offset-min", "0")...)...)
 	cfg := t.TempDir()
 	os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(`{"awaySummaryEnabled":false,"statusLine":{"type":"command","command":"python3 x/statusline.py","refreshInterval":5}}`), 0o644) //nolint:errcheck
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_PROJECT_DIR="+t.TempDir(), "CG_MANAGED_SETTINGS="+filepath.Join(cfg, "no-managed.json"), "CONTEXT_GURU_STATE="+t.TempDir(), "CLAUDE_CODE_SESSION_ID=session-A",
+	cmd.Env = append(hostEnvWithoutClaude(), "NO_COLOR=1", "COLUMNS=100", "CG_ASCII=", "CLAUDE_CONFIG_DIR="+cfg, "CLAUDE_PROJECT_DIR="+t.TempDir(), "CG_MANAGED_SETTINGS="+filepath.Join(cfg, "no-managed.json"), "CONTEXT_GURU_STATE="+t.TempDir(), "XDG_CACHE_HOME="+t.TempDir(), "CLAUDE_CODE_SESSION_ID=session-A",
 		"ANTHROPIC_BASE_URL="+base+"/anthropic", "TZ=UTC")
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
@@ -862,5 +884,18 @@ func TestCGRemoveShowsTheClientCommandForAClientOnlyItem(t *testing.T) {
 	}
 	if strings.Contains(out, "set skillOverrides") {
 		t.Errorf("a filterable item got the client-only command line too:\n%s", out)
+	}
+}
+
+// The filter drops what a Claude Code session sets, and keeps the suite's own leak mark: every child
+// must carry CG_PLUGIN_TEST_RUN, or TestMain cannot find a process a test left running.
+func TestHostEnvWithoutClaudeKeepsTheLeakMark(t *testing.T) {
+	t.Setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+	env := strings.Join(hostEnvWithoutClaude(), "\n")
+	if !strings.Contains(env, leakRunVar+"="+leakRun) {
+		t.Errorf("the filter dropped %s, the run's leak mark", leakRunVar)
+	}
+	if strings.Contains(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL=") {
+		t.Error("the filter kept ANTHROPIC_DEFAULT_HAIKU_MODEL, which changes what cg.py reports")
 	}
 }
