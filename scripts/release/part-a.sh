@@ -7,8 +7,8 @@
 # (a stop gives rc=143), so a poller can wait for that line. rc 0: every step passed. A failed step is run once more; the summary says
 # "flaky" when the second run passed, and "FAILED" when both failed.
 #
-# The whole run takes about 40 minutes. The dash race tests alone need up to 25 minutes on a
-# loaded machine, which is why they get -timeout 25m. The record and plugin race steps get 40m and 30m. Run it detached, and wait for the DONE line.
+# The whole run takes about 70 to 90 minutes on a laptop. The race steps have these limits: proxy 20m,
+# dash 25m, plugin 30m, rest 20m, record 40m. Run it detached, and wait for the DONE line.
 #
 # GO: the go binary (default: go on PATH, else /usr/local/go/bin/go).
 set -uo pipefail
@@ -46,6 +46,8 @@ step() {
   rc=1
 }
 
+skipnote="skipped TestBobReleasePythonSuite in race-rest (Bob plugin on hold, #1221)"
+
 rest=$("$GO" list ./... | grep -vE '/(proxy|dash|context-guru-plugin)(/|$)')
 
 step vet           "$GO" vet ./...
@@ -59,7 +61,8 @@ step race-proxy    env CGO_ENABLED=1 "$GO" test -race -timeout 20m ./proxy/...
 step race-dash     env CGO_ENABLED=1 "$GO" test -race -timeout 25m ./dash/...
 step race-plugin   env CGO_ENABLED=1 "$GO" test -race -timeout 30m ./context-guru-plugin
 # shellcheck disable=SC2086 # $rest is a list of packages
-# The Bob plugin is on hold: skip its install suite. Remove the skip when the owner resumes it.
+# The Bob plugin is on hold (#1221): skip its install suite. Remove the skip when the owner resumes it.
 step race-rest     env CGO_ENABLED=1 "$GO" test -race -timeout 20m -skip TestBobReleasePythonSuite $rest
 step race-record   env CGO_ENABLED=1 "$GO" test -race -timeout 40m -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
+echo "$skipnote" >> "$sum"
 exit "$rc"
