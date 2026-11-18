@@ -46,6 +46,7 @@ export const START_CHECK_TIMEOUT_MS = 5000;
 
 interface Install {
   preset?: string;
+  restart_pending?: boolean;
   port?: number;
   base_urls?: Record<string, string>;
   cache_strategy?: string;
@@ -265,10 +266,16 @@ export function parseFacts(text: string): Record<string, string> {
   return out;
 }
 
-/** Split `/context-guru` arguments. A bare command (or only spaces) means `status`. */
 /** A preset pick-list option: the name, then what it does (#1156). */
 export function presetLabel(name: string): string {
   return `${name}: ${PRESET_TEXT[name]}`;
+}
+
+/** The current preset or cache strategy, read fresh: another Pi session may have changed it. Undefined
+ *  while a restart is pending (the last one failed), so choosing the same value restarts again. */
+export function currentSetting(key: "preset" | "cache_strategy", dir: string = STATE_DIR): string | undefined {
+  const fresh = readInstall(dir);
+  return fresh?.restart_pending ? undefined : fresh?.[key];
 }
 
 export function presetFromLabel(label: string | undefined): string | undefined {
@@ -287,6 +294,7 @@ export function choiceProblem(kind: "preset" | "cache strategy", value: string, 
   return undefined;
 }
 
+/** Split `/context-guru` arguments. A bare command (or only spaces) means `status`. */
 export function parseArgs(args: string): { sub: string; value: string } {
   const [sub = "status", value = ""] = args.trim().split(/\s+/).filter(Boolean);
   return { sub, value };
@@ -526,7 +534,7 @@ export default function contextGuru(pi: ExtensionAPI) {
           const name = value || presetFromLabel(await ctx.ui.select("Preset (each one includes the one above it)",
             PRESETS.map(presetLabel)));
           if (!name) return say(ctx, "Nothing changed.");
-          const problem = choiceProblem("preset", name, PRESETS, install?.preset);
+          const problem = choiceProblem("preset", name, PRESETS, currentSetting("preset"));
           if (problem) return say(ctx, problem.text, problem.level);
           return configure(ctx, "--preset", name);
         }
@@ -544,7 +552,7 @@ export default function contextGuru(pi: ExtensionAPI) {
           if (!value && !ctx.hasUI) return say(ctx, `Cache strategies: ${names.join(", ")}`);
           const name = await pick(ctx, "Cache strategy", names, value);
           if (!name) return say(ctx, "Nothing changed.");
-          const problem = choiceProblem("cache strategy", name, names, install?.cache_strategy);
+          const problem = choiceProblem("cache strategy", name, names, currentSetting("cache_strategy"));
           if (problem) return say(ctx, problem.text, problem.level);
           return configure(ctx, "--cache-strategy", name);
         }

@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem,
+  stripsChatGPTFields, strategyChoices, type StartCheck, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -340,4 +340,13 @@ test("the current value is already set, so nothing restarts", () => {
   assert.deepEqual(choiceProblem("preset", "medium", ["off", "medium"], "medium"),
     { text: "Already set: preset medium. Nothing changed.", level: "info" });
   assert.equal(choiceProblem("cache strategy", "none", ["none"], "auto"), undefined);
+});
+
+test("a setting whose restart is pending is not current, so choosing it restarts again", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cg-current-"));
+  writeFileSync(join(dir, "install.json"), JSON.stringify({ preset: "high", cache_strategy: "none" }));
+  assert.equal(currentSetting("preset", dir), "high");
+  assert.equal(currentSetting("cache_strategy", dir), "none");
+  writeFileSync(join(dir, "install.json"), JSON.stringify({ preset: "high", restart_pending: true }));
+  assert.equal(currentSetting("preset", dir), undefined);
 });

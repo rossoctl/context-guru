@@ -1047,8 +1047,7 @@ class StrategiesFromTheProxy(Sandbox):
             self.assertFalse(pi_plugin.proxy_config().exists())
             self.assertEqual(pi_plugin.read_record()["cache_strategy"], "none")
             with mock.patch.object(pi_plugin, "start_service", return_value=True):
-                # A real change (the preset), so configure writes the file: `none` alone is already set.
-                code, facts = self.run_main("configure", "--preset", "medium", "--cache-strategy", "none")
+                code, facts = self.run_main("configure", "--cache-strategy", "none")
         self.assertEqual((code, facts["result"]), (0, "configured"))
         self.assertNotIn("cache:", pi_plugin.proxy_config().read_text())
 
@@ -1327,9 +1326,10 @@ class ConfigureUnchanged(Sandbox):
     def setUp(self):
         super().setUp()
         pi_plugin.write_record({"port": 8800, "preset": "medium", "cache_strategy": "auto", "binary": "/bin/true"})
+        pi_plugin.write_proxy_config("medium", "auto")
 
-    def configure(self, *argv):
-        with mock.patch.object(pi_plugin, "start_service", return_value=True) as start, \
+    def configure(self, *argv, started=True):
+        with mock.patch.object(pi_plugin, "start_service", return_value=started) as start, \
                 mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
             code, facts = self.run_main("configure", *argv)
         return code, facts, start
@@ -1343,6 +1343,25 @@ class ConfigureUnchanged(Sandbox):
         code, facts, start = self.configure("--cache-strategy", "5-min-ping")
         self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "unchanged", "auto"))
         start.assert_not_called()
+
+    def test_a_retry_after_a_failed_restart_restarts_again(self):
+        code, facts, _ = self.configure("--preset", "high", started=False)
+        self.assertEqual((code, facts["result"]), (1, "not_applied"))
+        self.assertTrue(pi_plugin.read_record()["restart_pending"])
+        code, facts, start = self.configure("--preset", "high")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        start.assert_called_once()
+        self.assertNotIn("restart_pending", pi_plugin.read_record())
+        code, facts, start = self.configure("--preset", "high")
+        self.assertEqual(facts["result"], "unchanged")
+        start.assert_not_called()
+
+    def test_a_missing_config_file_is_written_and_restarted(self):
+        pi_plugin.proxy_config().unlink()
+        code, facts, start = self.configure("--preset", "medium")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        start.assert_called_once()
+        self.assertTrue(pi_plugin.proxy_config().exists())
 
     def test_a_new_preset_still_restarts(self):
         code, facts, start = self.configure("--preset", "high")

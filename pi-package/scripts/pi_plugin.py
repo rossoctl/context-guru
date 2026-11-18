@@ -1021,8 +1021,10 @@ def configure(args):
         try:
             strategy, _ = resolve_strategy(strategy, record.get("binary"))
             if (preset, strategy) == (record.get("preset", DEFAULT_PRESET),
-                                      record.get("cache_strategy", DEFAULT_STRATEGY)):
-                # The same setting: a restart would only cost a cache rewrite in every open session.
+                                      record.get("cache_strategy", DEFAULT_STRATEGY)) \
+                    and not record.get("restart_pending") and proxy_config().exists():
+                # The same setting, and it is in effect: a restart would only cost a cache rewrite in
+                # every open session. After a failed restart, or with no config file, it restarts.
                 facts(result="unchanged", preset=preset, cache_strategy=strategy)
                 return 0
             write_proxy_config(preset, strategy, upstreams)
@@ -1032,9 +1034,18 @@ def configure(args):
         except Exception as error:
             facts(result="refused", detail=error)
             return 2
-        record.update(preset=preset, cache_strategy=strategy)
+        # Pending until the start works, so a retry of the same setting restarts again.
+        record.update(preset=preset, cache_strategy=strategy, restart_pending=True)
         write_record(record)
     restarted = start_service(record["binary"], int(record["port"]), upstreams)
+    if restarted:
+        try:
+            with restart_lock():
+                record = read_record()
+                record.pop("restart_pending", None)
+                write_record(record)
+        except LockBusy:
+            pass  # Stays pending: the next configure of the same setting restarts once more.
     extra = {}
     if restarted and preset == "ultrahigh":
         extra["probe"] = ask_defer_probe(int(record["port"]))
