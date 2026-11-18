@@ -160,6 +160,8 @@ func Main(hooks Hooks) {
 			"drop dashboard rows older than this (0 = no age limit)")
 		dashMaxBytes = flag.Int64("dashboard-max-bytes", int64(envInt("DASHBOARD_MAX_BYTES", 512<<20)),
 			"cap the dashboard database size, dropping oldest rows first (0 = no size limit)")
+		dashBackup = flag.Bool("dashboard-backup", envBool("DASHBOARD_BACKUP", true),
+			"before the age, size or quota rule deletes rows, keep two copies of the dashboard database, <db>.bak and <db>.bak.1 (a new copy only when the newest is older than 24h); the copies take up to twice the database size on disk and hold stored data, content included")
 		// Content capture is opt-IN, not opt-out. The before/after diff is the dashboard's
 		// best view, but it is the one path that writes ARBITRARY agent output to disk, and
 		// arbitrary output cannot be allowlisted the way headers and config keys are — it
@@ -426,6 +428,7 @@ func Main(hooks Hooks) {
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
 			MinKeepBytes:      *dashMinKeep,
+			DisableBackup:     !*dashBackup,
 			MaxRowsPerTenant:  *dashMaxRowsPerTenant,
 
 			Remote: remote,

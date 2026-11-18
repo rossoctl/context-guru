@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -43,8 +44,18 @@ func (r *Recorder) janitorPass() {
 	// filled the database it evicts the QUIET tenants' history (theirs is the oldest)
 	// and leaves the offender's recent rows in place. Trimming the offender to its own
 	// quota first usually leaves nothing for the byte rule to do at all.
-	r.enforceQuotas()
-	if n, err := r.db.Prune(time.Now(), r.opts.RetentionAge, r.opts.RetentionBytes); err != nil {
+	//
+	// The backup copy (backup.go) is made lazily, once per pass, by the first rule that is about
+	// to delete rows. The disk-pressure rule below never asks for one.
+	backup := sync.OnceValue(r.ensureBackup)
+	r.enforceQuotasWith(backup)
+	if n, err := r.db.PruneWith(time.Now(), PruneOptions{
+		MaxAge:       r.opts.RetentionAge,
+		MaxBytes:     r.opts.RetentionBytes,
+		FloorBytes:   r.retentionFloor(),
+		ActiveWindow: defaultActiveSessionWindow,
+		BeforeDelete: backup,
+	}); err != nil {
 		slog.Warn("dash: retention prune failed", "err", err)
 	} else if n > 0 {
 		slog.Info("dash: pruned old dashboard rows", "requests", n)
@@ -125,6 +136,14 @@ func (r *Recorder) minKeepBytes() int64 {
 	return defaultMinKeepBytes
 }
 
+// retentionFloor is the size at which the size rule stops (see Options.RetentionFloorBytes).
+func (r *Recorder) retentionFloor() int64 {
+	if r.opts.RetentionFloorBytes > 0 {
+		return r.opts.RetentionFloorBytes
+	}
+	return max(r.opts.RetentionBytes/4, 0)
+}
+
 // SetTenantQuota supplies the per-tenant row quota a manager set in the control plane.
 // Returning 0 means "this tenant has no quota of its own", which falls back to
 // Options.MaxRowsPerTenant. Wired by the host after the control database is open (the
@@ -148,7 +167,12 @@ func (r *Recorder) quotaFor(tenantID string) int64 {
 }
 
 // enforceQuotas trims any tenant over its row quota back to it.
-func (r *Recorder) enforceQuotas() {
+func (r *Recorder) enforceQuotas() { r.enforceQuotasWith(r.ensureBackup) }
+
+// enforceQuotasWith is enforceQuotas with the backup step given. The janitor passes one shared
+// by the whole pass. backup is called before the first trim. A false result does not stop the trim: a row quota is a
+// bound the operator set, and a failed copy must not keep a tenant over it.
+func (r *Recorder) enforceQuotasWith(backup func() bool) {
 	// Nothing configured at all: skip the count query entirely, which is what a
 	// single-tenant proxy does on every pass.
 	if r.opts.MaxRowsPerTenant <= 0 && r.tenantQuota.Load() == nil {
@@ -181,6 +205,7 @@ func (r *Recorder) enforceQuotas() {
 				"rows", rows, "quota", quota)
 			continue
 		}
+		backup()
 		n, err := r.trimTenantToQuota(id, quota)
 		if err != nil {
 			slog.Warn("dash: tenant quota trim failed", "tenant", id, "err", err)
