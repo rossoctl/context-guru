@@ -241,7 +241,6 @@ export function strategyChoices(facts: Record<string, string>): { names: string[
   return { names: names.length ? names : ["none"], error: facts.strategy_error || undefined };
 }
 
-/** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
 type Message = { text: string; level: "info" | "error" };
 
 /** What a failed proxy start tells the user: the proxy is off, and what to run (#1146). */
@@ -269,6 +268,7 @@ export function configureMessage(f: Record<string, string>, code: number, stderr
   return { text: `context-guru: ${f.result ?? "error"} ${f.detail ?? stderr.trim()}`, level: "error" };
 }
 
+/** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
 export function parseFacts(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split("\n")) {

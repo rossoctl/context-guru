@@ -404,9 +404,9 @@ class Restart(Sandbox):
 
         def run(cmd, **kwargs):
             self.calls.append(cmd)
-            code = 113 if cmd[1] in self.fail else 0
+            code = 113 if cmd[1] in self.fail or cmd[1] == "print" else 0
             if code and kwargs.get("check"):
-                raise subprocess.CalledProcessError(code, cmd)
+                raise subprocess.CalledProcessError(code, cmd, b"", b"launchctl said no\n")
             return subprocess.CompletedProcess(cmd, code, b"", b"")
         self.run_patch = mock.patch.object(pi_plugin.subprocess, "run", side_effect=run)
         self.run_patch.start()
@@ -454,8 +454,8 @@ class Restart(Sandbox):
         self.fail = {"kickstart"}
         # The kickstart fails, so the plist is loaded. RunAtLoad starts it: no second kickstart (#1146).
         code, facts = self.restart("launchd", lambda port, timeout=1: False)
-        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap"])
-        self.assertEqual(self.calls[1], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "print", "bootstrap"])
+        self.assertEqual(self.calls[2], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
         # Loaded, but /healthz never answers here.
         self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "restarted"))
 
@@ -468,11 +468,21 @@ class Restart(Sandbox):
             if cmd[1] == "kickstart" and first[0]:
                 first[0] = False
                 return subprocess.CompletedProcess(cmd, 113, b"", b"")
+            if cmd[1] == "print":  # not loaded
+                return subprocess.CompletedProcess(cmd, 113, b"", b"")
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
         with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
             code, facts = self.restart("launchd", [False, True])
-        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap"])
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "print", "bootstrap"])
         self.assertEqual((code, facts["result"]), (0, "up"))
+
+    def test_a_failed_bootstrap_at_restart_writes_launchctls_error_to_the_proxy_log(self):
+        self.our_plist()
+        self.fail = {"kickstart", "bootstrap"}
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["service"]), (1, "failed"))
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("launchctl bootstrap failed (exit 113): launchctl said no", log)
 
     def test_a_plist_we_do_not_own_is_left_alone(self):
         self.our_plist(managed=False)
@@ -1401,6 +1411,27 @@ class StartService(Sandbox):
         self.assertFalse(self.start("systemd"))
         log = (pi_plugin.state_dir() / "proxy.log").read_text()
         self.assertIn("systemctl restart failed (exit 1): Job failed.", log)
+
+    def test_a_log_that_cannot_be_written_still_gives_a_failed_start_not_a_crash(self):
+        self.answers["bootstrap"] = [(113, b"no\n")]
+        (pi_plugin.state_dir() / "proxy.log").mkdir(parents=True)  # opening it to append fails
+        self.assertFalse(self.start())
+
+    def test_a_hung_launchctl_print_does_not_block_stop(self):
+        plist = pi_plugin.launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        with open(plist, "wb") as handle:
+            pi_plugin.plistlib.dump({"Label": pi_plugin.LAUNCHD_LABEL, "ContextGuruManaged": True}, handle)
+        real_run = pi_plugin.subprocess.run
+
+        def run(cmd, **kwargs):
+            if cmd[:2] == ["launchctl", "print"]:
+                self.assertIsNotNone(kwargs.get("timeout"))
+                raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            return real_run(cmd, **kwargs)
+        with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
+            self.assertEqual(pi_plugin.stop_service(), "stopped")
+        self.assertFalse(plist.exists())
 
     def test_launchd_stop_waits_until_the_job_is_gone_before_it_returns(self):
         plist = pi_plugin.launchd_plist()

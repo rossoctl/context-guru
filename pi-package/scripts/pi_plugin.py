@@ -132,8 +132,8 @@ def facts(**values):
 START_CHECK_SECONDS = 5
 
 # The longest a command waits for another one's restart lock. A restart usually holds it for a few
-# seconds. Slow service commands can make it hold the lock for longer (the launchd path has up to
-# 90 s of command time limits, and setup holds it across start_service). A caller that waits 40 s
+# seconds. Slow service commands can make it hold the lock for longer (the launchd path has about
+# 2 minutes of command time limits in the worst case, and setup holds it across start_service). A caller that waits 40 s
 # reports `busy` and still finishes inside the extension's 60 s limit.
 LOCK_WAIT_SECONDS = 40
 
@@ -553,15 +553,23 @@ def _systemd_quote(value, exec_line=True):
 def log_service_error(error):
     """Append a failed service command and its stderr to the proxy log, which the failure facts name."""
     stderr = (error.stderr or b"").decode("utf-8", "replace").strip()
-    with open(state_dir() / "proxy.log", "a", encoding="utf-8") as handle:
-        handle.write(f"context-guru-pi: {error.cmd[0]} {error.cmd[1 if error.cmd[0] == 'launchctl' else 2]} "
-                     f"failed (exit {error.returncode}): {stderr}\n")
+    try:
+        with open(state_dir() / "proxy.log", "a", encoding="utf-8") as handle:
+            handle.write(f"context-guru-pi: {error.cmd[0]} {error.cmd[1 if error.cmd[0] == 'launchctl' else 2]} "
+                         f"failed (exit {error.returncode}): {stderr}\n")
+    except OSError:
+        pass  # The failed start is still reported; only its detail is lost.
 
 
 def wait_launchd_gone(target, seconds=5.0):
     """`launchctl bootout` returns before launchd removes the job (#1146). Wait until it is gone."""
     deadline = time.monotonic() + seconds
-    while subprocess.run(["launchctl", "print", target], capture_output=True).returncode == 0:
+    while True:
+        try:
+            if subprocess.run(["launchctl", "print", target], capture_output=True, timeout=seconds).returncode:
+                return
+        except subprocess.TimeoutExpired:
+            return
         if time.monotonic() >= deadline:
             return
         time.sleep(0.1)
@@ -662,9 +670,13 @@ def restart_service():
             kick = ["launchctl", "kickstart", "-k", target]
             if subprocess.run(kick, capture_output=True, timeout=30).returncode != 0:
                 # Not loaded (a bootout, or a failed login start): loading the plist starts it.
+                wait_launchd_gone(target)
                 launchd_bootstrap(domain, plist)
             return "restarted"
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except subprocess.CalledProcessError as error:
+        log_service_error(error)
+        return "failed"
+    except (OSError, subprocess.TimeoutExpired):
         return "failed"
     return "unsupported"
 
