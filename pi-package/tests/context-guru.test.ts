@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck,
+  stripsChatGPTFields, strategyChoices, type StartCheck, uninstallText,
 } from "../extensions/context-guru.ts";
 
 const install = {
@@ -316,4 +316,12 @@ test("the strategy names come from the proxy's list, and an old proxy offers onl
   assert.deepEqual(old.names, ["none"]);
   assert.match(old.error ?? "", /v0\.7\.1/);
   assert.deepEqual(strategyChoices({}).names, ["none"]);
+});
+
+test("uninstall names a proxy binary it kept", () => {
+  assert.equal(uninstallText({ models_restore: "restored", service: "stopped", binary_kept: "/opt/p (not downloaded by setup)" }),
+    "context-guru removed (models.json: restored, service: stopped). Kept your proxy binary /opt/p (not downloaded by setup). " +
+    "Re-select the model with /model, or restart Pi.");
+  assert.equal(uninstallText({ models_restore: "restored", service: "stopped" }),
+    "context-guru removed (models.json: restored, service: stopped). Re-select the model with /model, or restart Pi.");
 });

@@ -49,6 +49,7 @@ class Sandbox(unittest.TestCase):
             "HOME": str(root), "XDG_STATE_HOME": str(root / "state"),
             "XDG_CONFIG_HOME": str(root / "config"), "PI_CODING_AGENT_DIR": str(root / "agent")})
         self.env.start()
+        os.environ.pop("CONTEXT_GURU_BIN", None)  # a developer's own setting; the patch puts it back
         self.models = root / "agent/models.json"
         self.state = root / "state/context-guru-pi/routing.json"
 
@@ -1383,6 +1384,31 @@ class OwnBinary(Sandbox):
             self.setup_plan()
         self.assertEqual(seen, [managed])
 
+    def test_plan_says_which_binary_setup_uses(self):
+        _, facts = self.setup_plan()
+        self.assertEqual(facts["binary"], "download")
+        self.assertIn("Setup downloads the latest context-guru-proxy release.", facts["consent_question"])
+        mine = self.executable("my-proxy")
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": str(mine)}):
+            _, facts = self.setup_plan()
+        self.assertEqual(facts["binary"], str(mine.resolve()))
+        self.assertIn(f"Setup uses the proxy at {mine.resolve()}.", facts["consent_question"])
+
+    def test_a_context_guru_bin_that_names_no_file_is_refused_not_replaced(self):
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": "/no/such/proxy"}):
+            code, facts = self.setup_plan()
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_named_missing"))
+        self.assertIn("/no/such/proxy", facts["detail"])
+
+    def test_context_guru_bin_that_names_the_download_is_used_with_no_record(self):
+        managed = str(self.managed().resolve())
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": managed}), \
+                mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [managed])
+
     def test_update_of_a_binary_setup_did_not_download_says_what_to_do(self):
         other = self.executable("my-proxy")
         pi_plugin.write_record({"binary": str(other), "port": 8800})
@@ -1390,7 +1416,7 @@ class OwnBinary(Sandbox):
             code, facts = self.run_main("update", "--install")
         self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_not_managed"))
         self.assertIn("run /context-guru setup again", facts["detail"])
-        self.assertIn("CONTEXT_GURU_BIN", facts["detail"])
+        self.assertIn("If CONTEXT_GURU_BIN is set, unset it", facts["detail"])
 
     def test_uninstall_names_a_binary_it_keeps(self):
         other = self.executable("my-proxy")

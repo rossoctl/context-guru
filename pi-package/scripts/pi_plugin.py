@@ -740,8 +740,14 @@ def setup(args):
     port = choose_port(record)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
     preset = record.get("preset") or DEFAULT_PRESET
+    named_binary = os.environ.get("CONTEXT_GURU_BIN")
     executable = find_binary()
-    if executable and not record.get("binary") and Path(executable) == managed_binary().resolve():
+    if named_binary and not shutil.which(named_binary):
+        # The person named a binary. Setup does not swap in another one.
+        facts(result="refused", reason="binary_named_missing",
+              detail=f"CONTEXT_GURU_BIN names {named_binary}, which is not an executable file; nothing was changed")
+        return 2
+    if executable and not named_binary and not record.get("binary") and Path(executable) == managed_binary().resolve():
         # A download with no install record is left by a failed setup and can be older than the latest
         # release (#1157). Setup downloads again.
         executable = None
@@ -769,27 +775,29 @@ def setup(args):
     chains = {p: chain_upstream(p, url, port) for p, url in clash.items()}
     unchainable = {p: reason for p, (_, reason) in chains.items() if reason}
     if args.plan:
+        uses = (f" Setup uses the proxy at {executable}." if executable
+                else " Setup downloads the latest context-guru-proxy release.")
         if clash:
             # Two paired answers, never one plain question: a person picks chain or replace.
             extra = ["--cache-strategy", strategy] if args.cache_strategy else []
             pairs = {}
             if not unchainable:
                 pairs.update(consent_question_chain=consent_question(
-                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}, row=row),
+                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}, row=row) + uses,
                     confirm_command_chain=confirm_command("chain", extra))
             else:
                 pairs["chain_refused"] = ",".join(f"{p}:{r}" for p, r in sorted(unchainable.items()))
             others = {p: u for p, u in upstreams.items() if p not in clash}
-            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash, row=row),
+            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash, row=row) + uses,
                          confirm_command_replace=confirm_command("replace", extra))
             facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
                   existing_base_url=clash, conflicts=",".join(sorted(clash)), port=port, preset=preset,
-                  cache_strategy=strategy, **pairs, **hatch)
+                  cache_strategy=strategy, binary=executable or "download", **pairs, **hatch)
             return 0
         facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy,
               service=service_kind() or "unsupported", already_routed=str(
                   all(models_route.is_routed(models_path(), port, p) for p in PROVIDERS)).lower(),
-              consent_question=consent_question(port, strategy, upstreams, row=row))
+              binary=executable or "download", consent_question=consent_question(port, strategy, upstreams, row=row) + uses)
         return 0
     if not args.i_consent_to_traffic_interception:
         facts(result="refused", reason="consent_required")
@@ -1072,8 +1080,9 @@ def update(args):
         return 0
     if executable and Path(executable).resolve() != managed_binary().resolve():
         facts(result="refused", reason="binary_not_managed", binary=executable,
-              detail="setup did not download this proxy, so update cannot replace it. Unset CONTEXT_GURU_BIN "
-                     "and run /context-guru setup again: setup then downloads a proxy that update can update")
+              detail="setup did not download this proxy, so update cannot replace it. If CONTEXT_GURU_BIN is set, "
+                     "unset it, then run /context-guru setup again: setup then downloads a proxy that update can "
+                     "update")
         return 2
     try:
         executable, version = install_release_binary(latest)
