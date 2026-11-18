@@ -313,18 +313,21 @@ func (k *keeper) LiveSessionKeys() []string {
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
-	k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK)
+	_ = k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK)
 }
 
 // recordTouch is record with the liveness-clock alias apply derived from the ARRIVING request
 // (apply.Trace.TouchAlias). The body here went through tool deferral, which changes the head the
 // alias hashes, so a ping that re-derived the alias from it would touch a key the request never
 // reads (#902). "" falls back to deriving it from the body.
+//
+// It returns the ping plan the keeper built for the wait this response starts (#1198), or nil when
+// none was built (the keep-alive is off for the request, or a gate refused it first).
 func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
-	u Usage, usageOK bool) {
+	u Usage, usageOK bool) *keepalive.PlanInForce {
 	if k == nil || tn == nil {
-		return
+		return nil
 	}
 	// keepalive.Keeper.Record departs the thread's open request (the one arrive opened) on every
 	// return path of its own. A panic in this function BEFORE it hands off would skip that and
@@ -413,8 +416,14 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
+	plan := &keepalive.PlanInForce{}
+	rec.Plan = plan
 	recorded = true
 	k.Keeper.Record(rec)
+	if !plan.Built {
+		return nil
+	}
+	return plan
 }
 
 // canPing reports whether the keep-alive can ping a thread of this session on this tenancy: the kill

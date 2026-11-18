@@ -23,7 +23,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_bob_plugin import (  # noqa: E402
-    FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary)
+    FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary,
+    block_network)
+
+
+def setUpModule():
+    unittest.addModuleCleanup(block_network())
+
 
 LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
 # The proxy's own test runs this exact file through the real pipeline on Bob's route
@@ -288,17 +294,17 @@ class ConfigureTest(Installed):
 
     def test_bob_ultrahigh_is_refused_on_a_proxy_older_than_its_settings(self):
         before, calls = self.tree(), len(self.launchctl_calls())
-        with mock.patch.object(PLUGIN, "binary_version", return_value="v0.7.1"):
+        with mock.patch.object(PLUGIN, "binary_version", return_value="v0.7.3"):
             code, out, _ = self.run_main("configure", "--preset", "bob-ultrahigh")
         self.assertEqual(code, 2, out)
         self.assertIn("result=refused\nreason=proxy_too_old\npreset=bob-ultrahigh\n", out)
-        self.assertIn("bob-ultrahigh needs context-guru-proxy v0.7.2 or newer; this one is "
-                      "v0.7.1. Run the update skill first.", out)
+        self.assertIn("bob-ultrahigh needs context-guru-proxy v0.7.4 or newer; this one is "
+                      "v0.7.3. Run the update skill first.", out)
         self.assertEqual(self.tree(), before)
         self.assertEqual(len(self.launchctl_calls()), calls)
 
     def test_bob_ultrahigh_runs_on_a_new_or_unnumbered_proxy(self):
-        for version in ("v0.7.2", "v0.8.0", "v0.6.7-32-g58939a47", "unknown"):
+        for version in ("v0.7.4", "v0.8.0", "v0.6.7-32-g58939a47", "unknown"):
             with self.subTest(version=version):
                 self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
                 with mock.patch.object(PLUGIN, "binary_version", return_value=version):
@@ -486,8 +492,8 @@ class UpdateTest(TempHome):
         self.addCleanup(self.proxy.__exit__, None, None, None)
         managed = PLUGIN.managed_binary()
         managed.parent.mkdir(parents=True)
-        # The oldest proxy setup keeps for the default preset (bob-ultrahigh needs v0.7.2).
-        fake_binary(managed.parent, "context-guru-proxy v0.7.2 (commit old)")
+        # The oldest proxy setup keeps for the default preset (bob-ultrahigh needs v0.7.4).
+        fake_binary(managed.parent, "context-guru-proxy v0.7.4 (commit old)")
         self.old_bytes = managed.read_bytes()
         os.environ["CONTEXT_GURU_BIN"] = "/nonexistent/context-guru-proxy"
         # Never the real network: setup must keep the managed fake, not download a release.
@@ -512,7 +518,7 @@ class UpdateTest(TempHome):
         before = self.tree()
         code, out, _ = self.run_main("update", "--check")
         self.assertEqual(code, 0, out)
-        self.assertIn("installed_version=v0.7.2\n", out)
+        self.assertIn("installed_version=v0.7.4\n", out)
         self.assertIn("latest_version=v9.9.9\n", out)
         self.assertIn("update_available=true\n", out)
         self.assertEqual(self.tree(), before)
@@ -627,12 +633,12 @@ class SetupSkipsOldProxyTest(TempHome):
     def test_a_proxy_too_old_for_the_default_preset_is_skipped_and_setup_downloads(self):
         old = self.on_path("context-guru-proxy v0.7.1")
         code, out, _ = self.setup_downloading()
-        self.assertIn(f"binary_skipped={old} is v0.7.1; bob-ultrahigh needs v0.7.2 or later\n",
+        self.assertIn(f"binary_skipped={old} is v0.7.1; bob-ultrahigh needs v0.7.4 or later\n",
                       out)
         self.assert_downloaded(code, out)
 
     def test_a_proxy_on_path_that_lists_strategies_is_used(self):
-        new = self.on_path("context-guru-proxy v0.7.2")
+        new = self.on_path("context-guru-proxy v0.7.4")
         code, out, _ = self.setup_without_download()
         self.assertEqual(code, 0, out)
         self.assertNotIn("binary_skipped=", out)
@@ -646,7 +652,7 @@ class SetupSkipsOldProxyTest(TempHome):
         self.assertEqual(PLUGIN.read_record()["binary"], str(new.resolve()))
 
     def test_a_rerun_with_preset_lossless_keeps_a_v0_7_1_proxy(self):
-        self.on_path("context-guru-proxy v0.7.2")
+        self.on_path("context-guru-proxy v0.7.4")
         self.assertEqual(self.setup_without_download()[0], 0)
         self.assertEqual(self.run_main("configure", "--preset", "lossless")[0], 0)
         older = self.on_path("context-guru-proxy v0.7.1")

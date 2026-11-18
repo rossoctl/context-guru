@@ -64,7 +64,8 @@ writes (`bob-ultrahigh`, the default, needs v0.7.2 or later). It skips any other
 ### Status bar
 
 Setup also installs a status bar item in Bob: `CG ✓ ctx 21k/270k · cache 1h 54:10 · saved 0`. It
-reads only counts and times from the local proxy.
+reads only counts and times from the local proxy. With `bob-ultrahigh` and a proxy from v0.7.4 or
+later, it also shows the saved Bobcoins, for example `saved 3.1k tok · 1.75 Bobcoins`.
 
 **The status bar needs a build before setup.** Until the install script ships it (plan phase P7):
 
@@ -134,9 +135,11 @@ it. Bob updates itself and restarts. A Bob started from a terminal or by its upd
 the variable. `result=no_bob_traffic` tells you this. The fix is to quit Bob and open it from the
 Dock.
 
-The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Dollar figures
-for Bob are not: Bob bills in Bobcoins, and the proxy does not price them yet. With `bob-ultrahigh`
-the proxy prices them with estimated dollar rates (see below).
+The dashboard is at `http://127.0.0.1:PORT/dashboard/`. Token figures are correct. Bob bills in
+Bobcoins, not dollars. With `bob-ultrahigh`, the dashboard's and the status bar's Bob cost figures are
+Bobcoins (2.0 per million tokens, see below). The dashboard shows them as Bobcoins. The Bob status
+bar shows Bobcoins with a proxy that sends `currency`. With another preset, the proxy does not price
+Bob.
 
 ## Presets
 
@@ -164,13 +167,16 @@ It is `ultrahigh` with 4 Bob changes:
 3. **The sweep may apply on a warm cache** (`warm: true`), behind its cost gate.
 4. **Tool deferral keeps Bob's core tools** (see below).
 
-It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`): every input token at one
-flat rate, a cache read and a cache write too. The sweep's cost gate needs that. Without it, the
-gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. The dollar rates are
-estimates; only the flat ratio is measured. So with this preset the dashboard's Bob dollar figures
-change. Leaving the preset, `uninstall` and the reset script remove the prices.
+It also gives the proxy Bob's prices (`prices.yaml`, as `MODEL_PRICES`), **in Bobcoins, not
+dollars**: 2.0 Bobcoins per million tokens for fresh input, a cache read, a cache write and output
+alike. That is the rate IBM's own per-call credits show. The sweep's cost gate needs the flat rate.
+Without it, the gate prices a cache rewrite at Claude rates and cuts nothing on a warm cache. So with
+this preset the dashboard's and the status bar's Bob cost figures are Bobcoins. The file says
+`currency: Bobcoins`, so the proxy sends that unit and the dashboard shows Bobcoins. Leaving the preset, `uninstall` and the reset script remove the prices.
 
-It needs context-guru-proxy v0.7.2 or newer. On an older release, `configure` refuses it and says
+It needs context-guru-proxy v0.7.4 or newer. Rows written before the upgrade are stored as dollars,
+so a dashboard range that covers the upgrade says the costs are in more than one unit and shows no
+money until those rows leave the range. On an older release, `configure` refuses it and says
 to update first.
 
 The model sees 3 more tools: `context_guru_tools` (the tool search), `context_guru_expand` (gets cut

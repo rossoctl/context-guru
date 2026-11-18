@@ -305,6 +305,13 @@ type KeepAliveLedger struct {
 	// read, and the keeper stops pinging that session.
 	PingsThatReadNothing int64 `json:"pings_that_read_nothing"`
 	PingsThatWrote       int64 `json:"pings_that_wrote"`
+	// PingsTimedOut counts ping rows booked at an estimated cost because the ping ran to its
+	// timeout (#754, StopTimeoutEstimated). They are in Pings and PingUSD, and not in
+	// PingsThatReadNothing: a timeout says nothing about whether the cache was read.
+	PingsTimedOut int64 `json:"pings_timed_out"`
+	// PingTimedOutUSD is the part of PingUSD those rows carry: the keeper's projection, not a
+	// billed figure. PingUSD minus this is the measured ping spend.
+	PingTimedOutUSD float64 `json:"ping_timed_out_usd"`
 	// BytesPerDay is what this account's own ping rows cost on disk, measured rather than
 	// assumed: 294 B of row plus ~103 B of index per ping. Here because per-session overrides
 	// are the mechanism by which somebody could raise it.
@@ -362,12 +369,14 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(CASE WHEN `+autoPing+` THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN `+autoPing+` THEN r.cost_usd ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.cache_read = 0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.cache_read = 0 AND r.stop_reason != '`+StopTimeoutEstimated+`' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.cache_write > r.cache_read THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.stop_reason = '`+StopTimeoutEstimated+`' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN `+autoPing+` AND r.stop_reason = '`+StopTimeoutEstimated+`' THEN r.cost_usd ELSE 0 END),0),
 		MIN(CASE WHEN r.keepalive = 1 OR r.keepalive_pings > 0 OR r.keepalive_saved_usd > 0
 			THEN r.ts END)
 		FROM requests r WHERE `+kaCond, kaArgs...).Scan(
-			&o.Pings, &o.PingUSD, &o.PingsThatReadNothing, &o.PingsThatWrote, &from); err != nil {
+			&o.Pings, &o.PingUSD, &o.PingsThatReadNothing, &o.PingsThatWrote, &o.PingsTimedOut, &o.PingTimedOutUSD, &from); err != nil {
 			return err
 		}
 		o.RecordedFrom = from.Int64

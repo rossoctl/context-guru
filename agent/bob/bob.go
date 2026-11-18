@@ -12,7 +12,8 @@ import (
 	"github.com/rossoctl/context-guru/agent"
 )
 
-// ModelPath is Bob's model route. It is the only route Bob owns.
+// ModelPath is Bob's model route: the only route in Paths. Bob's control-plane paths
+// (ProfilePath and the model-info paths) are not model routes; see controlplane.go.
 const ModelPath = "/inference/v1/chat/completions"
 
 // Bob overrides only where it differs from the neutral agent.

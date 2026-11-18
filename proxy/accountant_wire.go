@@ -97,6 +97,27 @@ func (c *capture) accRun(meta accountant.RequestMeta, client []byte, th thread.R
 	c.accEndNow(th, forwarded, ops)
 }
 
+// responsesServerHeldHistory says whether a Responses body leaves part of its prompt on the provider's side, so
+// the proxy cannot see the prefix the provider reads and bills. Three fields do that: previous_response_id
+// (the earlier turns of a response chain), conversation (a stored conversation's items, a string id or an
+// object), and an input item of type item_reference (an item the provider expands from its own store). The
+// accountant has no record for such a request (fallback server_held_history, #899).
+func responsesServerHeldHistory(body []byte) bool {
+	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+		return true
+	}
+	switch c := gjson.GetBytes(body, "conversation"); {
+	case c.Type == gjson.String && c.String() != "", c.IsObject():
+		return true
+	}
+	held := false
+	gjson.GetBytes(body, "input").ForEach(func(_, it gjson.Result) bool {
+		held = it.Get("type").String() == "item_reference"
+		return !held
+	})
+	return held
+}
+
 // accEndNow records the thread, the forwarded body and the operations. A thread that continues
 // another by content names it as its parent, but starts with no state of its own: accountant carries
 // Thread.Parent and does not read it (design §4.1).

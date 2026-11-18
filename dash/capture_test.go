@@ -393,3 +393,23 @@ func TestConcurrentCaptureIsRaceFree(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A declined rebuild forwards the original body (#1179): the event books no saving and no component acted.
+func TestFromTraceBooksNoSavingWhenTheRebuildIsDeclined(t *testing.T) {
+	tr := apply.Trace{
+		Messages: 3, AttemptedTokens: 1000, Declined: true,
+		Run: &components.RunReport{
+			TokensBefore: 1000, TokensAfter: 100,
+			Components: []components.Report{{Component: "cache_aware_summarizer", Kind: "offload", TokensBefore: 1000, TokensAfter: 100}},
+		},
+	}
+	var e Event
+	e.FromTrace(tr, map[string]int{"cache_aware_summarizer": 900})
+	if e.TokensAfter != 1000 || e.SavedUnique != 0 || e.AttemptedTokens != 0 {
+		t.Fatalf("tokens after %d, saved unique %d, attempted %d: want 1000, 0, 0", e.TokensAfter, e.SavedUnique, e.AttemptedTokens)
+	}
+	c := e.Components[0]
+	if c.SavedGross != 0 || c.SavedUnique != 0 || c.Acted || c.Mutated {
+		t.Fatalf("component row = %+v, want no saving, not acted, not mutated", c)
+	}
+}

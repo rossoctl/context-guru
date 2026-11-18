@@ -43,6 +43,7 @@
  "compaction_resets": 0,
  "corrected_saving_rows": 0,
  "cost_usd": 2.794,
+ "currency": "USD",
  "decl_credit_priced": true,
  "decl_filter_reads": 0,
  "decl_filter_requests": 0,
@@ -96,6 +97,15 @@
  "expand_rate": 0,
  "expand_tokens": 0,
  "expands": 0,
+ "fallback_cost_usd": 0,
+ "fallback_requests": 0,
+ "fallback_saved": {
+  "compaction_usd": 0,
+  "defer_usd": 0,
+  "filter_usd": 0,
+  "keepalive_usd": 0,
+  "reorder_usd": 0
+ },
  "fresh_input": 23640,
  "frozen_tokens": 0,
  "invalid_config_recent": 0,

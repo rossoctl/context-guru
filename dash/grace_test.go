@@ -1,10 +1,12 @@
 package dash
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/thread"
 )
 
@@ -14,16 +16,11 @@ const twoHours = int64(2 * 60 * 60 * 1000)
 // seeds a SECOND recorder from the database knows the first one's rows are on disk.
 func waitForRowCount(t *testing.T, rec *Recorder, want int64) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int64
+	var n int64
+	testutil.WaitForState(t, fmt.Sprintf("the requests table to reach %d rows", want), func() bool {
 		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
-		if n == want {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("rows never reached %d", want)
+		return n == want
+	}, func() string { return fmt.Sprintf("%d rows", n) })
 }
 
 // A restart recovers the grace clock per thread, and a keep-alive ping that READ the cache

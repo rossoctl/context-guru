@@ -22,6 +22,8 @@ export type ThreadView = {
   /** Seconds until the cache goes cold: the keep-alive plan's horizon while the entry is warm, else remS. */
   untilColdS?: number
   ttlS: number
+  /** The cache-write tier the proxy uses for this entry (ttl_s 300 or 3600); undefined when the entry does not say. */
+  writeTier?: '5m' | '1h'
   /** Seconds until the next automatic ping, only while it fires before the entry expires. */
   nextPingS?: number
   /** The last touch was a keep-alive ping; a keep-alive plan exists. Together they are the clock's `↻`. */
@@ -63,6 +65,8 @@ export type View = {
   pingReason?: string
   /** Commands not run for 7+ days, longest idle first (the weekly tip). */
   tip: string[]
+  /** On a Claude subscription: the learned 5-hour weights, when the fit passed its checks (model.ts fiveHourWeights). */
+  weights?: import('../hooks/model').FiveHourWeights
 }
 
 /** One `cg.py cachestate --json` document (the raw /api/cachestate entry plus age_s, stale) and when it was read. */
@@ -87,6 +91,8 @@ export type Snapshot = {
     /** From `cg.py cachestate`: the status line's update marker and, on a subscription, this window's saved tokens. */
     update?: string
     window_saved?: string
+    /** From `cg.py cachestate` on a subscription: the learned 5-hour weights (cg.py share_weights), or absent. */
+    fivehour_weights?: unknown
     [key: string]: unknown
   }
 }

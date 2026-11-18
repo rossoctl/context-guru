@@ -47,6 +47,7 @@
   "sessions": 24,
   "unpriced_sessions": 8
  },
+ "currency": "USD",
  "models": [
   {
    "cache_read_usd_per_token": 0,

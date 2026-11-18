@@ -26,7 +26,7 @@ func TestLifecycleRowsFollowRequestsAndQuotaCountsRequestsOnly(t *testing.T) {
 	if counts["heavy"] != 40 {
 		t.Fatalf("quota counted %d rows, want the 40 requests (lifecycle rows must not count)", counts["heavy"])
 	}
-	rec.enforceQuotas()
+	rec.enforceQuotas(rec.ensureBackup)
 	reqs, life := countRows(t, rec.db, "requests"), lifeRows(t, rec.db)
 	if reqs > 10 || life != reqs {
 		t.Errorf("after trim: %d requests, %d lifecycle rows; want lifecycle == requests <= 10", reqs, life)

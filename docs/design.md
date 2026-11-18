@@ -20,12 +20,14 @@ infrastructure the components sit on.
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
-| `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. The shared code asks the request's agent; it never names one |
-| `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), and where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`) |
+| `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
+| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`) |
+| `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`), and its control plane (`Gateway`, `ControlPlane`): the profile's region strip and the model-info window parse |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
+| `thinkcount/` | the token count of each thinking block, for the accountant: reads a response's signatures and `thinking_tokens` (JSON, or a stream as it goes by) and keeps a bounded table by signature hash, which the host passes to `accountant.NewBodyCounted` |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
 | `dash/` | the persistent observability layer: SQLite store, off-hot-path capture, SSE hub, JSON API, embedded UI |
 | `config/` | strict YAML loader, presets, pipeline builder |

@@ -724,7 +724,7 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 			}
 			return nil, 0
 		}
-		if content, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, in.prevLocal); ok {
+		if content, _, ok := warmRatios(c.ModelName, c.PrevBilledInputThread, in.prevLocal); ok {
 			sum := 0
 			for _, h := range plan.rules {
 				sum += h.saves
@@ -759,7 +759,7 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 		return nil, 0
 	}
 	resetCount()
-	if _, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, in.prevLocal); !ok {
+	if _, _, ok := warmRatios(c.ModelName, c.PrevBilledInputThread, in.prevLocal); !ok {
 		sweepWarmNoBilled.Add(1)
 		noteWarmTrigger("no_billed_size")
 		return nil, 0
@@ -846,7 +846,7 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 		var dBilled int
 		measured := false
 		if len(res.Valid) > 0 {
-			if content, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, prevLocal); ok {
+			if content, _, ok := warmRatios(c.ModelName, c.PrevBilledInputThread, prevLocal); ok {
 				dBilled = int(float64(res.validTokens()) * content)
 				measured = true
 				// D by what chose it, for EVERY decision line of this gate, accepted or refused.

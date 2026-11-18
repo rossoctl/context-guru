@@ -10,6 +10,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -19,7 +20,9 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -109,6 +112,10 @@ type capture struct {
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread    string
 	agentComp bool
+	// compVerdict is the client compaction verdict of this request (#947), set by noteThread;
+	// compKnown says the tracker judged the request, so "" in compVerdict means none rather than unknown.
+	compVerdict string
+	compKnown   bool
 	// cpoint and cpointSrc are C for this request and where it came from (#948).
 	cpoint     int
 	cpointSrc  string
@@ -151,6 +158,10 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaPlan is the ping plan the keeper built for the wait this response starts (#1198); nil when none
+	// was built. hosted is true on a multi-tenant proxy, whose host clock says nothing about the user.
+	kaPlan *keepalive.PlanInForce
+	hosted bool
 	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
 	kaRefreshedAt time.Time
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
@@ -161,14 +172,19 @@ type capture struct {
 	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
 	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
+	// metrics receives each priced request for the push metrics (Options.MetricsSink; nil = off).
+	metrics acmetrics.Observer
+	// inference is the common inference set (Options.InferenceMetrics; nil = off).
+	inference *InferenceMetrics
 	// observe is true when the tenancy runs in observe mode: the trace is then empty by design
 	// and the accountant figure must not be booked.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings  *PingStore
 	accReq *accountant.Request
-	// accUnsupportedWire is set for a request on a wire the accountant does not read (OpenAI Responses).
-	accUnsupportedWire bool
+	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
+	// holds its history, so the accountant has no record of it.
+	accServerHeldHistory bool
 	// accNoResult says why no Result was attached when Compute was reached and gave none.
 	accNoResult string
 	// accClient is the body the agent sent, kept for accEnd's envelope diff (envelopeOps).
@@ -218,9 +234,18 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		unique:   map[string]int{},
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
-		savings:  h.savings, pings: h.opts.Pings,
+		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
 		observe: tn.Mode == components.ModeObserve,
 		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
+		hosted:  h.opts.Tenants != nil,
+	}
+}
+
+// noteKeepAlivePlan records the ping plan the keeper built for the wait this response starts (#1198).
+func (c *capture) noteKeepAlivePlan(p *keepalive.PlanInForce) {
+	defer c.timed("noteKeepAlivePlan")()
+	if c != nil {
+		c.kaPlan = p
 	}
 }
 
@@ -288,6 +313,9 @@ func (c *capture) noteThread(res thread.Result) {
 	if c != nil {
 		c.thread = res.ID
 		c.inherits, c.hasInherit = res.InheritsFrom()
+		// A "session" result is the tracker's fallback: no session id, no message list, or a recovered
+		// panic. It judged nothing, so the row keeps no verdict (NULL) and the old rule decides (#947).
+		c.compVerdict, c.compKnown = string(compactionVerdict(res)), res.Source != thread.SourceSession
 	}
 }
 
@@ -611,6 +639,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.DropUnbilledSavings()
 	e.ThreadID = c.thread
 	e.AgentCompaction = c.agentComp
+	e.ClientCompaction, e.ClientCompactionKnown = c.compVerdict, c.compKnown
 	// Only a client-set C (the user's setting or the client's own default, #963) is stored: the table value scales with the window and is read back
 	// from the table, so an old row and a new table row read alike (compactionpoint.Recorded).
 	if compactionpoint.IsClientSource(c.cpointSrc) && c.cpoint > 0 {
@@ -646,6 +675,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// that case as WaitingUnknown rather than WaitingRetry.
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
+	toolParams, spawn := usage.ToolParams, usage.Spawn
 	if usage.ToolUseIncomplete {
 		terminal = []string{} // the name list may miss the true last call: never "done" (#857)
 	}
@@ -674,11 +704,34 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
 			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
-		return dash.WaitCauseResult{
+		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
 			MonitorExpiryMs: obs.MonitorExpiryMs,
 		}
+		// The metadata that predicts when the user returns (#1198). The wait tool's `timeout` and
+		// `run_in_background` are kept only for a wait on the tool's own result (waitTool is set).
+		if waitTool != "" {
+			if toolParams.HasTimeout {
+				v := toolParams.TimeoutMs
+				res.WaitToolTimeoutMs = &v
+			}
+			if toolParams.HasBackground {
+				v := toolParams.Background
+				res.WaitToolBackground = &v
+			}
+		}
+		// A prompt is known only for a response that was read: an unknown cause says nothing.
+		if waitingFor != waitcause.WaitingUnknown {
+			res.WaitPrompt = waitcause.PromptNone
+			if waitingFor == waitcause.WaitingHuman {
+				res.WaitPrompt = waitcause.PromptOf(toolUseNames)
+			}
+		}
+		// The person's id, raw, for the writer to hash. Read here, on the writer goroutine.
+		res.Fanout, res.SpawnType = spawn.N, spawn.Type
+		res.UserKey = session.UserKey(gjson.GetBytes(waitBody, "metadata.user_id").String())
+		return res
 	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
@@ -809,6 +862,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
+	c.fillStrategyMeta(e)
 
 	var price modelinfo.Price
 	priced := false
@@ -845,6 +899,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
+				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
+					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
 			} else {
 				c.accNoResult = "compute_panicked"
 			}
@@ -857,28 +913,25 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}
 	}
+	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
+	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
+	// the client keeps.
+	if usageOK && !c.rejected() {
+		c.savings.recordThinking(usage.Thinking)
+	}
 	endAcc()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
-	if c.accUnsupportedWire {
-		e.SetAccountantUnsupportedWire()
+	if c.accServerHeldHistory {
+		e.SetAccountantServerHeldHistory()
 	}
 	e.PriceMode(price, usageOK && priced)
-	if (c.accReq != nil || c.accUnsupportedWire) && e.AccountantFallback() != "" {
+	if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
+		e.RecordAccountantFallback()
 		logFallback(e, c.noResultWhy(usageOK))
 	}
-	if cgIn > 0 || cgOut > 0 || cgCacheWrite > 0 || cgCacheRead > 0 {
-		cgPrice, cgPriced := price, priced
-		if c.pricer != nil && cgModel != "" && cgModel != c.model {
-			if p2, ok := c.pricer.Price(context.Background(), cgModel); ok {
-				cgPrice, cgPriced = p2, true
-			}
-		}
-		if cgPriced {
-			e.CGLLMCostUSD = cgPrice.Cost(cgIn, cgCacheRead, cgCacheWrite, cgOut)
-		} else {
-			e.CGCostUnpriced = true
-		}
-	}
+	e.CGModel = cgModel
+	e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
+	e.PriceCG(c.pricer, price, priced)
 
 	if !captureContent {
 		e.Content = nil
@@ -922,6 +975,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// otherwise. Same discipline as Record either way: a non-blocking send, nothing else here.
 	// e.Project rides along: invocations are recorded per folder, because one session works in
 	// several and a per-session folder cannot scope a per-project report.
+	// After the response, on the handler's defer: counter adds only (R46). A panic costs the metric.
+	c.inference.Observe(e, time.Since(c.start))
 	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
 	c.rec.Record(e)
 }
@@ -1008,4 +1063,52 @@ func (c *capture) noResultWhy(usageOK bool) string {
 		return "upstream_rounds=" + strconv.Itoa(c.rounds)
 	}
 	return ""
+}
+
+// fillStrategyMeta sets the strategy metadata that one request alone decides (#1198): the host's
+// UTC offset and the ping plan. The wait's tool parameters and prompt, the turn, the concurrency and
+// the person's hash are filled on the writer (WaitCause, dash.Recorder).
+//
+// The offset comes from the host's own time zone at the request time, and only on a local proxy,
+// where the host is the user's machine. A hosted proxy has no zone of its user, so it leaves the
+// field NULL (unknown).
+func (c *capture) fillStrategyMeta(e *dash.Event) {
+	if !c.hosted {
+		_, off := c.start.Zone()
+		v := off / 60
+		e.TZOffsetMin = &v
+	}
+	e.ClientEntrypoint = clientEntrypoint(c.agent)
+	if p := c.kaPlan; p != nil {
+		e.KAPlannedPings, e.KAMinPrefixTokens, e.KAIdleS = &p.MaxPings, &p.MinPrefixTokens, &p.IdleSeconds
+	}
+}
+
+// clientEntrypoint classifies how the client was started from its User-Agent: cli (interactive),
+// headless (`-p`, which Claude Code reports as sdk-cli), sdk, or other. "" for an empty agent.
+// Claude Code sends "claude-cli/<ver> (external, <entrypoint>)"; Codex sends "codex_cli_rs/<ver> ...".
+func clientEntrypoint(ua string) string {
+	l := strings.ToLower(strings.TrimSpace(ua))
+	if l == "" {
+		return ""
+	}
+	if i := strings.LastIndex(l, "("); i >= 0 && strings.HasPrefix(l, "claude-") {
+		inner := strings.TrimSuffix(strings.TrimSpace(l[i+1:]), ")")
+		if j := strings.LastIndex(inner, ","); j >= 0 {
+			inner = inner[j+1:]
+		}
+		switch inner = strings.TrimSpace(inner); {
+		case inner == "cli":
+			return "cli"
+		case inner == "sdk-cli":
+			return "headless"
+		case strings.HasPrefix(inner, "sdk"):
+			return "sdk"
+		}
+		return "other"
+	}
+	if strings.HasPrefix(l, "codex") {
+		return "cli"
+	}
+	return "other"
 }

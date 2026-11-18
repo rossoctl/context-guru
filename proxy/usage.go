@@ -9,6 +9,7 @@ import (
 
 	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/thinkcount"
 	"github.com/tidwall/gjson"
 )
 
@@ -66,8 +67,17 @@ type Usage struct {
 	// ToolUseIncomplete is true when ToolUseNames may miss the true last call, because the bytes
 	// read were a spliced head+tail sniff window. The terminal-tool rule never applies then (#857).
 	ToolUseIncomplete bool
+	// ToolParams is the two numeric/boolean parameters of the LAST tool call that say how long the
+	// wait may last (#1198): `timeout` and `run_in_background`. Nothing else of the call's input is
+	// kept. The zero value means neither was stated, or the call could not be read.
+	ToolParams ToolParams
+	// Spawn is the subagent calls of this response (#1198): how many, and the type of the last.
+	Spawn Spawn
 	// Backend is which of Bob's backends answered (bobBackend). Set on Bob's model route only.
 	Backend string
+	// Thinking is the signature of each thinking block the response made and its thinking_tokens. finish
+	// records it in the accountant's count table (issue #1187). Empty when the response made no block.
+	Thinking thinkcount.Response
 }
 
 // usageMiss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -396,6 +406,10 @@ func responseUsageWhy(contentType string, body []byte, spliced bool) (Usage, usa
 	u.StopReason = responseStopReason(sse, body)
 	u.ToolUseNames = responseToolUseNames(sse, body)
 	u.ToolUseIncomplete = spliced
+	if !spliced {
+		u.ToolParams = responseLastToolParams(sse, body)
+		u.Spawn = responseSpawns(sse, body)
+	}
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
 	// not the other. See usageCounters.
 	if counter, alertable := usageCounters[why]; alertable {
@@ -771,4 +785,154 @@ func max64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// ToolParams is what the last tool call of a response said about how long its wait may last
+// (#1198). Each value has its own "stated" flag, because an absent parameter and a zero are
+// different facts. Metadata only: one number and one flag; the rest of the input is dropped.
+type ToolParams struct {
+	TimeoutMs     int64 // the call's `timeout`, in ms (Claude Code's Bash and others); valid when HasTimeout
+	HasTimeout    bool
+	Background    bool // the call's `run_in_background`; valid when HasBackground
+	HasBackground bool
+}
+
+// toolParamsOf reads ONLY `timeout` (a positive number) and `run_in_background` (a boolean) off a
+// tool call's input JSON. Any other key, and any other type, is ignored.
+func toolParamsOf(input string) ToolParams {
+	var p ToolParams
+	if !gjson.Valid(input) {
+		return p
+	}
+	if t := gjson.Get(input, "timeout"); t.Type == gjson.Number && t.Int() > 0 {
+		p.TimeoutMs, p.HasTimeout = t.Int(), true
+	}
+	if b := gjson.Get(input, "run_in_background"); b.Type == gjson.True || b.Type == gjson.False {
+		p.Background, p.HasBackground = b.Bool(), true
+	}
+	return p
+}
+
+// responseLastToolParams reads the parameters of the LAST tool call of a response, the call
+// responseToolUseNames reports last (and the wait tool of the row). A buffered response of any
+// dialect carries the input whole. A streamed Anthropic response carries it as input_json_delta
+// pieces, joined here per content block. A streamed OpenAI response is not read: that is a gap,
+// and the value stays unstated rather than guessed. The caller skips a spliced window, whose last
+// call may be missing.
+func responseLastToolParams(sse bool, body []byte) ToolParams {
+	if !sse {
+		var last *schema.OutputCall
+		calls := []schema.OutputCall{}
+		for _, wire := range []string{schema.WireAnthropic, schema.WireOpenAI, schema.WireResponses} {
+			calls = append(calls, schema.OutputCalls(wire, body)...)
+		}
+		for i := range calls {
+			if !calls[i].Custom && calls[i].Name != "" {
+				last = &calls[i]
+			}
+		}
+		if last == nil {
+			return ToolParams{}
+		}
+		return toolParamsOf(last.Args)
+	}
+	var (
+		cur   = -1 // content-block index of the last named tool_use
+		input strings.Builder
+		start string // the block's input as content_block_start gave it, "{}" when streamed
+	)
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if cb := gjson.Get(payload, "content_block"); cb.Get("type").String() == "tool_use" {
+			if cb.Get("name").String() != "" {
+				cur = int(gjson.Get(payload, "index").Int())
+				input.Reset()
+				start = cb.Get("input").Raw
+			}
+			continue
+		}
+		if cur >= 0 && gjson.Get(payload, "delta.type").String() == "input_json_delta" &&
+			int(gjson.Get(payload, "index").Int()) == cur {
+			input.WriteString(gjson.Get(payload, "delta.partial_json").String())
+		}
+	}
+	if cur < 0 {
+		return ToolParams{}
+	}
+	if input.Len() > 0 {
+		return toolParamsOf(input.String())
+	}
+	return toolParamsOf(start)
+}
+
+// Spawn is the subagent calls one response made: N of them, and the subagent_type of the last that
+// stated one. Only the type is read from their input, never the prompt.
+type Spawn struct {
+	N    int
+	Type string
+}
+
+// spawnTools are the tool names that start a subagent.
+var spawnTools = map[string]bool{"Agent": true, "Task": true}
+
+// responseSpawns counts the subagent calls of a response and reads the subagent_type of the last one.
+// A streamed Anthropic response joins each call's input_json_delta pieces. Other streams are not read.
+func responseSpawns(sse bool, body []byte) Spawn {
+	var sp Spawn
+	typeOf := func(input string) string {
+		if t := gjson.Get(input, "subagent_type"); t.Type == gjson.String && len(t.Str) <= 64 {
+			return t.Str
+		}
+		return ""
+	}
+	if !sse {
+		for _, wire := range []string{schema.WireAnthropic, schema.WireOpenAI, schema.WireResponses} {
+			for _, c := range schema.OutputCalls(wire, body) {
+				if !c.Custom && spawnTools[c.Name] {
+					sp.N++
+					if t := typeOf(c.Args); t != "" {
+						sp.Type = t
+					}
+				}
+			}
+		}
+		return sp
+	}
+	inputs := map[int]*strings.Builder{}
+	var order []int
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		idx := int(gjson.Get(payload, "index").Int())
+		if cb := gjson.Get(payload, "content_block"); cb.Get("type").String() == "tool_use" {
+			if spawnTools[cb.Get("name").String()] {
+				inputs[idx] = &strings.Builder{}
+				order = append(order, idx)
+				if raw := cb.Get("input").Raw; raw != "" && raw != "{}" {
+					inputs[idx].WriteString(raw)
+				}
+			}
+			continue
+		}
+		if b := inputs[idx]; b != nil && gjson.Get(payload, "delta.type").String() == "input_json_delta" {
+			b.WriteString(gjson.Get(payload, "delta.partial_json").String())
+		}
+	}
+	for _, i := range order {
+		sp.N++
+		if t := typeOf(inputs[i].String()); t != "" {
+			sp.Type = t
+		}
+	}
+	return sp
 }

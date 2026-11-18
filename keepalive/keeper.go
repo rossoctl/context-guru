@@ -2,6 +2,7 @@ package keepalive
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"net/http"
@@ -426,6 +427,24 @@ type Record struct {
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
 	Hold func() dispatch.Ref
+	// Plan, when non-nil, receives the ping plan built for the wait this response starts (#1198). It
+	// is written only when the request passed every gate and got a schedule: a refused request leaves it
+	// untouched, which the host reads as "no plan".
+	Plan *PlanInForce
+}
+
+// PlanInForce is the ping plan Record built for one wait: the count of pings, the billed-prefix floor the
+// gate used and the spacing between pings. Numbers only.
+type PlanInForce struct {
+	// Built is true once Record filled the plan; false means no plan was built for the request.
+	Built bool
+	// MaxPings is the ping count after the per-wait plan (pol.MaxPings).
+	MaxPings int
+	// MinPrefixTokens is the prefix floor for this wait (Policy.WaitMinPrefix): 20k for a tool wait,
+	// 80k for a person or an unknown cause, with the plan on.
+	MinPrefixTokens int
+	// IdleSeconds is the spacing between pings (pol.Idle), after the one-hour schedule is applied.
+	IdleSeconds int
 }
 
 // EntryView is a read-only snapshot of one tracked entry. Exported for tests and replay tooling;
@@ -504,8 +523,10 @@ type Keeper struct {
 	// Counters, for /stats and for the honest question "is this thing spending money and
 	// getting nothing?". Every one of them is a way the mechanism can be useless.
 	pings    atomic.Int64
-	skipped  atomic.Int64 // due, but a limit or a cap or a gate refused
+	skipped  atomic.Int64  // due, but a limit or a cap or a gate refused
+	mm       manualMetrics // manual-hold measures (#1103); guarded by mu
 	failed   atomic.Int64
+	timedOut atomic.Int64  // the part of failed that ran to pingTimeout: probably billed (#754)
 	wrote    atomic.Int64  // pings that CREATED instead of refreshing — a bug, not a cost
 	missed   atomic.Int64  // pings that read nothing — a real cache miss, not a failure
 	spentUSD atomic.Uint64 // float64 bits; only ever read as a whole
@@ -879,6 +900,9 @@ func (k *Keeper) Record(r Record) {
 	}
 	if len(body) > limit {
 		refuse(ReasonTooLarge)
+		k.mu.Lock()
+		k.mm.tooLarge++
+		k.mu.Unlock()
 		k.retire(key)
 		k.skipped.Add(1)
 		return
@@ -1040,6 +1064,13 @@ func (k *Keeper) Record(r Record) {
 		e.ceiling = pol.Ceiling()
 		e.pol = Policy{ManualHold: true} // off: due, Plans, PendingPings and Sweep all read pol.On()
 	}
+	// The request passed every gate and got a schedule: report that plan (#1198). A refused or
+	// manual-only request leaves it unbuilt. e.pol is the policy the thread keeps, so a one-hour
+	// thread reports its own bounded count.
+	if r.Plan != nil && !e.manualOnly {
+		*r.Plan = PlanInForce{Built: true, MaxPings: e.pol.MaxPings,
+			MinPrefixTokens: e.pol.WaitMinPrefix(wait, IsSubagentThread(threadID)), IdleSeconds: int(e.pol.Idle / time.Second)}
+	}
 	k.clearReasonLocked(r.Key)
 	k.live[key] = e
 	k.bytes += int64(len(owned))
@@ -1049,6 +1080,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	if e.manualOnly {
 		e.timer = time.AfterFunc(e.holdFor, func() { k.expireManual(key) })
+		k.recordManualHoldLocked(e)
 		k.evictManualLocked(r.Key.Tenant)
 		k.evictLocked()
 		return
@@ -1130,6 +1162,13 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
 }
 
+// projectedRefreshExtraUSD is what a refresh costs OVER the ping it replaces (#1144): the summary
+// call minus the ping that was due. When both read the same cached prefix (the prefix_ask path,
+// at a planned ping), the read cancels and what is left is the reply. Callers use it only then. Never negative. Zero when the model is not priced, like its two siblings.
+func (k *Keeper) projectedRefreshExtraUSD(model string, prefix int64, route, endpoint string) float64 {
+	return max(0, k.projectedSummaryUSD(model, endpoint, prefix)-k.projectedPingUSD(model, prefix, route, endpoint))
+}
+
 // expectedRefreshSavingUSD is the dollar value a refresh folding tailTokens of new material into
 // a `cache_state: pre_expiry` reserve is expected to earn back: those tokens would otherwise be
 // written, at the model's cache-WRITE rate, on the cold return the reserve exists to cheapen.
@@ -1139,8 +1178,8 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 //
 // Zero when the model is not priced, for the same reason projectedPingUSD/projectedSummaryUSD are
 // — an incomplete price list must not block a feature it cannot afford to evaluate, and
-// fireSummarySubstitute's own comparison (saving < cost) already fails toward "ping normally"
-// whenever cost cannot be shown to be zero too.
+// fireSummarySubstitute's own comparison (saving < what the refresh costs) fails toward "refresh"
+// only when that cost is zero too, the same as before.
 func (k *Keeper) expectedRefreshSavingUSD(model, endpoint string, prefix int64, tailTokens int) float64 {
 	if model == "" || tailTokens <= 0 {
 		return 0
@@ -1513,6 +1552,7 @@ func (k *Keeper) fire(j pingJob) {
 	resp, err := k.o.Dispatcher.Do(ctx, dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,
 		Ref: j.ref, Provider: j.provider, Method: http.MethodPost, Path: j.route, Header: j.hdr,
 		Body: body})
+	ctxErr := ctx.Err() // read before cancel, which would set it on every call
 	cancel()
 	zero(body)
 	status := resp.Status
@@ -1528,6 +1568,15 @@ func (k *Keeper) fire(j pingJob) {
 		slog.Debug("context-guru: cache keep-alive ping failed",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread, "err", err,
 			"retry", retry)
+		// A ping that ran to pingTimeout was probably sent, and the provider bills it whether or
+		// not we wait for the answer (#532, #754). Book it at the keeper's own projection, marked
+		// as an estimate. "Probably": a 60 s dial or TLS hang also ends here, and never reached
+		// the provider. A fast failure (EOF, reset, refused) probably never reached it either, so
+		// it books nothing, as before.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctxErr, context.DeadlineExceeded) {
+			k.timedOut.Add(1)
+			k.recordTimedOut(j, ms)
+		}
 		return
 	}
 	switch k.noteOutcome(j, status, u) {
@@ -1780,6 +1829,35 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	return cost
 }
 
+// recordTimedOut books a ping that ran to pingTimeout (#754). No answer came back, so there is
+// no usage to price: the cost is e.pingUSD, the keeper's own projection of one ping on e.prefix at
+// the model's read price, and the report says TimedOut so a sink can keep it apart from a measured
+// row. It counts as spend and NOT as a refresh: nobody knows whether the provider read the entry,
+// so neither cache clock moves and e.refreshed is left alone (record1 sets both only on a 2xx
+// that billed the cache).
+func (k *Keeper) recordTimedOut(j pingJob, ms float64) {
+	e := j.e
+	k.mu.Lock()
+	model, provider, route, preset, agent := e.model, e.provider, e.route, e.preset, e.agent
+	appliedStrategy, cost := e.tag, e.pingUSD
+	e.spent += cost
+	k.mu.Unlock()
+	k.addSpent(cost)
+	slog.Info("context-guru: cache keep-alive ping timed out; booked at its projected cost",
+		"tenant", tenantLabel(j.tenant), "session", j.session, "thread", j.thread,
+		"estimated_cost_usd", cost, "ms", ms)
+	if ka, ok := j.emitter.(components.KeepAliveEmitter); ok {
+		ka.KeepAlivePing(components.KeepAliveReport{
+			Tenant: j.tenant, Session: j.session, Thread: j.thread, Model: model, Provider: string(provider),
+			Route: route, Pings: j.ping, CostUSD: cost, DurationMs: ms,
+			TS: k.now().UnixMilli(), Agent: agent, Preset: preset, Strategy: appliedStrategy,
+			MaxTokens: pingOutputBudget(route) + j.vary%pingVary,
+			Window:    j.gapStart,
+			TimedOut:  true,
+		})
+	}
+}
+
 // pingCost prices one ping's usage. The same gate dash.Event.Price used to apply before pricing
 // anything: no cost without a usable rate, and no cost claimed for a ping whose usage reported
 // nothing at all. priced is false when the model has no rate.
@@ -1817,7 +1895,10 @@ type Stats struct {
 	Pings   int64 `json:"pings"`
 	Skipped int64 `json:"skipped"`
 	Failed  int64 `json:"failed"`
-	Wrote   int64 `json:"wrote_instead_of_read"`
+	// TimedOut is the part of Failed that ran to pingTimeout (#754). Unlike a fast failure, such a
+	// ping was probably billed, so each one is booked in SpentUSD at its projected cost.
+	TimedOut int64 `json:"timed_out"`
+	Wrote    int64 `json:"wrote_instead_of_read"`
 	// Missed counts pings that read nothing — a real cache miss, not a failure. A FIRST miss
 	// in a row keeps pinging; a SECOND stops it (see noteOutcome), which is why Missed and
 	// Wrote can both be 1 for the same session (TestASecondMissInARowStops).
@@ -2059,7 +2140,7 @@ func (k *Keeper) Stats() Stats {
 	sw := offload.SweepPingCounters()
 	bc := offload.SweepBatchCounters() // ONE snapshot, so the three batch fields agree
 	return Stats{Live: live, Pings: k.pings.Load(), Skipped: k.skipped.Load(),
-		Failed: k.failed.Load(), Wrote: k.wrote.Load(), Missed: k.missed.Load(),
+		Failed: k.failed.Load(), TimedOut: k.timedOut.Load(), Wrote: k.wrote.Load(), Missed: k.missed.Load(),
 		RouteTrips:                         k.routeTrips.Load(),
 		SpentUSD:                           math.Float64frombits(k.spentUSD.Load()),
 		SummarySubstituted:                 k.summarySubstituted.Load(),

@@ -67,15 +67,17 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	var upAvg, cgAvg sql.NullFloat64
 	var manual manualAgg
 	var tok leanAgg
+	var fb fallbackAgg
 	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(append([]any{
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
 		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings,
 		&o.EstimatedRequests, &o.EstimatedSavedUSD, &o.EstimatedSavedLowUSD},
-		append(append(manual.dest(), &o.DeferNetUSD), tok.dest()...)...)...); err != nil {
+		append(append(append(manual.dest(), &o.DeferNetUSD), tok.dest()...), fb.dest()...)...)...); err != nil {
 		return nil, err
 	}
 	o.ManualPings = manual.pings()
+	fb.apply(o)
 	o.UpstreamMsAvg, o.CGLatencyMsAvg = upAvg.Float64, cgAvg.Float64
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
 		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
@@ -132,6 +134,7 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.estimated_saved_low_usd ELSE 0 END),0),
 			` + manualSelect + `,
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.defer_net_usd ELSE 0 END),0),
-			` + accTokenLeanTerms + `
+			` + accTokenLeanTerms + `,
+			` + fallbackTerms(agent+" AND r.acc_fallback <> ''", f.Since) + `
 		FROM requests r WHERE ` + cond, args
 }

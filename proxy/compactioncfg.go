@@ -13,6 +13,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
@@ -195,7 +196,7 @@ func clientOf(userAgent string) string {
 }
 
 // bobWindow is Bob's own max_input_tokens for the model, as seen in the model/info response that
-// passed through this proxy (noteBobModelInfo). 0 = not seen. Metadata only: a number for each
+// passed through this proxy (the agent's ControlPlane reply, stored by noteBobWindows). 0 = not seen. Metadata only: a number for each
 // model id, in memory, at most bobWindowMax entries.
 func (h *Handler) bobWindow(model string) int {
 	h.bobWinMu.Lock()
@@ -203,34 +204,31 @@ func (h *Handler) bobWindow(model string) int {
 	return h.bobWin[model]
 }
 
-const bobWindowMax = 512
+const bobWindowMax = bob.MaxModelWindows
 
-// noteBobModelInfo records data[].model_name -> data[].model_info.max_input_tokens (the LiteLLM
-// shape Bob reads in getLiteLLMModels). A body that is not that shape records nothing.
-func (h *Handler) noteBobModelInfo(body []byte) {
-	data := gjson.GetBytes(body, "data")
-	if !data.IsArray() {
+// noteBobModelInfo records bob.ModelWindows(body). A body that is not that shape records nothing.
+func (h *Handler) noteBobModelInfo(body []byte) { h.noteBobWindows(bob.ModelWindows(body)) }
+
+// noteBobWindows records the agent's window catalog (agent.ControlReply.Windows). An empty catalog,
+// or one over bobWindowMax entries, records nothing. A window <= 0 is dropped.
+func (h *Handler) noteBobWindows(windows map[string]int) {
+	// The agent caps the map too; this host check keeps the cap if the agent changes.
+	if len(windows) == 0 || len(windows) > bobWindowMax {
 		return
 	}
-	got := map[string]int{}
-	data.ForEach(func(_, v gjson.Result) bool {
-		name := v.Get("model_name").String()
-		w := v.Get("model_info.max_input_tokens")
-		if name != "" && len(name) <= 128 && w.Type == gjson.Number && w.Int() > 0 && w.Int() < 1<<40 && len(got) < bobWindowMax {
-			got[name] = int(w.Int())
+	// A copy: the agent keeps no handle on the host's store.
+	got := make(map[string]int, len(windows))
+	for m, w := range windows {
+		if w > 0 {
+			got[m] = w
 		}
-		return true
-	})
+	}
 	if len(got) == 0 {
 		return
 	}
 	h.bobWinMu.Lock()
 	defer h.bobWinMu.Unlock()
 	h.bobWin = got // the whole catalog replaces the old one: bounded, and never stale
-}
-
-func isBobModelInfo(r *http.Request) bool {
-	return r.Method == http.MethodGet && (r.URL.Path == "/inference/v1/model/info" || r.URL.Path == "/v1/model/info")
 }
 
 // ReadBobCompact reads Bob Shell's model.compressionThreshold (#963) from the user settings file

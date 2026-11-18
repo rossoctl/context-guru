@@ -185,3 +185,25 @@ func TestExplicitStrictSkipsPlainUserID(t *testing.T) {
 		t.Fatalf("taskId after skipped user_id, got %q", got)
 	}
 }
+
+// UserKey names the person, not the conversation.
+func TestUserKey(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`{"device_id":"abc123","account_uuid":"acct-1","session_id":"s1"}`, "a:acct-1"},
+		{`{"device_id":"abc123","account_uuid":"","session_id":"s1"}`, "d:abc123"},
+		{`{"session_id":"s1"}`, ""},
+		{`{"device_id":`, ""},
+		{"user_deadbeef_account_acct-1_session_s1", "l:user_deadbeef_account_acct-1"},
+		{"user_42", ""},
+		{"a-plain-session-uuid", ""},
+		{"", ""},
+		{"_session_x", ""},
+	} {
+		if got := UserKey(tc.in); got != tc.want {
+			t.Errorf("UserKey(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := UserKey(`{"device_id":"` + strings.Repeat("x", maxMetadataLen) + `"}`); got != "" {
+		t.Errorf("an oversize id gave %q", got)
+	}
+}

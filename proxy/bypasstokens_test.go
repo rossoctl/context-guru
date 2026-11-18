@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -246,5 +247,80 @@ func TestAnOversizeCompactionRowCarriesBothFlags(t *testing.T) {
 	}
 	if e := page.Requests[0]; !e.Bypassed || !e.AgentCompaction {
 		t.Fatalf("bypassed=%v agent_compaction=%v, want both true", e.Bypassed, e.AgentCompaction)
+	}
+}
+
+// #947: the first request after the agent's own compaction carries the verdict on its row, and
+// every other request a verdict of none. The rows share one Claude Code session id, which survives
+// the compaction; the post-compaction request shares no prefix with the turns before it.
+func TestTheRequestAfterACompactionCarriesTheVerdict(t *testing.T) {
+	up := fakeUpstream(t)
+	defer up.Close()
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	post := func(msgs ...string) {
+		var m []map[string]any
+		for i, c := range msgs {
+			role := "user"
+			if i%2 == 1 {
+				role = "assistant"
+			}
+			m = append(m, map[string]any{"role": role, "content": c})
+		}
+		b, _ := json.Marshal(map[string]any{"model": "gpt-x", "messages": m,
+			"metadata": map[string]any{"user_id": `{"session_id":"sess-947"}`}})
+		resp, err := http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	post("the task")
+	waitForRows(t, rec, 1)
+	post("the task", "a1", compactPromptForBypassTest)
+	waitForRows(t, rec, 2)
+	post("the summary of everything so far", "ok", "continue")
+	waitForRows(t, rec, 3)
+	post("the summary of everything so far", "ok", "continue", "a2", "next")
+	waitForRows(t, rec, 4)
+
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil || len(page.Requests) != 4 {
+		t.Fatalf("rows = %v, err %v", page, err)
+	}
+	rows := page.Requests
+	sort.Slice(rows, func(a, b int) bool {
+		return rows[a].TS < rows[b].TS || rows[a].TS == rows[b].TS && rows[a].ID < rows[b].ID
+	})
+	want := []string{"", "", "unknown", ""}
+	for i, e := range rows {
+		if !e.ClientCompactionKnown {
+			t.Errorf("request %d: no verdict stored (NULL)", i+1)
+		}
+		if e.ClientCompaction != want[i] {
+			t.Errorf("request %d: verdict %q, want %q", i+1, e.ClientCompaction, want[i])
+		}
+	}
+	if !rows[1].AgentCompaction {
+		t.Errorf("setup: request 2 is not marked as the compaction request")
+	}
+}
+
+// A declined rebuild forwards the original body (#1179): the request line must show no saving.
+func TestLifecycleLoggerShowsNoSavingWhenTheRebuildIsDeclined(t *testing.T) {
+	var buf bytes.Buffer
+	lg := slog.New(slog.NewTextHandler(&buf, nil))
+	run := &components.RunReport{TokensBefore: 900, TokensAfter: 100}
+	lifecycleLogger(lg, apply.Trace{Run: run, Declined: true}, false, time.Millisecond).Info("x")
+	out := buf.String()
+	if !strings.Contains(out, "tokens_after=900") || !strings.Contains(out, "saved=0") || !strings.Contains(out, "rebuild_declined=true") {
+		t.Fatalf("log line = %q, want tokens_after=900 saved=0 rebuild_declined=true", out)
+	}
+	buf.Reset()
+	lifecycleLogger(lg, apply.Trace{Run: run}, false, time.Millisecond).Info("x")
+	if !strings.Contains(buf.String(), "tokens_after=100") || !strings.Contains(buf.String(), "saved=800") {
+		t.Fatalf("a normal run lost its saving: %q", buf.String())
 	}
 }

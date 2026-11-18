@@ -1124,20 +1124,46 @@ covers the point it was written at. A later keep-alive ping can refresh it — w
 covering the larger conversation — instead of sending a plain ping.
 
 **That refresh is not free, so it only happens when it pays for itself.** The rule: refresh only
-when the money a cold return will save is at least as much as the refresh itself costs.
+when the money a cold return will save is at least as much as the refresh **adds** to the ping it
+replaces.
 
-- The refresh's own cost is a cache **read** of the whole conversation plus a short reply.
+- A refresh at a planned keep-alive ping takes the place of that ping. Both read the whole
+  conversation from the cache, so that read is paid either way. This holds when the summary call
+  reads the same cached bytes as the ping: the `prefix_ask` path, which is every Anthropic request
+  on the proxy.
+- What the refresh adds is the **reply**: about 2,000 output tokens instead of 1, about $0.02 on
+  Sonnet 5.
 - The money it saves is the new material it folds in, priced at what writing it on a cold return
   would have cost (the cache **write** rate).
 
 An earlier version of this used a fixed size instead — refresh once 6,000 new tokens had piled up.
 That number was borrowed from a different decision (`resummarize_tokens`, which still controls
-when a TURN re-derives its summary) and was far too small for a refresh: at Sonnet 5's prices,
-6,000 new tokens are worth about $0.015 on the eventual cold return, but the refresh itself costs
-about $0.20. Refreshing at 6,000 tokens meant paying $0.20 to save $0.015 — repeatedly, on an idle
-session, forever. The money rule fixes this: on Sonnet 5's prices it takes roughly **80,000** new
-tokens before a refresh earns itself back, and the number adjusts automatically for other models'
-prices.
+when a TURN re-derives its summary) and was too small for the cost it was weighed against then:
+6,000 new tokens are worth about $0.015 on a cold return at Sonnet 5's prices, and the rule
+counted the whole call, about $0.20 at 900,000 tokens, as the cost. A second version kept the
+whole call as the cost. That asked for roughly 80,000 new tokens at 900,000 tokens, and it asked
+for more as the conversation grew, although the read is paid by the ping anyway.
+
+**Today the rule weighs the saving against the extra cost only (#1144), in the case above.** On
+Sonnet 5's prices a refresh pays after about **8,000** new tokens, whatever the size of the
+conversation: `$0.02 ÷ $2.50 per million`. The number adjusts automatically for other models' prices.
+
+| | Cost the rule weighs | New tokens needed (Sonnet 5) |
+|---|---|---|
+| `refresh_cost: extra` (default) | about $0.02, the reply | about **8,000**, at any prompt size |
+| `refresh_cost: full` | the whole call: the read and the reply | about **80,000** at a 900k prompt |
+
+**These cases still weigh the whole call**, because no ping is replaced or the read is not shared:
+
+- the **extra slot** (the one request after the planned pings are spent; a declined refresh sends
+  nothing there);
+- the `messages` path, where the pipeline builds the request itself;
+- `model.source: config`, where another model reads the conversation with its own cache.
+
+- **The per-ping spending cap does not change.** It still compares the whole call with the cap,
+  because it limits what one keep-alive request spends.
+- **To keep the old rule,** set `refresh_cost: full` on `cache_aware_summarizer`.
+- **The first reserve** has no cost test. That did not change.
 
 #### What it costs, at 900,000 tokens on Sonnet 5
 
@@ -1152,6 +1178,72 @@ million cache-write tokens, $10 per million output tokens.
 So on a cold return, sending the summary instead of the full history saves about **$2.05**. On a
 warm turn it saves about **$0.16**. One summary call itself costs about **$0.20** (it reads the
 whole 900k conversation to write the new summary).
+
+#### Does the user come back? The return rate decides whether a reserve pays
+
+A `pre_expiry` reserve pays only if a request **arrives after the cache has gone cold**. Before the
+cache goes cold the reserve is not used, and if nobody comes back it is never used. So the
+summary call is a bet on one number: **p, the share of idle sessions whose next request finds the
+cache cold.**
+
+**The cold point is later than the last turn's TTL.** The summary call reads the cache, so it renews
+it, and later keep-alive pings renew it again (see Limits below: the reserve "gets used only after
+pinging stops"). On a 1-hour cache with a summary call near minute 59 and no more pings, a request
+finds the cache cold only after about minute 119.
+
+**The break-even.** Using the Sonnet 5 example above (900k tokens): a cold return saves
+$2.25 − $0.20 = $2.05.
+
+- **The usual case: the call takes the place of a keep-alive ping.** Real turns rarely land in the
+  last minute (see the table above), so the first `pre_expiry` call usually replaces a ping. The
+  ping's read was going to be paid. The extra cost is only the reply, about $0.02. **The reserve
+  pays when p is above about 1%.**
+- **The rare case: no ping would have run.** The extra cost is the whole call, $0.20 (the read and
+  the reply). The reserve pays when p is above about 10%.
+- Both are lower bounds on the value. After a cold return, every warm turn on the summary saves
+  about $0.16 more.
+
+**The refresh rule had two errors, and they go in opposite directions. #1144 fixed (a). (b) is still open.**
+
+- **(a) It counted the full call as the cost (fixed by default; `refresh_cost: full` restores it).** The code compared the saving with the read of the
+  whole conversation plus a reply (the "own cost" described above). A refresh at a planned ping takes
+  the place of that ping, so the read is paid either way. The extra cost is only the reply, about
+  10 times less. This makes the rule refresh **too seldom**.
+- **(b) It counts the saving as certain (p = 1).** For a session that never comes back, this makes
+  the rule refresh **too often**.
+- With the marginal cost, a refresh pays when `p × new tokens × $2.50 per million > $0.02`, so
+  after about `8,000 ÷ p` new tokens. That is about 16k tokens at p = 49% and about 48k at p = 17%.
+  The rule today uses p = 1, so it asks for about 8k. **For a session with a low p, such as a
+  subagent, it refreshes at a small expected loss.** A per-session p would fix that.
+
+**Measured return rates.** One developer's traffic through one proxy, Nov 8–15 (the dashboard's
+`requests` table, real requests only, keep-alive pings left out). The sample is every gap of at
+least 54 minutes after a request with a cached prefix of at least 100k tokens:
+
+| Thread | Gaps | Back at 54–60 min | Back at 60–119 min | Back after 119 min | Never came back |
+|---|---|---|---|---|---|
+| Main agent | 80 | 3 | 23 | **39 (49%)** | 15 (19%) |
+| Subagents | 48 | 1 | 6 | **8 (17%)** | 33 (69%) |
+
+- **p is the "after 119 min" column**, when the summary call is the last renewal. Each further ping
+  moves the cold point out by one TTL, so with more pings p is lower.
+- "Never came back" means that the thread sent no later request in the data. No such thread ended
+  within 24 hours of the end of the data, so the cut-off does not bias it much.
+- A subagent seldom comes back, because its task has ended.
+- **Both rates are far above the 1% break-even of the usual case.** The subagent rate is above the
+  10% break-even of the rare case too.
+- **p depends on the session.** The proxy already records facts that predict it: main thread or
+  subagent, the wait cause (`waiting_for`), the prefix size, and the session's own past gaps. A
+  per-session estimate is not built.
+
+#### Who keeps the saving: subscription or API key
+
+- **On an API key,** every token a summary saves is the user's money.
+- **On a subscription,** the user pays a fixed price. A saved token counts only as plan usage that
+  the user did not spend.
+  - For a user who stays far below the plan limit, the summary saves the provider's GPU time, not
+    the user's money. The user still loses detail.
+  - For a user who reaches the limit, the same saving is more work in each window.
 
 #### Which to choose
 

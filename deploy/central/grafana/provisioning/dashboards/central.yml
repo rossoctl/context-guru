@@ -1,0 +1,14 @@
+# Tells Grafana where to find the central dashboards.
+
+apiVersion: 1
+
+providers:
+  - name: central
+    orgId: 1
+    folder: central
+    type: file
+    # The files are the source of truth. A dashboard edited in the browser is overwritten on the
+    # next deploy, which is a confusing way to lose work.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/central

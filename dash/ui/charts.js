@@ -87,6 +87,7 @@ const CGCharts = (() => {
 
   /** Cumulative net saving over time: one line, zero marked, the latest value written at its end. */
   function netSaving(host, buckets) {
+    if (noMoneyChart(host)) return;
     const bins = rebin(buckets, ['baseline_cost_usd', 'cost_usd', 'cg_llm_cost_usd'], []);
     let acc = 0;
     const vals = bins.map((b) => (acc += b.baseline_cost_usd - b.cost_usd - b.cg_llm_cost_usd));
@@ -94,7 +95,7 @@ const CGCharts = (() => {
       return emptyState(host, 'No priced requests yet', 'This needs provider usage data and a known model price.');
     }
     const pad = { l: 52, r: 76, t: 14, b: 24 };
-    const f = frame(host, 220, 'Cumulative net saving over time, in dollars');
+    const f = frame(host, 220, 'Cumulative net saving over time, in ' + moneyWord());
     const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals) || 1;
     const x = (i) => pad.l + (bins.length === 1 ? 0 : (i / (bins.length - 1)) * (f.w - pad.l - pad.r));
     const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (f.h - pad.t - pad.b);
@@ -209,6 +210,7 @@ const CGCharts = (() => {
    *  green; cost added goes left in red. Rows whose figure is an upper bound are outlined, not filled. */
   function savingsBars(host, o) {
     clear(host);
+    if (noMoneyChart(host)) return;
     const w = Object.fromEntries((o.waterfall || []).map((s) => [s.key, s]));
     if (!w.baseline || !o.baseline_cost_usd) return emptyState(host, 'No priced requests yet', 'This needs provider usage data and a known model price.');
     // delta_usd is negative for a saving. flip so that saved is positive.

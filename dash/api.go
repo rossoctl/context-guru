@@ -94,6 +94,10 @@ type API struct {
 	// routeCache backs cachedRoute: the response cache for the remaining heavy GET routes, keyed by
 	// path as well as by principal and query because it is shared between them.
 	routeCache jsonCache
+	// currencyCache holds each view's unit (withCurrency), keyed by principal and query. The query
+	// reads the whole window (about 0.2 s on 200,000 rows), and /api/stats answers a cache hit in
+	// well under that, so the unit is cached for the same TTL as the replies.
+	currencyCache jsonCache
 	// promptCache holds the UNSTRIPPED prompt view; see (*API).prompt for why that is safe to share.
 	promptCache jsonCache
 	// spendCache covers /api/spend/explain, a whole-window pass over requests.
@@ -824,6 +828,12 @@ func (a *API) routes() []route {
 func (a *API) Mount(m *http.ServeMux) {
 	for _, rt := range a.routes() {
 		h := rt.h
+		// Inside cachedRoute, so its cached body carries the unit it was computed with. A route with its
+		// own cache in the handler (stats, components, tools, insights, spend) gets a unit at most 30 s
+		// old on a body that may be older.
+		if currencyRoutes[rt.pattern] {
+			h = a.withCurrency(h)
+		}
 		if cachedRoutes[rt.pattern] {
 			h = a.cachedRoute(h)
 		}
@@ -1527,7 +1537,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 			// pricing it needs a.pricer — Overview() returns before this figure exists, the
 			// same reason DeclCreditFor's addition below happens out here too. Leaving it out
 			// was the actual inconsistency, not a deliberate scoping choice: the page's own
-			// "Prefix-cache savings" tile (dash/ui/app.js) already adds CachesplitSavedUSD and
+			// "Prefix-cache savings" tile (dash/ui/tabs/overview.js) already adds CachesplitSavedUSD and
 			// this historical figure together and calls the sum ours — the headline total
 			// should agree with the tile two inches to its right, not exclude half of it.
 			o.TotalSavedUSD += cachesplitHist.USD

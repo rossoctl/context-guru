@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"strings"
 
 	"github.com/rossoctl/accountant"
@@ -113,6 +114,18 @@ type WaitCauseResult struct {
 	WaitingFor, WaitTool, WakeCause string
 	OpenBackground, OpenTeammate    int
 	MonitorExpiryMs                 int64
+	// The strategy metadata of issue #1198 that is read off the same body and response. All are
+	// "not computed" at their zero value: nil pointers and "".
+	WaitToolTimeoutMs  *int64
+	WaitToolBackground *bool
+	WaitPrompt         string
+	// UserKey is the person's id read off the request body (session.UserKey), still raw. The
+	// writer hashes it into Event.UserHash and drops it; it is never stored or published.
+	UserKey string
+	// SpawnType is the raw subagent_type of the last subagent call (hashed by the writer unless it is a
+	// built-in name); Fanout is how many subagent calls the response made.
+	SpawnType string
+	Fanout    int
 }
 
 // Event is one captured request, as handed to the capture channel. It is built on
@@ -125,8 +138,8 @@ type Event struct {
 	// accOpsDropped and accObserve qualify accRes (see PriceMode). Unexported: not serialized.
 	accOpsDropped int
 	accObserve    bool
-	// accUnsupportedWire marks a request on a wire the accountant does not read (see SetAccountantUnsupportedWire).
-	accUnsupportedWire bool
+	// accServerHeldHistory marks a request whose history the provider holds (see SetAccountantServerHeldHistory).
+	accServerHeldHistory bool
 	// accFallback is why PriceMode booked no saving (see AccountantFallback).
 	accFallback string
 	// accUnpricedWhy names which cause lies behind accFallback == FallbackUnpriced (see UnpricedWhy).
@@ -199,6 +212,38 @@ type Event struct {
 	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
 	// fills are what reaches JSON and the database.
 	WaitCause func() WaitCauseResult `json:"-"`
+	// The metadata that predicts when a user returns (#1198). Each is NULL in the database when it was
+	// not computed (the zero value here): absent means unknown, never a guess.
+	//
+	// WaitToolTimeoutMs / WaitToolBackground are the `timeout` and `run_in_background` of the tool
+	// call the thread waits for (WaitTool); no other part of the call's input is read.
+	// WaitPrompt is none|permission|question|other: whether the turn ends on a prompt a person must
+	// answer. TZOffsetMin is the host's UTC offset in minutes (local proxy only; 0 is UTC and is a
+	// real value). Turn counts the thread's real requests from 1; ActiveThreads counts the session's
+	// threads with a real request in the last ActiveThreadsWindow, this one included. The KA*
+	// fields are the ping plan in force for the wait the response starts. UserHash is a keyed hash of
+	// the person's id; the raw id is never kept.
+	WaitToolTimeoutMs  *int64 `json:"wait_tool_timeout_ms,omitempty"`
+	WaitToolBackground *bool  `json:"wait_tool_background,omitempty"`
+	WaitPrompt         string `json:"wait_prompt,omitempty"`
+	TZOffsetMin        *int   `json:"tz_offset_min,omitempty"`
+	Turn               int    `json:"turn,omitempty"`
+	ActiveThreads      int    `json:"active_threads,omitempty"`
+	KAPlannedPings     *int   `json:"ka_planned_pings,omitempty"`
+	KAMinPrefixTokens  *int   `json:"ka_min_prefix_tokens,omitempty"`
+	KAIdleS            *int   `json:"ka_idle_s,omitempty"`
+	// UserHash stays out of the API and the live feed: it is a pseudonymous id, for analysis scans of
+	// the database only.
+	UserHash string `json:"-"`
+	// ClientEntrypoint and PermissionMode describe the session's mode: an unattended run (headless or
+	// bypassPermissions) has no person who waits. SubagentType and ParentFanout describe the subagent
+	// calls THIS response made: the type of the last one and their count.
+	ClientEntrypoint string `json:"client_entrypoint,omitempty"`
+	PermissionMode   string `json:"permission_mode,omitempty"`
+	SubagentType     string `json:"subagent_type,omitempty"`
+	ParentFanout     int    `json:"parent_fanout,omitempty"`
+	spawnRaw         string
+	promptMark       string
 	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
 	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
 	// there (it rescans the request body). Neither is part of the JSON event.
@@ -285,13 +330,22 @@ type Event struct {
 	// downgraded request is indistinguishable from a granted one without this number.
 	CacheWrite1h int64 `json:"cache_write_1h"`
 
+	// Every *_usd figure on the row is in Currency, the unit of the price that costed it: US dollars,
+	// unless the operator's price file names another unit (Bob's says Bobcoins). The field names keep
+	// "usd" so no reader breaks. Empty until priced; an unpriced row is stored as USD, the default.
+	Currency        string  `json:"currency"`
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
-	// CGCostUnpriced is set at capture when the request made compaction calls that could not be
-	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: it only keeps the
-	// reprice pass from marking such a row complete (issue #920).
+	// CGCostUnpriced is set by PriceCG when the request made compaction calls that could not be
+	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: the reprice pass
+	// prices such a row on both halves once the price map loads (issues #920, #1033).
 	CGCostUnpriced bool `json:"-"`
+	// CGModel and the four CG token counts are what the request's compaction calls billed, the
+	// input PriceCG prices. Not stored: the reprice pass needs them only for a row written by this
+	// process, and it keeps them on its in-memory copy (issue #1033).
+	CGModel                                      string `json:"-"`
+	CGFresh, CGCacheRead, CGCacheWrite, CGOutput int64  `json:"-"`
 	// CacheSavedUSD is what the provider's prompt cache saved on this request: its
 	// cache-read tokens priced at the fresh rate they would have cost with no cache,
 	// minus what they actually cost. A measurement of the PROVIDER's mechanism, kept
@@ -361,8 +415,9 @@ type Event struct {
 	//
 	// proxy/keepalive.go increments it under the sweep's lock, before dispatch. Three paths then
 	// return without a request reaching the provider and without writing a ping row: the tenant
-	// limiter refusing spare headroom, an unusable body, and a transport error on send. All three
-	// bump skipped/failed and leave this count already raised. Measured consequence on a
+	// limiter refusing spare headroom, an unusable body, and a fast transport error on send. All
+	// three bump skipped/failed and leave this count already raised. (A ping that runs to its
+	// timeout does write a row since #754, marked StopTimeoutEstimated, with status 0.) Measured consequence on a
 	// 133,064-row production corpus: 7 of 105 credited rows carry KeepAlivePings >= 1 with no ping
 	// row anywhere in the span, two with none within 16.7 hours.
 	//
@@ -470,6 +525,20 @@ type Event struct {
 	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
 	// reply's id shape and usage fields. The id itself is never stored.
 	Backend string `json:"backend,omitempty"`
+	// ClientCompaction is the client compaction verdict (#947): "unknown" on the first request after
+	// the agent's own compaction (thread.Result.AfterCompaction), "" on any other request. The
+	// proxy sends the same verdict to the accountant (RequestMeta.Compaction). The replay cap
+	// closes an epoch on a row that carries one.
+	ClientCompaction string `json:"client_compaction,omitempty"`
+	// ClientCompactionKnown says the thread tracker judged this request (by prefix or by header), so
+	// ClientCompaction is a verdict and "" means "no compaction". When false the row stores NULL: no
+	// verdict. That includes the tracker's session fallback: no session id, no message list, a panic.
+	ClientCompactionKnown bool `json:"-"`
+	// AccFallback is why the accountant library could not price this request (a Fallback* reason, or
+	// FallbackUnrecorded on a back-filled row). "" when it priced the request, or never ran on it. Set by
+	// RecordAccountantFallback. A row with a reason books its cost and no saving, so the Overview counts it
+	// and leaves it out of the saving share (#1004).
+	AccFallback string `json:"acc_fallback,omitempty"`
 
 	// Limits are the subscription limit values the provider's answer carried in its
 	// anthropic-ratelimit-unified-* headers (#984), read by the host off the response headers.
@@ -611,8 +680,16 @@ type Meta struct {
 	// Anthropic `stop_reason` (end_turn|max_tokens|tool_use|stop_sequence|pause_turn|
 	// refusal|model_context_window_exceeded) or OpenAI `choices.0.finish_reason`
 	// (stop|length|tool_calls|content_filter). "" when the response carried none.
+	// StopTimeoutEstimated is the one value the proxy writes itself (#754).
 	StopReason string `json:"stop_reason"`
 }
+
+// StopTimeoutEstimated is the stop_reason of a keep-alive ping row that ran to the keeper's ping
+// timeout with no answer (#754). The provider probably billed it, so the row books the keeper's
+// projected cost of one ping, with every token column 0. It counts as keep-alive spend. It is not a
+// refresh (its cache_read is 0, so no refresh probe matches it) and not a cache miss either: nobody
+// knows what the provider did with it.
+const StopTimeoutEstimated = "timeout_estimated"
 
 // CacheBreakpoints is the total the provider's cap of four applies to.
 func (m Meta) CacheBreakpoints() int {
@@ -857,6 +934,13 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 			Before: c.Before, After: c.After, Components: c.Components,
 		})
 	}
+	if tr.Declined {
+		// The rebuild failed and the original went upstream: book no saving, and no component acted (#1179).
+		e.dropSavings()
+		for i := range e.Components {
+			e.Components[i].Mutated = false
+		}
+	}
 	e.UncompressedReason = uncompressedReason(e, tr)
 }
 
@@ -873,6 +957,11 @@ func (e *Event) DropUnbilledSavings() {
 	if e.Status == 0 || (e.Status >= 200 && e.Status < 300) {
 		return
 	}
+	e.dropSavings()
+}
+
+// dropSavings is the shared part: tokens after equal tokens before, and no component saved or acted.
+func (e *Event) dropSavings() {
 	e.TokensAfter = e.TokensBefore
 	e.SavedUnique, e.AttemptedTokens = 0, 0
 	for i := range e.Components {
@@ -933,6 +1022,30 @@ func (e *Event) Price(p modelinfo.Price, accountingComplete bool) {
 	e.priceCost(p, accountingComplete)
 }
 
+// PriceCG prices the request's compaction calls into CGLLMCostUSD. main is the agent model's price
+// and mainPriced whether it is known. The compaction model's own rate is used when it differs from
+// the agent's model and prices knows it; otherwise the agent's rate, as it always was. With no rate,
+// CGCostUnpriced is set and CGLLMCostUSD stays 0. A request with no compaction tokens is left alone.
+//
+// The capture site and the reprice pass both call it, so one request gets one figure either way.
+func (e *Event) PriceCG(prices modelinfo.Pricer, main modelinfo.Price, mainPriced bool) {
+	if e.CGFresh <= 0 && e.CGOutput <= 0 && e.CGCacheWrite <= 0 && e.CGCacheRead <= 0 {
+		return
+	}
+	p, ok := main, mainPriced
+	if prices != nil && e.CGModel != "" && e.CGModel != e.Model {
+		if p2, ok2 := prices.Price(context.Background(), e.CGModel); ok2 {
+			p, ok = p2, true
+		}
+	}
+	if !ok {
+		e.CGLLMCostUSD, e.CGCostUnpriced = 0, true
+		return
+	}
+	e.CGLLMCostUSD = p.Cost(e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput)
+	e.CGCostUnpriced = false
+}
+
 // priceCost is Price without clearing the accountant state. It reports whether the cost was
 // computed (accounting complete and a price known).
 func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
@@ -945,6 +1058,7 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 		return false
 	}
 	e.TokenAccounting = AccountingComplete
+	e.Currency = p.Unit()
 	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
 	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)

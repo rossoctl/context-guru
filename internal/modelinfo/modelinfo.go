@@ -59,8 +59,12 @@ func Exact(r Resolver, ctx context.Context, model string) (tokens int, exact, ok
 	return w, false, found
 }
 
-// Price is a model's per-token USD rates, in the four tiers a prompt-caching
-// provider bills. Zero rates mean "unknown" — a caller must treat a Price it did
+// USD is the unit of every price that does not name one: the public map, the built-in table, and a
+// price file without a currency key.
+const USD = "USD"
+
+// Price is a model's per-token rates, in the four tiers a prompt-caching provider bills. The rates
+// are in Unit(): US dollars, unless the operator's price file names another unit. Zero rates mean "unknown" — a caller must treat a Price it did
 // not get an ok=true for as "no pricing", never as free.
 type Price struct {
 	Input      float64 `json:"input"`       // fresh (uncached) input per token
@@ -73,6 +77,9 @@ type Price struct {
 	ReadFrac    float64 `json:"-"`
 	WriteFrac   float64 `json:"-"`
 	Write1hFrac float64 `json:"-"`
+	// Currency is the unit of the rates, from the price file's currency key. Empty means USD (see
+	// Unit). Not part of the wire form, so a price's JSON does not change.
+	Currency string `json:"-"`
 }
 
 // CacheReadFor is the cache-READ rate per token for a model. This is the ONE place the rule lives.
@@ -121,8 +128,10 @@ func (p Price) Resolved(model string) Price {
 
 // Cost prices one request's four token tiers in USD.
 func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
-	return float64(fresh)*p.Input + float64(cacheRead)*p.CacheRead +
-		float64(cacheWrite)*p.CacheWrite + float64(output)*p.Output
+	// Each product is rounded on its own (an explicit float64 conversion), so no platform fuses a
+	// multiply and an add (FMA, as on arm64). Every platform then gives the same bits (#1128).
+	return float64(float64(fresh)*p.Input) + float64(float64(cacheRead)*p.CacheRead) +
+		float64(float64(cacheWrite)*p.CacheWrite) + float64(float64(output)*p.Output)
 }
 
 // CostWithCacheWrite1h is Cost plus the one-hour cache-write premium.
@@ -142,7 +151,7 @@ func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheW
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
 	if cacheWrite1h > 0 {
 		if premium := p.CacheWrite1hPremium(); premium > 0 {
-			cost += float64(cacheWrite1h) * premium
+			cost += float64(float64(cacheWrite1h) * premium) // no FMA; see Cost
 		}
 	}
 	return cost
@@ -400,4 +409,12 @@ func (c Chain) Price(ctx context.Context, model string) (Price, bool) {
 		}
 	}
 	return Price{}, false
+}
+
+// Unit is the currency of the price's rates. A Price that names none is in US dollars.
+func (p Price) Unit() string {
+	if p.Currency == "" {
+		return USD
+	}
+	return p.Currency
 }

@@ -23,9 +23,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
@@ -36,6 +39,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
+	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/rossoctl/context-guru/tooldefer"
@@ -155,7 +159,11 @@ func Main(hooks Hooks) {
 		dashRetain = flag.Duration("dashboard-retention", envDuration("DASHBOARD_RETENTION", 7*24*time.Hour),
 			"drop dashboard rows older than this (0 = no age limit)")
 		dashMaxBytes = flag.Int64("dashboard-max-bytes", int64(envInt("DASHBOARD_MAX_BYTES", 512<<20)),
-			"cap the dashboard database size, dropping oldest rows first (0 = no size limit)")
+			"cap the dashboard database size, deleting whole idle sessions, oldest last activity first (0 = no size limit); sessions with a request in the last hour are kept unless one alone is over the limit; see --dashboard-max-bytes-floor")
+		dashMaxBytesFloor = flag.Int64("dashboard-max-bytes-floor", int64(envInt("DASHBOARD_MAX_BYTES_FLOOR", 0)),
+			"the size rule never makes the dashboard database smaller than this (0 = a quarter of --dashboard-max-bytes)")
+		dashBackup = flag.Bool("dashboard-backup", envBool("DASHBOARD_BACKUP", true),
+			"before the age, size or quota rule deletes rows, keep two copies of the dashboard database, <db>.bak and <db>.bak.1 (a new copy only when the newest is older than 24h); the copies take up to twice the database size on disk and hold stored data, content included")
 		// Content capture is opt-IN, not opt-out. The before/after diff is the dashboard's
 		// best view, but it is the one path that writes ARBITRARY agent output to disk, and
 		// arbitrary output cannot be allowlisted the way headers and config keys are — it
@@ -265,6 +273,17 @@ func Main(hooks Hooks) {
 		// does, because /metrics carries per-tenant cost.
 		metricsToken = flag.String("metrics-token", envOr("METRICS_TOKEN", ""),
 			"bearer token allowing a remote Prometheus to scrape /metrics (loopback never needs one)")
+		// Push of metrics to the central collector (R19). There is no default URL: with none, the
+		// proxy logs one warning and reports nothing. The token and the interval are optional.
+		// --metrics-push=false makes no connection.
+		pushOn = flag.Bool("metrics-push", envBool("METRICS_PUSH", true),
+			"push metrics to the central collector (false = no connection is made)")
+		pushURL = flag.String("metrics-push-url", envOr("METRICS_PUSH_URL", ""),
+			"collector base URL, https only (empty = the push is off: a warning, and no metrics are reported)")
+		pushToken = flag.String("metrics-push-token", envOr("METRICS_PUSH_TOKEN", ""),
+			"access token for the collector, if it asks for one; prefer the METRICS_PUSH_TOKEN variable, a flag shows in ps")
+		pushEvery = flag.Duration("metrics-push-interval", envDuration("METRICS_PUSH_INTERVAL", metricspush.DefaultInterval),
+			"time between pushes")
 		// Per-tenant limits on the shared box.
 		rpm = flag.Int("tenant-rpm", envInt("TENANT_RPM", 0),
 			"hosted mode: max requests per minute per tenant (0 = unlimited)")
@@ -397,20 +416,22 @@ func Main(hooks Hooks) {
 	var rec *dash.Recorder
 	if *dashOn {
 		opts := dash.Options{
-			DBPath:           *dashDB,
-			RetentionAge:     *dashRetain,
-			RetentionBytes:   *dashMaxBytes,
-			CaptureContent:   *dashContent,
-			ContentCap:       *dashContentCap,
-			QueueSize:        *dashQueue,
-			LifecycleSignals: *dashLifecycle,
-			TrustedCIDRs:     splitComma(*dashCIDRs),
+			DBPath:              *dashDB,
+			RetentionAge:        *dashRetain,
+			RetentionBytes:      *dashMaxBytes,
+			RetentionFloorBytes: *dashMaxBytesFloor,
+			CaptureContent:      *dashContent,
+			ContentCap:          *dashContentCap,
+			QueueSize:           *dashQueue,
+			LifecycleSignals:    *dashLifecycle,
+			TrustedCIDRs:        splitComma(*dashCIDRs),
 			// Prices rows booked at $0 before the price map finished its background load (#920).
 			Prices: priceResolver(windows),
 
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
 			MinKeepBytes:      *dashMinKeep,
+			DisableBackup:     !*dashBackup,
 			MaxRowsPerTenant:  *dashMaxRowsPerTenant,
 
 			Remote: remote,
@@ -720,6 +741,14 @@ func Main(hooks Hooks) {
 	if *dashDB != "" && *dashDB != ":memory:" {
 		tdPath = filepath.Join(filepath.Dir(*dashDB), tooldefer.FileName)
 	}
+	sinks, stopMetrics := startMetricsPush(metricsPushSettings{
+		dashboard: rec != nil, dashboardDB: *dashDB,
+		url: *pushURL, token: *pushToken, interval: *pushEvery, off: !*pushOn,
+	}, priceResolver(windows), cfg.Preset)
+	defer stopMetrics() // flush the last totals; runs after h.Close (LIFO)
+	if sinks.savings != nil || sinks.inference != nil {
+		kaKeepAlive.metrics.Store(&sinks) // the keeper's pings book into the same metrics
+	}
 	popts := proxy.Options{
 		BaseConfig:    baseConfig,
 		BuildConfig:   buildTenantConfig,
@@ -767,11 +796,13 @@ func Main(hooks Hooks) {
 		// head. In hosted mode each tenant's document supplies this instead (buildTenantConfig).
 		Cache: cachePolicy(cfg.Cache),
 		// Tools whose call ends an agent: no pings after one (#857). nil = shipped list; [] = off.
-		TerminalTools: cfg.Cache.KeepAliveTerminalTools,
-		Windows:       windows,                // dynamic context-window resolver (fraction triggers)
-		Prices:        priceResolver(windows), // per-token rates, so each captured request is priced at write time
-		Preset:        cfg.Preset,
-		Dashboard:     rec, // nil unless --dashboard
+		TerminalTools:    cfg.Cache.KeepAliveTerminalTools,
+		Windows:          windows,                // dynamic context-window resolver (fraction triggers)
+		Prices:           priceResolver(windows), // per-token rates, so each captured request is priced at write time
+		Preset:           cfg.Preset,
+		Dashboard:        rec, // nil unless --dashboard
+		MetricsSink:      sinks.savings,
+		InferenceMetrics: sinks.inference,
 		// The accountant's thread state survives a restart; it sits beside the dashboard database.
 		AccountantState: accountantStatePath(*dashDB, rec != nil),
 		Pings:           kaKeepAlive.pings,
@@ -853,6 +884,8 @@ func Main(hooks Hooks) {
 	if tenants == nil && rec != nil {
 		// Single-tenant: the removal list the running pipeline filters, for /api/adapt/tools.
 		h.API().SetToolFilterState(h.DashToolFilter())
+		// Single-tenant: /api/whoami names the preset the proxy runs, so the Overview can show it.
+		h.API().SetWhoami(h.LocalWhoami())
 	}
 
 	defer h.Close() // stop the off-path worker pool cleanly (no-op in sync mode)
@@ -1063,6 +1096,10 @@ type dashEmitter struct {
 	// pings is the store shared with the Handler (proxy.Options.Pings). Each converted ping
 	// carries an accountant Result on its event.
 	pings *proxy.PingStore
+	// metrics receives each ping row, like the request path does (nil until startMetricsPush runs,
+	// and nil when the push is off). The keeper calls KeepAlivePing from its own goroutine, so the
+	// pointer is atomic: a late set is always safe.
+	metrics atomic.Pointer[metricsSinks]
 }
 
 // Component and Run are no-ops: dashEmitter exists only to be tee'd in for its
@@ -1108,6 +1145,10 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	ev.CacheWrite, ev.OutputTokens = r.CacheWrite, r.Output
 	ev.CacheWrite1h = r.CacheWrite1h
 	ev.StopReason = r.StopReason
+	if r.TimedOut {
+		// No answer, so no provider stop reason: the row is marked as an estimate instead (#754).
+		ev.StopReason = dash.StopTimeoutEstimated
+	}
 	ev.UpstreamMs = r.DurationMs
 	// What the ping actually asked for, so the row says it rather than reading as a request
 	// with no output budget.
@@ -1124,10 +1165,39 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// derivation of the same number from the same inputs to agree by construction.
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
+	var pingRes accountant.Result
+	pingPriced := false
 	if res, ok := proxy.PingSavings(r, d.pings); ok {
 		ev.SetAccountant(res)
+		pingRes, pingPriced = res, true
 	}
+	d.observeMetrics(ev, r, pingRes, pingPriced)
 	d.rec.Record(ev)
+}
+
+// observeMetrics books a finished ping row into the push metrics. The ping does not pass through the
+// handler's finish, so this is the only place that sees it. A panic costs the metric only: the row
+// is recorded either way.
+func (d *dashEmitter) observeMetrics(ev *dash.Event, r components.KeepAliveReport, res accountant.Result, priced bool) {
+	sinks := d.metrics.Load()
+	if sinks == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("context-guru: ping metrics panicked; the ping books no metric", "panic", p)
+		}
+	}()
+	sinks.inference.Observe(ev, 0)
+	if priced && sinks.savings != nil {
+		sinks.savings.Observe(acmetrics.Observation{
+			Meta: accountant.RequestMeta{RequestID: "", Session: r.Session, Model: r.Model,
+				At: time.UnixMilli(r.TS), Billing: accountant.Billing{Mode: accountant.BillingAPI}},
+			Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
+				CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)},
+			Result: res,
+		})
+	}
 }
 
 // tenantMetrics adapts the recorder's per-tenant rollup for the Prometheus exporter.

@@ -141,6 +141,8 @@ func (r *Recorder) PurgeTenant(ctx context.Context, tenantID string) (PurgeResul
 		{&out.Components, `DELETE FROM request_components WHERE request_id IN
 		                   (SELECT id FROM requests WHERE tenant_id = ?)`},
 		{&out.Requests, `DELETE FROM requests WHERE tenant_id = ?`},
+		// The client lifecycle signals (#1198) hang off no request row, so nothing else removes them.
+		{new(int64), `DELETE FROM client_signals WHERE tenant_id = ?`},
 		{&out.SpendRows, `DELETE FROM tenant_spend WHERE tenant_id = ?`},
 	} {
 		res, derr := r.db.sql.ExecContext(ctx, step.sql, tenantID)
@@ -235,8 +237,9 @@ func (d *DB) TenantHasRows(tenantID string) (bool, error) {
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 	  (SELECT COUNT(*) FROM requests WHERE tenant_id = ?) +
 	  (SELECT COUNT(*) FROM archived_sessions WHERE tenant_id = ?) +
-	  (SELECT COUNT(*) FROM tenant_spend WHERE tenant_id = ?)`,
-		tenantID, tenantID, tenantID).Scan(&n)
+	  (SELECT COUNT(*) FROM tenant_spend WHERE tenant_id = ?) +
+	  (SELECT COUNT(*) FROM client_signals WHERE tenant_id = ?)`,
+		tenantID, tenantID, tenantID, tenantID).Scan(&n)
 	if err != nil || n > 0 {
 		return n > 0, err
 	}

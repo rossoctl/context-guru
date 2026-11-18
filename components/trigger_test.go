@@ -44,7 +44,7 @@ func TestTriggerFires(t *testing.T) {
 // fillCtx is a Ctx carrying only what the request-fraction gate reads: the window, its
 // provenance, and the provider's own count for the previous turn.
 func fillCtx(window, billed int) *Ctx {
-	return &Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: billed}
+	return &Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: billed, PrevBilledInputThread: billed}
 }
 
 // THE REGRESSION THIS FILE EXISTS FOR. min_request_frac shipped comparing frac*window against
@@ -207,13 +207,13 @@ func TestTheTwoSizeThresholdsAreAndedNotMaxed(t *testing.T) {
 	tr := Trigger{MinRequestTokens: 1_000, MinRequestFrac: 0.9}
 	req := &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{mkMsg(strings.Repeat("word ", 4000))}}
 
-	full := &Ctx{CtxWindow: 200_000, CtxWindowExact: true, PrevBilledInput: 190_000}
+	full := &Ctx{CtxWindow: 200_000, CtxWindowExact: true, PrevBilledInput: 190_000, PrevBilledInputThread: 190_000}
 	if !tr.Fires(req, full) {
 		t.Error("both thresholds met, so it must fire")
 	}
 	// Passing the token threshold but NOT the fraction: under max() this fired, because 5,000
 	// exceeded... nothing comparable. Under AND it must not.
-	notFull := &Ctx{CtxWindow: 200_000, CtxWindowExact: true, PrevBilledInput: 50_000}
+	notFull := &Ctx{CtxWindow: 200_000, CtxWindowExact: true, PrevBilledInput: 50_000, PrevBilledInputThread: 50_000}
 	if tr.Fires(req, notFull) {
 		t.Error("the request is over min_request_tokens but the context is only a quarter full; " +
 			"ANDed thresholds must both hold")
@@ -253,7 +253,7 @@ func TestTheFillFractionIsAFractionOfTheCompactionPointNotTheWindow(t *testing.T
 	early := &Ctx{
 		CtxWindow: 200_000, CtxWindowExact: true,
 		CompactionPoint: 120_000, CompactionPointSource: "measured",
-		PrevBilledInput: 110_000, // 0.92 of C, and only 0.55 of the window
+		PrevBilledInput: 110_000, PrevBilledInputThread: 110_000, // 0.92 of C, and only 0.55 of the window
 	}
 	if !tr.Fires(req, early) {
 		t.Error("the conversation is 92% of the way to where the CLIENT will compact, which is the " +
@@ -264,7 +264,7 @@ func TestTheFillFractionIsAFractionOfTheCompactionPointNotTheWindow(t *testing.T
 	tooEarly := &Ctx{
 		CtxWindow: 200_000, CtxWindowExact: true,
 		CompactionPoint: 120_000, CompactionPointSource: "measured",
-		PrevBilledInput: 60_000, // half of C
+		PrevBilledInput: 60_000, PrevBilledInputThread: 60_000, // half of C
 	}
 	if tr.Fires(req, tooEarly) {
 		t.Error("half way to the client's compaction point is not 90% full; the gate must still decline")
@@ -273,7 +273,7 @@ func TestTheFillFractionIsAFractionOfTheCompactionPointNotTheWindow(t *testing.T
 	// THE FALLBACK: with no compaction point known, the window is the denominator. That is correct
 	// where nothing compacts (a raw API client grows until the provider rejects it) and a guess where
 	// a client compacts unobserved — which is why the source is carried alongside.
-	noC := &Ctx{CtxWindow: 200_000, CtxWindowExact: true, PrevBilledInput: 185_000}
+	noC := &Ctx{CtxWindow: 200_000, CtxWindowExact: true, PrevBilledInput: 185_000, PrevBilledInputThread: 185_000}
 	if !tr.Fires(req, noC) {
 		t.Error("with no compaction point known the window is the denominator, and 185,000 of " +
 			"200,000 is over 0.9")
@@ -297,13 +297,42 @@ func TestACompactionPointAtOrAboveTheWindowStillFires(t *testing.T) {
 	c := &Ctx{
 		CtxWindow: 200_000, CtxWindowExact: true,
 		CompactionPoint: 199_200, CompactionPointSource: "measured",
-		PrevBilledInput: 180_000,
+		PrevBilledInput: 180_000, PrevBilledInputThread: 180_000,
 	}
 	if !tr.Fires(req, c) {
 		t.Error("180,000 billed against a 199,200 compaction point is 0.904 — over the 0.9 gate")
 	}
-	c.PrevBilledInput = 170_000 // 0.853 of C
+	c.PrevBilledInput, c.PrevBilledInputThread = 170_000, 170_000 // 0.853 of C
 	if tr.Fires(req, c) {
 		t.Error("170,000 of 199,200 is 0.853, under the gate")
+	}
+}
+
+// #1183: the fraction gate reads the request's OWN thread. The session figure is whichever thread
+// answered last, so it must never decide for another thread.
+func TestTheFractionGateReadsTheRequestsOwnThread(t *testing.T) {
+	tr := Trigger{MinRequestFrac: 0.9}
+	req := &schemas.BifrostChatRequest{Input: []schemas.ChatMessage{mkMsg("x")}}
+	const window = 1_000_000
+	cases := []struct {
+		name                     string
+		session, thread          int // PrevBilledInput, PrevBilledInputThread
+		wantFires, wantResolvble bool
+	}{
+		// Main thread at 0.95, Sonnet subagent answered last (35k): main MUST fire.
+		{"main at 0.95, subagent answered last", 35_000, 950_000, true, true},
+		// Subagent at 35k while the main thread (0.95) answered last: subagent must NOT fire.
+		{"small subagent, main answered last", 950_000, 35_000, false, true},
+		// The thread has no figure yet: unknown, decline (not resolvable).
+		{"thread unknown, session full", 950_000, 0, true, false},
+	}
+	for _, tc := range cases {
+		c := &Ctx{CtxWindow: window, CtxWindowExact: true, PrevBilledInput: tc.session, PrevBilledInputThread: tc.thread}
+		if got := tr.Fires(req, c); got != tc.wantFires {
+			t.Errorf("%s: Fires = %v, want %v", tc.name, got, tc.wantFires)
+		}
+		if got := tr.FracResolvable(c); got != tc.wantResolvble {
+			t.Errorf("%s: FracResolvable = %v, want %v", tc.name, got, tc.wantResolvble)
+		}
 	}
 }

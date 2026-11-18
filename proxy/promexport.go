@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -735,6 +737,48 @@ func (h *Handler) renderMetrics() string {
 					promLine(&b, "cg_tenant_refused_requests_total",
 						l+`,reason="`+string(r)+`"`, float64(n))
 				}
+			}
+		}
+	}
+
+	// --- manual holds (issue #1103) ----------------------------------------
+	//
+	// Counts and byte sizes only. The counters and the histogram are process-wide, like every other
+	// cg_keepalive_* series, so they carry no tenant. The gauge is per tenant, labelled like
+	// cg_tenant_refused_requests_total: /metrics is loopback or token only on a hosted proxy.
+	if h.keeper != nil {
+		mh := h.keeper.ManualHoldSnapshot()
+		promHeader(&b, "cg_keepalive_manual_hold_evicted_total",
+			"Manual holds the keeper released early because a tenant went over its cap. reason=bytes: the tenant's held bytes passed the per-tenant byte cap. reason=count: it passed the per-tenant entry cap. The oldest hold of that tenant goes first.", "counter")
+		promLine(&b, "cg_keepalive_manual_hold_evicted_total", `reason="bytes"`, float64(mh.EvictedBytes))
+		promLine(&b, "cg_keepalive_manual_hold_evicted_total", `reason="count"`, float64(mh.EvictedCount))
+		promHeader(&b, "cg_keepalive_refused_total",
+			"Requests the keeper refused to hold, by reason. too_large: the body was over the per-body limit. Counts a refusal whether or not the request asked for the Ping button.", "counter")
+		promLine(&b, "cg_keepalive_refused_total", `reason="too_large"`, float64(mh.TooLarge))
+		promHeader(&b, "cg_keepalive_manual_hold_body_bytes",
+			"Size of each body at the moment a manual hold started, in bytes. Buckets are 1, 4, 8, 16 and 32 MiB.", "histogram")
+		var cum int64
+		for i, mib := range keepalive.ManualHoldBucketsMiB {
+			cum += mh.Buckets[i]
+			promLine(&b, "cg_keepalive_manual_hold_body_bytes_bucket", `le="`+strconv.FormatInt(mib<<20, 10)+`"`, float64(cum))
+		}
+		promLine(&b, "cg_keepalive_manual_hold_body_bytes_bucket", `le="+Inf"`, float64(mh.SizeCount))
+		promLine(&b, "cg_keepalive_manual_hold_body_bytes_sum", "", float64(mh.SizeSum))
+		promLine(&b, "cg_keepalive_manual_hold_body_bytes_count", "", float64(mh.SizeCount))
+		if len(mh.Tenants) > 0 {
+			byID := map[string]string{}
+			if reg := h.registry(); reg != nil {
+				if all, err := reg.List(); err == nil {
+					for _, t := range all {
+						byID[t.ID] = t.Label
+					}
+				}
+			}
+			promHeader(&b, "cg_tenant_keepalive_manual_hold_bytes",
+				"Bytes this tenant holds in manual holds right now. Compare with the per-tenant cap (32 MiB): a tenant near it loses its oldest hold when the next one starts. Only tenants that hold something are present.", "gauge")
+			for _, t := range mh.Tenants {
+				promLine(&b, "cg_tenant_keepalive_manual_hold_bytes",
+					`tenant="`+escapeLabel(t.Tenant)+`",label="`+escapeLabel(byID[t.Tenant])+`"`, float64(t.Bytes))
 			}
 		}
 	}

@@ -134,7 +134,7 @@ jobs:
       # branch. That flake is not this job's business to hunt, but it IS this job's business not to
       # provoke it: serialising costs about a minute and removes the contention this job added.
       - name: Test the packages whose behaviour depends on which components compile in
-        run: go test -p 1 ./config/... ./components/... ./apply/... ./proxy/... ./store/...
+        run: go test -timeout 40m -p 1 ./config/... ./components/... ./apply/... ./proxy/... ./store/...
 
   # The session recorder (--record, --record-otlp) is only in a build with -tags cg_record.
   # The default build must stay free of OpenTelemetry, gRPC and protobuf (they add 11.5 MB).
@@ -162,7 +162,7 @@ jobs:
       - name: Test with the recorder (race)
         env:
           CGO_ENABLED: "1"
-        run: go test -race -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
+        run: go test -race -timeout 40m -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
 
   trivy:
     runs-on: ubuntu-latest

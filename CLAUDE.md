@@ -56,10 +56,15 @@ reference — port its *logic*, re-implement its transport in Go.
   `CGO_ENABLED=0`. cgo is needed only for `go test -race` and for `-tags cg_skeleton` (tree-sitter),
   which is why the Makefile still exports `CGO_ENABLED=1` for the test targets.
 - Match the surrounding code's style; keep packages small and single-purpose.
+- **Tests wait on a condition, not on time.** In `*_test.go`, use `testutil.WaitFor`,
+  `WaitForState` or `(Upstream).WaitForCall` instead of `time.Sleep`, a fixed-deadline poll loop
+  or a `time.After` timeout. `internal/timingguard` fails CI on a new one. A real case (an injected
+  fake delay) carries `//timing:ok <reason>`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Commits: DCO sign-off is mandatory** — `git commit -s`. Author as the repo owner.
   AI attribution uses `Assisted-By:` — never `Co-Authored-By`, never a "Generated with"
   line. Conventional-commit titles.
-- Observability: every exported metric is `cg_*` / `cg_tenant_*`. OpenTelemetry **GenAI
+- Observability: every exported metric is `cg_*` / `cg_tenant_*`, except the common set the proxies
+  push to the central collector: those are `llm_*` (metrics spec, #886). OpenTelemetry **GenAI
   semantic conventions** (`gen_ai.*`) are the intended direction and are not yet emitted.
 
 ## Branches, worktrees and force-push

@@ -78,6 +78,12 @@ type Result struct {
 	Inherits string
 	// inherits is set when Inherits names the primary thread, whose id is "".
 	inherits bool
+	// AfterCompaction is set on the first request after the main agent's own compaction: the request
+	// that matched no prefix and took over the compacting thread's id (newID), when that thread
+	// declares tools or is the primary. It is the request
+	// whose body holds the summary in place of the old transcript. The host reports it to the
+	// accountant (RequestMeta.Compaction) and on the dashboard row (#947).
+	AfterCompaction bool
 }
 
 // InheritsFrom reports the existing thread a new thread continues by content, if any.
@@ -257,7 +263,8 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	case compacted != nil:
 		res = Result{ID: compacted.id, Source: SourcePrefix}
 	default:
-		res = Result{ID: s.newID(sums, hasTools, model), Source: SourcePrefix}
+		id, after := s.newID(sums, hasTools, model)
+		res = Result{ID: id, Source: SourcePrefix, AfterCompaction: after}
 	}
 	if !ok {
 		// A header thread with no message list: keep its id, record nothing to match on.
@@ -292,23 +299,23 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 }
 
 // newID names a thread that matched nothing. The first thread of a session is the primary; the
-// successor of a compacting thread inherits its id; anything else is named after its own
-// fingerprint, which differs from every other thread's (a fork has its parent's prefix but not
-// its parent's full message list).
+// successor of a compacting thread inherits its id, and newID reports true when that thread is the
+// main agent's; anything else is named after its own fingerprint, which differs from every other
+// thread's (a fork has its parent's prefix but not its parent's full message list).
 //
 // The primary goes to the main agent, told by METADATA, not order: the main agent declares tools
 // (Claude Code's 23, Codex's exec_command), while an auxiliary request (Claude Code's security
 // monitor, a title) declares none. So a tool-less thread holds the primary id only until the first
 // thread with tools arrives; it then gets its own id. A client that never declares tools keeps
 // its first thread as the primary, exactly as before.
-func (s *sessionState) newID(sums []uint64, hasTools bool, model string) string {
+func (s *sessionState) newID(sums []uint64, hasTools bool, model string) (string, bool) {
 	holder := s.find(Primary)
 	switch {
 	case holder == nil && !s.hasPrefixThread():
-		return Primary
+		return Primary, false
 	case holder != nil && hasTools && !holder.tools:
 		holder.id = fingerprintID(holder.sum)
-		return Primary
+		return Primary, false
 	}
 	// The MOST RECENT compacting thread: the agent sends the post-compaction request right after
 	// its compaction request, so if two threads are compacting at once, the later one is the one
@@ -328,11 +335,15 @@ func (s *sessionState) newID(sums []uint64, hasTools bool, model string) string 
 	}
 	if succ != nil {
 		succ.compacting = false
-		return succ.id
+		// Only the main agent's hand-over is a client compaction (#947): the thread that declares tools,
+		// or the primary of a client that never declares any. A tool-less auxiliary thread (the
+		// auto-mode classifier above) can be marked compacting by mistake. It keeps its id, but its
+		// next request is not reported as the request after a compaction.
+		return succ.id, succ.tools || succ.id == Primary
 	}
 	// The same fingerprint as a thread that has since moved on is a resent request from that
 	// thread's past; the caller then joins it, which is right, since the prefix is the same.
-	return fingerprintID(sums[len(sums)-1])
+	return fingerprintID(sums[len(sums)-1]), false
 }
 
 // fingerprintID names a thread after a fingerprint: of its first request for a new thread, of its

@@ -257,6 +257,7 @@
   "ttl_observed": 0,
   "ttl_unknown": 147
  },
+ "currency": "USD",
  "first_ts": 1767615020000,
  "hour_bins": [
   {

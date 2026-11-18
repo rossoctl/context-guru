@@ -604,9 +604,10 @@ type Ctx struct {
 	PrevBilledInput int
 	// PrevBilledInputThread is PrevBilledInput for THIS request's thread only: the billed input of the
 	// previous turn of the same thread, or 0 when the thread has none (unknown). A session holds the main
-	// agent, subagents and side requests, and PrevBilledInput is whichever answered last. Use this one to
-	// measure how a thread GROWS (the billed-growth horizon). Use PrevBilledInput to ask how full the
-	// session's context is.
+	// agent, subagents and side requests, and PrevBilledInput is whichever answered last. Use this one for
+	// every question about THIS transcript: how full it is (the window-fraction trigger, Trigger.Fires) and
+	// how it GROWS (the billed-growth horizon). PrevBilledInput describes no single transcript, so do not
+	// use it to ask how full this request's context is (#1183).
 	PrevBilledInputThread int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
@@ -1253,6 +1254,11 @@ type KeepAliveReport struct {
 	// none). A sink reads only the metadata it needs from it,
 	// such as the subscription limit headers (#995), and must not change it.
 	Header http.Header
+	// TimedOut marks a ping that ran to the keeper's ping timeout with no answer (#754). The
+	// provider probably billed it, so CostUSD is the keeper's PROJECTED cost of one ping and every
+	// usage field is 0. A sink should count it as spend, mark it as an estimate, and not count it
+	// as a refresh: nobody knows whether the provider read the cached entry.
+	TimedOut bool
 }
 
 // KeepAliveEmitter is an OPTIONAL capability an Emitter implementation may add. Most Emitter

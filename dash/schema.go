@@ -290,9 +290,49 @@ CREATE TABLE IF NOT EXISTS requests (
   -- model asked back for, inserted as a message of its own and sent again on every later turn. 0 when
   -- none was inserted.
   restored_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The unit of every *_usd column on this row: the currency of the price that costed it (the price
+  -- file's currency key, USD by default; Bob's file says Bobcoins). Configuration, not user data.
+  currency TEXT NOT NULL DEFAULT 'USD',
   -- Which of Bob's backends answered (Event.Backend): 'A', 'B', 'other' or ''. A label, never the
   -- reply id.
   backend                 TEXT    NOT NULL DEFAULT '',
+  -- The client compaction verdict (#947, Event.ClientCompaction): 'unknown' on the first request
+  -- after the main agent's own compaction, '' on a request the thread tracker judged with none.
+  -- Nullable, no default: NULL is a row the tracker did not judge (no session id, no message list),
+  -- which includes every row written before the column. The replay cap reads NULL as "no verdict" and keeps the older drop detector for it.
+  client_compaction       TEXT,
+  -- Why the accountant library could not price this request (Event.AccFallback): a Fallback* reason,
+  -- 'unrecorded' on a row back-filled from its components (backfillAccFallback), or '' when the
+  -- library priced it or never ran on it. A fallback row books cost and no saving, so the
+  -- Overview counts it and leaves it out of the saving share (context-guru#1004).
+  acc_fallback            TEXT    NOT NULL DEFAULT '',
+  -- The metadata that predicts when a user returns (#1198). All nullable with no default: NULL is
+  -- "not computed" (a row from before the columns, a keep-alive ping, a value the host cannot know)
+  -- and must stay apart from a real 0. Numbers, flags and enums; no content.
+  -- wait_tool_timeout_ms / wait_tool_background: the timeout and run_in_background of the tool call
+  -- the thread waits for (wait_tool); no other part of the call's input is read.
+  wait_tool_timeout_ms    INTEGER,
+  wait_tool_background    INTEGER,
+  -- none|permission|question|other: the turn ends on a prompt a person must answer. 'permission' is
+  -- set later, by the client's Notification signal (client_signals).
+  wait_prompt             TEXT,
+  tz_offset_min           INTEGER,  -- the host's UTC offset in minutes; the local proxy only
+  turn                    INTEGER,  -- the thread's real requests, counting from 1; survives a restart, but a session whose rows were archived or pruned restarts from the rows that remain
+  active_threads          INTEGER,  -- threads of the session with a real request in the last 10 minutes
+  ka_planned_pings        INTEGER,  -- the ping plan in force for the wait this response starts
+  ka_min_prefix_tokens    INTEGER,
+  ka_idle_s               INTEGER,
+  -- A keyed hash (HMAC-SHA256, 64 bits) of the person's account id, with a per-install secret. A
+  -- pseudonymous id; the raw id is never stored.
+  user_hash               TEXT,
+  -- Session mode and fan-out (#1198): client_entrypoint is cli|headless|sdk|other from the User-Agent;
+  -- permission_mode is default|acceptEdits|plan|bypassPermissions|dontAsk|other from the client's last hook
+  -- signal of the session; subagent_type is a built-in subagent name or 'h:' + a keyed hash of a
+  -- custom one; parent_fanout is how many subagent calls this response made (NULL when none).
+  client_entrypoint       TEXT,
+  permission_mode         TEXT,
+  subagent_type           TEXT,
+  parent_fanout           INTEGER,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -520,6 +560,22 @@ CREATE TABLE IF NOT EXISTS request_lifecycle (
   granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
   ping_n            INTEGER NOT NULL DEFAULT 0
 );
+
+-- Client lifecycle signals (#1198): what the client's hooks told the proxy, one row per accepted event.
+-- A table and not columns on the next request, because a SessionEnd is often the LAST thing a session
+-- sends and no request follows it. Enums and ids only: the event (SessionEnd|SessionStart|Notification),
+-- and its reason or type from a closed set (see proxy/clientsignal.go). ts is epoch ms. Pruned by the
+-- retention age and by a row cap (pruneClientSignals) and removed with its tenant (Purge).
+CREATE TABLE IF NOT EXISTS client_signals (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         INTEGER NOT NULL,
+  tenant_id  TEXT    NOT NULL DEFAULT '',
+  session_id TEXT    NOT NULL DEFAULT '',
+  event      TEXT    NOT NULL,
+  reason     TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_client_signals_session ON client_signals(tenant_id, session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_client_signals_ts ON client_signals(ts);
 
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
@@ -951,8 +1007,64 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// The tokens of the restored copies a request carried (expand.fixed_restore, #481). Additive, 0 on
 	// every earlier row: those were not recorded, so they read as no copy.
 	{"requests", "restored_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	// The unit of the row's costs. Additive, USD on every earlier row: before the price file could name
+	// a unit, the dashboard read every cost as dollars. A row a Bobcoins price file costed before this
+	// column existed also reads USD, so a view across the upgrade can say mixed.
+	{"requests", "currency", "TEXT NOT NULL DEFAULT 'USD'"},
 	// Bob's backend label. Additive: an earlier row has none.
 	{"requests", "backend", "TEXT NOT NULL DEFAULT ''"},
+	// The client compaction verdict (#947). Nullable, no default: NULL says the row has no verdict,
+	// which is true of every earlier row.
+	{"requests", "client_compaction", "TEXT"},
+	// Why the accountant could not price the request (#1004). '' on an earlier row; backfillAccFallback
+	// marks the earlier rows whose components say they fell back.
+	{"requests", "acc_fallback", "TEXT NOT NULL DEFAULT ''"},
+	// The metadata that predicts when a user returns (#1198). Nullable, no default.
+	{"requests", "wait_tool_timeout_ms", "INTEGER"},
+	{"requests", "wait_tool_background", "INTEGER"},
+	{"requests", "wait_prompt", "TEXT"},
+	{"requests", "tz_offset_min", "INTEGER"},
+	{"requests", "turn", "INTEGER"},
+	{"requests", "active_threads", "INTEGER"},
+	{"requests", "ka_planned_pings", "INTEGER"},
+	{"requests", "ka_min_prefix_tokens", "INTEGER"},
+	{"requests", "ka_idle_s", "INTEGER"},
+	{"requests", "user_hash", "TEXT"},
+	{"requests", "client_entrypoint", "TEXT"},
+	{"requests", "permission_mode", "TEXT"},
+	{"requests", "subagent_type", "TEXT"},
+	{"requests", "parent_fanout", "INTEGER"},
+}
+
+// backfillAccFallback marks, ONCE, the rows written before acc_fallback existed whose request fell back. Such a
+// row has a component with priced_by 'none' (PriceMode marks every component of a fallback request so). Its
+// reason was not stored, so it reads 'unrecorded'. Recorded in meta, so a later open skips the scan.
+//
+// The rule is close to the live one, not the same. It cannot find a fallback with no component row, or one
+// PriceMode stopped before it marked the components (no usage or no price). And it marks a row the live code
+// leaves empty: one with components but no accountant record (the record panicked and was dropped). Both are
+// rare, and the old rows age out with the dashboard's retention. The update and the meta mark are one
+// transaction, so a stop between them cannot run the update again over rows the new code wrote.
+func backfillAccFallback(db *sql.DB) error {
+	var done string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = 'acc_fallback_backfilled'`).Scan(&done); err == nil {
+		return nil
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE requests SET acc_fallback = '` + FallbackUnrecorded + `'
+		WHERE acc_fallback = '' AND id IN (SELECT request_id FROM request_components WHERE priced_by = '` + PricedByNone + `')`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta(key,value) VALUES('acc_fallback_backfilled','1')`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // backfillDeferCost fills defer_cost_usd for the rows written before the column existed. Such a row was
@@ -1215,6 +1327,9 @@ func migrate(db *sql.DB) error {
 		if err := backfillDeferCost(db); err != nil {
 			return err
 		}
+		if err := backfillAccFallback(db); err != nil {
+			return err
+		}
 		warnPurge(purgeImportedHistory(db))
 		return nil
 	}
@@ -1225,6 +1340,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := backfillDeferCost(db); err != nil {
+		return err
+	}
+	if err := backfillAccFallback(db); err != nil {
 		return err
 	}
 	warnPurge(purgeImportedHistory(db))

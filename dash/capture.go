@@ -44,6 +44,9 @@ type Options struct {
 	// BatchSize / FlushInterval control how the writer batches inserts.
 	BatchSize     int
 	FlushInterval time.Duration
+	// PromptGrace is how long a permission-prompt mark waits for the row it interrupted to reach the
+	// writer before it marks the latest stored row. Default 2s.
+	PromptGrace time.Duration
 	// TrustedCIDRs are the networks allowed to see per-request CONTENT and the
 	// effective configuration. Loopback is always allowed. Aggregates are open to
 	// everyone (a proxy people bind to 0.0.0.0 still wants its numbers visible).
@@ -76,6 +79,14 @@ type Options struct {
 	// else, deleting our last megabyte does not help anyone and the dashboard going
 	// blank hides the problem instead of showing it.
 	MinKeepBytes int64
+	// RetentionFloorBytes is the floor of the SIZE rule (RetentionBytes): it never makes the
+	// database smaller than this, even when the database is still over its limit. 0 = a quarter
+	// of RetentionBytes. It is not MinKeepBytes: that floor (1 GiB) is above the default size
+	// limit (512 MiB), so it cannot serve the size rule.
+	RetentionFloorBytes int64
+	// DisableBackup turns off the backup copy (`<db>.bak`) the janitor makes before the age,
+	// size and quota rules delete rows. The zero value keeps the backup on.
+	DisableBackup bool
 	// MaxRowsPerTenant caps one tenant's retained request rows. Applied BEFORE the
 	// disk rule, so a heavy user is trimmed to its own quota before anyone else's
 	// history is touched. 0 = no per-tenant cap.
@@ -149,6 +160,9 @@ func (o *Options) withDefaults() {
 	if o.BatchSize <= 0 {
 		o.BatchSize = defaultBatchSize
 	}
+	if o.PromptGrace <= 0 {
+		o.PromptGrace = 2 * time.Second
+	}
 	if o.FlushInterval <= 0 {
 		o.FlushInterval = defaultFlushInterval
 	}
@@ -182,6 +196,11 @@ type Recorder struct {
 	ch   chan *Event
 	done chan struct{}
 	wg   sync.WaitGroup
+
+	// sigCh carries the client lifecycle signals to the writer (RecordSignal); sm is the writer's
+	// history for the strategy metadata (strategymeta.go).
+	sigCh chan ClientSignal
+	sm    *strategyMeta
 
 	captured atomic.Int64
 	dropped  atomic.Int64
@@ -265,6 +284,8 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		opts:      opts,
 		hub:       NewHub(),
 		ch:        make(chan *Event, opts.QueueSize),
+		sigCh:     make(chan ClientSignal, 256),
+		sm:        newStrategyMeta(),
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
@@ -496,6 +517,8 @@ func (r *Recorder) run() {
 	defer flush.Stop()
 	prune := time.NewTicker(pruneInterval)
 	defer prune.Stop()
+	settle := time.NewTicker(100 * time.Millisecond)
+	defer settle.Stop()
 
 	write := func() {
 		if len(batch) == 0 {
@@ -508,7 +531,9 @@ func (r *Recorder) run() {
 		// a keep-alive client's next request wait on it (~53 ms measured, ~25% of a
 		// request). Nothing reaches the database unredacted either way — the security
 		// property is the ordering against the INSERT, which this preserves.
+		r.markPending(batch)
 		for _, e := range batch {
+			userKey := ""
 			// Issue #424's RECORD half: the body rescan (waitcause.Tracker.Observe, ~11ms on
 			// a 783 KB body) runs HERE too, on this goroutine, for the exact reason Redact
 			// does — finish() runs on the handler's own defer, before the handler returns,
@@ -521,7 +546,14 @@ func (r *Recorder) run() {
 				wc := e.WaitCause()
 				e.WaitingFor, e.WaitTool, e.WakeCause = wc.WaitingFor, wc.WaitTool, wc.WakeCause
 				e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs = wc.OpenBackground, wc.OpenTeammate, wc.MonitorExpiryMs
+				e.WaitToolTimeoutMs, e.WaitToolBackground, e.WaitPrompt = wc.WaitToolTimeoutMs, wc.WaitToolBackground, wc.WaitPrompt
+				userKey = wc.UserKey
+				e.spawnRaw, e.ParentFanout = wc.SpawnType, wc.Fanout
 			}
+			// The turn, the session's concurrency, a permission prompt that arrived first and the
+			// person's hash (#1198): history the writer holds. After the wait cause, which sets
+			// WaitPrompt and hands over the person's key.
+			r.fillStrategyMeta(e, userKey)
 			if e.LifecycleFn != nil {
 				e.Lifecycle = e.LifecycleFn()
 			}
@@ -573,6 +605,22 @@ func (r *Recorder) run() {
 			}
 		case <-flush.C:
 			write()
+		case sig := <-r.sigCh:
+			// Store every row queued before the signal first, so the settled mark (settlePending) sees
+			// the row the prompt interrupted and not the one before it.
+		drain:
+			for {
+				select {
+				case e := <-r.ch:
+					batch = append(batch, e)
+				default:
+					break drain
+				}
+			}
+			write()
+			r.writeSignal(sig)
+		case <-settle.C:
+			r.settlePending(false)
 		case <-prune.C:
 			r.janitorPass()
 		case <-r.done:
@@ -590,6 +638,16 @@ func (r *Recorder) run() {
 				break
 			}
 			write()
+			for {
+				select {
+				case sig := <-r.sigCh:
+					r.writeSignal(sig)
+					continue
+				default:
+				}
+				break
+			}
+			r.settlePending(true)
 			return
 		}
 	}

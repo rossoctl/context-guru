@@ -65,7 +65,7 @@ proxy
 
 ### 3.3 In each proxy: the push setup (OpenTelemetry SDK and exporter)
 
-The SDK, the exporter, the collector URL and the token are settings of the host, not of the `accountant`. Each proxy owns a small package for them (`internal/metricspush` in context-guru). `accountant/metrics` stays API-only, and the `accountant` repo has no network code. The cost is about 150 lines that both proxies hold. R26 is about the metric code, which stays shared, so it still holds.
+The SDK, the exporter, the collector URL and the token are settings of the host, not of the `accountant`. Each proxy owns a small package for them (`proxyapp/metricspush` in context-guru). `accountant/metrics` stays API-only, and the `accountant` repo has no network code. The cost is about 150 lines that both proxies hold. R26 is about the metric code, which stays shared, so it still holds.
 
 - `Start(ctx, Config)` returns a meter provider and a shutdown function.
 - `Config` holds the collector URL (no default; with none, one warning and no metrics, R19), the token (R44), the interval (30 s), the off switch, and the resource attributes `proxy`, `service.instance.id` (the `machine` install ID, R43), `service.version` and `preset`.
@@ -186,7 +186,7 @@ Today `deploy/service/install.sh grafana` installs Prometheus, Grafana, Loki and
 | Secrets | None for the push while authentication is off. The Grafana password goes to the container in an env file on a tmpfs, not in argv. |
 | Ports | The collector publishes 4318 and 4319 on loopback by default (`BIND`). The TLS front end on the same host forwards to them. Prometheus and Alertmanager are on a private container network. Grafana is on `127.0.0.1:3000` only. |
 | Order at start | Prometheus, Alertmanager, the collector, Grafana. |
-| Developer machine | `deploy/central/compose.yaml` starts the same four images with the same config and no TLS. The end-to-end tests in `internal/metricspush` use it. The production path is the script. |
+| Developer machine | `deploy/central/compose.yaml` starts the same four images with the same config and no TLS. The end-to-end tests in `proxyapp/metricspush` use it. The production path is the script. |
 | Kubernetes | Not in scope. |
 
 ### 8.7 Operate

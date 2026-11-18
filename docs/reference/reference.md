@@ -198,7 +198,7 @@ thing and is counted separately. See [when the tiers read zero](#when-the-tiers-
 | `savings_pct_attempted` | `saved ÷ attempted`. The ratio to quote: `savings_pct`'s whole-request denominator recounts the transcript every turn and trends to ~0% on a long session. `0` when nothing was attempted. |
 | `savings_pct_new_input` | `saved ÷ (fresh + cache_write + saved)` — savings as a fraction of what would newly have entered the provider. Reported as `0`, **never 100**, when the provider reported no usage: savings must not be divided by themselves. |
 | `keepalive_pings_priced` | Keep-alive pings the host priced (each `PingSavings` call that returned ok, manual pings too). Read it together with the next field. `0` on a host with no ping store. |
-| `keepalive_rescue_facts_missing` | Priced real requests that followed keep-alive pings but found **no ping facts** for their thread. Non-zero means keep-alive credit was lost on that many returns. It also counts a return after a ping that got a non-2xx answer or no usage (such a ping is not priced), a return after the store evicted the facts, a return while a ping was still in flight, and a request whose pricing panicked. If it keeps rising while `keepalive_pings_priced` stays `0`, either the host does not wire the ping side (no `Options.Pings`, no `PingSavings` call, or `PingSavings` on a store other than `Options.Pings`), or its pings keep failing. A key mismatch inside one shared store does **not** fit this pattern: that store still prices pings, so `keepalive_pings_priced` rises too. To tell an unwired host from failing pings, read the keeper's own counters in `/stats`. `pings` rising with `failed` rising means the pings went out and failed. `failed` counts a refused ping, a ping with no usage, and a ping that never reached the provider (a transport error). `skipped` counts a ping that got a 429 or 5xx answer (it went out and was not priced), and also pings never sent (no spare rate or concurrency, a gate refusal, an eviction, a body that could not be built). So `pings` and `skipped` rising together with `failed` flat is either a 429 or 5xx storm or never-sent skips beside healthy pings. The dashboard ping rows tell them apart: a 429 or 5xx status against a 2xx with usage. `skipped` rising with `pings` flat means the keeper did not send them. The dashboard ping rows help only in part: a 429 or 5xx ping leaves a row with that status, a ping with no usage leaves a row with a 2xx status, and a refused ping or a transport error leaves no row. It moves only when the dashboard is on, because the capture and the savings tracker are dashboard-bound: `0` without a dashboard means not measured. On a wired host, a span served only by a committed substitute ping does not raise it, because the substitute stores ping facts. A substitute call that reported no usage stores none, so it can raise it. Also exported as `cg_keepalive_rescue_facts_missing_total`. |
+| `keepalive_rescue_facts_missing` | Priced real requests that followed keep-alive pings but found **no ping facts** for their thread. Non-zero means keep-alive credit was lost on that many returns. It also counts a return after a ping that got a non-2xx answer or no usage (such a ping is not priced), a return after the store evicted the facts, a return while a ping was still in flight, and a request whose pricing panicked. If it keeps rising while `keepalive_pings_priced` stays `0`, either the host does not wire the ping side (no `Options.Pings`, no `PingSavings` call, or `PingSavings` on a store other than `Options.Pings`), or its pings keep failing. A key mismatch inside one shared store does **not** fit this pattern: that store still prices pings, so `keepalive_pings_priced` rises too. To tell an unwired host from failing pings, read the keeper's own counters in `/stats`. `pings` rising with `failed` rising means the pings went out and failed. `failed` counts a refused ping, a ping with no usage, and a ping that never reached the provider (a transport error). `skipped` counts a ping that got a 429 or 5xx answer (it went out and was not priced), and also pings never sent (no spare rate or concurrency, a gate refusal, an eviction, a body that could not be built). So `pings` and `skipped` rising together with `failed` flat is either a 429 or 5xx storm or never-sent skips beside healthy pings. The dashboard ping rows tell them apart: a 429 or 5xx status against a 2xx with usage. `skipped` rising with `pings` flat means the keeper did not send them. The dashboard ping rows help only in part: a 429 or 5xx ping leaves a row with that status, a ping with no usage leaves a row with a 2xx status, a ping that ran to its 60 s timeout leaves a row with status 0 and `stop_reason` `timeout_estimated` (booked at its projected cost, and also counted in `/stats` `timed_out`), and a refused ping or a fast transport error leaves no row. It moves only when the dashboard is on, because the capture and the savings tracker are dashboard-bound: `0` without a dashboard means not measured. On a wired host, a span served only by a committed substitute ping does not raise it, because the substitute stores ping facts. A substitute call that reported no usage stores none, so it can raise it. Also exported as `cg_keepalive_rescue_facts_missing_total`. |
 
 ##### When the tiers read zero
 
@@ -399,6 +399,17 @@ same snapshot.
     already reference it). **Never wrap them in `rate()` or `increase()`** — both read a
     fall as a counter reset and extrapolate a spike at exactly the moment the value went
     down. For a per-second rate use the process-wide `cg_*` counters, which are monotonic.
+
+#### Manual-hold series (keep-alive)
+
+A manual hold keeps one body for the Ping button. These series count holds and sizes only. They carry no body, key or credential.
+
+- `cg_keepalive_manual_hold_evicted_total{reason="bytes"|"count"}`: holds the keeper released early because a tenant went over its cap (32 MiB of bodies, or 16 holds). The oldest hold of that tenant goes first.
+- `cg_keepalive_refused_total{reason="too_large"}`: requests the keeper did not hold because the body was over the per-body limit.
+- `cg_keepalive_manual_hold_body_bytes`: a histogram of body size when a hold starts. The buckets are 1, 4, 8, 16 and 32 MiB.
+- `cg_tenant_keepalive_manual_hold_bytes{tenant,label}`: bytes this tenant holds now. Only tenants that hold something appear.
+
+The counters and the histogram are process-wide, like the other `cg_keepalive_*` series. The gauge is per tenant, like `cg_tenant_refused_requests_total`. On a hosted proxy `/metrics` is open to loopback and to the `METRICS_TOKEN` bearer only, so the per-tenant gauge does not show to other tenants.
 
 #### Reading `acted: 0`
 
@@ -903,6 +914,7 @@ A gateway does not have to charge that, and two things go wrong when it does not
 which carries the whole litellm-gateway table:
 
 ```yaml
+# currency: Bobcoins     # optional: the unit of every rate in the file. Unset, USD
 # cache_read_frac: 0.1  # optional: one read multiple for every model. Unset, it follows the model
                          # (0.1x; 0.05x Opus/Sonnet 5.5; 0.025x Fable/Mythos 5.1)
 cache_write_frac: 1.25   # …and cache_write
@@ -913,7 +925,12 @@ models:
 ```
 
 Rates are **dollars per million tokens**, matching every vendor's price page; they are
-converted once on load. Ids are matched case-insensitively: an exact id wins, and otherwise
+converted once on load. A file whose rates are in another unit names it with `currency` (1 to 16
+ASCII letters; any other value stops the proxy at startup). Bob's file says `currency: Bobcoins`.
+The dashboard then shows those costs in that unit. The API's money fields keep their `*_usd` names.
+Each dashboard reply that carries them also says `currency`: the unit of the rows in its filter, or
+`mixed` when they have more than one unit. `/stats` and the `cg_*_usd` metrics are in the price
+file's unit too. Needs context-guru-proxy v0.7.4 or newer. Ids are matched case-insensitively: an exact id wins, and otherwise
 the **longest** entry wins whether it matched as a family prefix or by containment — so a
 specific entry always beats the family it belongs to and order in the file decides nothing.
 Containment applies only to entries that look like a model id (one containing a `/` or a

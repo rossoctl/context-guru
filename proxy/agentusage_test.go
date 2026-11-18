@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/thinkcount"
 )
 
 // everyFieldSet is a Usage with every field non-zero, so a mapping that drops or zeroes any field
@@ -18,6 +19,8 @@ func everyFieldSet(t *testing.T) Usage {
 		Searches: 2, SearchLoaded: []string{"Read"}, SearchDropped: 1, Live: &LiveFacts{},
 		FreshInput: 11, CacheRead: 22, CacheWrite: 33, Output: 44, CacheWrite1h: 5,
 		StopReason: "stop", Backend: "A", ToolUseNames: []string{"Bash"}, ToolUseIncomplete: true,
+		ToolParams: ToolParams{TimeoutMs: 1, HasTimeout: true}, Spawn: Spawn{N: 1},
+		Thinking: thinkcount.Response{Opaques: []string{"sig"}, Tokens: 7, HasTokens: true},
 	}
 	v := reflect.ValueOf(u)
 	for i := range v.NumField() {
