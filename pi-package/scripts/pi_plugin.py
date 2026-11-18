@@ -219,7 +219,10 @@ def plist_owned(path):
 # --------------------------------------------------------------------------------------------- binary
 
 def find_binary():
-    found = shutil.which(os.environ.get("CONTEXT_GURU_BIN", "context-guru-proxy"))
+    """CONTEXT_GURU_BIN, else the binary that setup downloaded. Never a context-guru-proxy on PATH: another
+    tool owns that one, and it can be too old, or change when that tool updates it (#1152)."""
+    named = os.environ.get("CONTEXT_GURU_BIN")
+    found = shutil.which(named) if named else None
     if found:
         return str(Path(found).resolve())
     if managed_binary().is_file() and os.access(managed_binary(), os.X_OK):
@@ -737,8 +740,11 @@ def setup(args):
     port = choose_port(record)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
     preset = record.get("preset") or DEFAULT_PRESET
-    executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
-    executable = executable or find_binary()
+    executable = find_binary()
+    if executable and not record.get("binary") and Path(executable) == managed_binary().resolve():
+        # A download with no install record is left by a failed setup and can be older than the latest
+        # release (#1157). Setup downloads again.
+        executable = None
     try:
         # No binary yet: setup downloads the latest release, which has the table. The name is checked
         # again below, once that binary exists.
@@ -1061,11 +1067,13 @@ def update(args):
     installed = (binary_version_text(executable) if executable else None) or "unknown"
     available = installed.removeprefix("v") != latest.removeprefix("v")
     if args.check:
-        facts(result="checked", installed_version=installed, latest_version=latest,
+        facts(result="checked", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
               update_available=str(available).lower())
         return 0
     if executable and Path(executable).resolve() != managed_binary().resolve():
-        facts(result="refused", reason="binary_not_managed", binary=executable)
+        facts(result="refused", reason="binary_not_managed", binary=executable,
+              detail="setup did not download this proxy, so update cannot replace it. Unset CONTEXT_GURU_BIN "
+                     "and run /context-guru setup again: setup then downloads a proxy that update can update")
         return 2
     try:
         executable, version = install_release_binary(latest)
@@ -1100,7 +1108,12 @@ def uninstall(args):
     record = read_record()
     facts(result="planned" if args.dry_run else "removing", models=models_path(),
           port=record.get("port", "(none)"))
+    recorded = record.get("binary")
+    # A binary the person supplied (CONTEXT_GURU_BIN) is theirs: uninstall says it keeps it (#1153).
+    kept = {"binary_kept": f"{recorded} (not downloaded by setup)"} \
+        if recorded and Path(recorded).resolve() != managed_binary().resolve() else {}
     if args.dry_run:
+        facts(**({"binary_remove": managed_binary()} if managed_binary().exists() else {}), **kept)
         return 0
     # Routing first, proxy second: the reverse of setup, so no moment has a route with no proxy.
     facts(models_restore=models_route.restore(routing_state()))
@@ -1113,6 +1126,7 @@ def uninstall(args):
         if managed_binary().exists():
             managed_binary().unlink()
             facts(binary_removed="true")
+        facts(**kept)
     facts(result="removed", kept=state_dir())
     return 0
 
