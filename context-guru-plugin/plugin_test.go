@@ -10500,16 +10500,17 @@ func fakeProxyDirAnyPort(t *testing.T) string {
 		"addr=\"\"\n" +
 		"while [ $# -gt 0 ]; do case \"$1\" in --listen) addr=$2; shift 2;; *) shift;; esac; done\n" +
 		"port=${addr##*:}\n" +
-		// `exec -a`, so the process this leaves behind still has context-guru-proxy in its command
-		// line. Everything that signals a proxy in this plugin checks that first and kills by PID -
-		// never by pattern - so a fake that execs away its own name is a fake nothing will ever stop.
-		"exec -a context-guru-proxy " + py + " -c '\n" +
+		// The name context-guru-proxy is also passed as an ARGUMENT, so the process this leaves behind
+		// has it in its command line. Everything that signals a proxy in this plugin checks that first
+		// and kills by PID - never by pattern. `exec -a` is not enough: on macOS Python re-launches
+		// itself and `ps` shows the Python.app path, not the name (#1217).
+		"exec " + py + " -c '\n" +
 		"import http.server, sys\n" +
 		"class H(http.server.BaseHTTPRequestHandler):\n" +
 		"    def do_GET(self):\n" +
 		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
 		"    def log_message(self, *a): pass\n" +
-		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\"\n"
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\" context-guru-proxy\n"
 	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
