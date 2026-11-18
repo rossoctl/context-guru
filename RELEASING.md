@@ -9,9 +9,10 @@ The process was first used for v0.5.1 and v0.5.2.
 Owner decision, 2026-11-18.
 
 - **Production is the personal laptop.** Each user runs context-guru on their own laptop, as the owner does. A release reaches every user at once through `releases/latest`.
-- **One difference from a plain local install:** savings metrics and metadata go to a central location for analysis.
+- **One difference from a plain local install:** a copy of the savings metrics and metadata also goes to a central store for analysis. The data stays in the local SQLite database too.
 - **The central store is not live yet.** Until it is live, measurements before a release run on the owner's laptop. Once it is live, the integrator and the production-monitor sessions may read the central metadata for measurements and for checks after a release.
 - **Hosted mode stays supported,** but it is not active inside IBM for now. The hosted-only checks (tenant isolation, hosted restart state) stay in the tests. They are not a release gate of their own.
+- **The central copy follows the local data.** Once the store is live, a PR that adds or changes data in a data-dependence row also updates the event sent to the central store (see [Behavior changes](#behavior-changes-need-a-humans-permission)).
 
 **A new integrator needs this page, the scripts in [`scripts/release/`](scripts/release/), and the maintainer's own private notes** (see [Private notes](#private-notes-of-the-integrator)). Nothing else. If you had to learn a step from a person or from an earlier session, add it here.
 
@@ -70,7 +71,7 @@ A PR must not change behavior unless a human developer allows it. This holds mos
   - Put all the pending behavior changes in one table (PR, who it affects, old, new, how to turn it off), so the owner can answer them in one message.
   - Quote the yes, with its date, in the squash-merge body.
   - The owner may type in another keyboard layout by mistake. Say how you read such an answer, and wait if you are not sure.
-- **A change in what leaves the laptop** is a behavior change too. Metrics and metadata go to a central store. A PR that adds or widens what leaves the laptop updates that feature's row in [docs/data-dependence.md](docs/data-dependence.md) to say so, at each storage level (off, metadata only, everything). The PR states it at the top. The owner of that row confirms it before the merge.
+- **The central copy must match the local data** (owner rule, David Amid, 2026-11-18: "anything that is added to the data dependence needs to then update the event going to the central store, once we have that functionality"). Once the central store is live, a PR that adds or changes data in a row of [docs/data-dependence.md](docs/data-dependence.md) also updates the event sent to the central store. Then the central copy matches the local data. Until the central store is live, this rule does not apply.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
 - **To revert a merged PR during a release** (as with #768):
   1. Try `git revert <merge-commit>` on a throwaway branch from `main`. Run vet, the build and the test suites there.
@@ -279,7 +280,7 @@ Notes:
 - **Checks for production on laptops.** A release reaches every laptop at once through `releases/latest`, so add these to the list:
   1. **Upgrade on an existing database.** Start the previous release, let it write a database, then start the new build on a copy of that database. The schema migrations must run and the data must stay.
   2. **Install through the plugin.** Install the proxy from the current `releases/latest` through the Claude Code plugin, and run the plugin from the commit. The update to the new release is checked after the publish (step 8). The checks of the other clients' plugins are the PR owner's job (see above).
-  3. **The central push, once it is in use.** Check three things: the push sends **metadata only** (read the payload, no transcript text, tool output or bodies); it **reaches the collector**; it **fails open** when the collector is down (the request still goes out and the user sees no error).
+  3. **The central push, once it is in use.** Check three things: the central copy holds **metadata only** (read the payload: no transcript text, tool output or bodies); it **reaches the collector**; it **fails open** when the collector is down (the request still goes out and the user sees no error).
 - At the end, stop the proxy by its own pid and remove everything the check created. **Remove the credential copies right after the last run;** the rest may stay until the tag. Report any state the check changed outside its own directories.
 
 A failed check blocks the tag. Fix it in a PR (step 2), then run the failed check again.
