@@ -358,9 +358,10 @@ type Handler struct {
 	// keeper and the dashboard's miss attribution can key on session + thread. See
 	// internal/thread and threadFor.
 	threads *thread.Tracker
-	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half —
-	// it never chooses a keep-alive ping budget and never changes keep-alive or compaction
-	// behaviour). The actual body scan runs on the DASHBOARD'S OWN writer goroutine, via a
+	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half).
+	// It never changes compaction behaviour. Its counts feed the keep-alive's wait cause, and when the
+	// writer reads a turn as a wait for background work it raises that entry's ping count
+	// (Keeper.RaiseWaitPlan, #1225). The actual body scan runs on the DASHBOARD'S OWN writer goroutine, via a
 	// closure finish() builds and hands to dash.Event.WaitCause — off the request path
 	// entirely, not merely off the upstream forward. See internal/waitcause,
 	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().

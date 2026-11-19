@@ -145,6 +145,10 @@ type kaEntry struct {
 	// wait is the wait cause this entry's pings were planned for (waitplan.go, #858). "" when the
 	// plan did not apply (plan off, a 1-hour thread, OpenAI). The sweep question reads it.
 	wait string
+	// planBase is Policy.MaxPings before the per-wait plan added its extra pings; planned is true when
+	// the plan set pol.MaxPings (5-minute tier, plan on, not OpenAI). RaiseWaitPlan reads both (#1225).
+	planBase int
+	planned  bool
 	// noTool: the plan is on and the thread has had no tool_use response yet, so it is not pinged.
 	noTool bool
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
@@ -203,6 +207,11 @@ type kaEntry struct {
 	// look, and coupling a security bound to a liveness loop is how a hold silently becomes
 	// unbounded. time.AfterFunc fires regardless.
 	timer *time.Timer
+	// armedAt is the keeper-clock instant the hard-deadline timer was armed. RaiseWaitPlan re-arms it for
+	// the raised count from this instant (#1225).
+	armedAt time.Time
+	// deadline is when that timer fires, on the keeper clock (the timer itself is not readable).
+	deadline time.Time
 }
 
 // due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
@@ -958,6 +967,7 @@ func (k *Keeper) Record(r Record) {
 	if guard {
 		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
 	}
+	planBase := pol.MaxPings
 	if planned {
 		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))
 	}
@@ -985,7 +995,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		wait:         wait,
+		wait: wait, planBase: planBase, planned: planned,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
@@ -1089,6 +1099,8 @@ func (k *Keeper) Record(r Record) {
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
+	e.armedAt = k.now()
+	e.deadline = e.armedAt.Add(e.hold())
 	e.timer = time.AfterFunc(e.hold(), func() { k.expireAuto(key) })
 	k.evictLocked()
 }
@@ -1162,6 +1174,13 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
 }
 
+// projectedRefreshExtraUSD is what a refresh costs OVER the ping it replaces (#1144): the summary
+// call minus the ping that was due. When both read the same cached prefix (the prefix_ask path,
+// at a planned ping), the read cancels and what is left is the reply. Callers use it only then. Never negative. Zero when the model is not priced, like its two siblings.
+func (k *Keeper) projectedRefreshExtraUSD(model string, prefix int64, route, endpoint string) float64 {
+	return max(0, k.projectedSummaryUSD(model, endpoint, prefix)-k.projectedPingUSD(model, prefix, route, endpoint))
+}
+
 // expectedRefreshSavingUSD is the dollar value a refresh folding tailTokens of new material into
 // a `cache_state: pre_expiry` reserve is expected to earn back: those tokens would otherwise be
 // written, at the model's cache-WRITE rate, on the cold return the reserve exists to cheapen.
@@ -1171,8 +1190,8 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 //
 // Zero when the model is not priced, for the same reason projectedPingUSD/projectedSummaryUSD are
 // — an incomplete price list must not block a feature it cannot afford to evaluate, and
-// fireSummarySubstitute's own comparison (saving < cost) already fails toward "ping normally"
-// whenever cost cannot be shown to be zero too.
+// fireSummarySubstitute's own comparison (saving < what the refresh costs) fails toward "refresh"
+// only when that cost is zero too, the same as before.
 func (k *Keeper) expectedRefreshSavingUSD(model, endpoint string, prefix int64, tailTokens int) float64 {
 	if model == "" || tailTokens <= 0 {
 		return 0

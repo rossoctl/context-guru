@@ -28,7 +28,6 @@ dash/meta_test.go sleep=1 poll=1
 dash/prefixcause_test.go sleep=1 poll=1
 dash/projectsinks_test.go sleep=1 poll=1 after=1
 dash/prompttext_test.go sleep=4 poll=3
-dash/reprice_test.go sleep=1
 dash/restartseed_test.go sleep=1 poll=1
 dash/sse_test.go sleep=3 poll=1 after=4
 dash/tenant_scope_test.go sleep=2 poll=2
