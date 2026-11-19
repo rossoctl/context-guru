@@ -261,7 +261,7 @@ test("first startup downloads the release binary and extracts under the state di
   const state = stateDirectory(directory)
 
   // A release fixture: the working stub proxy as a tarball, plus its checksums line.
-  const stub = stubProxyBinary()
+  const stub = stubProxyBinary(undefined, { version: "0.7.4" })
   const fixture = mkdtempSync(join(tmpdir(), "context-guru-release-"))
   const archive = join(fixture, "archive.tar.gz")
   spawnSync("tar", ["-czf", archive, "-C", dirname(stub), "context-guru-proxy"])

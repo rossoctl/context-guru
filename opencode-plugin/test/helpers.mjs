@@ -17,6 +17,7 @@ export async function waitUntilUnhealthy(port) {
 
 // A stub proxy binary: a node script named context-guru-proxy so the pid-guarded
 // kills in the scripts recognize it, serving /healthz like the real proxy.
+// It reports `version` for --version; null makes it answer like a binary that does not know the flag.
 // The strategy table the real proxy prints (shape of config.StrategiesJSON). Rows are trimmed.
 export const FAKE_STRATEGIES = {
   default: "auto",
@@ -32,12 +33,13 @@ export const FAKE_STRATEGIES = {
   ],
 }
 
-export function stubProxyBinary(table = FAKE_STRATEGIES) {
+export function stubProxyBinary(table = FAKE_STRATEGIES, { version = "0.7.3" } = {}) {
   const stubDirectory = mkdtempSync(join(tmpdir(), "context-guru-stub-"))
   const stub = join(stubDirectory, "context-guru-proxy")
   writeFileSync(stub, `#!/usr/bin/env node
 const { createServer } = require("node:http")
 if (process.argv[2] === "strategies") { console.log(${JSON.stringify(JSON.stringify(table))}); process.exit(0) }
+if (process.argv[2] === "--version") { ${version === null ? `console.error("Usage of context-guru-proxy:"); process.exit(2)` : `console.log(${JSON.stringify(`context-guru-proxy ${version} (commit stub)`)}); process.exit(0)`} }
 const record = (label) => { if (process.env.CG_TEST_RECORD) require("node:fs").appendFileSync(process.env.CG_TEST_RECORD, JSON.stringify({ label, argv: process.argv.slice(2), dashboardContent: process.env.DASHBOARD_CONTENT ?? null }) + String.fromCharCode(10)) }
 record("serve")
 const listen = process.argv.indexOf("--listen")
