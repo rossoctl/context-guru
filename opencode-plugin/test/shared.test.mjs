@@ -76,6 +76,9 @@ async function withReleases(versions, latest, fn, options) {
   const previous = { bin: process.env.CONTEXT_GURU_BIN, path: process.env.PATH, releases: process.env.CONTEXT_GURU_RELEASES_URL }
   delete process.env.CONTEXT_GURU_BIN
   process.env.PATH = `/usr/bin:/bin:${dirname(process.execPath)}`
+  // A start downloads the oldest release served here, not PINNED_VERSION, so a release bump does not break these tests.
+  const pinned = process.env.CONTEXT_GURU_VERSION === undefined
+  if (pinned) process.env.CONTEXT_GURU_VERSION = `v${versions[0]}`
   const release = await releaseServer(versions, latest, options)
   process.env.CONTEXT_GURU_RELEASES_URL = release.url
   const started = []
@@ -90,6 +93,7 @@ async function withReleases(versions, latest, fn, options) {
   } finally {
     for (const state of started) await stopRecorded(state)
     release.server.close()
+    if (pinned) delete process.env.CONTEXT_GURU_VERSION
     if (previous.bin !== undefined) process.env.CONTEXT_GURU_BIN = previous.bin
     process.env.PATH = previous.path
     if (previous.releases === undefined) delete process.env.CONTEXT_GURU_RELEASES_URL

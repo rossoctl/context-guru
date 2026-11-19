@@ -93,6 +93,14 @@ func newKeeper(h *Handler) *keeper {
 // The Dispatcher's Price and Spare read h.opts.Prices and h.limiter at CALL time, not here, exactly as the keeper
 // did when it held h itself: a handler's limiter and price table may be replaced after the keeper
 // is built (tests do both), and a ping must use the ones in force when it fires.
+// raiseWaitPlan hands the dashboard writer's wait cause to the keeper (#1225). See capture.raisePlan.
+func (h *Handler) raiseWaitPlan(tenant, session, thread, cause string) (int, bool) {
+	if h == nil || h.keeper == nil || h.keeper.Keeper == nil {
+		return 0, false
+	}
+	return h.keeper.Keeper.RaiseWaitPlan(keepalive.Key{Tenant: tenant, Session: session, Thread: thread}, cause)
+}
+
 func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 	k := &keeper{h: h, overrides: map[string]sessionOverride{}}
 	if h != nil {
