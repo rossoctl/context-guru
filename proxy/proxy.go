@@ -359,13 +359,19 @@ type Handler struct {
 	// internal/thread and threadFor.
 	threads *thread.Tracker
 	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half).
-	// It never changes compaction behaviour. Its counts feed the keep-alive's wait cause, and when the
-	// writer reads a turn as a wait for background work it raises that entry's ping count
-	// (Keeper.RaiseWaitPlan, #1225). The actual body scan runs on the DASHBOARD'S OWN writer goroutine, via a
+	// It never changes compaction behaviour. Its counts feed the keep-alive's wait cause. The ordered tracker
+	// update runs on the DASHBOARD'S OWN writer goroutine, via a
 	// closure finish() builds and hands to dash.Event.WaitCause — off the request path
-	// entirely, not merely off the upstream forward. See internal/waitcause,
+	// entirely, not merely off the upstream forward. A pure scan of the same body (earlyscan.go) runs
+	// while the request is upstream; the keeper plans from it and the writer reuses it, but only the
+	// writer writes the tracker. See internal/waitcause,
 	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().
 	waits *waitcause.Tracker
+	// scan counts the early wait-cause scan's outcomes (earlyscan.go); scanGate is a test hook that holds
+	// the scan goroutine before it starts, and scanDone one that tells it has finished. Neither affects behaviour.
+	scan     scanStats
+	scanGate func(context.Context)
+	scanDone func()
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
@@ -937,6 +943,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// After the response: /compact never calls a provider, so there is no usage to
 	// report and the row is honestly marked partially accounted.
 	cp.finish(Usage{}, false, h.captureContentFor(tn), h.contentCap(), h.contentMax())
+	cp.stopEarlyScan()
 }
 
 // splitComma splits a comma-separated header value into trimmed, non-empty names.
@@ -1544,6 +1551,9 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
 			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
 			cp.noteWaitBody(orig)
+			// The wait-cause scan of the same body starts HERE and runs while the request is upstream. The
+			// keeper takes it at response end without waiting (#1225, #1227; earlyscan.go).
+			cp.startEarlyScan(h, r.Context(), provider, orig)
 			// The alias derivation needs the pipeline that transforms THIS body, and the
 			// wire dialect and bypass flag it transforms under — see noteAliasSource.
 			cp.noteAliasSource(tn.Pipe, api, bypassed)
@@ -2007,7 +2017,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
 		usage.Live = cp.liveFacts(ttfb)
-		cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK))
+		cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
 		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache
 		// was COLD: this request has now either rewritten that prefix or failed trying to, and
@@ -2079,6 +2089,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		}
 		cp.noteRounds(rounds)
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
+		cp.stopEarlyScan() // the request is over: the scan's work in progress ends (a finished result stays)
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
 		// (which also logged its own WARN with the reason).
@@ -3042,6 +3053,8 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// response carried the unreadable usage, this is the process's total.
 	snap.UsageUnparsed, snap.UsageUnreadable = UsageGaps()
 	snap.StashRefused = offload.StashRefusals()
+	snap.WaitScanUsed, snap.WaitScanNotReady, snap.WaitScanUnknown = int64(h.scan.used.Load()), int64(h.scan.notReady.Load()), int64(h.scan.unknown.Load())
+	snap.WaitScanWriterEarly, snap.WaitScanWriterOwn = int64(h.scan.writerEarly.Load()), int64(h.scan.writerOwn.Load())
 	// The dangling-marker counter, process-wide for the same reason: it is a COMPONENT that
 	// replayed a marker whose payload had gone, whichever store instance lost it. Reported
 	// separately from StashRefused because they are opposite outcomes — see metrics.Snapshot.
