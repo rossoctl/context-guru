@@ -124,6 +124,7 @@ func orDefault(v, def int) int {
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
 // open-task counts (Options.OpenTasks). The open counts are as of the last request the host's
 // tracker observed, which can lag by one request: a stale count reads as "a person", the cheaper plan.
+// The host corrects that with RaiseWaitPlan once its in-order reading of the turn is done (#1225).
 func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
@@ -138,6 +139,43 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 	// the call (a spliced sniff window): the classifier reads such a response as a wait for a person.
 	// Whatever the classifier said (open background tasks read "background"), a tool stop gets the tool budget.
 	return toolStopWait(w, len(names) == 0, stopReason)
+}
+
+// RaiseWaitPlan raises the ping count of a live entry to the count of cause. The host calls it when it
+// learns the cause after Record planned the turn: Record reads the open-task counts as of the request
+// before, so the turn that starts a background task is planned as a wait for a person (#1225). The
+// count only goes up. It does nothing when the entry is gone, was not planned (1-hour tier, OpenAI,
+// plan off, manual hold), has stopped, or the cause gives no higher count (a subagent, a person).
+// It returns the new count and true when it raised. Metadata only: a cause string and counts.
+func (k *Keeper) RaiseWaitPlan(key Key, cause string) (int, bool) {
+	if k == nil || cause == "" {
+		return 0, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e, ok := k.live[key.id()]
+	if !ok || !e.planned || e.manualOnly || e.stopped || !e.pol.On() || !e.pol.WaitPlan {
+		return 0, false
+	}
+	p := e.pol
+	p.MaxPings = e.planBase
+	n := p.WaitPings(cause, IsSubagentThread(e.thread))
+	if n <= e.pol.MaxPings {
+		return 0, false
+	}
+	// The hard retention deadline was armed at record from the planned count: (K+1) x Idle. Re-arm it for
+	// the raised count from the same instant, or the timer retires the entry before the new last ping
+	// (and the extra request, which follows the last ping). A timer that already fired cannot be
+	// stopped: the entry is on its way out, so leave it.
+	left := e.armedAt.Add(time.Duration(n+1) * e.pol.Idle).Sub(k.now())
+	if left <= 0 || e.timer == nil || !e.timer.Stop() {
+		return 0, false
+	}
+	e.pol.MaxPings = n
+	e.deadline = e.armedAt.Add(e.hold())
+	id := key.id()
+	e.timer = time.AfterFunc(left, func() { k.expireAuto(id) })
+	return n, true
 }
 
 // toolStopWait applies the tool-stop rule: a response that stopped for a tool call and has no tool
