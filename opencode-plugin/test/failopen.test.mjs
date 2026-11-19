@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { spawn } from "node:child_process"
 import { createServer } from "node:http"
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -178,7 +179,8 @@ test("a connection reset after the proxy accepted is not bypassed", async () => 
   try {
     const { fetch: wrapped, url } = routed(RESET_PORT)
 
-    await assert.rejects(wrapped(url, requestInit()))
+    // The thrown error must not carry the key either.
+    await assert.rejects(wrapped(url, requestInit()), (error) => !`${error?.stack} ${error?.cause?.stack} ${JSON.stringify(error?.cause ?? {})}`.includes(CANARY))
 
     assert.equal(proxy.requests.length, 1)
     assert.equal(upstream.requests.length, 0)
@@ -349,6 +351,124 @@ test("a failed restart waits at most 5 s, then goes direct, and starts no new re
     assert.equal((await send()).status, 200)
     assert.equal(upstream.requests.length, 2)
   } finally {
+    delete process.env.CONTEXT_GURU_BIN
+    await upstream.close()
+  }
+})
+
+// A routed project with the stub proxy running. The proxy answers 404 on chat paths, the upstream 200,
+// so the status tells where a send went.
+async function routedProject(directory) {
+  const { lines, client } = logger()
+  const hooks = await plugin.server({ directory, client })
+  const config = { provider: { anthropic: { options: { baseURL: `http://127.0.0.1:${UPSTREAM_PORT}` } } } }
+  await hooks.config(config)
+  const state = stateDirectory(directory)
+  const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+  const { baseURL } = config.provider.anthropic.options
+  return {
+    lines,
+    state,
+    record,
+    ask: () => hooks["chat.headers"]({ sessionID: "session-back", provider: { info: { id: "anthropic" } } }, { headers: {} }),
+    send: () => config.provider.anthropic.options.fetch(`${baseURL}/messages`, requestInit()),
+  }
+}
+
+async function waitFor(condition, what, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await condition())) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+const isHealthy = (port) => fetch(`http://127.0.0.1:${port}/healthz`).then((response) => response.ok, () => false)
+
+function killRecorded(state) {
+  try { process.kill(Number(readFileSync(join(state, "proxy.pid"), "utf8")), "SIGTERM") } catch {}
+}
+
+test("after a fallback, routing returns to the proxy once chat.headers sees it healthy again", async () => {
+  const upstream = await recorder(UPSTREAM_PORT)
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  let project
+  let restarted
+  try {
+    project = await routedProject("/tmp/context-guru-failopen-back")
+    process.kill(project.record.pid, "SIGTERM")
+    await waitUntilUnhealthy(project.record.port)
+    assert.equal((await project.send()).status, 200)
+    assert.equal(upstream.requests.length, 1)
+
+    // Someone else starts the proxy again on the same port.
+    restarted = spawn(process.env.CONTEXT_GURU_BIN, ["--listen", `127.0.0.1:${project.record.port}`], { stdio: "ignore" })
+    await waitFor(() => isHealthy(project.record.port), "the proxy to start again")
+    await project.ask()
+
+    assert.equal((await project.send()).status, 404)
+    assert.equal(upstream.requests.length, 1)
+  } finally {
+    restarted?.kill("SIGTERM")
+    delete process.env.CONTEXT_GURU_BIN
+    await upstream.close()
+  }
+})
+
+test("a restart that is healthy before the 5 s cap sends the next request to the proxy", async () => {
+  const upstream = await recorder(UPSTREAM_PORT)
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  let project
+  try {
+    project = await routedProject("/tmp/context-guru-failopen-quick")
+    process.kill(project.record.pid, "SIGTERM")
+    await waitUntilUnhealthy(project.record.port)
+    assert.equal((await project.send()).status, 200)
+
+    const started = Date.now()
+    await project.ask()
+
+    assert.ok(Date.now() - started < 5000, `chat.headers waited ${Date.now() - started} ms`)
+    assert.ok(project.lines.some((line) => /proxy recovered/.test(line.message)), "the plugin did not restart the proxy")
+    assert.equal((await project.send()).status, 404)
+    assert.equal(upstream.requests.length, 1)
+  } finally {
+    if (project) killRecorded(project.state)
+    delete process.env.CONTEXT_GURU_BIN
+    await upstream.close()
+  }
+})
+
+test("a restart that succeeds after the capped wait sends the next request to the proxy", { timeout: 60000 }, async () => {
+  const upstream = await recorder(UPSTREAM_PORT)
+  process.env.CONTEXT_GURU_BIN = stubProxyBinary()
+  let project
+  try {
+    project = await routedProject("/tmp/context-guru-failopen-slow")
+    process.kill(project.record.pid, "SIGTERM")
+    await waitUntilUnhealthy(project.record.port)
+    // The restart runs a proxy that serves only after 7 s, past the 5 s cap.
+    const slow = join(mkdtempSync(join(tmpdir(), "context-guru-slow-")), "context-guru-proxy")
+    writeFileSync(slow, `#!/usr/bin/env node
+const port = Number(process.argv[process.argv.indexOf("--listen") + 1].split(":")[1])
+setTimeout(() => require("node:http").createServer((request, response) => {
+  if (request.url === "/healthz") response.end("ok")
+  else { response.statusCode = 404; response.end() }
+}).listen(port, "127.0.0.1"), 7000)
+`)
+    chmodSync(slow, 0o755)
+    writeFileSync(join(project.state, "install.json"), JSON.stringify({ ...project.record, binary: slow }))
+
+    await project.ask()
+    assert.equal((await project.send()).status, 200)
+    assert.equal(upstream.requests.length, 1)
+
+    // No chat.headers call after this point: only the finished restart may clear the down state.
+    await waitFor(() => project.lines.some((line) => /proxy recovered/.test(line.message)), "the background restart")
+    assert.equal((await project.send()).status, 404)
+    assert.equal(upstream.requests.length, 1)
+  } finally {
+    if (project) killRecorded(project.state)
     delete process.env.CONTEXT_GURU_BIN
     await upstream.close()
   }

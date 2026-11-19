@@ -14,8 +14,10 @@ When the proxy is down, OpenCode v1 requests go straight to the provider (the fa
   connection opened, a stream that broke, and a cancel reach OpenCode unchanged.
 - A direct request has your own headers and body. The plugin removes only its own
   `x-context-guru-session` header. Direct requests get no context-guru work, and `/stats` does not count them.
-- A request waits at most 5 s for a restart. After a failed restart, requests go direct for 30 s
-  and start no new restart.
+- A request waits about 5 s for a restart (up to 6.5 s when the health check also hangs). After a
+  failed restart, requests go direct for 30 s and start no new restart. Routing comes back at the
+  first request after the proxy is healthy again. In the 30 s after a failed restart, it comes back
+  when the 30 s end, even if `/context-guru-install` started the proxy earlier.
 - After `/context-guru-uninstall`, open sessions go direct at once. No OpenCode restart is needed.
 - The log line names the provider host and the error code only.
 - Set the plugin option `"fallback": false` to turn all of this off. Then requests fail while the proxy is down, as before.

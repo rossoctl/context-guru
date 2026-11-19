@@ -300,7 +300,7 @@ STATE=${shQuote(state)}
 if [ -f "$STATE/disabled" ]; then
   rm -f "$STATE/disabled"
   printf '%s\\n' "result=re-enabled"
-  printf '%s\\n' "note=restart OpenCode so providers route through the proxy again"
+  printf '%s\\n' "note=a session that was routed when it started goes back to the proxy when the proxy is healthy; restart OpenCode for a session that started while context-guru was disabled"
 fi
 if [ ! -f "$STATE/install.env" ]; then
   printf '%s\\n' "result=never-installed"
@@ -692,7 +692,7 @@ const COMMAND_SPECS = [
     description: "Repair the context-guru proxy and routing for this project",
     script: "context-guru-install",
     intro: "Repair this project's context-guru install.",
-    outro: () => "That block ran just now and already did what it could; it is idempotent, so re-running it is safe. Report its result plainly. If it printed result=re-enabled or a note about restarting OpenCode, tell the user to restart OpenCode so providers route through the proxy again.",
+    outro: () => "That block ran just now and already did what it could; it is idempotent, so re-running it is safe. Report its result plainly. If it printed result=re-enabled or a note about restarting OpenCode, tell the user what the note says: a session that was routed when it started goes back to the proxy without a restart, and a session that started while context-guru was disabled needs an OpenCode restart.",
   },
   {
     name: "context-guru-update",
@@ -861,6 +861,8 @@ const OWN_FETCH = Symbol("context-guru fail-open fetch")
 // headers, body and signal; only the plugin's session header is removed.
 function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
   const wrapped = async (input, init) => {
+    // The AI SDK passes a string URL. A Request object, or a URL that is not this proxy's route, goes to
+    // inner unchanged: no fallback and no disabled check.
     const url = typeof input === "string" || input instanceof URL ? new URL(input) : undefined
     const prefix = `/${dialect}/`
     if (!url || url.host !== `127.0.0.1:${port}` || !url.pathname.startsWith(prefix)) return inner(input, init)
@@ -1074,7 +1076,8 @@ const proxyRecoveries = new Map()
 // recorded port so routed providers keep working without an OpenCode restart.
 // Single-flight: concurrent requests share one recovery; a failed recovery is
 // retried by the next request, never in a loop.
-// With fallback on, a request waits at most RESTART_WAIT_MS; the restart goes on in the background
+// With fallback on, a request waits about RESTART_WAIT_MS (plus one health check of up to 1.5 s first);
+// the restart goes on in the background
 // and the request goes direct. After a failed restart, DOWN_WINDOW_MS of requests go direct and
 // start no new restart, so OpenCode's own retries do not each start one.
 const RESTART_WAIT_MS = 5000

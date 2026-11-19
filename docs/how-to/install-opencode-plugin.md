@@ -79,7 +79,8 @@ On OpenCode v1, the plugin sends a request straight to the provider when the pro
 - **When:** the connection to the proxy was refused, or the proxy failed its health check and the request was never sent to it.
 - **Never:** a 4xx or 5xx from the proxy, a reset or time-out after the connection opened, a broken stream, or a cancel. These reach OpenCode unchanged. The plugin never sends one request twice.
 - The direct request has your own headers and body, without the plugin's `x-context-guru-session` header. It gets no context-guru work, and `/stats` does not count it.
-- A request waits at most 5 s for a proxy restart. After a failed restart, requests go direct for 30 s and start no new restart.
+- A request waits about 5 s for a proxy restart (up to 6.5 s when the health check also hangs). After a failed restart, requests go direct for 30 s and start no new restart.
+- Routing comes back at the first request after the proxy is healthy again. In the 30 s after a failed restart, it comes back when the 30 s end, even if `/context-guru-install` started the proxy earlier.
 - After `/context-guru-uninstall`, open sessions go direct at once.
 - The OpenCode log line names the provider host and the error code only.
 - `"fallback": false` turns this off. Then requests fail while the proxy is down, and a request can wait about a minute for a restart.
