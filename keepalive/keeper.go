@@ -970,6 +970,8 @@ func (k *Keeper) Record(r Record) {
 			// lower one, whatever the extra-ping settings are. Today's cause is the tracker alone.
 			if base := k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, nil); base != wait {
 				sub := IsSubagentThread(threadID)
+				// With only the background count merged this cannot fire today (background has the lowest
+				// floor); it keeps the rule true if the merge ever widens.
 				if pol.WaitMinPrefix(wait, sub) > pol.WaitMinPrefix(base, sub) {
 					wait = base
 				}

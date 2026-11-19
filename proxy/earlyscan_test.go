@@ -373,3 +373,45 @@ func TestEarlyScanCountsNeverRefuseAHoldTodayMakes(t *testing.T) {
 		})
 	}
 }
+
+// Round-2 trace: today's policy can hold a wait without taking the per-wait plan (a head-1h strategy on the
+// 1-hour band, Idle 3590 s). Strategy A (open all day, 1-hour band, floor 20k) holds a 50k wait today. B (shut
+// window, floor 100k, newer) wins once the windows are ignored and refuses it (background floor 60k). The
+// fallback judges a policy by the gate Record applies to it, not by plan eligibility.
+//
+// In this trace the fallback is not reached: resolvePolicyWindows ignores the windows only when NO strategy
+// matched with them (a strategy open now already applies), so A applies both ways and the test pins the
+// outcome (held, with A). The fallback's gate is covered by TestEarlyScanCountsNeverRefuseAHoldTodayMakes; a
+// mutation of holds() cannot fail this test for that reason.
+func TestEarlyScanCountsKeepATodayHoldOfAPolicyOutsideThePlan(t *testing.T) {
+	account := CachePolicy{KeepAlive: true, WaitPlan: true, Idle: 280 * time.Second, MaxPings: 2,
+		MinPrefixTokens: 20000, ToolWaitMinPrefix: 60000, MaxUSDPerPing: 0.25}
+	k, _, clock := testKeeper(t, Limits{})
+	now := clock.now()
+	k.setStrategies([]tenant.Strategy{
+		{ID: "a", Active: true, HeadTTL1h: true, IdleSeconds: 3590, MaxPings: 1, MinPrefixTokens: 20000, MaxUSDPerPing: 0.5,
+			Windows: []tenant.Window{{Start: "00:00", End: "23:59"}}, // open all day (a strategy with no window never matches)
+			Target:  tenant.Target{Mode: tenant.TargetList, TenantIDs: []string{"t1"}}, UpdatedAt: now.Add(-time.Hour)},
+		{ID: "b", Active: true, IdleSeconds: 240, MaxPings: 4, MinPrefixTokens: 100000, MaxUSDPerPing: 0.5,
+			Windows: []tenant.Window{{Start: "00:00", End: "00:01"}},
+			Target:  tenant.Target{Mode: tenant.TargetList, TenantIDs: []string{"t1"}}, UpdatedAt: now},
+	})
+	tn := &Tenancy{ID: "t1", Cache: account}
+	for i, ts := range []time.Time{now.Add(-time.Second), now} {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("Authorization", "Bearer sk-caller-secret")
+		use := Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}
+		if i == 0 {
+			use.StopReason, use.ToolUseNames = "tool_use", []string{"Bash"}
+		}
+		k.recordTouch("", tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
+			bschemas.Anthropic, "/v1/messages", http.StatusOK, use, true, &keepalive.TaskCounts{Background: 1})
+	}
+	v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
+	if !held {
+		t.Fatal("a hold today's path makes (strategy A) was refused")
+	}
+	if v.Tag != "a" {
+		t.Fatalf("tag = %q policy %+v, want strategy a", v.Tag, v.Policy)
+	}
+}

@@ -417,16 +417,31 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 			// Today's policy is the one the windows give; the wide one is the policy with them ignored.
 			todayPol, todayApplied := k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, ignoreToday)
 			prefix := u.CacheRead + u.CacheWrite
-			cause := causeOf(open)
+			// The wait cause a policy is judged by is the one Record will use for it: the merged cause where
+			// the policy takes the per-wait plan, the tracker-only cause where it does not (a strategy on the
+			// 1-hour band keeps its own count and the general floor). Whether a policy HOLDS the wait does not
+			// depend on its plan eligibility.
+			causeFor := func(p keepalive.Policy) string {
+				if planEligible(p) {
+					return causeOf(open)
+				}
+				return causeOf(nil)
+			}
 			holds := func(p keepalive.Policy) bool {
-				return planEligible(p) && p.On() && prefix >= int64(p.WaitMinPrefix(cause, sub))
+				return p.On() && prefix >= int64(p.WaitMinPrefix(causeFor(p), sub))
+			}
+			pingsOf := func(p keepalive.Policy) int {
+				if planEligible(p) {
+					return p.WaitPings(causeFor(p), sub)
+				}
+				return p.MaxPings
 			}
 			switch {
 			case !planEligible(pol):
 				// The policy that ignoring the windows chose does not take the plan (a 1-hour Idle, or
 				// off): the reading does not apply, and today's windows decision stands.
 				pol, applied, open = todayPol, todayApplied, nil
-			case holds(todayPol) && (!holds(pol) || todayPol.WaitPings(cause, sub) > pol.WaitPings(cause, sub)):
+			case holds(todayPol) && (!holds(pol) || pingsOf(todayPol) > pingsOf(pol)):
 				// Today's policy holds this wait and the strategy's would refuse it or plan fewer pings.
 				pol, applied = todayPol, todayApplied
 			}

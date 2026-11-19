@@ -123,7 +123,8 @@ func orDefault(v, def int) int {
 }
 
 // TaskCounts are the open background-task and teammate-wait counts of a request body, read by the host
-// while the request was upstream (#1225, #1227). Counts only.
+// while the request was upstream (#1225, #1227). Counts only. WaitingFor reads only Background; Teammate is
+// carried for the host's own use and never changes a plan.
 type TaskCounts struct{ Background, Teammate int }
 
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
