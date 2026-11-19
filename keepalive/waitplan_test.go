@@ -345,3 +345,31 @@ func TestWaitPlanIncompleteNamesCountAsAToolCall(t *testing.T) {
 		t.Fatalf("pings = %d/%d, want 1", n, fd.n())
 	}
 }
+
+// #1225: the turn that starts a background task ends before the host's stored counts catch up. The
+// host reads the request body at plan time (ObserveTasks), so the plan is base + 3, as the dashboard's
+// waiting_for says.
+func TestWaitPlanBackgroundStartedInThisTurnGetsBackgroundCount(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		key       Key
+		stale, ob [2]int
+		want      int
+	}{
+		{"main, task seen only in the body", sess1, [2]int{0, 0}, [2]int{1, 0}, 5},
+		{"main, plain end of turn", sess1, [2]int{0, 0}, [2]int{0, 0}, 3},
+		{"main, teammate", sess1, [2]int{0, 0}, [2]int{0, 1}, 2},
+		{"subagent keeps its count", Key{Tenant: sess1.Tenant, Session: sess1.Session, Thread: "a:x"}, [2]int{0, 0}, [2]int{1, 0}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, clock := testKeeperWith(t, func(o *Options) {
+				o.OpenTasks = func(string, string, string) (int, int) { return tc.stale[0], tc.stale[1] }
+				o.ObserveTasks = func(Key, bschemas.ModelProvider, []byte) (int, int) { return tc.ob[0], tc.ob[1] }
+			})
+			recordSeq(k, tc.key, planPolicy(), kaBody, clock.now(), toolCall, endTurn)
+			if got := plannedPings(t, k, tc.key); got != tc.want {
+				t.Errorf("planned pings = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

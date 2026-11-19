@@ -377,6 +377,11 @@ type Options struct {
 	// OpenTasks reports a thread's open background-task and teammate-wait counts, for the wait cause
 	// the sweep stores with a held answer (#404, #453). nil: 0, 0.
 	OpenTasks func(tenant, session, thread string) (background, teammate int)
+	// ObserveTasks reads the request body that began the turn and reports the open counts as of that
+	// body (#1225). OpenTasks is as of the last body the host observed, which lags by one request
+	// when the host observes after the response. The turn that starts a background task would then
+	// read as a wait for a person. nil: OpenTasks.
+	ObserveTasks func(key Key, provider bschemas.ModelProvider, body []byte) (background, teammate int)
 	// TerminalTools names the tools whose call ends an agent (#857). A thread whose last response
 	// ends with one is done: it is never pinged. nil: the shipped list. A non-nil
 	// empty list turns the rule off, which is the behavior before #857.
@@ -956,7 +961,7 @@ func (k *Keeper) Record(r Record) {
 	planned := guard && !ttl1h && pol.Idle < 300*time.Second
 	wait := ""
 	if guard {
-		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
+		wait = k.WaitingForBody(r.Key, provider, body, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
 	}
 	if planned {
 		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))

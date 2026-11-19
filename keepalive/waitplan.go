@@ -4,6 +4,8 @@ import (
 	"strings"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/rossoctl/context-guru/internal/waitcause"
 )
 
@@ -125,11 +127,25 @@ func orDefault(v, def int) int {
 // open-task counts (Options.OpenTasks). The open counts are as of the last request the host's
 // tracker observed, which can lag by one request: a stale count reads as "a person", the cheaper plan.
 func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool) string {
+	return k.waitingFor(key, "", nil, names, incomplete, stopReason, usageOK)
+}
+
+// WaitingForBody is WaitingFor for a response whose request body is at hand. When the host supplies
+// Options.ObserveTasks, the open counts are those of that body, so the turn that starts a background
+// task already counts it (#1225). The dashboard reads the same body for its waiting_for column.
+func (k *Keeper) WaitingForBody(key Key, provider bschemas.ModelProvider, body []byte, names []string, incomplete bool, stopReason string, usageOK bool) string {
+	return k.waitingFor(key, provider, body, names, incomplete, stopReason, usageOK)
+}
+
+func (k *Keeper) waitingFor(key Key, provider bschemas.ModelProvider, body []byte, names []string, incomplete bool, stopReason string, usageOK bool) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
 	}
 	bg, tm := 0, 0
-	if k.o.OpenTasks != nil {
+	switch {
+	case k.o.ObserveTasks != nil && body != nil:
+		bg, tm = k.o.ObserveTasks(key, provider, body)
+	case k.o.OpenTasks != nil:
 		bg, tm = k.o.OpenTasks(key.Tenant, key.Session, key.Thread)
 	}
 	w, _ := waitcause.ClassifyWaitingForTerminal(terminalFor(k.o.TerminalTools, incomplete),
