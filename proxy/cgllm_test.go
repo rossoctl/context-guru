@@ -23,9 +23,9 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // fakeCheapModel is an Anthropic-dialect endpoint for the COMPACTION model: it returns a

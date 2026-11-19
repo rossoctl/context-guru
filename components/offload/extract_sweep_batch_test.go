@@ -17,9 +17,9 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Tests for BATCHING (#132): a long list of outputs is asked in balanced batches, in sequence, merged into

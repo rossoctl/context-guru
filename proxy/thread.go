@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // agentIDHeader is Claude Code's subagent id. Seen on the wire with Claude Code 2.1.294 through a
@@ -14,7 +14,7 @@ import (
 // -request-class) were NOT sent in that capture, so nothing here depends on them.
 const agentIDHeader = "x-claude-code-agent-id"
 
-// threadFor finds the session thread of one request (see internal/thread): the agent's header
+// threadFor finds the session thread of one request (see package thread): the agent's header
 // when it names one, prefix continuity otherwise, and the session itself as the last resort.
 //
 // body is the request as the agent sent it, before the pipeline ran.

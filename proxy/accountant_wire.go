@@ -10,8 +10,8 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )

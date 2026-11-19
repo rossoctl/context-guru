@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Client lifecycle signals for the keep-alive.

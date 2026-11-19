@@ -43,7 +43,6 @@ import (
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
@@ -52,6 +51,7 @@ import (
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 	"github.com/rossoctl/context-guru/thinkcount"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -356,7 +356,7 @@ type Handler struct {
 	keeper *keeper
 	// threads tells the threads of one session apart (main agent, subagents, forks), so the
 	// keeper and the dashboard's miss attribution can key on session + thread. See
-	// internal/thread and threadFor.
+	// package thread and threadFor.
 	threads *thread.Tracker
 	// waits records, per thread, why it waits and why it woke up (issue #424's RECORD half).
 	// It never changes compaction behaviour. Its counts feed the keep-alive's wait cause, and when the
@@ -1294,7 +1294,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			h.refuseRoute(w, r, tn, err)
 			return
 		}
-		// Not unconditional: only the agent's OWN compaction request (isAgentCompaction,
+		// Not unconditional: only the agent's OWN compaction request (thread.IsAgentCompaction,
 		// checked inside readGatedBody) may read past maxRequestBytes here — everything
 		// else still gets refused at the default ceiling exactly as before.
 		body, ok := readGatedBody(w, r, false)
@@ -1328,7 +1328,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// C beside the window, resolved once for both the enforced and the observed path.
 		cpoint := h.compactionPointFor(r, body, window)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
-		// The agent's OWN compaction request (isAgentCompaction) is NOT bypassed. Only the
+		// The agent's OWN compaction request (thread.IsAgentCompaction) is NOT bypassed. Only the
 		// header above bypasses. The request goes through the normal pipeline, like any other.
 		//
 		// Why: a bypass forwards the ORIGINAL history, but the provider cache holds the history
@@ -1350,7 +1350,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// compactions pass through. The counter is a report with Skipped set because the
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
-		agentCompaction := isAgentCompaction(body)
+		agentCompaction := thread.IsAgentCompaction(body)
 		if !bypassed && agentCompaction {
 			gate := "detected"
 			if int64(len(body)) > maxRequestBytes {
@@ -1739,7 +1739,7 @@ var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
-// request (isAgentCompaction — see agentcompaction.go; it goes through the pipeline like any
+// request (thread.IsAgentCompaction — see agentcompaction.go; it goes through the pipeline like any
 // other request) and the standalone /compact endpoint, whose whole job is to
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
@@ -1777,7 +1777,7 @@ func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride
 		refuseTooLarge(w, maxCompactionRequestBytes)
 		return nil, false
 	}
-	if !unconditionalOverride && !isAgentCompaction(body) {
+	if !unconditionalOverride && !thread.IsAgentCompaction(body) {
 		refuseTooLarge(w, maxRequestBytes)
 		return nil, false
 	}

@@ -1,10 +1,10 @@
 package keepalive
 
 import (
-	"strings"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // The per-wait ping plan (#858). The ping count is chosen when a turn ends, from what the thread
@@ -41,8 +41,9 @@ const (
 	MaxWaitPings = 11
 )
 
-// IsSubagentThread reports whether a thread id names a subagent. The main thread is "".
-func IsSubagentThread(threadID string) bool { return strings.HasPrefix(threadID, "a:") }
+// IsSubagentThread reports whether a thread id names a subagent. The main thread is "". It is
+// thread.IsAgentThread, so the keeper and the resolver share one rule.
+func IsSubagentThread(threadID string) bool { return thread.IsAgentThread(threadID) }
 
 // WindowsApply reports whether a manager strategy's time windows apply to a thread that waits for
 // cause. Only a wait for a person follows working hours. A tool, a background task, a teammate and

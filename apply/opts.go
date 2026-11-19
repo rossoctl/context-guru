@@ -5,8 +5,8 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Opts is BodyOpts' input: everything the positional BodyFull takes, plus the operating
@@ -24,9 +24,37 @@ type Opts struct {
 	// Session is the host-supplied session id ("" => content hash).
 	Session string
 	// ThreadOf, when set, finds the thread of the session this request belongs to (see
-	// internal/thread). It is called once, as soon as the session id is resolved and BEFORE the
+	// package thread). It is called once, as soon as the session id is resolved and BEFORE the
 	// pipeline runs, so components see the thread on Ctx.Thread; the result rides on
 	// Trace.Thread. nil leaves every request on the primary thread.
+	//
+	// A host builds it the way the proxy does (proxy/thread.go threadFor). Keep one
+	// thread.Tracker per process, because it holds per-session state:
+	//
+	//	orig := body // the request as the agent sent it, saved before the pipeline runs
+	//	agentID := strings.TrimSpace(req.Header.Get("x-claude-code-agent-id"))
+	//	if !thread.ValidHeaderID(agentID) {
+	//		agentID = ""
+	//	}
+	//	opts.ThreadOf = func(session string) thread.Result {
+	//		return tracker.Resolve(tenant+"\x00"+session, agentID, orig, thread.IsAgentCompaction(orig))
+	//	}
+	//
+	// If Trace.ThreadResolved is false after the call (observe mode, bypass, no message list),
+	// apply returned before it called ThreadOf. Call the same function yourself with
+	// Trace.Session, so the finish side below still has a thread.
+	//
+	// Host contract. Once ThreadOf is set, components key their state by
+	// thread.Key(session, threadID). Make the finish-side calls with the same thread
+	// (threadID = Trace.Thread.ID, session = Trace.Session), or state is written under one key
+	// and read under another:
+	//
+	//   - RecordBilledInputThread(store, session, threadID, billed), next to RecordBilledInput.
+	//   - offload.ResolveDeferredCacheAwareSummary(session, threadID).
+	//   - offload.ResolveWarmQuestion(session, threadID, forwarded, cacheRead).
+	//   - offload.ClearStaleKeepAliveCandidate(thread.Key(session, threadID), startedAt).
+	//   - every keepalive.Keeper call (ArriveAt, Depart, WaitingFor, RaiseWaitPlan and the
+	//     others) with keepalive.Key{Tenant: tenant, Session: session, Thread: threadID}.
 	ThreadOf func(session string) thread.Result
 	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty
 	// in single-tenant use, which leaves session keys byte-identical to before this

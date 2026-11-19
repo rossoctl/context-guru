@@ -13,9 +13,9 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Tests for the COLD APPLY (#404 PR C): C1, C3, C4, H1 after an apply, and the quality signals.
