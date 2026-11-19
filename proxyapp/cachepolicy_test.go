@@ -35,3 +35,19 @@ func TestCachePolicyActivePathCarriesItsResolvedFields(t *testing.T) {
 		t.Errorf("active policy lost a resolved default: %+v", p)
 	}
 }
+
+// #1243: the 1-hour-main-agent strategy reaches the proxy's policy with its size gate (the strategy's
+// 50,000 tokens = 200,000 bytes), and head_ttl_1h stays off.
+func TestCachePolicyCarriesTheMainAgentRelabel(t *testing.T) {
+	c, err := config.LoadBytes([]byte("cache:\n  strategy: 1-hour-main-agent\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cachePolicy(c.Cache)
+	if !p.MainAgentTTL1h || p.HeadTTL1h || !p.KeepAlive {
+		t.Fatalf("policy wrong: main=%v head=%v keepalive=%v", p.MainAgentTTL1h, p.HeadTTL1h, p.KeepAlive)
+	}
+	if p.HeadTTLMinBytes != 200000 {
+		t.Errorf("gate = %d bytes, want 200000", p.HeadTTLMinBytes)
+	}
+}

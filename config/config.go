@@ -89,7 +89,7 @@ type ExpandConfig struct {
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
 	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
-	// 1-hour-head, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// 1-hour-head, 1-hour-main-agent, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
 	// no strategy, and the file behaves as it always did. An unknown name is a config error.
 	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
@@ -217,17 +217,23 @@ type CacheConfig struct {
 	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
 	// +$60.56 at f=0.30.
 	//
-	// It is still off, because on the models that carry this service's spend the tier does not
-	// arrive. Measured live, one request each with the head labelled 1h:
-	// aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of 36,574 written),
-	// aws/claude-sonnet-5 was silently downgraded (0 of 48,212, and an otherwise normal 200).
-	// So the ttl field DOES reach the provider — Haiku honouring it proves that — and it is
-	// Bedrock's model coverage that refuses: the Claude 4.5 family, not the Opus 5 / 4.8 /
-	// Sonnet 5 this service runs. Zero 1h writes appear in 19,805 production requests, which is
-	// the same fact from the billing side. So this ships implemented, verifiable and off:
-	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
-	// zero on a model the honest projection for it is $0.
+	// It is off by default, and it protects only the head. Measured live, one request each with
+	// the head labelled 1h: aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of
+	// 36,574 written). An early reading said aws/claude-sonnet-5 was "silently downgraded" (0 of
+	// 48,212); that reading was not proven, because a head that is a cache READ writes nothing and
+	// shows 0 too (#1243). Direct requests on 2026-11-19 showed the gateway granting 1h on Haiku
+	// 5.5, Opus 5.5 and Opus 5.5 with 1M context. Usage.CacheWrite1h on a request that WROTE the
+	// entry is what says whether the tier arrived. The head is a small part of a Claude Code prompt
+	// and other sessions keep it warm, so for long sessions see MainAgentTTL1h.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
+	// MainAgentTTL1h asks for the ONE-HOUR tier on EVERY existing cache breakpoint (tools, system
+	// AND messages) of a MAIN-thread request whose body is at least the size gate (head_ttl_min_*).
+	// It adds no breakpoint. Subagent requests are not changed. It does not touch the keep-alive
+	// keys: with `keepalive` on, the session is a 1-hour session and `auto` sends its single ping
+	// at 59 minutes, while the subagents keep the 5-minute pings. The cost: every main-thread turn
+	// writes its new history at 2x instead of 1.25x. It pays when a gap longer than 5 minutes would
+	// otherwise rebuild the whole history. Set by the `1-hour-main-agent` strategy (#1243).
+	MainAgentTTL1h bool `yaml:"main_agent_ttl_1h"`
 	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
 	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
 	// (200,000). When both are set, this key wins.

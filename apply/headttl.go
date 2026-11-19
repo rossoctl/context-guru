@@ -1,10 +1,12 @@
 package apply
 
 import (
+	"hash/fnv"
 	"log/slog"
 	"strconv"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -38,19 +40,24 @@ import (
 //     provider hashes `tools` → `system` → `messages`, so anything in the first two arrays
 //     precedes every message breakpoint. This function only ever writes 1h into the head,
 //     so it cannot produce the illegal order.
-//   - **The 1h tier must actually arrive, and on the models that carry this service's spend it
-//     does not.** Measured live on this gateway, one request each with the head labelled 1h:
+//   - **The 1h tier must actually arrive, and only a request that WRITES the entry can show
+//     it.** Measured live on this gateway, one request each with the head labelled 1h:
 //     `aws/claude-haiku-4-5` came back with `ephemeral_1h_input_tokens: 36,251` of 36,574
-//     written — GRANTED; `aws/claude-sonnet-5` came back with `ephemeral_1h_input_tokens: 0`
-//     and all 48,212 tokens on the 5-minute tier — silently downgraded, with an otherwise
-//     normal 200. So the `ttl` field is NOT stripped in transit (Haiku honouring it proves it
-//     arrives); Bedrock's 1h support simply covers the Claude 4.5 family, and this service's
-//     spend is Opus 5, Opus 4.8, Sonnet 5 and Opus 4.6. Zero 1h writes appear in 19,805
-//     production requests, which is the same fact seen from the billing side.
+//     written — GRANTED. An early reading said `aws/claude-sonnet-5` was "silently
+//     downgraded" (`ephemeral_1h_input_tokens: 0` of 48,212 written). That reading is NOT
+//     proven (#1243): a head that is a cache READ writes nothing, so `cache_write_1h` is 0
+//     whatever the gateway grants. On 2026-11-19 direct requests to the gateway (Haiku 5.5,
+//     Opus 5.5, Opus 5.5 with 1M context) all returned `ephemeral_1h_input_tokens` of 12-15k.
+//     So the `ttl` field reaches the provider and the gateway grants it.
 //
-//     Hence: implemented, verifiable, and off. `Usage.CacheWrite1h` is what says whether a
-//     request that asked for 1h got it, and while that is zero on a model the honest
-//     projection for this policy on that model is $0.
+//     `Usage.CacheWrite1h` on a request that wrote the entry is what says whether a request
+//     that asked for 1h got it. Do not read a 0 on a request that only read the head as a
+//     downgrade.
+//
+// The head-only shape protects only `tools` and `system`, a small part of a Claude Code prompt
+// that other sessions keep warm anyway. The message history stays on the 5-minute tier. For long
+// sessions with idle gaps use the `1-hour-main-agent` strategy (upgradeMainAgentTTL below), which
+// relabels every existing breakpoint, history included, on the main thread only.
 //
 // Fails open: any parse trouble returns the input untouched.
 
@@ -165,4 +172,111 @@ func headPrefixTokens(body []byte) int {
 		n += tokens.Count(blocks[i].Get("text").String())
 	}
 	return n
+}
+
+// upgradeMainAgentTTL re-labels EVERY existing cache breakpoint of the request as a one-hour
+// entry: tools, system and messages. It is the `1-hour-main-agent` strategy's rewrite (#1243). The
+// caller decides that the request is on the main thread; this function only does the relabel.
+//
+// The same three constraints as upgradeHeadTTL hold, and each is why this is safe:
+//
+//   - It adds no breakpoint. It only sets `ttl` on a mark the client already sent, so the cap of
+//     four is not touched.
+//   - The order rule (1h entries before 5m ones) holds because NO breakpoint is left at 5m: all
+//     of them are 1h.
+//   - It never strips an existing ttl and sets "1h" on every mark, so a second call changes
+//     nothing (idempotent).
+//
+// A request with no breakpoint is returned untouched. It fails open: any edit error returns the
+// input body whole, never half-labelled.
+//
+// minBytes is the same size gate as the head policy: the body size in bytes, 0 = never.
+func upgradeMainAgentTTL(body []byte, provider bschemas.ModelProvider, minBytes int) (out []byte, upgraded bool) {
+	if !explicitBreakpointProvider(provider) || minBytes <= 0 || len(body) < minBytes {
+		return body, false
+	}
+	next := body
+	// relabel sets ttl on the mark at path when it is an object that does not ask 1h yet. A mark
+	// that already asks 1h counts as upgraded: the request is a 1h request all the same.
+	relabel := func(path string, cc gjson.Result) bool {
+		if !cc.IsObject() {
+			return true
+		}
+		upgraded = true
+		if cc.Get("ttl").String() == "1h" {
+			return true
+		}
+		set, err := sjson.SetBytes(next, path+".ttl", "1h")
+		if err != nil {
+			return false
+		}
+		next = set
+		return true
+	}
+	for _, arr := range headTTLPaths {
+		res := gjson.GetBytes(next, arr)
+		if !res.IsArray() {
+			continue
+		}
+		for i, el := range res.Array() {
+			if !relabel(arr+"."+strconv.Itoa(i)+".cache_control", el.Get("cache_control")) {
+				return body, false
+			}
+		}
+	}
+	msgs := gjson.GetBytes(next, "messages")
+	if msgs.IsArray() {
+		for i, m := range msgs.Array() {
+			base := "messages." + strconv.Itoa(i)
+			if !relabel(base+".cache_control", m.Get("cache_control")) {
+				return body, false
+			}
+			content := m.Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			for j, blk := range content.Array() {
+				if !relabel(base+".content."+strconv.Itoa(j)+".cache_control", blk.Get("cache_control")) {
+					return body, false
+				}
+			}
+		}
+	}
+	if !upgraded {
+		return body, false
+	}
+	return next, true
+}
+
+// mainAgentTTLOps reports the relabel of upgradeMainAgentTTL on the MESSAGES section, one rewrite
+// per message whose bytes changed. before and after are the whole bodies. The tools and system
+// sections are reported by the proxy, which diffs them (proxy/accountant_envelope.go); messages
+// cannot be diffed there, because a pipeline component may have edited the same message.
+//
+// The ChangeID starts with "headttl:", the prefix the accountant library finds a held-longer
+// entry by (design section 4.4): without it the library books no rescue for a gap past 5 minutes.
+// It comes from the message as it was before the relabel, so the same message has the same
+// ChangeID on every request.
+func mainAgentTTLOps(before, after []byte) []accountant.Operation {
+	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
+	if len(b) != len(a) {
+		return nil
+	}
+	var ops []accountant.Operation
+	for i := range b {
+		if b[i].Raw == a[i].Raw {
+			continue
+		}
+		h := fnv.New64a()
+		h.Write([]byte(b[i].Raw))
+		ops = append(ops, accountant.Operation{
+			Kind:       accountant.KindRewrite,
+			Operator:   "context-guru.headttl",
+			At:         accountant.Position{Section: accountant.SectionMessages, Index: i},
+			SizeBefore: accountant.Size{Bytes: len(b[i].Raw)},
+			SizeAfter:  accountant.Size{Bytes: len(a[i].Raw)},
+			ChangeID:   "headttl:" + strconv.FormatUint(h.Sum64(), 16),
+		})
+	}
+	return ops
 }

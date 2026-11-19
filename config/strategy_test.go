@@ -124,7 +124,7 @@ func TestStrategiesJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Default != "auto" || len(v.Strategies) != 6 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
+	if v.Default != "auto" || len(v.Strategies) != 7 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
 		t.Fatalf("bad json: %s", b)
 	}
 }
@@ -141,7 +141,7 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 6 {
+	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 7 {
 		t.Fatalf("bad json: %s", b)
 	}
 	for _, s := range v.Strategies {
@@ -212,8 +212,43 @@ func TestClaudeCodeOfferIsUnchangedByTheOpenAITags(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head"}
+	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head", "1-hour-main-agent"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Claude Code would offer %v, want %v", got, want)
+	}
+}
+
+// #1243: 1-hour-main-agent keeps auto's keep-alive keys and adds the main-agent 1h relabel with the
+// 50k-token gate. 1-hour-head is untouched: it still turns the pings off.
+func TestOneHourMainAgentStrategy(t *testing.T) {
+	c, err := LoadBytes([]byte("cache:\n  strategy: 1-hour-main-agent\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadBytes([]byte("cache:\n  strategy: auto\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Cache.MainAgentTTL1h || c.Cache.HeadTTL1h {
+		t.Fatalf("flags wrong: main_agent_ttl_1h=%v head_ttl_1h=%v", c.Cache.MainAgentTTL1h, c.Cache.HeadTTL1h)
+	}
+	if c.Cache.HeadTTLMinTokens != 50000 {
+		t.Errorf("size gate = %d tokens, want 50000", c.Cache.HeadTTLMinTokens)
+	}
+	// Same keep-alive keys as auto.
+	norm := func(x CacheConfig) CacheConfig {
+		x.Strategy, x.MainAgentTTL1h, x.HeadTTLMinBytes, x.HeadTTLMinTokens = "", false, 0, 0
+		return x
+	}
+	if !reflect.DeepEqual(norm(c.Cache), norm(a.Cache)) {
+		t.Errorf("keep-alive keys differ from auto:\n%+v\n%+v", norm(c.Cache), norm(a.Cache))
+	}
+	h, _ := LoadBytes([]byte("cache:\n  strategy: 1-hour-head\n"))
+	if h.Cache.KeepAlive || h.Cache.MainAgentTTL1h {
+		t.Error("1-hour-head changed: it must keep the pings off and not relabel the history")
+	}
+	row, _ := LookupStrategy("1-hour-head")
+	if strings.Contains(row.Desc, "SILENTLY DOWNGRADED") || !strings.Contains(row.Desc, "history") {
+		t.Errorf("1-hour-head description is wrong: %s", row.Desc)
 	}
 }

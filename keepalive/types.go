@@ -152,6 +152,10 @@ type Policy struct {
 	// it on the request body size in bytes. Passed through to apply.Opts — see apply/headttl.go.
 	HeadTTL1h       bool
 	HeadTTLMinBytes int
+	// MainAgentTTL1h asks for the one-hour tier on every existing breakpoint of a main-thread
+	// request (tools, system and messages), gated by the same HeadTTLMinBytes. Subagent requests
+	// are not changed. Passed through to apply.Opts (#1243).
+	MainAgentTTL1h bool
 	// HeadTTLMinTokens is DEPRECATED: the old name of HeadTTLMinBytes, kept so a host that still
 	// sets it builds and behaves as before. Read the gate through HeadTTLGateBytes.
 	HeadTTLMinTokens int

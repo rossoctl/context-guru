@@ -40,8 +40,10 @@ type Usage struct {
 	// tier for that model downgrades it silently: a normal 200 with a normal-looking
 	// `cache_creation_input_tokens` and nothing to distinguish it from a granted 1h entry.
 	// Measured live on this gateway: aws/claude-haiku-4-5 returned 36,251 of 36,574 written
-	// tokens at the 1h tier, aws/claude-sonnet-5 returned 0 of 48,212. Absent-or-zero here,
-	// with a 1h breakpoint on the wire, means the request was downgraded.
+	// tokens at the 1h tier. Absent-or-zero here with a 1h breakpoint on the wire means EITHER a
+	// downgrade OR that the request wrote nothing at that breakpoint (a cache read bills no
+	// write): the head of a warm session is always a read. Do not read zero as a downgrade
+	// without a request that wrote the entry (#1243).
 	CacheWrite1h int64
 	// StopReason is the provider's terminal reason for this response, normalized across
 	// dialects (see responseStopReason). It rides on Usage because it comes off the same

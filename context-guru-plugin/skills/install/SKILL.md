@@ -34,7 +34,7 @@ in `install.sh --route`, as line order rather than a paragraph somebody can read
 - `/context-guru:uninstall` reverses it. If routing itself breaks, no skill can run — so the install
   drops a plain-sh escape hatch outside the plugin, and step 4 tells them where.
 
-If `cache_strategy` is `auto`, `1-ping` or `2-ping` (the default is `auto`), one more clause: keep-alive is on, so it spends a little
+If `cache_strategy` is `auto`, `1-ping`, `2-ping` or `1-hour-main-agent` (the default is `auto`), one more clause: keep-alive is on, so it spends a little
 of their own quota on idle turns to hold the cache warm, and `/context-guru:cache-strategy-picker`
 names the alternatives and what each costs. Do not recommend one — they differ in what they spend, and
 that is the user's call. No status line is written: the Context Guru band above the prompt shows the same figures. Pass `--statusline` only when the user asks for the terminal status line too (it goes in the same file routing just used; `/context-guru:statusline off` undoes it).

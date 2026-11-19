@@ -84,6 +84,15 @@ type Opts struct {
 	// cannot affect anything today because this is off, but it is the one way this field
 	// touches shared behaviour.
 	HeadTTL1h bool
+	// MainAgentTTL1h asks for the one-hour tier on EVERY existing cache breakpoint (tools, system
+	// and messages) of a request on the MAIN thread, gated by HeadTTLMinBytes (the same size gate).
+	// It adds no breakpoint. See upgradeMainAgentTTL (#1243). It needs IsSubagent: a host that
+	// sets this and not IsSubagent asks for nothing, so an unknown thread never gets the premium.
+	MainAgentTTL1h bool
+	// IsSubagent says whether a thread id names a subagent. The host passes
+	// keepalive.IsSubagentThread: apply cannot import keepalive (keepalive imports apply), and a
+	// second detector here would drift from the one the keeper uses.
+	IsSubagent func(threadID string) bool
 	// HeadTTLMinBytes is the size gate on HeadTTL1h, in bytes of the request body. 0 disables the
 	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
 	// configuration asks for nothing instead of asking on every request.

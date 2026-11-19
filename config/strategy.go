@@ -13,7 +13,7 @@ import (
 // keys. The Claude Code plugin and the OpenCode plugin used to keep their own copy of this table;
 // they read it from `context-guru-proxy strategies --json` instead.
 //
-// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 30-min-ping (the Codex name).
+// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 1-hour-main-agent, 30-min-ping (the Codex name).
 //
 // RULES
 //   - `cache.strategy: <name>` fills the keys of the table row.
@@ -121,10 +121,27 @@ var Strategies = []Strategy{
 	{
 		Name:      "1-hour-head",
 		Spends:    false,
-		Desc:      "asks for the 1-hour tier on the tools/system breakpoints, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero 1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both of those measurements were on prefixes UNDER the 50k gate this ships with.",
+		Desc:      "asks for the 1-hour tier on the tools/system breakpoints ONLY, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). It covers only tools and system, a small part of a long prompt that other sessions often keep warm anyway. The message history stays on the 5-minute cache, and this strategy turns the pings off, so the history goes cold after 5 minutes of idle time and the next turn rebuilds it. For long sessions with idle gaps see 1-hour-main-agent. Measured GRANTED on Haiku 4.5; an early reading of 'silently downgraded on Sonnet 5' was a misread (a head that is only read shows zero 1h writes), so check Usage.CacheWrite1h on a request that WROTE the entry before believing either way.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"head_ttl_1h", true},
+			{"head_ttl_min_tokens", 50000},
+		},
+	},
+	{
+		Name:      "1-hour-main-agent",
+		Spends:    true,
+		Desc:      "asks for the 1-hour tier on EVERY existing cache breakpoint (tools, system and message history) of the MAIN agent's requests with a >=50k-token prefix. Adds no breakpoint. Subagent requests are not changed: they keep the 5-minute cache. Idle pings stay on, as in auto: a 1-hour session gets one ping at 59 minutes, and subagents keep the 5-minute pings. COST: every main-thread turn writes its new history at 2x instead of 1.25x; it pays when a gap over 5 minutes would otherwise rebuild a large history. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic"},
+		Cache: []StrategyKey{
+			{"keepalive", true},
+			{"keepalive_idle_seconds", 240},
+			{"keepalive_max_pings", 2},
+			{"keepalive_max_usd_per_ping", 0.5},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
+			{"keepalive_max_pings_1h", 1},
+			{"main_agent_ttl_1h", true},
 			{"head_ttl_min_tokens", 50000},
 		},
 	},

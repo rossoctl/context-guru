@@ -76,6 +76,9 @@ forTests.writesPrevented = writesPrevented;
 function strategyName(c) {
   if (!c) return '';
   if (!c.keepalive) return c.head_ttl_1h ? '1-hour-head' : 'none';
+  // 1-hour-main-agent is auto's keep-alive keys plus the main-agent relabel (#1243).
+  if (c.main_agent_ttl_1h && (c.keepalive_idle_seconds || 240) === 240 && (c.keepalive_max_pings || 2) === 2 &&
+      (c.keepalive_max_pings_1h || 1) === 1) return '1-hour-main-agent';
   if ((c.keepalive_idle_seconds || 240) !== 240) return '';
   const k = c.keepalive_max_pings || 2, k1h = c.keepalive_max_pings_1h || 1;
   if (k === 1 && k1h === 1) return '1-ping';

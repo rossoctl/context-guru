@@ -35,7 +35,7 @@ State on 2026-11-10: Claude Code plugin 0.6.7, Pi package as merged in #977, #98
 | **Session id** | Claude Code sends it | The extension adds the `x-context-guru-session` header |
 | **Lifecycle signals** | Session start, session end, notification | Session end and compaction |
 | **Client's own cache warming** | Not applicable | Stopped for routed models, so only the proxy pings |
-| **Cache strategies** | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head` | `none`, `auto`, `1-ping`, `2-ping` |
+| **Cache strategies** | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-main-agent` | `none`, `auto`, `1-ping`, `2-ping` |
 | **Commands** | 19 skills: install, status, preset and strategy pickers, insights, save-more, remove-mcp-and-skills, cache-campaign, doctor, session, update, uninstall, terminal views | One command, `/context-guru`, with `setup`, `status`, `preset`, `cache-strategy`, `update`, `uninstall` |
 | **What you see in a session** | The band above the prompt and a pane: next-message price, Ping, savings, sub-agent caches, tips. An optional status line | Nothing in the session. `status` prints a text summary and the dashboard link |
 | **Manual ping, beep, update check at session start** | Yes | No |
