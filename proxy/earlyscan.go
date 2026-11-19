@@ -41,11 +41,18 @@ type scanStats struct {
 }
 
 // startEarlyScan starts the scan goroutine for body and returns at once. ctx should end with the request.
-// gate, when non-nil, is called first on the goroutine (a test hook that holds the scan).
-func startEarlyScan(parent context.Context, provider bschemas.ModelProvider, body []byte, gate func(context.Context)) *earlyScan {
+// gate, when non-nil, is called first on the goroutine (a test hook that holds the scan). after, when
+// non-nil, is called last, once done is closed (a test hook that tells the scan has finished). Neither
+// changes what the scan does.
+func startEarlyScan(parent context.Context, provider bschemas.ModelProvider, body []byte, gate func(context.Context), after func()) *earlyScan {
 	ctx, cancel := context.WithCancel(parent)
 	s := &earlyScan{done: make(chan struct{}), cancel: cancel}
 	go func() {
+		defer func() {
+			if after != nil {
+				after() // runs after close(s.done): the defers run last to first
+			}
+		}()
 		defer close(s.done)
 		defer func() { _ = recover() }() // fail open: res stays nil
 		if gate != nil {

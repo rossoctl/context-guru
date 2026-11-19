@@ -32,10 +32,19 @@ const bgStartBody = `{"model":"claude-sonnet-5-5","max_tokens":100,"messages":[
 
 // scanUpstream answers request 1 with a tool call and every later one with end_turn, with a 30k prefix
 // (29,000 read + 1,000 written): under the person floor (80k), over the tool-wait floor (20k).
-func scanUpstream(t *testing.T, hits *atomic.Int64) *httptest.Server {
+func scanUpstream(t *testing.T, hits *atomic.Int64, scanned <-chan struct{}) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
+		if scanned != nil && hits.Load() < 2 {
+			// The answer waits until this request's scan has finished, so the keeper finds it ready: no race
+			// between the scan and the response. Pings (hits 3 and later) do not start a scan.
+			select {
+			case <-scanned:
+			case <-time.After(30 * time.Second):
+				t.Error("the early scan never finished")
+			}
+		}
 		n := hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		content, stop := `[{"type":"text","text":"ok"}]`, "end_turn"
@@ -96,9 +105,11 @@ func scanPost(t *testing.T, srv *httptest.Server) {
 // ((5+1) x Idle) retires the entry. No late call, no pending hold.
 func TestEarlyScanPlansABackgroundTurnAtResponseTime(t *testing.T) {
 	var hits atomic.Int64
-	up := scanUpstream(t, &hits)
+	scanned := make(chan struct{}, 16)
+	up := scanUpstream(t, &hits, scanned)
 	defer up.Close()
 	h := scanHandler(t, up.URL)
+	h.scanDone = func() { scanned <- struct{}{} }
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -129,7 +140,7 @@ func TestEarlyScanPlansABackgroundTurnAtResponseTime(t *testing.T) {
 // plan is today's (a 30k person wait is not held), and the writer scans for itself.
 func TestEarlyScanNotReadyDoesNotHoldTheResponse(t *testing.T) {
 	var hits atomic.Int64
-	up := scanUpstream(t, &hits)
+	up := scanUpstream(t, &hits, nil)
 	defer up.Close()
 	h := scanHandler(t, up.URL)
 	release := make(chan struct{})
@@ -163,7 +174,7 @@ func TestEarlyScanNotReadyDoesNotHoldTheResponse(t *testing.T) {
 func TestEarlyScanEndsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	release := make(chan struct{})
-	s := startEarlyScan(ctx, bschemas.Anthropic, []byte(bgStartBody), func(c context.Context) { <-release })
+	s := startEarlyScan(ctx, bschemas.Anthropic, []byte(bgStartBody), func(c context.Context) { <-release }, nil)
 	if s.ready() {
 		t.Fatal("ready before the hook let it go")
 	}
@@ -181,7 +192,7 @@ func TestEarlyScanEndsWithItsContext(t *testing.T) {
 
 // A finished result survives stop(): the writer reads it after the handler ended.
 func TestEarlyScanResultSurvivesStop(t *testing.T) {
-	s := startEarlyScan(context.Background(), bschemas.Anthropic, []byte(bgStartBody), nil)
+	s := startEarlyScan(context.Background(), bschemas.Anthropic, []byte(bgStartBody), nil, nil)
 	testutil.WaitFor(t, "the scan finishes", s.ready)
 	s.stop()
 	var st scanStats
@@ -194,7 +205,7 @@ func TestEarlyScanResultSurvivesStop(t *testing.T) {
 // Over the work bound, the scan says unknown and the plan is today's.
 func TestEarlyScanOverTheWorkBoundIsUnknown(t *testing.T) {
 	big := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("x", 9<<20) + `"}]}`)
-	s := startEarlyScan(context.Background(), bschemas.Anthropic, big, nil)
+	s := startEarlyScan(context.Background(), bschemas.Anthropic, big, nil, nil)
 	testutil.WaitFor(t, "the scan finishes", s.ready)
 	var st scanStats
 	if s.openTasks(&st) != nil || st.unknown.Load() != 1 {
@@ -204,7 +215,7 @@ func TestEarlyScanOverTheWorkBoundIsUnknown(t *testing.T) {
 
 // A panic in the scan goroutine (here in the hook) fails open: done closes, no result, no crash.
 func TestEarlyScanPanicFailsOpen(t *testing.T) {
-	s := startEarlyScan(context.Background(), bschemas.Anthropic, []byte(bgStartBody), func(context.Context) { panic("boom") })
+	s := startEarlyScan(context.Background(), bschemas.Anthropic, []byte(bgStartBody), func(context.Context) { panic("boom") }, nil)
 	testutil.WaitFor(t, "the scan goroutine ends", s.ready)
 	if s.result() != nil {
 		t.Fatal("a panicking scan returned a result")

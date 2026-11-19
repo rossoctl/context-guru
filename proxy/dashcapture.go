@@ -1138,7 +1138,7 @@ func (c *capture) startEarlyScan(h *Handler, ctx context.Context, provider bsche
 		return
 	}
 	c.scanStat = &h.scan
-	c.early = startEarlyScan(ctx, provider, body, h.scanGate)
+	c.early = startEarlyScan(ctx, provider, body, h.scanGate, h.scanDone)
 }
 
 // stopEarlyScan ends the scan's work in progress when the request is over. Nil-safe.

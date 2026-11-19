@@ -368,9 +368,10 @@ type Handler struct {
 	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().
 	waits *waitcause.Tracker
 	// scan counts the early wait-cause scan's outcomes (earlyscan.go); scanGate is a test hook that holds
-	// the scan goroutine before it starts. Neither affects behaviour.
+	// the scan goroutine before it starts, and scanDone one that tells it has finished. Neither affects behaviour.
 	scan     scanStats
 	scanGate func(context.Context)
+	scanDone func()
 	// promCache memoises the Prometheus body for a scrape interval; the per-tenant
 	// series cost a SQL query and Grafana scrapes every few seconds.
 	promCache promCache
