@@ -46,7 +46,9 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 	}
 	unlock := func() {
 		if lock != nil {
-			lock.ExecContext(context.Background(), "ROLLBACK")
+			if _, err := lock.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+				t.Logf("release the writer lock: %v (later steps may wait on busy_timeout)", err)
+			}
 			lock.Close()
 			lock = nil
 		}
@@ -67,8 +69,10 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 		t.Fatal("Record blocked on a full queue; capture must never block a request")
 	}
 
-	// Release the writer before reading Stats: Stats reads the database too, and would wait on the
-	// lock. The burst is over, so Captured and Dropped no longer change.
+	// Release the writer before reading Stats. The read itself would not wait (WAL), but Stats can
+	// take a new connection from the pool, and a new connection first runs the DSN's
+	// journal_mode(WAL) pragma, which needs a lock: under the lock that took the full 5 s of
+	// busy_timeout (measured). The burst is over, so Captured and Dropped no longer change.
 	unlock()
 	s := r.Stats()
 	if s.Captured != n {
@@ -91,10 +95,11 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 
 	// Close: every captured event is now written, counted as dropped, or counted as a write error.
 	// None is lost without a count.
-	if err := r.Close(); err != nil {
+	err = r.Close()
+	closed = true // before the check: a second Close would panic on close(r.done) and hide err
+	if err != nil {
 		t.Fatal(err)
 	}
-	closed = true
 	if s := r.Stats(); s.Written+s.Dropped+s.Errors != s.Captured {
 		t.Errorf("written %d + dropped %d + errors %d != captured %d: an event was lost without a count",
 			s.Written, s.Dropped, s.Errors, s.Captured)
