@@ -162,3 +162,32 @@ test("update installs the latest release over a too-old managed binary that has 
     restore()
   }
 })
+
+// A binary that does not know --version may start serving instead of answering. The update check must not wait for it.
+test("the update check stops a binary that never answers --version", async () => {
+  const directory = "/tmp/context-guru-versions-hung"
+  const state = stateDirectory(directory)
+  const restore = isolatePath()
+  const { server, url } = await releaseServer()
+  process.env.CONTEXT_GURU_RELEASES_URL = url
+  const oldDirectory = mkdtempSync(join(tmpdir(), "context-guru-hung-"))
+  const old = join(oldDirectory, "context-guru-proxy")
+  writeFileSync(old, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'context-guru-proxy 0.7.0 (commit old)'; exit 0; fi\nexit 2\n", { mode: 0o755 })
+  try {
+    const binary = placeManaged(state, old)
+    // The refused start writes the command scripts. Then the binary turns into one that hangs.
+    await (await plugin.server(context(directory))).config(anthropic())
+    writeFileSync(binary, "#!/bin/sh\nexec sleep 60\n", { mode: 0o755 })
+
+    const started = Date.now()
+    const check = await run(join(state, "context-guru-update"))
+
+    assert.ok(Date.now() - started < 15000, `the check took ${Date.now() - started} ms`)
+    assert.equal(check.status, 0, check.out)
+    assert.match(check.out, /^latest=v0\.7\.3$/m)
+    assert.match(check.out, /^result=available$/m)
+  } finally {
+    server.close()
+    restore()
+  }
+})
