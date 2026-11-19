@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/tooldefer"
 )
@@ -237,5 +239,117 @@ func TestBypassedRequestStoresNoFallback(t *testing.T) {
 	}
 	if e.AccFallback != "" {
 		t.Fatalf("stored acc_fallback %q on a bypassed request, want none", e.AccFallback)
+	}
+}
+
+// openCodeConversation is shaped like an OpenCode request through the Vercel AI SDK Anthropic provider (OpenCode
+// v1.19.5 provider/transform.ts applyCaching; @ai-sdk/anthropic convert-to-anthropic-prompt.ts): two system blocks
+// with a mark each, a mark on the last block of each of the last two messages, and no mark on a tool declaration.
+func openCodeConversation(turns int) []byte {
+	mark := func() map[string]any { return map[string]any{"type": "ephemeral"} }
+	var tools []any
+	for _, n := range []string{"bash", "read", "edit", "glob", "grep", "task", "todowrite"} {
+		tools = append(tools, map[string]any{"name": n, "description": strings.Repeat("Runs "+n+". ", 30),
+			"input_schema": map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}},
+				"required": []any{"x"}, "additionalProperties": false}})
+	}
+	msgs := []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "fix the test"}}}}
+	for k := 0; k < turns; k++ {
+		id := "toolu_" + string(rune('a'+k))
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "Looking."},
+				map[string]any{"type": "tool_use", "id": id, "name": "bash", "input": map[string]any{"x": "ls"}}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": bigToolOutput()}}})
+	}
+	for _, m := range msgs[max(0, len(msgs)-2):] {
+		c := m.(map[string]any)["content"].([]any)
+		c[len(c)-1].(map[string]any)["cache_control"] = mark()
+	}
+	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64,
+		"system": []any{
+			map[string]any{"type": "text", "text": strings.Repeat("You are opencode. ", 200), "cache_control": mark()},
+			map[string]any{"type": "text", "text": "<env>dir: /x</env>" + strings.Repeat(" rules.", 100), "cache_control": mark()},
+		},
+		"messages": msgs, "tools": tools, "tool_choice": map[string]any{"type": "auto"}})
+	return b
+}
+
+// A session that runs on under another pipeline after a restart. The saved thread state holds the expand
+// declaration that the first pipeline added (a change with no bytes before). The second pipeline does not add it,
+// and the library ends such a change only when the client edits before it. It stayed active, so every later
+// request failed the sum check with ops=-340 (the declaration's size) and bodies=0, and booked no saving (#1169).
+func TestStateOfAnotherPipelineIsNotRestored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	up := billedUpstream(t)
+	defer up.Close()
+	run := func(yaml string, from, to int) []dash.Event {
+		h, rec, tap := accHandlerOpts(t, up.URL, yaml, func(o *Options) { o.AccountantState = path })
+		return postOpenCodeTurns(t, h, rec, tap, from, to)
+	}
+	run("preset: conservative\n", 1, 2)
+	pricedAfterRestart(t, run("preset: off\n", 3, 4))
+}
+
+// The same through an adapt change: the proxy starts with conservative, the adapt apply swaps in off, and
+// the restart runs off from the saved override. The key must name the configuration that runs, not the one
+// the proxy was started with, so the conservative thread state does not come back.
+func TestStateIsNotRestoredAfterAnAdaptChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	override := filepath.Join(t.TempDir(), "d.db.adapt.json")
+	const base = "preset: conservative\n"
+	up := billedUpstream(t)
+	defer up.Close()
+	opts := func(o *Options) {
+		o.AccountantState, o.AdaptOverride, o.BaseConfig = path, override, base
+		o.BuildConfig = func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+			cfg, err := config.LoadBytes(doc)
+			if err != nil {
+				return BuiltConfig{}, err
+			}
+			p, err := cfg.Build(e)
+			return BuiltConfig{Pipe: p, Preset: cfg.Preset}, err
+		}
+	}
+	h, rec, tap := accHandlerOpts(t, up.URL, base, opts)
+	postOpenCodeTurns(t, h, rec, tap, 1, 2) // the expand declaration is an active change now
+	if _, _, err := h.adaptWriteLocal("compaction", "test", func(string) (string, error) { return "preset: off\n", nil }); err != nil {
+		t.Fatal(err)
+	}
+	h.Close() // saves the state and keeps the override for the next start
+	h, rec, tap = accHandlerOpts(t, up.URL, base, opts)
+	if got := strings.Join(h.static.Load().Pipe.Names(), ","); got != "" {
+		t.Fatalf("setup: the restart runs %q, want the override's empty pipeline", got)
+	}
+	pricedAfterRestart(t, postOpenCodeTurns(t, h, rec, tap, 3, 4))
+}
+
+// postOpenCodeTurns sends the OpenCode conversation with from to to tool turns, waits for the rows, closes the
+// handler (which saves the state) and returns the events.
+func postOpenCodeTurns(t *testing.T, h *Handler, rec *dash.Recorder, tap *accTap, from, to int) []dash.Event {
+	t.Helper()
+	for k := from; k <= to; k++ {
+		accPostBody(t, h, "ses_opencode", openCodeConversation(k))
+	}
+	waitForRows(t, rec, int64(to-from+1))
+	h.Close()
+	return tap.all()
+}
+
+// pricedAfterRestart fails when a request after the restart failed a check, or the second one has no
+// accountant result or fell back. The first is held out as a new thread's estimate.
+func pricedAfterRestart(t *testing.T, evs []dash.Event) {
+	t.Helper()
+	for i, e := range evs {
+		if res, ok := e.AccountantResult(); ok {
+			for _, c := range res.Checks {
+				t.Errorf("request %d after the restart: check failed: %s %s", i+1, c.Check, c.Detail)
+			}
+		}
+	}
+	if _, ok := evs[1].AccountantResult(); !ok {
+		t.Errorf("second request after the restart has no accountant result (fallback %q)", evs[1].AccountantFallback())
+	}
+	if fb := evs[1].AccountantFallback(); fb != "" {
+		t.Errorf("second request after the restart fell back: %s", fb)
 	}
 }

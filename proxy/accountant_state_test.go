@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/config"
 )
 
 // twoTurns runs turn 1 (the change is made and reported) on a tracker, saves it, and returns the bodies
@@ -72,6 +75,80 @@ func TestSavingsStateFailsOpen(t *testing.T) {
 	}
 	if newSavingsTracker().restore(path, time.Now()) {
 		t.Error("a corrupt file was restored")
+	}
+}
+
+// A snapshot is restored only by a proxy with the configuration that wrote it (#1169).
+func TestStateRestoresOnlyUnderTheSameConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	saved := newSavingsTracker()
+	saved.setConfig("conservative")
+	if err := saved.save(path); err != nil {
+		t.Fatal(err)
+	}
+	same, other := newSavingsTracker(), newSavingsTracker()
+	same.setConfig("conservative")
+	other.setConfig("off")
+	if !same.restore(path, time.Now()) {
+		t.Error("the snapshot was not restored under the configuration that wrote it")
+	}
+	if other.restore(path, time.Now()) {
+		t.Error("the snapshot was restored under another configuration")
+	}
+}
+
+// State saved after a live swap holds the changes of two configurations, so no start restores it.
+func TestStateAfterALiveSwapIsNotRestored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	running := newSavingsTracker()
+	running.setConfig("conservative")
+	running.openConfig()
+	running.setConfig("off") // the swap: the state still holds the changes made under conservative
+	if err := running.save(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"conservative", "off"} {
+		next := newSavingsTracker()
+		next.setConfig(key)
+		if next.restore(path, time.Now()) {
+			t.Errorf("state saved after a live swap was restored under %s", key)
+		}
+	}
+}
+
+func testPipe(t *testing.T, yaml string) *components.Pipeline {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe, err := cfg.Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pipe
+}
+
+// The key changes with each input that decides what the proxy adds, and is the same for the same inputs.
+func TestAccConfigKeyFollowsWhatTheProxyAdds(t *testing.T) {
+	const doc = "preset: conservative\n"
+	base := accConfigKey(testPipe(t, doc), true, "", doc)
+	if again := accConfigKey(testPipe(t, doc), true, "", doc); again != base {
+		t.Errorf("the same inputs gave two keys: %s, %s", base, again)
+	}
+	if auto := accConfigKey(testPipe(t, doc), true, "auto", doc); auto != base {
+		t.Errorf("an empty expand mode is auto, but the keys differ: %s, %s", base, auto)
+	}
+	for name, key := range map[string]string{
+		"another pipeline":    accConfigKey(testPipe(t, "preset: off\n"), true, "", doc),
+		"no persisting store": accConfigKey(testPipe(t, doc), false, "", doc), // expand.Inject adds nothing
+		"expand never":        accConfigKey(testPipe(t, doc), true, "never", doc),
+		"expand always":       accConfigKey(testPipe(t, doc), true, "always", doc),
+		"another config text": accConfigKey(testPipe(t, doc), true, "", doc+"# edited\n"),
+	} {
+		if key == base {
+			t.Errorf("%s gave the same key", name)
+		}
 	}
 }
 
