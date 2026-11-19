@@ -242,7 +242,7 @@ func TestTenantRowQuotaTrimsOnlyTheOffender(t *testing.T) {
 		t.Fatalf("the light tenant holds %d rows, expected to be under the quota", counts["light"])
 	}
 
-	rec.enforceQuotas()
+	rec.enforceQuotas(rec.ensureBackup)
 
 	var heavy, light int64
 	if err := rec.db.sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE tenant_id='heavy'`).Scan(&heavy); err != nil {

@@ -220,7 +220,7 @@ func TestRecorderRepricesBothHalvesOfARowWithAnUnpricedCompactionCall(t *testing
 		}
 		return r
 	}
-	time.Sleep(60 * time.Millisecond) // several passes with no price: nothing changes
+	time.Sleep(60 * time.Millisecond) //timing:ok negative wait: several passes with no price, nothing changes
 	for _, s := range []string{"same", "other"} {
 		if r := get(s); r.acct != AccountingPartial || r.cost != 0 || r.cg != 0 {
 			t.Fatalf("%s before the load: %+v, want partial at $0 on both halves", s, r)

@@ -79,6 +79,14 @@ type Options struct {
 	// else, deleting our last megabyte does not help anyone and the dashboard going
 	// blank hides the problem instead of showing it.
 	MinKeepBytes int64
+	// RetentionFloorBytes is the floor of the SIZE rule (RetentionBytes): it never makes the
+	// database smaller than this, even when the database is still over its limit. 0 = a quarter
+	// of RetentionBytes. It is not MinKeepBytes: that floor (1 GiB) is above the default size
+	// limit (512 MiB), so it cannot serve the size rule.
+	RetentionFloorBytes int64
+	// DisableBackup turns off the backup copy (`<db>.bak`) the janitor makes before the age,
+	// size and quota rules delete rows. The zero value keeps the backup on.
+	DisableBackup bool
 	// MaxRowsPerTenant caps one tenant's retained request rows. Applied BEFORE the
 	// disk rule, so a heavy user is trimmed to its own quota before anyone else's
 	// history is touched. 0 = no per-tenant cap.
