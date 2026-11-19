@@ -1087,14 +1087,23 @@ async function ensureProxyRunning(directory, client, fallback = false) {
   const record = readJSON(join(state, "install.json"))
   if (!record?.port || !record.binary || !Array.isArray(record.args) || !record.args.length) return
   if (fallback && proxyHealth.get(state)?.until > Date.now()) return
-  if (await healthy(record.port)) { proxyHealth.delete(state); return }
+  if (await healthy(record.port)) {
+    if (fallback && proxyHealth.get(state)?.down) await safeLog(client, "info", `proxy is healthy again on 127.0.0.1:${record.port}; requests go through context-guru`)
+    proxyHealth.delete(state)
+    return
+  }
   if (existsSync(join(state, "disabled"))) return
   let recovery = proxyRecoveries.get(state)
+  // One request waits for a restart. Others that come while it runs go direct at once.
+  if (recovery && fallback) {
+    proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+    return
+  }
   if (!recovery) {
     recovery = withLock(dirname(state), async () => {
       // Another instance may have restarted it while this one waited for the lock.
       if (await healthy(record.port)) return true
-      return recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client)
+      return recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client, fallback)
     }).then((ok) => {
       if (ok) proxyHealth.delete(state)
       else proxyHealth.set(state, { down: true, until: Date.now() + DOWN_WINDOW_MS })
@@ -1111,27 +1120,40 @@ async function ensureProxyRunning(directory, client, fallback = false) {
     new Promise((resolve) => { timer = setTimeout(() => resolve(true), RESTART_WAIT_MS) }),
   ])
   clearTimeout(timer)
-  if (capped) proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+  if (!capped) return
+  proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+  await safeLog(client, "warn", `proxy is not healthy after ${RESTART_WAIT_MS / 1000} s; requests go to the provider without context-guru while it restarts`)
 }
 
-async function recoverProxy(state, record, client) {
+async function recoverProxy(state, record, client, fallback = false) {
   const logPath = join(state, "proxy.log")
+  const failed = async (why) => {
+    const direct = fallback ? `; requests go to the provider without context-guru for ${DOWN_WINDOW_MS / 1000} s` : ""
+    await safeLog(client, "error", `proxy recovery failed on 127.0.0.1:${record.port} (${why}); see ${logPath}${direct}`)
+    return false
+  }
   const log = openSync(logPath, "a", 0o600)
   let child
+  let exited
   try {
     child = spawn(record.binary, withCaptureOff(record.args ?? []), { detached: true, stdio: ["ignore", log, log], env: captureOffEnv() })
-    child.once("error", () => {})
-  } catch {
-    return false
+    exited = new Promise((resolve) => { child.once("exit", (code, signal) => resolve({ code, signal })); child.once("error", (error) => resolve({ error })) })
+  } catch (error) {
+    return failed(`could not start: ${error?.code ?? "error"}`)
   } finally {
     closeSync(log)
   }
   child.unref()
-  if (typeof child.pid !== "number") return false
-  if (!(await waitForHealthy(record.port))) {
+  const started = Date.now()
+  // A child that exits, or never starts, fails the restart at once: there is no need to poll /healthz.
+  const outcome = await Promise.race([waitForHealthy(record.port).then((ok) => ({ ok })), exited.then((result) => ({ exited: result }))])
+  if (outcome.exited) {
+    const { error, code, signal } = outcome.exited
+    return failed(error ? `could not start: ${error.code ?? "error"}` : signal ? `exited with signal ${signal}` : `exited with code ${code}`)
+  }
+  if (!outcome.ok) {
     try { process.kill(child.pid, "SIGTERM") } catch {}
-    await safeLog(client, "error", `proxy recovery failed on 127.0.0.1:${record.port}; see ${logPath}`)
-    return false
+    return failed(`not healthy in ${Math.round((Date.now() - started) / 1000)} s`)
   }
   writeRecoveryFiles(state, child.pid, record.managed === true)
   await safeLog(client, "info", `proxy recovered on 127.0.0.1:${record.port}`)

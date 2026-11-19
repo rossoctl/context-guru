@@ -42,9 +42,12 @@ async function recorder(port, handle = (request, response) => response.end("{\"o
   }
 }
 
+// Every log line of every test in this file, for the key check in the last test.
+const allLines = []
+
 function logger() {
   const lines = []
-  return { lines, client: { app: { log: async ({ body }) => { lines.push(body) } } } }
+  return { lines, client: { app: { log: async ({ body }) => { lines.push(body); allLines.push(body) } } } }
 }
 
 function requestInit(extra = {}) {
@@ -303,56 +306,82 @@ test("end to end: proxy up goes to the proxy; proxy dead goes to the upstream, a
   }
 })
 
-test("a failed restart waits at most 5 s, then goes direct, and starts no new restart for 30 s", { timeout: 60000 }, async () => {
+// A routed project whose proxy is dead, and whose next restart runs `script` (sh). Each start is counted.
+async function failingRestart(directory, script) {
   const upstream = await recorder(UPSTREAM_PORT)
   process.env.CONTEXT_GURU_BIN = stubProxyBinary()
-  const directory = "/tmp/context-guru-failopen-restart"
   const state = stateDirectory(directory)
   const { lines, client } = logger()
-  let record
-  try {
-    const hooks = await plugin.server({ directory, client })
-    const config = { provider: { anthropic: { options: { baseURL: `http://127.0.0.1:${UPSTREAM_PORT}` } } } }
-    await hooks.config(config)
-    record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
-    process.kill(record.pid, "SIGTERM")
-    await waitUntilUnhealthy(record.port)
-    // The next restart runs a binary that records each start and exits, so it never becomes healthy.
-    const binDirectory = mkdtempSync(join(tmpdir(), "context-guru-failing-"))
-    mkdirSync(binDirectory, { recursive: true })
-    const failing = join(binDirectory, "context-guru-proxy")
-    const starts = join(binDirectory, "starts.log")
-    writeFileSync(failing, `#!/bin/sh\necho start >> ${JSON.stringify(starts)}\nexit 1\n`)
-    chmodSync(failing, 0o755)
-    writeFileSync(join(state, "install.json"), JSON.stringify({ ...record, binary: failing }))
-    const countStarts = () => { try { return readFileSync(starts, "utf8").split("\n").filter(Boolean).length } catch { return 0 } }
-    const ask = () => hooks["chat.headers"]({ sessionID: "session-restart", provider: { info: { id: "anthropic" } } }, { headers: {} })
-    const send = () => config.provider.anthropic.options.fetch(`${config.provider.anthropic.options.baseURL}/messages`, requestInit())
+  const hooks = await plugin.server({ directory, client })
+  const config = { provider: { anthropic: { options: { baseURL: `http://127.0.0.1:${UPSTREAM_PORT}` } } } }
+  await hooks.config(config)
+  const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+  process.kill(record.pid, "SIGTERM")
+  await waitUntilUnhealthy(record.port)
+  const binDirectory = mkdtempSync(join(tmpdir(), "context-guru-failing-"))
+  const failing = join(binDirectory, "context-guru-proxy")
+  const starts = join(binDirectory, "starts.log")
+  writeFileSync(failing, `#!/bin/sh\necho start >> ${JSON.stringify(starts)}\n${script}\n`)
+  chmodSync(failing, 0o755)
+  writeFileSync(join(state, "install.json"), JSON.stringify({ ...record, binary: failing }))
+  return {
+    upstream,
+    lines,
+    countStarts: () => { try { return readFileSync(starts, "utf8").split("\n").filter(Boolean).length } catch { return 0 } },
+    ask: () => hooks["chat.headers"]({ sessionID: "session-restart", provider: { info: { id: "anthropic" } } }, { headers: {} }),
+    send: () => config.provider.anthropic.options.fetch(`${config.provider.anthropic.options.baseURL}/messages`, requestInit()),
+    cleanup: async () => { delete process.env.CONTEXT_GURU_BIN; await upstream.close() },
+  }
+}
 
-    const started = Date.now()
-    await ask()
-    const waited = Date.now() - started
+const timed = async (fn) => { const started = Date.now(); await fn(); return Date.now() - started }
+
+test("a restart that never gets healthy waits about 5 s once, then goes direct; no wait again while it runs; no new restart for 30 s", { timeout: 60000 }, async () => {
+  // The binary stays alive and never serves, so only the health poll can end the restart.
+  const project = await failingRestart("/tmp/context-guru-failopen-restart", "exec sleep 60")
+  try {
+    const waited = await timed(project.ask)
 
     assert.ok(waited < 6000, `chat.headers waited ${waited} ms`)
     assert.ok(waited >= 4500, `chat.headers returned after ${waited} ms, before the 5 s cap`)
-    assert.equal((await send()).status, 200)
-    assert.equal(upstream.requests.length, 1)
+    assert.ok(project.lines.some((line) => line.level === "warn" && /not healthy after 5 s.*without context-guru/.test(line.message)), "no log line when the wait reached the cap")
+    assert.equal((await project.send()).status, 200)
+    assert.equal(project.upstream.requests.length, 1)
 
-    // The restart goes on in the background and fails. Then the 30 s window starts.
-    const deadline = Date.now() + 30000
-    while (!lines.some((line) => /proxy recovery failed/.test(line.message)) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100))
-    assert.ok(lines.some((line) => /proxy recovery failed/.test(line.message)), "the restart did not fail in time")
-    assert.equal(countStarts(), 1)
+    // The restart still runs. A second request does not wait for it again.
+    const second = await timed(project.ask)
+    assert.ok(second < 1000, `chat.headers waited ${second} ms again while the restart ran`)
+    assert.equal((await project.send()).status, 200)
+    assert.equal(project.countStarts(), 1)
 
-    const again = Date.now()
-    await ask()
-    assert.ok(Date.now() - again < 1000, `chat.headers in the down window took ${Date.now() - again} ms`)
-    assert.equal(countStarts(), 1)
-    assert.equal((await send()).status, 200)
-    assert.equal(upstream.requests.length, 2)
+    // The restart fails. Then the 30 s window starts.
+    await waitFor(() => project.lines.some((line) => /proxy recovery failed/.test(line.message)), "the restart to fail", 30000)
+    assert.ok(project.lines.some((line) => line.level === "error" && /proxy recovery failed on 127\.0\.0\.1:\d+ \(not healthy in \d+ s\).*without context-guru/.test(line.message)), "the failure line does not say why")
+    const third = await timed(project.ask)
+    assert.ok(third < 1000, `chat.headers in the down window took ${third} ms`)
+    assert.equal(project.countStarts(), 1)
+    assert.equal((await project.send()).status, 200)
+    assert.equal(project.upstream.requests.length, 3)
   } finally {
-    delete process.env.CONTEXT_GURU_BIN
-    await upstream.close()
+    await project.cleanup()
+  }
+})
+
+test("a restarted binary that exits at once fails the restart at once and starts the 30 s window", async () => {
+  const project = await failingRestart("/tmp/context-guru-failopen-exits", "exit 1")
+  try {
+    const waited = await timed(project.ask)
+
+    assert.ok(waited < 3000, `chat.headers waited ${waited} ms for a binary that had exited`)
+    assert.ok(project.lines.some((line) => line.level === "error" && /proxy recovery failed on 127\.0\.0\.1:\d+ \(exited with code 1\).*without context-guru/.test(line.message)), "no failure line that says the binary exited")
+    assert.equal((await project.send()).status, 200)
+    const second = await timed(project.ask)
+    assert.ok(second < 1000, `chat.headers in the down window took ${second} ms`)
+    assert.equal(project.countStarts(), 1)
+    assert.equal((await project.send()).status, 200)
+    assert.equal(project.upstream.requests.length, 2)
+  } finally {
+    await project.cleanup()
   }
 })
 
@@ -406,6 +435,7 @@ test("after a fallback, routing returns to the proxy once chat.headers sees it h
     await waitFor(() => isHealthy(project.record.port), "the proxy to start again")
     await project.ask()
 
+    assert.ok(project.lines.some((line) => line.level === "info" && /proxy is healthy again on 127\.0\.0\.1:\d+/.test(line.message)), "no log line when routing came back")
     assert.equal((await project.send()).status, 404)
     assert.equal(upstream.requests.length, 1)
   } finally {
@@ -472,4 +502,13 @@ setTimeout(() => require("node:http").createServer((request, response) => {
     delete process.env.CONTEXT_GURU_BIN
     await upstream.close()
   }
+})
+
+// Runs last: node:test runs the top-level tests of a file in order. Each test above sent the key.
+test("no log line of any test in this file holds the key, including the down and recovered lines", () => {
+  const messages = allLines.map((line) => line.message)
+  for (const pattern of [/refused the connection/, /not healthy after 5 s/, /proxy recovery failed/, /proxy recovered/, /healthy again/]) {
+    assert.ok(messages.some((message) => pattern.test(message)), `no line matched ${pattern}`)
+  }
+  for (const line of allLines) assert.ok(!JSON.stringify(line).includes(CANARY), `a log line holds the key: ${line.message}`)
 })
