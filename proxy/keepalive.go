@@ -93,14 +93,6 @@ func newKeeper(h *Handler) *keeper {
 // The Dispatcher's Price and Spare read h.opts.Prices and h.limiter at CALL time, not here, exactly as the keeper
 // did when it held h itself: a handler's limiter and price table may be replaced after the keeper
 // is built (tests do both), and a ping must use the ones in force when it fires.
-// raiseWaitPlan hands the dashboard writer's wait cause to the keeper (#1225). See capture.raisePlan.
-func (h *Handler) raiseWaitPlan(tenant, session, thread, cause string) (int, bool) {
-	if h == nil || h.keeper == nil || h.keeper.Keeper == nil {
-		return 0, false
-	}
-	return h.keeper.Keeper.RaiseWaitPlan(keepalive.Key{Tenant: tenant, Session: session, Thread: thread}, cause)
-}
-
 func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 	k := &keeper{h: h, overrides: map[string]sessionOverride{}}
 	if h != nil {
@@ -321,7 +313,7 @@ func (k *keeper) LiveSessionKeys() []string {
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
-	_ = k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK)
+	_ = k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK, nil)
 }
 
 // recordTouch is record with the liveness-clock alias apply derived from the ARRIVING request
@@ -331,9 +323,13 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 //
 // It returns the ping plan the keeper built for the wait this response starts (#1198), or nil when
 // none was built (the keep-alive is off for the request, or a gate refused it first).
+//
+// open, when non-nil, are the open-task counts of this turn's own body (the early scan, earlyscan.go). The
+// same counts decide the windows here and the plan in Record, so a turn that starts background work gets the
+// background count, the background floor and no windows together (#1225, #1227).
 func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
-	u Usage, usageOK bool) *keepalive.PlanInForce {
+	u Usage, usageOK bool, open *keepalive.TaskCounts) *keepalive.PlanInForce {
 	if k == nil || tn == nil {
 		return nil
 	}
@@ -398,7 +394,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		ignoreWindows := false
 		if pol.WaitPlan && tracked {
 			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
-				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
+				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, open)
 			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
 		}
 		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
@@ -421,7 +417,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}

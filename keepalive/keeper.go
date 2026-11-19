@@ -145,10 +145,6 @@ type kaEntry struct {
 	// wait is the wait cause this entry's pings were planned for (waitplan.go, #858). "" when the
 	// plan did not apply (plan off, a 1-hour thread, OpenAI). The sweep question reads it.
 	wait string
-	// planBase is Policy.MaxPings before the per-wait plan added its extra pings; planned is true when
-	// the plan set pol.MaxPings (5-minute tier, plan on, not OpenAI). RaiseWaitPlan reads both (#1225).
-	planBase int
-	planned  bool
 	// noTool: the plan is on and the thread has had no tool_use response yet, so it is not pinged.
 	noTool bool
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
@@ -207,11 +203,6 @@ type kaEntry struct {
 	// look, and coupling a security bound to a liveness loop is how a hold silently becomes
 	// unbounded. time.AfterFunc fires regardless.
 	timer *time.Timer
-	// armedAt is the keeper-clock instant the hard-deadline timer was armed. RaiseWaitPlan re-arms it for
-	// the raised count from this instant (#1225).
-	armedAt time.Time
-	// deadline is when that timer fires, on the keeper clock (the timer itself is not readable).
-	deadline time.Time
 }
 
 // due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
@@ -425,13 +416,16 @@ type Record struct {
 	// ToolUseIncomplete: ToolUseNames may miss the true last call (a spliced sniff window). The
 	// terminal-tool rule is then off for this response, so the thread is pinged as before (#857).
 	ToolUseIncomplete bool
-	Policy            Policy // resolved by the host
-	Tag               string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent             string
-	Preset            string
-	Header            http.Header // the request's headers; only PingHeaders' allow-list is read
-	Store             store.Store
-	Emitter           components.Emitter // nil: components.NopEmitter{}
+	// OpenTasks, when non-nil, are the open-task counts the host read from this request's own body (see
+	// WaitingFor). nil: the host had no result, and the tracker's counts decide, as before.
+	OpenTasks *TaskCounts
+	Policy    Policy // resolved by the host
+	Tag       string // host label returned by Arrive (proxy: the applied strategy id)
+	Agent     string
+	Preset    string
+	Header    http.Header // the request's headers; only PingHeaders' allow-list is read
+	Store     store.Store
+	Emitter   components.Emitter // nil: components.NopEmitter{}
 	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
@@ -965,9 +959,8 @@ func (k *Keeper) Record(r Record) {
 	planned := guard && !ttl1h && pol.Idle < 300*time.Second
 	wait := ""
 	if guard {
-		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
+		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, r.OpenTasks)
 	}
-	planBase := pol.MaxPings
 	if planned {
 		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))
 	}
@@ -995,7 +988,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		wait: wait, planBase: planBase, planned: planned,
+		wait:         wait,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
@@ -1099,8 +1092,6 @@ func (k *Keeper) Record(r Record) {
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.armedAt = k.now()
-	e.deadline = e.armedAt.Add(e.hold())
 	e.timer = time.AfterFunc(e.hold(), func() { k.expireAuto(key) })
 	k.evictLocked()
 }

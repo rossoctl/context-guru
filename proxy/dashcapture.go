@@ -138,11 +138,10 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
-	// raisePlan tells the keeper the wait cause the writer found for this turn (#1225); nil: none.
-	// The writer calls it right after its in-order ObserveWith, so the keeper's plan, built at response
-	// time from the counts of the request before, rises to the background count in time (the first
-	// ping is minutes away). Metadata only.
-	raisePlan func(tenant, session, thread, cause string) (int, bool)
+	// early is this request's early wait-cause scan (earlyscan.go); nil: none was started. scanStat is the
+	// handler's counters.
+	early    *earlyScan
+	scanStat *scanStats
 	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
 	terminal []string
 	// The alias derivation's other inputs (#766): the pipeline that will transform this
@@ -240,10 +239,9 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
 		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
-		observe:   tn.Mode == components.ModeObserve,
-		authSub:   provider == string(bschemas.Anthropic) && callerIsSubscription(r),
-		hosted:    h.opts.Tenants != nil,
-		raisePlan: h.raiseWaitPlan,
+		observe: tn.Mode == components.ModeObserve,
+		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
+		hosted:  h.opts.Tenants != nil,
 	}
 }
 
@@ -679,7 +677,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// never completed with a 2xx. status 0 (never reached an upstream) is deliberately NOT
 	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
 	// that case as WaitingUnknown rather than WaitingRetry.
-	raise := c.raisePlan
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
 	toolParams, spawn := usage.ToolParams, usage.Spawn
@@ -691,9 +688,23 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
 	var normMsgs []bschemas.ChatMessage
 	var normDone bool
+	early, scanStat := c.early, c.scanStat
 	norm := func() []bschemas.ChatMessage {
 		if !normDone {
-			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+			// The scan that ran while the request was upstream already normalized this body: reuse it when it
+			// is ready, else normalize here, as before. The check never blocks.
+			if r := early.result(); r != nil {
+				normMsgs = r.Messages()
+				if scanStat != nil {
+					scanStat.writerEarly.Add(1)
+				}
+			} else {
+				normMsgs = apply.NormalizeMessages(provider, waitBody)
+				if scanStat != nil && early != nil {
+					scanStat.writerOwn.Add(1)
+				}
+			}
+			normDone = true
 		}
 		return normMsgs
 	}
@@ -711,13 +722,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
 			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
-		// The keeper planned this turn from the counts of the request before. Tell it the cause of
-		// this turn when it is background work (#1225). It only raises the count, and never blocks.
-		if raise != nil && waitingFor == waitcause.WaitingBackground {
-			if n, ok := raise(tenantID, sessionID, threadID, waitingFor); ok {
-				e.KAPlannedPings = &n
-			}
-		}
 		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
@@ -1125,4 +1129,29 @@ func clientEntrypoint(ua string) string {
 		return "cli"
 	}
 	return "other"
+}
+
+// startEarlyScan starts the early wait-cause scan of body (earlyscan.go). It needs the tracker (the dashboard
+// is on) and a non-empty body. Nil-safe.
+func (c *capture) startEarlyScan(h *Handler, ctx context.Context, provider bschemas.ModelProvider, body []byte) {
+	if c == nil || h == nil || h.waits == nil || len(body) == 0 {
+		return
+	}
+	c.scanStat = &h.scan
+	c.early = startEarlyScan(ctx, provider, body, h.scanGate)
+}
+
+// stopEarlyScan ends the scan's work in progress when the request is over. Nil-safe.
+func (c *capture) stopEarlyScan() {
+	if c != nil {
+		c.early.stop()
+	}
+}
+
+// earlyOpenTasks is the keeper's non-blocking take of the early scan at response end. Nil-safe.
+func (c *capture) earlyOpenTasks(h *Handler) *keepalive.TaskCounts {
+	if c == nil || h == nil {
+		return nil
+	}
+	return c.early.openTasks(&h.scan)
 }
