@@ -63,7 +63,13 @@ func (k *Keeper) pendLocked(r Record, e *kaEntry, pol Policy, planned bool, wait
 		ttl = DefaultPendingTTL
 	}
 	e.armedAt = k.now()
-	k.dropPendingLocked(id, false)
+	k.dropPendingLocked(id)
+	// The refusal Record would have made, recorded now so the Ping button and the counts read it at once.
+	// A promotion takes it back (promoteLocked).
+	k.setReasonLocked(r.Key, e.pendReason)
+	if e.pendReason == ReasonBelowLimits {
+		k.skipped.Add(1)
+	}
 	k.pending[id] = e
 	k.pendBytes += int64(len(e.body))
 	e.timer = time.AfterFunc(ttl, func() { k.expirePending(id, e) })
@@ -76,14 +82,13 @@ func (k *Keeper) expirePending(id string, e *kaEntry) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.pending[id] == e {
-		k.dropPendingLocked(id, true)
+		k.dropPendingLocked(id)
 	}
 }
 
 // dropPendingLocked releases the pending record of id: body zeroed, credential released, timer stopped.
-// refuse: record the refusal Record would have made (reason, and the skipped count for a held-back
-// automatic thread). k.mu must be held.
-func (k *Keeper) dropPendingLocked(id string, refuse bool) {
+// The refusal reason was set when the record was made. k.mu must be held.
+func (k *Keeper) dropPendingLocked(id string) {
 	e, ok := k.pending[id]
 	if !ok {
 		return
@@ -92,12 +97,6 @@ func (k *Keeper) dropPendingLocked(id string, refuse bool) {
 	k.pendBytes -= int64(len(e.body))
 	k.releaseLocked(e)
 	e.clear()
-	if refuse {
-		k.setReasonLocked(e.key, e.pendReason)
-		if e.pendReason == ReasonBelowLimits {
-			k.skipped.Add(1)
-		}
-	}
 }
 
 // promoteLocked turns the pending record of id into a live entry planned for cause, when cause is
@@ -110,13 +109,16 @@ func (k *Keeper) promoteLocked(id, cause string) (int, bool) {
 	}
 	delete(k.pending, id)
 	k.pendBytes -= int64(len(e.body))
-	if !k.now().Before(e.armedAt.Add(e.hold())) {
+	if Disabled() || !k.now().Before(e.armedAt.Add(e.hold())) {
 		k.releaseLocked(e)
 		e.clear()
 		return 0, false
 	}
 	e.timer = nil
-	k.clearReasonLocked(e.key)
+	k.clearReasonLocked(e.key) // the refusal set at pend time no longer holds
+	if e.pendReason == ReasonBelowLimits {
+		k.skipped.Add(-1)
+	}
 	k.live[id] = e
 	k.bytes += int64(len(e.body))
 	k.armHoldLocked(id, e, e.armedAt)

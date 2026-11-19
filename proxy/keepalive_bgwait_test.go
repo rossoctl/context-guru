@@ -48,6 +48,8 @@ func TestWriterPromotesABackgroundTurnUnderThePersonFloor(t *testing.T) {
 			fs := &fakeSender{}
 			h := &Handler{opts: Options{}, limiter: NewLimiter(Limits{}), rec: &dash.Recorder{},
 				client: &http.Client{Transport: fs}}
+			// The keeper has no OpenTasks (h.waits is set after): it reads the turn as a person's, as at response
+			// time. The capture's writer uses the real tracker and reads background. That split is the case.
 			k := newKeeperWith(h, keepalive.Options{Go: inline}) // the real clock, the real timers
 			rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"), BatchSize: 1, FlushInterval: time.Millisecond})
 			if err != nil {

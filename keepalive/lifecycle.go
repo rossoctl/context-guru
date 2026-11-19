@@ -109,9 +109,11 @@ func (k *Keeper) RetireSessionStartedBefore(tenant, session string, cutoff time.
 	defer k.mu.Unlock()
 	n := 0
 	for key, e := range k.pending {
-		if key == base || strings.HasPrefix(key, base+"\x00") ||
-			(e.client != "" && e.tenant == tenant && e.client == session) {
-			k.dropPendingLocked(key, false)
+		own := key == base || strings.HasPrefix(key, base+"\x00") ||
+			(e.client != "" && e.tenant == tenant && e.client == session)
+		// The same filter as the live entries below: a compaction retires the main thread only.
+		if own && (cutoff.IsZero() || (e.thread == "" && e.startedAt.Before(cutoff))) {
+			k.dropPendingLocked(key)
 		}
 	}
 	for key, e := range k.live {

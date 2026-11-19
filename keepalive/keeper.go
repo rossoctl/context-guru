@@ -713,7 +713,7 @@ func (k *Keeper) Shutdown() {
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
 	for key := range k.pending {
-		k.dropPendingLocked(key, false)
+		k.dropPendingLocked(key)
 	}
 	k.bytes = 0
 	k.turns = map[string]int{}
@@ -787,7 +787,7 @@ func (k *Keeper) ArriveAt(key Key) (pings int, refreshed int64, tag string, refr
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.inflight[id]++
-	k.dropPendingLocked(id, true) // the next request is here: the turn it would have waited on is over
+	k.dropPendingLocked(id) // the next request is here: the turn it would have waited on is over
 	e, ok := k.live[id]
 	if !ok {
 		return 0, 0, "", time.Time{}
@@ -1075,7 +1075,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
 	// its body and credential must not be left behind.
-	k.dropPendingLocked(key, false)
+	k.dropPendingLocked(key)
 	if prev, ok := k.live[key]; ok {
 		k.bytes -= int64(len(prev.body))
 		k.releaseLocked(prev) // the OLD credential goes before the new one is held
@@ -1265,7 +1265,7 @@ func (k *Keeper) retire(key string) {
 // retireLocked is retire's body, for callers that already hold k.mu (the route breaker's gate
 // in Record). k.mu must be held.
 func (k *Keeper) retireLocked(key string) {
-	k.dropPendingLocked(key, false)
+	k.dropPendingLocked(key)
 	e, ok := k.live[key]
 	if !ok {
 		return
@@ -1312,7 +1312,7 @@ func (k *Keeper) Forget(tenantID string) {
 	defer k.mu.Unlock()
 	for key := range k.pending {
 		if strings.HasPrefix(key, prefix) {
-			k.dropPendingLocked(key, false)
+			k.dropPendingLocked(key)
 		}
 	}
 	for key, e := range k.live {

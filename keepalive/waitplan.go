@@ -192,8 +192,11 @@ func (k *Keeper) RaiseWaitPlan(key Key, cause string) (int, bool) {
 		// (and the extra request, which follows the last ping). A timer that already fired cannot be
 		// stopped: the entry is on its way out, so leave it.
 		left := e.armedAt.Add(time.Duration(n+1) * c.p.Idle).Sub(k.now())
-		if left <= 0 || e.timer == nil {
+		if e.timer == nil {
 			return 0, false
+		}
+		if left <= 0 {
+			continue // this candidate's deadline is behind us; the next may still have time
 		}
 		// The new policy must still pass the entry's gates (the wide policy can have another floor): else
 		// the sweep would drop the entry and the thread would get fewer pings than it has now.

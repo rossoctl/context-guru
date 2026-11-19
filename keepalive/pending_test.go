@@ -299,3 +299,52 @@ func reasonOf(k *Keeper, key Key) string {
 	defer k.mu.Unlock()
 	return k.reasons[key.id()].reason
 }
+
+// A late report: the wide policy's deadline ((5+1) x 60 s = 360 s) is behind us, the entry's own
+// ((5+1) x 290 s) is not. The raise must fall through to the entry's own plan (the #1226 raise), not end
+// the search at the wide candidate.
+func TestRaiseWaitPlanLateReportFallsThroughToTheEntrysOwnPlan(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	own := planPolicy()
+	own.Idle = 290 * time.Second
+	wide := planPolicy()
+	wide.Idle = 60 * time.Second
+	recordWide(k, sess1, own, &wide, kaBody, clock.now(), usage50k, endTurn)
+	k.mu.Lock()
+	armed := k.live[sess1.id()].armedAt
+	k.mu.Unlock()
+	clock.advance(400 * time.Second)
+	n, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground)
+	if !ok || n != 5 {
+		t.Fatalf("raise = %d %v, want 5 true (the entry's own plan)", n, ok)
+	}
+	v, _ := k.Entry(sess1)
+	if v.Tag == "wide" || v.Policy.Idle != 290*time.Second {
+		t.Fatalf("policy %+v tag %q: the expired wide policy was applied", v.Policy, v.Tag)
+	}
+	k.mu.Lock()
+	deadline := k.live[sess1.id()].deadline
+	k.mu.Unlock()
+	if want := armed.Add(6 * 290 * time.Second); !deadline.Equal(want) {
+		t.Fatalf("deadline = %v, want %v (timer re-armed for 5 pings)", deadline, want)
+	}
+}
+
+// The refusal reason is set when the record is made, and a promotion takes it back.
+func TestPendingSetsTheReasonAtOnceAndPromotionClearsIt(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	recordWide(k, sess1, personFloor(), nil, kaBody, clock.now(), usage50k, endTurn)
+	if r := reasonOf(k, sess1); r != ReasonBelowLimits {
+		t.Fatalf("reason = %q, want %q at once", r, ReasonBelowLimits)
+	}
+	before := k.skipped.Load()
+	if _, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); !ok {
+		t.Fatal("not promoted")
+	}
+	if r := reasonOf(k, sess1); r != "" {
+		t.Errorf("reason = %q after the promotion, want none", r)
+	}
+	if k.skipped.Load() != before-1 {
+		t.Errorf("skipped = %d, want %d", k.skipped.Load(), before-1)
+	}
+}
