@@ -424,7 +424,7 @@ if [ "$yes" -ne 1 ]; then
   printf '%s\\n' "action=stop-proxy" "action=disable-routing"
   [ "$purge" -eq 1 ] && printf '%s\\n' "action=purge-binary-and-state"
   printf '%s\\n' "apply=sh $STATE/context-guru-uninstall --yes"
-  printf '%s\\n' "note=providers unroute when OpenCode next restarts; /context-guru-install undoes this"
+  printf '%s\\n' "note=open OpenCode sessions send requests straight to the provider at once; with the plugin option fallback: false, providers unroute when OpenCode next restarts; /context-guru-install undoes this"
   exit 0
 fi
 if [ -f "$STATE/proxy.pid" ]; then
@@ -451,7 +451,7 @@ if [ "$purge" -eq 1 ]; then
 else
   printf '%s\\n' "result=uninstalled" "purged=no" "binary_kept=\${binary:-}"
 fi
-printf '%s\\n' "note=restart OpenCode so providers stop routing through the proxy"
+printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; with the plugin option fallback: false, restart OpenCode so providers stop routing through the proxy"
 printf '%s\\n' "undo=/context-guru-install"
 `
 }
@@ -706,7 +706,7 @@ const COMMAND_SPECS = [
     description: "Stop the context-guru proxy and disable routing",
     script: "context-guru-uninstall",
     intro: "Uninstall context-guru from this project.",
-    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them to restart OpenCode so providers stop routing through the proxy, and that /context-guru-install undoes this. Never run it with --yes without asking first.",
+    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider (with the plugin option fallback: false, they must restart OpenCode first), and that /context-guru-install undoes this. Never run it with --yes without asking first.",
   },
   {
     name: "context-guru-preset",
@@ -840,7 +840,53 @@ function providerUpstream(original, dialect, own) {
   return proxyUpstreamURL(original)
 }
 
-export function routeProviders(config, port, own) {
+// Fall back only when the proxy cannot have received the request. Node gives ECONNREFUSED in the
+// cause; Bun, which runs OpenCode, gives ConnectionRefused on the error itself.
+function refusedCode(error) {
+  for (const code of [error?.code, error?.cause?.code]) if (code === "ECONNREFUSED" || code === "ConnectionRefused") return code
+  return undefined
+}
+
+function replayable(body) {
+  return body == null || typeof body === "string" || body instanceof ArrayBuffer || ArrayBuffer.isView(body) || body instanceof Blob || body instanceof URLSearchParams
+}
+
+// Per project: { down, until }. "down" sends requests direct; "until" is the end of the window after
+// a failed restart, in which chat.headers starts no new restart.
+const proxyHealth = new Map()
+const OWN_FETCH = Symbol("context-guru fail-open fetch")
+
+// Sends to the proxy while it is usable, else to the upstream the proxy would use: the upstream plus
+// the path after /<dialect> (proxy/proxy.go). The direct request carries the caller's own method,
+// headers, body and signal; only the plugin's session header is removed.
+function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
+  const wrapped = async (input, init) => {
+    const url = typeof input === "string" || input instanceof URL ? new URL(input) : undefined
+    const prefix = `/${dialect}/`
+    if (!url || url.host !== `127.0.0.1:${port}` || !url.pathname.startsWith(prefix)) return inner(input, init)
+    const direct = () => {
+      const headers = new Headers(init?.headers)
+      headers.delete("x-context-guru-session")
+      return inner(`${upstream.replace(/\/+$/, "")}${url.pathname.slice(prefix.length - 1)}${url.search}`, { ...init, headers })
+    }
+    if (existsSync(join(state, "disabled")) || proxyHealth.get(state)?.down) return direct()
+    try {
+      return await inner(input, init)
+    } catch (error) {
+      const code = refusedCode(error)
+      if (!code || init?.signal?.aborted || !replayable(init?.body)) throw error
+      proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+      let host = "upstream"
+      try { host = new URL(upstream).host } catch {}
+      await safeLog(client, "warn", `proxy refused the connection (${code}); sent the request to ${host} without context-guru`)
+      return direct()
+    }
+  }
+  wrapped[OWN_FETCH] = inner
+  return wrapped
+}
+
+export function routeProviders(config, port, own, fallback) {
   config.provider ||= {}
   const configuredIds = Object.keys(config.provider)
   const modelIds = modelProviderIds(config)
@@ -865,6 +911,12 @@ export function routeProviders(config, port, own) {
     const provider = config.provider[id] ||= {}
     provider.options ||= {}
     provider.options.baseURL = `http://127.0.0.1:${port}/${dialect}/v1`
+    if (!fallback) continue
+    // A fetch another plugin set earlier is chained. A re-run config hook unwraps our own first.
+    const previous = provider.options.fetch
+    const inner = previous?.[OWN_FETCH] ?? (typeof previous === "function" ? previous : (input, init) => fetch(input, init))
+    const upstream = routes.find((route) => route.id === id).upstream
+    provider.options.fetch = failOpenFetch({ ...fallback, port, dialect, upstream, inner })
   }
   return routes
 }
@@ -1022,21 +1074,41 @@ const proxyRecoveries = new Map()
 // recorded port so routed providers keep working without an OpenCode restart.
 // Single-flight: concurrent requests share one recovery; a failed recovery is
 // retried by the next request, never in a loop.
-async function ensureProxyRunning(directory, client) {
+// With fallback on, a request waits at most RESTART_WAIT_MS; the restart goes on in the background
+// and the request goes direct. After a failed restart, DOWN_WINDOW_MS of requests go direct and
+// start no new restart, so OpenCode's own retries do not each start one.
+const RESTART_WAIT_MS = 5000
+const DOWN_WINDOW_MS = 30000
+async function ensureProxyRunning(directory, client, fallback = false) {
   const state = stateDirectory(directory)
   const record = readJSON(join(state, "install.json"))
   if (!record?.port || !record.binary || !Array.isArray(record.args) || !record.args.length) return
-  if (await healthy(record.port)) return
+  if (fallback && proxyHealth.get(state)?.until > Date.now()) return
+  if (await healthy(record.port)) { proxyHealth.delete(state); return }
   if (existsSync(join(state, "disabled"))) return
-  const inFlight = proxyRecoveries.get(state)
-  if (inFlight) return inFlight
-  const recovery = withLock(dirname(state), async () => {
-    // Another instance may have restarted it while this one waited for the lock.
-    if (await healthy(record.port)) return
-    await recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client)
-  }).finally(() => proxyRecoveries.delete(state))
-  proxyRecoveries.set(state, recovery)
-  return recovery
+  let recovery = proxyRecoveries.get(state)
+  if (!recovery) {
+    recovery = withLock(dirname(state), async () => {
+      // Another instance may have restarted it while this one waited for the lock.
+      if (await healthy(record.port)) return true
+      return recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client)
+    }).then((ok) => {
+      if (ok) proxyHealth.delete(state)
+      else proxyHealth.set(state, { down: true, until: Date.now() + DOWN_WINDOW_MS })
+    }, (error) => {
+      proxyHealth.set(state, { down: true, until: Date.now() + DOWN_WINDOW_MS })
+      throw error
+    }).finally(() => proxyRecoveries.delete(state))
+    proxyRecoveries.set(state, recovery)
+  }
+  if (!fallback) return recovery
+  let timer
+  const capped = await Promise.race([
+    recovery.then(() => false, () => false),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(true), RESTART_WAIT_MS) }),
+  ])
+  clearTimeout(timer)
+  if (capped) proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
 }
 
 async function recoverProxy(state, record, client) {
@@ -1047,23 +1119,26 @@ async function recoverProxy(state, record, client) {
     child = spawn(record.binary, withCaptureOff(record.args ?? []), { detached: true, stdio: ["ignore", log, log], env: captureOffEnv() })
     child.once("error", () => {})
   } catch {
-    return
+    return false
   } finally {
     closeSync(log)
   }
   child.unref()
-  if (typeof child.pid !== "number") return
+  if (typeof child.pid !== "number") return false
   if (!(await waitForHealthy(record.port))) {
     try { process.kill(child.pid, "SIGTERM") } catch {}
     await safeLog(client, "error", `proxy recovery failed on 127.0.0.1:${record.port}; see ${logPath}`)
-    return
+    return false
   }
   writeRecoveryFiles(state, child.pid, record.managed === true)
   await safeLog(client, "info", `proxy recovered on 127.0.0.1:${record.port}`)
+  return true
 }
 
 async function ContextGuruPlugin({ directory, client }, options = {}) {
   const { preset, requestedStrategy } = effectiveSettings(stateDirectory(directory), options)
+  // On by default: when the proxy is down, a request goes to the provider. `fallback: false` turns it off.
+  const fallback = options.fallback !== false
   let routedIds = new Set()
   return {
     config: async (config) => {
@@ -1079,14 +1154,16 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
           return
         }
         const own = recordedRoutes(state)
-        const preview = { provider: config.provider ? structuredClone(config.provider) : {}, model: config.model, small_model: config.small_model, agent: config.agent }
+        // Only the base URLs: a provider option can be a function (another plugin's fetch), which structuredClone refuses.
+        const providers = Object.entries(config.provider ?? {}).map(([id, provider]) => [id, { options: { baseURL: provider?.options?.baseURL } }])
+        const preview = { provider: Object.fromEntries(providers), model: config.model, small_model: config.small_model, agent: config.agent }
         const routes = routeProviders(preview, 0, own)
         if (!routes.length) {
           await safeLog(client, "debug", "no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
           return
         }
         const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client })
-        routeProviders(config, proxy.port, own)
+        routeProviders(config, proxy.port, own, fallback ? { state, client } : undefined)
         routedIds = new Set(routes.map((route) => route.id))
       } catch (error) {
         await safeLog(client, "error", `proxy startup failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -1097,7 +1174,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
       const id = input.provider?.info?.id ?? input.model?.providerID
       if (!id || !routedIds.has(id)) return
       try {
-        await ensureProxyRunning(directory, client)
+        await ensureProxyRunning(directory, client, fallback)
       } catch {
         // Recovery must never break the request it is trying to save.
       }

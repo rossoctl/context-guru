@@ -2,7 +2,7 @@
 
 Date: 2026-11-19
 Issue: [#1159](https://github.com/rossoctl/context-guru/issues/1159)
-Status: proposal. The owner must approve the behavior changes in section 7.
+Status: approved by the owner on 2026-11-19, with the three behavior changes in section 7.
 
 ## 1. Result: yes, a `fetch` option in the `config` hook works in OpenCode 1.19.5
 

@@ -6,6 +6,20 @@ upstreams, adds the OpenCode session ID to each request, and fails open if the p
 If the proxy later exits — idle timeout or crash — the plugin restarts it on the same port before
 the next request.
 
+When the proxy is down, OpenCode v1 requests go straight to the provider (the fallback):
+
+- The plugin sends a request direct only when the proxy cannot have received it: the connection was
+  refused, or the proxy did not pass its health check, so the request was never sent to it.
+- It never sends a request twice. A 4xx or 5xx from the proxy, a reset or a time-out after the
+  connection opened, a stream that broke, and a cancel reach OpenCode unchanged.
+- A direct request has your own headers and body. The plugin removes only its own
+  `x-context-guru-session` header. Direct requests get no context-guru work, and `/stats` does not count them.
+- A request waits at most 5 s for a restart. After a failed restart, requests go direct for 30 s
+  and start no new restart.
+- After `/context-guru-uninstall`, open sessions go direct at once. No OpenCode restart is needed.
+- The log line names the provider host and the error code only.
+- Set the plugin option `"fallback": false` to turn all of this off. Then requests fail while the proxy is down, as before.
+
 The plugin supports both OpenCode generations from one file: OpenCode 1.18.29 and later call the
 v1 `server()` export (`config` and `chat.headers` hooks), and OpenCode 2 calls the v2 `setup()`
 export (provider, command, and session-hook domains). Older OpenCode 1.x releases that only
@@ -61,6 +75,7 @@ The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills
 Pings spend your own credential while you are away. `none` sends no pings.
 
 A choice saved by `/context-guru-preset` or `/context-guru-strategy` wins over these options.
+The option `"fallback": false` turns off the direct send when the proxy is down (see above). The default is `true`.
 
 Restart OpenCode after changing plugin configuration. The proxy dashboard is available at the
 port printed in the OpenCode log under `/dashboard/`. Each project gets its own port and state.
