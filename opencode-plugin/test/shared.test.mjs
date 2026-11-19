@@ -3,7 +3,7 @@ import test from "node:test"
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
 
@@ -19,7 +19,8 @@ const PLATFORMS = { darwin: "darwin", linux: "linux" }
 const ARCHITECTURES = { arm64: "arm64", x64: "amd64" }
 const SHARED_BIN = join(ROOT, "bin")
 
-const context = (directory) => ({ directory, client: { app: { log: async () => {} } } })
+const context = (directory, logs = []) => ({ directory, client: { app: { log: async ({ body }) => { logs.push(body.message) } } } })
+const archiveName = (number) => `context-guru_${number}_${PLATFORMS[process.platform]}_${ARCHITECTURES[process.arch]}.tar.gz`
 const anthropic = () => ({ provider: { anthropic: { options: { baseURL: "https://api.anthropic.com" } } } })
 
 // Async on purpose: the in-process release server must answer the scripts' curl calls.
@@ -33,23 +34,30 @@ function run(script, args = []) {
   })
 }
 
+// A release archive that holds the stub proxy which reports `version`.
+function stubArchive(version) {
+  const stub = stubProxyBinary(undefined, { version })
+  const archive = join(mkdtempSync(join(tmpdir(), "context-guru-release-")), "archive.tar.gz")
+  spawnSync("tar", ["-czf", archive, "-C", dirname(stub), "context-guru-proxy"])
+  const bytes = readFileSync(archive)
+  return { bytes, checksum: createHash("sha256").update(bytes).digest("hex") }
+}
+
 // A release server that holds a stub proxy for each version and counts the archive downloads.
-async function releaseServer(versions, latest) {
-  const releases = {}
+// `latestTag` is where /releases/latest points. `extra` serves more URLs, as a map from path to body.
+async function releaseServer(versions, latest, { latestTag = `v${latest}`, extra = {} } = {}) {
+  const releases = { ...extra }
   for (const version of versions) {
-    const stub = stubProxyBinary(undefined, { version })
-    const archive = join(mkdtempSync(join(tmpdir(), "context-guru-release-")), "archive.tar.gz")
-    spawnSync("tar", ["-czf", archive, "-C", dirname(stub), "context-guru-proxy"])
-    const bytes = readFileSync(archive)
-    const name = `context-guru_${version}_${PLATFORMS[process.platform]}_${ARCHITECTURES[process.arch]}.tar.gz`
+    const { bytes, checksum } = stubArchive(version)
+    const name = archiveName(version)
     releases[`/releases/download/v${version}/${name}`] = bytes
-    releases[`/releases/download/v${version}/checksums.txt`] = `${createHash("sha256").update(bytes).digest("hex")}  ${name}\n`
+    releases[`/releases/download/v${version}/checksums.txt`] = `${checksum}  ${name}\n`
   }
   const downloads = []
   const server = createServer((request, response) => {
     if (request.url === "/releases/latest") {
       response.statusCode = 302
-      response.setHeader("Location", `http://127.0.0.1:${server.address().port}/releases/tag/v${latest}`)
+      response.setHeader("Location", `http://127.0.0.1:${server.address().port}/releases/tag/${latestTag}`)
       response.end()
     } else if (releases[request.url] !== undefined) {
       if (request.url.endsWith(".tar.gz")) downloads.push(request.url)
@@ -64,11 +72,11 @@ async function releaseServer(versions, latest) {
 }
 
 // No context-guru-proxy on PATH and no CONTEXT_GURU_BIN, so the plugin uses its managed binary.
-async function withReleases(versions, latest, fn) {
+async function withReleases(versions, latest, fn, options) {
   const previous = { bin: process.env.CONTEXT_GURU_BIN, path: process.env.PATH, releases: process.env.CONTEXT_GURU_RELEASES_URL }
   delete process.env.CONTEXT_GURU_BIN
   process.env.PATH = `/usr/bin:/bin:${dirname(process.execPath)}`
-  const release = await releaseServer(versions, latest)
+  const release = await releaseServer(versions, latest, options)
   process.env.CONTEXT_GURU_RELEASES_URL = release.url
   const started = []
   try {
@@ -224,4 +232,49 @@ test("reset in one project keeps the shared copy that another project uses", asy
     assert.equal(existsSync(projectBinary(a)), false)
     assert.equal(realpathSync(projectBinary(b)), realpathSync(shared("v0.7.3")))
   })
+})
+
+test("a CONTEXT_GURU_VERSION that is not a release tag stops the start and writes no binary", async () => {
+  process.env.CONTEXT_GURU_VERSION = "v1/../x"
+  const logs = []
+  try {
+    await withReleases(["0.7.3"], "0.7.3", async () => {
+      const directory = "/tmp/context-guru-shared-odd-version"
+      const state = stateDirectory(directory)
+      const rootBefore = readdirSync(ROOT)
+      const binBefore = existsSync(SHARED_BIN) ? readdirSync(SHARED_BIN).sort() : []
+      const config = anthropic()
+
+      await (await plugin.server(context(directory, logs))).config(config)
+
+      assert.ok(logs.some((message) => /CONTEXT_GURU_VERSION is not a release tag: v1\/\.\.\/x/.test(message)), logs.join("|"))
+      assert.equal(existsSync(join(state, "install.json")), false, "a proxy started")
+      assert.equal(config.provider.anthropic.options.baseURL, "https://api.anthropic.com")
+      // Only the project's own state directory is new. Nothing appears in the shared bin/ or beside it.
+      assert.deepEqual(readdirSync(ROOT).filter((name) => !rootBefore.includes(name) && name !== basename(state)), [])
+      assert.deepEqual(existsSync(SHARED_BIN) ? readdirSync(SHARED_BIN).sort() : [], binBefore)
+      assert.equal(existsSync(join(state, "bin")), false)
+    })
+  } finally {
+    delete process.env.CONTEXT_GURU_VERSION
+  }
+})
+
+test("update refuses a latest tag of .. and writes no binary outside its version directory", async () => {
+  // curl resolves download/.. to the releases path, so a valid archive waits there. Without the guard,
+  // the update would install it as <root>/bin/../context-guru-proxy.
+  const { bytes, checksum } = stubArchive("0.7.4")
+  const name = archiveName("..")
+  const extra = { [`/releases/${name}`]: bytes, "/releases/checksums.txt": `${checksum}  ${name}\n` }
+  await withReleases(["0.7.3"], "0.7.3", async ({ start }) => {
+    const state = await start("/tmp/context-guru-shared-odd-tag")
+
+    const applied = await run(join(state, "context-guru-update"), ["--yes"])
+
+    assert.equal(existsSync(join(ROOT, "context-guru-proxy")), false, applied.out)
+    assert.equal(existsSync(join(SHARED_BIN, "context-guru-proxy")), false, applied.out)
+    assert.equal(applied.status, 1, applied.out)
+    assert.match(applied.out, /^reason=odd-tag$/m)
+    assert.equal(realpathSync(projectBinary(state)), realpathSync(shared("v0.7.3")))
+  }, { latestTag: "..", extra })
 })
