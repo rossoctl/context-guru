@@ -30,6 +30,19 @@ const bgStartBody = `{"model":"claude-sonnet-5-5","max_tokens":100,"messages":[
 {"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"make","run_in_background":true}}]},
 {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"Command running in background with ID: bash1."}]}]}`
 
+// softTB is a testing.TB whose Fatalf reports with Errorf and returns. testutil.WaitForState calls Fatalf, and
+// FailNow must not run off the test goroutine; the HTTP handler goroutine uses this one, and answers 500 when
+// it failed, so the test fails on its own goroutine.
+type softTB struct {
+	testing.TB
+	failed atomic.Bool
+}
+
+func (s *softTB) Fatalf(format string, args ...any) {
+	s.failed.Store(true)
+	s.TB.Errorf(format, args...)
+}
+
 // scanUpstream answers request 1 with a tool call and every later one with end_turn, with a 30k prefix
 // (29,000 read + 1,000 written): under the person floor (80k), over the tool-wait floor (20k).
 func scanUpstream(t *testing.T, hits *atomic.Int64, scanned <-chan struct{}) *httptest.Server {
@@ -40,7 +53,8 @@ func scanUpstream(t *testing.T, hits *atomic.Int64, scanned <-chan struct{}) *ht
 			// The answer waits until this request's scan has finished, so the keeper finds it ready: no race
 			// between the scan and the response. Pings (hits 3 and later) do not start a scan.
 			got := 0
-			testutil.WaitForState(t, "this request's early scan to finish", func() bool {
+			soft := &softTB{TB: t}
+			testutil.WaitForState(soft, "this request's early scan to finish", func() bool {
 				select {
 				case <-scanned:
 					got++
