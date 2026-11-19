@@ -207,6 +207,11 @@ type kaEntry struct {
 	// look, and coupling a security bound to a liveness loop is how a hold silently becomes
 	// unbounded. time.AfterFunc fires regardless.
 	timer *time.Timer
+	// armedAt is the keeper-clock instant the hard-deadline timer was armed. RaiseWaitPlan re-arms it for
+	// the raised count from this instant (#1225).
+	armedAt time.Time
+	// deadline is when that timer fires, on the keeper clock (the timer itself is not readable).
+	deadline time.Time
 }
 
 // due reports whether this TRACKED entry should be pinged now. Timing, K and the stop flag
@@ -1094,6 +1099,8 @@ func (k *Keeper) Record(r Record) {
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
+	e.armedAt = k.now()
+	e.deadline = e.armedAt.Add(e.hold())
 	e.timer = time.AfterFunc(e.hold(), func() { k.expireAuto(key) })
 	k.evictLocked()
 }

@@ -163,7 +163,18 @@ func (k *Keeper) RaiseWaitPlan(key Key, cause string) (int, bool) {
 	if n <= e.pol.MaxPings {
 		return 0, false
 	}
+	// The hard retention deadline was armed at record from the planned count: (K+1) x Idle. Re-arm it for
+	// the raised count from the same instant, or the timer retires the entry before the new last ping
+	// (and the extra request, which follows the last ping). A timer that already fired cannot be
+	// stopped: the entry is on its way out, so leave it.
+	left := e.armedAt.Add(time.Duration(n+1) * e.pol.Idle).Sub(k.now())
+	if left <= 0 || e.timer == nil || !e.timer.Stop() {
+		return 0, false
+	}
 	e.pol.MaxPings = n
+	e.deadline = e.armedAt.Add(e.hold())
+	id := key.id()
+	e.timer = time.AfterFunc(left, func() { k.expireAuto(id) })
 	return n, true
 }
 

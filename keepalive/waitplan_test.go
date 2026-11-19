@@ -446,3 +446,29 @@ func TestRaiseWaitPlan(t *testing.T) {
 		}
 	})
 }
+
+// #1225: the raise moves the hard retention deadline too. With the deadline left at (3+1) x Idle the
+// entry is retired before ping 4 and the wire behavior equals main. The test drives the fake clock and
+// counts the pings the fake dispatcher gets; the real timer is re-armed to (5+1) x Idle from record.
+func TestRaiseWaitPlanSendsAllRaisedPingsAndMovesTheDeadline(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	recordSeq(k, sess1, planPolicy(), kaBody, clock.now(), toolCall, endTurn)
+	e := k.live[sess1.id()]
+	idle := e.pol.Idle
+	armed := e.armedAt
+	if n, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); !ok || n != 5 {
+		t.Fatalf("raise = %d %v, want 5 true", n, ok)
+	}
+	k.mu.Lock()
+	deadline := e.deadline
+	k.mu.Unlock()
+	if want := armed.Add(6 * idle); !deadline.Equal(want) {
+		t.Fatalf("deadline = %v, want %v (record + (5+1) x Idle)", deadline, want)
+	}
+	for i := 1; i <= 7; i++ {
+		k.Sweep(clock.advance(idle + time.Second))
+	}
+	if fd.n() != 5 {
+		t.Fatalf("pings sent = %d, want 5", fd.n())
+	}
+}
