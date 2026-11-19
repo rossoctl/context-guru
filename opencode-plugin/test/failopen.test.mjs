@@ -6,18 +6,18 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-failopen-test-"))
-process.env.CONTEXT_GURU_PORT_START = "9800"
+process.env.CONTEXT_GURU_PORT_START = "9200"
 
 import plugin, { routeProviders, stateDirectory } from "../index.js"
 import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
 
-// Ports only this file uses. 9863 stays closed: nothing listens there.
-const UPSTREAM_PORT = 9860
-const HANG_PORT = 9861
-const ERROR_PORT = 9862
-const CLOSED_PORT = 9863
-const RESET_PORT = 9864
-const BROKEN_PORT = 9865
+// Ports only this file uses. 9263 stays closed: nothing listens there.
+const UPSTREAM_PORT = 9260
+const HANG_PORT = 9261
+const ERROR_PORT = 9262
+const CLOSED_PORT = 9263
+const RESET_PORT = 9264
+const BROKEN_PORT = 9265
 
 // A made-up key. It must reach the upstream unchanged and appear nowhere else.
 const CANARY = "sk-ant-canary-1159-do-not-log-7f3a9c"
@@ -113,7 +113,7 @@ test("a refused connection sends the request once to the upstream, unchanged exc
     assert.equal(lines.length, 1)
     assert.equal(lines[0].level, "warn")
     assert.match(lines[0].message, /ECONNREFUSED/)
-    assert.match(lines[0].message, /127\.0\.0\.1:9860/)
+    assert.match(lines[0].message, /127\.0\.0\.1:9260/)
     assert.doesNotMatch(lines[0].message, /canary|\/gw|messages|beta/)
   } finally {
     await upstream.close()
