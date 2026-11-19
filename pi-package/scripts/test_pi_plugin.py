@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1317,6 +1318,60 @@ class ChainMode(Sandbox):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("models_restore=restored", out.stdout)
         self.assertEqual(json.loads(self.models.read_text()), self.document)
+
+
+class PortCheck(unittest.TestCase):
+    """#1232: setup's port check is the proxy's own bind (SO_REUSEADDR). A port that only has TIME_WAIT
+    connections, as right after the proxy stops, is free; a port with a live listener is not."""
+
+    def listener(self):
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        return sock
+
+    def test_a_port_with_only_time_wait_connections_is_free(self):
+        server = self.listener()
+        self.addCleanup(server.close)
+        port = server.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port))
+        self.addCleanup(client.close)
+        accepted, _ = server.accept()
+        accepted.close()  # the server side closes first, so TIME_WAIT is on the server's port
+        client.recv(1)
+        client.close()
+        server.close()
+        with socket.socket() as plain, self.assertRaises(OSError, msg="a plain bind must fail: TIME_WAIT is there"):
+            plain.bind(("127.0.0.1", port))
+        self.assertTrue(pi_plugin.port_free(port))
+
+    def test_a_port_with_a_live_listener_is_not_free(self):
+        server = self.listener()
+        self.addCleanup(server.close)
+        self.assertFalse(pi_plugin.port_free(server.getsockname()[1]))
+
+    def wildcard(self, family, address):
+        sock = socket.socket(family)
+        self.addCleanup(sock.close)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)  # dual stack, like most servers
+        sock.bind((address, 0))
+        sock.listen()
+        return sock.getsockname()[1]
+
+    def test_a_port_another_program_listens_on_for_all_addresses_is_not_free(self):
+        # On macOS a 127.0.0.1 bind with SO_REUSEADDR succeeds next to this listener, and would take the
+        # other program's local traffic. The check must still say "taken" (review of #1234).
+        self.assertFalse(pi_plugin.port_free(self.wildcard(socket.AF_INET, "0.0.0.0")))
+
+    @unittest.skipUnless(socket.has_ipv6, "no IPv6 on this machine")
+    def test_a_port_with_a_dual_stack_listener_is_not_free(self):
+        self.assertFalse(pi_plugin.port_free(self.wildcard(socket.AF_INET6, "::")))
+
+    def test_the_first_free_port_uses_the_same_check(self):
+        with mock.patch.object(pi_plugin, "port_free", side_effect=lambda p: p == 8790):
+            self.assertEqual(pi_plugin.first_free_port(), 8790)
 
 
 if __name__ == "__main__":
