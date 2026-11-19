@@ -131,3 +131,44 @@ func TestSubagentRequestBooksNoTTLPremium(t *testing.T) {
 		t.Fatalf("a subagent request was changed (ops %d)", len(ops))
 	}
 }
+
+// #1243, the free move. On this gateway a request that asks 1h on a prefix already cached at 5m is a
+// READ with no write: no premium is billed and usage shows no 1h write. The accountant must book no
+// premium for it (nothing was billed). What it books for a LATER read after a gap is characterised
+// below: accBilledTTL keeps a read-only turn on the thread's last billed tier, which is 5m here, so
+// the entry is judged a 5-minute entry and the library books no rescue.
+func TestRelabelOfAnEntryAlreadyCachedAt5mBooksNoPremium(t *testing.T) {
+	st := newSavingsTracker()
+	t0 := time.Unix(1_700_000_000, 0)
+	// Request 1: no relabel (for example under the size gate on an earlier turn), written at 5m.
+	c1 := mainAgentTurn(2)
+	req1 := st.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: t0}, c1)
+	st.end(req1, accountant.Thread{ID: "main"}, c1, nil, accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeExact})
+	st.compute(req1, Usage{CacheWrite: 20000})
+
+	// Request 2, one minute later: relabelled to 1h, the whole prefix is READ, nothing written.
+	c2 := mainAgentTurn(2)
+	fwd, ops := relabelled(t, c2, thread.Primary)
+	req2 := st.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", Model: "m", At: t0.Add(time.Minute)}, c2)
+	st.end(req2, accountant.Thread{ID: "main"}, fwd, ops, accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact})
+	req2.LowerTTL(5 * time.Minute) // what accBilledTTL does for a read-only turn on a 5m thread
+	res2 := st.compute(req2, Usage{CacheRead: 20000})
+	if len(res2.Checks) != 0 {
+		t.Fatalf("checks failed: %+v", res2.Checks)
+	}
+	for _, e := range res2.CacheEffects {
+		if e.Kind == accountant.EffectTTLPremium {
+			t.Fatalf("booked a premium for a request that wrote nothing: %+v", e)
+		}
+	}
+	t.Logf("r2 effects: %+v", res2.CacheEffects)
+
+	// Request 3, 10 minutes after request 2: a read. Report what is booked.
+	c3 := mainAgentTurn(3)
+	fwd3, ops3 := relabelled(t, c3, thread.Primary)
+	req3 := st.begin(accountant.RequestMeta{RequestID: "r3", Session: "s", Model: "m", At: t0.Add(11 * time.Minute)}, c3)
+	st.end(req3, accountant.Thread{ID: "main"}, fwd3, ops3, accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact})
+	req3.LowerTTL(5 * time.Minute)
+	res3 := st.compute(req3, Usage{CacheRead: 19000, CacheWrite: 1000})
+	t.Logf("r3 checks: %+v effects: %+v", res3.Checks, res3.CacheEffects)
+}
