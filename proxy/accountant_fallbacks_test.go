@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/tooldefer"
 )
@@ -282,21 +284,70 @@ func TestStateOfAnotherPipelineIsNotRestored(t *testing.T) {
 	defer up.Close()
 	run := func(yaml string, from, to int) []dash.Event {
 		h, rec, tap := accHandlerOpts(t, up.URL, yaml, func(o *Options) { o.AccountantState = path })
-		for k := from; k <= to; k++ {
-			accPostBody(t, h, "ses_opencode", openCodeConversation(k))
-		}
-		waitForRows(t, rec, int64(to-from+1))
-		h.Close() // saves the state
-		return tap.all()
+		return postOpenCodeTurns(t, h, rec, tap, from, to)
 	}
 	run("preset: conservative\n", 1, 2)
-	evs := run("preset: off\n", 3, 4)
+	pricedAfterRestart(t, run("preset: off\n", 3, 4))
+}
+
+// The same through an adapt change: the proxy starts with conservative, the adapt apply swaps in off, and
+// the restart runs off from the saved override. The key must name the configuration that runs, not the one
+// the proxy was started with, so the conservative thread state does not come back.
+func TestStateIsNotRestoredAfterAnAdaptChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	override := filepath.Join(t.TempDir(), "d.db.adapt.json")
+	const base = "preset: conservative\n"
+	up := billedUpstream(t)
+	defer up.Close()
+	opts := func(o *Options) {
+		o.AccountantState, o.AdaptOverride, o.BaseConfig = path, override, base
+		o.BuildConfig = func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+			cfg, err := config.LoadBytes(doc)
+			if err != nil {
+				return BuiltConfig{}, err
+			}
+			p, err := cfg.Build(e)
+			return BuiltConfig{Pipe: p, Preset: cfg.Preset}, err
+		}
+	}
+	h, rec, tap := accHandlerOpts(t, up.URL, base, opts)
+	postOpenCodeTurns(t, h, rec, tap, 1, 2) // the expand declaration is an active change now
+	if _, _, err := h.adaptWriteLocal("compaction", "test", func(string) (string, error) { return "preset: off\n", nil }); err != nil {
+		t.Fatal(err)
+	}
+	h.Close() // saves the state and keeps the override for the next start
+	h, rec, tap = accHandlerOpts(t, up.URL, base, opts)
+	if got := strings.Join(h.static.Load().Pipe.Names(), ","); got != "" {
+		t.Fatalf("setup: the restart runs %q, want the override's empty pipeline", got)
+	}
+	pricedAfterRestart(t, postOpenCodeTurns(t, h, rec, tap, 3, 4))
+}
+
+// postOpenCodeTurns sends the OpenCode conversation with from to to tool turns, waits for the rows, closes the
+// handler (which saves the state) and returns the events.
+func postOpenCodeTurns(t *testing.T, h *Handler, rec *dash.Recorder, tap *accTap, from, to int) []dash.Event {
+	t.Helper()
+	for k := from; k <= to; k++ {
+		accPostBody(t, h, "ses_opencode", openCodeConversation(k))
+	}
+	waitForRows(t, rec, int64(to-from+1))
+	h.Close()
+	return tap.all()
+}
+
+// pricedAfterRestart fails when a request after the restart failed a check, or the second one has no
+// accountant result or fell back. The first is held out as a new thread's estimate.
+func pricedAfterRestart(t *testing.T, evs []dash.Event) {
+	t.Helper()
 	for i, e := range evs {
 		if res, ok := e.AccountantResult(); ok {
 			for _, c := range res.Checks {
 				t.Errorf("request %d after the restart: check failed: %s %s", i+1, c.Check, c.Detail)
 			}
 		}
+	}
+	if _, ok := evs[1].AccountantResult(); !ok {
+		t.Errorf("second request after the restart has no accountant result (fallback %q)", evs[1].AccountantFallback())
 	}
 	if fb := evs[1].AccountantFallback(); fb != "" {
 		t.Errorf("second request after the restart fell back: %s", fb)

@@ -29,8 +29,12 @@ type savingsTracker struct {
 	// thinking holds the token count of each thinking block a response made, by its signature's key, so a block
 	// the client sends back is priced at its own count (issue #1187, accountant design D16). Saved with the state.
 	thinking *thinkcount.Table
-	// config is accConfigKey of this proxy: save writes it, and restore loads only a snapshot with the same key.
-	config string
+	// config is accConfigKey of the running configuration: save writes it, and restore loads only a snapshot with
+	// the same key. configOpen is set once the state is restored (openConfig). configMu guards both: an adapt apply
+	// sets the key while the periodic save reads it.
+	configMu   sync.Mutex
+	config     string
+	configOpen bool
 }
 
 // recordThinking stores the thinking counts of one billed response. Nil-safe.
