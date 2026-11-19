@@ -695,7 +695,7 @@ func (h *Handler) renderMetrics() string {
 
 	// --- the early wait-cause scan (#1225, #1227) -----------------------------
 	promHeaderProc(&b, "cg_waitcause_early_scan_total",
-		"What the keeper did with the early wait-cause scan at response end: used (its counts joined the plan), not_ready (still running, today's plan), unknown (it could not say: work bound, server-held history, panic, cancelled; today's plan). A high not_ready or unknown share means the plan is often today's.", "counter")
+		"What the keeper did with the early wait-cause scan at response end, for every recorded request that has a scan (the dashboard on), whether or not its keep-alive is on: used (its counts joined the plan), not_ready (still running, today's plan), unknown (it could not say: work bound, server-held history, panic, cancelled; today's plan). A high not_ready or unknown share means the plan is often today's.", "counter")
 	promLine(&b, "cg_waitcause_early_scan_total", `result="used"`, float64(h.scan.used.Load()))
 	promLine(&b, "cg_waitcause_early_scan_total", `result="not_ready"`, float64(h.scan.notReady.Load()))
 	promLine(&b, "cg_waitcause_early_scan_total", `result="unknown"`, float64(h.scan.unknown.Load()))

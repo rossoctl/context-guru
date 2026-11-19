@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 )
 
@@ -126,12 +127,17 @@ func orDefault(v, def int) int {
 type TaskCounts struct{ Background, Teammate int }
 
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
-// open-task counts. The counts are the larger of two readings: the host's tracker (Options.OpenTasks),
-// which is as of the request before and carries tasks whose start has left a compacted body, and counts
-// the host read from this turn's own body (open, nil: the host had no result in time). A stale tracker
-// count alone reads a turn that starts background work as "a person", the cheaper plan (#1225). The
-// larger count can only move a wait from "a person" to "background", never the other way, so a turn
-// gets no fewer pings than the tracker alone gave.
+// open-task counts. The background count is the larger of two readings: the host's tracker
+// (Options.OpenTasks), which is as of the request before and carries tasks whose start has left a
+// compacted body, and the count the host read from this turn's own body (open; nil: the host had no
+// result in time). A stale tracker count alone reads a turn that starts background work as "a person",
+// the cheaper plan (#1225).
+//
+// Only the background count is merged. The teammate count is the tracker's alone: a merged teammate
+// count could turn "a person" (base+1 pings, the general floor) into "a teammate" (base pings), which is
+// fewer. With the background count merged, the cause moves only from "a person" or "a teammate" to
+// "background", which gets at least those pings and a floor no higher. Record also takes the larger
+// count of the two causes, so no configuration of the extra pings can lower it.
 func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool, open *TaskCounts) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
@@ -141,7 +147,7 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 		bg, tm = k.o.OpenTasks(key.Tenant, key.Session, key.Thread)
 	}
 	if open != nil {
-		bg, tm = max(bg, open.Background), max(tm, open.Teammate)
+		bg = max(bg, open.Background)
 	}
 	w, _ := waitcause.ClassifyWaitingForTerminal(terminalFor(k.o.TerminalTools, incomplete),
 		names, stopReason, false, usageOK, bg, tm)
@@ -255,4 +261,17 @@ func (k *Keeper) ToolSeen(key Key) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.toolSeen[key.id()]
+}
+
+// OneHourTier reports whether Record would put this response on the 1-hour schedule: the thread was
+// granted the 1-hour lifetime and the provider is not OpenAI. The host asks it before it decides how far to
+// trust a body reading (#1227): the per-wait plan, and so the body reading, does not apply to that tier.
+func (k *Keeper) OneHourTier(key Key, body []byte, u Usage, usageOK bool, provider bschemas.ModelProvider) bool {
+	if k == nil || provider == bschemas.OpenAI {
+		return false
+	}
+	k.mu.Lock()
+	prev := k.tier1h[key.id()]
+	k.mu.Unlock()
+	return ResolveTier(body, u, usageOK, prev)
 }

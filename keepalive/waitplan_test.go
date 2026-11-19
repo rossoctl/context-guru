@@ -6,6 +6,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 
 	"github.com/rossoctl/context-guru/store"
 )
@@ -396,11 +397,82 @@ func TestRecordPlansFromTheHostsOwnBodyCounts(t *testing.T) {
 			t.Fatalf("planned %d, want 5", got)
 		}
 	})
-	t.Run("teammate counts", func(t *testing.T) {
+	t.Run("a teammate count in the body is not merged: 3 pings stay 3, the floor stays", func(t *testing.T) {
+		// Merged, human (base+1 = 3) would become teammate (base = 2): one ping fewer.
 		k, _, clock := testKeeper(t)
 		rec(k, clock.now(), &TaskCounts{Teammate: 1})
-		if got := plannedPings(t, k, sess1); got != 2 {
-			t.Fatalf("planned %d, want 2 (a teammate wait)", got)
+		if _, ok := k.Entry(sess1); ok {
+			t.Fatal("held: the teammate count changed the floor of a 50k person wait")
+		}
+		k2, _, clock2 := testKeeper(t)
+		p := person
+		p.MinPrefixTokens = 20000 // held either way: compare the counts
+		for i, r := range []resp{toolCall, endTurn} {
+			k2.Record(Record{Key: sess1, StartedAt: clock2.now().Add(-time.Duration(1-i) * time.Second), Body: []byte(kaBody),
+				Provider: bschemas.Anthropic, Route: "/v1/messages", Status: http.StatusOK,
+				Usage:        Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: r.stop},
+				ToolUseNames: r.names, UsageOK: true, Policy: p, Header: kaHeader(),
+				Hold: fakeOf(k2).hold(sess1), OpenTasks: &TaskCounts{Teammate: 1}})
+		}
+		if got := plannedPings(t, k2, sess1); got != 3 {
+			t.Fatalf("planned %d, want 3 (a person wait keeps its count)", got)
+		}
+	})
+	t.Run("never fewer: a background extra below the human extra keeps the larger count", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		p := person
+		p.HumanExtraPings, p.BackgroundExtraPings = 5, 1 // human 7, background 3
+		p.MinPrefixTokens = 20000
+		for i, r := range []resp{toolCall, endTurn} {
+			k.Record(Record{Key: sess1, StartedAt: clock.now().Add(-time.Duration(1-i) * time.Second), Body: []byte(kaBody),
+				Provider: bschemas.Anthropic, Route: "/v1/messages", Status: http.StatusOK,
+				Usage:        Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: r.stop},
+				ToolUseNames: r.names, UsageOK: true, Policy: p, Header: kaHeader(),
+				Hold: fakeOf(k).hold(sess1), OpenTasks: &TaskCounts{Background: 1}})
+		}
+		if got := plannedPings(t, k, sess1); got != 7 {
+			t.Fatalf("planned %d, want 7 (the person count, the larger)", got)
+		}
+	})
+	t.Run("a hold today's path makes is never refused", func(t *testing.T) {
+		// 90k prefix clears the 80k person floor: held with or without the scan, with at least 3 pings.
+		for _, open := range []*TaskCounts{nil, {Background: 1}, {Teammate: 1}, {}} {
+			k, _, clock := testKeeper(t)
+			for i, r := range []resp{toolCall, endTurn} {
+				k.Record(Record{Key: sess1, StartedAt: clock.now().Add(-time.Duration(1-i) * time.Second), Body: []byte(kaBody),
+					Provider: bschemas.Anthropic, Route: "/v1/messages", Status: http.StatusOK,
+					Usage:        Usage{CacheRead: 88576, CacheWrite: 1200, StopReason: r.stop},
+					ToolUseNames: r.names, UsageOK: true, Policy: person, Header: kaHeader(),
+					Hold: fakeOf(k).hold(sess1), OpenTasks: open})
+			}
+			if v, ok := k.Entry(sess1); !ok || v.Policy.MaxPings < 3 {
+				t.Fatalf("open=%+v: held=%v pings=%d, want held with at least 3", open, ok, v.Policy.MaxPings)
+			}
+		}
+	})
+	t.Run("the 1-hour tier and OpenAI do not use the body reading", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		for i, ts := range []time.Time{clock.now().Add(-time.Second), clock.now()} {
+			k.Record(Record{Key: sess1, StartedAt: ts, Body: []byte(ttlBody1h), Provider: bschemas.Anthropic,
+				Route: "/v1/messages", Status: http.StatusOK,
+				Usage:        Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200, StopReason: []string{"tool_use", "end_turn"}[i]},
+				ToolUseNames: [][]string{{"Bash"}, nil}[i], UsageOK: true, Policy: person, Header: kaHeader(),
+				Hold: fakeOf(k).hold(sess1), OpenTasks: &TaskCounts{Background: 1}})
+		}
+		if _, ok := k.Entry(sess1); ok {
+			t.Fatal("a 1-hour 50k person wait was held on the strength of the body reading")
+		}
+		k2, _, _ := testKeeper(t)
+		pol := person
+		pol.Idle = modelinfo.OpenAIDefaultKeepAliveIdle
+		for i := 0; i < 2; i++ {
+			k2.Record(Record{Key: sess1, StartedAt: time.Now(), Provider: bschemas.OpenAI, Route: "/v1/responses",
+				Body:   []byte(`{"model":"azure/gpt-5.6-luna","max_output_tokens":2048,"input":[]}`),
+				Status: http.StatusOK, Usage: Usage{CacheRead: 48576, StopReason: "end_turn"}, UsageOK: true, Policy: pol,
+				Header: kaHeader(), Hold: fakeOf(k2).hold(sess1), OpenTasks: &TaskCounts{Background: 1}})
+		}
+		if _, ok := k2.Entry(sess1); ok {
+			t.Fatal("a 50k OpenAI person wait was held on the strength of the body reading")
 		}
 	})
 }

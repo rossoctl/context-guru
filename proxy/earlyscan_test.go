@@ -272,3 +272,56 @@ func TestEarlyScanCountsIgnoreTheWindowForBackgroundWork(t *testing.T) {
 		})
 	}
 }
+
+// #1227: the body reading decides the windows only where the plan changes the count. On the 1-hour tier
+// and for OpenAI, a shut window still applies to a wait that reads "a person" (the account's policy, no
+// tag); on the 5-minute tier the same counts ignore it (the strategy's tag).
+func TestEarlyScanCountsDoNotMoveTheWindowOfThe1HourTierOrOpenAI(t *testing.T) {
+	account := CachePolicy{KeepAlive: true, WaitPlan: true, Idle: 280 * time.Second, MaxPings: 2,
+		MinPrefixTokens: 20000, MaxUSDPerPing: 0.25}
+	for _, tc := range []struct {
+		name     string
+		provider bschemas.ModelProvider
+		body     string
+		use      Usage
+		wantTag  string
+	}{
+		{"5-minute tier: window ignored", bschemas.Anthropic, kaBody, Usage{CacheRead: 48576, CacheWrite: 1200}, "s"},
+		{"1-hour tier: window applies", bschemas.Anthropic, ttlBody1h, Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200}, ""},
+		{"OpenAI: window applies", bschemas.OpenAI, `{"model":"azure/gpt-5.6-luna","max_output_tokens":2048,"input":[]}`,
+			Usage{CacheRead: 48576}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, clock := testKeeper(t, Limits{})
+			now := clock.now()
+			k.setStrategies([]tenant.Strategy{{
+				ID: "s", Active: true, IdleSeconds: 240, MaxPings: 4, MinPrefixTokens: 20000, MaxUSDPerPing: 0.5,
+				Windows: []tenant.Window{{Start: "00:00", End: "00:01"}},
+				Target:  tenant.Target{Mode: tenant.TargetList, TenantIDs: []string{"t1"}}, UpdatedAt: now,
+			}})
+			tn := &Tenancy{ID: "t1", Cache: account}
+			route := "/v1/messages"
+			if tc.provider == bschemas.OpenAI {
+				route = "/v1/responses"
+			}
+			for i, ts := range []time.Time{now.Add(-time.Second), now} {
+				r := httptest.NewRequest(http.MethodPost, route, strings.NewReader(""))
+				r.Header.Set("Authorization", "Bearer sk-caller-secret")
+				use := tc.use
+				use.StopReason = "end_turn"
+				if i == 0 {
+					use.StopReason, use.ToolUseNames = "tool_use", []string{"Bash"}
+				}
+				k.recordTouch("", tn, "sess-1", "", ts, []byte(tc.body), upstream{base: "http://up", path: route}, r,
+					tc.provider, route, http.StatusOK, use, true, &keepalive.TaskCounts{Background: 1})
+			}
+			v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
+			if !held {
+				t.Fatal("not held")
+			}
+			if v.Tag != tc.wantTag {
+				t.Fatalf("tag = %q, want %q", v.Tag, tc.wantTag)
+			}
+		})
+	}
+}

@@ -391,13 +391,33 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		}
 		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
 		// cause of the response that ended this turn.
-		ignoreWindows := false
+		// The body reading joins only where the per-wait plan changes the count (the 5-minute tier, not
+		// OpenAI, Idle under 300 s: Record's own guard), for the windows as for the plan (#1227). Elsewhere
+		// the tracker-only cause decides, as before.
+		account := pol
+		wkey := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
+		sub := keepalive.IsSubagentThread(threadID)
+		causeOf := func(o *keepalive.TaskCounts) string {
+			return k.Keeper.WaitingFor(wkey, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, o)
+		}
+		planEligible := func(p keepalive.Policy) bool { return p.WaitPlan && p.On() && p.Idle < 300*time.Second }
+		ignoreWindows, ignoreToday := false, false
 		if pol.WaitPlan && tracked {
-			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
-				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, open)
-			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
+			ignoreToday = !keepalive.WindowsApply(causeOf(nil), sub)
+			ignoreWindows = ignoreToday
+			if open != nil && provider != bschemas.OpenAI &&
+				!k.Keeper.OneHourTier(wkey, body, keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
+					CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h, StopReason: u.StopReason}, usageOK, provider) {
+				ignoreWindows = !keepalive.WindowsApply(causeOf(open), sub)
+			}
 		}
 		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
+		if ignoreWindows != ignoreToday && !planEligible(pol) {
+			// The policy that ignoring the windows chose does not take the plan (a 1-hour Idle, or off):
+			// the reading does not apply, and today's windows decision stands.
+			pol, applied = k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, ignoreToday)
+			open = nil
+		}
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.

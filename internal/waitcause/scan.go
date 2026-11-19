@@ -8,8 +8,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// The work bounds of ScanBody. They bound the WORK, not the time: a body over either bound is not read
-// at all, and the caller falls back to the counts the tracker holds. 8 MiB is above any body the
+// The work bounds of ScanBody. They bound the WORK, not the time: the byte bound refuses a body before any read; the message bound refuses a list after it is
+// normalized (the byte bound is what limits that work). Either way the caller falls back to the counts the tracker holds. 8 MiB is above any body the
 // dashboard writer scanned in measurements (783 KB was the largest in #424's benchmark, ~11 ms).
 const (
 	MaxScanBytes    = 8 << 20
