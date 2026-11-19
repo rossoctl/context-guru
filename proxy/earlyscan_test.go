@@ -325,3 +325,51 @@ func TestEarlyScanCountsDoNotMoveTheWindowOfThe1HourTierOrOpenAI(t *testing.T) {
 		})
 	}
 }
+
+// Ignoring the windows must never refuse a hold today's decision makes. The account's floor is 20k and the
+// shut-window strategy's is 100k, and a background wait takes the lower of the floor and the tool-wait floor (60k
+// on the account, which the strategy inherits): the strategy's floor for it is 60k. A 50k background turn is held with the account's policy, not refused.
+// When the strategy's policy holds too, it is used (it plans at least as many pings).
+func TestEarlyScanCountsNeverRefuseAHoldTodayMakes(t *testing.T) {
+	account := CachePolicy{KeepAlive: true, WaitPlan: true, Idle: 280 * time.Second, MaxPings: 2,
+		MinPrefixTokens: 20000, ToolWaitMinPrefix: 60000, MaxUSDPerPing: 0.25}
+	for _, tc := range []struct {
+		name     string
+		floor    int
+		strategy int // MaxPings of the strategy
+		wantTag  string
+		wantPing int
+	}{
+		{"strategy floor 100k: today's policy holds", 100000, 4, "", 5},
+		{"strategy floor 20k, more pings: the strategy", 20000, 4, "s", 7},
+		{"strategy floor 20k, fewer pings: today's policy", 20000, 1, "", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, clock := testKeeper(t, Limits{})
+			now := clock.now()
+			k.setStrategies([]tenant.Strategy{{
+				ID: "s", Active: true, IdleSeconds: 240, MaxPings: tc.strategy, MinPrefixTokens: tc.floor, MaxUSDPerPing: 0.5,
+				Windows: []tenant.Window{{Start: "00:00", End: "00:01"}},
+				Target:  tenant.Target{Mode: tenant.TargetList, TenantIDs: []string{"t1"}}, UpdatedAt: now,
+			}})
+			tn := &Tenancy{ID: "t1", Cache: account}
+			for i, ts := range []time.Time{now.Add(-time.Second), now} {
+				r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+				r.Header.Set("Authorization", "Bearer sk-caller-secret")
+				use := Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}
+				if i == 0 {
+					use.StopReason, use.ToolUseNames = "tool_use", []string{"Bash"}
+				}
+				k.recordTouch("", tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
+					bschemas.Anthropic, "/v1/messages", http.StatusOK, use, true, &keepalive.TaskCounts{Background: 1})
+			}
+			v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
+			if !held {
+				t.Fatal("a hold today's path makes was refused")
+			}
+			if v.Tag != tc.wantTag || v.Policy.MaxPings != tc.wantPing {
+				t.Fatalf("tag %q pings %d, want %q and %d", v.Tag, v.Policy.MaxPings, tc.wantTag, tc.wantPing)
+			}
+		})
+	}
+}

@@ -412,11 +412,24 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 			}
 		}
 		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
-		if ignoreWindows != ignoreToday && !planEligible(pol) {
-			// The policy that ignoring the windows chose does not take the plan (a 1-hour Idle, or off):
-			// the reading does not apply, and today's windows decision stands.
-			pol, applied = k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, ignoreToday)
-			open = nil
+		if ignoreWindows != ignoreToday {
+			// Ignoring the windows must never refuse a hold today's decision makes, nor plan fewer pings.
+			// Today's policy is the one the windows give; the wide one is the policy with them ignored.
+			todayPol, todayApplied := k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, ignoreToday)
+			prefix := u.CacheRead + u.CacheWrite
+			cause := causeOf(open)
+			holds := func(p keepalive.Policy) bool {
+				return planEligible(p) && p.On() && prefix >= int64(p.WaitMinPrefix(cause, sub))
+			}
+			switch {
+			case !planEligible(pol):
+				// The policy that ignoring the windows chose does not take the plan (a 1-hour Idle, or
+				// off): the reading does not apply, and today's windows decision stands.
+				pol, applied, open = todayPol, todayApplied, nil
+			case holds(todayPol) && (!holds(pol) || todayPol.WaitPings(cause, sub) > pol.WaitPings(cause, sub)):
+				// Today's policy holds this wait and the strategy's would refuse it or plan fewer pings.
+				pol, applied = todayPol, todayApplied
+			}
 		}
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
