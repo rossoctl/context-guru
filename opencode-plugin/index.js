@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
-import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { spawn, spawnSync } from "node:child_process"
@@ -73,9 +73,24 @@ export function captureOffEnv(env = process.env) {
   return { ...env, DASHBOARD_CONTENT: "0" }
 }
 
+function stateRoot() {
+  return process.env.CONTEXT_GURU_STATE || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-opencode")
+}
+
 export function stateDirectory(directory) {
-  const root = process.env.CONTEXT_GURU_STATE || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-opencode")
-  return join(root, createHash("sha256").update(directory).digest("hex").slice(0, 16))
+  return join(stateRoot(), createHash("sha256").update(directory).digest("hex").slice(0, 16))
+}
+
+// All projects share one downloaded copy per release, in <root>/bin/<version>/. Each project's
+// bin/context-guru-proxy is a symlink to it, so the scripts and records keep one path per project.
+function sharedBinary(version) {
+  if (!/^v[A-Za-z0-9._-]+$/.test(version ?? "")) return undefined
+  return join(stateRoot(), "bin", version, "context-guru-proxy")
+}
+
+function wantedVersion() {
+  const version = process.env.CONTEXT_GURU_VERSION || PINNED_VERSION
+  return version.startsWith("v") ? version : `v${version}`
 }
 
 function readJSON(path) {
@@ -126,9 +141,10 @@ function releasesBase() {
   return process.env.CONTEXT_GURU_RELEASES_URL || `https://github.com/${REPOSITORY}/releases`
 }
 
-async function downloadBinary(state) {
-  let version = process.env.CONTEXT_GURU_VERSION || PINNED_VERSION
-  if (!version.startsWith("v")) version = `v${version}`
+async function downloadBinary() {
+  const version = wantedVersion()
+  const destination = sharedBinary(version)
+  if (!destination) throw new Error(`CONTEXT_GURU_VERSION is not a release tag: ${version}`)
 
   const { platform, architecture } = releasePlatform()
   const number = version.slice(1)
@@ -150,11 +166,11 @@ async function downloadBinary(state) {
 
   // Extract under the state directory, not os.tmpdir(): the renameSync onto the
   // destination must stay on one filesystem, or it fails with EXDEV wherever /tmp
-  // is tmpfs and the state directory is on disk (common on Linux).
-  const workDirectory = join(state, `download-${process.pid}-${randomBytes(3).toString("hex")}`)
+  // is tmpfs and the state directory is on disk (common on Linux). The rename also
+  // means two projects that download the same release at once never write one file.
+  const workDirectory = join(stateRoot(), "bin", `download-${process.pid}-${randomBytes(3).toString("hex")}`)
   const archivePath = join(workDirectory, "archive.tar.gz")
   const extractDirectory = join(workDirectory, "extract")
-  const destination = join(state, "bin", "context-guru-proxy")
   mkdirSync(extractDirectory, { recursive: true, mode: 0o700 })
   try {
     writeFileSync(archivePath, archive, { mode: 0o600 })
@@ -172,8 +188,9 @@ async function downloadBinary(state) {
     }
     if (!source) throw new Error("release archive does not contain context-guru-proxy")
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 })
+    // Before the rename: another instance may run the shared file as soon as it exists.
+    spawnSync("chmod", ["755", source])
     renameSync(source, destination)
-    spawnSync("chmod", ["755", destination])
   } finally {
     spawnSync("rm", ["-rf", workDirectory])
   }
@@ -197,7 +214,34 @@ function findBinary(state) {
   if (path) return { path, managed: false }
   const managed = join(state, "bin", "context-guru-proxy")
   if (existsSync(managed)) return { path: managed, managed: true, version: reportedVersion(managed) ?? readJSON(join(state, "install.json"))?.version }
+  const shared = sharedBinary(wantedVersion())
+  if (shared && existsSync(shared)) return { path: shared, managed: true, version: wantedVersion() }
   return undefined
+}
+
+// Points this project's bin/context-guru-proxy at the shared copy. An older plugin downloaded a copy
+// into the project itself: it moves to the shared place, or goes when the shared place has that
+// version already. A rename on one filesystem is atomic and copies nothing. The caller holds the lock
+// on the state root, so no other instance moves or links the same file at the same time.
+function shareBinary(state, binary) {
+  const link = join(state, "bin", "context-guru-proxy")
+  if (!binary.managed || (binary.path === link && lstatSync(link).isSymbolicLink())) return binary
+  let target = binary.path
+  if (binary.path === link) {
+    target = sharedBinary(binary.version)
+    // The version is not known: keep the copy where it is, as before.
+    if (!target) return binary
+    if (existsSync(target)) rmSync(link)
+    else {
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+      renameSync(link, target)
+    }
+  }
+  mkdirSync(dirname(link), { recursive: true, mode: 0o700 })
+  const temporary = `${link}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`
+  symlinkSync(target, temporary)
+  renameSync(temporary, link)
+  return { ...binary, path: link }
 }
 
 function freePort(start = 8787) {
@@ -231,9 +275,28 @@ async function waitForHealthy(port) {
   return false
 }
 
+// A shell function for the scripts that need STATE and ROOT set. release_shared PATH removes a shared
+// copy of the proxy when no other project still uses it: no other project's symlink points at it, and
+// no other project's install.env records its version.
+const RELEASE_SHARED = `release_shared() {
+  case "$1" in "$ROOT"/bin/*/context-guru-proxy) ;; *) return 0 ;; esac
+  shared_version=$(basename "$(dirname "$1")")
+  for other in "$ROOT"/*/; do
+    other=\${other%/}
+    [ "$other" = "$STATE" ] && continue
+    [ "$(readlink "$other/bin/context-guru-proxy" 2>/dev/null)" = "$1" ] && return 0
+    grep -qxF "version=$shared_version" "$other/install.env" 2>/dev/null && return 0
+  done
+  rm -f "$1"
+  rmdir "$(dirname "$1")" 2>/dev/null || true
+}`
+
 function resetScript(state) {
   return `#!/bin/sh
 set -u
+STATE=${shQuote(state)}
+ROOT=${shQuote(dirname(state))}
+${RELEASE_SHARED}
 PID_FILE=${JSON.stringify(join(state, "proxy.pid"))}
 BIN_FILE=${JSON.stringify(join(state, "bin", "context-guru-proxy"))}
 if [ -f ${JSON.stringify(join(state, "install.env"))} ]; then . ${JSON.stringify(join(state, "install.env"))}; fi
@@ -248,7 +311,11 @@ if [ -f "$PID_FILE" ]; then
   esac
 fi
 rm -f "$PID_FILE"
-if [ "$(head -1 ${JSON.stringify(join(state, "managed-binary"))} 2>/dev/null)" = yes ]; then rm -f "$BIN_FILE"; fi
+if [ "$(head -1 ${JSON.stringify(join(state, "managed-binary"))} 2>/dev/null)" = yes ]; then
+  shared=$(readlink "$BIN_FILE" 2>/dev/null || true)
+  rm -f "$BIN_FILE"
+  [ -n "$shared" ] && release_shared "$shared"
+fi
 printf '%s\\n' 'context-guru: proxy stopped; remove the plugin entry and restart OpenCode to unroute.'
 `
 }
@@ -343,6 +410,8 @@ set -u
 REPO="\${CONTEXT_GURU_REPO:-rossoctl/context-guru}"
 RELEASES="\${CONTEXT_GURU_RELEASES_URL:-https://github.com/\$REPO/releases}"
 STATE=${shQuote(state)}
+ROOT=${shQuote(dirname(state))}
+${RELEASE_SHARED}
 if [ -f "$STATE/install.env" ]; then
   . "$STATE/install.env"
 elif [ -f "$STATE/bin/context-guru-proxy" ]; then
@@ -364,7 +433,8 @@ reported=$( { LISTEN_ADDR=127.0.0.1:0 CONFIG= "$binary" --version 2>/dev/null & 
 if [ -n "$reported" ]; then version=$reported; fi
 latest=$(curl -fsSI --max-time 10 "$RELEASES/latest" 2>/dev/null | tr -d '\\r' | sed -n 's/^[Ll]ocation:.*\\/tag\\///p' | head -1)
 case "$latest" in
-  ''|*[!A-Za-z0-9._-]*) printf '%s\\n' "result=lookup-failed" "reason=odd-tag"; exit 1 ;;
+  # The tag names a directory under $ROOT/bin, so "." and ".." are odd too.
+  ''|.*|*[!A-Za-z0-9._-]*) printf '%s\\n' "result=lookup-failed" "reason=odd-tag"; exit 1 ;;
 esac
 printf '%s\\n' "installed=\${version:-unknown}" "latest=$latest"
 if [ "$latest" = "\${version:-}" ]; then
@@ -406,9 +476,18 @@ if [ -f "$STATE/proxy.pid" ]; then
   esac
   rm -f "$STATE/proxy.pid"
 fi
-mv "$replacement" "$binary" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
-chmod 755 "$binary"
-if [ "$(uname -s)" = "Darwin" ]; then xattr -d com.apple.quarantine "$binary" 2>/dev/null || true; fi
+# Install into the shared place under a temp name, then rename: another project may update at once.
+# Then point this project at it. Another project that uses the old version keeps it.
+shared="$ROOT/bin/$latest/context-guru-proxy"
+old=$(readlink "$binary" 2>/dev/null || true)
+mkdir -p "$ROOT/bin/$latest" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+mv "$replacement" "$shared.tmp.$$" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+chmod 755 "$shared.tmp.$$"
+if [ "$(uname -s)" = "Darwin" ]; then xattr -d com.apple.quarantine "$shared.tmp.$$" 2>/dev/null || true; fi
+mv -f "$shared.tmp.$$" "$shared" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+rm -f "$binary.tmp.$$"
+ln -s "$shared" "$binary.tmp.$$" && mv -f "$binary.tmp.$$" "$binary" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+if [ -n "$old" ] && [ "$old" != "$shared" ]; then release_shared "$old"; fi
 if [ -f "$STATE/install.env" ]; then
   grep -v '^version=' "$STATE/install.env" > "$STATE/install.env.new" || true
   printf '%s\\n' "version=$latest" >> "$STATE/install.env.new"
@@ -428,6 +507,8 @@ function uninstallScript(state) {
 # context-guru: stop the proxy and disable routing for this project. --yes applies; --purge also removes the binary and state files.
 set -u
 STATE=${shQuote(state)}
+ROOT=${shQuote(dirname(state))}
+${RELEASE_SHARED}
 yes=0
 purge=0
 for arg in "$@"; do
@@ -460,10 +541,13 @@ printf 'disabled by context-guru-uninstall\\n' > "$STATE/disabled"
 if [ "$purge" -eq 1 ]; then
   # Remove a binary only when the plugin downloaded it: the marker file says "yes" AND the binary
   # lives in this project's state directory. A binary from PATH or CONTEXT_GURU_BIN is never removed.
+  # That binary is a symlink to a shared copy. The copy goes only with its last user.
+  shared=$(readlink "$STATE/bin/context-guru-proxy" 2>/dev/null || true)
   if [ "$(head -1 "$STATE/managed-binary" 2>/dev/null)" = yes ]; then
     case "\${binary:-}" in "$STATE"/bin/*) rm -f "$binary" 2>/dev/null ;; esac
   fi
   rm -rf "$STATE/bin"
+  [ -n "$shared" ] && release_shared "$shared"
   rm -f "$STATE/install.json" "$STATE/install.env" "$STATE/proxy.yaml" "$STATE/proxy.log" "$STATE/dashboard.db" "$STATE/managed-binary" "$STATE/context-guru-start"
   rm -f "$STATE/settings.env" "$STATE/options.env" "$STATE/strategies.tsv" "$STATE/strategies.aliases" "$STATE/strategies.default"
   rm -f "$STATE/context-guru-reset" "$STATE/context-guru-status" "$STATE/context-guru-update" "$STATE/context-guru-uninstall" "$STATE/context-guru-preset" "$STATE/context-guru-strategy"
@@ -975,12 +1059,13 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
   // The download can take minutes. It runs before the lock: it writes a temp name and renames it, so
   // two instances that both download only replace the file with the same bytes.
   let binary = findBinary(state)
-  if (!binary) binary = await downloadBinary(state)
+  if (!binary) binary = await downloadBinary()
   return withLock(dirname(state), async () => {
     // Another instance may have put a binary in place while this one waited. Keep the version we
     // know when the file on disk does not report one.
     const found = findBinary(state)
     if (found) binary = { ...found, version: found.version || binary?.version }
+    binary = shareBinary(state, binary)
     const dialects = [...new Set(routes.map((route) => route.dialect))]
     const table = loadStrategyTable(binary.path)
     const resolved = resolveStrategy(table, requestedStrategy, dialects)
