@@ -163,16 +163,23 @@ def first_free_port():
 
 
 def port_free(port):
-    """True when the proxy can bind the port. The proxy binds with SO_REUSEADDR, so the check does too:
-    without it, the TIME_WAIT connections a stopped proxy leaves make the port look taken for about
-    30 s, and a setup right after uninstall moves to the next port (#1232)."""
+    """True when the proxy can bind the port and no program listens on it.
+
+    The bind uses SO_REUSEADDR, as the proxy does: without it, the TIME_WAIT connections a stopped proxy
+    leaves make the port look taken for about 30 s (#1232). On macOS that bind also succeeds next to
+    another program's 0.0.0.0 or [::] listener, and the proxy would then take that program's local
+    traffic. So a port where a connection to 127.0.0.1 is accepted is taken."""
     with socket.socket() as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port))
-            return True
         except OSError:
             return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return False  # someone accepted: a live listener
+    except OSError:
+        return True  # refused (or nothing answered): nobody listens
 
 
 def choose_port(record):
