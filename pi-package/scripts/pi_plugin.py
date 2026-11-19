@@ -157,17 +157,17 @@ def wait_healthy(port, tries=50):
 
 def first_free_port():
     for port in range(8787, 8888):
-        with socket.socket() as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                pass
+        if port_free(port):
+            return port
     raise RuntimeError("no free port in 8787..8887")
 
 
 def port_free(port):
+    """True when the proxy can bind the port. The proxy binds with SO_REUSEADDR, so the check does too:
+    without it, the TIME_WAIT connections a stopped proxy leaves make the port look taken for about
+    30 s, and a setup right after uninstall moves to the next port (#1232)."""
     with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port))
             return True
