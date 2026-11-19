@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 
 	"github.com/rossoctl/context-guru/store"
@@ -470,5 +471,35 @@ func TestRaiseWaitPlanSendsAllRaisedPingsAndMovesTheDeadline(t *testing.T) {
 	}
 	if fd.n() != 5 {
 		t.Fatalf("pings sent = %d, want 5", fd.n())
+	}
+}
+
+// #1225: the hard-deadline timer is a real timer, so this test runs on real time with a short Idle.
+// Planned for 3 pings the entry would be retired at (3+1) x Idle = 400 ms. After the raise to 5 it must
+// still be live well past that, and be retired at (5+1) x Idle = 600 ms. A raise that leaves the timer
+// at the planned count fails the first check. The margins are 250 ms each side.
+func TestRaiseWaitPlanMovesTheRealRetentionTimer(t *testing.T) {
+	const idle = 100 * time.Millisecond
+	k, _, clock := testKeeper(t)
+	pol := planPolicy()
+	pol.Idle = idle
+	recordSeq(k, sess1, pol, kaBody, clock.now(), toolCall, endTurn)
+	if got := plannedPings(t, k, sess1); got != 3 {
+		t.Fatalf("planned %d, want 3", got)
+	}
+	start := time.Now()
+	if n, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); !ok || n != 5 {
+		t.Fatalf("raise = %d %v, want 5 true", n, ok)
+	}
+	testutil.WaitFor(t, "the old deadline (400 ms) is behind us", func() bool { return time.Since(start) > 450*time.Millisecond })
+	if _, ok := k.Entry(sess1); !ok {
+		t.Fatalf("entry retired %v after the raise: the timer still has the planned count", time.Since(start))
+	}
+	testutil.WaitForState(t, "the entry retired at the raised deadline", func() bool {
+		_, ok := k.Entry(sess1)
+		return !ok
+	}, func() string { return "still live after " + time.Since(start).String() })
+	if d := time.Since(start); d < 500*time.Millisecond {
+		t.Errorf("retired after %v, want about 600 ms", d)
 	}
 }
