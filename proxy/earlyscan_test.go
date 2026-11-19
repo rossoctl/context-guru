@@ -39,11 +39,18 @@ func scanUpstream(t *testing.T, hits *atomic.Int64, scanned <-chan struct{}) *ht
 		if scanned != nil && hits.Load() < 2 {
 			// The answer waits until this request's scan has finished, so the keeper finds it ready: no race
 			// between the scan and the response. Pings (hits 3 and later) do not start a scan.
-			select {
-			case <-scanned:
-			case <-time.After(30 * time.Second):
-				t.Error("the early scan never finished")
-			}
+			got := 0
+			testutil.WaitForState(t, "this request's early scan to finish", func() bool {
+				select {
+				case <-scanned:
+					got++
+					return true
+				default:
+					return false
+				}
+			}, func() string {
+				return fmt.Sprintf("scan-done signals received: %d, upstream hits: %d", got, hits.Load())
+			})
 		}
 		n := hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
