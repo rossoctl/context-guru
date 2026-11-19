@@ -244,6 +244,14 @@ const (
 	// peak of 11 live sessions, but it drives ~350-byte synthetic bodies, so it exercises the
 	// count bound and says nothing about this one.
 	MaxBytes = 128 << 20
+	// DefaultPendingTTL, MaxPending and MaxPendingBytes bound the pending records of #1227: a thread that
+	// Record did not hold, kept for one dashboard flush window (250 ms; 5 s leaves room for a busy writer)
+	// until the host says the turn is background work. A pending record holds what a live entry holds, so
+	// the bounds are small: 32 records, 16 MiB of body in all. Over a bound, the thread is not kept (it is
+	// refused, as before #1227).
+	DefaultPendingTTL = 5 * time.Second
+	MaxPending        = 32
+	MaxPendingBytes   = 16 << 20
 	// MaxTurnKeys bounds the per-thread turn counter (per session before #423).
 	// Larger than the entry bound because it holds one int rather than a body, and it has to
 	// outlive the entry.

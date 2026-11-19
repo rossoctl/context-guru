@@ -141,41 +141,86 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 	return toolStopWait(w, len(names) == 0, stopReason)
 }
 
-// RaiseWaitPlan raises the ping count of a live entry to the count of cause. The host calls it when it
+// RaiseWaitPlan raises the ping plan of a thread to the plan of cause. The host calls it when it
 // learns the cause after Record planned the turn: Record reads the open-task counts as of the request
-// before, so the turn that starts a background task is planned as a wait for a person (#1225). The
-// count only goes up. It does nothing when the entry is gone, was not planned (1-hour tier, OpenAI,
-// plan off, manual hold), has stopped, or the cause gives no higher count (a subagent, a person).
-// It returns the new count and true when it raised. Metadata only: a cause string and counts.
+// before, so the turn that starts a background task is planned as a wait for a person (#1225). Two
+// things follow from a "background" report, both only ever up (#1227):
+//
+//   - a live entry gets the higher ping count, and the policy of Record.WidePolicy (no time windows)
+//     when the windows had changed its policy;
+//   - a thread that Record did not hold (below the person floor, or outside the windows) and kept as a
+//     pending record is promoted to a live entry with the background plan.
+//
+// It does nothing when there is neither (a gone, released or stopped entry, a subagent, an OpenAI
+// thread, the 1-hour tier, plan off, a manual hold), or when the cause gives no better plan.
+// It returns the new count and true when it changed something. Metadata only: a cause string and counts.
 func (k *Keeper) RaiseWaitPlan(key Key, cause string) (int, bool) {
 	if k == nil || cause == "" {
 		return 0, false
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	e, ok := k.live[key.id()]
-	if !ok || !e.planned || e.manualOnly || e.stopped || !e.pol.On() || !e.pol.WaitPlan {
-		return 0, false
-	}
-	p := e.pol
-	p.MaxPings = e.planBase
-	n := p.WaitPings(cause, IsSubagentThread(e.thread))
-	if n <= e.pol.MaxPings {
-		return 0, false
-	}
-	// The hard retention deadline was armed at record from the planned count: (K+1) x Idle. Re-arm it for
-	// the raised count from the same instant, or the timer retires the entry before the new last ping
-	// (and the extra request, which follows the last ping). A timer that already fired cannot be
-	// stopped: the entry is on its way out, so leave it.
-	left := e.armedAt.Add(time.Duration(n+1) * e.pol.Idle).Sub(k.now())
-	if left <= 0 || e.timer == nil || !e.timer.Stop() {
-		return 0, false
-	}
-	e.pol.MaxPings = n
-	e.deadline = e.armedAt.Add(e.hold())
 	id := key.id()
-	e.timer = time.AfterFunc(left, func() { k.expireAuto(id) })
-	return n, true
+	e, ok := k.live[id]
+	if !ok {
+		return k.promoteLocked(id, cause)
+	}
+	if !e.planned || e.manualOnly || e.stopped || !e.pol.On() || !e.pol.WaitPlan {
+		return 0, false
+	}
+	sub := IsSubagentThread(e.thread)
+	// Two candidates, the wide policy first (no time windows), then the entry's own. The first that gives
+	// no fewer pings, passes the entry's gates and still has time on its deadline wins.
+	type cand struct {
+		p      Policy
+		base   int
+		widest bool
+	}
+	cands := []cand{{e.pol, e.planBase, false}}
+	if w := e.widePol; w != nil && cause == waitcause.WaitingBackground && !sub && usableWide(*w) && *w != e.pol {
+		cands = []cand{{*w, w.MaxPings, true}, cands[0]}
+	}
+	for _, c := range cands {
+		c.p.MaxPings = c.base
+		n := c.p.WaitPings(cause, sub)
+		if n < e.pol.MaxPings || (n == e.pol.MaxPings && !c.widest) {
+			continue
+		}
+		c.p.MaxPings = n
+		// The hard retention deadline was armed at record from the planned count: (K+1) x Idle. Re-arm it
+		// for the new plan from the same instant, or the timer retires the entry before the new last ping
+		// (and the extra request, which follows the last ping). A timer that already fired cannot be
+		// stopped: the entry is on its way out, so leave it.
+		left := e.armedAt.Add(time.Duration(n+1) * c.p.Idle).Sub(k.now())
+		if left <= 0 || e.timer == nil {
+			return 0, false
+		}
+		// The new policy must still pass the entry's gates (the wide policy can have another floor): else
+		// the sweep would drop the entry and the thread would get fewer pings than it has now.
+		old := e.pol
+		e.pol = c.p
+		if c.widest && !e.pingable() {
+			e.pol = old
+			continue
+		}
+		if !e.timer.Stop() {
+			e.pol = old
+			return 0, false
+		}
+		if c.widest {
+			e.planBase, e.tag = c.base, e.wideTag
+		}
+		e.deadline = e.armedAt.Add(e.hold())
+		e.timer = time.AfterFunc(left, func() { k.expireAuto(id) })
+		return n, true
+	}
+	return 0, false
+}
+
+// usableWide reports whether a wide policy (Record.WidePolicy) can replace a live entry's policy: on, the
+// plan on, the 5-minute spacing, no manual hold.
+func usableWide(w Policy) bool {
+	return w.On() && w.WaitPlan && w.Idle > 0 && w.Idle < 300*time.Second && !w.ManualHold
 }
 
 // toolStopWait applies the tool-stop rule: a response that stopped for a tool call and has no tool

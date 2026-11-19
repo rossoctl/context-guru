@@ -149,6 +149,12 @@ type kaEntry struct {
 	// the plan set pol.MaxPings (5-minute tier, plan on, not OpenAI). RaiseWaitPlan reads both (#1225).
 	planBase int
 	planned  bool
+	// widePol and wideTag are Record.WidePolicy and Record.WideTag (#1227). nil: the windows did not
+	// change the policy of this response.
+	widePol *Policy
+	wideTag string
+	// pendReason is the refusal reason a pending record (pending) gives when it expires unused.
+	pendReason string
 	// noTool: the plan is on and the thread has had no tool_use response yet, so it is not pinged.
 	noTool bool
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
@@ -379,6 +385,9 @@ type Options struct {
 	// Spare reserves the tenant's spare rate/concurrency headroom for one ping; nil = no limiter.
 	Spare func(tenant string, reserveFrac float64) (release func(), err error)
 	Now   func() time.Time // nil: time.Now
+	// PendingTTL is how long Record keeps a thread it did not hold, waiting for the host's report that the
+	// turn is background work (RaiseWaitPlan, #1227). Zero: DefaultPendingTTL.
+	PendingTTL time.Duration
 	// Go runs one ping; nil: `go f()`. Exported for tests and replay tooling (an inline runner
 	// makes a replay deterministic); hosts do not need it.
 	Go     func(f func())
@@ -440,6 +449,12 @@ type Record struct {
 	// is written only when the request passed every gate and got a schedule: a refused request leaves it
 	// untouched, which the host reads as "no plan".
 	Plan *PlanInForce
+	// WidePolicy, when non-nil, is the policy this thread would get for a wait that is not for a person:
+	// the host's resolution with the manager strategy's time windows ignored. The host sets it only when
+	// the windows applied to this response and gave another policy (#1227). The keeper keeps it, and a
+	// later RaiseWaitPlan for background work swaps it in. WideTag is its Tag. Numbers and a label only.
+	WidePolicy *Policy
+	WideTag    string
 }
 
 // PlanInForce is the ping plan Record built for one wait: the count of pings, the billed-prefix floor the
@@ -484,6 +499,14 @@ type Keeper struct {
 	mu    sync.Mutex
 	live  map[string]*kaEntry
 	bytes int64
+	// pending holds, for a few seconds, the thread that Record did NOT hold because its wait read as a
+	// person's (the 80k floor, or the time windows) but that a background reading would hold (#1227).
+	// It is an entry in all but the schedule: the same owned, masked body, the same held credential,
+	// released exactly once. The host's RaiseWaitPlan promotes it to a live entry when the dashboard
+	// writer reports the turn as background work; otherwise it expires after Options.PendingTTL.
+	// Bounded by MaxPending and MaxPendingBytes. Keyed like live.
+	pending   map[string]*kaEntry
+	pendBytes int64
 	// routeFails, routeTripped and credDead are the route breaker and the dead-credential
 	// marks (main #527) — see breaker.go. Keyed with the tenant first, so one tenant can
 	// never switch off another's pings.
@@ -615,7 +638,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, pending: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -689,6 +712,9 @@ func (k *Keeper) Shutdown() {
 		delete(k.live, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}
+	for key := range k.pending {
+		k.dropPendingLocked(key, false)
+	}
 	k.bytes = 0
 	k.turns = map[string]int{}
 	k.tier1h = map[string]bool{}
@@ -761,6 +787,7 @@ func (k *Keeper) ArriveAt(key Key) (pings int, refreshed int64, tag string, refr
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.inflight[id]++
+	k.dropPendingLocked(id, true) // the next request is here: the turn it would have waited on is over
 	e, ok := k.live[id]
 	if !ok {
 		return 0, 0, "", time.Time{}
@@ -858,12 +885,20 @@ func (k *Keeper) Record(r Record) {
 	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
 	// is off, or where the schedule's own gates refuse the thread; it just never gets a schedule.
 	// manualOnly is decided once the gates below have run, so every refusal can name its reason.
+	// off: the policy is off (a manager strategy whose time window is closed, #1227), but a wait for
+	// background work would ignore the window. The request goes on through the gates with the wide policy
+	// so a pending record can be built; it is never held unless the host reports background work.
+	off := false
 	if !pol.On() && !pol.ManualHold {
-		k.mu.Lock()
-		k.setReasonLocked(r.Key, ReasonNotOptedIn)
-		k.mu.Unlock()
-		k.retire(key)
-		return
+		if w := r.WidePolicy; w != nil && w.On() && w.WaitPlan && !w.ManualHold && provider != bschemas.OpenAI {
+			pol, off = *w, true
+		} else {
+			k.mu.Lock()
+			k.setReasonLocked(r.Key, ReasonNotOptedIn)
+			k.mu.Unlock()
+			k.retire(key)
+			return
+		}
 	}
 	refuse := func(reason string) {
 		if pol.ManualHold {
@@ -995,7 +1030,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		wait: wait, planBase: planBase, planned: planned,
+		wait: wait, planBase: planBase, planned: planned, widePol: r.WidePolicy, wideTag: r.WideTag,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
@@ -1040,6 +1075,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
 	// its body and credential must not be left behind.
+	k.dropPendingLocked(key, false)
 	if prev, ok := k.live[key]; ok {
 		k.bytes -= int64(len(prev.body))
 		k.releaseLocked(prev) // the OLD credential goes before the new one is held
@@ -1049,7 +1085,15 @@ func (k *Keeper) Record(r Record) {
 	// The automatic gates decide whether this thread is pinged on a schedule. A request that opted in
 	// to the button and fails them (or has no schedule at all) is still held, as a manual-only entry:
 	// no schedule, a hard life of 300 s (59 min on a one-hour thread). Only the cost ceiling is kept, because a press spends money too.
-	if !pol.On() || !e.pingable() {
+	if off || !pol.On() || !e.pingable() {
+		if k.pendLocked(r, e, pol, planned, wait, off) {
+			return
+		}
+		if off {
+			k.setReasonLocked(r.Key, ReasonNotOptedIn)
+			e.clear()
+			return
+		}
 		if !pol.ManualHold {
 			reason := ReasonBelowLimits
 			if e.pingUSD > pol.Ceiling() {
@@ -1099,10 +1143,16 @@ func (k *Keeper) Record(r Record) {
 	// entry: K pings each restarting the clock, plus one final Idle to notice the last one
 	// bought nothing. After that there is no legitimate use, so the material goes whether or not
 	// anything else in this process is awake.
-	e.armedAt = k.now()
-	e.deadline = e.armedAt.Add(e.hold())
-	e.timer = time.AfterFunc(e.hold(), func() { k.expireAuto(key) })
+	k.armHoldLocked(key, e, k.now())
 	k.evictLocked()
+}
+
+// armHoldLocked arms the hard retention deadline of an automatic entry at (K+1) x Idle from the instant
+// from. k.mu must be held.
+func (k *Keeper) armHoldLocked(id string, e *kaEntry, from time.Time) {
+	e.armedAt = from
+	e.deadline = from.Add(e.hold())
+	e.timer = time.AfterFunc(e.deadline.Sub(k.now()), func() { k.expireAuto(id) })
 }
 
 // nextVaryLocked picks the output-budget step for a ping about to be dispatched on thread key,
@@ -1215,6 +1265,7 @@ func (k *Keeper) retire(key string) {
 // retireLocked is retire's body, for callers that already hold k.mu (the route breaker's gate
 // in Record). k.mu must be held.
 func (k *Keeper) retireLocked(key string) {
+	k.dropPendingLocked(key, false)
 	e, ok := k.live[key]
 	if !ok {
 		return
@@ -1259,6 +1310,11 @@ func (k *Keeper) Forget(tenantID string) {
 	prefix := tenantID + "\x00"
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	for key := range k.pending {
+		if strings.HasPrefix(key, prefix) {
+			k.dropPendingLocked(key, false)
+		}
+	}
 	for key, e := range k.live {
 		if !strings.HasPrefix(key, prefix) {
 			continue

@@ -108,6 +108,12 @@ func (k *Keeper) RetireSessionStartedBefore(tenant, session string, cutoff time.
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	n := 0
+	for key, e := range k.pending {
+		if key == base || strings.HasPrefix(key, base+"\x00") ||
+			(e.client != "" && e.tenant == tenant && e.client == session) {
+			k.dropPendingLocked(key, false)
+		}
+	}
 	for key, e := range k.live {
 		own := key == base || strings.HasPrefix(key, base+"\x00") ||
 			(e.client != "" && e.tenant == tenant && e.client == session)

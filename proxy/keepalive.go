@@ -375,6 +375,8 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		(client != "" && k.endedAfter(tn.ID, client, startedAt)))
 	pol := tn.Cache
 	applied := ""
+	var wide *keepalive.Policy // the policy of a wait for background work, windows ignored (#1227)
+	wideTag := ""
 	if ended || k.h == nil || k.h.rec == nil {
 		pol = keepalive.Policy{}
 	} else {
@@ -401,16 +403,29 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
 			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
 		}
+		account := pol
 		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
+		// The policy a wait for background work would get: the windows ignored. A turn that starts background
+		// work reads as a wait for a person at record time (the open-task counts lag by one request, #1225),
+		// and the dashboard writer corrects it a moment later. The keeper keeps this policy for that
+		// correction (#1227). Only when the windows applied here and gave another policy.
+		if account.WaitPlan && tracked && !ignoreWindows && provider != bschemas.OpenAI {
+			if w, wt := k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, true); w != pol {
+				wide, wideTag = &w, wt
+			}
+		}
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
 		pol.ManualHold = tracked && !keepAliveDisabled() && provider != bschemas.OpenAI && wantsManualHold(r)
+		if wide != nil {
+			wide.ManualHold = pol.ManualHold
+		}
 	}
 	// The credential id only matters for a hold the core may keep, so it is not computed (an
 	// HMAC over the masked auth headers) for any other request.
 	cred := ""
-	if tracked && (pol.On() || pol.ManualHold) {
+	if tracked && (pol.On() || pol.ManualHold || (wide != nil && wide.On())) {
 		cred = credKey(up, r.Header)
 	}
 	key := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
@@ -421,7 +436,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, WidePolicy: wide, WideTag: wideTag, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}
