@@ -44,6 +44,13 @@ The proxy state, log, dashboard database, and recovery command live under:
 ~/.local/state/context-guru-opencode/<project-id>/
 ```
 
+The downloaded proxy is shared. The plugin keeps one copy per version in
+`~/.local/state/context-guru-opencode/bin/<version>/`. Each project's `bin/context-guru-proxy` is a
+link to the version that project uses. An older plugin kept a copy in each project. At the next start,
+the plugin moves that copy to the shared directory, or removes it when the shared directory has that
+version already. `/context-guru-update` adds the new version beside the old one, so other projects
+keep theirs. `--purge` removes a shared copy only when no other project still uses it.
+
 The exact project directory is printed to the OpenCode log. The dashboard is at
 `http://127.0.0.1:<port>/dashboard/`.
 

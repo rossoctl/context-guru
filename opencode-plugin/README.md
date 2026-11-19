@@ -31,7 +31,9 @@ On OpenCode 2 the config key is `plugins` (plural); the same local path works:
 
 For a project-only install, put the same local path in the project's `opencode.json` instead. The
 first startup downloads release v0.7.3 when `context-guru-proxy` is not already on `PATH`,
-verifies its SHA-256 checksum, and stores it under `~/.local/state/context-guru-opencode/`.
+verifies its SHA-256 checksum, and stores it in `~/.local/state/context-guru-opencode/bin/<version>/`.
+All projects share this one copy per version. Each project links to the version it uses.
+`/context-guru-uninstall --purge` removes a shared copy only when no other project still uses it.
 
 The default is `preset: off` with the `auto` cache strategy. These match the Claude Code plugin.
 `auto` fits Anthropic and OpenAI. If a chosen strategy does not fit the routed providers (for example `1-hour-head` on an OpenAI-only setup), the plugin runs `none` and logs why.
@@ -74,7 +76,7 @@ The plugin registers six commands:
 | `/context-guru-status` | Proxy up or down, port, version, routing, and savings from `/stats` |
 | `/context-guru-install` | Idempotent repair: clears a disable marker, restarts a stopped proxy |
 | `/context-guru-update` | Checks for a newer proxy binary; installs it after confirmation |
-| `/context-guru-uninstall` | Stops the proxy and disables routing after confirmation; `--purge` also removes the binary the plugin downloaded and the state files, except the `disabled` marker and the proxy's `dashboard.db.accountant-state.json` |
+| `/context-guru-uninstall` | Stops the proxy and disables routing after confirmation; `--purge` also removes the binary the plugin downloaded (a shared copy only when no other project uses it) and the state files, except the `disabled` marker and the proxy's `dashboard.db.accountant-state.json` |
 | `/context-guru-preset` | Chat command. Lists the presets, switches after your yes in the chat. The native dialog is in the `ctrl+p` palette |
 | `/context-guru-strategy` | Chat command. Lists the cache strategies, switches after your yes in the chat. The native dialog is in the `ctrl+p` palette |
 
