@@ -4,8 +4,6 @@ import (
 	"strings"
 	"time"
 
-	bschemas "github.com/maximhq/bifrost/core/schemas"
-
 	"github.com/rossoctl/context-guru/internal/waitcause"
 )
 
@@ -126,26 +124,13 @@ func orDefault(v, def int) int {
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
 // open-task counts (Options.OpenTasks). The open counts are as of the last request the host's
 // tracker observed, which can lag by one request: a stale count reads as "a person", the cheaper plan.
+// The host corrects that with RaiseWaitPlan once its in-order reading of the turn is done (#1225).
 func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool) string {
-	return k.waitingFor(key, "", nil, names, incomplete, stopReason, usageOK)
-}
-
-// WaitingForBody is WaitingFor for a response whose request body is at hand. When the host supplies
-// Options.ObserveTasks, the open counts are those of that body, so the turn that starts a background
-// task already counts it (#1225). The dashboard reads the same body for its waiting_for column.
-func (k *Keeper) WaitingForBody(key Key, provider bschemas.ModelProvider, body []byte, names []string, incomplete bool, stopReason string, usageOK bool) string {
-	return k.waitingFor(key, provider, body, names, incomplete, stopReason, usageOK)
-}
-
-func (k *Keeper) waitingFor(key Key, provider bschemas.ModelProvider, body []byte, names []string, incomplete bool, stopReason string, usageOK bool) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
 	}
 	bg, tm := 0, 0
-	switch {
-	case k.o.ObserveTasks != nil && body != nil:
-		bg, tm = k.o.ObserveTasks(key, provider, body)
-	case k.o.OpenTasks != nil:
+	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(key.Tenant, key.Session, key.Thread)
 	}
 	w, _ := waitcause.ClassifyWaitingForTerminal(terminalFor(k.o.TerminalTools, incomplete),
@@ -154,6 +139,32 @@ func (k *Keeper) waitingFor(key Key, provider bschemas.ModelProvider, body []byt
 	// the call (a spliced sniff window): the classifier reads such a response as a wait for a person.
 	// Whatever the classifier said (open background tasks read "background"), a tool stop gets the tool budget.
 	return toolStopWait(w, len(names) == 0, stopReason)
+}
+
+// RaiseWaitPlan raises the ping count of a live entry to the count of cause. The host calls it when it
+// learns the cause after Record planned the turn: Record reads the open-task counts as of the request
+// before, so the turn that starts a background task is planned as a wait for a person (#1225). The
+// count only goes up. It does nothing when the entry is gone, was not planned (1-hour tier, OpenAI,
+// plan off, manual hold), has stopped, or the cause gives no higher count (a subagent, a person).
+// It returns the new count and true when it raised. Metadata only: a cause string and counts.
+func (k *Keeper) RaiseWaitPlan(key Key, cause string) (int, bool) {
+	if k == nil || cause == "" {
+		return 0, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e, ok := k.live[key.id()]
+	if !ok || !e.planned || e.manualOnly || e.stopped || !e.pol.On() || !e.pol.WaitPlan {
+		return 0, false
+	}
+	p := e.pol
+	p.MaxPings = e.planBase
+	n := p.WaitPings(cause, IsSubagentThread(e.thread))
+	if n <= e.pol.MaxPings {
+		return 0, false
+	}
+	e.pol.MaxPings = n
+	return n, true
 }
 
 // toolStopWait applies the tool-stop rule: a response that stopped for a tool call and has no tool

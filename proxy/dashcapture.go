@@ -138,6 +138,11 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
+	// raisePlan tells the keeper the wait cause the writer found for this turn (#1225); nil: none.
+	// The writer calls it right after its in-order ObserveWith, so the keeper's plan, built at response
+	// time from the counts of the request before, rises to the background count in time (the first
+	// ping is minutes away). Metadata only.
+	raisePlan func(tenant, session, thread, cause string) (int, bool)
 	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
 	terminal []string
 	// The alias derivation's other inputs (#766): the pipeline that will transform this
@@ -235,9 +240,10 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
 		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
-		observe: tn.Mode == components.ModeObserve,
-		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
-		hosted:  h.opts.Tenants != nil,
+		observe:   tn.Mode == components.ModeObserve,
+		authSub:   provider == string(bschemas.Anthropic) && callerIsSubscription(r),
+		hosted:    h.opts.Tenants != nil,
+		raisePlan: h.raiseWaitPlan,
 	}
 }
 
@@ -673,6 +679,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// never completed with a 2xx. status 0 (never reached an upstream) is deliberately NOT
 	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
 	// that case as WaitingUnknown rather than WaitingRetry.
+	raise := c.raisePlan
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
 	toolParams, spawn := usage.ToolParams, usage.Spawn
@@ -704,6 +711,13 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
 			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		// The keeper planned this turn from the counts of the request before. Tell it the cause of
+		// this turn when it is background work (#1225). It only raises the count, and never blocks.
+		if raise != nil && waitingFor == waitcause.WaitingBackground {
+			if n, ok := raise(tenantID, sessionID, threadID, waitingFor); ok {
+				e.KAPlannedPings = &n
+			}
+		}
 		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,

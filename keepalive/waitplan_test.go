@@ -6,6 +6,8 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/waitcause"
 
 	"github.com/rossoctl/context-guru/store"
 )
@@ -346,30 +348,101 @@ func TestWaitPlanIncompleteNamesCountAsAToolCall(t *testing.T) {
 	}
 }
 
-// #1225: the turn that starts a background task ends before the host's stored counts catch up. The
-// host reads the request body at plan time (ObserveTasks), so the plan is base + 3, as the dashboard's
-// waiting_for says.
-func TestWaitPlanBackgroundStartedInThisTurnGetsBackgroundCount(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		key       Key
-		stale, ob [2]int
-		want      int
-	}{
-		{"main, task seen only in the body", sess1, [2]int{0, 0}, [2]int{1, 0}, 5},
-		{"main, plain end of turn", sess1, [2]int{0, 0}, [2]int{0, 0}, 3},
-		{"main, teammate", sess1, [2]int{0, 0}, [2]int{0, 1}, 2},
-		{"subagent keeps its count", Key{Tenant: sess1.Tenant, Session: sess1.Session, Thread: "a:x"}, [2]int{0, 0}, [2]int{1, 0}, 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			k, _, clock := testKeeperWith(t, func(o *Options) {
-				o.OpenTasks = func(string, string, string) (int, int) { return tc.stale[0], tc.stale[1] }
-				o.ObserveTasks = func(Key, bschemas.ModelProvider, []byte) (int, int) { return tc.ob[0], tc.ob[1] }
-			})
-			recordSeq(k, tc.key, planPolicy(), kaBody, clock.now(), toolCall, endTurn)
-			if got := plannedPings(t, k, tc.key); got != tc.want {
-				t.Errorf("planned pings = %d, want %d", got, tc.want)
+// #1225: RaiseWaitPlan raises a planned entry to the count of the cause the host learned later. It
+// never lowers, and does nothing for an entry the plan did not set.
+func TestRaiseWaitPlan(t *testing.T) {
+	sub := Key{Tenant: "t1", Session: "sess-1", Thread: "a:abc"}
+	end := Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}
+	t.Run("person to background raises 3 to 5, once", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		recordSeq(k, sess1, planPolicy(), kaBody, clock.now(), toolCall, endTurn)
+		if n, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); !ok || n != 5 {
+			t.Fatalf("raise = %d %v, want 5 true", n, ok)
+		}
+		if got := plannedPings(t, k, sess1); got != 5 {
+			t.Fatalf("pings = %d, want 5", got)
+		}
+		if _, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); ok {
+			t.Fatal("a second raise to the same count changed the entry")
+		}
+	})
+	t.Run("never lowers", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		recordSeq(k, sess1, planPolicy(), kaBody, clock.now(), toolCall, toolCall) // own tool: 8
+		for _, c := range []string{waitcause.WaitingBackground, waitcause.WaitingHuman, waitcause.WaitingTeammate, waitcause.WaitingUnknown, ""} {
+			if _, ok := k.RaiseWaitPlan(sess1, c); ok {
+				t.Errorf("cause %q changed an entry at 8", c)
 			}
-		})
-	}
+		}
+		if got := plannedPings(t, k, sess1); got != 8 {
+			t.Fatalf("pings = %d, want 8", got)
+		}
+	})
+	t.Run("subagent is a no-op", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		recordSeq(k, sub, planPolicy(), kaBody, clock.now(), toolCall, endTurn)
+		if _, ok := k.RaiseWaitPlan(sub, waitcause.WaitingBackground); ok {
+			t.Fatal("a subagent was raised")
+		}
+		if got := plannedPings(t, k, sub); got != 2 {
+			t.Fatalf("pings = %d, want 2", got)
+		}
+	})
+	t.Run("OpenAI is a no-op", func(t *testing.T) {
+		k, _, _ := testKeeper(t)
+		pol := planPolicy()
+		pol.Idle = modelinfo.OpenAIDefaultKeepAliveIdle
+		for i := 0; i < 2; i++ {
+			k.Record(Record{Key: sess1, StartedAt: time.Now(), Provider: bschemas.OpenAI, Route: "/v1/responses",
+				Body:   []byte(`{"model":"azure/gpt-5.6-luna","max_output_tokens":2048,"input":[]}`),
+				Status: http.StatusOK, Usage: end, UsageOK: true, Policy: pol, Header: kaHeader(), Hold: fakeOf(k).hold(sess1)})
+		}
+		v, ok := k.Entry(sess1)
+		if !ok {
+			t.Fatal("the OpenAI entry is not tracked: the case proves nothing")
+		}
+		before := v.Policy.MaxPings
+		if _, raised := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); raised {
+			t.Fatal("an OpenAI entry was raised")
+		}
+		if v2, _ := k.Entry(sess1); v2.Policy.MaxPings != before {
+			t.Fatalf("pings %d -> %d", before, v2.Policy.MaxPings)
+		}
+	})
+	t.Run("1-hour tier is a no-op", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		for _, ts := range []time.Time{clock.now().Add(-time.Second), clock.now()} {
+			k.Record(Record{Key: sess1, StartedAt: ts, Body: []byte(ttlBody1h), Provider: bschemas.Anthropic,
+				Route: "/v1/messages", Status: http.StatusOK,
+				Usage:        Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200, StopReason: "tool_use"},
+				ToolUseNames: []string{"Bash"}, UsageOK: true, Policy: planPolicy(), Header: kaHeader(),
+				Hold: fakeOf(k).hold(sess1)})
+		}
+		v, ok := k.Entry(sess1)
+		if !ok || !v.TTL1h {
+			t.Fatalf("not a 1-hour entry: %+v ok=%v", v, ok)
+		}
+		if _, raised := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); raised {
+			t.Fatal("a 1-hour entry was raised")
+		}
+	})
+	t.Run("plan off is a no-op", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		recordSeq(k, sess1, kaPolicy(), kaBody, clock.now(), toolCall, endTurn)
+		if _, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); ok {
+			t.Fatal("an entry with the plan off was raised")
+		}
+	})
+	t.Run("released entry and nil keeper are no-ops", func(t *testing.T) {
+		k, _, clock := testKeeper(t)
+		recordSeq(k, sess1, planPolicy(), kaBody, clock.now(), toolCall, endTurn)
+		k.Forget("t1")
+		if _, ok := k.RaiseWaitPlan(sess1, waitcause.WaitingBackground); ok {
+			t.Fatal("a released entry was raised")
+		}
+		var nk *Keeper
+		if _, ok := nk.RaiseWaitPlan(sess1, waitcause.WaitingBackground); ok {
+			t.Fatal("a nil keeper raised")
+		}
+	})
 }

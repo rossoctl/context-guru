@@ -93,14 +93,12 @@ func newKeeper(h *Handler) *keeper {
 // The Dispatcher's Price and Spare read h.opts.Prices and h.limiter at CALL time, not here, exactly as the keeper
 // did when it held h itself: a handler's limiter and price table may be replaced after the keeper
 // is built (tests do both), and a ping must use the ones in force when it fires.
-func observeTasksFor(h *Handler) func(keepalive.Key, bschemas.ModelProvider, []byte) (int, int) {
-	return func(key keepalive.Key, provider bschemas.ModelProvider, body []byte) (int, int) {
-		obs := h.waits.Observe(key.Tenant, key.Session, key.Thread, provider, body)
-		if obs.MsgCount == 0 { // body not readable (empty, or server-held history): keep the stored counts
-			return h.waits.OpenCounts(key.Tenant, key.Session, key.Thread)
-		}
-		return obs.OpenBackground, obs.OpenTeammate
+// raiseWaitPlan hands the dashboard writer's wait cause to the keeper (#1225). See capture.raisePlan.
+func (h *Handler) raiseWaitPlan(tenant, session, thread, cause string) (int, bool) {
+	if h == nil || h.keeper == nil || h.keeper.Keeper == nil {
+		return 0, false
 	}
+	return h.keeper.Keeper.RaiseWaitPlan(keepalive.Key{Tenant: tenant, Session: session, Thread: thread}, cause)
 }
 
 func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
@@ -119,10 +117,6 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 		o.OpenTasks = func(tenantID, session, threadID string) (int, int) {
 			return h.waits.OpenCounts(tenantID, session, threadID)
 		}
-		// The keep-alive plans at the end of the response, before the dashboard writer observes the
-		// request body. Observing here makes the plan see the background task this turn started
-		// (#1225). Observe is idempotent: the dashboard row observes the same body again.
-		o.ObserveTasks = observeTasksFor(h)
 	}
 	if h != nil {
 		o.Spare = func(tenantID string, reserveFrac float64) (func(), error) {
@@ -403,8 +397,8 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		// cause of the response that ended this turn.
 		ignoreWindows := false
 		if pol.WaitPlan && tracked {
-			cause := k.Keeper.WaitingForBody(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
-				provider, body, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
+			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
+				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
 			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
 		}
 		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)

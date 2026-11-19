@@ -145,6 +145,10 @@ type kaEntry struct {
 	// wait is the wait cause this entry's pings were planned for (waitplan.go, #858). "" when the
 	// plan did not apply (plan off, a 1-hour thread, OpenAI). The sweep question reads it.
 	wait string
+	// planBase is Policy.MaxPings before the per-wait plan added its extra pings; planned is true when
+	// the plan set pol.MaxPings (5-minute tier, plan on, not OpenAI). RaiseWaitPlan reads both (#1225).
+	planBase int
+	planned  bool
 	// noTool: the plan is on and the thread has had no tool_use response yet, so it is not pinged.
 	noTool bool
 	// endsAtText is whether the recorded request's last non-system message is not a tool_result turn
@@ -377,11 +381,6 @@ type Options struct {
 	// OpenTasks reports a thread's open background-task and teammate-wait counts, for the wait cause
 	// the sweep stores with a held answer (#404, #453). nil: 0, 0.
 	OpenTasks func(tenant, session, thread string) (background, teammate int)
-	// ObserveTasks reads the request body that began the turn and reports the open counts as of that
-	// body (#1225). OpenTasks is as of the last body the host observed, which lags by one request
-	// when the host observes after the response. The turn that starts a background task would then
-	// read as a wait for a person. nil: OpenTasks.
-	ObserveTasks func(key Key, provider bschemas.ModelProvider, body []byte) (background, teammate int)
 	// TerminalTools names the tools whose call ends an agent (#857). A thread whose last response
 	// ends with one is done: it is never pinged. nil: the shipped list. A non-nil
 	// empty list turns the rule off, which is the behavior before #857.
@@ -961,8 +960,9 @@ func (k *Keeper) Record(r Record) {
 	planned := guard && !ttl1h && pol.Idle < 300*time.Second
 	wait := ""
 	if guard {
-		wait = k.WaitingForBody(r.Key, provider, body, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
+		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
 	}
+	planBase := pol.MaxPings
 	if planned {
 		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))
 	}
@@ -990,7 +990,7 @@ func (k *Keeper) Record(r Record) {
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
-		wait:         wait,
+		wait: wait, planBase: planBase, planned: planned,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
