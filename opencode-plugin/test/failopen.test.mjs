@@ -401,6 +401,21 @@ test("with fallback: false, a restart whose binary exits while the proxy comes u
   }
 })
 
+// A binary that cannot start at all (missing, or not executable) ends the restart at once, as before this PR.
+test("with fallback: false, a restart whose binary is missing returns at once", async () => {
+  const directory = "/tmp/context-guru-failopen-missing"
+  const project = await failingRestart(directory, "exit 1", { fallback: false })
+  const record = join(stateDirectory(directory), "install.json")
+  writeFileSync(record, JSON.stringify({ ...JSON.parse(readFileSync(record, "utf8")), binary: join(tmpdir(), "context-guru-no-such-binary") }))
+  try {
+    const waited = await timed(project.ask)
+
+    assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
+  } finally {
+    await project.cleanup()
+  }
+})
+
 // A routed project with the stub proxy running. The proxy answers 404 on chat paths, the upstream 200,
 // so the status tells where a send went.
 async function routedProject(directory) {

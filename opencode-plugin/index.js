@@ -1143,6 +1143,8 @@ async function recoverProxy(state, record, client, fallback = false) {
   } finally {
     closeSync(log)
   }
+  // A binary that cannot start at all (missing, not executable) has no pid. Spawn does not throw for it.
+  if (typeof child.pid !== "number") return fallback ? failed("could not start") : false
   child.unref()
   const started = Date.now()
   // With the fallback on, a child that exits, or never starts, fails the restart at once, and requests go
