@@ -88,8 +88,8 @@ cache:
   The message history stays on the 5-minute cache, so it goes cold after 5 idle minutes.
 - `1-hour-main-agent` (#1243) asks for the 1-hour cache on **every** breakpoint of the **main
   agent's** requests (tools, system and history), for requests of at least 50k tokens. It adds no
-  breakpoint. Subagent requests keep the 5-minute cache. The pings stay on, as in `auto`: a 1-hour
-  session gets one ping at 59 minutes, and subagents keep the 5-minute pings. **Cost:** each
+  breakpoint. Subagent requests keep the 5-minute cache. The main thread gets **no ping**, the
+  59-minute one included. Subagents keep `auto`'s 5-minute pings. **Cost:** each
   main-thread turn writes its new history at 2x the input price, not 1.25x. It pays when a gap
   over 5 minutes would otherwise rebuild a large history. Opt-in; no default changes.
 - A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.

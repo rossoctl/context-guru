@@ -28,3 +28,32 @@ func TestResolveTierForTheMainAgentStrategy(t *testing.T) {
 		t.Errorf("the one-hour schedule is idle %v, %d pings; want 59 minutes and 1 ping", pol.Idle, pol.MaxPings)
 	}
 }
+
+// #1243, owner decision: with 1-hour-main-agent the MAIN thread gets no ping, the 59-minute one
+// included. A subagent thread keeps the policy's pings.
+func TestMainAgentStrategySendsNoPingOnTheMainThread(t *testing.T) {
+	pol := Policy{KeepAlive: true, Idle: 240e9, MaxPings: 2, Idle1h: 3540e9, MaxPings1h: 1, MaxUSDPerPing: 0.5,
+		MinPrefixTokens: 1000, MainAgentTTL1h: true}
+	for _, tc := range []struct {
+		name   string
+		thread string
+		held   bool
+	}{{"main thread", "", false}, {"subagent thread", "a:agent1", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, clock := testKeeper(t)
+			key := Key{Tenant: "t1", Session: "sess-1", Thread: tc.thread}
+			recordHold(k, key, clock.now(), kaBody, pol, false)
+			_, held := k.Entry(key)
+			if held != tc.held {
+				t.Fatalf("held = %v, want %v", held, tc.held)
+			}
+		})
+	}
+	// The same policy without the strategy holds the main thread: the gate is the strategy's.
+	pol.MainAgentTTL1h = false
+	k, _, clock := testKeeper(t)
+	recordHold(k, sess1, clock.now(), kaBody, pol, false)
+	if _, held := k.Entry(sess1); !held {
+		t.Fatal("control: the main thread was not held without the strategy; the test proves nothing")
+	}
+}

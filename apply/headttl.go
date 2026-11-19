@@ -40,19 +40,18 @@ import (
 //     provider hashes `tools` → `system` → `messages`, so anything in the first two arrays
 //     precedes every message breakpoint. This function only ever writes 1h into the head,
 //     so it cannot produce the illegal order.
-//   - **The 1h tier must actually arrive, and only a request that WRITES the entry can show
-//     it.** Measured live on this gateway, one request each with the head labelled 1h:
-//     `aws/claude-haiku-4-5` came back with `ephemeral_1h_input_tokens: 36,251` of 36,574
-//     written — GRANTED. An early reading said `aws/claude-sonnet-5` was "silently
-//     downgraded" (`ephemeral_1h_input_tokens: 0` of 48,212 written). That reading is NOT
-//     proven (#1243): a head that is a cache READ writes nothing, so `cache_write_1h` is 0
-//     whatever the gateway grants. On 2026-11-19 direct requests to the gateway (Haiku 5.5,
-//     Opus 5.5, Opus 5.5 with 1M context) all returned `ephemeral_1h_input_tokens` of 12-15k.
-//     So the `ttl` field reaches the provider and the gateway grants it.
+//   - **The 1h tier must actually arrive, and the grant depends on the model and the provider.**
+//     Measured live on this gateway with fresh writes, one request each with the head labelled 1h:
+//     `aws/claude-haiku-4-5` came back with `ephemeral_1h_input_tokens: 36,251` of 36,574 written
+//     (granted); `aws/claude-sonnet-5` came back with 0 of 48,212 (refused, an otherwise normal 200).
+//     That refusal was real but is out of date: on 2026-11-19 direct requests to the same gateway
+//     (litellm 1.108.4, Bedrock), each writing a fresh ~12.6k-token system block with ttl 1h, were
+//     granted on claude-sonnet-5, claude-sonnet-5-5, claude-opus-4-8, claude-opus-5-5 and
+//     claude-haiku-5-5 (about 12.6k tokens each). So the `ttl` field reaches the provider, and
+//     whether it is honoured varies with model, provider and date.
 //
-//     `Usage.CacheWrite1h` on a request that wrote the entry is what says whether a request
-//     that asked for 1h got it. Do not read a 0 on a request that only read the head as a
-//     downgrade.
+//     `Usage.CacheWrite1h` on a request that WROTE the entry says whether a request that asked for
+//     1h got it. A 0 on a request that only read the head says nothing (a read writes nothing).
 //
 // The head-only shape protects only `tools` and `system`, a small part of a Claude Code prompt
 // that other sessions keep warm anyway. The message history stays on the 5-minute tier. For long
@@ -84,7 +83,7 @@ var headTTLPaths = [...]string{"tools", "system"}
 // ponytail: the gate is evaluated per request, so a session growing across the threshold starts
 // asking for 1h mid-conversation and a compaction can take it back — the head is then re-labelled
 // and, because this never STRIPS an existing ttl, a request can carry 1h while its neighbours do
-// not. Harmless while this is off and while the provider downgrades it anyway (a differing ttl
+// not. Harmless while this is off or the provider refuses it (a differing ttl
 // does not change the prefix hash, so neither direction costs a cache miss); if it is ever
 // switched on for real, latch the decision per session instead of recomputing it.
 //

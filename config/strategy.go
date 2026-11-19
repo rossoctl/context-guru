@@ -121,7 +121,7 @@ var Strategies = []Strategy{
 	{
 		Name:      "1-hour-head",
 		Spends:    false,
-		Desc:      "asks for the 1-hour tier on the tools/system breakpoints ONLY, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). It covers only tools and system, a small part of a long prompt that other sessions often keep warm anyway. The message history stays on the 5-minute cache, and this strategy turns the pings off, so the history goes cold after 5 minutes of idle time and the next turn rebuilds it. For long sessions with idle gaps see 1-hour-main-agent. Measured GRANTED on Haiku 4.5; an early reading of 'silently downgraded on Sonnet 5' was a misread (a head that is only read shows zero 1h writes), so check Usage.CacheWrite1h on a request that WROTE the entry before believing either way.",
+		Desc:      "asks for the 1-hour tier on the tools/system breakpoints ONLY, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). It covers only tools and system, a small part of a long prompt that other sessions often keep warm anyway. The message history stays on the 5-minute cache, and this strategy turns the pings off, so the history goes cold after 5 minutes of idle time and the next turn rebuilds it. For long sessions with idle gaps see 1-hour-main-agent. Whether the 1-hour tier is granted depends on the model and the provider, and it changes over time. Measured with fresh writes: claude-haiku-4-5 granted (36,251 of 36,574 tokens at 1h); claude-sonnet-5 REFUSED on an earlier date (0 of 48,212 written at 1h); on 2026-11-19 the same gateway granted 1h on claude-sonnet-5, claude-sonnet-5-5, claude-opus-4-8, claude-opus-5-5 and claude-haiku-5-5 (about 12.6k tokens each). A zero in Usage.CacheWrite1h counts only on a request that wrote the entry: a head that is only read shows zero too.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"head_ttl_1h", true},
@@ -131,7 +131,7 @@ var Strategies = []Strategy{
 	{
 		Name:      "1-hour-main-agent",
 		Spends:    true,
-		Desc:      "asks for the 1-hour tier on EVERY existing cache breakpoint (tools, system and message history) of the MAIN agent's requests with a >=50k-token prefix. Adds no breakpoint. Subagent requests are not changed: they keep the 5-minute cache. Idle pings stay on, as in auto: a 1-hour session gets one ping at 59 minutes, and subagents keep the 5-minute pings. COST: every main-thread turn writes its new history at 2x instead of 1.25x; it pays when a gap over 5 minutes would otherwise rebuild a large history. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Desc:      "asks for the 1-hour tier on EVERY existing cache breakpoint (tools, system and message history) of the MAIN agent's requests with a >=50k-token prefix. Adds no breakpoint. The MAIN thread gets NO idle ping, the 59-minute one included: its history is held by the 1-hour cache alone. Subagent requests are not changed: they keep the 5-minute cache and auto's pings (first ping at 240s, at most 2). COST: every main-thread turn writes its new history at 2x instead of 1.25x; it pays when a gap over 5 minutes would otherwise rebuild a large history. SPENDS THE CALLER'S CREDENTIAL on subagent pings while nobody is at the keyboard.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},

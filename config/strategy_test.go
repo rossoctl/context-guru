@@ -248,7 +248,8 @@ func TestOneHourMainAgentStrategy(t *testing.T) {
 		t.Error("1-hour-head changed: it must keep the pings off and not relabel the history")
 	}
 	row, _ := LookupStrategy("1-hour-head")
-	if strings.Contains(row.Desc, "SILENTLY DOWNGRADED") || !strings.Contains(row.Desc, "history") {
+	if strings.Contains(row.Desc, "SILENTLY DOWNGRADED") || strings.Contains(row.Desc, "$0") ||
+		!strings.Contains(row.Desc, "history") || !strings.Contains(row.Desc, "2026-11-19") || !strings.Contains(row.Desc, "claude-opus-5-5") {
 		t.Errorf("1-hour-head description is wrong: %s", row.Desc)
 	}
 }

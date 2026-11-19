@@ -855,6 +855,12 @@ func (k *Keeper) Record(r Record) {
 	// instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := r.Policy
 	model := gjson.GetBytes(body, "model").String()
+	// 1-hour-main-agent (#1243): the MAIN thread gets no ping at all, the 59-minute one included. Its
+	// history is on the 1-hour cache and the owner chose to let it expire rather than spend on it.
+	// Subagent threads keep auto's schedule. This turns off the schedule only: a manual hold still works.
+	if pol.MainAgentTTL1h && !IsSubagentThread(threadID) {
+		pol.KeepAlive = false
+	}
 	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
 	// is off, or where the schedule's own gates refuse the thread; it just never gets a schedule.
 	// manualOnly is decided once the gates below have run, so every refusal can name its reason.

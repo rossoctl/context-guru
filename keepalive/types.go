@@ -154,7 +154,8 @@ type Policy struct {
 	HeadTTLMinBytes int
 	// MainAgentTTL1h asks for the one-hour tier on every existing breakpoint of a main-thread
 	// request (tools, system and messages), gated by the same HeadTTLMinBytes. Subagent requests
-	// are not changed. Passed through to apply.Opts (#1243).
+	// are not changed. Passed through to apply.Opts (#1243). It also means NO ping on the main
+	// thread (Keeper.Record, proxy canPing); subagent threads keep the policy's pings.
 	MainAgentTTL1h bool
 	// HeadTTLMinTokens is DEPRECATED: the old name of HeadTTLMinBytes, kept so a host that still
 	// sets it builds and behaves as before. Read the gate through HeadTTLGateBytes.

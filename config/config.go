@@ -217,14 +217,17 @@ type CacheConfig struct {
 	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
 	// +$60.56 at f=0.30.
 	//
-	// It is off by default, and it protects only the head. Measured live, one request each with
-	// the head labelled 1h: aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of
-	// 36,574 written). An early reading said aws/claude-sonnet-5 was "silently downgraded" (0 of
-	// 48,212); that reading was not proven, because a head that is a cache READ writes nothing and
-	// shows 0 too (#1243). Direct requests on 2026-11-19 showed the gateway granting 1h on Haiku
-	// 5.5, Opus 5.5 and Opus 5.5 with 1M context. Usage.CacheWrite1h on a request that WROTE the
-	// entry is what says whether the tier arrived. The head is a small part of a Claude Code prompt
-	// and other sessions keep it warm, so for long sessions see MainAgentTTL1h.
+	// It is off by default, and it protects only the head. Whether the provider grants the 1-hour
+	// tier depends on the model and the provider, and it changes over time. Measured with fresh
+	// writes on this gateway: aws/claude-haiku-4-5 GRANTED (ephemeral_1h_input_tokens 36,251 of
+	// 36,574 written); aws/claude-sonnet-5 REFUSED on the earlier date (0 of 48,212 written at 1h,
+	// an otherwise normal 200); on 2026-11-19 direct requests to the same gateway (litellm 1.108.4,
+	// Bedrock), each writing a fresh ~12.6k-token system block with ttl 1h, were GRANTED on
+	// claude-sonnet-5 (12,632), claude-sonnet-5-5 (12,635), claude-opus-4-8 (12,630),
+	// claude-opus-5-5 (12,636) and claude-haiku-5-5 (12,632). So read Usage.CacheWrite1h on a
+	// request that WROTE the entry, per model, and do not assume either way. A zero on a request that
+	// only read the head says nothing: a read writes nothing. The head is a small part of a Claude
+	// Code prompt and other sessions keep it warm, so for long sessions see MainAgentTTL1h.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
 	// MainAgentTTL1h asks for the ONE-HOUR tier on EVERY existing cache breakpoint (tools, system
 	// AND messages) of a MAIN-thread request whose body is at least the size gate (head_ttl_min_*).
@@ -232,7 +235,8 @@ type CacheConfig struct {
 	// keys: with `keepalive` on, the session is a 1-hour session and `auto` sends its single ping
 	// at 59 minutes, while the subagents keep the 5-minute pings. The cost: every main-thread turn
 	// writes its new history at 2x instead of 1.25x. It pays when a gap longer than 5 minutes would
-	// otherwise rebuild the whole history. Set by the `1-hour-main-agent` strategy (#1243).
+	// otherwise rebuild the whole history. Set by the `1-hour-main-agent` strategy (#1243). The main thread then gets NO idle ping, the 59-minute one
+	// included; subagent threads keep the keep-alive keys.
 	MainAgentTTL1h bool `yaml:"main_agent_ttl_1h"`
 	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
 	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
