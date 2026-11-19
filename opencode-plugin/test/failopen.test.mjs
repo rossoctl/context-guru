@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -307,12 +307,12 @@ test("end to end: proxy up goes to the proxy; proxy dead goes to the upstream, a
 })
 
 // A routed project whose proxy is dead, and whose next restart runs `script` (sh). Each start is counted.
-async function failingRestart(directory, script) {
+async function failingRestart(directory, script, options) {
   const upstream = await recorder(UPSTREAM_PORT)
   process.env.CONTEXT_GURU_BIN = stubProxyBinary()
   const state = stateDirectory(directory)
   const { lines, client } = logger()
-  const hooks = await plugin.server({ directory, client })
+  const hooks = await plugin.server({ directory, client }, options)
   const config = { provider: { anthropic: { options: { baseURL: `http://127.0.0.1:${UPSTREAM_PORT}` } } } }
   await hooks.config(config)
   const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
@@ -381,6 +381,22 @@ test("a restarted binary that exits at once fails the restart at once and starts
     assert.equal((await project.send()).status, 200)
     assert.equal(project.upstream.requests.length, 2)
   } finally {
+    await project.cleanup()
+  }
+})
+
+// fallback: false keeps the old restart: it polls /healthz and does not stop when the started process exits.
+// A wrapper that starts the proxy in the background and exits 0 still gives a working restart.
+test("with fallback: false, a restart whose binary exits while the proxy comes up still succeeds", { timeout: 60000 }, async () => {
+  const stub = stubProxyBinary()
+  const project = await failingRestart("/tmp/context-guru-failopen-wrapper", `(sleep 1; exec ${JSON.stringify(stub)} "$@") >/dev/null 2>&1 &\nexit 0`, { fallback: false })
+  try {
+    await project.ask()
+
+    assert.ok(project.lines.some((line) => /proxy recovered on 127\.0\.0\.1:\d+/.test(line.message)), project.lines.map((line) => line.message).join("|"))
+    assert.equal(project.lines.some((line) => /proxy recovery failed/.test(line.message)), false)
+  } finally {
+    spawnSync("pkill", ["-f", stub])
     await project.cleanup()
   }
 })

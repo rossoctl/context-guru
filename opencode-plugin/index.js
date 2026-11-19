@@ -1145,8 +1145,11 @@ async function recoverProxy(state, record, client, fallback = false) {
   }
   child.unref()
   const started = Date.now()
-  // A child that exits, or never starts, fails the restart at once: there is no need to poll /healthz.
-  const outcome = await Promise.race([waitForHealthy(record.port).then((ok) => ({ ok })), exited.then((result) => ({ exited: result }))])
+  // With the fallback on, a child that exits, or never starts, fails the restart at once, and requests go
+  // direct. `fallback: false` keeps the old restart: it polls /healthz for the full time, so a wrapper that
+  // starts the proxy in the background and exits still gives a working restart.
+  const health = waitForHealthy(record.port).then((ok) => ({ ok }))
+  const outcome = await (fallback ? Promise.race([health, exited.then((result) => ({ exited: result }))]) : health)
   if (outcome.exited) {
     const { error, code, signal } = outcome.exited
     return failed(error ? `could not start: ${error.code ?? "error"}` : signal ? `exited with signal ${signal}` : `exited with code ${code}`)
