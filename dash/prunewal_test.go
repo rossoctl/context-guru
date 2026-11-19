@@ -567,3 +567,84 @@ func TestActiveTrimRespectsTheFloor(t *testing.T) {
 		t.Fatalf("the trim cut the session to %d rows; the floor allows about 2%%", n)
 	}
 }
+
+// #1224: a round that frees nothing stops the rule until the file grows.
+func TestSizeRuleStaysStoppedUntilTheFileGrows(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	seedFat(t, db, idleSet("old", 6, 80))
+	size, _ := db.sizeBytes()
+	grow := func(n int) {
+		var evs []*Event
+		for i := 0; i < n; i++ {
+			e := mkEvent(time.Now().UnixMilli(), "grow", "m", 1000, 900)
+			e.TenantID = "t"
+			raw := make([]byte, 4096)
+			rand.Read(raw)
+			txt := hex.EncodeToString(raw)
+			e.Content = []ContentRow{{Path: "messages.0", Before: txt, After: txt[:10]}}
+			evs = append(evs, e)
+		}
+		if err := db.insertBatch(evs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o := PruneOptions{MaxBytes: size * 8 / 10, ActiveWindow: time.Hour}
+
+	// Pass 1: the round deletes a session while a writer adds more than it frees.
+	rounds := 0
+	db.dropProbe = func() { rounds++; grow(200) }
+	d1, err := db.PruneWith(time.Now(), o)
+	if err != nil || d1 == 0 || rounds != 1 {
+		t.Fatalf("pass 1: deleted=%d rounds=%d err=%v; want one deleting round", d1, rounds, err)
+	}
+
+	// Pass 2 and 3: no growth. The rule must not delete again.
+	db.dropProbe = func() { rounds++ }
+	logs := captureLogs(t)
+	for i := 0; i < 2; i++ {
+		if d, err := db.PruneWith(time.Now(), o); err != nil || d != 0 {
+			t.Fatalf("pass %d after the stop: deleted %d rows (err %v); want 0", i+2, d, err)
+		}
+	}
+	got := logs()
+	if rounds != 1 {
+		t.Fatalf("a delete round ran after the stop (rounds=%d)", rounds)
+	}
+	if n := strings.Count(got, "size rule is holding"); n != 1 {
+		t.Errorf("the held state was logged %d times in 2 passes; want once", n)
+	}
+
+	// Growth inside the margin does not re-arm it.
+	grow(1)
+	if d, _ := db.PruneWith(time.Now(), o); d != 0 {
+		t.Fatalf("one page of growth re-armed the rule (deleted %d)", d)
+	}
+
+	// Growth past the margin does.
+	grow(200)
+	d4, err := db.PruneWith(time.Now(), o)
+	if err != nil || d4 == 0 {
+		t.Fatalf("after growth past the margin the rule deleted %d rows (err %v); want some", d4, err)
+	}
+}
+
+func TestSizeRuleClearsTheStopWhenTheFileFallsUnderTheLimit(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	seedFat(t, db, idleSet("old", 4, 40))
+	size, _ := db.sizeBytes()
+	db.sizeStuck.set(size)
+	if _, err := db.PruneWith(time.Now(), PruneOptions{MaxBytes: size * 2, ActiveWindow: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	if db.sizeStuck.size.Load() != 0 {
+		t.Fatal("the stuck state stayed after the file was under its limit")
+	}
+}
