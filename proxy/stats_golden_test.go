@@ -206,6 +206,11 @@ var statsGoldenTopLevel = []string{
 	// loosening the assertion: fresh/cache_read/cache_write reading 0 on a healthy request is
 	// exactly the kind of silence a golden test exists to make someone notice.
 	"usage_unparsed",
+	"wait_scan_not_ready",
+	"wait_scan_unknown",
+	"wait_scan_used",
+	"wait_scan_writer_early",
+	"wait_scan_writer_own",
 	"usage_unreadable",
 	"wasted_tokens",
 }

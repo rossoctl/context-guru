@@ -389,7 +389,7 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm fu
 		// open" guard on each open; a delete of an absent key is a no-op) except the
 		// Skill-anonymous close fallback, which is explicitly guarded by ts.appliedCloses —
 		// see scanOpenState's doc for why that ONE path needs it.
-		scanOpenState(ts, entries, now)
+		scanOpenState(ts, entries, now, nil)
 		obs.OpenBackground, obs.MonitorExpiryMs = countBackgroundLocked(ts, now)
 		obs.OpenTeammate = countTeammatesLocked(ts, now)
 	}()
@@ -637,7 +637,9 @@ func hasSystemMarker(text string) bool {
 // side effect on an entry OTHER than the one the signal names, so firing it a second time for
 // the SAME historical signal would wrongly close a second, unrelated task; see
 // threadState.appliedCloses and closeOldestAnon's own idempotency guard.
-func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time) {
+// stop, when non-nil, is polled once per message; a true stops the scan and the function returns false
+// (the state is then partial and the caller must discard it). nil never stops.
+func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time, stop func() bool) bool {
 	openBG := func(id string, dur time.Duration) {
 		if _, exists := ts.openBackground[id]; exists {
 			return // already open — do NOT reset firstSeen on a resend
@@ -685,6 +687,9 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 	}
 
 	for _, e := range entries {
+		if stop != nil && stop() {
+			return false
+		}
 		for _, b := range blocksOf(e) {
 			switch b.kind {
 			case kindToolUse:
@@ -752,6 +757,7 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 			}
 		}
 	}
+	return true
 }
 
 // removeFromAnonOrder drops id from ts.anonOrder, if present. Only ever needed when an entry

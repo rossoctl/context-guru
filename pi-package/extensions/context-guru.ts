@@ -23,7 +23,11 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATE_DIR = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-pi");
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "pi_plugin.py");
+const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SCRIPT = join(PACKAGE_DIR, "scripts", "pi_plugin.py");
+/** The package folder of the copy that runs in this Pi process. Two installed copies (two clones, or a
+ *  worktree) both load; without this, Pi renames both commands and /context-guru disappears (#1154). */
+export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
 const SESSION_HEADER = "x-context-guru-session";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
@@ -261,6 +265,33 @@ export function strategyChoices(facts: Record<string, string>): { names: string[
   return { names: names.length ? names : ["none"], error: facts.strategy_error || undefined };
 }
 
+type Message = { text: string; level: "info" | "error" };
+
+/** What a failed proxy start tells the user: the proxy is off, and what to run (#1146). */
+function proxyOff(f: Record<string, string>): string {
+  return `the proxy did not start and is off. Run /context-guru status.${f.log ? ` The log is ${f.log}.` : ""}`;
+}
+
+/** The result of `update --install`. A non-zero exit is never shown as a success (#1155). */
+export function updateMessage(f: Record<string, string>, code: number): Message {
+  if (f.result === "updated" && f.restart === "failed") {
+    return { text: `context-guru updated to ${f.version}, but ${proxyOff(f)}`, level: "error" };
+  }
+  if (f.result === "updated" && code === 0) return { text: `context-guru updated to ${f.version}.`, level: "info" };
+  return { text: ["context-guru update:", f.result ?? "error", f.version, f.reason, f.detail].filter(Boolean).join(" "),
+    level: "error" };
+}
+
+/** The result of `configure --preset` or `--cache-strategy`. */
+export function configureMessage(f: Record<string, string>, code: number, stderr: string): Message {
+  if (f.result === "configured" && code === 0) {
+    return { text: `context-guru now runs preset ${f.preset}, cache strategy ${f.cache_strategy}.` +
+      (f.probe ? ` Tool deferral probe: ${f.probe}.` : ""), level: "info" };
+  }
+  if (f.result === "not_applied") return { text: `context-guru: the new setting is saved, but ${proxyOff(f)}`, level: "error" };
+  return { text: `context-guru: ${f.result ?? "error"} ${f.detail ?? stderr.trim()}`, level: "error" };
+}
+
 /** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
 export function parseFacts(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -283,6 +314,21 @@ export function endKind(reason: string): string | undefined {
 }
 
 export default function contextGuru(pi: ExtensionAPI) {
+  const shared = globalThis as Record<symbol, unknown>;
+  const owner = shared[LOADED];
+  if (typeof owner === "string" && owner !== PACKAGE_DIR) {
+    let warned = false;
+    pi.on("session_start", (_event, ctx) => {
+      if (warned) return;
+      warned = true;
+      const text = `context-guru: two copies of the Pi package are loaded, ${owner} and ${PACKAGE_DIR}. ` +
+        `Only the first one runs. Remove the other one from "packages" in ~/.pi/agent/settings.json.`;
+      if (ctx.hasUI) ctx.ui.notify(text, "warning");
+      else console.warn(text);
+    });
+    return;
+  }
+  shared[LOADED] = PACKAGE_DIR;
   let install = readInstall();
 
   const routed = (ctx: ExtensionContext) => isRouted(install, ctx.model?.baseUrl);
@@ -371,6 +417,8 @@ export default function contextGuru(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, ctx) => signal(ctx, "SessionStart", "compact"));
 
   pi.on("session_shutdown", (event, ctx) => {
+    // A reload, /new, /resume or /fork loads every copy again, so the first copy to load claims it again.
+    if (shared[LOADED] === PACKAGE_DIR) delete shared[LOADED];
     try {
       checks.end(ctx.sessionManager.getSessionId());
     } catch {
@@ -479,10 +527,8 @@ export default function contextGuru(pi: ExtensionAPI) {
     // As for restart: configure can wait for a session-start restart that holds the lock.
     const out = await run(["configure", flag, value], RESTART_TIMEOUT_MS);
     install = readInstall();
-    const f = out.facts;
-    say(ctx, f.result === "configured"
-      ? `context-guru now runs preset ${f.preset}, cache strategy ${f.cache_strategy}.` + (f.probe ? ` Tool deferral probe: ${f.probe}.` : "")
-      : `context-guru: ${f.result ?? "error"} ${f.detail ?? out.stderr.trim()}`, f.result === "configured" ? "info" : "error");
+    const m = configureMessage(out.facts, out.code, out.stderr);
+    say(ctx, m.text, m.level);
   };
 
   pi.registerCommand("context-guru", {
@@ -525,8 +571,9 @@ export default function contextGuru(pi: ExtensionAPI) {
           if (check.update_available !== "true") return say(ctx, `context-guru proxy ${check.installed_version ?? "?"} is current.`);
           if (!(await agree(ctx, "Update the proxy?",
             `Install ${check.latest_version} (now ${check.installed_version}) and restart the proxy?`))) return;
-          const f = (await run(["update", "--install"], 300_000)).facts;
-          return say(ctx, ["context-guru update:", f.result, f.version, f.reason, f.detail].filter(Boolean).join(" "));
+          const out = await run(["update", "--install"], 300_000);
+          const m = updateMessage(out.facts, out.code);
+          return say(ctx, m.text, m.level);
         }
         case "uninstall": {
           if (!(await agree(ctx, "Remove context-guru?",

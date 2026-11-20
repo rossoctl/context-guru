@@ -404,9 +404,9 @@ class Restart(Sandbox):
 
         def run(cmd, **kwargs):
             self.calls.append(cmd)
-            code = 113 if cmd[1] in self.fail else 0
+            code = 113 if cmd[1] in self.fail or cmd[1] == "print" else 0
             if code and kwargs.get("check"):
-                raise subprocess.CalledProcessError(code, cmd)
+                raise subprocess.CalledProcessError(code, cmd, b"", b"launchctl said no\n")
             return subprocess.CompletedProcess(cmd, code, b"", b"")
         self.run_patch = mock.patch.object(pi_plugin.subprocess, "run", side_effect=run)
         self.run_patch.start()
@@ -452,11 +452,12 @@ class Restart(Sandbox):
     def test_launchd_bootstraps_a_plist_that_is_not_loaded(self):
         self.our_plist()
         self.fail = {"kickstart"}
-        # The first kickstart fails, so the plist is loaded; the second kickstart then fails too here.
+        # The kickstart fails, so the plist is loaded. RunAtLoad starts it: no second kickstart (#1146).
         code, facts = self.restart("launchd", lambda port, timeout=1: False)
-        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
-        self.assertEqual(self.calls[1], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
-        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "failed"))
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "print", "bootstrap"])
+        self.assertEqual(self.calls[2], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
+        # Loaded, but /healthz never answers here.
+        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "restarted"))
 
     def test_launchd_bootstrap_then_kickstart_brings_it_up(self):
         self.our_plist()
@@ -467,11 +468,21 @@ class Restart(Sandbox):
             if cmd[1] == "kickstart" and first[0]:
                 first[0] = False
                 return subprocess.CompletedProcess(cmd, 113, b"", b"")
+            if cmd[1] == "print":  # not loaded
+                return subprocess.CompletedProcess(cmd, 113, b"", b"")
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
         with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
             code, facts = self.restart("launchd", [False, True])
-        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "print", "bootstrap"])
         self.assertEqual((code, facts["result"]), (0, "up"))
+
+    def test_a_failed_bootstrap_at_restart_writes_launchctls_error_to_the_proxy_log(self):
+        self.our_plist()
+        self.fail = {"kickstart", "bootstrap"}
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["service"]), (1, "failed"))
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("launchctl bootstrap failed (exit 113): launchctl said no", log)
 
     def test_a_plist_we_do_not_own_is_left_alone(self):
         self.our_plist(managed=False)
@@ -898,6 +909,18 @@ class ConfigByName(Sandbox):
                          ("1-ping", both, {"openai": "x"}))
         self.assertEqual(started["upstreams"], both)
         self.assertIn("# chained: openai -> proxy -> https://gw.example/openai/v1", pi_plugin.proxy_config().read_text())
+
+    def test_update_whose_proxy_does_not_start_reports_failed_and_names_the_log(self):
+        self.installed(binary=str(pi_plugin.managed_binary()))
+        new = str(pi_plugin.managed_binary())
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"), \
+                mock.patch.object(pi_plugin, "binary_version_text", return_value="0.7.0"), \
+                mock.patch.object(pi_plugin, "install_release_binary", return_value=(new, "v0.7.1")), \
+                mock.patch.object(pi_plugin, "names_strategies", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", return_value=False):
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["restart"]), (1, "updated", "failed"))
+        self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
 
     def test_update_after_an_uninstall_during_the_wait_skips_the_restart(self):
         """Review finding on #1058: no KeyError, and no new record holding only the binary."""
@@ -1419,6 +1442,123 @@ class DefaultStrategyFallback(Sandbox):
         self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "unknown_strategy"))
         self.fetch.assert_called_once()
         self.assertFalse(pi_plugin.managed_binary().exists())
+
+
+class StartService(Sandbox):
+    """`start_service`: launchd's `bootout` returns before the job is gone, so a `bootstrap` right after
+    it can fail with error 5 (#1146). `bootstrap` alone starts the proxy (RunAtLoad)."""
+
+    TARGET = f"gui/{os.getuid()}/io.rossoctl.context-guru-pi"
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        # Each command's answers in order, as (exit code, stderr); the last one repeats.
+        self.answers = {"print": [(113, b"")]}
+
+        def run(cmd, **kwargs):
+            self.calls.append(cmd)
+            answers = self.answers.get(cmd[1] if cmd[0] == "launchctl" else cmd[2], [(0, b"")])
+            code, err = answers.pop(0) if len(answers) > 1 else answers[0]
+            if code and kwargs.get("check"):
+                raise subprocess.CalledProcessError(code, cmd, b"", err)
+            return subprocess.CompletedProcess(cmd, code, b"", err)
+        for patch in (mock.patch.object(pi_plugin.subprocess, "run", side_effect=run),
+                      mock.patch.object(pi_plugin.time, "sleep"),
+                      mock.patch.object(pi_plugin, "wait_healthy", return_value=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def start(self, kind="launchd"):
+        with mock.patch.object(pi_plugin, "service_kind", return_value=kind):
+            return pi_plugin.start_service("/bin/proxy", 8800)
+
+    def verbs(self):
+        return [c[1] if c[0] == "launchctl" else " ".join(c[2:4]) for c in self.calls]
+
+    def test_launchd_start_loads_the_plist_once_and_does_not_kickstart_it(self):
+        self.assertTrue(self.start())
+        self.assertEqual(self.verbs(), ["bootout", "print", "bootstrap"])
+        self.assertEqual(self.calls[1], ["launchctl", "print", self.TARGET])
+
+    def test_launchd_start_waits_until_bootout_has_removed_the_job(self):
+        self.answers["print"] = [(0, b""), (0, b""), (113, b"")]
+        self.assertTrue(self.start())
+        self.assertEqual(self.verbs(), ["bootout", "print", "print", "print", "bootstrap"])
+
+    def test_launchd_start_retries_a_bootstrap_that_fails_with_error_5(self):
+        self.answers["bootstrap"] = [(5, b"Bootstrap failed: 5: Input/output error\n"), (0, b"")]
+        self.assertTrue(self.start())
+        self.assertEqual(self.verbs(), ["bootout", "print", "bootstrap", "bootstrap"])
+
+    def test_launchd_start_that_fails_writes_launchctls_error_to_the_proxy_log(self):
+        self.answers["bootstrap"] = [(5, b"Bootstrap failed: 5: Input/output error\n")]
+        self.assertFalse(self.start())
+        self.assertEqual(self.verbs().count("bootstrap"), 3)
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error", log)
+
+    def test_launchd_start_does_not_retry_another_bootstrap_error(self):
+        self.answers["bootstrap"] = [(113, b"Bootstrap failed: 113\n")]
+        self.assertFalse(self.start())
+        self.assertEqual(self.verbs().count("bootstrap"), 1)
+
+    def test_systemd_start_enables_and_restarts_once_without_a_second_start(self):
+        self.assertTrue(self.start("systemd"))
+        self.assertEqual(self.verbs(), ["daemon-reload", "enable context-guru-pi.service",
+                                        "restart context-guru-pi.service"])
+
+    def test_systemd_start_that_fails_writes_systemctls_error_to_the_proxy_log(self):
+        self.answers["restart"] = [(1, b"Job failed.\n")]
+        self.assertFalse(self.start("systemd"))
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("systemctl restart failed (exit 1): Job failed.", log)
+
+    def test_a_log_that_cannot_be_written_still_gives_a_failed_start_not_a_crash(self):
+        self.answers["bootstrap"] = [(113, b"no\n")]
+        (pi_plugin.state_dir() / "proxy.log").mkdir(parents=True)  # opening it to append fails
+        self.assertFalse(self.start())
+
+    def test_a_hung_launchctl_print_does_not_block_stop(self):
+        plist = pi_plugin.launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        with open(plist, "wb") as handle:
+            pi_plugin.plistlib.dump({"Label": pi_plugin.LAUNCHD_LABEL, "ContextGuruManaged": True}, handle)
+        real_run = pi_plugin.subprocess.run
+
+        def run(cmd, **kwargs):
+            if cmd[:2] == ["launchctl", "print"]:
+                self.assertIsNotNone(kwargs.get("timeout"))
+                raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            return real_run(cmd, **kwargs)
+        with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
+            self.assertEqual(pi_plugin.stop_service(), "stopped")
+        self.assertFalse(plist.exists())
+
+    def test_launchd_stop_waits_until_the_job_is_gone_before_it_returns(self):
+        plist = pi_plugin.launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        with open(plist, "wb") as handle:
+            pi_plugin.plistlib.dump({"Label": pi_plugin.LAUNCHD_LABEL, "ContextGuruManaged": True}, handle)
+        self.answers["print"] = [(0, b""), (113, b"")]
+        self.assertEqual(pi_plugin.stop_service(), "stopped")
+        self.assertEqual(self.verbs(), ["bootout", "print", "print"])
+        self.assertFalse(plist.exists())
+
+
+class FailedStartNamesTheLog(Sandbox):
+    """A command whose proxy start failed names the log that holds the service manager's error."""
+
+    def setUp(self):
+        super().setUp()
+        pi_plugin.write_record({"port": 8800, "preset": "high", "cache_strategy": "none", "binary": "/bin/proxy"})
+
+    def test_configure_that_cannot_start_the_proxy_names_the_log(self):
+        with mock.patch.object(pi_plugin, "start_service", return_value=False), \
+                mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+            code, facts = self.run_main("configure", "--preset", "medium")
+        self.assertEqual((code, facts["result"]), (1, "not_applied"))
+        self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
 
 
 if __name__ == "__main__":

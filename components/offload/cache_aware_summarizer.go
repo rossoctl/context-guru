@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -120,6 +121,9 @@ type CacheAwareSummarizer struct {
 	modelClient components.Model
 	trigger     components.Trigger
 	mode        markerMode
+	// refreshFullCost is true when refresh_cost is "full": the keep-alive refresh test then weighs
+	// the saving against the whole summary call, as it did before #1144.
+	refreshFullCost bool
 	// overrideProfiles caches the on-disk registry after the first successful read.
 	overrideProfiles atomic.Value
 }
@@ -169,10 +173,14 @@ type cacheAwareSummarizerConfig struct {
 	// on every turn and the request carrying the agent's answer never gets a hit past it — the
 	// component would invalidate the cache it exists to protect, and pay a synchronous model call
 	// per turn to do it.
-	ResummarizeTokens int                `yaml:"resummarize_tokens"`
-	MarkerMode        string             `yaml:"marker_mode"` // full (default) | summary | off
-	Model             modelConfig        `yaml:"model"`
-	Trigger           components.Trigger `yaml:"trigger"`
+	ResummarizeTokens int    `yaml:"resummarize_tokens"`
+	MarkerMode        string `yaml:"marker_mode"` // full (default) | summary | off
+	// RefreshCost picks the cost the keep-alive refresh test weighs the saving against: "extra"
+	// (default, the cost over the ping the refresh replaces) or "full" (the whole call, the test
+	// before #1144). Read only with trigger.cache_state: pre_expiry and keep-alive on.
+	RefreshCost string             `yaml:"refresh_cost"`
+	Model       modelConfig        `yaml:"model"`
+	Trigger     components.Trigger `yaml:"trigger"`
 }
 
 // summarizerProfiles is summarizer_model_profiles.yaml; see that file for the provenance of
@@ -456,6 +464,15 @@ func init() {
 				"which changes the forwarded prefix every turn and forfeits the cache stability " +
 				"this component exists for."},
 		markerModeField(),
+		{Key: "refresh_cost", Type: components.FieldEnum, Default: RefreshCostExtra,
+			Options: []string{RefreshCostExtra, RefreshCostFull},
+			Hint: "What a keep-alive refresh of a pre_expiry reserve must earn back. extra = only the " +
+				"cost over the ping it replaces (the reply, about $0.02), so a refresh pays after " +
+				"about 8,000 new tokens on Sonnet 5. full = the whole call, the read of the " +
+				"conversation too (the rule before #1144), about 80,000 new tokens at a 900k prompt. " +
+				"extra applies only where the refresh replaces a planned ping and the call reads the ping's own " +
+				"prefix (prefix_ask); the extra slot, the messages path and model.source: config use the whole call. " +
+				"Read only with trigger.cache_state: pre_expiry and keep-alive on."},
 	}
 	f = append(f, modelFields("model")...)
 	// The shared trigger descriptors, with the two defaults this component's constructor
@@ -554,6 +571,12 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	if cfg.ResummarizeTokens < 0 {
 		return nil, errors.New("cache_aware_summarizer: resummarize_tokens must be >= 0")
 	}
+	switch cfg.RefreshCost {
+	case "", RefreshCostExtra, RefreshCostFull:
+	default:
+		return nil, fmt.Errorf("cache_aware_summarizer: refresh_cost %q is not one of [%s %s]",
+			cfg.RefreshCost, RefreshCostExtra, RefreshCostFull)
+	}
 	// Installs min_request_frac: 0.9 / cache_state: any for keys the operator did not write, and
 	// validates cache_state — see applyCacheAwareTriggerDefaults.
 	if err := applyCacheAwareTriggerDefaults(raw, &cfg.Trigger); err != nil {
@@ -577,6 +600,7 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 		profiles: profiles, minTokens: cfg.MinTokens, maxRequestTokens: cfg.MaxRequestTokens, resummarizeTokens: cfg.ResummarizeTokens,
 		modelSource: cfg.Model.Source,
 		trigger:     cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode),
+		refreshFullCost: cfg.RefreshCost == RefreshCostFull,
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.InstructionRole)) {
 	case "", "auto":

@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { createServer } from "node:http";
@@ -11,8 +12,9 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, setupDoneText, consentText,
+  stripsChatGPTFields, strategyChoices, type StartCheck, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
+import contextGuru from "../extensions/context-guru.ts";
 
 const install = {
   port: 8800,
@@ -341,4 +343,119 @@ test("the consent dialog names a strategy fallback before the yes", () => {
     cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none" });
   assert.deepEqual(p.consent, { chain: "C cache strategy auto is not offered for Pi, so setup uses none.",
     replace: "R cache strategy auto is not offered for Pi, so setup uses none." });
+});
+
+/** A Pi that records what an extension registers. `emit` runs the handlers of one event. */
+function fakePi() {
+  const handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>> = {};
+  const commands: string[] = [];
+  const pi = {
+    on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => (handlers[name] ??= []).push(fn),
+    registerCommand: (name: string) => commands.push(name),
+    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false, truncated: false }),
+  };
+  const notices: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: { notify: (text: string) => notices.push(text) },
+    model: undefined,
+    modelRegistry: { getAll: () => [] },
+    sessionManager: { getSessionId: () => "s1" },
+  };
+  const emit = (name: string, event: unknown = {}) => (handlers[name] ?? []).forEach((fn) => fn(event, ctx));
+  return { pi: pi as never, commands, notices, emit, events: () => Object.keys(handlers) };
+}
+
+test("a second copy of the package registers nothing and warns once, naming both folders", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  g[LOADED] = "/clone-a/pi-package";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    assert.deepEqual(second.commands, []);
+    assert.deepEqual(second.events(), ["session_start"]);
+    second.emit("session_start");
+    second.emit("session_start");
+    assert.equal(second.notices.length, 1);
+    assert.match(second.notices[0], /two copies/);
+    assert.ok(second.notices[0].includes("/clone-a/pi-package and "), second.notices[0]);
+    assert.ok(second.notices[0].includes(join(dirname(fileURLToPath(import.meta.url)), "..") + "."), second.notices[0]);
+    assert.match(second.notices[0], /settings\.json/);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("the first copy registers its command, and a reload of it after shutdown registers again", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    assert.deepEqual(first.commands, ["context-guru"]);
+    assert.equal(g[LOADED], join(dirname(fileURLToPath(import.meta.url)), ".."));
+    first.emit("session_shutdown", { reason: "reload" });
+    // Released, so a different copy that loads after the reload (the user removed this one) runs.
+    assert.equal(g[LOADED], undefined);
+    const reloaded = fakePi();
+    contextGuru(reloaded.pi);
+    assert.deepEqual(reloaded.commands, ["context-guru"]);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("a shutdown releases only this copy's marker, for /new as for a reload", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    first.emit("session_shutdown", { reason: "new" });
+    assert.equal(g[LOADED], undefined);
+    contextGuru(fakePi().pi);
+    g[LOADED] = "/clone-a/pi-package"; // another copy holds it now
+    first.emit("session_shutdown", { reason: "reload" });
+    assert.equal(g[LOADED], "/clone-a/pi-package");
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("an update whose restart failed is an error that says the proxy is off and what to run", () => {
+  const m = updateMessage({ result: "updated", version: "v0.7.3", restart: "failed", log: "/s/proxy.log" }, 1);
+  assert.equal(m.level, "error");
+  assert.equal(m.text, "context-guru updated to v0.7.3, but the proxy did not start and is off. " +
+    "Run /context-guru status. The log is /s/proxy.log.");
+});
+
+test("an update that restarted, or needed no restart, is info", () => {
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "skipped" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+});
+
+test("an update that exits non-zero is an error even when its facts say updated", () => {
+  assert.equal(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 1).level, "error");
+});
+
+test("an update that was refused shows the reason and the detail", () => {
+  assert.deepEqual(updateMessage({ result: "refused", reason: "binary_not_managed", detail: "x" }, 2),
+    { text: "context-guru update: refused binary_not_managed x", level: "error" });
+});
+
+test("a configure whose restart failed says the proxy is off and what to run", () => {
+  assert.deepEqual(configureMessage({ result: "not_applied", preset: "medium", log: "/s/proxy.log" }, 1, ""), {
+    text: "context-guru: the new setting is saved, but the proxy did not start and is off. " +
+      "Run /context-guru status. The log is /s/proxy.log.",
+    level: "error",
+  });
+});
+
+test("a configure that worked names the preset and the strategy", () => {
+  assert.deepEqual(configureMessage({ result: "configured", preset: "medium", cache_strategy: "none" }, 0, ""),
+    { text: "context-guru now runs preset medium, cache strategy none.", level: "info" });
+});
+
+test("a configure with no facts shows stderr", () => {
+  assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
 });
