@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
+  stripsChatGPTFields, strategyChoices, type StartCheck, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
   uninstallText, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
@@ -321,6 +321,58 @@ test("the strategy names come from the proxy's list, and an old proxy offers onl
   assert.deepEqual(old.names, ["none"]);
   assert.match(old.error ?? "", /v0\.7\.1/);
   assert.deepEqual(strategyChoices({}).names, ["none"]);
+});
+
+test("a request does not wait when no restart is running", async () => {
+  const gate = new RestartGate();
+  // The wait settles before a 0 ms timer fires: no wait at all, whatever the machine's load.
+  const first = await Promise.race([gate.wait(10_000).then(() => "wait"), new Promise((r) => setTimeout(() => r("timer"), 0))]);
+  assert.equal(first, "wait");
+});
+
+test("Esc ends the wait at once", async () => {
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const stop = new AbortController();
+  const waiting = gate.wait(10_000, stop.signal).then(() => "ended");
+  stop.abort();
+  assert.equal(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("still waiting"), 1000))]), "ended");
+  assert.equal(await gate.wait(10_000, AbortSignal.abort()).then(() => "ended"), "ended", "an aborted signal waits not at all");
+});
+
+test("a request waits for a running restart and goes as soon as it ends", async () => {
+  const gate = new RestartGate();
+  const release = gate.hold();
+  let went = false;
+  const waiting = gate.wait(10_000).then(() => { went = true; });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(went, false);
+  release();
+  await waiting;
+  assert.equal(went, true);
+});
+
+test("a request waits at most the limit, 10 seconds by default", async () => {
+  assert.equal(FIRST_REQUEST_WAIT_MS, 10_000);
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const start = Date.now();
+  await gate.wait(30);
+  assert.ok(Date.now() - start < 500);
+});
+
+test("the start check holds requests only while it restarts, also when the restart throws", async () => {
+  const seen: string[] = [];
+  const hold = () => { seen.push("hold"); return () => seen.push("release"); };
+  await checkAtStart({ ...fake([true]).check, hold });
+  assert.deepEqual(seen, [], "a proxy that answers holds nothing");
+
+  const { check } = fake([false, true], {
+    restart: async () => { seen.push("restart"); throw new Error("boom"); },
+    answers: (() => { const a = [false, true]; return async () => { seen.push("check"); return a.shift() ?? false; }; })(),
+  });
+  assert.equal(await checkAtStart({ ...check, hold }), "restarted");
+  assert.deepEqual(seen, ["check", "hold", "restart", "check", "release"]);
 });
 
 test("each preset has the Claude Code plugin's text, without the markdown", () => {
