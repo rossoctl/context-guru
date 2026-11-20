@@ -8,7 +8,9 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
 
@@ -227,5 +229,60 @@ func TestFreeOneHourPingDoesNotLowerTheThreadsTier(t *testing.T) {
 	}
 	if e, ok := k.Entry(sess1); !ok || !e.TTL1h {
 		t.Errorf("a read with 1h markers is a free switch, not a downgrade: entry %+v found %v", e, ok)
+	}
+}
+
+// "Keep-alive never shortens the cache strategy": a substitute (here the summarizer's call) renews the
+// entry at 5 minutes. On a main-thread long wait it must not take the place of the 1-hour ping. The
+// substitute takes the first ping and the 1-hour ping follows it, with no second substitute, so the
+// wait still ends with the entry at 1 hour (one 1-hour touch).
+func TestSubstituteDoesNotReplaceTheOneHourPing(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	model := &fakeSummaryModel{out: "<summary>explored the handler, 3 tests fail.</summary>"}
+	kaCandidate(t, "sess-1", st, model)
+
+	pol := onWaitPolicy()
+	start := clock.now()
+	for _, d := range []time.Duration{-time.Second, 0} {
+		stop := "tool_use"
+		var names []string
+		if d == 0 {
+			stop = "end_turn" // a person: a long wait
+		} else {
+			names = []string{"Bash"}
+		}
+		k.Record(Record{Key: sess1, StartedAt: start.Add(d), Body: []byte(kaToolBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: pol, ToolUseNames: names,
+			Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: stop}, Header: kaHeader(), Hold: fd.hold(sess1)})
+	}
+	if n := k.Sweep(start.Add(240 * time.Second)); n != 1 {
+		t.Fatalf("the first ping did not fire (%d)", n)
+	}
+	testutil.WaitFor(t, "the summary substitute", func() bool { return k.summarySubstituted.Load() == 1 })
+	if fd.n() != 0 {
+		t.Fatalf("the substitute did not take the first ping: %d ordinary pings", fd.n())
+	}
+	// The 1-hour ping follows, one idle period after the substitute.
+	if n := k.Sweep(start.Add(480 * time.Second)); n != 1 {
+		t.Fatalf("the 1-hour ping was not planned after the substitute (%d)", n)
+	}
+	waitPings(t, k, 2)
+	if fd.n() != 1 || !apply.AllBreakpointsAskExtendedTTL(fd.sent[0].Body) {
+		t.Fatalf("the ping after the substitute is not a 1-hour ping (%d sent)", fd.n())
+	}
+	if model.calls.Load() != 1 {
+		t.Errorf("the substitute ran %d times, want 1: the 1-hour ping is never substituted", model.calls.Load())
+	}
+	if e, ok := k.Entry(sess1); !ok || !e.TTL1h {
+		t.Errorf("the wait did not end with a 1-hour entry: %+v %v", e, ok)
+	}
+	for _, at := range []time.Duration{720, 960, 3600} {
+		if n := k.Sweep(start.Add(at * time.Second)); n != 0 {
+			t.Fatalf("a further ping fired at %ds", at)
+		}
 	}
 }

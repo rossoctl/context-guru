@@ -161,6 +161,11 @@ type kaEntry struct {
 	// (Policy.OneHourOnWait, #1243). Set at record time and never changed. The ping is the only ping of
 	// that wait (the policy's MaxPings is 1).
 	oneHour bool
+	// oneHourSubstituted is set when a substitute (a summary or a sweep question) took the place of the
+	// first ping of a 1-hour-on-wait entry. A substitute renews the entry at 5 minutes, which is not the
+	// 1-hour entry the strategy plans, so the 1-hour ping is planned AFTER it: the entry's MaxPings goes
+	// to 2 and the next ping is the 1-hour ping, with no substitute. Guarded by Keeper.mu.
+	oneHourSubstituted bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
 	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
 	pingUSD float64
@@ -1573,7 +1578,27 @@ func (k *Keeper) fire(j pingJob) {
 		k.fireExtra(j)
 		return
 	}
-	if k.fireSubstitute(j) {
+	// A substitute renews the entry for the lifetime of ITS markers: 5 minutes. On a 1-hour-on-wait
+	// entry that would end the wait with a 5-minute entry, shortening the strategy (CLAUDE.md,
+	// "Keep-alive never shortens the cache strategy"). The substitute's request is built by the offload
+	// code, so its markers cannot be relabelled here (option (a)); instead the substitute may take the
+	// FIRST ping and the 1-hour ping follows it (option (b)). The ping that follows is never substituted.
+	substitute := true
+	if j.oneHour {
+		k.mu.Lock()
+		substitute = !j.e.oneHourSubstituted
+		k.mu.Unlock()
+	}
+	if substitute && k.fireSubstitute(j) {
+		if j.oneHour {
+			k.mu.Lock()
+			j.e.oneHourSubstituted = true
+			j.e.pol.MaxPings = 2 // the 1-hour ping is still to come
+			if j.e.timer != nil {
+				j.e.timer.Reset(j.e.hold()) // the deadline covered one ping; it now covers two
+			}
+			k.mu.Unlock()
+		}
 		return
 	}
 

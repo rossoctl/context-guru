@@ -90,7 +90,7 @@ cache:
   a teammate, background work, or an unknown cause): the first ping, at the usual time, carries every cache marker at the
   1-hour tier, and it is the **only** ping of that wait (no 59-minute ping). On the gateway measured on
   2026-11-19 that switch is a read, not a rewrite, so one read at 0.1x keeps the prompt for 1 hour and no
-  request pays the 2x write premium. A tool wait and **every subagent thread** behave as in `auto` (5-minute pings). The proxy
+  request pays the 2x write premium. A tool wait and **every subagent thread** behave as in `auto` (5-minute pings). If a summary or sweep substitute takes that first ping, it renews the entry for only 5 minutes, so the 1-hour ping follows it (never substituted) and the wait still ends at 1 hour. The proxy
   checks the first 1-hour ping's usage and, on a route where the switch costs a rewrite (Anthropic
   first-party is not tested), stops sending 1-hour pings there and falls back to `auto`. Opt-in; no
   default changes.
