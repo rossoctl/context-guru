@@ -286,3 +286,42 @@ func TestStrategyCRUD(t *testing.T) {
 		t.Errorf("second delete = %v, want ErrNoStrategy", err)
 	}
 }
+
+// OneHourOnWait (#1243) round-trips through create, a sparse patch and a reload.
+func TestStrategyOneHourOnWaitPersistsAndPatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tenant.db")
+	r1, err := Open(path, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	created, err := r1.CreateStrategy("mgr-1", Strategy{
+		Name: "1h on wait", IdleSeconds: 240, MaxPings: 2, OneHourOnWait: true,
+		Windows: []Window{{Start: "00:00", End: "24:00"}}, Target: Target{Mode: TargetAll},
+	})
+	if err != nil || !created.OneHourOnWait {
+		t.Fatalf("create did not keep one_hour_on_wait: %+v %v", created, err)
+	}
+	off := false
+	if u, err := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{OneHourOnWait: &off}); err != nil || u.OneHourOnWait {
+		t.Fatalf("patch did not turn it off: %+v %v", u, err)
+	}
+	on := true
+	if _, err := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{OneHourOnWait: &on}); err != nil {
+		t.Fatal(err)
+	}
+	// A patch that names another field leaves it alone.
+	name := "renamed"
+	if u, _ := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{Name: &name}); !u.OneHourOnWait {
+		t.Error("a patch of the name reset one_hour_on_wait")
+	}
+	r1.Close()
+	r2, err := Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	list, err := r2.ListStrategies()
+	if err != nil || len(list) != 1 || !list[0].OneHourOnWait {
+		t.Fatalf("after reload: %+v %v", list, err)
+	}
+}
