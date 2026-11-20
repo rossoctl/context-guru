@@ -142,6 +142,39 @@ test("native preset flow: select, confirm switch, confirm restart, then the prox
   }
 })
 
+test("confirming a restart the proxy already applied toasts success, not an error", async () => {
+  const directory = "/tmp/context-guru-tui-applied"
+  const state = await setup(directory)
+  const before = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+  try {
+    const { api, shown, toasts } = fakeApi(directory)
+    await pickAndSwitch(api, directory, "preset")
+    shown.at(-1).props.onSelect({ value: "medium" })
+    const confirmSwitch = shown.at(-1)
+    await confirmSwitch.props.onConfirm()
+    assert.match(readFileSync(join(state, "settings.env"), "utf8"), /preset=medium/)
+    const confirmRestart = shown.at(-1)
+    assert.equal(confirmRestart.kind, "confirm")
+
+    // A fresh OpenCode start (opencode run answers in a new process) applies
+    // the saved choice before the agent answers yes to the restart.
+    const again = await plugin.server(server(directory))
+    await again.config({ provider: { anthropic: { options: { baseURL: "https://api.anthropic.com" } } } })
+    const applied = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
+    assert.notEqual(applied.pid, before.pid)
+    assert.match(readFileSync(join(state, "proxy.yaml"), "utf8"), /preset: medium/)
+
+    await confirmRestart.props.onConfirm()
+    assert.equal(Number(readFileSync(join(state, "proxy.pid"), "utf8")), applied.pid)
+    assert.equal(toasts.at(-1).variant, "success")
+    assert.match(toasts.at(-1).message, /already uses preset "medium"/)
+    process.kill(applied.pid, "SIGTERM")
+    await waitUntilUnhealthy(before.port)
+  } finally {
+    delete process.env.CONTEXT_GURU_BIN
+  }
+})
+
 test("cancelling the first confirm saves nothing, and cancelling the restart saves but keeps the proxy", async () => {
   const directory = "/tmp/context-guru-tui-cancel"
   const state = await setup(directory)
