@@ -232,11 +232,12 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
 **Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. The owner's laptop is one such machine. A test machine is not required. It runs:
 - `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`, with and without `-tags cg_record`;
 - the check that the default build links no OpenTelemetry, gRPC or protobuf;
-- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...` (with `-timeout 25m`), `./context-guru-plugin`, then all the rest;
+- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 25m, plugin 30m, rest 20m, record 40m;
 - the `-tags cg_record` race tests, as CI runs them.
 
 Notes:
-- **The run takes about 40 minutes, so run it detached.** Its summary file always ends with `DONE rc=<n>`, also on a failure. Wait for that line; a marker written only on success makes a failure look like a hang.
+- **Part A skips `TestBobReleasePythonSuite` (in `race-rest`).** The owner put the Bob plugin on hold on 2026-11-18. The summary names the skip. Remove the skip in `scripts/release/part-a.sh` when the owner resumes the plugin ([#1221](https://github.com/rossoctl/context-guru/issues/1221)).
+- **The run takes about 70 to 90 minutes on a laptop, so run it detached.** Its summary file always ends with `DONE rc=<n>`, also on a failure. Wait for that line; a marker written only on success makes a failure look like a hang.
 - **Copy the code into an empty directory.** A copy tool that only adds files leaves a deleted test in place, and it keeps running.
 - **Do not copy new code into that directory while a run is in progress.**
 - The script runs a failed step once more. "flaky" in the summary means the second run passed. If a step failed twice, run it on the same commit in a clean directory. That separates a flaky test from a defect.

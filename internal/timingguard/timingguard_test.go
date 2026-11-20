@@ -6,7 +6,7 @@
 //
 // What it flags, in *_test.go files only:
 //
-//   - sleep: a call to time.Sleep, or a bare <-time.After(...) statement.
+//   - sleep: a call to time.Sleep, or a <-time.After(...) outside a select (bare, x := or var x =).
 //   - poll:  a for loop that uses a time.Now().Add(...) deadline, or time.After(...), as its limit.
 //   - after: a select case on <-time.After(...), used as a test timeout.
 //
@@ -18,7 +18,8 @@
 //
 //	//timing:ok <reason>
 //
-// The reason must not be empty.
+// The marker is "//timing:ok", then white space, then a reason. The reason must not be empty.
+// "//timing:okay" is not the marker. The guard follows an alias import and a dot-import of time.
 //
 // The baseline file lists the existing cases per test file and kind. It only shrinks: a count
 // that goes up fails, and a count that goes down also fails until the baseline is lowered.
@@ -91,6 +92,7 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 	if err != nil {
 		return nil, nil, err
 	}
+	// The local name of the time import: the alias, "." for a dot-import, or "time".
 	timeAlias := ""
 	for _, imp := range file.Imports {
 		if strings.Trim(imp.Path.Value, "\"") != "time" {
@@ -101,9 +103,15 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 			timeAlias = imp.Name.Name
 		}
 	}
-	if timeAlias == "" || timeAlias == "_" || timeAlias == "." {
+	if timeAlias == "" || timeAlias == "_" {
 		return counts, nil, nil
 	}
+	dotImport := timeAlias == "."
+	// Limit of the dot-import check. Without type checking, the guard cannot see a function-local
+	// variable that shadows Sleep, After or Now, or a name from a dot-import of another package.
+	// A bare Sleep(...) in a file that dot-imports time counts as time.Sleep. The guard needs no
+	// check for a package-level Sleep, After or Now in that file: Go rejects such a file as a
+	// redeclaration of the dot-imported name.
 
 	// Lines that carry a valid //timing:ok.
 	okLines := map[int]bool{}
@@ -112,8 +120,13 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 			if !strings.HasPrefix(c.Text, okMarker) {
 				continue
 			}
+			rest := strings.TrimPrefix(c.Text, okMarker)
+			// "//timing:okay ..." is not the marker. The marker ends at white space or at the end.
+			if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+				continue
+			}
 			line := fset.Position(c.Pos()).Line
-			if strings.TrimSpace(strings.TrimPrefix(c.Text, okMarker)) == "" {
+			if strings.TrimSpace(rest) == "" {
 				malformed = append(malformed, fmt.Sprintf("%s:%d: //timing:ok needs a reason", rel, line))
 				continue
 			}
@@ -132,6 +145,10 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return nil, false
+		}
+		if dotImport {
+			id, ok := call.Fun.(*ast.Ident)
+			return call, ok && id.Name == name
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok || sel.Sel.Name != name {
@@ -247,6 +264,22 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 				if !inSelect[s] && isAfterRecv(s, isTimeCall) {
 					record(s.Pos(), Sleep)
 				}
+			case *ast.AssignStmt:
+				if !inSelect[s] {
+					for _, v := range s.Rhs {
+						if isUnaryAfter(v, isTimeCall) {
+							record(v.Pos(), Sleep)
+						}
+					}
+				}
+			case *ast.ValueSpec:
+				// var x = <-time.After(d), in a function or at package level. A var is never a
+				// select case, so no inSelect check is needed.
+				for _, v := range s.Values {
+					if isUnaryAfter(v, isTimeCall) {
+						record(v.Pos(), Sleep)
+					}
+				}
 			case *ast.CallExpr:
 				if _, ok := isTimeCall(n, "Sleep"); ok {
 					record(s.Pos(), Sleep)
@@ -269,7 +302,8 @@ func scanSource(rel string, src []byte) (counts Counts, malformed []string, err 
 	return counts, malformed, nil
 }
 
-// isAfterRecv reports whether s is <-time.After(...), or v := <-time.After(...).
+// isAfterRecv reports whether a select comm statement is <-time.After(...) or
+// v := <-time.After(...).
 func isAfterRecv(s ast.Stmt, isTimeCall func(ast.Node, string) (*ast.CallExpr, bool)) bool {
 	var e ast.Expr
 	switch c := s.(type) {
@@ -280,6 +314,10 @@ func isAfterRecv(s ast.Stmt, isTimeCall func(ast.Node, string) (*ast.CallExpr, b
 			e = c.Rhs[0]
 		}
 	}
+	return isUnaryAfter(e, isTimeCall)
+}
+
+func isUnaryAfter(e ast.Expr, isTimeCall func(ast.Node, string) (*ast.CallExpr, bool)) bool {
 	u, ok := e.(*ast.UnaryExpr)
 	if !ok || u.Op != token.ARROW {
 		return false
@@ -552,6 +590,77 @@ func TestTestTimingScanFollowsAnAliasedImport(t *testing.T) {
 	c, _, err := scanSource("x/x_test.go", []byte(src))
 	if err != nil || c[Sleep] != 1 {
 		t.Errorf("aliased import: counts %v, err %v", c, err)
+	}
+}
+
+func scanFile(t *testing.T, src string) (Counts, []string) {
+	t.Helper()
+	c, bad, err := scanSource("x/x_test.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, bad
+}
+
+func TestTestTimingScanCountsAReceiveOutsideASelect(t *testing.T) {
+	for name, body := range map[string]string{
+		"assign":    "x := <-time.After(time.Second)\n_ = x",
+		"var":       "var x = <-time.After(time.Second)\n_ = x",
+		"typed var": "var x time.Time = <-time.After(time.Second)\n_ = x",
+	} {
+		c, _ := scan(t, "x/x_test.go", body)
+		if c[Sleep] != 1 || c.total() != 1 {
+			t.Errorf("%s: counts %v, want sleep=1 only", name, c)
+		}
+	}
+}
+
+func TestTestTimingScanCountsEveryReceiveOfAMultiValueForm(t *testing.T) {
+	cases := map[string]string{
+		"package var":      "package p\nimport \"time\"\nvar x = <-time.After(1)\n",
+		"package var list": "package p\nimport \"time\"\nvar x, y = <-time.After(1), <-time.After(2)\n",
+		"func assign list": "package p\nimport \"time\"\nfunc f() { x, y := <-time.After(1), <-time.After(2); _, _ = x, y }\n",
+		"func var list":    "package p\nimport \"time\"\nfunc f() { var x, y = <-time.After(1), <-time.After(2); _, _ = x, y }\n",
+	}
+	want := map[string]int{"package var": 1, "package var list": 2, "func assign list": 2, "func var list": 2}
+	for name, src := range cases {
+		c, _ := scanFile(t, src)
+		if c[Sleep] != want[name] || c.total() != want[name] {
+			t.Errorf("%s: counts %v, want sleep=%d only", name, c, want[name])
+		}
+	}
+}
+
+func TestTestTimingScanFollowsADotImport(t *testing.T) {
+	c, _ := scanFile(t, "package p\nimport . \"time\"\nfunc f() { Sleep(1); <-After(1); x := <-After(1); _ = x }\n")
+	if c[Sleep] != 3 {
+		t.Errorf("dot-import: counts %v, want sleep=3", c)
+	}
+	c, _ = scanFile(t, "package p\nimport . \"time\"\nfunc f() { for end := Now().Add(1); Now().Before(end); { } }\n")
+	if c[Poll] != 1 {
+		t.Errorf("dot-import poll: counts %v, want poll=1", c)
+	}
+}
+
+func TestTestTimingScanSkipsALocalFuncNamedSleep(t *testing.T) {
+	// No dot-import of time: a bare Sleep is not time.Sleep.
+	c, _ := scanFile(t, "package p\nimport \"time\"\nvar _ = time.Second\nfunc Sleep(int) {}\nfunc f() { Sleep(1) }\n")
+	if c.total() != 0 {
+		t.Errorf("local Sleep counted: %v", c)
+	}
+}
+
+func TestTestTimingScanDoesNotTakeOkayForTheMarker(t *testing.T) {
+	c, bad := scan(t, "x/x_test.go", "//timing:okay x\ntime.Sleep(time.Second)")
+	if c[Sleep] != 1 {
+		t.Errorf("//timing:okay must not excuse the sleep: %v", c)
+	}
+	if len(bad) != 0 {
+		t.Errorf("//timing:okay is not a marker, so it is not malformed: %v", bad)
+	}
+	c, bad = scan(t, "x/x_test.go", "//timing:ok reason\ntime.Sleep(time.Second)")
+	if c.total() != 0 || len(bad) != 0 {
+		t.Errorf("//timing:ok reason must excuse the sleep: %v %v", c, bad)
 	}
 }
 
