@@ -171,14 +171,19 @@ is installed and at least one Pi model goes to the proxy (the session's model or
 1. It sends `GET http://127.0.0.1:<port>/healthz`, with a 5-second limit. This is a local call. It
    makes no model call and uses no tokens.
 2. If the proxy does not answer, it restarts the service once: `launchctl kickstart -k` on macOS
-   (it loads the LaunchAgent first if it is not loaded), `systemctl --user restart` on Linux. It
-   restarts only a service that setup wrote. Before it restarts, it checks `/healthz` once more with
-   the same 5-second limit, so a proxy that is slow but alive is not restarted.
+   (or, if the LaunchAgent is not loaded, `launchctl bootstrap`, which starts it), `systemctl --user
+   restart` on Linux. It restarts only a service that setup wrote. Before it restarts, it checks
+   `/healthz` once more with the same 5-second limit, so a proxy that is slow but alive is not
+   restarted.
 3. It checks `/healthz` again, with the same 5-second limit.
 4. If the proxy still does not answer, it shows one warning. The warning says the proxy is down and
    why: the restart did not help, the service file is missing, the service file is not ours, or the
    platform has no user service. It tells you to run `/context-guru status`. It names the reset
    command only when that file exists.
+
+When a preset, cache strategy or update cannot start the proxy, the command shows an error. The error
+says the proxy is off and names the log. The log has the error from `launchctl` or `systemctl`, also
+for a failed restart at session start.
 
 The check runs in the background. The session does not wait for it. It runs once per session start
 and never loops. When the session ends, Pi stops that session's check, the restart included. So
