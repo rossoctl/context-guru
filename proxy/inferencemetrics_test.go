@@ -100,24 +100,31 @@ func TestRequestsAndErrorsByStatus(t *testing.T) {
 	}
 }
 
-// #1248: PriceEstimated marks the saving (penalty_unknown), not the rate behind the cost. This proxy
-// has no fallback rates, so the fallback part of the cost is 0, but the series still exists.
+// #1248: the estimated cost is the part of the cost priced from a fallback rate (FallbackCostUSD).
+// PriceEstimated marks the saving (penalty_unknown), not the rate, so it books nothing here.
 func TestCostAndEstimatedCost(t *testing.T) {
 	im, r := newInference(t)
-	im.Observe(goodEvent(), time.Second)
 	e := goodEvent()
 	e.PriceEstimated = true
 	im.Observe(e, time.Second)
 	all := collectAll(t, r)
-	if c := sumFloat(all["llm.inference.cost.usd"]); c < 0.0399 || c > 0.0401 {
-		t.Errorf("cost = %v, want 0.04", c)
-	}
 	est, ok := all["llm.inference.estimated_cost.usd"]
 	if !ok {
 		t.Fatal("no estimated cost series: the panel would read no data, not 0")
 	}
 	if c := sumFloat(est); c != 0 {
-		t.Errorf("estimated cost = %v, want 0 (no rate is a fallback; PriceEstimated is about the saving)", c)
+		t.Errorf("estimated cost = %v, want 0 (PriceEstimated is about the saving, not the rate)", c)
+	}
+
+	fb := goodEvent()
+	fb.FallbackCostUSD = 0.005
+	im.Observe(fb, time.Second)
+	all = collectAll(t, r)
+	if c := sumFloat(all["llm.inference.cost.usd"]); c < 0.0399 || c > 0.0401 {
+		t.Errorf("cost = %v, want 0.04", c)
+	}
+	if c := sumFloat(all["llm.inference.estimated_cost.usd"]); c < 0.00499 || c > 0.00501 {
+		t.Errorf("estimated cost = %v, want 0.005 (only the fallback part of the cost)", c)
 	}
 }
 

@@ -29,11 +29,11 @@ func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float
 	case acmetrics.TierInput:
 		return pr.Input, false
 	case acmetrics.TierCacheRead:
-		return pr.CacheRead, false
+		return pr.CacheRead, pr.CacheReadFallback // a fallback rate is marked estimated (#1248)
 	case acmetrics.TierCacheWrite5m:
-		return pr.CacheWrite, false
+		return pr.CacheWrite, pr.CacheWriteFallback
 	case acmetrics.TierCacheWrite1h:
-		return pr.CacheWrite1h(), false
+		return pr.CacheWrite1h(), pr.CacheWrite1hFallback
 	case acmetrics.TierOutput:
 		return pr.Output, false
 	}

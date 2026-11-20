@@ -364,7 +364,7 @@ def inference():
                     desc="Provider cost at request time. Each proxy prices with its own rate table."))
     P.append(stat(13, "Spend priced from a fallback rate", f'{inc("llm_inference_estimated_cost_usd_total")} / clamp_min({inc("llm_inference_cost_usd_total")}, 1e-9)',
                   16, 29, w=8, h=8, unit="percentunit", decimals=1, c=YELLOW, big=True,
-                  desc="Share of spend priced from a fallback rate. A high value means the money panels are a guess. context-guru has no fallback rates (a model with no rate is left unpriced), so its proxies read 0."))
+                  desc="Share of spend priced from a fallback rate: a cache tier that no price source states, filled from a default multiple (R47). A high value means the money panels are a guess."))
     return dash("central-inference", "Inference", "What do the models consume, and how fast do they answer?", P, ["inference"])
 
 

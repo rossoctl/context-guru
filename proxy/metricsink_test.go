@@ -10,6 +10,7 @@ import (
 	"time"
 
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"go.opentelemetry.io/otel/attribute"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -112,6 +113,35 @@ func TestPricerAdapterNeverBlocks(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Price blocked")
 	}
+}
+
+// #1248: the Pricer contract says a fallback rate is marked estimated. A cache tier filled from a
+// default multiple, for a model that is not Claude, is one. A stated rate is not.
+func TestPricerMarksFallbackTiersEstimated(t *testing.T) {
+	p := metricsPricer{prices: partialPricer{}}
+	for _, tc := range []struct {
+		model string
+		tier  acmetrics.Tier
+		want  bool
+	}{
+		{"gemini-3-flash-preview", acmetrics.TierInput, false},
+		{"gemini-3-flash-preview", acmetrics.TierCacheRead, true},
+		{"gemini-3-flash-preview", acmetrics.TierCacheWrite5m, true},
+		{"gemini-3-flash-preview", acmetrics.TierCacheWrite1h, true},
+		{"claude-sonnet-5-5", acmetrics.TierCacheRead, false},
+		{"claude-sonnet-5-5", acmetrics.TierCacheWrite1h, false},
+	} {
+		if _, est := p.Price(tc.model, time.Now(), tc.tier); est != tc.want {
+			t.Errorf("%s tier %v: estimated = %v, want %v", tc.model, tc.tier, est, tc.want)
+		}
+	}
+}
+
+// partialPricer states only the input and output rates, as a price feed that omits cache rates does.
+type partialPricer struct{}
+
+func (partialPricer) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	return modelinfo.Price{Input: 2e-06, Output: 1e-05}.Resolved(model), true
 }
 
 func attrKey(k string) attribute.Key { return attribute.Key(k) }

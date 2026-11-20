@@ -32,7 +32,8 @@ groups:
           /
           clamp_min(sum by (proxy) (rate(llm_savings_requests_total[5m])), 1e-9)
 
-      # Share of requests whose saving is marked estimated (question A7, R47).
+      # Share of requests whose saving is marked estimated: a possible cache break, a billing mode
+      # that is not api, or a rate the Pricer marked estimated (question A7, R47).
       - record: proxy:llm_savings_estimated_ratio:rate5m
         expr: |
           sum by (proxy) (rate(llm_savings_estimated_total[5m]))

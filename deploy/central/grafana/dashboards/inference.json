@@ -850,7 +850,7 @@
       "id": 13,
       "type": "stat",
       "title": "Spend priced from a fallback rate",
-      "description": "Share of spend priced from a fallback rate. A high value means the money panels are a guess. context-guru has no fallback rates (a model with no rate is left unpriced), so its proxies read 0.",
+      "description": "Share of spend priced from a fallback rate: a cache tier that no price source states, filled from a default multiple (R47). A high value means the money panels are a guess.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"

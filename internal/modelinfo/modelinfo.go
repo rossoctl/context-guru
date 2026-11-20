@@ -80,6 +80,13 @@ type Price struct {
 	// Currency is the unit of the rates, from the price file's currency key. Empty means USD (see
 	// Unit). Not part of the wire form, so a price's JSON does not change.
 	Currency string `json:"-"`
+
+	// The tiers that Resolved filled from a fallback rate: no source stated the rate, the operator
+	// set no multiple, and the model is not a Claude model, so the default multiple is a guess
+	// (#1248). FallbackCost prices them. Not part of the wire form.
+	CacheReadFallback    bool `json:"-"`
+	CacheWriteFallback   bool `json:"-"`
+	CacheWrite1hFallback bool `json:"-"`
 }
 
 // CacheReadFor is the cache-READ rate per token for a model. This is the ONE place the rule lives.
@@ -120,10 +127,35 @@ func (p Price) CacheWrite1hFor(model string) float64 {
 // Resolved returns the price with both cache tiers filled for the model and their multiples
 // cleared. A price source calls it once the model is known. Callers then read the fields.
 // Write1hFrac stays: no field states the 1-hour rate, so CacheWrite1h still needs it.
+//
+// It also marks each tier it filled from a fallback rate (see CacheReadFallback). The published
+// multiples of a Claude model are not a fallback. A second call sees the filled rates as stated, so
+// it keeps the marks of the first call and never clears them.
 func (p Price) Resolved(model string) Price {
+	guess := !IsClaude(model)
+	p.CacheReadFallback = p.CacheReadFallback || (guess && p.CacheRead <= 0 && p.ReadFrac <= 0)
+	p.CacheWriteFallback = p.CacheWriteFallback || (guess && p.CacheWrite <= 0 && p.WriteFrac <= 0)
+	p.CacheWrite1hFallback = p.CacheWrite1hFallback || (guess && p.Write1hFrac <= 0)
 	p.CacheRead, p.CacheWrite = p.CacheReadFor(model), p.CacheWrite5mFor(model)
 	p.ReadFrac, p.WriteFrac = 0, 0
 	return p
+}
+
+// FallbackCost is the part of CostWithCacheWrite1h that its fallback tiers priced: the cache reads,
+// the cache writes and the 1-hour premium, each only when Resolved marked that tier. It is 0 for a
+// price with no marks. The products are rounded one by one, as in Cost.
+func (p Price) FallbackCost(cacheRead, cacheWrite, cacheWrite1h int64) float64 {
+	var cost float64
+	if p.CacheReadFallback {
+		cost += float64(float64(cacheRead) * p.CacheRead)
+	}
+	if p.CacheWriteFallback {
+		cost += float64(float64(cacheWrite) * p.CacheWrite)
+	}
+	if p.CacheWrite1hFallback && cacheWrite1h > 0 {
+		cost += float64(float64(cacheWrite1h) * p.CacheWrite1hPremium())
+	}
+	return cost
 }
 
 // Cost prices one request's four token tiers in USD.
