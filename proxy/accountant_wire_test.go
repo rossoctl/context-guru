@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/rossoctl/accountant"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 	"io"
 	"math"
 	"net/http"

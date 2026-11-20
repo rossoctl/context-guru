@@ -18,11 +18,11 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/session"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -107,7 +107,7 @@ type capture struct {
 	meta dash.Meta
 	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
 	predArrival *predictive.Arrival
-	// thread is the session thread this request belongs to (see internal/thread), set by
+	// thread is the session thread this request belongs to (see package thread), set by
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread    string

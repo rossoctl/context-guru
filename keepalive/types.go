@@ -83,7 +83,7 @@ import (
 
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Key names one tracked THREAD of one session (#423). Thread "" is the primary thread.
