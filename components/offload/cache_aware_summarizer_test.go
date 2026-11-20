@@ -569,3 +569,56 @@ func TestCacheAwareRegistersAKeepAliveCandidateEvenWhenTheStashIsRefused(t *test
 			"stash-capacity check — the candidate should have survived it")
 	}
 }
+
+func TestCacheAwareRefreshCostOption(t *testing.T) {
+	for _, tc := range []struct {
+		yaml    string
+		wantErr bool
+		full    bool
+	}{
+		{"{}", false, false},
+		{"refresh_cost: extra", false, false},
+		{"refresh_cost: full", false, true},
+		{"refresh_cost: fulll", true, false},
+	} {
+		c, err := newCacheAwareSummarizer([]byte(tc.yaml))
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%q: err = %v, wantErr %v", tc.yaml, err, tc.wantErr)
+		}
+		if err == nil && c.(*CacheAwareSummarizer).refreshFullCost != tc.full {
+			t.Errorf("%q: refreshFullCost = %v, want %v", tc.yaml, !tc.full, tc.full)
+		}
+	}
+}
+
+// refresh_cost reaches the keeper from a real constructed component, and so does the commission
+// path: only prefix_ask reads the ping's own bytes.
+func TestCacheAwareConfigReachesTheKeepAliveInfo(t *testing.T) {
+	for _, tc := range []struct {
+		yaml, path string
+		full, pfx  bool
+	}{
+		{"{}", "prefix_ask", false, true},
+		{"refresh_cost: full", "prefix_ask", true, true},
+		{"refresh_cost: extra", "messages", false, false},
+	} {
+		c, err := newCacheAwareSummarizer([]byte(tc.yaml))
+		if err != nil {
+			t.Fatal(err)
+		}
+		const session = "cfg-info-sess"
+		call := func(context.Context) (string, error) { return "", nil }
+		c.(*CacheAwareSummarizer).registerKeepAliveCandidate(
+			&components.Ctx{Session: session, Store: store.NewMemory(store.Options{MaxEntries: 10}), Ctx: context.Background()},
+			call, tc.path, nil, 0, true)
+		_, info, _, ok := KeepAliveSubstitute(session)
+		ClearKeepAliveCandidate(session)
+		if !ok {
+			t.Fatalf("%q: no candidate offered", tc.yaml)
+		}
+		if info.RefreshFullCost != tc.full || info.ReadsPingPrefix != tc.pfx {
+			t.Errorf("%q on %s: RefreshFullCost=%v ReadsPingPrefix=%v, want %v %v",
+				tc.yaml, tc.path, info.RefreshFullCost, info.ReadsPingPrefix, tc.full, tc.pfx)
+		}
+	}
+}

@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, LOADED,
+  stripsChatGPTFields, strategyChoices, type StartCheck, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
 
@@ -393,4 +393,44 @@ test("a shutdown releases only this copy's marker, for /new as for a reload", ()
   } finally {
     delete g[LOADED];
   }
+});
+
+test("an update whose restart failed is an error that says the proxy is off and what to run", () => {
+  const m = updateMessage({ result: "updated", version: "v0.7.3", restart: "failed", log: "/s/proxy.log" }, 1);
+  assert.equal(m.level, "error");
+  assert.equal(m.text, "context-guru updated to v0.7.3, but the proxy did not start and is off. " +
+    "Run /context-guru status. The log is /s/proxy.log.");
+});
+
+test("an update that restarted, or needed no restart, is info", () => {
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "skipped" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+});
+
+test("an update that exits non-zero is an error even when its facts say updated", () => {
+  assert.equal(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 1).level, "error");
+});
+
+test("an update that was refused shows the reason and the detail", () => {
+  assert.deepEqual(updateMessage({ result: "refused", reason: "binary_not_managed", detail: "x" }, 2),
+    { text: "context-guru update: refused binary_not_managed x", level: "error" });
+});
+
+test("a configure whose restart failed says the proxy is off and what to run", () => {
+  assert.deepEqual(configureMessage({ result: "not_applied", preset: "medium", log: "/s/proxy.log" }, 1, ""), {
+    text: "context-guru: the new setting is saved, but the proxy did not start and is off. " +
+      "Run /context-guru status. The log is /s/proxy.log.",
+    level: "error",
+  });
+});
+
+test("a configure that worked names the preset and the strategy", () => {
+  assert.deepEqual(configureMessage({ result: "configured", preset: "medium", cache_strategy: "none" }, 0, ""),
+    { text: "context-guru now runs preset medium, cache strategy none.", level: "info" });
+});
+
+test("a configure with no facts shows stderr", () => {
+  assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
 });

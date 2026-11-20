@@ -416,13 +416,16 @@ type Record struct {
 	// ToolUseIncomplete: ToolUseNames may miss the true last call (a spliced sniff window). The
 	// terminal-tool rule is then off for this response, so the thread is pinged as before (#857).
 	ToolUseIncomplete bool
-	Policy            Policy // resolved by the host
-	Tag               string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent             string
-	Preset            string
-	Header            http.Header // the request's headers; only PingHeaders' allow-list is read
-	Store             store.Store
-	Emitter           components.Emitter // nil: components.NopEmitter{}
+	// OpenTasks, when non-nil, are the open-task counts the host read from this request's own body (see
+	// WaitingFor). nil: the host had no result, and the tracker's counts decide, as before.
+	OpenTasks *TaskCounts
+	Policy    Policy // resolved by the host
+	Tag       string // host label returned by Arrive (proxy: the applied strategy id)
+	Agent     string
+	Preset    string
+	Header    http.Header // the request's headers; only PingHeaders' allow-list is read
+	Store     store.Store
+	Emitter   components.Emitter // nil: components.NopEmitter{}
 	// Hold is called once, under the keeper lock, only if the entry is tracked. The host captures
 	// the request's credential and returns the Ref it issued for it; the keeper releases it exactly
 	// once.
@@ -954,12 +957,36 @@ func (k *Keeper) Record(r Record) {
 	// tier carries a 1-hour Idle even when the gateway granted 5 minutes; its count is the manager's.
 	guard := pol.WaitPlan && pol.On() && provider != bschemas.OpenAI
 	planned := guard && !ttl1h && pol.Idle < 300*time.Second
-	wait := ""
+	wait, planBaseWait := "", ""
 	if guard {
-		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK)
+		// The host's reading of this turn's own body joins only where the plan changes the count (#1227).
+		var open *TaskCounts
+		if planned {
+			open = r.OpenTasks
+		}
+		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, open)
+		if open != nil {
+			// Keep-alive never shortens: the plan is the larger count of the two causes, and the floor the
+			// lower one, whatever the extra-ping settings are. Today's cause is the tracker alone.
+			if base := k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, nil); base != wait {
+				sub := IsSubagentThread(threadID)
+				// With only the background count merged this cannot fire today (background has the lowest
+				// floor); it keeps the rule true if the merge ever widens.
+				if pol.WaitMinPrefix(wait, sub) > pol.WaitMinPrefix(base, sub) {
+					wait = base
+				}
+				if pol.WaitPings(base, sub) > pol.WaitPings(wait, sub) {
+					planBaseWait = base
+				}
+			}
+		}
 	}
 	if planned {
-		pol.MaxPings = pol.WaitPings(wait, IsSubagentThread(threadID))
+		pings := pol.WaitPings(wait, IsSubagentThread(threadID))
+		if planBaseWait != "" {
+			pings = max(pings, pol.WaitPings(planBaseWait, IsSubagentThread(threadID)))
+		}
+		pol.MaxPings = pings
 	}
 	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
 	// session — and tracked sessions are gated down to a handful — in exchange for being able to
@@ -1162,6 +1189,13 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
 }
 
+// projectedRefreshExtraUSD is what a refresh costs OVER the ping it replaces (#1144): the summary
+// call minus the ping that was due. When both read the same cached prefix (the prefix_ask path,
+// at a planned ping), the read cancels and what is left is the reply. Callers use it only then. Never negative. Zero when the model is not priced, like its two siblings.
+func (k *Keeper) projectedRefreshExtraUSD(model string, prefix int64, route, endpoint string) float64 {
+	return max(0, k.projectedSummaryUSD(model, endpoint, prefix)-k.projectedPingUSD(model, prefix, route, endpoint))
+}
+
 // expectedRefreshSavingUSD is the dollar value a refresh folding tailTokens of new material into
 // a `cache_state: pre_expiry` reserve is expected to earn back: those tokens would otherwise be
 // written, at the model's cache-WRITE rate, on the cold return the reserve exists to cheapen.
@@ -1171,8 +1205,8 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 //
 // Zero when the model is not priced, for the same reason projectedPingUSD/projectedSummaryUSD are
 // — an incomplete price list must not block a feature it cannot afford to evaluate, and
-// fireSummarySubstitute's own comparison (saving < cost) already fails toward "ping normally"
-// whenever cost cannot be shown to be zero too.
+// fireSummarySubstitute's own comparison (saving < what the refresh costs) fails toward "refresh"
+// only when that cost is zero too, the same as before.
 func (k *Keeper) expectedRefreshSavingUSD(model, endpoint string, prefix int64, tailTokens int) float64 {
 	if model == "" || tailTokens <= 0 {
 		return 0
