@@ -496,10 +496,6 @@ func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschema
 	if !pol.On() {
 		return false
 	}
-	// 1-hour-main-agent: the main thread is never pinged (#1243), so nothing is kept for it.
-	if pol.MainAgentTTL1h && !keepalive.IsSubagentThread(threadID) {
-		return false
-	}
 	// A thread with no tool call yet is not pinged (#858), so it keeps no copy either.
 	if pol.WaitPlan && !k.Keeper.ToolSeen(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}) {
 		return false

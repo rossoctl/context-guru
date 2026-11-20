@@ -157,6 +157,10 @@ type kaEntry struct {
 	// pingRunning is set while one of e's own pings is out (Sweep sets it, fire clears it), so the extra
 	// request never starts before the last plain ping's response is in.
 	pingRunning bool
+	// oneHour marks an entry whose one planned ping carries every cache marker at the 1-hour tier
+	// (Policy.OneHourOnWait, #1243). Set at record time and never changed. The ping is the only ping of
+	// that wait (the policy's MaxPings is 1).
+	oneHour bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
 	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
 	pingUSD float64
@@ -516,6 +520,10 @@ type Keeper struct {
 	// thread never repeats the step its predecessor last sent (#706, #712 review). Bounded and reset
 	// exactly as turns is.
 	lastVary map[string]int
+	// oneHourOff holds the provider routes where the first 1-hour ping cost a rewrite (#1243). A route in
+	// it gets no 1-hour ping for the life of the process; its threads fall back to the plain schedule.
+	// Keyed by oneHourRoute. Bounded by the number of routes.
+	oneHourOff map[string]bool
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -609,7 +617,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourOff: map[string]bool{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -849,12 +857,6 @@ func (k *Keeper) Record(r Record) {
 	// instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := r.Policy
 	model := gjson.GetBytes(body, "model").String()
-	// 1-hour-main-agent (#1243): the MAIN thread gets no ping at all, the 59-minute one included. Its
-	// history is on the 1-hour cache and the owner chose to let it expire rather than spend on it.
-	// Subagent threads keep auto's schedule. This turns off the schedule only: a manual hold still works.
-	if pol.MainAgentTTL1h && !IsSubagentThread(threadID) {
-		pol.KeepAlive = false
-	}
 	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
 	// is off, or where the schedule's own gates refuse the thread; it just never gets a schedule.
 	// manualOnly is decided once the gates below have run, so every refusal can name its reason.
@@ -964,6 +966,7 @@ func (k *Keeper) Record(r Record) {
 	guard := pol.WaitPlan && pol.On() && provider != bschemas.OpenAI
 	planned := guard && !ttl1h && pol.Idle < 300*time.Second
 	wait, planBaseWait := "", ""
+	oneHour := false
 	if guard {
 		// The host's reading of this turn's own body joins only where the plan changes the count (#1227).
 		var open *TaskCounts
@@ -993,6 +996,13 @@ func (k *Keeper) Record(r Record) {
 			pings = max(pings, pol.WaitPings(planBaseWait, IsSubagentThread(threadID)))
 		}
 		pol.MaxPings = pings
+		// 1-hour-on-wait (#1243): on a LONG wait the one ping carries every marker at 1 hour, and it is
+		// the only ping of the wait (no 59-minute ping). A short wait keeps the plan above, as auto.
+		// A route where the switch was seen to cost a rewrite is skipped.
+		if pol.OneHourOnWait && LongWait(wait, IsSubagentThread(threadID)) && !k.oneHourBlocked(provider, r.Endpoint, route) {
+			pol.MaxPings = 1
+			oneHour = true
+		}
 	}
 	// A keeper-OWNED copy, not the slice serve just used. It costs one allocation per tracked
 	// session — and tracked sessions are gated down to a handful — in exchange for being able to
@@ -1019,6 +1029,7 @@ func (k *Keeper) Record(r Record) {
 		provider: provider, model: model, route: route, preset: r.Preset,
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
 		wait:         wait,
+		oneHour:      oneHour,
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
@@ -1454,7 +1465,7 @@ func (k *Keeper) Sweep(now time.Time) int {
 		due = append(due, pingJob{e: e, raw: raw, hdr: e.hdr.Clone(), key: e.key, ref: e.ref,
 			route: e.route, provider: e.provider, model: e.model,
 			tenant: e.tenant, session: e.session, thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
-			ping: e.pings, prevStartedAt: prevStartedAt, gapStart: e.gapStart})
+			ping: e.pings, prevStartedAt: prevStartedAt, gapStart: e.gapStart, oneHour: e.oneHour})
 	}
 	k.mu.Unlock()
 
@@ -1496,6 +1507,9 @@ type pingJob struct {
 	// extra marks the one extra sweep question after the last planned ping (kaEntry.extraDue): it sends
 	// the question or nothing, never an ordinary ping.
 	extra bool
+	// oneHour is e.oneHour, copied out under the lock. oneHourSent is set in fire when the body really
+	// went out relabelled (a body with no marker goes out as it is), and read by record1.
+	oneHour, oneHourSent bool
 	// vary is the output-budget step this ping was actually sent with (Keeper.nextVaryLocked), set
 	// in fire at dispatch time and read by record1 for the audit row.
 	vary int
@@ -1580,6 +1594,18 @@ func (k *Keeper) fire(j pingJob) {
 		k.skipped.Add(1)
 		return
 	}
+	// 1-hour-on-wait (onehour.go): relabel every marker. The route may have been switched off since the
+	// record. A body with no marker is sent as it is.
+	if j.oneHour {
+		k.mu.Lock()
+		endpoint := j.e.endpoint
+		k.mu.Unlock()
+		if !k.oneHourBlocked(j.provider, endpoint, j.route) {
+			if out, relabelled := apply.RelabelAllTTL1h(body, j.provider); relabelled {
+				body, j.oneHourSent = out, true
+			}
+		}
+	}
 	start := k.now()
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	resp, err := k.o.Dispatcher.Do(ctx, dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,
@@ -1611,6 +1637,9 @@ func (k *Keeper) fire(j pingJob) {
 			k.recordTimedOut(j, ms)
 		}
 		return
+	}
+	if j.oneHourSent {
+		k.judgeOneHour(j, status, u)
 	}
 	switch k.noteOutcome(j, status, u) {
 	case outcomeTransient:
@@ -1849,7 +1878,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 			// — tagged on the ping's own row, never on the real request it later rescues, since
 			// only the ping's policy resolution ever consults the strategy list.
 			Strategy:   appliedStrategy,
-			FreshInput: u.FreshInput, CacheWrite1h: u.CacheWrite1h,
+			FreshInput: u.FreshInput, CacheWrite1h: u.CacheWrite1h, OneHour: j.oneHourSent,
 			// What the ping actually asked for, so the row says it rather than reading as a
 			// request with no output budget. The audit trail is the reason these rows exist; a
 			// column that is blank because nobody filled it in is the same defect at a smaller

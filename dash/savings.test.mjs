@@ -94,7 +94,7 @@ test('the cache strategy name is read back from the settings, and only for a nam
   assert.equal(strategyName({ keepalive: true, keepalive_max_pings: 1 }), '1-ping');
   assert.equal(strategyName({ keepalive: true, keepalive_max_pings: 2, keepalive_max_pings_1h: 2 }), '2-ping');
   assert.equal(strategyName({ head_ttl_1h: true }), '1-hour-head');
-  assert.equal(strategyName({ keepalive: true, main_agent_ttl_1h: true }), '1-hour-main-agent');
+  assert.equal(strategyName({ keepalive: true, keepalive_one_hour_on_wait: true }), '1-hour-on-wait');
   assert.equal(strategyName({}), 'none');
   assert.equal(strategyName({ keepalive: true, keepalive_idle_seconds: 120 }), ''); // hand-tuned: no name
   assert.equal(strategyName(null), '');

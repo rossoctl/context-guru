@@ -76,7 +76,7 @@ cache:
 ### A named strategy
 
 `cache.strategy` sets several keys at once from a built-in table: `none`, `auto`, `1-ping`,
-`2-ping`, `1-hour-head`, `1-hour-main-agent`, `30-min-ping` (the Codex name). The alias `5-min-ping` means `auto`.
+`2-ping`, `1-hour-head`, `1-hour-on-wait`, `30-min-ping` (the Codex name). The alias `5-min-ping` means `auto`.
 
 ```yaml
 cache:
@@ -86,12 +86,14 @@ cache:
 
 - `1-hour-head` asks for the 1-hour cache on `tools` and `system` only, and turns the pings off.
   The message history stays on the 5-minute cache, so it goes cold after 5 idle minutes.
-- `1-hour-main-agent` (#1243) asks for the 1-hour cache on **every** breakpoint of the **main
-  agent's** requests (tools, system and history), for requests of at least 50k tokens. It adds no
-  breakpoint. Subagent requests keep the 5-minute cache. The main thread gets **no ping**, the
-  59-minute one included. Subagents keep `auto`'s 5-minute pings. **Cost:** each
-  main-thread turn writes its new history at 2x the input price, not 1.25x. It pays when a gap
-  over 5 minutes would otherwise rebuild a large history. Opt-in; no default changes.
+- `1-hour-on-wait` (#1243) is `auto` with one change on a **long wait** (a person, a teammate, background
+  work, or an unknown cause): the first ping, at the usual time, carries every cache marker at the
+  1-hour tier, and it is the **only** ping of that wait (no 59-minute ping). On the gateway measured on
+  2026-11-19 that switch is a read, not a rewrite, so one read at 0.1x keeps the prompt for 1 hour and no
+  request pays the 2x write premium. A tool wait and a subagent wait behave as in `auto`. The proxy
+  checks the first 1-hour ping's usage and, on a route where the switch costs a rewrite (Anthropic
+  first-party is not tested), stops sending 1-hour pings there and falls back to `auto`. Opt-in; no
+  default changes.
 - A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
 - No `strategy` key: nothing changes.
 - An unknown name stops the proxy with a config error.

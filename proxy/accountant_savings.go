@@ -24,6 +24,8 @@ type savingsTracker struct {
 	written lastSaved
 	// billed1h is the tier each thread's last write was billed at, for accBilledTTL (issue #1078).
 	billed1h *tierStore
+	// starts is when each thread's last real request started, for the 1-hour ping's rescue.
+	starts *startStore
 	// rescueFactsMissing counts priced requests that followed keep-alive pings but found no ping facts.
 	rescueFactsMissing atomic.Int64
 	// thinking holds the token count of each thinking block a response made, by its signature's key, so a block
@@ -78,7 +80,7 @@ func (s *savingsTracker) drop(req *accountant.Request) {
 }
 
 func newSavingsTracker() *savingsTracker {
-	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore(), billed1h: newTierStore(),
+	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore(), billed1h: newTierStore(), starts: newStartStore(),
 		thinking: thinkcount.NewTable(0)}
 }
 

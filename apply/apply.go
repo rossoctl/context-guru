@@ -433,40 +433,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			}
 		}()
 	}
-	// The main-agent 1h relabel (#1243), on the FINAL body of every return below, after the tail
-	// mark above has run (this defer is registered first, so it runs last): it relabels every
-	// breakpoint, the tail mark included. Here and not beside the head relabel because it needs the
-	// thread, which is resolved only once the session id is known, and because it edits messages,
-	// whose byte offsets the pipeline's writeback has already used by then. The size gate is on the
-	// final body. Not in observe mode, not on a bypassed request.
-	if mode != components.ModeObserve && !bypass && o.MainAgentTTL1h && o.IsSubagent != nil &&
-		o.HeadTTLMinBytes > 0 && explicitBreakpointProvider(provider) {
-		defer func() {
-			// A host that resolves threads but never reached the resolution (an early return)
-			// does not know the thread: ask for nothing. Without a resolver every request is on
-			// the primary thread.
-			if o.ThreadOf != nil && !res.Trace.ThreadResolved {
-				return
-			}
-			if o.IsSubagent(res.Trace.Thread.ID) {
-				return
-			}
-			cur := res.Body
-			if cur == nil {
-				cur = o.Body
-			}
-			out, ok := upgradeMainAgentTTL(cur, provider, o.HeadTTLMinBytes)
-			if !ok || bytes.Equal(out, cur) {
-				if ok {
-					res.Trace.HeadTTL1h = true // already all 1h: still a 1h request
-				}
-				return
-			}
-			res.Trace.Ops = append(res.Trace.Ops, mainAgentTTLOps(cur, out)...)
-			res.Trace.HeadTTL1h = true
-			res.Body, res.Changed = out, true
-		}()
-	}
 	models := o.Models
 	// Tool-schema annotation strip: a top-level field the pipeline never sees (it
 	// operates on `messages`). Done FIRST, before any byte offset into the body is

@@ -20,6 +20,8 @@ const pingStoreMax = 4096
 type PingStore struct {
 	mu sync.Mutex
 	m  map[string]accountant.PingFacts
+	// oh holds the latest 1-hour-on-wait ping of each thread (accountant_onehour.go).
+	oh map[string]oneHourPing
 	// priced counts the pings PingSavings priced (it returned ok), manual ones too.
 	priced atomic.Int64
 }
@@ -91,6 +93,9 @@ func (s *PingStore) drop(key, window string) {
 	if f, ok := s.m[key]; ok && (window == "" || f.PingWindow == window) {
 		delete(s.m, key)
 	}
+	if p, ok := s.oh[key]; ok && (window == "" || p.window == window) {
+		delete(s.oh, key)
+	}
 }
 
 // pingFromReport maps a keeper report to the library's Ping. r.CostUSD is deliberately not
@@ -139,6 +144,10 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (res accountant.Re
 	st.notePriced()
 	if !r.Manual {
 		st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
+		if r.OneHour {
+			st.putOneHour(accPingKey(r.Session, accThreadID(r.Thread)), oneHourPing{
+				window: facts.PingWindow, at: pingStart(r), read: int(r.CacheRead)})
+		}
 	}
 	return res, true
 }

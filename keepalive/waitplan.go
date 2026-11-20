@@ -59,6 +59,21 @@ func WindowsApply(cause string, subagent bool) bool {
 	return true
 }
 
+// LongWait reports whether a thread that waits for cause waits long enough for the 1-hour-on-wait
+// ping (#1243): a person, a teammate, background work, or a cause the proxy cannot name. A tool wait,
+// a retry and a finished thread are short or over, and a SUBAGENT thread that ends its turn waits for
+// its main agent, which is working: its "human" wait is short too (the same reading as WindowsApply).
+// The classification is waitcause's. This only groups its values.
+func LongWait(cause string, subagent bool) bool {
+	switch cause {
+	case waitcause.WaitingBackground, waitcause.WaitingTeammate, waitcause.WaitingUnknown, "":
+		return true
+	case waitcause.WaitingHuman:
+		return !subagent
+	}
+	return false
+}
+
 // WaitPings is the ping count for a thread that waits for cause. With WaitPlan off it is MaxPings.
 func (p Policy) WaitPings(cause string, subagent bool) int {
 	base := p.MaxPings

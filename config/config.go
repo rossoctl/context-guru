@@ -89,7 +89,7 @@ type ExpandConfig struct {
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
 	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
-	// 1-hour-head, 1-hour-main-agent, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// 1-hour-head, 1-hour-on-wait, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
 	// no strategy, and the file behaves as it always did. An unknown name is a config error.
 	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
@@ -146,6 +146,14 @@ type CacheConfig struct {
 	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
 	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
 	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
+	// KeepAliveOneHourOnWait turns on the 1-hour-on-wait ping (#1243). With it, a thread on the
+	// 5-minute tier that waits for a person, a teammate, background work or an unknown cause gets ONE
+	// ping, at the usual first-ping time, with every cache marker relabelled to 1 hour, and no further
+	// ping on that wait. On the gateway measured on 2026-11-19 the switch is a read, not a rewrite,
+	// so the entry lives 1 hour for the price of one read. A tool wait and a subagent wait behave as
+	// without it. The keeper checks the first 1-hour ping's usage and stops the switch on a route where
+	// it costs a rewrite. It needs the wait plan (WaitPlan), which the proxy turns on by default.
+	KeepAliveOneHourOnWait bool `yaml:"keepalive_one_hour_on_wait"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
 	//
@@ -227,17 +235,8 @@ type CacheConfig struct {
 	// claude-opus-5-5 (12,636) and claude-haiku-5-5 (12,632). So read Usage.CacheWrite1h on a
 	// request that WROTE the entry, per model, and do not assume either way. A zero on a request that
 	// only read the head says nothing: a read writes nothing. The head is a small part of a Claude
-	// Code prompt and other sessions keep it warm, so for long sessions see MainAgentTTL1h.
+	// Code prompt and other sessions keep it warm, so for long waits see the 1-hour-on-wait strategy.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
-	// MainAgentTTL1h asks for the ONE-HOUR tier on EVERY existing cache breakpoint (tools, system
-	// AND messages) of a MAIN-thread request whose body is at least the size gate (head_ttl_min_*).
-	// It adds no breakpoint. Subagent requests are not changed. It does not touch the keep-alive
-	// keys: with `keepalive` on, the session is a 1-hour session and `auto` sends its single ping
-	// at 59 minutes, while the subagents keep the 5-minute pings. The cost: every main-thread turn
-	// writes its new history at 2x instead of 1.25x. It pays when a gap longer than 5 minutes would
-	// otherwise rebuild the whole history. Set by the `1-hour-main-agent` strategy (#1243). The main thread then gets NO idle ping, the 59-minute one
-	// included; subagent threads keep the keep-alive keys.
-	MainAgentTTL1h bool `yaml:"main_agent_ttl_1h"`
 	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
 	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
 	// (200,000). When both are set, this key wins.

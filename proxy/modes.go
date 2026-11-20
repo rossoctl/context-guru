@@ -10,7 +10,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/thread"
-	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // Operating modes on the request path (#31).
@@ -62,10 +61,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx), ThreadOf: r.threadOf,
 		HeadTTL1h:       headTTL1h,
 		HeadTTLMinBytes: headTTLMinBytes,
-		// The main-agent relabel (#1243). The thread test is the keeper's own detector.
-		MainAgentTTL1h: r.tn.Cache.MainAgentTTL1h,
-		IsSubagent:     keepalive.IsSubagentThread,
-		Mode:           mode, Tracker: h.tracker,
+		Mode:            mode, Tracker: h.tracker,
 		// The asker a component may use to put a question to the request's own model over its
 		// cached transcript. nil on a non-Anthropic route or without an incoming client; a
 		// component decides for itself what nil means. See prefixask.go.

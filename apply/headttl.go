@@ -1,12 +1,10 @@
 package apply
 
 import (
-	"hash/fnv"
 	"log/slog"
 	"strconv"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -55,8 +53,7 @@ import (
 //
 // The head-only shape protects only `tools` and `system`, a small part of a Claude Code prompt
 // that other sessions keep warm anyway. The message history stays on the 5-minute tier. For long
-// sessions with idle gaps use the `1-hour-main-agent` strategy (upgradeMainAgentTTL below), which
-// relabels every existing breakpoint, history included, on the main thread only.
+// waits use the `1-hour-on-wait` strategy (RelabelAllTTL1h below), which relabels the keep-alive ping.
 //
 // Fails open: any parse trouble returns the input untouched.
 
@@ -173,9 +170,10 @@ func headPrefixTokens(body []byte) int {
 	return n
 }
 
-// upgradeMainAgentTTL re-labels EVERY existing cache breakpoint of the request as a one-hour
-// entry: tools, system and messages. It is the `1-hour-main-agent` strategy's rewrite (#1243). The
-// caller decides that the request is on the main thread; this function only does the relabel.
+// RelabelAllTTL1h re-labels EVERY existing cache breakpoint of a body as a one-hour entry: tools,
+// system and messages. The `1-hour-on-wait` strategy (#1243) uses it on the keep-alive PING body, never
+// on a real request: the ping is the one request that switches a cached prompt from 5 minutes to 1 hour,
+// and on the measured gateway that switch is a read.
 //
 // The same three constraints as upgradeHeadTTL hold, and each is why this is safe:
 //
@@ -188,10 +186,9 @@ func headPrefixTokens(body []byte) int {
 //
 // A request with no breakpoint is returned untouched. It fails open: any edit error returns the
 // input body whole, never half-labelled.
-//
-// minBytes is the same size gate as the head policy: the body size in bytes, 0 = never.
-func upgradeMainAgentTTL(body []byte, provider bschemas.ModelProvider, minBytes int) (out []byte, upgraded bool) {
-	if !explicitBreakpointProvider(provider) || minBytes <= 0 || len(body) < minBytes {
+func RelabelAllTTL1h(body []byte, provider bschemas.ModelProvider) (out []byte, upgraded bool) {
+	const minBytes = 1
+	if !explicitBreakpointProvider(provider) || len(body) < minBytes {
 		return body, false
 	}
 	next := body
@@ -245,37 +242,4 @@ func upgradeMainAgentTTL(body []byte, provider bschemas.ModelProvider, minBytes 
 		return body, false
 	}
 	return next, true
-}
-
-// mainAgentTTLOps reports the relabel of upgradeMainAgentTTL on the MESSAGES section, one rewrite
-// per message whose bytes changed. before and after are the whole bodies. The tools and system
-// sections are reported by the proxy, which diffs them (proxy/accountant_envelope.go); messages
-// cannot be diffed there, because a pipeline component may have edited the same message.
-//
-// The ChangeID starts with "headttl:", the prefix the accountant library finds a held-longer
-// entry by (design section 4.4): without it the library books no rescue for a gap past 5 minutes.
-// It comes from the message as it was before the relabel, so the same message has the same
-// ChangeID on every request.
-func mainAgentTTLOps(before, after []byte) []accountant.Operation {
-	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
-	if len(b) != len(a) {
-		return nil
-	}
-	var ops []accountant.Operation
-	for i := range b {
-		if b[i].Raw == a[i].Raw {
-			continue
-		}
-		h := fnv.New64a()
-		h.Write([]byte(b[i].Raw))
-		ops = append(ops, accountant.Operation{
-			Kind:       accountant.KindRewrite,
-			Operator:   "context-guru.headttl",
-			At:         accountant.Position{Section: accountant.SectionMessages, Index: i},
-			SizeBefore: accountant.Size{Bytes: len(b[i].Raw)},
-			SizeAfter:  accountant.Size{Bytes: len(a[i].Raw)},
-			ChangeID:   "headttl:" + strconv.FormatUint(h.Sum64(), 16),
-		})
-	}
-	return ops
 }

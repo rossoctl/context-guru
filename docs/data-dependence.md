@@ -144,7 +144,7 @@ These are the presets in the Claude Code plugin picker.
 | `none` | ✅ Works | ✅ Works | ✅ Works | David Amid, #569 |
 | `auto` (was `5-min-ping`; `5-min-ping` is now an alias) | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works | David Amid, #569 |
 | `1-ping`, `2-ping`, `30-min-ping` (the same ping mechanism as `auto`; they differ only in how many pings and when) | ❌ The same as `auto` | ❌ The same as `auto` | ✅ Works | David Amid, #569 |
-| `1-hour-main-agent` (#1243) | ❌ The same as `auto` for subagent threads: their pings need the stored last request. The main thread gets no ping. The relabel itself needs no storage. | ❌ The same as `auto` | ✅ Works | David Amid, #1243 (to confirm) |
+| `1-hour-on-wait` (#1243) | ❌ The same as `auto`: the ping needs the stored last request. | ❌ The same as `auto` | ✅ Works | David Amid, #1243 (to confirm) |
 | `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works | David Amid, #569 |
 
 The named strategies are one table in the proxy (`config/strategy.go`, #980). That change only gives
@@ -154,7 +154,7 @@ keeps.
 **Why `auto` (and the other ping strategies) needs storage and `1-hour-head` does not:** a ping is a **new** request that
 Context Guru sends by itself while the user is idle. To read the same cache, the ping must have the
 exact bytes of the last prompt, so Context Guru keeps them. `1-hour-head` only changes the request
-that the client sends anyway. `1-hour-main-agent` does the same relabel on every breakpoint of the main agent's requests and sends no ping on the main thread (subagents keep `auto`'s pings). It reads only metadata for its decision: the thread id (is it a subagent), and the request body size against the 50k-token gate. It stores no text for the relabel. The client supplies the bytes, so Context Guru keeps nothing.
+that the client sends anyway. `1-hour-on-wait` relabels the markers of the keep-alive ping body only, never a real request. It reads metadata for its decision: the wait cause, the thread id and the ping's usage counts. It keeps one flag and two numbers per thread in memory (the ping's start, its read count), and the time of the last request. The client supplies the bytes, so Context Guru keeps nothing.
 
 **The credential:** Context Guru itself does not keep it. It keeps only a handle, and the host that
 runs it (for example the proxy binary) sends the ping through its Dispatcher. The proxy binary's
