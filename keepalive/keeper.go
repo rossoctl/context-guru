@@ -158,9 +158,16 @@ type kaEntry struct {
 	// request never starts before the last plain ping's response is in.
 	pingRunning bool
 	// oneHour marks an entry whose one planned ping carries every cache marker at the 1-hour tier
-	// (Policy.OneHourOnWait, #1243). Set at record time and never changed. The ping is the only ping of
-	// that wait (the policy's MaxPings is 1).
+	// (Policy.OneHourOnWait, #1243). Set at record time; cleared if the ping falls back to the plain plan.
+	// The ping is the only ping of that wait (the policy's MaxPings is 1). Guarded by Keeper.mu.
 	oneHour bool
+	// planPings is the ping count the wait plan gave at record time, before the 1-hour plan lowered it to
+	// 1. If the 1-hour ping cannot go out (the route is off, or another wait holds the probe), the count
+	// returns to this and the wait is plain auto.
+	planPings int
+	// recordedReal is the wall-clock time of the record, for the hard deadline: (K+1) x X from the record,
+	// whatever changes K later.
+	recordedReal time.Time
 	// oneHourSubstituted is set when a substitute (a summary or a sweep question) took the place of the
 	// first ping of a 1-hour-on-wait entry. A substitute renews the entry at 5 minutes, which is not the
 	// 1-hour entry the strategy plans, so the 1-hour ping is planned AFTER it: the entry's MaxPings goes
@@ -236,7 +243,11 @@ const extraSlotMargin = 30 * time.Second
 // extraWaiting reports whether e's span ended at a text turn, spent its planned pings, and has not yet
 // sent its one extra request. Called with k.mu held.
 func (e *kaEntry) extraWaiting() bool {
-	return e.endsAtText && !e.extraAsked && !e.stopped && !e.manualOnly && e.pol.On() &&
+	// Not on a 1-hour-on-wait wait (#1243): the extra's request is built by the offload code from the
+	// client's body, so it carries 5-minute markers, and a read at 5 minutes would move the 1-hour entry
+	// back to 5 minutes and cut the cover the 1-hour ping paid for. The extra only renews an entry that
+	// is about to expire; a 1-hour entry is not.
+	return !e.oneHour && e.endsAtText && !e.extraAsked && !e.stopped && !e.manualOnly && e.pol.On() &&
 		e.pings >= e.pol.MaxPings && e.pings > 0 && !e.pingRunning
 }
 
@@ -260,6 +271,14 @@ func (e *kaEntry) extraDue(now time.Time) bool {
 	// A slot missed (a real request in flight, a slow tick) is never sent late: not past the normal
 	// hold deadline.
 	return e.extraWaiting() && !now.Before(e.extraSlot()) && now.Before(e.startedAt.Add(e.pol.Idle))
+}
+
+// rearmLocked moves the hard-deadline timer to (K+1) x X from the RECORD time, for the K now in force. It
+// does not extend the deadline past that formula by the time already spent. Called with k.mu held.
+func (e *kaEntry) rearmLocked() {
+	if e.timer != nil {
+		e.timer.Reset(max(time.Until(e.recordedReal.Add(e.hold())), time.Millisecond))
+	}
 }
 
 // hold is how long this entry may keep the caller's credential and conversation: (K+1) x X, the
@@ -525,10 +544,12 @@ type Keeper struct {
 	// thread never repeats the step its predecessor last sent (#706, #712 review). Bounded and reset
 	// exactly as turns is.
 	lastVary map[string]int
-	// oneHourOff holds the provider routes where the first 1-hour ping cost a rewrite (#1243). A route in
-	// it gets no 1-hour ping for the life of the process; its threads fall back to the plain schedule.
-	// Keyed by oneHourRoute. Bounded by the number of routes.
-	oneHourOff map[string]bool
+	// oneHourRoutes is the run-time state of the 1-hour ping per provider|endpoint|route|model
+	// (onehour.go): unknown, proven, or off. Bounded by oneHourRoutesMax.
+	oneHourRoutes map[string]*oneHourRouteState
+	// oneHourProbes holds, per THREAD (keyed like live), the free probe the thread left for its return.
+	// Resolved and deleted by that thread's next real request. Bounded by MaxTurnKeys.
+	oneHourProbes map[string]oneHourProbe
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -622,7 +643,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourOff: map[string]bool{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -832,6 +853,8 @@ func (k *Keeper) Record(r Record) {
 		return
 	}
 	key := r.Key.id()
+	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
+	k.resolveOneHourProbe(key, startedAt, u, usageOK)
 	// A client lifecycle signal (host-gated; see MarkEnded) that this session already ended
 	// holds nothing further: this request was in flight when the user left, so its cache entry
 	// is not worth holding. Matched on Key.Session or r.Client, the id the client's own hooks
@@ -971,7 +994,7 @@ func (k *Keeper) Record(r Record) {
 	guard := pol.WaitPlan && pol.On() && provider != bschemas.OpenAI
 	planned := guard && !ttl1h && pol.Idle < 300*time.Second
 	wait, planBaseWait := "", ""
-	oneHour := false
+	oneHour, planPings := false, 0
 	if guard {
 		// The host's reading of this turn's own body joins only where the plan changes the count (#1227).
 		var open *TaskCounts
@@ -1005,7 +1028,8 @@ func (k *Keeper) Record(r Record) {
 		// hour, and it is the only ping of the wait (no 59-minute ping). A short wait and every subagent
 		// thread keep the plan above, as auto.
 		// A route where the switch was seen to cost a rewrite is skipped.
-		if pol.OneHourOnWait && LongWait(wait, IsSubagentThread(threadID)) && !k.oneHourBlocked(provider, r.Endpoint, route) {
+		if pol.OneHourOnWait && LongWait(wait, IsSubagentThread(threadID)) && !k.oneHourBlocked(provider, r.Endpoint, route, model) {
+			planPings = pol.MaxPings
 			pol.MaxPings = 1
 			oneHour = true
 		}
@@ -1036,6 +1060,8 @@ func (k *Keeper) Record(r Record) {
 		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
 		wait:         wait,
 		oneHour:      oneHour,
+		planPings:    planPings,
+		recordedReal: time.Now(),
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
 		hdr:     hdr, tag: r.Tag,
@@ -1587,19 +1613,29 @@ func (k *Keeper) fire(j pingJob) {
 	if j.oneHour {
 		k.mu.Lock()
 		substitute = !j.e.oneHourSubstituted
+		if substitute {
+			// Raise the count BEFORE the substitute runs, not after it returns: a substitute can run for
+			// minutes, and a sweep that sees pings(1) >= MaxPings(1) meanwhile would retire the entry and
+			// lose the 1-hour ping. The flag also keeps that ping from being substituted.
+			j.e.oneHourSubstituted = true
+			j.e.pol.MaxPings = max(j.e.pol.MaxPings, 2)
+			j.e.rearmLocked()
+		}
 		k.mu.Unlock()
 	}
 	if substitute && k.fireSubstitute(j) {
-		if j.oneHour {
-			k.mu.Lock()
-			j.e.oneHourSubstituted = true
-			j.e.pol.MaxPings = 2 // the 1-hour ping is still to come
-			if j.e.timer != nil {
-				j.e.timer.Reset(j.e.hold()) // the deadline covered one ping; it now covers two
-			}
-			k.mu.Unlock()
-		}
 		return
+	}
+	if substitute && j.oneHour {
+		// The substitute declined or failed: the ordinary ping below IS the 1-hour ping, and the wait
+		// plans one. Unless the follow-up already went out meanwhile, put the count back.
+		k.mu.Lock()
+		j.e.oneHourSubstituted = false
+		if j.e.pings < 2 {
+			j.e.pol.MaxPings = 1
+			j.e.rearmLocked()
+		}
+		k.mu.Unlock()
 	}
 
 	// Falling through to an ordinary ping needs its own slot — the one above was already
@@ -1620,16 +1656,32 @@ func (k *Keeper) fire(j pingJob) {
 		k.skipped.Add(1)
 		return
 	}
-	// 1-hour-on-wait (onehour.go): relabel every marker. The route may have been switched off since the
-	// record. A body with no marker is sent as it is.
+	// 1-hour-on-wait (onehour.go): relabel every marker, if this wait may. The route can be off, or
+	// another wait can hold the probe of an unproven route: this wait is then plain auto, with the count
+	// the plan gave at record time. A body with no marker is sent as it is.
+	rk := ""
 	if j.oneHour {
 		k.mu.Lock()
-		endpoint := j.e.endpoint
+		rk = oneHourRoute(j.provider, j.e.endpoint, j.route, j.e.model)
 		k.mu.Unlock()
-		if !k.oneHourBlocked(j.provider, endpoint, j.route) {
+		if k.oneHourClaim(rk) {
 			if out, relabelled := apply.RelabelAllTTL1h(body, j.provider); relabelled {
+				if len(out) == 0 || len(body) == 0 || &out[0] != &body[0] {
+					zero(body) // the abandoned plaintext copy
+				}
 				body, j.oneHourSent = out, true
 			}
+			if !j.oneHourSent {
+				k.oneHourRelease(rk) // nothing to relabel: no probe was sent
+			}
+		} else {
+			k.mu.Lock()
+			j.e.oneHour = false
+			if j.e.planPings > j.e.pol.MaxPings {
+				j.e.pol.MaxPings = j.e.planPings
+				j.e.rearmLocked()
+			}
+			k.mu.Unlock()
 		}
 	}
 	start := k.now()
@@ -1648,6 +1700,9 @@ func (k *Keeper) fire(j pingJob) {
 	ms := float64(k.now().Sub(start).Microseconds()) / 1000.0
 	k.pings.Add(1)
 	if err != nil {
+		if j.oneHourSent {
+			k.oneHourRelease(rk) // a failed probe proves nothing
+		}
 		k.failed.Add(1) // a transport error: counted, not stopped, not a breaker failure
 		retry := k.giveBackFailedPing(j)
 		slog.Debug("context-guru: cache keep-alive ping failed",
@@ -1665,7 +1720,7 @@ func (k *Keeper) fire(j pingJob) {
 		return
 	}
 	if j.oneHourSent {
-		k.judgeOneHour(j, status, u)
+		k.judgeOneHour(j, status, u, start)
 	}
 	switch k.noteOutcome(j, status, u) {
 	case outcomeTransient:

@@ -187,8 +187,7 @@ func headPrefixTokens(body []byte) int {
 // A request with no breakpoint is returned untouched. It fails open: any edit error returns the
 // input body whole, never half-labelled.
 func RelabelAllTTL1h(body []byte, provider bschemas.ModelProvider) (out []byte, upgraded bool) {
-	const minBytes = 1
-	if !explicitBreakpointProvider(provider) || len(body) < minBytes {
+	if !explicitBreakpointProvider(provider) || len(body) == 0 {
 		return body, false
 	}
 	next := body

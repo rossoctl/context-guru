@@ -91,7 +91,6 @@ func (s *PingStore) drop(key, window string) {
 	if f, ok := s.m[key]; ok && (window == "" || f.PingWindow == window) {
 		delete(s.m, key)
 	}
-
 }
 
 // pingFromReport maps a keeper report to the library's Ping. r.CostUSD is deliberately not

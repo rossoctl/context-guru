@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -48,6 +49,27 @@ func TestLongWaitGroupsTheWaitCauses(t *testing.T) {
 	}
 }
 
+// oneHourKeyOf is the route key of the kaBody model on the test route.
+func oneHourKeyOf() string {
+	return oneHourRoute(bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5")
+}
+
+// proveRoute marks the test route as proven to grant the 1-hour tier.
+func proveRoute(k *Keeper) {
+	k.mu.Lock()
+	k.oneHourRoutes[oneHourKeyOf()] = &oneHourRouteState{proven: true}
+	k.mu.Unlock()
+}
+
+func routeState(k *Keeper) oneHourRouteState {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if st := k.oneHourRoutes[oneHourKeyOf()]; st != nil {
+		return *st
+	}
+	return oneHourRouteState{}
+}
+
 // recordWait records two turns on key: one that called a tool (so the thread is pinged at all, #858),
 // then one that ends with stop and names. The second turn sets the wait the ping serves.
 func recordWait(k *Keeper, pol Policy, key Key, at time.Time, stop string, names []string) {
@@ -67,6 +89,7 @@ func TestOneHourPingOnALongWait(t *testing.T) {
 	fd.setResp(func(DispatchRequest) (Usage, int, error) {
 		return Usage{CacheRead: 49000, CacheWrite: 100, Output: 1}, http.StatusOK, nil // a free switch
 	})
+	proveRoute(k)
 	start := clock.now()
 	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil) // a person
 	if n := k.Sweep(start.Add(239 * time.Second)); n != 0 {
@@ -190,48 +213,6 @@ func TestCostlySwitchTurnsTheRouteOff(t *testing.T) {
 	}
 }
 
-// A free switch leaves the route on: the next long wait gets a 1-hour ping again.
-func TestFreeSwitchKeepsTheRouteOn(t *testing.T) {
-	k, fd, clock := testKeeper(t)
-	fd.setResp(func(DispatchRequest) (Usage, int, error) {
-		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
-	})
-	for i, key := range []Key{sess1, {Tenant: "t1", Session: "sess-2"}} {
-		at := clock.advance(time.Hour)
-		recordWait(k, onWaitPolicy(), key, at, "end_turn", nil)
-		k.Sweep(at.Add(240 * time.Second))
-		waitPings(t, k, int64(i+1))
-		if !apply.AllBreakpointsAskExtendedTTL(fd.sent[len(fd.sent)-1].Body) {
-			t.Fatalf("wait %d: not a 1-hour ping", i+1)
-		}
-	}
-}
-
-// A free 1-hour ping READS and writes nothing at 1h. That is not a downgrade, so it must not lower the
-// thread's remembered tier: a downgrade can only be judged on a request that wrote tokens.
-func TestFreeOneHourPingDoesNotLowerTheThreadsTier(t *testing.T) {
-	k, fd, clock := testKeeper(t)
-	fd.setResp(func(DispatchRequest) (Usage, int, error) {
-		return Usage{CacheRead: 49500, CacheWrite: 0, CacheWrite1h: 0, Output: 1}, http.StatusOK, nil
-	})
-	start := clock.now()
-	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
-	k.mu.Lock()
-	before, hadBefore := k.tier1h[sess1.id()]
-	k.mu.Unlock()
-	k.Sweep(start.Add(240 * time.Second))
-	waitPings(t, k, 1)
-	k.mu.Lock()
-	after, hadAfter := k.tier1h[sess1.id()]
-	k.mu.Unlock()
-	if before != after || hadBefore != hadAfter {
-		t.Errorf("the ping changed the remembered tier: %v/%v -> %v/%v", before, hadBefore, after, hadAfter)
-	}
-	if e, ok := k.Entry(sess1); !ok || !e.TTL1h {
-		t.Errorf("a read with 1h markers is a free switch, not a downgrade: entry %+v found %v", e, ok)
-	}
-}
-
 // "Keep-alive never shortens the cache strategy": a substitute (here the summarizer's call) renews the
 // entry at 5 minutes. On a main-thread long wait it must not take the place of the 1-hour ping. The
 // substitute takes the first ping and the 1-hour ping follows it, with no second substitute, so the
@@ -245,6 +226,7 @@ func TestSubstituteDoesNotReplaceTheOneHourPing(t *testing.T) {
 	model := &fakeSummaryModel{out: "<summary>explored the handler, 3 tests fail.</summary>"}
 	kaCandidate(t, "sess-1", st, model)
 
+	proveRoute(k)
 	pol := onWaitPolicy()
 	start := clock.now()
 	for _, d := range []time.Duration{-time.Second, 0} {
@@ -284,5 +266,249 @@ func TestSubstituteDoesNotReplaceTheOneHourPing(t *testing.T) {
 		if n := k.Sweep(start.Add(at * time.Second)); n != 0 {
 			t.Fatalf("a further ping fired at %ds", at)
 		}
+	}
+}
+
+// A free 1-hour ping READS and writes nothing at 1h. That is not a downgrade, so it must not lower the
+// thread's remembered tier. And a read does not show the tier, so on a route not yet proven the entry is
+// not believed to be 1-hour.
+func TestFreeOneHourPingDoesNotLowerTheThreadsTier(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 0, CacheWrite1h: 0, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.mu.Lock()
+	before, hadBefore := k.tier1h[sess1.id()]
+	k.mu.Unlock()
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	k.mu.Lock()
+	after, hadAfter := k.tier1h[sess1.id()]
+	k.mu.Unlock()
+	if before != after || hadBefore != hadAfter {
+		t.Errorf("the ping changed the remembered tier: %v/%v -> %v/%v", before, hadBefore, after, hadAfter)
+	}
+	if e, ok := k.Entry(sess1); ok && e.TTL1h {
+		t.Error("a read on an unproven route marked the entry 1-hour")
+	}
+}
+
+// returnAt records the thread's return: a real 5-minute request that reads read tokens.
+func returnAt(k *Keeper, key Key, at time.Time, read int64) {
+	k.Record(Record{Key: key, StartedAt: at, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+		Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(),
+		Usage: Usage{CacheRead: read, CacheWrite: 50000 - read, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
+}
+
+// The grant is UNKNOWN until proven. Unknown: the first long wait probes, the entry is not believed
+// 1-hour, and a second wait on the route gets auto's plan (one probe at a time).
+func TestUnknownRouteProbesOnceAndIsNotBelieved(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	if !apply.AllBreakpointsAskExtendedTTL(fd.sent[0].Body) {
+		t.Fatal("the probe is not a 1-hour ping")
+	}
+	if e, ok := k.Entry(sess1); ok && e.TTL1h {
+		t.Error("an unproven entry is marked 1-hour")
+	}
+	if st := routeState(k); st.proven || st.off {
+		t.Errorf("state after the probe = %+v, want unknown", st)
+	}
+	// Another wait on the route while the probe is out: plain auto, with auto's count.
+	other := Key{Tenant: "t1", Session: "sess-2"}
+	t2 := clock.advance(time.Minute)
+	recordWait(k, onWaitPolicy(), other, t2, "end_turn", nil)
+	k.Sweep(t2.Add(240 * time.Second))
+	waitPings(t, k, 2)
+	last := fd.sent[len(fd.sent)-1]
+	if last.Key != other || apply.AllBreakpointsAskExtendedTTL(last.Body) {
+		t.Fatalf("a second wait probed while the first probe was out (key %v)", last.Key)
+	}
+	if n := k.Sweep(t2.Add(480 * time.Second)); n != 1 {
+		t.Errorf("the fallback wait did not get auto's second ping (%d): its count was not restored", n)
+	}
+}
+
+// Proven: the return reads the prefix more than 5 minutes after the probe. The route is then proven and
+// the next wait's entry is believed 1-hour.
+func TestReturnAfterFiveMinutesReadingThePrefixProvesTheGrant(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	// The return: 20 minutes after the wait began, it still READS the prefix.
+	returnAt(k, sess1, start.Add(20*time.Minute), 49500)
+	if st := routeState(k); !st.proven {
+		t.Fatalf("state = %+v, want proven", st)
+	}
+	n0 := fd.n()
+	t2 := clock.advance(time.Hour)
+	other := Key{Tenant: "t1", Session: "sess-2"}
+	recordWait(k, onWaitPolicy(), other, t2, "end_turn", nil)
+	k.Sweep(t2.Add(240 * time.Second))
+	waitPings(t, k, 2)
+	if !apply.AllBreakpointsAskExtendedTTL(fd.sent[n0].Body) {
+		t.Fatal("the next wait on a proven route did not get a 1-hour ping")
+	}
+	if e, ok := k.Entry(other); !ok || !e.TTL1h {
+		t.Errorf("on a proven route the entry is believed 1-hour: %+v %v", e, ok)
+	}
+}
+
+// Downgrading: the return is a cold rebuild. The entry died at 5 minutes, so the route is switched off.
+func TestColdReturnAfterTheProbeSwitchesTheRouteOff(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	returnAt(k, sess1, start.Add(20*time.Minute), 0)
+	if st := routeState(k); !st.off {
+		t.Fatalf("state = %+v, want off", st)
+	}
+	n0 := fd.n()
+	t2 := clock.advance(time.Hour)
+	other := Key{Tenant: "t1", Session: "sess-2"}
+	recordWait(k, onWaitPolicy(), other, t2, "end_turn", nil)
+	k.Sweep(t2.Add(240 * time.Second))
+	waitPings(t, k, 2)
+	if apply.AllBreakpointsAskExtendedTTL(fd.sent[n0].Body) {
+		t.Error("a route proven to downgrade still got a 1-hour ping")
+	}
+}
+
+// A return inside 5 minutes of the probe proves nothing: the probe is released, the state stays unknown.
+func TestEarlyReturnProvesNothing(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	returnAt(k, sess1, start.Add(5*time.Minute), 49500) // 60 s after the ping
+	if st := routeState(k); st.proven || st.off || !st.probeUntil.IsZero() {
+		t.Errorf("state = %+v, want unknown with the probe released", st)
+	}
+}
+
+// A 1-hour ping that lands on an entry that had already expired reads ~0 and writes the prefix. It says
+// nothing about the route.
+func TestMissedOneHourPingDoesNotSwitchTheRouteOff(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 0, CacheWrite: 49776, CacheWrite1h: 49776, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	// A slow tick: the ping goes out 400 s in, after the 5-minute entry is gone.
+	k.Sweep(clock.advance(400 * time.Second))
+	waitPings(t, k, 1)
+	if !apply.AllBreakpointsAskExtendedTTL(fd.sent[0].Body) {
+		t.Fatal("not a 1-hour ping")
+	}
+	if st := routeState(k); st.off {
+		t.Fatal("a ping on an expired entry switched the route off")
+	}
+	if st := routeState(k); !st.probeUntil.IsZero() {
+		t.Error("the probe was not released")
+	}
+}
+
+// A route that was switched off after the entry was recorded: the wait is plain auto, with the count the
+// plan gave at record time (a person: base + 1).
+func TestBlockedAtFireTimeRestoresThePlanCount(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.mu.Lock()
+	k.oneHourRoutes[oneHourKeyOf()] = &oneHourRouteState{off: true}
+	k.mu.Unlock()
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	if apply.AllBreakpointsAskExtendedTTL(fd.sent[0].Body) {
+		t.Fatal("a ping went out relabelled on a route that is off")
+	}
+	if n := k.Sweep(start.Add(480 * time.Second)); n != 1 {
+		t.Errorf("auto's second ping did not follow (%d): the plan count was not restored", n)
+	}
+}
+
+// The extra slot (#776) must not follow a 1-hour ping: its request carries 5-minute markers and would
+// move the 1-hour entry back to 5 minutes.
+func TestNoExtraRequestAfterTheOneHourPing(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	proveRoute(k)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	model := &fakeSummaryModel{out: "<summary>explored.</summary>"}
+	kaCandidate(t, "sess-1", st, model)
+	start := clock.now()
+	// A body that ends at a text turn: the extra slot would apply.
+	for _, d := range []time.Duration{-time.Second, 0} {
+		stop, names := "tool_use", []string{"Bash"}
+		if d == 0 {
+			stop, names = "end_turn", nil
+		}
+		k.Record(Record{Key: sess1, StartedAt: start.Add(d), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(), ToolUseNames: names,
+			Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: stop}, Header: kaHeader(), Hold: fd.hold(sess1)})
+	}
+	k.mu.Lock()
+	e := k.live[sess1.id()]
+	endsAtText := e != nil && e.endsAtText
+	k.mu.Unlock()
+	if !endsAtText {
+		t.Fatal("the test body does not end at a text turn; the extra slot would not apply")
+	}
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	for _, at := range []time.Duration{450, 460, 470, 479} {
+		k.Sweep(start.Add(at * time.Second))
+	}
+	if model.calls.Load() != 0 {
+		t.Errorf("the extra substitute ran %d times after the 1-hour ping", model.calls.Load())
+	}
+}
+
+// The substitute fails: the ordinary ping IS the 1-hour ping, and no second ping follows.
+func TestFailedSubstituteLeavesOneOneHourPing(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	proveRoute(k)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	kaCandidate(t, "sess-1", st, &fakeSummaryModel{err: errors.New("upstream refused")})
+	pol := onWaitPolicy()
+	start := clock.now()
+	for _, d := range []time.Duration{-time.Second, 0} {
+		stop, names := "tool_use", []string{"Bash"}
+		if d == 0 {
+			stop, names = "end_turn", nil
+		}
+		k.Record(Record{Key: sess1, StartedAt: start.Add(d), Body: []byte(kaToolBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: pol, ToolUseNames: names,
+			Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: stop}, Header: kaHeader(), Hold: fd.hold(sess1)})
+	}
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	if fd.n() != 1 || !apply.AllBreakpointsAskExtendedTTL(fd.sent[0].Body) {
+		t.Fatalf("the fallback ping is not the 1-hour ping (%d sent)", fd.n())
+	}
+	if n := k.Sweep(start.Add(480 * time.Second)); n != 0 {
+		t.Errorf("a second ping followed a failed substitute (%d)", n)
 	}
 }
