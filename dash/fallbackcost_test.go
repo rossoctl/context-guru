@@ -15,22 +15,22 @@ func TestPriceKeepsTheFallbackCost(t *testing.T) {
 	gem := &Event{Model: "gemini-3-flash-preview", FreshInput: 100, CacheRead: 1000, OutputTokens: 10}
 	gem.Price(feed.Resolved(gem.Model), true)
 	want := 1000 * 10e-6 * modelinfo.AnthropicCacheReadFrac
-	if !near(gem.FallbackCostUSD, want) {
-		t.Errorf("gemini fallback cost = %v, want %v (the cache reads only)", gem.FallbackCostUSD, want)
+	if !near(gem.FallbackRateCostUSD, want) {
+		t.Errorf("gemini fallback cost = %v, want %v (the cache reads only)", gem.FallbackRateCostUSD, want)
 	}
-	if gem.FallbackCostUSD >= gem.CostUSD {
-		t.Errorf("fallback %v must be a part of cost %v", gem.FallbackCostUSD, gem.CostUSD)
+	if gem.FallbackRateCostUSD >= gem.CostUSD {
+		t.Errorf("fallback %v must be a part of cost %v", gem.FallbackRateCostUSD, gem.CostUSD)
 	}
 
 	cl := &Event{Model: "claude-sonnet-5-5", FreshInput: 100, CacheRead: 1000, OutputTokens: 10}
 	cl.Price(feed.Resolved(cl.Model), true)
-	if cl.CostUSD <= 0 || cl.FallbackCostUSD != 0 {
-		t.Errorf("claude cost/fallback = %v/%v, want >0/0", cl.CostUSD, cl.FallbackCostUSD)
+	if cl.CostUSD <= 0 || cl.FallbackRateCostUSD != 0 {
+		t.Errorf("claude cost/fallback = %v/%v, want >0/0", cl.CostUSD, cl.FallbackRateCostUSD)
 	}
 
 	// A row that cannot be priced keeps no fallback cost from an earlier pricing.
 	gem.Price(feed.Resolved(gem.Model), false)
-	if gem.FallbackCostUSD != 0 {
-		t.Errorf("unpriced row fallback cost = %v, want 0", gem.FallbackCostUSD)
+	if gem.FallbackRateCostUSD != 0 {
+		t.Errorf("unpriced row fallback cost = %v, want 0", gem.FallbackRateCostUSD)
 	}
 }

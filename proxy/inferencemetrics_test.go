@@ -100,7 +100,7 @@ func TestRequestsAndErrorsByStatus(t *testing.T) {
 	}
 }
 
-// #1248: the estimated cost is the part of the cost priced from a fallback rate (FallbackCostUSD).
+// #1248: the estimated cost is the part of the cost priced from a fallback rate (FallbackRateCostUSD).
 // PriceEstimated marks the saving (penalty_unknown), not the rate, so it books nothing here.
 func TestCostAndEstimatedCost(t *testing.T) {
 	im, r := newInference(t)
@@ -117,7 +117,7 @@ func TestCostAndEstimatedCost(t *testing.T) {
 	}
 
 	fb := goodEvent()
-	fb.FallbackCostUSD = 0.005
+	fb.FallbackRateCostUSD = 0.005
 	im.Observe(fb, time.Second)
 	all = collectAll(t, r)
 	if c := sumFloat(all["llm.inference.cost.usd"]); c < 0.0399 || c > 0.0401 {
