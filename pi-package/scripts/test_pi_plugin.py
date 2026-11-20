@@ -49,6 +49,7 @@ class Sandbox(unittest.TestCase):
             "HOME": str(root), "XDG_STATE_HOME": str(root / "state"),
             "XDG_CONFIG_HOME": str(root / "config"), "PI_CODING_AGENT_DIR": str(root / "agent")})
         self.env.start()
+        os.environ.pop("CONTEXT_GURU_BIN", None)  # a developer's own setting; the patch puts it back
         self.models = root / "agent/models.json"
         self.state = root / "state/context-guru-pi/routing.json"
 
@@ -808,7 +809,7 @@ class ConfigByName(Sandbox):
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
             code, facts = self.run_main("update", "--check")
         self.assertEqual((code, facts["installed_version"], facts["latest_version"], facts["update_available"]),
-                         (0, "0.7.0", "v0.7.1", "true"))
+                         (0, "0.7.0", "0.7.1", "true"))  # one form for both (#1153)
         pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.1 (commit abc)")})
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
             _, facts = self.run_main("update", "--check")
@@ -1088,7 +1089,8 @@ class StrategiesFromTheProxy(Sandbox):
 
     def test_setup_on_a_proxy_that_cannot_list_refuses_a_named_strategy_and_writes_nothing(self):
         binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
-        pi_plugin.write_record({"binary": binary})
+        # The person names the binary (D2: setup takes no other binary that it did not download).
+        self.enterContext(mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": binary}))
         for argv in (("setup", "--plan"), ("setup", "--i-consent-to-traffic-interception")):
             code, facts = self.run_main(*argv)
             self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
@@ -1559,6 +1561,123 @@ class FailedStartNamesTheLog(Sandbox):
             code, facts = self.run_main("configure", "--preset", "medium")
         self.assertEqual((code, facts["result"]), (1, "not_applied"))
         self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
+
+
+class OwnBinary(Sandbox):
+    """D2 (#1152): Pi uses CONTEXT_GURU_BIN, or the binary that setup downloaded. It never takes a
+    context-guru-proxy from PATH: another tool owns that one, and it can be too old or change."""
+
+    def executable(self, name):
+        path = Path(self.tmp.name) / "bin" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def managed(self):
+        path = pi_plugin.managed_binary()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def test_a_proxy_on_path_is_not_used(self):
+        on_path = self.executable("context-guru-proxy")
+        with mock.patch.dict(os.environ, {"PATH": str(on_path.parent)}):
+            self.assertIsNone(pi_plugin.find_binary())
+            self.managed()
+            self.assertEqual(pi_plugin.find_binary(), str(pi_plugin.managed_binary().resolve()))
+
+    def test_context_guru_bin_is_used_first(self):
+        mine = self.executable("my-proxy")
+        self.managed()
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": str(mine)}):
+            self.assertEqual(pi_plugin.find_binary(), str(mine.resolve()))
+
+    def setup_plan(self):
+        with mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=8800):
+            return self.run_main("setup", "--plan", "--cache-strategy", "none")
+
+    def test_setup_ignores_a_recorded_binary_that_is_neither_managed_nor_named(self):
+        other = self.executable("context-guru-proxy")
+        pi_plugin.write_record({"binary": str(other)})
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [None])  # no binary: setup will download its own
+
+    def test_setup_does_not_trust_a_leftover_download_with_no_install_record(self):
+        self.managed()  # a failed setup left it (#1157); it may be older than the latest release
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [None])
+
+    def test_setup_keeps_its_own_download_when_the_install_record_names_it(self):
+        managed = str(self.managed().resolve())
+        pi_plugin.write_record({"binary": managed, "port": 8800})
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [managed])
+
+    def test_plan_says_which_binary_setup_uses(self):
+        _, facts = self.setup_plan()
+        self.assertEqual(facts["binary"], "download")
+        self.assertIn("Setup downloads the latest context-guru-proxy release.", facts["consent_question"])
+        mine = self.executable("my-proxy")
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": str(mine)}):
+            _, facts = self.setup_plan()
+        self.assertEqual(facts["binary"], str(mine.resolve()))
+        self.assertIn(f"Setup uses the proxy at {mine.resolve()}.", facts["consent_question"])
+
+    def test_a_context_guru_bin_that_names_no_file_is_refused_not_replaced(self):
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": "/no/such/proxy"}):
+            code, facts = self.setup_plan()
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_named_missing"))
+        self.assertIn("/no/such/proxy", facts["detail"])
+
+    def test_context_guru_bin_that_names_the_download_is_used_with_no_record(self):
+        managed = str(self.managed().resolve())
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": managed}), \
+                mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [managed])
+
+    def test_update_of_a_binary_setup_did_not_download_says_what_to_do(self):
+        other = self.executable("my-proxy")
+        pi_plugin.write_record({"binary": str(other), "port": 8800})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.3"):
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_not_managed"))
+        self.assertIn("run /context-guru setup again", facts["detail"])
+        self.assertIn("If CONTEXT_GURU_BIN is set, unset it", facts["detail"])
+
+    def test_uninstall_names_a_binary_it_keeps(self):
+        other = self.executable("my-proxy")
+        pi_plugin.write_record({"binary": str(other), "port": 8800})
+        with mock.patch.object(pi_plugin, "stop_service", return_value="stopped"):
+            _, facts = self.run_main("uninstall")
+        self.assertEqual(facts["binary_kept"], f"{other} (not downloaded by setup)")
+        self.assertNotIn("binary_removed", facts)
+        self.assertTrue(other.exists())
+
+    def test_uninstall_dry_run_lists_what_it_removes_and_keeps(self):
+        other = self.executable("my-proxy")
+        pi_plugin.write_record({"binary": str(other), "port": 8800})
+        managed = self.managed()
+        _, facts = self.run_main("uninstall", "--dry-run")
+        self.assertEqual(facts["result"], "planned")
+        self.assertEqual(facts["binary_remove"], str(managed))
+        self.assertEqual(facts["binary_kept"], f"{other} (not downloaded by setup)")
+        self.assertTrue(managed.exists())
 
 
 if __name__ == "__main__":

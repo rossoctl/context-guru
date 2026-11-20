@@ -219,7 +219,10 @@ def plist_owned(path):
 # --------------------------------------------------------------------------------------------- binary
 
 def find_binary():
-    found = shutil.which(os.environ.get("CONTEXT_GURU_BIN", "context-guru-proxy"))
+    """CONTEXT_GURU_BIN, else the binary that setup downloaded. Never a context-guru-proxy on PATH: another
+    tool owns that one, and it can be too old, or change when that tool updates it (#1152)."""
+    named = os.environ.get("CONTEXT_GURU_BIN")
+    found = shutil.which(named) if named else None
     if found:
         return str(Path(found).resolve())
     if managed_binary().is_file() and os.access(managed_binary(), os.X_OK):
@@ -806,8 +809,17 @@ def setup(args):
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
     note = {}
     preset = record.get("preset") or DEFAULT_PRESET
-    executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
-    executable = executable or find_binary()
+    named_binary = os.environ.get("CONTEXT_GURU_BIN")
+    executable = find_binary()
+    if named_binary and not shutil.which(named_binary):
+        # The person named a binary. Setup does not swap in another one.
+        facts(result="refused", reason="binary_named_missing",
+              detail=f"CONTEXT_GURU_BIN names {named_binary}, which is not an executable file; nothing was changed")
+        return 2
+    if executable and not named_binary and not record.get("binary") and Path(executable) == managed_binary().resolve():
+        # A download with no install record is left by a failed setup and can be older than the latest
+        # release (#1157). Setup downloads again.
+        executable = None
     try:
         # No binary yet: setup downloads the latest release, which has the table. The name is checked
         # again below, once that binary exists.
@@ -832,27 +844,29 @@ def setup(args):
     chains = {p: chain_upstream(p, url, port) for p, url in clash.items()}
     unchainable = {p: reason for p, (_, reason) in chains.items() if reason}
     if args.plan:
+        uses = (f" Setup uses the proxy at {executable}." if executable
+                else " Setup downloads the latest context-guru-proxy release.")
         if clash:
             # Two paired answers, never one plain question: a person picks chain or replace.
             extra = ["--cache-strategy", strategy] if args.cache_strategy else []
             pairs = {}
             if not unchainable:
                 pairs.update(consent_question_chain=consent_question(
-                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}, row=row),
+                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}, row=row) + uses,
                     confirm_command_chain=confirm_command("chain", extra))
             else:
                 pairs["chain_refused"] = ",".join(f"{p}:{r}" for p, r in sorted(unchainable.items()))
             others = {p: u for p, u in upstreams.items() if p not in clash}
-            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash, row=row),
+            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash, row=row) + uses,
                          confirm_command_replace=confirm_command("replace", extra))
             facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
                   existing_base_url=clash, conflicts=",".join(sorted(clash)), port=port, preset=preset,
-                  cache_strategy=strategy, **note, **pairs, **hatch)
+                  cache_strategy=strategy, binary=executable or "download", **note, **pairs, **hatch)
             return 0
         facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy, **note,
               service=service_kind() or "unsupported", already_routed=str(
                   all(models_route.is_routed(models_path(), port, p) for p in PROVIDERS)).lower(),
-              consent_question=consent_question(port, strategy, upstreams, row=row))
+              binary=executable or "download", consent_question=consent_question(port, strategy, upstreams, row=row) + uses)
         return 0
     if not args.i_consent_to_traffic_interception:
         facts(result="refused", reason="consent_required")
@@ -1147,11 +1161,14 @@ def update(args):
     installed = (binary_version_text(executable) if executable else None) or "unknown"
     available = installed.removeprefix("v") != latest.removeprefix("v")
     if args.check:
-        facts(result="checked", installed_version=installed, latest_version=latest,
+        facts(result="checked", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
               update_available=str(available).lower())
         return 0
     if executable and Path(executable).resolve() != managed_binary().resolve():
-        facts(result="refused", reason="binary_not_managed", binary=executable)
+        facts(result="refused", reason="binary_not_managed", binary=executable,
+              detail="setup did not download this proxy, so update cannot replace it. If CONTEXT_GURU_BIN is set, "
+                     "unset it, then run /context-guru setup again: setup then downloads a proxy that update can "
+                     "update")
         return 2
     try:
         executable, version = install_release_binary(latest)
@@ -1189,7 +1206,12 @@ def uninstall(args):
     record = read_record()
     facts(result="planned" if args.dry_run else "removing", models=models_path(),
           port=record.get("port", "(none)"))
+    recorded = record.get("binary")
+    # A binary the person supplied (CONTEXT_GURU_BIN) is theirs: uninstall says it keeps it (#1153).
+    kept = {"binary_kept": f"{recorded} (not downloaded by setup)"} \
+        if recorded and Path(recorded).resolve() != managed_binary().resolve() else {}
     if args.dry_run:
+        facts(**({"binary_remove": managed_binary()} if managed_binary().exists() else {}), **kept)
         return 0
     # Routing first, proxy second: the reverse of setup, so no moment has a route with no proxy.
     facts(models_restore=models_route.restore(routing_state()))
@@ -1202,6 +1224,7 @@ def uninstall(args):
         if managed_binary().exists():
             managed_binary().unlink()
             facts(binary_removed="true")
+        facts(**kept)
     facts(result="removed", kept=state_dir())
     return 0
 

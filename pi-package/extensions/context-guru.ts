@@ -265,6 +265,12 @@ export function strategyChoices(facts: Record<string, string>): { names: string[
   return { names: names.length ? names : ["none"], error: facts.strategy_error || undefined };
 }
 
+/** The message after `uninstall`. A binary the person supplied stays, and the message names it (#1153). */
+export function uninstallText(f: Record<string, string>): string {
+  return `context-guru removed (models.json: ${f.models_restore}, service: ${f.service}). ` +
+    (f.binary_kept ? `Kept your proxy binary ${f.binary_kept}. ` : "") + "Re-select the model with /model, or restart Pi.";
+}
+
 type Message = { text: string; level: "info" | "error" };
 
 /** What a failed proxy start tells the user: the proxy is off, and what to run (#1146). */
@@ -577,11 +583,10 @@ export default function contextGuru(pi: ExtensionAPI) {
         }
         case "uninstall": {
           if (!(await agree(ctx, "Remove context-guru?",
-            "Restore models.json, stop and remove the proxy service, and delete the downloaded binary."))) return;
+            "Restore models.json, stop and remove the proxy service, and delete the binary that setup downloaded."))) return;
           const f = (await run(["uninstall"], 60_000)).facts;
           await reloadModels(ctx);
-          return say(ctx, `context-guru removed (models.json: ${f.models_restore}, service: ${f.service}). ` +
-            "Re-select the model with /model, or restart Pi.");
+          return say(ctx, uninstallText(f));
         }
         default:
           return say(ctx, `Unknown subcommand ${sub}. Use one of: ${SUBCOMMANDS.join(", ")}`, "warning");

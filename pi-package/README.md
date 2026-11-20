@@ -35,7 +35,9 @@ Start Pi and run:
 Setup shows one question and changes nothing until you answer yes. On yes it:
 
 1. Downloads the latest `context-guru-proxy` release and checks it against the release's SHA-256
-   list. A `context-guru-proxy` already on `PATH` is used instead.
+   list. Setup does not use a `context-guru-proxy` on `PATH`: another tool owns that one. To use
+   your own binary, set `CONTEXT_GURU_BIN` to its path. `/context-guru update` cannot update a binary
+   that you supplied.
 2. Starts the proxy as a user service: a LaunchAgent on macOS, `systemd --user` on Linux. The
    service starts at login and restarts after a crash. Each Pi session start checks it once (see
    [Proxy check at session start](#proxy-check-at-session-start)).
@@ -148,7 +150,7 @@ Setup does not write this override: it is a change to your own model settings, s
 | `/context-guru preset [name]` | `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. Restarts the proxy after a yes |
 | `/context-guru cache-strategy [name]` | Lists the strategies the proxy offers, then sets one. Restarts the proxy after a yes |
 | `/context-guru update` | Checks for a newer proxy release and installs it after a yes |
-| `/context-guru uninstall` | Restores `models.json`, stops and removes the service, deletes the downloaded binary |
+| `/context-guru uninstall` | Restores `models.json`, stops and removes the service, deletes the binary that setup downloaded. A binary that you supplied stays, and uninstall names it |
 
 `/context-guru` alone runs `status`. Every command that writes or restarts asks for a yes first. In print
 mode (`pi -p`) there is no dialog, so these commands change nothing.
