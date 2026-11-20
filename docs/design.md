@@ -26,6 +26,7 @@ infrastructure the components sit on.
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
+| `models/` | model context windows and token prices: `Resolver`, `Chain`, `ExactWindow`. A facade over `internal/modelinfo`; the LiteLLM gateway client is in `models/litellm`. A host that needs only these imports them, not `proxyapp`, so it does not link the proxy (#1251) |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
 | `thinkcount/` | the token count of each thinking block, for the accountant: reads a response's signatures and `thinking_tokens` (JSON, or a stream as it goes by) and keeps a bounded table by signature hash, which the host passes to `accountant.NewBodyCounted` |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
