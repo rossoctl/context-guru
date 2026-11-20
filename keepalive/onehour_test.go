@@ -570,22 +570,49 @@ func TestColdRebuildFromTheSameModelWithTheSamePrefixIsADowngrade(t *testing.T) 
 	}
 }
 
-// OneHourGranted is true only for a route the probe proved, per model.
-func TestOneHourGrantedOnlyForAProvenRoute(t *testing.T) {
+// ReadSetsTTL is how the accountant is told a read sets the TTL. A proven route: always. An unproven route:
+// only for the return that follows a 1-hour ping, so the return that PROVES the route is credited in the
+// same pass; a return that is cold then switches the route off and is never credited. Off: never.
+func TestReadSetsTTLForTheAccountant(t *testing.T) {
 	k, start := probeThenWait(t)
-	g := func(model string) bool { return k.OneHourGranted(bschemas.Anthropic, "", "/v1/messages", model) }
-	if g("aws/claude-sonnet-5") {
-		t.Fatal("granted before any proof")
+	g := func(model string, pinged bool) bool {
+		return k.ReadSetsTTL(bschemas.Anthropic, "", "/v1/messages", model, pinged)
 	}
+	const m = "aws/claude-sonnet-5"
+	if g(m, false) {
+		t.Error("an unproven route with no 1-hour ping before the request: ReadSetsTTL on")
+	}
+	if !g(m, true) {
+		t.Error("the return after a 1-hour ping is not priced as one (the proof return would get no rescue)")
+	}
+	// The proof arrives: the route is proven, and stays on for every request.
 	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 49500, 100, false)
-	if !g("aws/claude-sonnet-5") {
-		t.Error("not granted after the proof")
+	if st := routeState(k); !st.proven {
+		t.Fatalf("state = %+v, want proven", st)
 	}
-	if g("aws/claude-opus-5") {
+	if !g(m, false) || !g(m, true) {
+		t.Error("a proven route is not ReadSetsTTL")
+	}
+	if g("aws/claude-opus-5", false) {
 		t.Error("the proof of one model counted for another")
 	}
 	var nilK *Keeper
-	if nilK.OneHourGranted(bschemas.Anthropic, "", "/v1/messages", "m") {
-		t.Error("a nil keeper granted")
+	if nilK.ReadSetsTTL(bschemas.Anthropic, "", "/v1/messages", "m", true) {
+		t.Error("a nil keeper reported it")
+	}
+}
+
+// The first return is cold: the route is switched off, and ReadSetsTTL is off after that, pinged or not.
+func TestReadSetsTTLIsOffOnceTheColdReturnSwitchedTheRouteOff(t *testing.T) {
+	k, start := probeThenWait(t)
+	if !k.ReadSetsTTL(bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5", true) {
+		t.Fatal("not priced as a return after a 1-hour ping before the return")
+	}
+	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 0, 50000, false)
+	if st := routeState(k); !st.off {
+		t.Fatalf("state = %+v, want off", st)
+	}
+	if k.ReadSetsTTL(bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5", true) {
+		t.Error("ReadSetsTTL stayed on after the route was switched off")
 	}
 }

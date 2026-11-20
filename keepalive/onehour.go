@@ -81,19 +81,32 @@ func (k *Keeper) oneHourBlocked(provider bschemas.ModelProvider, endpoint, route
 	return st != nil && st.off
 }
 
-// OneHourGranted reports whether the run-time check PROVED that a read sets the entry's TTL on this route and
-// model: a 1-hour ping kept a 5-minute entry alive past 5 minutes (state "proven"). The accountant is told
-// it as Provider.ReadSetsTTL (rossoctl/accountant#105). The proxy does not guess it from a model name or a
-// provider: the route is Anthropic-shaped whatever it forwards to, and only this evidence says what it did.
-// Nil-safe.
-func (k *Keeper) OneHourGranted(provider bschemas.ModelProvider, endpoint, route, model string) bool {
+// ReadSetsTTL says whether the accountant may be told that a read sets the entry's TTL on this route and
+// model (Provider.ReadSetsTTL, rossoctl/accountant#105). The proxy does not guess it from a model name or a
+// provider: the route is Anthropic-shaped whatever it forwards to, and only evidence says what it did.
+//
+//   - A route the probe PROVED: always.
+//   - A route not yet proven, for a request that follows a 1-hour ping (pinged): yes, unless the route is
+//     off. This is the return that decides the probe. It is priced in the same pass, before the keeper
+//     records the proof (the accounting runs first), so it must be priced as a return after a 1-hour ping
+//     to be credited at all. The library's rescue is itself evidence: it credits only tokens the return
+//     READ after the 5-minute lifetime. A cold return reads nothing and books none, and the keeper then
+//     switches the route off (resolveOneHourProbe).
+//   - Otherwise no. Nil-safe.
+func (k *Keeper) ReadSetsTTL(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool {
 	if k == nil {
 		return false
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
-	return st != nil && st.proven
+	switch {
+	case st != nil && st.off:
+		return false
+	case st != nil && st.proven:
+		return true
+	}
+	return pinged
 }
 
 // oneHourClaim decides, at fire time, whether this ping may be the 1-hour ping. A proven route always

@@ -478,9 +478,9 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 	return plan
 }
 
-// oneHourGranted is Keeper.OneHourGranted, nil-safe for a deployment with no keep-alive.
-func (k *keeper) oneHourGranted(provider bschemas.ModelProvider, endpoint, route, model string) bool {
-	return k != nil && k.Keeper != nil && k.Keeper.OneHourGranted(provider, endpoint, route, model)
+// readSetsTTL is Keeper.ReadSetsTTL, nil-safe for a deployment with no keep-alive.
+func (k *keeper) readSetsTTL(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool {
+	return k != nil && k.Keeper != nil && k.Keeper.ReadSetsTTL(provider, endpoint, route, model, pinged)
 }
 
 // canPing reports whether the keep-alive can ping a thread of this session on this tenancy: the kill

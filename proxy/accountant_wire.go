@@ -140,9 +140,13 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	billed := c.accBilled(forwarded)
 	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
 	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accMeta.Model, forwarded, c.pings, c.accMeta.Session, t)
-	// A read sets the entry's TTL on a route the keeper PROVED does so (the 1-hour-on-wait probe), and
-	// nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not measured.
-	if c.readSets != nil && c.readSets(bschemas.ModelProvider(c.provider), c.endpoint, c.route, c.accMeta.Model) {
+	// A read sets the entry's TTL on a route the keeper PROVED does so (the 1-hour-on-wait probe), and on the
+	// return that decides that proof: facts.PingTTL is 1 hour when a 1-hour ping served the gap. The keeper
+	// records the proof after this request is priced, so without the second case the proof return would book
+	// no rescue. Nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not
+	// measured. The rescue is itself evidence (it credits only tokens the return READ), see Keeper.ReadSetsTTL.
+	if c.readSets != nil && c.readSets(bschemas.ModelProvider(c.provider), c.endpoint, c.route, c.accMeta.Model,
+		facts.PingTTL >= time.Hour) {
 		facts.Provider.ReadSetsTTL = true
 	}
 	c.accPingWindow, c.accFacts = facts.PingWindow, facts

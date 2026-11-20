@@ -1375,7 +1375,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
-		cp.noteReadSets(up.base, h.keeper.oneHourGranted)
+		cp.noteReadSets(up.base, h.keeper.readSetsTTL)
 		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),

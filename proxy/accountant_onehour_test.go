@@ -31,6 +31,10 @@ func ohBody(turns int) []byte {
 // a return at the given gap after the request that reads it again. readSets is Provider.ReadSetsTTL on the
 // return's facts, as accEndNow sets it from the keeper's proof.
 func ohRun(t *testing.T, returnAfter time.Duration, readSets, oneHourPing bool) accountant.Result {
+	return ohRunWith(t, returnAfter, readSets, oneHourPing, Usage{CacheRead: ohPrefix, CacheWrite: 20})
+}
+
+func ohRunWith(t *testing.T, returnAfter time.Duration, readSets, oneHourPing bool, ret Usage) accountant.Result {
 	t.Helper()
 	st, pings := newSavingsTracker(), NewPingStore()
 	t0 := time.Unix(1_700_000_000, 0)
@@ -48,7 +52,7 @@ func ohRun(t *testing.T, returnAfter time.Duration, readSets, oneHourPing bool) 
 	if _, ok := PingSavings(r, pings); !ok {
 		t.Fatal("the ping was not converted")
 	}
-	return turn(t0.Add(returnAfter), ohBody(2), Usage{CacheRead: ohPrefix, CacheWrite: 20}, readSets)
+	return turn(t0.Add(returnAfter), ohBody(2), ret, readSets)
 }
 
 func ohRescue(res accountant.Result) (n int, found bool) {
@@ -117,19 +121,50 @@ func TestPingFromReportCarriesTheOneHourTTL(t *testing.T) {
 	}
 }
 
-// accEndNow sets ReadSetsTTL from the keeper's proof and from nothing else.
-func TestReadSetsTTLComesFromTheKeepersProofOnly(t *testing.T) {
-	for _, proven := range []bool{false, true} {
-		c := &capture{savings: newSavingsTracker(), pings: NewPingStore(), provider: string(bschemas.Anthropic), route: "/v1/messages"}
-		c.noteReadSets("http://up", func(p bschemas.ModelProvider, endpoint, route, model string) bool {
-			return proven && p == bschemas.Anthropic && endpoint == "http://up" && route == "/v1/messages" && model == "m"
+// A cold FIRST return (the entry did not outlive 5 minutes) books no rescue even when it is priced as the
+// return after a 1-hour ping: the library credits only tokens the return read. The keeper then switches the
+// route off (keepalive.TestReadSetsTTLIsOffOnceTheColdReturnSwitchedTheRouteOff).
+func TestColdFirstReturnAfterTheOneHourPingBooksNoRescue(t *testing.T) {
+	res := ohRunWith(t, 20*time.Minute, true, true, Usage{CacheWrite: ohPrefix})
+	if _, found := ohRescue(res); found {
+		t.Errorf("a rescue was booked for a cold return: %+v", res.CacheEffects)
+	}
+}
+
+// accEndNow sets ReadSetsTTL from the keeper: on when the keeper says so for this route and model, and
+// when facts.PingTTL says a 1-hour ping served the gap (the proof return). Off otherwise.
+func TestReadSetsTTLComesFromTheKeeperAndThe1HourPing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		oneHour  bool // a 1-hour ping is in the ping store for the thread
+		keeperOn func(pinged bool) bool
+		want     bool
+	}{
+		{"no ping, route unproven", false, func(p bool) bool { return p }, false},
+		{"a 1-hour ping, route unproven", true, func(p bool) bool { return p }, true},
+		{"a 1-hour ping, route off", true, func(bool) bool { return false }, false},
+		{"no ping, route proven", false, func(bool) bool { return true }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pings := NewPingStore()
+			if tc.oneHour {
+				r := okReport()
+				r.Session, r.Thread, r.OneHour, r.Model = "s", "", true, "m"
+				if _, ok := PingSavings(r, pings); !ok {
+					t.Fatal("ping not stored")
+				}
+			}
+			c := &capture{savings: newSavingsTracker(), pings: pings, provider: string(bschemas.Anthropic), route: "/v1/messages"}
+			c.noteReadSets("http://up", func(p bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool {
+				return p == bschemas.Anthropic && endpoint == "http://up" && route == "/v1/messages" && model == "m" && tc.keeperOn(pinged)
+			})
+			c.accBegin(accountant.RequestMeta{RequestID: "r", Session: "s", Model: "m", At: time.Unix(1_700_000_000, 0)}, ohBody(1))
+			c.accEnd(thread.Result{}, ohBody(1), nil)
+			c.accWait()
+			if c.accFacts.Provider.ReadSetsTTL != tc.want {
+				t.Errorf("ReadSetsTTL = %v, want %v", c.accFacts.Provider.ReadSetsTTL, tc.want)
+			}
 		})
-		c.accBegin(accountant.RequestMeta{RequestID: "r", Session: "s", Model: "m", At: time.Unix(1_700_000_000, 0)}, ohBody(1))
-		c.accEnd(thread.Result{}, ohBody(1), nil)
-		c.accWait()
-		if c.accFacts.Provider.ReadSetsTTL != proven {
-			t.Errorf("proven=%v: ReadSetsTTL = %v", proven, c.accFacts.Provider.ReadSetsTTL)
-		}
 	}
 }
 

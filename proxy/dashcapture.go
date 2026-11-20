@@ -185,10 +185,10 @@ type capture struct {
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
 	pings *PingStore
-	// endpoint and readSets tell the accountant whether this route is proven to set the TTL on a read
-	// (Provider.ReadSetsTTL). readSets is the keeper's oneHourGranted; nil = never.
+	// endpoint and readSets tell the accountant whether a read sets the TTL on this route
+	// (Provider.ReadSetsTTL). readSets is the keeper's readSetsTTL; nil = never.
 	endpoint string
-	readSets func(provider bschemas.ModelProvider, endpoint, route, model string) bool
+	readSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
 	accReq   *accountant.Request
 	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
 	// holds its history, so the accountant has no record of it.
@@ -316,7 +316,7 @@ func (c *capture) noteAgentCompaction(v bool) {
 }
 
 // noteReadSets gives the capture the upstream and the keeper's proof, for Provider.ReadSetsTTL. Nil-safe.
-func (c *capture) noteReadSets(endpoint string, f func(provider bschemas.ModelProvider, endpoint, route, model string) bool) {
+func (c *capture) noteReadSets(endpoint string, f func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool) {
 	if c != nil {
 		c.endpoint, c.readSets = endpoint, f
 	}
