@@ -28,21 +28,22 @@ type Opts struct {
 	// pipeline runs, so components see the thread on Ctx.Thread; the result rides on
 	// Trace.Thread. nil leaves every request on the primary thread.
 	//
-	// A host builds it the way the proxy does (proxy/thread.go threadFor). Keep one
-	// thread.Tracker per process, because it holds per-session state:
+	// A host builds it with thread.ResolveSession, the rule the proxy uses too (proxy/thread.go
+	// threadFor). ResolveSession gives the primary thread for an empty session and recovers a
+	// panic. Keep one thread.Tracker per process, because it holds per-session state:
 	//
 	//	orig := body // the request as the agent sent it, saved before the pipeline runs
-	//	agentID := strings.TrimSpace(req.Header.Get("x-claude-code-agent-id"))
-	//	if !thread.ValidHeaderID(agentID) {
-	//		agentID = ""
-	//	}
+	//	agentID, _ := thread.HeaderAgentID(req.Header.Get(thread.AgentHeader))
 	//	opts.ThreadOf = func(session string) thread.Result {
-	//		return tracker.Resolve(tenant+"\x00"+session, agentID, orig, thread.IsAgentCompaction(orig))
+	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, thread.IsAgentCompaction(orig))
+	//		return res
 	//	}
 	//
-	// If Trace.ThreadResolved is false after the call (observe mode, bypass, no message list),
-	// apply returned before it called ThreadOf. Call the same function yourself with
-	// Trace.Session, so the finish side below still has a thread.
+	// Call ThreadOf (and so Resolve) once per request: each call records the request as its
+	// thread's newest turn. If Trace.ThreadResolved is false after the call, apply returned
+	// before it called ThreadOf (no message list, or no message it can use). Then call the same
+	// function yourself with Trace.Session, so the finish side below still has a thread.
+	// Trace.Session is "" in that case, so the result is the primary thread.
 	//
 	// Host contract. Once ThreadOf is set, components key their state by
 	// thread.Key(session, threadID). Make the finish-side calls with the same thread

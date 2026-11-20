@@ -192,6 +192,9 @@ func ValidHeaderID(v string) bool {
 // agentCompaction marks the agent's own compaction request (see the compacting field).
 //
 // A nil tracker, and an empty scope, give the session itself.
+//
+// Each call records the request as its thread's newest turn, so call it once per request. A host
+// calls ResolveSession, which adds the empty-session rule and fails open.
 func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bool) Result {
 	if t == nil || scope == "" {
 		return Result{ID: Primary, Source: SourceSession}

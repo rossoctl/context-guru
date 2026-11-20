@@ -664,7 +664,7 @@ func TestObserveModeRecordsBilledInputUnderTheRequestThread(t *testing.T) {
 		strings.NewReader(summarizableRequest()))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-context-guru-session", "sess-observe-sub")
-	req.Header.Set(agentIDHeader, "sub1")
+	req.Header.Set(thread.AgentHeader, "sub1")
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

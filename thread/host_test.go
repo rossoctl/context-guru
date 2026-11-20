@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -46,12 +45,10 @@ type host struct {
 func (h *host) serve(t *testing.T, header http.Header, body []byte) apply.Trace {
 	t.Helper()
 	orig := body
-	agentID := strings.TrimSpace(header.Get("x-claude-code-agent-id"))
-	if !thread.ValidHeaderID(agentID) {
-		agentID = ""
-	}
+	agentID, _ := thread.HeaderAgentID(header.Get(thread.AgentHeader))
 	threadOf := func(session string) thread.Result {
-		return h.tracker.Resolve("tenant\x00"+session, agentID, orig, thread.IsAgentCompaction(orig))
+		res, _ := h.tracker.ResolveSession("tenant", session, agentID, orig, thread.IsAgentCompaction(orig))
+		return res
 	}
 	res := apply.BodyOpts(context.Background(), h.pipe, h.store, apply.Opts{
 		Provider: bschemas.Anthropic, Body: body, Session: "sess-1", Tenant: "tenant", ThreadOf: threadOf,
@@ -70,7 +67,7 @@ func agentHeader(v string) http.Header {
 
 // TestAnEmbeddingHostGetsTheProxysThreads drives a session through a host built only from exported
 // API: the main thread, a subagent named by its header, an invalid header, the agent's own
-// compaction and the request after it.
+// compaction, the request after it, and a request apply returns early on.
 func TestAnEmbeddingHostGetsTheProxysThreads(t *testing.T) {
 	h := &host{tracker: thread.New(), store: store.NewMemory(store.Options{}), pipe: components.NewPipeline(nil, nil)}
 	compact := "Your task is to create a detailed summary of the conversation so far."
@@ -87,6 +84,9 @@ func TestAnEmbeddingHostGetsTheProxysThreads(t *testing.T) {
 		{"invalid header falls back to prefix continuity", agentHeader("bad id!"), hostBody("task", "a1", "u2", "a3", "u4"), thread.Primary, thread.SourcePrefix, false},
 		{"compaction", nil, hostBody("task", "a1", "u2", "a3", "u4", "a5", compact), thread.Primary, thread.SourcePrefix, false},
 		{"after compaction", nil, hostBody("summary of everything", "continue"), thread.Primary, thread.SourcePrefix, true},
+		// apply returns before it resolves the session, so the host's own fallback call gets an
+		// empty session. The header must not name a thread then: the proxy gives the session.
+		{"no message list, with a header", agentHeader("agentS"), []byte(`{"model":"claude-sonnet-5","input":"hi"}`), thread.Primary, thread.SourceSession, false},
 	}
 	for _, s := range steps {
 		tr := h.serve(t, s.header, s.body)

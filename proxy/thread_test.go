@@ -183,7 +183,7 @@ func TestThreadForFallsBackOnAnUnusableHeader(t *testing.T) {
 	req := func(agentID string) *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "/x", nil)
 		if agentID != "\x01unset" {
-			r.Header.Set(agentIDHeader, agentID)
+			r.Header.Set(thread.AgentHeader, agentID)
 		}
 		return r
 	}
@@ -236,7 +236,7 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("x-context-guru-session", "sess-th")
 				if withHeader && agentID != "" {
-					req.Header.Set(agentIDHeader, agentID)
+					req.Header.Set(thread.AgentHeader, agentID)
 				}
 				resp, err := srv.Client().Do(req)
 				if err != nil {
