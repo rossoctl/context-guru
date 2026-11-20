@@ -146,11 +146,11 @@ type CacheConfig struct {
 	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
 	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
 	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
-	// KeepAliveOneHourOnWait turns on the 1-hour-on-wait ping (#1243). With it, a thread on the
-	// 5-minute tier that waits for a person, a teammate, background work or an unknown cause gets ONE
+	// KeepAliveOneHourOnWait turns on the 1-hour-on-wait ping (#1243), MAIN AGENT ONLY. With it, the main
+	// thread on the 5-minute tier, when it waits for a person, a teammate, background work or an unknown cause gets ONE
 	// ping, at the usual first-ping time, with every cache marker relabelled to 1 hour, and no further
 	// ping on that wait. On the gateway measured on 2026-11-19 the switch is a read, not a rewrite,
-	// so the entry lives 1 hour for the price of one read. A tool wait and a subagent wait behave as
+	// so the entry lives 1 hour for the price of one read. A tool wait and EVERY subagent thread behave as
 	// without it. The keeper checks the first 1-hour ping's usage and stops the switch on a route where
 	// it costs a rewrite. It needs the wait plan (WaitPlan), which the proxy turns on by default.
 	KeepAliveOneHourOnWait bool `yaml:"keepalive_one_hour_on_wait"`

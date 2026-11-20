@@ -30,8 +30,11 @@ func TestLongWaitGroupsTheWaitCauses(t *testing.T) {
 		{waitcause.WaitingTeammate, false, true},
 		{waitcause.WaitingBackground, false, true},
 		{waitcause.WaitingUnknown, false, true},
-		{waitcause.WaitingBackground, true, true},
-		{waitcause.WaitingHuman, true, false}, // a subagent's "human" wait is for its main agent
+		// MAIN AGENT ONLY: a subagent thread is never long, whatever its cause.
+		{waitcause.WaitingBackground, true, false},
+		{waitcause.WaitingTeammate, true, false},
+		{waitcause.WaitingUnknown, true, false},
+		{waitcause.WaitingHuman, true, false},
 		{waitcause.WaitingOwnTool, false, false},
 		{waitcause.WaitingOwnTool, true, false},
 		{waitcause.WaitingRetry, false, false},
@@ -113,18 +116,29 @@ func TestShortWaitIsPlainAuto(t *testing.T) {
 	}
 }
 
-// A subagent's wait for its main agent is short. A subagent that waits for background work is long.
-func TestSubagentWaits(t *testing.T) {
-	k, fd, clock := testKeeper(t)
-	sub := Key{Tenant: "t1", Session: "sess-1", Thread: "a:x"}
-	start := clock.now()
-	recordWait(k, onWaitPolicy(), sub, start, "end_turn", nil)
-	if n := k.Sweep(start.Add(240 * time.Second)); n != 1 {
-		t.Fatalf("no ping (%d)", n)
-	}
-	waitPings(t, k, 1)
-	if gjson.GetBytes(fd.sent[0].Body, "system.0.cache_control.ttl").Exists() {
-		t.Error("a subagent's wait for its main agent got a 1-hour ping")
+// MAIN AGENT ONLY: a subagent thread on a long wait (here background work, then a person) gets auto's
+// normal 5-minute pings, and its count is auto's.
+func TestSubagentLongWaitsAreAutoNotOneHour(t *testing.T) {
+	for _, tc := range []struct {
+		name, stop string
+		names      []string
+	}{{"a person", "end_turn", nil}, {"background work", "tool_use", []string{"BashOutput", "TaskOutput"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, fd, clock := testKeeper(t)
+			sub := Key{Tenant: "t1", Session: "sess-1", Thread: "a:x"}
+			start := clock.now()
+			recordWait(k, onWaitPolicy(), sub, start, tc.stop, tc.names)
+			if n := k.Sweep(start.Add(240 * time.Second)); n != 1 {
+				t.Fatalf("no ping (%d)", n)
+			}
+			waitPings(t, k, 1)
+			if gjson.GetBytes(fd.sent[0].Body, "system.0.cache_control.ttl").Exists() {
+				t.Errorf("a subagent's ping was relabelled: %s", fd.sent[0].Body)
+			}
+			if n := k.Sweep(start.Add(480 * time.Second)); n != 1 {
+				t.Errorf("a subagent does not get auto's second 5-minute ping (%d)", n)
+			}
+		})
 	}
 }
 
@@ -188,5 +202,30 @@ func TestFreeSwitchKeepsTheRouteOn(t *testing.T) {
 		if !apply.AllBreakpointsAskExtendedTTL(fd.sent[len(fd.sent)-1].Body) {
 			t.Fatalf("wait %d: not a 1-hour ping", i+1)
 		}
+	}
+}
+
+// A free 1-hour ping READS and writes nothing at 1h. That is not a downgrade, so it must not lower the
+// thread's remembered tier: a downgrade can only be judged on a request that wrote tokens.
+func TestFreeOneHourPingDoesNotLowerTheThreadsTier(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 0, CacheWrite1h: 0, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.mu.Lock()
+	before, hadBefore := k.tier1h[sess1.id()]
+	k.mu.Unlock()
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	k.mu.Lock()
+	after, hadAfter := k.tier1h[sess1.id()]
+	k.mu.Unlock()
+	if before != after || hadBefore != hadAfter {
+		t.Errorf("the ping changed the remembered tier: %v/%v -> %v/%v", before, hadBefore, after, hadAfter)
+	}
+	if e, ok := k.Entry(sess1); !ok || !e.TTL1h {
+		t.Errorf("a read with 1h markers is a free switch, not a downgrade: entry %+v found %v", e, ok)
 	}
 }

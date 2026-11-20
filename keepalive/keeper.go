@@ -996,8 +996,9 @@ func (k *Keeper) Record(r Record) {
 			pings = max(pings, pol.WaitPings(planBaseWait, IsSubagentThread(threadID)))
 		}
 		pol.MaxPings = pings
-		// 1-hour-on-wait (#1243): on a LONG wait the one ping carries every marker at 1 hour, and it is
-		// the only ping of the wait (no 59-minute ping). A short wait keeps the plan above, as auto.
+		// 1-hour-on-wait (#1243), MAIN AGENT ONLY: on a LONG wait the one ping carries every marker at 1
+		// hour, and it is the only ping of the wait (no 59-minute ping). A short wait and every subagent
+		// thread keep the plan above, as auto.
 		// A route where the switch was seen to cost a rewrite is skipped.
 		if pol.OneHourOnWait && LongWait(wait, IsSubagentThread(threadID)) && !k.oneHourBlocked(provider, r.Endpoint, route) {
 			pol.MaxPings = 1

@@ -916,7 +916,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		} else if c.rounds <= 1 {
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
-				res = c.accOneHourRescue(res, usage)
 				e.SetAccountant(res)
 				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
 					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})

@@ -169,7 +169,7 @@ type Policy struct {
 	// behavior before #858: MaxPings for every wait. The zero Policy has it off, so a host that builds a
 	// Policy by hand keeps the old behavior until it asks.
 	WaitPlan bool
-	// OneHourOnWait turns on the 1-hour-on-wait ping (#1243): for a thread on the 5-minute tier whose
+	// OneHourOnWait turns on the 1-hour-on-wait ping (#1243), MAIN AGENT ONLY: for the main thread on the 5-minute tier whose
 	// wait is long (LongWait), the first ping carries every cache marker at 1 hour and is the only ping
 	// of that wait. Needs WaitPlan.
 	OneHourOnWait bool
