@@ -147,9 +147,11 @@ func (im *InferenceMetrics) Observe(e *dash.Event, elapsed time.Duration) {
 
 	if e.CostUSD > 0 {
 		im.cost.Add(ctx, e.CostUSD, mp)
-		if e.PriceEstimated {
-			im.estimatedCost.Add(ctx, e.CostUSD, mp)
-		}
+		// This proxy never prices from a fallback rate: a model with no rate gets no CostUSD at all
+		// (Event.priceCost), and the cache tiers use the provider's own multiples. So the fallback part
+		// is always 0. Adding 0 keeps the series, so the panel reads 0 and not "no data" (#1248).
+		// Do not feed it PriceEstimated: that marks the SAVING (penalty_unknown), not the rate.
+		im.estimatedCost.Add(ctx, 0, mp)
 	}
 
 	if elapsed > 0 {

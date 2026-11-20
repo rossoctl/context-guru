@@ -650,8 +650,8 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Output tokens per streamed request",
-      "description": "Not a speed. Output tokens divided by streamed requests, by model. A true tokens per second needs the time spent writing, which is not recorded.",
+      "title": "Output tokens per request",
+      "description": "Not a speed. Output tokens divided by successful requests, streamed or not, by model. The token counter has no stream label, and a failed request bills no output (#1248). A true tokens per second needs the time spent writing, which is not recorded.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -664,7 +664,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (model)(rate(llm_inference_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\",tier=\"output\"}[$__rate_interval])) / clamp_min(sum by (model) (rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",stream=\"true\"}[$__rate_interval])), 1e-9)",
+          "expr": "sum by (model)(rate(llm_inference_tokens_total{proxy=~\"$proxy\", machine=~\"$machine\",tier=\"output\"}[$__rate_interval])) / clamp_min(sum by (model) (rate(llm_inference_requests_total{proxy=~\"$proxy\", machine=~\"$machine\",status_class=\"2xx\"}[$__rate_interval])), 1e-9)",
           "legendFormat": "{{model}}",
           "refId": "A",
           "datasource": {
@@ -850,7 +850,7 @@
       "id": 13,
       "type": "stat",
       "title": "Spend priced from a fallback rate",
-      "description": "Share of spend where the model had no rate of its own. A high value means the money panels are a guess.",
+      "description": "Share of spend priced from a fallback rate. A high value means the money panels are a guess. context-guru has no fallback rates (a model with no rate is left unpriced), so its proxies read 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"

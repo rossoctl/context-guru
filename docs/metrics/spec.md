@@ -175,7 +175,7 @@ Three needs drive these requirements.
 - R35. `saved` and `added` are two counters. A change can cost more than it saves. Net is `saved - added` in a query. The cost of the compaction model's own calls is part of `added`, booked under the component that made the call (R45).
 - R36. A request the `accountant` cannot price adds nothing to `saved` or `added`. It adds 1 to a counter of unpriced requests, by reason.
 
-- R47. Each proxy keeps its own rate table. The common module takes a `Pricer` from the proxy and shares no rates. Two proxies can price the same tokens differently. A `usd` figure is a figure of one proxy, and the `proxy` label says which. A comparison of proxies by money (A6) must state this, and a comparison by tokens needs no caveat. A price from a fallback rate is counted in `llm_inference_estimated_cost_usd_total` and `llm_savings_estimated_total`.
+- R47. Each proxy keeps its own rate table. The common module takes a `Pricer` from the proxy and shares no rates. Two proxies can price the same tokens differently. A `usd` figure is a figure of one proxy, and the `proxy` label says which. A comparison of proxies by money (A6) must state this, and a comparison by tokens needs no caveat. If a proxy prices a tier from a fallback rate, it counts the dollars of that tier, and only those, in `llm_inference_estimated_cost_usd_total`. A proxy without fallback rates leaves a model with no rate unpriced, and this counter stays at 0. context-guru is such a proxy. `llm_savings_estimated_total` counts requests whose saving is marked estimated (section 5.2). That mark is about the saving, not about the rate.
 - R45. The cost of an LLM call that a component makes itself, such as compaction, is booked as `added` (cost and tokens) under that component's `component` label. There is no separate counter, so net is always `saved - added`. **Open:** confirm that the `accountant` sees these calls (open question 4). If it does not, the proxy must pass them to the `accountant` as a `spend` change.
 
 ### 3.5 Convention
@@ -267,8 +267,8 @@ Labels in this section:
 | `llm_inference_ttfb_seconds` | histogram | s | `model`, `provider` | Time to first byte for streamed answers. |
 | `llm_inference_added_seconds` | histogram | s | `model` | Time the proxy added on top of the upstream time. |
 | `llm_inference_tokens_total` | counter | 1 | `model`, `provider`, `tier` | Provider-billed tokens. `tier` is from R34: read input (`cache_read`), write input (`cache_write_5m`, `cache_write_1h`), uncached `input`, and `output`. |
-| `llm_inference_cost_usd_total` | counter | none | `model`, `provider`, `tier` | Provider cost at request time. |
-| `llm_inference_estimated_cost_usd_total` | counter | none | `model`, `provider` | Part of the cost priced from a fallback rate. Sub-set of the line above. |
+| `llm_inference_cost_usd_total` | counter | none | `model`, `provider` | Provider cost at request time. For cost by tier, price `llm_inference_tokens_total`. |
+| `llm_inference_estimated_cost_usd_total` | counter | none | `model`, `provider` | Part of the cost priced from a fallback rate (R47). Sub-set of the line above. It is 0 for a proxy without fallback rates. |
 
 The cache read ratio is not exported. Query it: `cache_read / (cache_read + cache_write_* + input)` on `llm_inference_tokens_total`.
 

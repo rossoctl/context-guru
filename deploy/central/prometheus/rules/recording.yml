@@ -32,7 +32,7 @@ groups:
           /
           clamp_min(sum by (proxy) (rate(llm_savings_requests_total[5m])), 1e-9)
 
-      # Share of the savings figure that came from a fallback rate (question A7).
+      # Share of requests whose saving is marked estimated (question A7, R47).
       - record: proxy:llm_savings_estimated_ratio:rate5m
         expr: |
           sum by (proxy) (rate(llm_savings_estimated_total[5m]))
