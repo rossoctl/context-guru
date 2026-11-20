@@ -159,7 +159,11 @@ func Main(hooks Hooks) {
 		dashRetain = flag.Duration("dashboard-retention", envDuration("DASHBOARD_RETENTION", 7*24*time.Hour),
 			"drop dashboard rows older than this (0 = no age limit)")
 		dashMaxBytes = flag.Int64("dashboard-max-bytes", int64(envInt("DASHBOARD_MAX_BYTES", 512<<20)),
-			"cap the dashboard database size, dropping oldest rows first (0 = no size limit)")
+			"cap the dashboard database size, deleting whole idle sessions, oldest last activity first (0 = no size limit); sessions with a request in the last hour are kept unless one alone is over the limit; see --dashboard-max-bytes-floor")
+		dashMaxBytesFloor = flag.Int64("dashboard-max-bytes-floor", int64(envInt("DASHBOARD_MAX_BYTES_FLOOR", 0)),
+			"the size rule never makes the dashboard database smaller than this (0 = a quarter of --dashboard-max-bytes)")
+		dashBackup = flag.Bool("dashboard-backup", envBool("DASHBOARD_BACKUP", true),
+			"before the age, size or quota rule deletes rows, keep two copies of the dashboard database, <db>.bak and <db>.bak.1 (a new copy only when the newest is older than 24h); the copies take up to twice the database size on disk and hold stored data, content included")
 		// Content capture is opt-IN, not opt-out. The before/after diff is the dashboard's
 		// best view, but it is the one path that writes ARBITRARY agent output to disk, and
 		// arbitrary output cannot be allowlisted the way headers and config keys are — it
@@ -412,20 +416,22 @@ func Main(hooks Hooks) {
 	var rec *dash.Recorder
 	if *dashOn {
 		opts := dash.Options{
-			DBPath:           *dashDB,
-			RetentionAge:     *dashRetain,
-			RetentionBytes:   *dashMaxBytes,
-			CaptureContent:   *dashContent,
-			ContentCap:       *dashContentCap,
-			QueueSize:        *dashQueue,
-			LifecycleSignals: *dashLifecycle,
-			TrustedCIDRs:     splitComma(*dashCIDRs),
+			DBPath:              *dashDB,
+			RetentionAge:        *dashRetain,
+			RetentionBytes:      *dashMaxBytes,
+			RetentionFloorBytes: *dashMaxBytesFloor,
+			CaptureContent:      *dashContent,
+			ContentCap:          *dashContentCap,
+			QueueSize:           *dashQueue,
+			LifecycleSignals:    *dashLifecycle,
+			TrustedCIDRs:        splitComma(*dashCIDRs),
 			// Prices rows booked at $0 before the price map finished its background load (#920).
 			Prices: priceResolver(windows),
 
 			DiskHighWatermark: *dashDiskHigh,
 			DiskLowWatermark:  *dashDiskLow,
 			MinKeepBytes:      *dashMinKeep,
+			DisableBackup:     !*dashBackup,
 			MaxRowsPerTenant:  *dashMaxRowsPerTenant,
 
 			Remote: remote,

@@ -21,6 +21,11 @@ Pi installs a package from a local path. Clone this repository, then:
 pi install /path/to/context-guru/pi-package
 ```
 
+Install from one clone only. A `pi install` from a second clone or worktree adds a second entry to
+`packages` in `~/.pi/agent/settings.json`; it does not replace the first one. If two copies are
+installed, only the first one runs, and Pi shows a warning that names both folders. To switch
+clones, remove the old entry from `packages`.
+
 Start Pi and run:
 
 ```text
@@ -56,7 +61,8 @@ free port and moves both routes to it. It does not refuse because of its own old
 ## An existing baseUrl (a company gateway)
 
 If `models.json` already sends `anthropic` or `openai` to another endpoint, setup asks one question
-with three answers. Only a provider with its own `baseUrl` is affected. The other provider is routed
+with three answers. After you pick Chain or Replace, it shows what that answer changes and asks for
+your yes. Only a provider with its own `baseUrl` is affected. The other provider is routed
 as usual.
 
 | Answer | Route | Use it when |
@@ -91,6 +97,51 @@ From a shell, `pi_plugin.py setup --plan` prints `consent_question_chain` with `
 and `consent_question_replace` with `confirm_command_replace`. Setup with a conflict and no
 `--on-conflict chain|replace` refuses and changes nothing.
 
+### A gateway on Bedrock: `output_config` is refused
+
+A LiteLLM gateway with a Bedrock model group can refuse Pi's newer built-in Claude models with HTTP 400:
+
+```text
+litellm.BadRequestError: BedrockException - {"message":"messages.2.output_config: Extra inputs are not permitted"}
+```
+
+- **Why.** Pi 1.5.2 sets `compat.supportsMidConvoEffort: true` on 6 built-in models: `claude-opus-5`,
+  `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1` and
+  `claude-fable-5-2`. With it, and with thinking on, Pi puts the effort setting (`output_config`) on
+  messages inside `messages[]`. The Anthropic API accepts that. Bedrock does not. context-guru does
+  not add the field; it forwards it unchanged.
+- **Fix.** Turn the flag off for the models you use, in the `anthropic` entry of
+  `~/.pi/agent/models.json`:
+
+  ```json
+  {
+    "providers": {
+      "anthropic": {
+        "modelOverrides": {
+          "claude-opus-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-opus-5-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-sonnet-5-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-haiku-5-5": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-fable-5-1": { "compat": { "supportsMidConvoEffort": false } },
+          "claude-fable-5-2": { "compat": { "supportsMidConvoEffort": false } }
+        }
+      }
+    }
+  }
+  ```
+
+  Keep the other keys of that entry (`baseUrl`, `apiKey`, `headers`) as they are. Setup changes only
+  `baseUrl`, and uninstall puts back only `baseUrl`, so the overrides stay.
+- **The cost.** With the flag on, a change of the thinking level keeps the prompt cache. With it off,
+  a change of the thinking level in a session rewrites the cache for that turn.
+- **Then restart Pi.** In the test for #1147, a Pi that was already running kept failing after
+  `/reload`.
+- **Tested on Bedrock:** `claude-opus-5` only. The other 5 models use the same Pi code, so they are
+  expected to fail the same way. Pi's other mid-conversation flags (`supportsMidConvoSystemMessages`,
+  `supportsMidConvoToolChanges`) are not checked on Bedrock yet.
+
+Setup does not write this override: it is a change to your own model settings, so you make it.
+
 ## Commands
 
 | Command | What it does |
@@ -107,9 +158,11 @@ mode (`pi -p`) there is no dialog, so these commands change nothing.
 The presets and the cache strategies are the same as in the Claude Code plugin. See
 [docs/reference/presets.md](../docs/reference/presets.md).
 
-The default preset is `off`: the proxy trims nothing. The default cache strategy is `auto`: the proxy
-sends small keep-alive requests while you are idle, which uses some of your own quota. Choose `none`
-to turn the pings off.
+The default preset is `off`: the proxy trims nothing. Setup asks for the cache strategy `auto`: the
+proxy sends small keep-alive requests while you are idle, which uses some of your own quota. If the
+proxy does not offer `auto` for Pi, setup uses `none` (no pings) and says so. Proxy v0.7.3 offers
+only `none` for Pi, because its ping strategies serve Anthropic only. A strategy you name with
+`--cache-strategy` is never replaced: setup refuses it if the proxy does not offer it.
 
 One cache strategy drives both providers. The package keeps no list of strategies. It asks the proxy
 (`context-guru-proxy strategies`) for the names and the texts, and offers the strategies that serve both
@@ -173,14 +226,19 @@ is installed and at least one Pi model goes to the proxy (the session's model or
 1. It sends `GET http://127.0.0.1:<port>/healthz`, with a 5-second limit. This is a local call. It
    makes no model call and uses no tokens.
 2. If the proxy does not answer, it restarts the service once: `launchctl kickstart -k` on macOS
-   (it loads the LaunchAgent first if it is not loaded), `systemctl --user restart` on Linux. It
-   restarts only a service that setup wrote. Before it restarts, it checks `/healthz` once more with
-   the same 5-second limit, so a proxy that is slow but alive is not restarted.
+   (or, if the LaunchAgent is not loaded, `launchctl bootstrap`, which starts it), `systemctl --user
+   restart` on Linux. It restarts only a service that setup wrote. Before it restarts, it checks
+   `/healthz` once more with the same 5-second limit, so a proxy that is slow but alive is not
+   restarted.
 3. It checks `/healthz` again, with the same 5-second limit.
 4. If the proxy still does not answer, it shows one warning. The warning says the proxy is down and
    why: the restart did not help, the service file is missing, the service file is not ours, or the
    platform has no user service. It tells you to run `/context-guru status`. It names the reset
    command only when that file exists.
+
+When a preset, cache strategy or update cannot start the proxy, the command shows an error. The error
+says the proxy is off and names the log. The log has the error from `launchctl` or `systemctl`, also
+for a failed restart at session start.
 
 The check runs in the background. The session does not wait for it. It runs once per session start
 and never loops. When the session ends, Pi stops that session's check, the restart included. So

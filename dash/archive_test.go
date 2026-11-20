@@ -431,3 +431,27 @@ func TestArchiveFormatIsPlainGzippedJSONL(t *testing.T) {
 		t.Error("DecodeArchive accepted non-gzip input")
 	}
 }
+
+// The size rule MIGRATES like the disk and quota rules: with cold storage configured, a session
+// leaves local disk only after it is uploaded (#1204).
+func TestSizeRuleArchivesInsteadOfDeleting(t *testing.T) {
+	rec, m := archiveRecorder(t, Options{
+		CaptureContent: true, ContentCap: 4096, RetentionAge: -1, RetentionBytes: 1,
+		RetentionFloorBytes: 1, DisableBackup: true,
+	})
+	for i := 0; i < 8; i++ {
+		seedSessionWithContent(t, rec.db, "t1",
+			"s-"+string(rune('a'+i)), 2, time.Duration(100-i)*time.Hour)
+	}
+	before := countRows(t, rec.db, "requests")
+	rec.janitorPass()
+	if countRows(t, rec.db, "requests") >= before {
+		t.Fatal("the size rule evicted nothing")
+	}
+	if m.puts == 0 {
+		t.Fatal("the size rule deleted sessions WITHOUT archiving them")
+	}
+	if _, err := rec.db.ArchivedSessionByID("s-a"); err != nil {
+		t.Errorf("the oldest session was not archived: %v", err)
+	}
+}

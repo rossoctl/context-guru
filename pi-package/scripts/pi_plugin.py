@@ -132,8 +132,8 @@ def facts(**values):
 START_CHECK_SECONDS = 5
 
 # The longest a command waits for another one's restart lock. A restart usually holds it for a few
-# seconds. Slow service commands can make it hold the lock for longer (the launchd path has up to
-# 90 s of command time limits, and setup holds it across start_service). A caller that waits 40 s
+# seconds. Slow service commands can make it hold the lock for longer (the launchd path has about
+# 2 minutes of command time limits in the worst case, and setup holds it across start_service). A caller that waits 40 s
 # reports `busy` and still finishes inside the extension's 60 s limit.
 LOCK_WAIT_SECONDS = 40
 
@@ -380,6 +380,19 @@ def resolve_strategy(name, executable):
                         f"{', '.join(r['name'] for r in offered)})", "unknown_strategy")
 
 
+def pick_strategy(name, executable, named_by_person):
+    """resolve_strategy, plus a note. A name the person gave is refused as before. A name setup picked
+    itself (the default, or the recorded one) that this proxy does not offer for Pi becomes `none`, so
+    setup does not refuse its own default (#1148). The note says why. Every other error (an old proxy,
+    a probe that failed) is refused as before."""
+    try:
+        return (*resolve_strategy(name, executable), {})
+    except StrategyError as error:
+        if named_by_person or error.reason != "unknown_strategy":
+            raise
+        return NONE_STRATEGY, None, {"cache_strategy_note": f"cache strategy {name} is not offered for Pi, so setup uses none"}
+
+
 def install_release_binary(version=None):
     """Download the release for this platform, check it against the release's SHA-256 list, and
     install it into the private state directory. A checksum problem is a hard stop: the binary
@@ -553,6 +566,46 @@ def _systemd_quote(value, exec_line=True):
     return '"' + value + '"'
 
 
+def log_service_error(error):
+    """Append a failed service command and its stderr to the proxy log, which the failure facts name."""
+    stderr = (error.stderr or b"").decode("utf-8", "replace").strip()
+    try:
+        with open(state_dir() / "proxy.log", "a", encoding="utf-8") as handle:
+            handle.write(f"context-guru-pi: {error.cmd[0]} {error.cmd[1 if error.cmd[0] == 'launchctl' else 2]} "
+                         f"failed (exit {error.returncode}): {stderr}\n")
+    except OSError:
+        pass  # The failed start is still reported; only its detail is lost.
+
+
+def wait_launchd_gone(target, seconds=5.0):
+    """`launchctl bootout` returns before launchd removes the job (#1146). Wait until it is gone."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            if subprocess.run(["launchctl", "print", target], capture_output=True, timeout=seconds).returncode:
+                return
+        except subprocess.TimeoutExpired:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.1)
+
+
+def launchd_bootstrap(domain, plist):
+    """Load the plist. RunAtLoad starts the proxy, so no kickstart follows: a `kickstart -k` here kills
+    the new process, and launchd then waits its 10 s throttle. Error 5 means the old job is still being
+    removed; try again."""
+    for attempt in range(3):
+        try:
+            subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
+                           timeout=30)
+            return
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 5 or attempt == 2:
+                raise
+            time.sleep(0.5)
+
+
 def start_service(executable, port, upstreams=None):
     """Install and start the user service. Returns True once /healthz answers."""
     root = state_dir()
@@ -575,9 +628,13 @@ def start_service(executable, port, upstreams=None):
         unit.chmod(0o600)
         try:
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True)
-            subprocess.run(["systemctl", "--user", "enable", "--now", unit.name], check=True, capture_output=True)
+            # `restart` starts a stopped unit too; `enable --now` before it would start the proxy twice.
+            subprocess.run(["systemctl", "--user", "enable", unit.name], check=True, capture_output=True)
             subprocess.run(["systemctl", "--user", "restart", unit.name], check=True, capture_output=True)
-        except (OSError, subprocess.CalledProcessError):
+        except subprocess.CalledProcessError as error:
+            log_service_error(error)
+            return False
+        except OSError:
             return False
     elif kind == "launchd":
         plist = launchd_plist()
@@ -592,10 +649,12 @@ def start_service(executable, port, upstreams=None):
         domain = f"gui/{os.getuid()}"
         subprocess.run(["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"], capture_output=True)
         try:
-            subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True)
-            subprocess.run(["launchctl", "kickstart", "-k", f"{domain}/{LAUNCHD_LABEL}"], check=True,
-                           capture_output=True)
-        except (OSError, subprocess.CalledProcessError):
+            wait_launchd_gone(f"{domain}/{LAUNCHD_LABEL}")
+            launchd_bootstrap(domain, plist)
+        except subprocess.CalledProcessError as error:
+            log_service_error(error)
+            return False
+        except (OSError, subprocess.TimeoutExpired):
             return False
     else:
         return False
@@ -626,12 +685,14 @@ def restart_service():
             target = f"{domain}/{LAUNCHD_LABEL}"
             kick = ["launchctl", "kickstart", "-k", target]
             if subprocess.run(kick, capture_output=True, timeout=30).returncode != 0:
-                # Not loaded (a bootout, or a failed login start): load the plist, then start it.
-                subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
-                               timeout=30)
-                subprocess.run(kick, check=True, capture_output=True, timeout=30)
+                # Not loaded (a bootout, or a failed login start): loading the plist starts it.
+                wait_launchd_gone(target)
+                launchd_bootstrap(domain, plist)
             return "restarted"
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except subprocess.CalledProcessError as error:
+        log_service_error(error)
+        return "failed"
+    except (OSError, subprocess.TimeoutExpired):
         return "failed"
     return "unsupported"
 
@@ -650,6 +711,8 @@ def stop_service():
         if not plist_owned(plist):
             return "not_owned"
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], capture_output=True)
+        # Wait, or a setup right after this finds the old proxy still on the port and picks another.
+        wait_launchd_gone(f"gui/{os.getuid()}/{LAUNCHD_LABEL}")
         plist.unlink()
         return "stopped"
     return "gone"
@@ -673,6 +736,7 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
     """`upstreams`: {provider: chained upstream}. `replaced`: {provider: the baseUrl that replace
     mode stops using}. `row`: the proxy's table row of the strategy (None for `none`)."""
     upstreams, replaced = upstreams or {}, replaced or {}
+    row = row or {}
 
     def route(p):
         text = f"{NAMES[p]} at {models_route.base_url(port, p)}, forwarding to "
@@ -692,7 +756,7 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
                      f"key or headers go to {', '.join(UPSTREAMS[p] for p in replaced)} instead.")
     if upstreams or replaced:
         question += " Uninstall puts the old baseUrl back."
-    if row and row["spends"]:
+    if row.get("spends"):
         chained = " and ".join(NAMES[p] for p in PROVIDERS if p in upstreams)
         spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
                   if upstreams else "using your own quota on each provider")
@@ -707,6 +771,9 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
                          "standard auth headers (Authorization, x-api-key), not those headers, so the "
                          f"endpoint may refuse it and keep-alive may stop for {names}. If so, run "
                          "/context-guru cache-strategy none.")
+    if row.get("unchecked"):
+        question += (f" If the proxy that setup downloads does not offer {strategy} for Pi, setup uses none, "
+                     "which sends no keep-alive requests.")
     return question
 
 
@@ -738,7 +805,9 @@ def setup(args):
     # port, and the old URLs must still count as ours, not as a foreign gateway.
     earlier = own_urls(record)
     port = choose_port(record)
+    named = bool(args.cache_strategy)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
+    note = {}
     preset = record.get("preset") or DEFAULT_PRESET
     named_binary = os.environ.get("CONTEXT_GURU_BIN")
     executable = find_binary()
@@ -755,9 +824,9 @@ def setup(args):
         # No binary yet: setup downloads the latest release, which has the table. The name is checked
         # again below, once that binary exists.
         if executable or strategy == NONE_STRATEGY:
-            strategy, row = resolve_strategy(strategy, executable)
+            strategy, row, note = pick_strategy(strategy, executable, named)
         elif STRATEGY_NAME.match(strategy):
-            row = {"spends": True, "desc": ""}
+            row = {"spends": True, "desc": "", "unchecked": not named}
         else:
             raise StrategyError(f"cache strategy {strategy!r} is not a valid name", "unknown_strategy")
     except StrategyError as error:
@@ -792,9 +861,9 @@ def setup(args):
                          confirm_command_replace=confirm_command("replace", extra))
             facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
                   existing_base_url=clash, conflicts=",".join(sorted(clash)), port=port, preset=preset,
-                  cache_strategy=strategy, binary=executable or "download", **pairs, **hatch)
+                  cache_strategy=strategy, binary=executable or "download", **note, **pairs, **hatch)
             return 0
-        facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy,
+        facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy, **note,
               service=service_kind() or "unsupported", already_routed=str(
                   all(models_route.is_routed(models_path(), port, p) for p in PROVIDERS)).lower(),
               binary=executable or "download", consent_question=consent_question(port, strategy, upstreams, row=row) + uses)
@@ -827,16 +896,29 @@ def setup(args):
         facts(result="error", reason="config_conflict", config=proxy_config(),
               detail=f"refusing to overwrite a proxy config we did not write: {proxy_config()}")
         return 2
+    downloaded = False
     if not executable:
         try:
             executable, version = install_release_binary()
+            downloaded = True
             facts(binary="installed", binary_version=version, binary_path=executable)
         except Exception as error:
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
+
+    def drop_download():
+        """A setup that stops under the lock and before the start leaves no binary behind: the next
+        setup would use it, even when a newer release exists (#1157). After a failed start the binary
+        stays, because the service names it."""
+        if downloaded:
+            managed_binary().unlink(missing_ok=True)
+            facts(binary="removed")
+
     try:
-        strategy, _ = resolve_strategy(strategy, executable)
+        strategy, _, more = pick_strategy(strategy, executable, named)
+        note.update(more)
     except StrategyError as error:
+        drop_download()
         facts(result="refused", reason=error.reason, detail=error)
         return 2
     # The config, the start and the record happen under the restart lock: a session-start restart
@@ -844,6 +926,7 @@ def setup(args):
     try:
         lock = restart_lock()
     except LockBusy as error:
+        # The binary stays: the setup that holds the lock may have downloaded the same file.
         facts(result="error", reason="busy", detail=error)
         return 2
     with lock:
@@ -853,6 +936,7 @@ def setup(args):
         try:
             write_proxy_config(preset, strategy, upstreams)
         except Exception as error:
+            drop_download()
             facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
             return 2
         # Proxy first, routing second: a route written while nothing answers makes every request fail.
@@ -870,7 +954,7 @@ def setup(args):
     except Exception as error:
         facts(result="error", reason="routing_write_failed", detail=error, proxy_running="true")
         return 1
-    facts(result="routed", port=port, models=models_path(), preset=preset, cache_strategy=strategy,
+    facts(result="routed", port=port, models=models_path(), preset=preset, cache_strategy=strategy, **note,
           routes=routes_text(upstreams), dashboard=f"http://127.0.0.1:{port}/dashboard/", reset_hatch=hatch)
     return 0
 
@@ -1047,6 +1131,8 @@ def configure(args):
     extra = {}
     if restarted and preset == "ultrahigh":
         extra["probe"] = ask_defer_probe(int(record["port"]))
+    if not restarted:
+        extra["log"] = state_dir() / "proxy.log"
     facts(result="configured" if restarted else "not_applied", preset=preset, cache_strategy=strategy,
           proxy_restarted=str(restarted).lower(), **extra)
     return 0 if restarted else 1
@@ -1109,8 +1195,11 @@ def update(args):
         # Re-render with the NEW binary: it decides whether the config names the strategy.
         config = rerender_config(record, executable)
     restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
-    facts(result="updated", version=version, config=config, restart="completed" if restarted else "failed")
-    return 0 if restarted else 1
+    if not restarted:
+        facts(result="updated", version=version, config=config, restart="failed", log=state_dir() / "proxy.log")
+        return 1
+    facts(result="updated", version=version, config=config, restart="completed")
+    return 0
 
 
 def uninstall(args):

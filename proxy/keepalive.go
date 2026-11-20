@@ -313,7 +313,7 @@ func (k *keeper) LiveSessionKeys() []string {
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
-	_ = k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK)
+	_ = k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK, nil)
 }
 
 // recordTouch is record with the liveness-clock alias apply derived from the ARRIVING request
@@ -323,9 +323,13 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 //
 // It returns the ping plan the keeper built for the wait this response starts (#1198), or nil when
 // none was built (the keep-alive is off for the request, or a gate refused it first).
+//
+// open, when non-nil, are the open-task counts of this turn's own body (the early scan, earlyscan.go). The
+// same counts decide the windows here and the plan in Record, so a turn that starts background work gets the
+// background count, the background floor and no windows together (#1225, #1227).
 func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
-	u Usage, usageOK bool) *keepalive.PlanInForce {
+	u Usage, usageOK bool, open *keepalive.TaskCounts) *keepalive.PlanInForce {
 	if k == nil || tn == nil {
 		return nil
 	}
@@ -387,13 +391,61 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		}
 		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
 		// cause of the response that ended this turn.
-		ignoreWindows := false
+		// The body reading joins only where the per-wait plan changes the count (the 5-minute tier, not
+		// OpenAI, Idle under 300 s: Record's own guard), for the windows as for the plan (#1227). Elsewhere
+		// the tracker-only cause decides, as before.
+		account := pol
+		wkey := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
+		sub := keepalive.IsSubagentThread(threadID)
+		causeOf := func(o *keepalive.TaskCounts) string {
+			return k.Keeper.WaitingFor(wkey, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, o)
+		}
+		planEligible := func(p keepalive.Policy) bool { return p.WaitPlan && p.On() && p.Idle < 300*time.Second }
+		ignoreWindows, ignoreToday := false, false
 		if pol.WaitPlan && tracked {
-			cause := k.Keeper.WaitingFor(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID},
-				u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK)
-			ignoreWindows = !keepalive.WindowsApply(cause, keepalive.IsSubagentThread(threadID))
+			ignoreToday = !keepalive.WindowsApply(causeOf(nil), sub)
+			ignoreWindows = ignoreToday
+			if open != nil && provider != bschemas.OpenAI &&
+				!k.Keeper.OneHourTier(wkey, body, keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
+					CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h, StopReason: u.StopReason}, usageOK, provider) {
+				ignoreWindows = !keepalive.WindowsApply(causeOf(open), sub)
+			}
 		}
 		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
+		if ignoreWindows != ignoreToday {
+			// Ignoring the windows must never refuse a hold today's decision makes, nor plan fewer pings.
+			// Today's policy is the one the windows give; the wide one is the policy with them ignored.
+			todayPol, todayApplied := k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, ignoreToday)
+			prefix := u.CacheRead + u.CacheWrite
+			// The wait cause a policy is judged by is the one Record will use for it: the merged cause where
+			// the policy takes the per-wait plan, the tracker-only cause where it does not (a strategy on the
+			// 1-hour band keeps its own count and the general floor). Whether a policy HOLDS the wait does not
+			// depend on its plan eligibility.
+			causeFor := func(p keepalive.Policy) string {
+				if planEligible(p) {
+					return causeOf(open)
+				}
+				return causeOf(nil)
+			}
+			holds := func(p keepalive.Policy) bool {
+				return p.On() && prefix >= int64(p.WaitMinPrefix(causeFor(p), sub))
+			}
+			pingsOf := func(p keepalive.Policy) int {
+				if planEligible(p) {
+					return p.WaitPings(causeFor(p), sub)
+				}
+				return p.MaxPings
+			}
+			switch {
+			case !planEligible(pol):
+				// The policy that ignoring the windows chose does not take the plan (a 1-hour Idle, or
+				// off): the reading does not apply, and today's windows decision stands.
+				pol, applied, open = todayPol, todayApplied, nil
+			case holds(todayPol) && (!holds(pol) || pingsOf(todayPol) > pingsOf(pol)):
+				// Today's policy holds this wait and the strategy's would refuse it or plan fewer pings.
+				pol, applied = todayPol, todayApplied
+			}
+		}
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
@@ -413,7 +465,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}
