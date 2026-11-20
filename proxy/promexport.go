@@ -693,6 +693,17 @@ func (h *Handler) renderMetrics() string {
 		}
 	}
 
+	// --- the early wait-cause scan (#1225, #1227) -----------------------------
+	promHeaderProc(&b, "cg_waitcause_early_scan_total",
+		"What the keeper did with the early wait-cause scan at response end, for every recorded request that has a scan (the dashboard on), whether or not its keep-alive is on: used (its counts joined the plan), not_ready (still running, today's plan), unknown (it could not say: work bound, server-held history, panic, cancelled; today's plan). A high not_ready or unknown share means the plan is often today's.", "counter")
+	promLine(&b, "cg_waitcause_early_scan_total", `result="used"`, float64(h.scan.used.Load()))
+	promLine(&b, "cg_waitcause_early_scan_total", `result="not_ready"`, float64(h.scan.notReady.Load()))
+	promLine(&b, "cg_waitcause_early_scan_total", `result="unknown"`, float64(h.scan.unknown.Load()))
+	promHeaderProc(&b, "cg_waitcause_writer_scan_total",
+		"How the dashboard writer got the normalized body for its tracker update: early (reused the scan) or own (normalized it itself).", "counter")
+	promLine(&b, "cg_waitcause_writer_scan_total", `source="early"`, float64(h.scan.writerEarly.Load()))
+	promLine(&b, "cg_waitcause_writer_scan_total", `source="own"`, float64(h.scan.writerOwn.Load()))
+
 	// --- keep-alive credit wiring --------------------------------------------
 	promHeaderProc(&b, "cg_keepalive_rescue_facts_missing_total",
 		"Requests that followed keep-alive pings but found no ping facts, so keep-alive credit was lost on that return. Also counts a return after an unpriced ping (non-2xx or no usage), after an eviction, or after a pricing panic. If it keeps rising while cg_keepalive_pings_priced_total stays 0, the host does not wire the ping side or its pings keep failing (compare the keeper counters pings, failed and skipped in /stats). Moves only with the dashboard on.", "counter")

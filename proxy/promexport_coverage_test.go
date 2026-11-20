@@ -122,13 +122,21 @@ var notExportedWhy = map[string]string{
 	// these AFTER renderMetrics takes its snapshot, so a promLine off `s` would export a permanent
 	// 0 while passing this test — which is precisely the silent-zero failure #200 is about, and it
 	// would be embarrassing to reproduce it in the counter meant to report it.
-	"UsageUnparsed":   "cg_usage_unparsed_total, from proxy.UsageGaps()",
-	"UsageUnreadable": "cg_usage_unreadable_total, from proxy.UsageGaps()",
-	"StashLive":       `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
-	"StashCapacity":   `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
-	"StashBytes":      `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
-	"StashMaxBytes":   `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
-	"Extract":         "the cg_extract_* family, from metrics.ExtractSnapshot()",
+	// The early wait-cause scan counters are exported as cg_waitcause_early_scan_total and
+	// cg_waitcause_writer_scan_total, read off the handler's own counters (the /stats handler fills these
+	// fields at serve time too).
+	"WaitScanUsed":        `cg_waitcause_early_scan_total{result="used"}, from Handler.scan`,
+	"WaitScanNotReady":    `cg_waitcause_early_scan_total{result="not_ready"}, from Handler.scan`,
+	"WaitScanUnknown":     `cg_waitcause_early_scan_total{result="unknown"}, from Handler.scan`,
+	"WaitScanWriterEarly": `cg_waitcause_writer_scan_total{source="early"}, from Handler.scan`,
+	"WaitScanWriterOwn":   `cg_waitcause_writer_scan_total{source="own"}, from Handler.scan`,
+	"UsageUnparsed":       "cg_usage_unparsed_total, from proxy.UsageGaps()",
+	"UsageUnreadable":     "cg_usage_unreadable_total, from proxy.UsageGaps()",
+	"StashLive":           `cg_stash_reserve_entries{state="live"}, from store.Memory.StashStats()`,
+	"StashCapacity":       `cg_stash_reserve_entries{state="capacity"}, from store.Memory.StashStats()`,
+	"StashBytes":          `cg_stash_reserve_bytes{state="live"}, from store.Memory.StashStats()`,
+	"StashMaxBytes":       `cg_stash_reserve_bytes{state="capacity"}, from store.Memory.StashStats()`,
+	"Extract":             "the cg_extract_* family, from metrics.ExtractSnapshot()",
 
 	// Not numbers. Prometheus has no string sample, and a list of names would have to
 	// become a label — which is what the cg_component_* family already is.
