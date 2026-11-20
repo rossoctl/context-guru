@@ -94,7 +94,8 @@ cache:
   treats the grant as unknown until it is proven: the first long wait on a provider, endpoint, route and
   model is a probe. If the thread returns more than 5 minutes later and still reads the prompt, the route
   is proven. If the return is a cold rebuild, or the ping itself rewrote the prompt (expected on Anthropic
-  first-party, not tested), the route is switched off and falls back to `auto`. Opt-in; no
+  first-party, not tested), the route is switched off and falls back to `auto`. A manager's stored
+  strategy can switch it on too (`one_hour_on_wait`), for local and hosted installs alike. Opt-in; no
   default changes.
 - A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
 - No `strategy` key: nothing changes.

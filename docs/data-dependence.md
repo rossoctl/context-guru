@@ -144,7 +144,7 @@ These are the presets in the Claude Code plugin picker.
 | `none` | ✅ Works | ✅ Works | ✅ Works | David Amid, #569 |
 | `auto` (was `5-min-ping`; `5-min-ping` is now an alias) | ❌ **Cannot work without storage.** A ping sends your last request again, so Context Guru must keep it. **Today it runs anyway and keeps it.** That breaks the opt-out (see [What this audit found](#what-this-audit-found)). | ❌ Cannot work, for the same reason | ✅ Works | David Amid, #569 |
 | `1-ping`, `2-ping`, `30-min-ping` (the same ping mechanism as `auto`; they differ only in how many pings and when) | ❌ The same as `auto` | ❌ The same as `auto` | ✅ Works | David Amid, #569 |
-| `1-hour-on-wait` (#1243, main agent only) | ❌ The same as `auto`: the ping needs the stored last request. | ❌ The same as `auto` | ✅ Works | David Amid, #1243 (to confirm) |
+| `1-hour-on-wait` (#1243, main agent only) | ❌ The same as `auto`: the ping needs the stored last request. | ❌ The same as `auto` | ✅ Works | David Amid, #1243, confirmed 2026-11-20 |
 | `1-hour-head` | ✅ Works. It sends no request of its own. It changes only a label on the request the client is sending, so the provider keeps that cache for 1 hour. It keeps nothing. | ✅ Works | ✅ Works | David Amid, #569 |
 
 The named strategies are one table in the proxy (`config/strategy.go`, #980). That change only gives
