@@ -858,7 +858,8 @@ func (k *Keeper) Record(r Record) {
 	}
 	key := r.Key.id()
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
-	k.resolveOneHourProbe(key, startedAt, u, usageOK, gjson.GetBytes(body, "model").String(), r.PrefixRewritten)
+	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
+	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
 	// A client lifecycle signal (host-gated; see MarkEnded) that this session already ended
 	// holds nothing further: this request was in flight when the user left, so its cache entry
 	// is not worth holding. Matched on Key.Session or r.Client, the id the client's own hooks
@@ -888,7 +889,6 @@ func (k *Keeper) Record(r Record) {
 	// being retained on its very next request; anything held for a session that goes quiet
 	// instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := r.Policy
-	model := gjson.GetBytes(body, "model").String()
 	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
 	// is off, or where the schedule's own gates refuse the thread; it just never gets a schedule.
 	// manualOnly is decided once the gates below have run, so every refusal can name its reason.
