@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, LOADED, configureMessage, updateMessage,
+  stripsChatGPTFields, strategyChoices, type StartCheck, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
 
@@ -276,7 +276,7 @@ test("a stopped check ends at once, before its time limit", async () => {
   }
 });
 
-test("a conflict is one question: chain, replace, or change nothing", () => {
+test("a conflict is a short question, and each answer's consent text is kept apart from it", () => {
   const p = conflictPrompt({
     result: "needs_decision", conflicts: "anthropic", existing_base_url: '{"anthropic":"https://gw.example"}',
     consent_question_chain: "CHAIN-TEXT", consent_question_replace: "REPLACE-TEXT",
@@ -286,8 +286,10 @@ test("a conflict is one question: chain, replace, or change nothing", () => {
   assert.equal(p.answers[KEEP], undefined, "no answer means nothing changes");
   assert.match(p.title, /somewhere else: anthropic: https:\/\/gw.example\./);
   assert.doesNotMatch(p.title, /\{/);
-  assert.match(p.title, /CHAIN-TEXT/);
-  assert.match(p.title, /REPLACE-TEXT/);
+  // #1158: a pick-list title is a short question. The consent text goes into the confirm dialog.
+  assert.doesNotMatch(p.title, /CHAIN-TEXT|REPLACE-TEXT/);
+  assert.ok(p.title.length < 200, p.title);
+  assert.deepEqual(p.consent, { chain: "CHAIN-TEXT", replace: "REPLACE-TEXT" });
 });
 
 test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
@@ -318,6 +320,29 @@ test("the strategy names come from the proxy's list, and an old proxy offers onl
   assert.deepEqual(old.names, ["none"]);
   assert.match(old.error ?? "", /v0\.7\.1/);
   assert.deepEqual(strategyChoices({}).names, ["none"]);
+});
+
+test("a setup that fell back to the none strategy says so", () => {
+  const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "none",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none", dashboard: "d", reset_hatch: "h" });
+  assert.match(text, /Preset off, cache strategy none\. Dashboard: d\n/);
+  assert.match(text, /\ncache strategy auto is not offered for Pi, so setup uses none\.\n/);
+});
+
+test("a setup with no fallback has no note line", () => {
+  const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "auto", dashboard: "d", reset_hatch: "h" });
+  assert.doesNotMatch(text, /so setup uses/);
+  assert.equal(text.split("\n").length, 4);
+});
+
+test("the consent dialog names a strategy fallback before the yes", () => {
+  assert.equal(consentText("ROUTE-TEXT", "cache strategy auto is not offered for Pi, so setup uses none"),
+    "ROUTE-TEXT cache strategy auto is not offered for Pi, so setup uses none.");
+  assert.equal(consentText("ROUTE-TEXT", undefined), "ROUTE-TEXT");
+  const p = conflictPrompt({ consent_question_chain: "C", consent_question_replace: "R", existing_base_url: "x",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none" });
+  assert.deepEqual(p.consent, { chain: "C cache strategy auto is not offered for Pi, so setup uses none.",
+    replace: "R cache strategy auto is not offered for Pi, so setup uses none." });
 });
 
 /** A Pi that records what an extension registers. `emit` runs the handlers of one event. */

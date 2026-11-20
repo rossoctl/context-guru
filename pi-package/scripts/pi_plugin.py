@@ -377,6 +377,19 @@ def resolve_strategy(name, executable):
                         f"{', '.join(r['name'] for r in offered)})", "unknown_strategy")
 
 
+def pick_strategy(name, executable, named_by_person):
+    """resolve_strategy, plus a note. A name the person gave is refused as before. A name setup picked
+    itself (the default, or the recorded one) that this proxy does not offer for Pi becomes `none`, so
+    setup does not refuse its own default (#1148). The note says why. Every other error (an old proxy,
+    a probe that failed) is refused as before."""
+    try:
+        return (*resolve_strategy(name, executable), {})
+    except StrategyError as error:
+        if named_by_person or error.reason != "unknown_strategy":
+            raise
+        return NONE_STRATEGY, None, {"cache_strategy_note": f"cache strategy {name} is not offered for Pi, so setup uses none"}
+
+
 def install_release_binary(version=None):
     """Download the release for this platform, check it against the release's SHA-256 list, and
     install it into the private state directory. A checksum problem is a hard stop: the binary
@@ -720,6 +733,7 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
     """`upstreams`: {provider: chained upstream}. `replaced`: {provider: the baseUrl that replace
     mode stops using}. `row`: the proxy's table row of the strategy (None for `none`)."""
     upstreams, replaced = upstreams or {}, replaced or {}
+    row = row or {}
 
     def route(p):
         text = f"{NAMES[p]} at {models_route.base_url(port, p)}, forwarding to "
@@ -739,7 +753,7 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
                      f"key or headers go to {', '.join(UPSTREAMS[p] for p in replaced)} instead.")
     if upstreams or replaced:
         question += " Uninstall puts the old baseUrl back."
-    if row and row["spends"]:
+    if row.get("spends"):
         chained = " and ".join(NAMES[p] for p in PROVIDERS if p in upstreams)
         spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
                   if upstreams else "using your own quota on each provider")
@@ -754,6 +768,9 @@ def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
                          "standard auth headers (Authorization, x-api-key), not those headers, so the "
                          f"endpoint may refuse it and keep-alive may stop for {names}. If so, run "
                          "/context-guru cache-strategy none.")
+    if row.get("unchecked"):
+        question += (f" If the proxy that setup downloads does not offer {strategy} for Pi, setup uses none, "
+                     "which sends no keep-alive requests.")
     return question
 
 
@@ -785,7 +802,9 @@ def setup(args):
     # port, and the old URLs must still count as ours, not as a foreign gateway.
     earlier = own_urls(record)
     port = choose_port(record)
+    named = bool(args.cache_strategy)
     strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
+    note = {}
     preset = record.get("preset") or DEFAULT_PRESET
     executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
     executable = executable or find_binary()
@@ -793,9 +812,9 @@ def setup(args):
         # No binary yet: setup downloads the latest release, which has the table. The name is checked
         # again below, once that binary exists.
         if executable or strategy == NONE_STRATEGY:
-            strategy, row = resolve_strategy(strategy, executable)
+            strategy, row, note = pick_strategy(strategy, executable, named)
         elif STRATEGY_NAME.match(strategy):
-            row = {"spends": True, "desc": ""}
+            row = {"spends": True, "desc": "", "unchecked": not named}
         else:
             raise StrategyError(f"cache strategy {strategy!r} is not a valid name", "unknown_strategy")
     except StrategyError as error:
@@ -828,9 +847,9 @@ def setup(args):
                          confirm_command_replace=confirm_command("replace", extra))
             facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
                   existing_base_url=clash, conflicts=",".join(sorted(clash)), port=port, preset=preset,
-                  cache_strategy=strategy, **pairs, **hatch)
+                  cache_strategy=strategy, **note, **pairs, **hatch)
             return 0
-        facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy,
+        facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy, **note,
               service=service_kind() or "unsupported", already_routed=str(
                   all(models_route.is_routed(models_path(), port, p) for p in PROVIDERS)).lower(),
               consent_question=consent_question(port, strategy, upstreams, row=row))
@@ -863,16 +882,29 @@ def setup(args):
         facts(result="error", reason="config_conflict", config=proxy_config(),
               detail=f"refusing to overwrite a proxy config we did not write: {proxy_config()}")
         return 2
+    downloaded = False
     if not executable:
         try:
             executable, version = install_release_binary()
+            downloaded = True
             facts(binary="installed", binary_version=version, binary_path=executable)
         except Exception as error:
             facts(result="error", reason="binary_install_failed", detail=error)
             return 2
+
+    def drop_download():
+        """A setup that stops under the lock and before the start leaves no binary behind: the next
+        setup would use it, even when a newer release exists (#1157). After a failed start the binary
+        stays, because the service names it."""
+        if downloaded:
+            managed_binary().unlink(missing_ok=True)
+            facts(binary="removed")
+
     try:
-        strategy, _ = resolve_strategy(strategy, executable)
+        strategy, _, more = pick_strategy(strategy, executable, named)
+        note.update(more)
     except StrategyError as error:
+        drop_download()
         facts(result="refused", reason=error.reason, detail=error)
         return 2
     # The config, the start and the record happen under the restart lock: a session-start restart
@@ -880,6 +912,7 @@ def setup(args):
     try:
         lock = restart_lock()
     except LockBusy as error:
+        # The binary stays: the setup that holds the lock may have downloaded the same file.
         facts(result="error", reason="busy", detail=error)
         return 2
     with lock:
@@ -889,6 +922,7 @@ def setup(args):
         try:
             write_proxy_config(preset, strategy, upstreams)
         except Exception as error:
+            drop_download()
             facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
             return 2
         # Proxy first, routing second: a route written while nothing answers makes every request fail.
@@ -906,7 +940,7 @@ def setup(args):
     except Exception as error:
         facts(result="error", reason="routing_write_failed", detail=error, proxy_running="true")
         return 1
-    facts(result="routed", port=port, models=models_path(), preset=preset, cache_strategy=strategy,
+    facts(result="routed", port=port, models=models_path(), preset=preset, cache_strategy=strategy, **note,
           routes=routes_text(upstreams), dashboard=f"http://127.0.0.1:{port}/dashboard/", reset_hatch=hatch)
     return 0
 
