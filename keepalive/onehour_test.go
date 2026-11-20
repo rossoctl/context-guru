@@ -119,9 +119,6 @@ func TestOneHourPingOnALongWait(t *testing.T) {
 			t.Fatalf("a second ping fired at %ds (%d)", at, n)
 		}
 	}
-	// A free switch: the session is a 1-hour session until the next real request. It is checked
-	// right after the ping, before any sweep drops the finished entry.
-
 }
 
 // A short wait (a tool) behaves exactly as auto: the plain body, and the planned count.
@@ -510,5 +507,85 @@ func TestFailedSubstituteLeavesOneOneHourPing(t *testing.T) {
 	}
 	if n := k.Sweep(start.Add(480 * time.Second)); n != 0 {
 		t.Errorf("a second ping followed a failed substitute (%d)", n)
+	}
+}
+
+// returnWith records the thread's return with full control of the request: the model and whether the client
+// rewrote the prefix. The usage is a cold rebuild unless read is large.
+func returnWith(k *Keeper, key Key, at time.Time, body string, read, write int64, rewritten bool) {
+	k.Record(Record{Key: key, StartedAt: at, Body: []byte(body), Provider: bschemas.Anthropic,
+		Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(), PrefixRewritten: rewritten,
+		Usage: Usage{CacheRead: read, CacheWrite: write, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
+}
+
+func probeThenWait(t *testing.T) (*Keeper, time.Time) {
+	t.Helper()
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	return k, start
+}
+
+// A cold return caused by the client (its own compaction, or a fork or rewind) is not a downgrade: the
+// route stays unknown and the probe is released.
+func TestColdReturnAfterAClientCompactionIsNotADowngrade(t *testing.T) {
+	k, start := probeThenWait(t)
+	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 0, 50000, true)
+	if st := routeState(k); st.off || st.proven || !st.probeUntil.IsZero() {
+		t.Errorf("state = %+v, want unknown with the probe released", st)
+	}
+}
+
+// A cold return on another model is not a downgrade either: the provider keeps a cache for each model.
+func TestColdReturnOnAnotherModelIsNotADowngrade(t *testing.T) {
+	k, start := probeThenWait(t)
+	other := strings.Replace(kaBody, "aws/claude-sonnet-5", "aws/claude-opus-5", 1)
+	returnWith(k, sess1, start.Add(20*time.Minute), other, 0, 50000, false)
+	if st := routeState(k); st.off || st.proven {
+		t.Errorf("state = %+v, want unknown", st)
+	}
+}
+
+// A return that read and wrote nothing (an uncacheable request) is not a cold rebuild.
+func TestReturnWithNoCacheActivityIsNotADowngrade(t *testing.T) {
+	k, start := probeThenWait(t)
+	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 0, 0, false)
+	if st := routeState(k); st.off {
+		t.Errorf("state = %+v: a return with no cache activity switched the route off", st)
+	}
+}
+
+// The control for the three above: the same cold return, from the same model, with the prefix untouched,
+// is a downgrade. The tests above are not vacuous.
+func TestColdRebuildFromTheSameModelWithTheSamePrefixIsADowngrade(t *testing.T) {
+	k, start := probeThenWait(t)
+	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 0, 50000, false)
+	if st := routeState(k); !st.off {
+		t.Errorf("state = %+v, want off", st)
+	}
+}
+
+// OneHourGranted is true only for a route the probe proved, per model.
+func TestOneHourGrantedOnlyForAProvenRoute(t *testing.T) {
+	k, start := probeThenWait(t)
+	g := func(model string) bool { return k.OneHourGranted(bschemas.Anthropic, "", "/v1/messages", model) }
+	if g("aws/claude-sonnet-5") {
+		t.Fatal("granted before any proof")
+	}
+	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 49500, 100, false)
+	if !g("aws/claude-sonnet-5") {
+		t.Error("not granted after the proof")
+	}
+	if g("aws/claude-opus-5") {
+		t.Error("the proof of one model counted for another")
+	}
+	var nilK *Keeper
+	if nilK.OneHourGranted(bschemas.Anthropic, "", "/v1/messages", "m") {
+		t.Error("a nil keeper granted")
 	}
 }

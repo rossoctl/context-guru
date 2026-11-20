@@ -1375,6 +1375,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
+		cp.noteReadSets(up.base, h.keeper.oneHourGranted)
 		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
@@ -2017,6 +2018,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
 		usage.Live = cp.liveFacts(ttfb)
+		usage.PrefixRewritten = cp.prefixRewritten()
 		cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
 		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
 		// Release any cache_aware_summarizer side call this turn deferred because its own cache

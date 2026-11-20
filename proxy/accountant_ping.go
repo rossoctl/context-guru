@@ -101,6 +101,9 @@ func pingFromReport(r components.KeepAliveReport) accountant.Ping {
 		Usage: accountant.CallUsage{Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
 			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)}, Output: int(r.Output)},
 		At: pingStart(r), Window: r.Window,
+		// The TTL the ping asked: 1 hour for a 1-hour-on-wait ping (every marker relabelled). A plain ping
+		// leaves it 0 (not known): the library then judges the entry by the previous request's markers.
+		TTL: oneHourIf(r.OneHour),
 	}
 }
 
@@ -139,10 +142,6 @@ func PingSavings(r components.KeepAliveReport, st *PingStore) (res accountant.Re
 	st.notePriced()
 	if !r.Manual {
 		st.put(accPingKey(r.Session, accThreadID(r.Thread)), facts)
-		// TODO(#1243): a 1-hour-on-wait ping (r.OneHour) must carry Ping.TTL = 1h once the accountant
-		// release with Provider.ReadSetsTTL and Ping.TTL (rossoctl/accountant#106) is wired in. Until then
-		// the library judges the entry by the previous real request's 5-minute markers and books no rescue
-		// for a return more than 5 minutes after the ping. Do NOT re-derive the TTL from timing here.
 	}
 	return res, true
 }
@@ -152,3 +151,11 @@ var (
 	pingOps              = accountant.PingOps
 	accountantStandalone = accountant.ComputeStandalone
 )
+
+// oneHourIf is time.Hour when on, else 0.
+func oneHourIf(on bool) time.Duration {
+	if on {
+		return time.Hour
+	}
+	return 0
+}

@@ -67,6 +67,7 @@ type oneHourRouteState struct {
 // oneHourProbe is what a free probe leaves for the thread's return.
 type oneHourProbe struct {
 	route  string
+	model  string    // the model the probe's request named, to see a model switch on the return
 	at     time.Time // when the ping started
 	prefix int64     // the billed prefix of the request it copied
 }
@@ -78,6 +79,21 @@ func (k *Keeper) oneHourBlocked(provider bschemas.ModelProvider, endpoint, route
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
 	return st != nil && st.off
+}
+
+// OneHourGranted reports whether the run-time check PROVED that a read sets the entry's TTL on this route and
+// model: a 1-hour ping kept a 5-minute entry alive past 5 minutes (state "proven"). The accountant is told
+// it as Provider.ReadSetsTTL (rossoctl/accountant#105). The proxy does not guess it from a model name or a
+// provider: the route is Anthropic-shaped whatever it forwards to, and only this evidence says what it did.
+// Nil-safe.
+func (k *Keeper) OneHourGranted(provider bschemas.ModelProvider, endpoint, route, model string) bool {
+	if k == nil {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
+	return st != nil && st.proven
 }
 
 // oneHourClaim decides, at fire time, whether this ping may be the 1-hour ping. A proven route always
@@ -149,7 +165,7 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 			if len(k.oneHourProbes) >= MaxTurnKeys {
 				k.oneHourProbes = map[string]oneHourProbe{}
 			}
-			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, at: start, prefix: e.prefix}
+			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, model: e.model, at: start, prefix: e.prefix}
 		}
 		k.mu.Unlock()
 	case read < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
@@ -189,9 +205,10 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 
 // resolveOneHourProbe runs on every real request of a thread (Record). If the thread left a free probe,
 // this request is its return: a read of the prefix more than 5 minutes after the probe proves the grant
-// (the 5-minute entry would be gone); a cold rebuild proves a downgrade. A return inside 5 minutes, over
-// an hour later, or a partial read proves nothing.
-func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, usageOK bool) {
+// (the 5-minute entry would be gone); a cold rebuild (a near-zero read and a large write) proves a
+// downgrade. A return inside 5 minutes, over an hour later, a partial read, a return on another model, or
+// a return after the client rewrote the prefix (prefixRewritten) proves nothing: the probe is released.
+func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, usageOK bool, model string, prefixRewritten bool) {
 	k.mu.Lock()
 	p, ok := k.oneHourProbes[key]
 	delete(k.oneHourProbes, key)
@@ -201,8 +218,11 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 	}
 	gap := startedAt.Sub(p.at)
 	prefix := float64(p.prefix)
+	write := float64(max(u.CacheWrite, u.CacheWrite1h))
 	switch {
-	case !usageOK || gap <= 5*time.Minute || gap > time.Hour:
+	// A return on another model, or after the client rewrote the prefix (a compaction, a fork), reads cold
+	// whatever the cache tier is: it proves nothing about the grant. The probe is not resolved.
+	case !usageOK || gap <= 5*time.Minute || gap > time.Hour || prefixRewritten || (model != "" && model != p.model):
 		k.oneHourRelease(p.route)
 	case float64(u.CacheRead) >= oneHourFreeRead*prefix:
 		k.mu.Lock()
@@ -210,7 +230,9 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 			st.proven, st.probeUntil = true, time.Time{}
 		}
 		k.mu.Unlock()
-	case float64(u.CacheRead) < oneHourCostlyRead*prefix:
+	case float64(u.CacheRead) < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
+		// A cold REBUILD: it read almost nothing and wrote the prefix back. A return that read and wrote
+		// nothing (an uncacheable request) is not one.
 		parts := strings.SplitN(p.route, "|", 4)
 		k.oneHourSwitchOff(p.route, bschemas.ModelProvider(parts[0]), parts[2], parts[1], parts[3],
 			"the entry did not outlive 5 minutes after the 1-hour ping (a silent downgrade)",

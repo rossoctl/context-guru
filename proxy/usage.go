@@ -24,11 +24,16 @@ type Usage struct {
 	SearchLoaded  []string
 	SearchDropped int
 	// Live is the request-side facts a learned keep-alive campaign reads at response end (predictive.go). nil on paths that do not set it.
-	Live       *LiveFacts
-	FreshInput int64
-	CacheRead  int64
-	CacheWrite int64
-	Output     int64
+	Live *LiveFacts
+	// PrefixRewritten says the client rewrote the prefix this request sends: the agent's own compaction
+	// came just before it, or the thread tracker found it forks or rewinds another thread's content
+	// (capture.prefixRewritten). A cache miss on such a request has a cause other than the cache tier. Set
+	// by serve beside Live; read by recordTouch.
+	PrefixRewritten bool
+	FreshInput      int64
+	CacheRead       int64
+	CacheWrite      int64
+	Output          int64
 	// CacheWrite1h is the part of CacheWrite the provider billed at the ONE-HOUR write
 	// tier, from `usage.cache_creation.ephemeral_1h_input_tokens`. Zero on every response
 	// that wrote only 5-minute entries, which on this deployment is all of them.

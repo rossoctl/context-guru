@@ -413,9 +413,13 @@ type Options struct {
 
 // Record is one finished upstream request, handed to Keeper.Record by the host.
 type Record struct {
-	Key       Key
-	StartedAt time.Time // when the upstream request STARTED
-	Body      []byte    // exact bytes sent upstream; the keeper copies and masks it
+	// PrefixRewritten says the client rewrote the prefix this request sends (its own compaction, or a fork or
+	// rewind of another thread). A cold read on such a request does not say the cache tier failed, so the
+	// 1-hour-on-wait probe is not resolved on it (onehour.go).
+	PrefixRewritten bool
+	Key             Key
+	StartedAt       time.Time // when the upstream request STARTED
+	Body            []byte    // exact bytes sent upstream; the keeper copies and masks it
 	// TouchAlias is the key of the cold decision's liveness clock for this request (apply's
 	// Trace.TouchAlias), derived from the request as it ARRIVED. A ping touches this key. "" means
 	// the host has none, and the touch derives its key from Body, which is right only when the
@@ -854,7 +858,7 @@ func (k *Keeper) Record(r Record) {
 	}
 	key := r.Key.id()
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
-	k.resolveOneHourProbe(key, startedAt, u, usageOK)
+	k.resolveOneHourProbe(key, startedAt, u, usageOK, gjson.GetBytes(body, "model").String(), r.PrefixRewritten)
 	// A client lifecycle signal (host-gated; see MarkEnded) that this session already ended
 	// holds nothing further: this request was in flight when the user left, so its cache entry
 	// is not worth holding. Matched on Key.Session or r.Client, the id the client's own hooks
