@@ -154,7 +154,7 @@ keeps.
 **Why `auto` (and the other ping strategies) needs storage and `1-hour-head` does not:** a ping is a **new** request that
 Context Guru sends by itself while the user is idle. To read the same cache, the ping must have the
 exact bytes of the last prompt, so Context Guru keeps them. `1-hour-head` only changes the request
-that the client sends anyway. `1-hour-on-wait` (main agent only) relabels the markers of the keep-alive ping body only, never a real request. It reads metadata for its decision: the wait cause, the thread id, the model name, the client-compaction verdict, the fork or inherit flag, and the usage counts of the ping and of the thread's return. It keeps one flag per provider route in memory (the switch was seen to cost a rewrite). It stores no text. The client supplies the bytes, so Context Guru keeps nothing.
+that the client sends anyway. `1-hour-on-wait` (main agent only) relabels the markers of the keep-alive ping body only, never a real request. It reads metadata for its decision: the wait cause, the thread id, the model name, the client-compaction verdict, the fork or inherit flag, and the usage counts of the ping and of the thread's return. It keeps, in memory only, a small record per provider, endpoint, route and model (whether the grant is proven or off, and the deadline of the probe), and a record per thread for its pending probe (the route, the model, the time of the ping, and the prefix token count). All of it is metadata. It stores no text. The client supplies the bytes, so Context Guru keeps nothing.
 
 **The credential:** Context Guru itself does not keep it. It keeps only a handle, and the host that
 runs it (for example the proxy binary) sends the ping through its Dispatcher. The proxy binary's
