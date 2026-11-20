@@ -31,11 +31,26 @@ export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
 const SESSION_HEADER = "x-context-guru-session";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
+/** One line per preset, the Claude Code plugin's preset-picker text without its markdown. A test fails
+ *  when the two drift apart. */
+export const PRESET_TEXT: Record<string, string> = {
+  off: "nothing runs, requests go through untouched",
+  conservative: "trims obvious waste — the safe first step into \"carry less\"",
+  medium: "conservative plus a cheap model that keeps only what looks relevant in recent tool output, and a summary " +
+    "prepared in the background that is used only if you come back after the cache expired",
+  high: "medium, but the summary of older turns is used as soon as the context window is nearly full",
+  xhigh: "high plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut",
+  ultrahigh: "Experimental. xhigh plus tool deferral: tools your own last sessions never used are sent as names only, " +
+    "and the model loads one through search when it needs it. Opt-in. Turn it off for one session with " +
+    "ENABLE_TOOL_SEARCH=false",
+};
 const SUBCOMMANDS = ["setup", "status", "preset", "cache-strategy", "update", "uninstall"];
 /** The time limit of each /healthz check at session start (the user's choice). */
 export const START_CHECK_TIMEOUT_MS = 5000;
 
 interface Install {
+  preset?: string;
+  restart_pending?: boolean;
   port?: number;
   base_urls?: Record<string, string>;
   cache_strategy?: string;
@@ -290,6 +305,9 @@ export function updateMessage(f: Record<string, string>, code: number): Message 
 
 /** The result of `configure --preset` or `--cache-strategy`. */
 export function configureMessage(f: Record<string, string>, code: number, stderr: string): Message {
+  if (f.result === "unchanged") {
+    return { text: `Already set: preset ${f.preset}, cache strategy ${f.cache_strategy}. Nothing changed.`, level: "info" };
+  }
   if (f.result === "configured" && code === 0) {
     return { text: `context-guru now runs preset ${f.preset}, cache strategy ${f.cache_strategy}.` +
       (f.probe ? ` Tool deferral probe: ${f.probe}.` : ""), level: "info" };
@@ -306,6 +324,34 @@ export function parseFacts(text: string): Record<string, string> {
     if (at > 0) out[line.slice(0, at)] = line.slice(at + 1);
   }
   return out;
+}
+
+/** A preset pick-list option: the name, then what it does (#1156). */
+export function presetLabel(name: string): string {
+  return `${name}: ${PRESET_TEXT[name]}`;
+}
+
+/** The current preset or cache strategy, read fresh: another Pi session may have changed it. Undefined
+ *  while a restart is pending (the last one failed), so choosing the same value restarts again. */
+export function currentSetting(key: "preset" | "cache_strategy", dir: string = STATE_DIR): string | undefined {
+  const fresh = readInstall(dir);
+  return fresh?.restart_pending ? undefined : fresh?.[key];
+}
+
+export function presetFromLabel(label: string | undefined): string | undefined {
+  return label?.split(":", 1)[0];
+}
+
+/** Why a chosen name is not applied: it is unknown, or it is the current setting (a restart would only
+ *  cost a cache rewrite). Undefined when the change goes ahead. */
+export function choiceProblem(kind: "preset" | "cache strategy", value: string, names: string[], current?: string):
+  { text: string; level: "info" | "error" } | undefined {
+  if (!names.includes(value)) {
+    return { text: `Unknown ${kind} '${value}'. ${kind === "preset" ? "Presets" : "Cache strategies"}: ${names.join(", ")}`,
+      level: "error" };
+  }
+  if (value === current) return { text: `Already set: ${kind} ${value}. Nothing changed.`, level: "info" };
+  return undefined;
 }
 
 /** Split `/context-guru` arguments. A bare command (or only spaces) means `status`. */
@@ -468,7 +514,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       }
       args.push("--on-conflict", answer);
     } else if (f.result !== "planned") {
-      say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}`, "error");
+      say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}${f.detail ? `: ${f.detail}` : ""}`, "error");
       return;
     } else {
       // Consent comes from a person. Print mode has no dialog, and no answer is a no.
@@ -553,9 +599,13 @@ export default function contextGuru(pi: ExtensionAPI) {
         case "status":
           return status(ctx);
         case "preset": {
-          const name = await pick(ctx, "Preset (each one includes the one above it)", PRESETS, value);
-          if (name) return configure(ctx, "--preset", name);
-          return say(ctx, `Presets: ${PRESETS.join(", ")}`);
+          if (!value && !ctx.hasUI) return say(ctx, `Presets: ${PRESETS.join(", ")}`);
+          const name = value || presetFromLabel(await ctx.ui.select("Preset (each one includes the one above it)",
+            PRESETS.map(presetLabel)));
+          if (!name) return say(ctx, "Nothing changed.");
+          const problem = choiceProblem("preset", name, PRESETS, currentSetting("preset"));
+          if (problem) return say(ctx, problem.text, problem.level);
+          return configure(ctx, "--preset", name);
         }
         case "cache-strategy": {
           const listed = await run(["configure", "--list"], 30_000);
@@ -568,9 +618,12 @@ export default function contextGuru(pi: ExtensionAPI) {
           if (value && !names.includes(value)) {
             return say(ctx, `context-guru: cache strategy ${value} cannot be set. ${error ?? `Offered: ${names.join(", ")}`}`, "error");
           }
+          if (!value && !ctx.hasUI) return say(ctx, `Cache strategies: ${names.join(", ")}`);
           const name = await pick(ctx, "Cache strategy", names, value);
-          if (name) return configure(ctx, "--cache-strategy", name);
-          return say(ctx, `Cache strategies: ${names.join(", ")}`);
+          if (!name) return say(ctx, "Nothing changed.");
+          const problem = choiceProblem("cache strategy", name, names, currentSetting("cache_strategy"));
+          if (problem) return say(ctx, problem.text, problem.level);
+          return configure(ctx, "--cache-strategy", name);
         }
         case "update": {
           const check = (await run(["update", "--check"], 30_000)).facts;
