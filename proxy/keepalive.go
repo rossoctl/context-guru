@@ -465,7 +465,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}
@@ -476,6 +476,11 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		return nil
 	}
 	return plan
+}
+
+// readSetsTTL is Keeper.ReadSetsTTL, nil-safe for a deployment with no keep-alive.
+func (k *keeper) readSetsTTL(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool {
+	return k != nil && k.Keeper != nil && k.Keeper.ReadSetsTTL(provider, endpoint, route, model, pinged)
 }
 
 // canPing reports whether the keep-alive can ping a thread of this session on this tenancy: the kill

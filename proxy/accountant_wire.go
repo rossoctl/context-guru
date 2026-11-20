@@ -53,7 +53,8 @@ func (c *capture) accEnd(th thread.Result, forwarded []byte, ops []accountant.Op
 	if c == nil || c.savings == nil || !c.accOpen || c.accJob != nil {
 		return
 	}
-	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer, accMeta: c.accMeta}
+	w := &capture{savings: c.savings, provider: c.provider, pings: c.pings, accClient: c.accClient, accPreDefer: c.accPreDefer, accMeta: c.accMeta,
+		route: c.route, endpoint: c.endpoint, readSets: c.readSets}
 	job := &accJob{done: make(chan struct{}), w: w}
 	meta, client := c.accMeta, c.accClient
 	ops = append([]accountant.Operation(nil), ops...)
@@ -139,6 +140,15 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	billed := c.accBilled(forwarded)
 	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
 	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accMeta.Model, forwarded, c.pings, c.accMeta.Session, t)
+	// A read sets the entry's TTL on a route the keeper PROVED does so (the 1-hour-on-wait probe), and on the
+	// return that decides that proof: facts.PingTTL is 1 hour when a 1-hour ping served the gap. The keeper
+	// records the proof after this request is priced, so without the second case the proof return would book
+	// no rescue. Nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not
+	// measured. The rescue is itself evidence (it credits only tokens the return READ), see Keeper.ReadSetsTTL.
+	if c.readSets != nil && c.readSets(bschemas.ModelProvider(c.provider), c.endpoint, c.route, c.accMeta.Model,
+		facts.PingTTL >= time.Hour) {
+		facts.Provider.ReadSetsTTL = true
+	}
 	c.accPingWindow, c.accFacts = facts.PingWindow, facts
 	c.savings.end(c.accReq, t, billed, ops, facts)
 }

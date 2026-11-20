@@ -184,8 +184,12 @@ type capture struct {
 	// and the accountant figure must not be booked.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
-	pings  *PingStore
-	accReq *accountant.Request
+	pings *PingStore
+	// endpoint and readSets tell the accountant whether a read sets the TTL on this route
+	// (Provider.ReadSetsTTL). readSets is the keeper's readSetsTTL; nil = never.
+	endpoint string
+	readSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
+	accReq   *accountant.Request
 	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
 	// holds its history, so the accountant has no record of it.
 	accServerHeldHistory bool
@@ -309,6 +313,19 @@ func (c *capture) noteAgentCompaction(v bool) {
 	if c != nil {
 		c.agentComp = v
 	}
+}
+
+// noteReadSets gives the capture the upstream and the keeper's proof, for Provider.ReadSetsTTL. Nil-safe.
+func (c *capture) noteReadSets(endpoint string, f func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool) {
+	if c != nil {
+		c.endpoint, c.readSets = endpoint, f
+	}
+}
+
+// prefixRewritten says the client rewrote the prefix of this request: the agent's own compaction came just
+// before it, or the tracker found the thread forks or rewinds another one. Nil-safe.
+func (c *capture) prefixRewritten() bool {
+	return c != nil && ((c.compKnown && c.compVerdict != "") || c.hasInherit)
 }
 
 // noteThread records which thread of the session this request belongs to.

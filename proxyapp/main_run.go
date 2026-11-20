@@ -1387,6 +1387,7 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 	}
 	return proxy.CachePolicy{
 		WaitPlan:             plan.WaitPlan,
+		OneHourOnWait:        c.KeepAliveOneHourOnWait,
 		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
 		ToolWaitMinPrefix:    plan.ToolWaitMinPrefix,
 		BackgroundExtraPings: plan.BackgroundExtraPings,

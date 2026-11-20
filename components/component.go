@@ -1229,6 +1229,9 @@ type KeepAliveReport struct {
 	// FreshInput and CacheWrite1h are the ping's own usage tiers beyond CacheRead/CacheWrite/
 	// Output, carried for the same reason.
 	FreshInput, CacheWrite1h int64
+	// OneHour marks a 1-hour-on-wait ping (#1243): its body carried every cache marker at the 1-hour tier.
+	// The accountant uses it to book the rescue when the thread returns after the 5-minute lifetime.
+	OneHour bool
 	// MaxTokens is what the ping itself asked for (see keepalive.go's pingOutputBudget), so a
 	// sink can record what was requested rather than reading as a request with no output
 	// budget at all.

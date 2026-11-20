@@ -506,3 +506,42 @@ func TestValidWindowsRequiresAtLeastOne(t *testing.T) {
 		t.Error("an overnight window was accepted")
 	}
 }
+
+// #1243: a manager's stored strategy may switch on the 1-hour-on-wait ping, the same way it sets the other
+// strategy keys. It only turns it ON; a strategy that leaves it off keeps the account's own setting.
+func TestStoredStrategyTurnsOnTheOneHourOnWaitPing(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+
+	body := `{"name":"1h on wait","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_on_wait":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	w, out := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	if out["one_hour_on_wait"] != true {
+		t.Errorf("the response does not report one_hour_on_wait: %v", out)
+	}
+	id, _ := out["id"].(string)
+	pol, applied := f.h.keeper.applyStrategy(userID, CachePolicy{WaitPlan: true}, at)
+	if applied != id || !pol.OneHourOnWait || !pol.WaitPlan {
+		t.Fatalf("the stored strategy did not turn the ping on for a hosted tenant: applied=%q policy=%+v", applied, pol)
+	}
+
+	// Turned off by PATCH: the policy no longer carries it.
+	w, _ = f.do(t, http.MethodPatch, "/api/keepalive/strategies/"+id, `{"one_hour_on_wait":false}`, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch = %d: %s", w.Code, w.Body)
+	}
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); pol.OneHourOnWait {
+		t.Error("the strategy still turned the ping on after it was patched off")
+	}
+	// A strategy cannot turn the account's own setting OFF.
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourOnWait: true}, at); !pol.OneHourOnWait {
+		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}

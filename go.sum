@@ -100,8 +100,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
-github.com/rossoctl/accountant v0.4.0 h1:vg/Qzd9V93uMB52g0Rs+rjQ4nFDjy+F5qPMFD+iO9nk=
-github.com/rossoctl/accountant v0.4.0/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
+github.com/rossoctl/accountant v0.5.0 h1:5IwMF5wiw0JPnIzHma5xJAaYWge6KW5seAe0Zh4xNKc=
+github.com/rossoctl/accountant v0.5.0/go.mod h1:AA9aM/QvO3AksXUGjOJiunMSxiZ1PqRsCxqKvq4IsrI=
 github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624 h1:/pfhva2bnjY8GanZIUoiqy0KQ1RbspWN0kG0gapnNrQ=
 github.com/rossoctl/accountant/metrics v0.0.0-20261111151953-6085d4661624/go.mod h1:OtEYvVnZhMepTLXLTAXTFxf8fRAib/41vehHWKYO99o=
 github.com/spf13/cast v1.10.0 h1:h2x0u2shc1QuLHfxi+cTJvs30+ZAHOGRic8uyGTDWxY=
