@@ -41,6 +41,8 @@ Read `result=` first.
   - `github_rate_limited` says nothing about whether a beta exists. Tell the user to wait,
     or to pass the tag.
   - `install_failed` with `checksum_*` means the download is **not** installed.
+    The script puts the update answer back (`update_answer_restored=`). If you see
+    `update_answer_restore_failed=true`, give the user the command in `note=`.
   - `version_mismatch` means the file on disk is not the beta. Say so; do not call it done.
 
 Report these lines when they appear:
@@ -49,6 +51,7 @@ Report these lines when they appear:
   value, the new value, and the way back:
   `"${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" update-check answer --answer always`.
   Name #1254. Say the user may turn it on again once #1254 is fixed and released.
+- `update_answer=unreadable`: the #1254 guard did not run. Give the command in `note=`.
 - `plugin_older=true`: the plugin is older than the plugin in the beta. Give
   `plugin_update_command=` (run it in Claude Code), then restart Claude Code.
 - `path_shadow=`: another `context-guru-proxy` comes first on PATH. Name it.

@@ -15,7 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 const betaTag = "v9.9.9-beta.1"
@@ -63,6 +64,7 @@ type betaEnv struct {
 	t           *testing.T
 	home, dest  string
 	state, stub string
+	tmp         string
 	mark, args  string
 	proxy       string
 	apiBody     string // body the release-list stub serves
@@ -82,7 +84,8 @@ func newBetaEnv(t *testing.T) *betaEnv {
 		proxy: filepath.Join(root, "fakebin", "context-guru-proxy"), apiCode: "200",
 		apiBody: `[{"tag_name":"v9.9.8","prerelease":false},` +
 			`{"tag_name":"` + betaTag + `","prerelease":true},{"tag_name":"v9.9.0-beta.1","prerelease":true}]`}
-	for _, d := range []string{e.home, e.dest, e.state, e.stub} {
+	e.tmp = filepath.Join(root, "tmp") // the script's work dir lands here, and goes with the test
+	for _, d := range []string{e.home, e.dest, e.state, e.stub, e.tmp} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -110,7 +113,9 @@ func newBetaEnv(t *testing.T) *betaEnv {
 	}
 	write(filepath.Join(sc, "settings.py"), string(realSettings), 0o755)
 	write(filepath.Join(src, top, "context-guru-plugin", ".claude-plugin", "plugin.json"), `{"name":"context-guru","version":"9.9.9"}`, 0o644)
+	// Files the script must NOT extract: one beside the plugin, one in a plugin folder it does not use.
 	write(filepath.Join(src, top, "README.md"), "not extracted\n", 0o644)
+	write(filepath.Join(src, top, "context-guru-plugin", "skills", "x", "SKILL.md"), "not extracted\n", 0o644)
 	archive := filepath.Join(root, "src.tar.gz")
 	if out, err := exec.Command("tar", "czf", archive, "-C", src, top).CombinedOutput(); err != nil {
 		t.Fatalf("tar: %v (%s)", err, out)
@@ -135,6 +140,7 @@ func newBetaEnv(t *testing.T) *betaEnv {
 		"PATH="+e.stub+":"+filepath.Dir(py)+":/usr/bin:/bin",
 		"CONTEXT_GURU_DEST="+e.dest,
 		"CONTEXT_GURU_STATE="+e.state,
+		"TMPDIR="+e.tmp,
 		"CONTEXT_GURU_BIN=", // the script must not need this from the caller
 		"CG_TEST_MARK="+e.mark, "CG_TEST_ARGS="+e.args, "CG_TEST_PROXY="+e.proxy,
 	)
@@ -188,13 +194,9 @@ func (e *betaEnv) stopAtCleanup(pid int) {
 
 func (e *betaEnv) waitHealthy(port string) {
 	e.t.Helper()
-	for i := 0; i < 100; i++ {
-		if exec.Command("curl", "-fsS", "--max-time", "1", "http://127.0.0.1:"+port+"/healthz").Run() == nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	e.t.Fatalf("fake proxy on %s never answered", port)
+	testutil.WaitFor(e.t, "the fake proxy on "+port+" to answer /healthz", func() bool {
+		return exec.Command("curl", "-fsS", "--max-time", "1", "http://127.0.0.1:"+port+"/healthz").Run() == nil
+	})
 }
 
 func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
@@ -239,13 +241,18 @@ func TestInstallBetaPicksTheNewestPrereleaseAndUsesItsOwnInstaller(t *testing.T)
 			t.Errorf("beta_scripts misses %s: %v", f, err)
 		}
 	}
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(scripts))) }) //nolint:errcheck
-	if _, err := os.Stat(filepath.Join(filepath.Dir(scripts), "..", "README.md")); err == nil {
-		t.Error("the script extracted more than the plugin scripts")
-	}
+	// Walk the whole work area (TMPDIR is private to this test). Both files sit in the archive. An
+	// extraction or a copy that is too broad would put one of them anywhere under here.
+	filepath.Walk(e.tmp, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
+		if err == nil && !info.IsDir() && (info.Name() == "README.md" || info.Name() == "SKILL.md") {
+			t.Errorf("the script extracted more than the plugin scripts: %s", path)
+		}
+		return nil
+	})
 	if facts["restart"] != "not_requested" {
 		t.Errorf("restart = %q: a restart must be opt-in", facts["restart"])
 	}
+	// Assumes the repo's plugin.json version is below 9.9.9, the version in the fixture archive.
 	if facts["plugin_older"] != "true" || !strings.Contains(facts["plugin_update_command"], "/plugin marketplace update") {
 		t.Errorf("the installed plugin is older than 9.9.9 and the output must say so: %v", facts)
 	}
@@ -261,7 +268,6 @@ func TestInstallBetaTakesAnExplicitTagAndRefusesAnOddOne(t *testing.T) {
 	if code != 0 || facts["tag"] != betaTag {
 		t.Fatalf("explicit tag: exit %d, %v", code, facts)
 	}
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) }) //nolint:errcheck
 	for _, bad := range []string{"main", "v1.2", "v1.2.3/../x", "v1.2.3;rm"} {
 		facts, _, code := e.run(nil, bad)
 		if code == 0 || !strings.HasPrefix(facts["reason"], "bad_tag") {
@@ -297,7 +303,6 @@ func TestInstallBetaSetsTheUpdateAnswerToNeverAgainstIssue1254(t *testing.T) {
 		t.Fatalf("seed: answer = %q, want auto", got)
 	}
 	facts, out, code := e.run(nil, betaTag)
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) }) //nolint:errcheck
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
@@ -318,7 +323,6 @@ func TestInstallBetaLeavesAnOtherUpdateAnswerAlone(t *testing.T) {
 	e := newBetaEnv(t)
 	// No update-check file: the answer is "ask". Nothing to guard, and nothing may be written.
 	facts, _, code := e.run(nil, betaTag)
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) }) //nolint:errcheck
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -332,31 +336,38 @@ func TestInstallBetaLeavesAnOtherUpdateAnswerAlone(t *testing.T) {
 
 func TestInstallBetaFailsClosedWhenTheInstallerFails(t *testing.T) {
 	e := newBetaEnv(t)
+	set := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "update-check", "answer", "--answer", "always")
+	set.Env = e.env
+	if out, err := set.CombinedOutput(); err != nil {
+		t.Fatalf("seeding the update answer: %v (%s)", err, out)
+	}
 	facts, _, code := e.run([]string{"FAKE_INSTALL_FAIL=1"}, betaTag)
-	t.Cleanup(func() {
-		if d := facts["beta_scripts"]; d != "" {
-			os.RemoveAll(filepath.Dir(filepath.Dir(d))) //nolint:errcheck
-		}
-	})
 	if code == 0 || !strings.HasPrefix(facts["reason"], "install_failed") || !strings.Contains(facts["reason"], "checksum_mismatch") {
 		t.Fatalf("want reason=install_failed naming the checksum; got exit %d, %v", code, facts)
 	}
 	if facts["result"] != "error" {
 		t.Errorf("result = %q", facts["result"])
 	}
+	if _, set := facts["beta_scripts"]; set {
+		t.Error("the output names beta_scripts, but the folder is deleted after a failure")
+	}
+	if facts["update_answer_restored"] != "auto" || e.updateAnswer() != "auto" {
+		t.Errorf("a failed install must put the update answer back and say so; stored=%q, %v", e.updateAnswer(), facts)
+	}
+	if _, err := os.Stat(filepath.Join(e.dest, "context-guru-proxy")); err == nil {
+		t.Error("a binary was installed")
+	}
 }
 
 func TestInstallBetaChecksTheInstalledVersion(t *testing.T) {
 	e := newBetaEnv(t)
 	facts, _, code := e.run([]string{"FAKE_PROXY_VERSION=v0.6.0"}, betaTag)
-	t.Cleanup(func() {
-		if d := facts["beta_scripts"]; d != "" {
-			os.RemoveAll(filepath.Dir(filepath.Dir(d))) //nolint:errcheck
-		}
-	})
 	// The fake installer copies the proxy, and the proxy reads FAKE_PROXY_VERSION when it runs.
 	if code == 0 || !strings.HasPrefix(facts["reason"], "version_mismatch") {
 		t.Fatalf("want reason=version_mismatch; got exit %d, %v", code, facts)
+	}
+	if _, set := facts["beta_scripts"]; set {
+		t.Error("the output names beta_scripts, but the folder is deleted after a failure")
 	}
 }
 
@@ -364,8 +375,7 @@ func TestInstallBetaDoesNotTouchARunningProxyWithoutRestart(t *testing.T) {
 	e := newBetaEnv(t)
 	port := freePort(t)
 	pid := e.startFakeProxy(port)
-	facts, _, code := e.run(nil, betaTag)
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) }) //nolint:errcheck
+	_, _, code := e.run(nil, betaTag)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -388,7 +398,6 @@ func TestInstallBetaRestartsWithThePresetAndNeverGuessesTheProcess(t *testing.T)
 	}
 	facts, _, code := e.run(nil, betaTag, "--restart", "--port", port)
 	t.Cleanup(func() {
-		os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) //nolint:errcheck
 		if b, err := os.ReadFile(filepath.Join(e.state, "proxy-"+port+".pid")); err == nil {
 			if p, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
 				syscall.Kill(p, syscall.SIGKILL) //nolint:errcheck
@@ -431,7 +440,6 @@ func TestInstallBetaRefusesToStopAPidThatIsNotOurProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts, _, code := e.run(nil, betaTag, "--restart", "--port", port)
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) }) //nolint:errcheck
 	if code == 0 || !strings.HasPrefix(facts["reason"], "pid_not_ours") {
 		t.Fatalf("want reason=pid_not_ours; got exit %d, %v", code, facts)
 	}
@@ -446,8 +454,78 @@ func TestInstallBetaRefusesToStopAPidThatIsNotOurProxy(t *testing.T) {
 func TestInstallBetaRestartNeedsAPort(t *testing.T) {
 	e := newBetaEnv(t)
 	facts, _, code := e.run(nil, betaTag, "--restart")
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(facts["beta_scripts"]))) }) //nolint:errcheck
 	if code == 0 || !strings.HasPrefix(facts["reason"], "port_unknown") {
 		t.Fatalf("an unrouted sandbox has no port: want reason=port_unknown; got exit %d, %v", code, facts)
+	}
+}
+
+func TestInstallBetaRestartWithNothingRunningJustStarts(t *testing.T) {
+	e := newBetaEnv(t)
+	port := freePort(t)
+	facts, _, code := e.run(nil, betaTag, "--restart", "--port", port)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(filepath.Join(e.state, "proxy-"+port+".pid")); err == nil {
+			if p, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				syscall.Kill(p, syscall.SIGKILL) //nolint:errcheck
+			}
+		}
+	})
+	if code != 0 || facts["stopped_pid"] != "none" || facts["restart"] != "done" || facts["healthz"] != "ok" {
+		t.Fatalf("want stopped_pid=none restart=done healthz=ok; got exit %d, %v", code, facts)
+	}
+	if facts["preset"] != "off" {
+		t.Errorf("preset = %q, want off when nothing is configured and nothing runs", facts["preset"])
+	}
+}
+
+func TestInstallBetaDoesNotStopAProxyItHasNoPidfileFor(t *testing.T) {
+	e := newBetaEnv(t)
+	port := freePort(t)
+	pid := e.startFakeProxy(port)
+	if err := os.Remove(filepath.Join(e.state, "proxy-"+port+".pid")); err != nil {
+		t.Fatal(err)
+	}
+	facts, _, code := e.run(nil, betaTag, "--restart", "--port", port)
+	if code == 0 || !strings.HasPrefix(facts["reason"], "port_in_use_not_ours") {
+		t.Fatalf("want reason=port_in_use_not_ours; got exit %d, %v", code, facts)
+	}
+	if !alive(pid) {
+		t.Fatal("a proxy without a pidfile was stopped")
+	}
+}
+
+func TestInstallBetaRefusesBadArguments(t *testing.T) {
+	e := newBetaEnv(t)
+	for _, c := range []struct {
+		reason string
+		args   []string
+	}{
+		{"bad_port", []string{"--port", "abc"}},
+		{"bad_port", []string{"--port"}},
+		{"unknown_flag", []string{"--nope"}},
+		{"too_many_arguments", []string{betaTag, "v1.0.0"}},
+	} {
+		facts, _, code := e.run(nil, c.args...)
+		if code == 0 || !strings.HasPrefix(facts["reason"], c.reason) {
+			t.Errorf("%v: want reason=%s; got exit %d, %v", c.args, c.reason, code, facts)
+		}
+	}
+	if _, err := os.Stat(e.mark); err == nil {
+		t.Error("an installer ran after a bad argument")
+	}
+}
+
+func TestInstallBetaReportsAnUnreadableUpdateAnswer(t *testing.T) {
+	e := newBetaEnv(t)
+	// A file we did not write: settings.py refuses to read it as ours.
+	if err := os.WriteFile(filepath.Join(e.state, "update-check.yaml"), []byte("answer: auto\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	facts, _, code := e.run(nil, betaTag)
+	if code != 0 {
+		t.Fatalf("exit %d, %v", code, facts)
+	}
+	if facts["update_answer"] != "unreadable" {
+		t.Errorf("update_answer = %q, want unreadable: the guard did not run and the output must say so", facts["update_answer"])
 	}
 }

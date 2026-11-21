@@ -35,7 +35,21 @@ BIN=context-guru-proxy
 STATE="${CONTEXT_GURU_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/context-guru}"
 
 emit() { printf '%s\n' "$*"; }
-die()  { emit "result=error"; emit "reason=$1"; exit 1; }
+# RESTORE_ANSWER is set once the update answer was changed (step 4). Every die after that puts the
+# old answer back, so a failed install does not leave the user's setting changed.
+RESTORE_ANSWER=""
+SCRIPTS=""
+die() {
+  if [ -n "$RESTORE_ANSWER" ] && [ -n "$SCRIPTS" ]; then
+    if python3 "$SCRIPTS/settings.py" update-check answer --answer always 2>/dev/null | grep -q '^answer=auto$'; then
+      emit "update_answer_restored=${RESTORE_ANSWER}"
+    else
+      emit "update_answer_restore_failed=true"
+      emit "note=the update answer is still never. Turn it back on with: settings.py update-check answer --answer always"
+    fi
+  fi
+  emit "result=error"; emit "reason=$1"; exit 1
+}
 
 TAG=""
 RESTART=0
@@ -97,10 +111,13 @@ mkdir -p "$WORK/dl" "$WORK/plugin" || die "no_tmpdir"
 curl -fsSL --max-time 120 -o "$WORK/dl/src.tar.gz" \
     "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz" 2>/dev/null ||
   die "source_unavailable: could not download the source archive of ${TAG}"
+# The top directory must not be '.' or '..', and the file names must not be either, so no member
+# can leave the extraction directory.
 members=$(tar tzf "$WORK/dl/src.tar.gz" 2>/dev/null |
-  grep -E '^[^/]+/context-guru-plugin/(scripts/[^/]+|\.claude-plugin/plugin\.json)$')
+  grep -E '^[^/]+/context-guru-plugin/(scripts/[^/]+|\.claude-plugin/plugin\.json)$' |
+  grep -Ev '^\.{1,2}/|/\.{1,2}$')
 [ -n "$members" ] || die "plugin_not_in_tag: ${TAG} has no context-guru-plugin/scripts"
-# Extract only those exact members. Names with '..' cannot match the pattern above.
+# Extract only those exact members.
 # An array, so a name with a space stays one argument. No -T: bsdtar and GNU tar read it differently.
 want=()
 while IFS= read -r m; do want+=("$m"); done <<<"$members"
@@ -112,7 +129,6 @@ for f in install.sh settings.py start-proxy.sh; do
   [ -f "$WORK/plugin/scripts/$f" ] || die "plugin_not_in_tag: ${TAG} has no scripts/$f"
 done
 SCRIPTS="$WORK/plugin/scripts"
-emit "beta_scripts=${SCRIPTS}"
 
 # --- 3. is the installed plugin older than the beta? -----------------------------------------
 # Compared on X.Y.Z only. Reported, never fixed: the plugin cache belongs to Claude Code.
@@ -153,12 +169,16 @@ fi
 # how to change it back.
 upd=$(python3 "$SCRIPTS/settings.py" update-check show 2>/dev/null)
 answer=$(printf '%s\n' "$upd" | sed -n 's/^answer=//p' | head -n 1)
+# `show` prints result=ok with an answer. Anything else (file not ours, unreadable, no python)
+# means we cannot tell, so say so: the guard did not run.
+printf '%s\n' "$upd" | grep -q '^result=ok$' || { answer=unreadable; emit "note=the update answer could not be read, so the #1254 guard did not run. Set it yourself: settings.py update-check answer --answer never"; }
 case "$answer" in
   auto|always)
     out=$(python3 "$SCRIPTS/settings.py" update-check answer --answer never 2>/dev/null)
     if printf '%s\n' "$out" | grep -q '^answer=never$'; then
       emit "update_answer_was=${answer}"
       emit "update_answer_now=never"
+      RESTORE_ANSWER="$answer"
       emit "update_answer_restore=settings.py update-check answer --answer always"
       emit "note=the update answer was ${answer}. It is now never, because of #1254: auto-update would install the older stable over the beta. Turn it back on with: settings.py update-check answer --answer always"
     else
@@ -189,7 +209,11 @@ if [ -n "$first" ] && [ "$first" != "$DEST/$BIN" ]; then
   emit "path_shadow=${first}"
   emit "note=another ${BIN} comes first on PATH (${first}); a session may start that one"
 fi
+# The beta is on disk now. From here the answer stays `never` even if a later step fails: the
+# installed beta still needs the #1254 guard.
+RESTORE_ANSWER=""
 KEEP=1   # the skill runs settings.py and start-proxy.sh from beta_scripts after this
+emit "beta_scripts=${SCRIPTS}"
 
 # --- 7. restart (only when asked) -----------------------------------------------------------
 if [ "$RESTART" != 1 ]; then
@@ -208,8 +232,9 @@ emit "port=${PORT}"
 
 # The preset: a restart without --preset resets it to off (#1244). Use the configured one; if
 # none is configured, use the one the running proxy was started with.
-preset=$(python3 "$SCRIPTS/settings.py" preset show 2>/dev/null | kv preset)
-pfile=$(python3 "$SCRIPTS/settings.py" preset show 2>/dev/null | kv file)
+pshow=$(python3 "$SCRIPTS/settings.py" preset show 2>/dev/null)
+preset=$(printf '%s\n' "$pshow" | kv preset)
+pfile=$(printf '%s\n' "$pshow" | kv file)
 if [ -z "$preset" ] || [ "$pfile" = "(none)" ]; then
   fp=$(sed -n 's/^preset=\([^ ]*\).*/\1/p' "$STATE/proxy-${PORT}.fingerprint" 2>/dev/null | head -n 1)
   [ -n "$fp" ] && preset="$fp"
