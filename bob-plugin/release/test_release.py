@@ -47,6 +47,11 @@ if "--help" in args:
     print("  {flag} string")
     print("fake-arch={arch}")
     sys.exit(0)
+# setup lists the cache strategies (#1111). Without this answer it skips the fake as too old and
+# downloads the real latest release from GitHub in the middle of the test.
+if args[:1] == ["strategies"]:
+    print('{{"strategies": [{{"name": "none", "providers": ["any"], "spends": false, "desc": "fake"}}]}}')
+    sys.exit(0)
 if {dies}:
     sys.exit(1)
 import time
@@ -231,6 +236,10 @@ class Release(unittest.TestCase):
             "LANG": "en_US.UTF-8",
             "USER": os.environ.get("USER", "test"),
             "CG_TEST_ROOT": str(self.root),
+            # No real network: a download (setup's release fallback) goes to a closed local port and
+            # fails at once, so a fake the scripts reject fails the test loudly, not by a quiet download.
+            **{k: "http://127.0.0.1:9" for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")},
+            **{k: "127.0.0.1,localhost" for k in ("NO_PROXY", "no_proxy")},
             "CG_TEST_ARCH": "arm64",
             "CG_BOB_QUIT_WAIT_S": "2",
             "CONTEXT_GURU_BOB_APP": str(self.bob_app),

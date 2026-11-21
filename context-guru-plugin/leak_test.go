@@ -35,6 +35,12 @@ var leakRun = fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 
 func TestMain(m *testing.M) {
 	os.Setenv(leakRunVar, leakRun) //nolint:errcheck
+	// On macOS t.TempDir() is under /var, a symlink to /private/var, while settings.py records paths
+	// with os.path.realpath. Resolve TMPDIR once, so the paths a test builds and the paths the scripts
+	// report agree.
+	if dir, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
+		os.Setenv("TMPDIR", dir) //nolint:errcheck
+	}
 	code := m.Run()
 	if left := markedProcs(""); len(left) > 0 {
 		fmt.Fprintf(os.Stderr, "FAIL: the suite left %d process(es) running (stop them in t.Cleanup):\n", len(left))
