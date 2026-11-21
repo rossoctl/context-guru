@@ -3,7 +3,7 @@ name: **Trace recording** (`--record`, `--record-otlp`)
 kind: content
 off: ❌ Off
 metadata_only: ❌ **Cannot work.** A trace without bodies cannot be replayed.
-everything: ✅ Works, only for accounts that opted in. Off for every account until its owner turns it on.
+everything: ✅ Works, only for accounts that opted in. Off for every account until its owner turns it on. One session can opt out, which also deletes what was recorded for it ([session-recorder.md](reference/session-recorder.md#leaving-one-session-out)).
 order: 280
 ---
 
