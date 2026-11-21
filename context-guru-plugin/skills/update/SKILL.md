@@ -50,6 +50,7 @@ misleading thing this skill can do.
 ## 2. Report honestly
 
 - `update_available=false`: up to date, name the version.
+  This also holds when a beta is installed and `latest` is an older stable: an update never goes backwards.
 - `update_available=true`: name both versions and that the download is on the order of 30 MB.
 - `update_available=unknown`: say the check failed and why (`reason=`), and that you don't know
   either way — never fall back to the cached `latest=` from the block above as if it answered this.

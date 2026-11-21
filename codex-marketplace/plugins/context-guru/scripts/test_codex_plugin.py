@@ -393,6 +393,15 @@ screen_reader_detection_done = true
                 PLUGIN.install_release_binary("v0.3.4")
         fetch.assert_not_called()
 
+    def test_update_check_does_not_call_a_beta_outdated(self):
+        """releases/latest never names a prerelease, so a beta is not behind the older stable (#1254)."""
+        for installed, latest, want in (
+            ("v0.7.5-beta.1", "v0.7.4", False), ("0.7.5-beta.1", "v0.7.4", False),
+            ("v0.7.5-beta.1", "v0.7.5", True), ("v0.7.5-beta.2", "v0.7.5-beta.1", False),
+            ("v0.7.4", "v0.7.5", True), ("v0.7.5", "v0.7.5", False), ("unknown", "v0.7.5", True),
+        ):
+            self.assertEqual(PLUGIN.release_is_newer(latest, installed), want, (installed, latest))
+
     def test_update_check_is_read_only(self):
         args = type("Args", (), {"check": True, "install": False})()
         with mock.patch.object(PLUGIN, "latest_release_tag", return_value="v1.2.3"), \

@@ -1544,6 +1544,19 @@ resolve_latest_tag() {
   printf 'tag=%s\n' "$v"
 }
 
+# latest_is_newer LATEST HAVE: is LATEST strictly newer than HAVE, in semantic-version order?
+# `releases/latest` never names a prerelease, so an installed beta is NOT behind it (#1254).
+# The comparison lives in settings.py. If that gives no answer, fall back to "the tags differ".
+latest_is_newer() {
+  ln_=$("$(route_here)/settings.py" update-check newer --latest "$1" --installed "$2" 2>/dev/null \
+          | sed -n 's/^newer=//p' | head -1)
+  case "$ln_" in
+    true)  return 0 ;;
+    false) return 1 ;;
+  esac
+  [ "${1#v}" != "${2#v}" ]
+}
+
 # --check-latest: resolve installed vs. latest and REPORT, never download, never install, never
 # write the proxy binary. Exists because the ordinary flow above can only say "a newer release
 # exists" as a side effect of actually fetching one (CONTEXT_GURU_UPGRADE=1) — which is the wrong
@@ -1566,7 +1579,7 @@ if [ "${1:-}" = --check-latest ]; then
            exit 0 ;;
   esac
   emit "latest_version=${latest}"
-  if [ -n "$have" ] && { [ "$have" = "${latest#v}" ] || [ "$have" = "$latest" ]; }; then
+  if [ -n "$have" ] && ! latest_is_newer "$latest" "$have"; then
     emit "result=checked"; emit "update_available=false"
   else
     emit "result=checked"; emit "update_available=true"
@@ -1622,7 +1635,15 @@ if [ "$VERSION" = latest ]; then
   # disagree about what "latest" means.
   resolved=$(resolve_latest_tag) || true
   case "$resolved" in
-    tag=*) VERSION="${resolved#tag=}" ;;
+    tag=*) VERSION="${resolved#tag=}"
+           # An upgrade never goes backwards: an installed beta stays when the latest stable is
+           # older (#1254). An explicit CONTEXT_GURU_VERSION still installs any tag.
+           if [ -n "${have:-}" ] && [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ] && ! latest_is_newer "$VERSION" "$have"; then
+             emit "result=present"
+             emit "note=${have} is not older than the latest release ${VERSION}; nothing to upgrade"
+             record_installed_version "$have"
+             exit 0
+           fi ;;
     error=github_rate_limited)
       die "github_rate_limited: GitHub's API is rate limited for this IP (60/hour, shared with everything behind the same address), so the latest version could not be resolved. This says NOTHING about whether a release exists. Wait for the window to reset, or set CONTEXT_GURU_VERSION=vX.Y.Z to skip resolution entirely." ;;
     *)

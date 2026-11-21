@@ -158,6 +158,30 @@ def latest_release_tag():
     return tag
 
 
+_SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def _semver_key(text):
+    """Sort key in semantic-version order (a prerelease sorts below its release), or None."""
+    match = _SEMVER.fullmatch((text or "").strip())
+    if not match:
+        return None
+    core = tuple(int(part) for part in match.groups()[:3])
+    if match.group(4) is None:
+        return core, (1,)
+    return core, (0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in match.group(4).split(".")))
+
+
+def release_is_newer(latest, installed):
+    """True when `latest` is strictly newer than `installed`. `releases/latest` never names a
+    prerelease, so an installed beta is not behind it (#1254). An unparsable side falls back to
+    "the tags differ"."""
+    left, right = _semver_key(latest), _semver_key(installed)
+    if left is None or right is None:
+        return (latest or "").strip().removeprefix("v") != (installed or "").strip().removeprefix("v")
+    return left > right
+
+
 def fetch(url):
     with urllib.request.urlopen(url, timeout=60) as response:
         return response.read()
@@ -829,7 +853,7 @@ def update(args):
             fields = completed.stdout.split()
             if len(fields) >= 2:
                 installed = fields[1]
-    available = installed.removeprefix("v") != latest.removeprefix("v")
+    available = release_is_newer(latest, installed)
     if args.check:
         facts(result="checked", installed_version=installed, latest_version=latest,
               update_available=str(available).lower())

@@ -819,6 +819,14 @@ class ConfigByName(Sandbox):
             _, facts = self.run_main("update", "--check")
         self.assertEqual((facts["installed_version"], facts["update_available"]), ("unknown", "true"))
 
+    def test_update_check_does_not_call_a_beta_outdated(self):
+        """releases/latest never names a prerelease, so a beta is not behind the older stable (#1254)."""
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.5-beta.1 (commit abc)")})
+        for latest, want in (("v0.7.4", "false"), ("v0.7.5", "true"), ("v0.7.5-beta.1", "false")):
+            with mock.patch.object(pi_plugin, "latest_release_tag", return_value=latest):
+                _, facts = self.run_main("update", "--check")
+            self.assertEqual((latest, facts["update_available"]), (latest, want))
+
     def test_configure_writes_the_config_and_the_record_under_the_restart_lock(self):
         self.installed()
         held = {}
