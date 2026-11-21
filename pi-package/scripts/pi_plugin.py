@@ -1204,17 +1204,17 @@ def update(args):
         facts(result="checked", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
               update_available=str(available).lower())
         return 0
-    if _semver_key(installed) is not None and not available:
-        # An update never goes backwards: an installed beta stays when latest is an older stable (#1254).
-        facts(result="current", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
-              update_available="false")
-        return 0
     if executable and Path(executable).resolve() != managed_binary().resolve():
         facts(result="refused", reason="binary_not_managed", binary=executable,
               detail="setup did not download this proxy, so update cannot replace it. If CONTEXT_GURU_BIN is set, "
                      "unset it, then run /context-guru setup again: setup then downloads a proxy that update can "
                      "update")
         return 2
+    if _semver_key(installed) is not None and not available:
+        # An update never goes backwards: an installed beta stays when latest is an older stable (#1254).
+        facts(result="current", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
+              update_available="false")
+        return 0
     try:
         executable, version = install_release_binary(latest)
     except Exception as error:

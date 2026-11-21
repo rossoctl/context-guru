@@ -4632,7 +4632,7 @@ def update_is_newer(latest: str, installed: str) -> bool:
     test (the tags differ, ignoring a leading `v`), so an odd version string still fails open."""
     a, b = _semver_key(latest), _semver_key(installed)
     if a is None or b is None:
-        return (latest or "").strip().lstrip("v") != (installed or "").strip().lstrip("v")
+        return (latest or "").strip().removeprefix("v") != (installed or "").strip().removeprefix("v")
     return a > b
 
 

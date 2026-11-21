@@ -842,6 +842,15 @@ class ConfigByName(Sandbox):
             if not installs:
                 self.assertEqual(facts["result"], "current")
 
+    def test_update_install_refuses_an_unmanaged_binary_before_it_reports_current(self):
+        """A user-supplied binary gets result=refused, exit 2, even when it is not older than latest (#1254)."""
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.5-beta.1 (commit abc)")})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.4"), \
+             mock.patch.object(pi_plugin, "install_release_binary") as install:
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_not_managed"))
+        install.assert_not_called()
+
     def test_configure_writes_the_config_and_the_record_under_the_restart_lock(self):
         self.installed()
         held = {}
