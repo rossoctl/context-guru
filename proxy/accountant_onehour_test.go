@@ -8,7 +8,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // #1243. A 1-hour-on-wait ping moves the entry of a 5-minute main thread to 1 hour, and a read 5 to 60
