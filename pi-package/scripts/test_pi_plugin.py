@@ -819,6 +819,38 @@ class ConfigByName(Sandbox):
             _, facts = self.run_main("update", "--check")
         self.assertEqual((facts["installed_version"], facts["update_available"]), ("unknown", "true"))
 
+    def test_update_check_does_not_call_a_beta_outdated(self):
+        """releases/latest never names a prerelease, so a beta is not behind the older stable (#1254)."""
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.5-beta.1 (commit abc)")})
+        for latest, want in (("v0.7.4", "false"), ("v0.7.5", "true"), ("v0.7.5-beta.1", "false")):
+            with mock.patch.object(pi_plugin, "latest_release_tag", return_value=latest):
+                _, facts = self.run_main("update", "--check")
+            self.assertEqual((latest, facts["update_available"]), (latest, want))
+
+    def test_update_install_never_goes_backwards_from_a_beta(self):
+        """`update --install` keeps a beta when latest is an older stable (#1254)."""
+        for installed, latest, installs in (("0.7.5-beta.1", "v0.7.4", False), ("0.7.5", "v0.7.5", False),
+                                            ("0.7.5-beta.1", "v0.7.5", True)):
+            pi_plugin.write_record({"port": 8800, "binary": self.fake_binary(f"context-guru-proxy {installed} (commit abc)")})
+            with mock.patch.object(pi_plugin, "latest_release_tag", return_value=latest), \
+                 mock.patch.object(pi_plugin, "managed_binary", return_value=Path(pi_plugin.read_record()["binary"])), \
+                 mock.patch.object(pi_plugin, "install_release_binary",
+                                   side_effect=RuntimeError("download failed")) as install:
+                code, facts = self.run_main("update", "--install")
+            self.assertEqual(install.called, installs, (installed, latest))
+            self.assertEqual(code, 1 if installs else 0, (installed, latest))
+            if not installs:
+                self.assertEqual(facts["result"], "current")
+
+    def test_update_install_refuses_an_unmanaged_binary_before_it_reports_current(self):
+        """A user-supplied binary gets result=refused, exit 2, even when it is not older than latest (#1254)."""
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.5-beta.1 (commit abc)")})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.4"), \
+             mock.patch.object(pi_plugin, "install_release_binary") as install:
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_not_managed"))
+        install.assert_not_called()
+
     def test_configure_writes_the_config_and_the_record_under_the_restart_lock(self):
         self.installed()
         held = {}

@@ -666,6 +666,15 @@ def _update_available_segment() -> str | None:
         installed = ""
     if installed and (latest == installed or latest == f"v{installed}"):
         return None  # already current
+    if installed:
+        # A beta is not "behind" the older stable that releases/latest names (#1254).
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import settings  # noqa: PLC0415 - as in _our_port
+            if not settings.update_is_newer(latest, installed):
+                return None
+        except Exception:  # noqa: BLE001 - fail open: keep the segment
+            pass
     if fields["answer"] == "auto":
         return f"{GREEN}▲ {latest} auto{RESET}"
     return f"{GREEN}▲ update {latest}{RESET}"

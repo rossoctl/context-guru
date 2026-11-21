@@ -248,6 +248,30 @@ def latest_release_tag():
     return tag
 
 
+_SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def _semver_key(text):
+    """Sort key in semantic-version order (a prerelease sorts below its release), or None."""
+    match = _SEMVER.fullmatch((text or "").strip())
+    if not match:
+        return None
+    core = tuple(int(part) for part in match.groups()[:3])
+    if match.group(4) is None:
+        return core, (1,)
+    return core, (0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in match.group(4).split(".")))
+
+
+def release_is_newer(latest, installed):
+    """True when `latest` is strictly newer than `installed`. `releases/latest` never names a
+    prerelease, so an installed beta is not behind it (#1254). An unparsable side falls back to
+    "the tags differ"."""
+    left, right = _semver_key(latest), _semver_key(installed)
+    if left is None or right is None:
+        return (latest or "").strip().removeprefix("v") != (installed or "").strip().removeprefix("v")
+    return left > right
+
+
 def fetch(url):
     with urllib.request.urlopen(url, timeout=60) as response:
         return response.read()
@@ -1175,7 +1199,7 @@ def update(args):
     record = read_record()
     executable = record.get("binary") or find_binary()
     installed = (binary_version_text(executable) if executable else None) or "unknown"
-    available = installed.removeprefix("v") != latest.removeprefix("v")
+    available = release_is_newer(latest, installed)
     if args.check:
         facts(result="checked", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
               update_available=str(available).lower())
@@ -1186,6 +1210,11 @@ def update(args):
                      "unset it, then run /context-guru setup again: setup then downloads a proxy that update can "
                      "update")
         return 2
+    if _semver_key(installed) is not None and not available:
+        # An update never goes backwards: an installed beta stays when latest is an older stable (#1254).
+        facts(result="current", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
+              update_available="false")
+        return 0
     try:
         executable, version = install_release_binary(latest)
     except Exception as error:
