@@ -169,7 +169,7 @@ fi
 # how to change it back.
 upd=$(python3 "$SCRIPTS/settings.py" update-check show 2>/dev/null)
 answer=$(printf '%s\n' "$upd" | sed -n 's/^answer=//p' | head -n 1)
-# `show` prints result=ok with an answer. Anything else (file not ours, unreadable, no python)
+# `show` prints result=ok with an answer. Anything else (file not ours, unreadable)
 # means we cannot tell, so say so: the guard did not run.
 printf '%s\n' "$upd" | grep -q '^result=ok$' || { answer=unreadable; emit "note=the update answer could not be read, so the #1254 guard did not run. Set it yourself: settings.py update-check answer --answer never"; }
 case "$answer" in
