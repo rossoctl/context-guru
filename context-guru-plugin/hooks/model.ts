@@ -198,12 +198,14 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
     warmUsd: num(e.next_warm_usd),
     coldUsd: cold && cold > 0 ? cold : undefined,
     tokens: num(e.prefix_tokens),
-    writeTier: e.ttl_s === 3600 ? '1h' : e.ttl_s === 300 ? '5m' : undefined,
+    // The tier the entry was BILLED at. An unproven hour is the clock's belief, not a write: the entry was written at 5
+    // minutes, and next_cold_usd is priced at that tier, so the 5-hour share's cold figure uses it too.
+    writeTier: e.ttl_unproven === true ? '5m' : e.ttl_s === 3600 ? '1h' : e.ttl_s === 300 ? '5m' : undefined,
     isUnproven: e.ttl_unproven === true,
     saved: num(e.saved_usd),
     isHeld: num(e.held_until_ms) !== undefined,
     // What the per-second clock is computed from: a newer document that moves it must replace the stored one.
-    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), num(e.held_until_ms), num(e.pings_left), num(e.next_ping_ms)].join(','),
+    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), e.ttl_unproven === true ? 'u' : '', num(e.held_until_ms), num(e.pings_left), num(e.next_ping_ms)].join(','),
     ...clockOf(e, now),
     nextPingS: nextPingIn(e, now),
   }

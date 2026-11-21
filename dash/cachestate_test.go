@@ -318,16 +318,20 @@ func oneHourScene(t *testing.T) (*API, int64) {
 func TestCacheStateCountsAnHourFromAFreeOneHourPing(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		touches   map[string]OneHourTouch
+		touches   func(now int64) map[string]OneHourTouch
 		wantTTL   float64
 		unproven  bool
 		threadTTL float64
 	}{
 		{"no fact: the billed tier", nil, 300, false, 300},
-		{"unproven route", map[string]OneHourTouch{"": {AtMS: 1, Proven: false}}, 3600, true, 3600},
-		{"proven route", map[string]OneHourTouch{"": {AtMS: 1, Proven: true}}, 3600, false, 3600},
+		{"unproven route", func(now int64) map[string]OneHourTouch {
+			return map[string]OneHourTouch{"": {AtMS: now - 100_000, Proven: false}}
+		}, 3600, true, 3600},
+		{"proven route", func(now int64) map[string]OneHourTouch {
+			return map[string]OneHourTouch{"": {AtMS: now - 100_000, Proven: true}}
+		}, 3600, false, 3600},
 		// A fact for another thread leaves the main clock alone.
-		{"a subagent's fact", map[string]OneHourTouch{"a:X": {AtMS: 1}}, 300, false, 300},
+		{"a subagent's fact", func(now int64) map[string]OneHourTouch { return map[string]OneHourTouch{"a:X": {AtMS: now - 90_000}} }, 300, false, 300},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, now := oneHourScene(t)
@@ -336,7 +340,7 @@ func TestCacheStateCountsAnHourFromAFreeOneHourPing(t *testing.T) {
 					if session != "s1" {
 						t.Errorf("asked for session %q", session)
 					}
-					return tc.touches
+					return tc.touches(now)
 				})
 			}
 			_, body := get(t, a, "/api/cachestate?session=s1", "")
@@ -356,7 +360,7 @@ func TestCacheStateCountsAnHourFromAFreeOneHourPing(t *testing.T) {
 			}
 			// The session entry is the latest touch, the subagent's: it follows the subagent's own fact.
 			wantSession := 300.0
-			if _, ok := tc.touches["a:X"]; ok {
+			if tc.touches != nil && tc.touches(now)["a:X"] != (OneHourTouch{}) {
 				wantSession = 3600
 			}
 			if body["ttl_s"] != wantSession {
@@ -389,5 +393,31 @@ func TestCacheStateSessionEntryFollowsTheOneHourPing(t *testing.T) {
 	_, body = get(t, a, "/api/cachestate?session=s1", "")
 	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] == true {
 		t.Errorf("a real 1h write: ttl_s/ttl_unproven = %v/%v", body["ttl_s"], body["ttl_unproven"])
+	}
+}
+
+// The touch counts only while the thread's last touch is that ping. A row well past the ping (a manual press, a
+// request) moved the entry, so the clock falls back to the billed tier (#1258).
+func TestCacheStateDoesNotLengthenAClockPastTheOneHourPing(t *testing.T) {
+	a, now := oneHourScene(t)
+	// The fact says the ping started 20 minutes before the thread's last row.
+	a.SetOneHourTouches(func(string, bool, string) map[string]OneHourTouch {
+		return map[string]OneHourTouch{"": {AtMS: now - 100_000 - 20*60_000, Proven: true}}
+	})
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	for _, th := range body["threads"].([]any) {
+		if m := th.(map[string]any); m["main"] == true && (m["ttl_s"] != 300.0 || m["ttl_unproven"] == true) {
+			t.Errorf("a row past the ping still counts an hour: ttl_s/ttl_unproven = %v/%v", m["ttl_s"], m["ttl_unproven"])
+		}
+	}
+	// Inside the slack (the ping's own row is recorded when the response arrives) it still counts.
+	a.SetOneHourTouches(func(string, bool, string) map[string]OneHourTouch {
+		return map[string]OneHourTouch{"": {AtMS: now - 100_000 - 30_000, Proven: true}}
+	})
+	_, body = get(t, a, "/api/cachestate?session=s1", "")
+	for _, th := range body["threads"].([]any) {
+		if m := th.(map[string]any); m["main"] == true && m["ttl_s"] != 3600.0 {
+			t.Errorf("the ping's own row (30 s after its start) lost the hour: ttl_s = %v", m["ttl_s"])
+		}
 	}
 }

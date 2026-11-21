@@ -790,3 +790,18 @@ func TestAReleasedProbeIsLoggedAndASwitchOffIsLogged(t *testing.T) {
 		t.Errorf("no switch-off line:\n%s", got)
 	}
 }
+
+// A manual "Ping now" after a free 1-hour ping sends the held body with 5-minute markers, which moves the
+// entry back to 5 minutes. The press is the thread's new last touch: the 1-hour clock ends (#1258).
+func TestAManualPressEndsTheOneHourTouch(t *testing.T) {
+	k, _ := probeThenWait(t)
+	if _, ok := touchOf(k, sess1); !ok {
+		t.Fatal("no touch to end")
+	}
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Second}); err != nil {
+		t.Fatalf("PingNow: %v", err)
+	}
+	if _, ok := touchOf(k, sess1); ok {
+		t.Error("the touch outlived a manual press: the clock would count an hour from a 5-minute ping")
+	}
+}

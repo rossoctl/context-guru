@@ -1256,3 +1256,15 @@ test('the cache clock counts an hour from a free 1-hour ping, with 1h? while the
   expect(cacheClock(at({}, { ttl_unproven: true }).main)!.time).toBe('56:40')
   expect(at({ ttl_unproven: true }).main.isUnproven).toBe(true)
 })
+
+// #1258: an unproven hour is the clock's belief, not a write. The thread view keeps the BILLED tier (5m) so the 5-hour
+// share's cold figure uses the basis next_cold_usd is priced at, and the redraw check sees the mark flip.
+test('an unproven hour keeps the billed write tier and moves the redraw anchor when the mark flips', async () => {
+  const ping = NOW - 200_000
+  const at = (extra: object) =>
+    view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping, ttl_s: 3600, ...extra }] } }, NOW)!
+  expect(at({ ttl_unproven: true }).main.writeTier).toBe('5m')
+  expect(at({}).main.writeTier).toBe('1h')
+  expect(at({ ttl_unproven: true }).main.anchor).not.toBe(at({}).main.anchor)
+  expect(signature(at({ ttl_unproven: true }))).not.toBe(signature(at({})))
+})

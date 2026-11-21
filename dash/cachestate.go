@@ -132,7 +132,8 @@ func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, sessio
 // ping asked every cache marker at 1 hour and read the prefix without writing. The entry then lives an
 // hour from the ping, so the clock counts an hour from it, until the thread's next real request. Metadata only.
 type OneHourTouch struct {
-	// AtMS is when the ping started (epoch ms). The fact ends an hour after it.
+	// AtMS is when the ping started (epoch ms). The fact ends an hour after it, and holds only while the thread's
+	// last touch is within oneHourSlackMS of it.
 	AtMS int64
 	// Proven is true when the route is proven to grant the 1-hour tier. False: the clock is a belief the
 	// thread's return will test, and the clients mark it ("1h?").
@@ -145,6 +146,11 @@ func (a *API) SetOneHourTouches(fn func(tenantID string, allTenants bool, sessio
 	a.oneHour = fn
 }
 
+// oneHourSlackMS is how far after the ping's start the ping's own row may sit. The row is recorded when the
+// response arrives, and a ping times out at 60 s, so 2 minutes covers it. A row further past the ping is a later
+// touch (a manual press, a request): the entry is no longer the 1-hour one the ping made.
+const oneHourSlackMS = 2 * 60 * 1000
+
 // applyOneHour lengthens the clock of every entry whose last touch was a free 1-hour ping to the hour, and
 // marks it unproven while the route is. The session entry follows the thread that holds the same touch.
 // Prices keep the tier the entry was billed at: the next request writes its own tier, not the ping's.
@@ -154,7 +160,9 @@ func applyOneHour(s *CacheState, touches map[string]OneHourTouch) {
 	for i := range s.Threads {
 		t := &s.Threads[i]
 		o, ok := touches[t.ID]
-		if !ok || t.TTLSeconds >= hour {
+		// The touch counts only while the thread's last touch is that ping: a newer row means a later touch
+		// moved the entry (defense in depth; the keeper also drops the fact at a press and at a request).
+		if !ok || t.TTLSeconds >= hour || t.LastTS > o.AtMS+oneHourSlackMS {
 			continue
 		}
 		t.TTLSeconds, t.TTLUnproven = hour, !o.Proven
