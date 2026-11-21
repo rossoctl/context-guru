@@ -96,7 +96,7 @@ CONTEXT_GURU_UPGRADE=1 "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
 
 This is the same checksum-verified download path `/context-guru:install` uses for a first install —
 nothing here reimplements it. Report `result=installed`/`checksum=`/any `reason=` exactly as that
-skill does; a failure there is a hard stop on the install — not on step 3, which has already run and
+skill does. If it returns `result=present` with a `note=`, install.sh refused to go backwards or had nothing newer: tell the user the installed version is not older than the latest release, and that nothing changed. A failure there is a hard stop on the install — not on step 3, which has already run and
 whose recorded answer stands regardless.
 
 On success, restart the proxy so the new binary is live now rather than at the next session:

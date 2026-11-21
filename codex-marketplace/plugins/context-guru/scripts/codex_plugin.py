@@ -858,6 +858,10 @@ def update(args):
         facts(result="checked", installed_version=installed, latest_version=latest,
               update_available=str(available).lower())
         return 0
+    if _semver_key(installed) is not None and not available:
+        # An update never goes backwards: an installed beta stays when latest is an older stable (#1254).
+        facts(result="current", installed_version=installed, latest_version=latest, update_available="false")
+        return 0
     try:
         executable, version = install_release_binary(latest)
     except Exception as error:

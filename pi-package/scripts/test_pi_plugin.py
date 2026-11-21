@@ -827,6 +827,21 @@ class ConfigByName(Sandbox):
                 _, facts = self.run_main("update", "--check")
             self.assertEqual((latest, facts["update_available"]), (latest, want))
 
+    def test_update_install_never_goes_backwards_from_a_beta(self):
+        """`update --install` keeps a beta when latest is an older stable (#1254)."""
+        for installed, latest, installs in (("0.7.5-beta.1", "v0.7.4", False), ("0.7.5", "v0.7.5", False),
+                                            ("0.7.5-beta.1", "v0.7.5", True)):
+            pi_plugin.write_record({"port": 8800, "binary": self.fake_binary(f"context-guru-proxy {installed} (commit abc)")})
+            with mock.patch.object(pi_plugin, "latest_release_tag", return_value=latest), \
+                 mock.patch.object(pi_plugin, "managed_binary", return_value=Path(pi_plugin.read_record()["binary"])), \
+                 mock.patch.object(pi_plugin, "install_release_binary",
+                                   side_effect=RuntimeError("download failed")) as install:
+                code, facts = self.run_main("update", "--install")
+            self.assertEqual(install.called, installs, (installed, latest))
+            self.assertEqual(code, 1 if installs else 0, (installed, latest))
+            if not installs:
+                self.assertEqual(facts["result"], "current")
+
     def test_configure_writes_the_config_and_the_record_under_the_restart_lock(self):
         self.installed()
         held = {}

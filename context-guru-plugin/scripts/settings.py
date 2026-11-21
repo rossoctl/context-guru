@@ -4900,7 +4900,7 @@ def main() -> int:
 
     uc = sub.add_parser("update-check")
     uc.add_argument("op", choices=("show", "stamp", "notify", "answer", "newer"))
-    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
+    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp` and `newer`")
     uc.add_argument("--installed", default="", help="the installed tag; for `newer`")
     uc.add_argument("--answer", default="",
                     help="for `answer`: one of " + ", ".join(UPDATE_ANSWERS))

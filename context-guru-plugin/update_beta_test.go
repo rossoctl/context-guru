@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // TestUpdateIsNewerOrdersVersionsLikeSemver (#1254). `releases/latest` never names a prerelease, so
@@ -85,14 +86,18 @@ func updateBranchRun(t *testing.T, installed, latest, answer string) (string, bo
 	bin := servingProxy(t, dir, port, filepath.Join(dir, "started"))
 	out, _ := startProxyScript(t, filepath.Join(scripts, "start-proxy.sh"), state, home, bin, port, "TMPDIR="+dir)
 	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sentinel); err == nil {
-			return out, true
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Deterministic: start-proxy.sh starts the install and prints its note in the same branch, so
+	// the note is the end-of-decision signal. With the note, wait for the stub (no time limit of
+	// our own). Without it, the branch was not taken and the stub cannot run.
+	if !strings.Contains(out, "updating the proxy in the background") {
+		_, err := os.Stat(sentinel)
+		return out, err == nil
 	}
-	return out, false
+	testutil.WaitFor(t, "the stub install.sh ran", func() bool {
+		_, err := os.Stat(sentinel)
+		return err == nil
+	})
+	return out, true
 }
 
 func TestStartProxyNeverUpdatesABetaToAnOlderStable(t *testing.T) {
@@ -204,12 +209,9 @@ func TestUpgradeNeverInstallsAnOlderStableOverABeta(t *testing.T) {
 
 func writeUpdateRecord(t *testing.T, state, installed, latest string) {
 	t.Helper()
-	if err := os.MkdirAll(state, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rec := "# context-guru update_check=1 managed-by /context-guru:update\nanswer: ask\nskipped: \nnotified: \nlatest: " + latest + "\n"
-	if err := os.WriteFile(filepath.Join(state, "update-check.yaml"), []byte(rec), 0o600); err != nil {
-		t.Fatal(err)
+	// `stamp` writes the record with the real ownership marker line.
+	if _, code := settingsIn(t, state, t.TempDir(), "update-check", "stamp", "--latest", latest); code != 0 {
+		t.Fatalf("update-check stamp exited %d", code)
 	}
 	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte(installed+"\n"), 0o600); err != nil {
 		t.Fatal(err)
