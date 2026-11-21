@@ -211,7 +211,7 @@ type capRow struct {
 	// Bypassed marks a request the proxy forwarded untouched. Rows written before the agent's own
 	// compaction request stopped being bypassed carry it for that request.
 	Bypassed bool
-	// AgentCompaction marks the agent's own compaction request (isAgentCompaction). Either flag is
+	// AgentCompaction marks the agent's own compaction request (thread.IsAgentCompaction). Either flag is
 	// the evidence that a drop in tokens_before is the client compacting.
 	AgentCompaction bool
 	// Verdict is the client compaction verdict the proxy stored (#947): "unknown" (later "manual" or

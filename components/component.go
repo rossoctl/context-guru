@@ -517,17 +517,17 @@ type Ctx struct {
 	// Thread is the thread of the session this request belongs to (main agent, a subagent, a
 	// fork): "" for the primary thread. A component that keeps per-CONVERSATION state between
 	// requests, outside the Store's session keys, keys it by thread.Key(Session, Thread) — each
-	// thread is its own conversation with its own provider cache entry. See internal/thread.
+	// thread is its own conversation with its own provider cache entry. See thread.
 	Thread string
 	// ThreadInherits says this request starts a NEW thread that continues another thread's prefix
 	// (a Claude Code side request, a fork), and ThreadParent names that thread: "" with
-	// ThreadInherits true means the parent is the primary (main) thread. internal/thread sets it
+	// ThreadInherits true means the parent is the primary (main) thread. Package thread sets it
 	// only on the FIRST request of a new thread, the one request whose own per-thread state is
 	// still empty, so a component may fall back to thread.Key(Session, ThreadParent) there and
 	// nowhere else. apply's cached boundary does exactly that (modes.Tracker.TurnFrom).
 	ThreadParent   string
 	ThreadInherits bool
-	// DeclaresTools says the request declares tools: the metadata internal/thread uses to tell the
+	// DeclaresTools says the request declares tools: the metadata package thread uses to tell the
 	// main agent (and a fork of it) from a tool-less side request (a title, a quota check, an
 	// end-of-turn note). cache_aware_summarizer and summarize use it to decide whether a new
 	// inheriting thread keeps a copy of its parent's checkpoint (see offload.adoptParentCheckpoint).
@@ -1208,7 +1208,7 @@ func (NopEmitter) Run(RunReport)    {}
 type KeepAliveReport struct {
 	Tenant, Session, Model, Provider, Route string
 	// Thread is the session thread the ping kept warm ("" = the primary thread), so a ping row
-	// says WHICH cache entry it protected. See internal/thread.
+	// says WHICH cache entry it protected. See thread.
 	Thread                        string
 	Pings                         int
 	CacheRead, CacheWrite, Output int64

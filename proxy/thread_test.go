@@ -16,8 +16,8 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/testutil"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // threadBody is an Anthropic-dialect body whose messages are the given texts, with Claude Code's
@@ -183,7 +183,7 @@ func TestThreadForFallsBackOnAnUnusableHeader(t *testing.T) {
 	req := func(agentID string) *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "/x", nil)
 		if agentID != "\x01unset" {
-			r.Header.Set(agentIDHeader, agentID)
+			r.Header.Set(thread.AgentHeader, agentID)
 		}
 		return r
 	}
@@ -236,7 +236,7 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("x-context-guru-session", "sess-th")
 				if withHeader && agentID != "" {
-					req.Header.Set(agentIDHeader, agentID)
+					req.Header.Set(thread.AgentHeader, agentID)
 				}
 				resp, err := srv.Client().Do(req)
 				if err != nil {
@@ -337,7 +337,7 @@ func TestSentStashDropsTheOldestThreadNotTheActiveOne(t *testing.T) {
 	}
 }
 
-// threadBodyWithTools is threadBody plus a tools declaration — the metadata internal/thread
+// threadBodyWithTools is threadBody plus a tools declaration — the metadata package thread
 // reads to tell the main agent from a side request (title, quota check, end-of-turn note).
 func threadBodyWithTools(texts ...string) []byte {
 	var m map[string]any
@@ -347,7 +347,7 @@ func threadBodyWithTools(texts ...string) []byte {
 	return b
 }
 
-// #426 fix, the prefix-ask stash: a side request gets its OWN thread id from internal/thread
+// #426 fix, the prefix-ask stash: a side request gets its OWN thread id from package thread
 // (TestASideRequestDoesNotMoveTheMainThreadsTail), so its own put() can no longer land on the
 // main thread's key and replace its stashed body.
 func TestSentStashSurvivesASideRequest(t *testing.T) {
@@ -436,7 +436,7 @@ func TestWaitCauseSurvivesASideRequest(t *testing.T) {
 	scope := "t1\x00sess"
 
 	// Built by hand, in the same key order as turn2 and side3 below (role before content):
-	// internal/thread's fingerprint hashes an object's keys in DOCUMENT order, so turn2's first
+	// Package thread's fingerprint hashes an object's keys in DOCUMENT order, so turn2's first
 	// message must be byte-for-byte the same shape as this one for the prefix match to hold.
 	turn1 := []byte(`{"model":"claude-sonnet-5",` +
 		`"tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
