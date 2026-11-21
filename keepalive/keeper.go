@@ -554,6 +554,10 @@ type Keeper struct {
 	// oneHourProbes holds, per THREAD (keyed like live), the free probe the thread left for its return.
 	// Resolved and deleted by that thread's next real request. Bounded by MaxTurnKeys.
 	oneHourProbes map[string]oneHourProbe
+	// oneHourTouches holds, per THREAD (keyed like live), that its last touch was a free 1-hour ping, until
+	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock.
+	// Bounded by MaxTurnKeys.
+	oneHourTouches map[string]oneHourTouch
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -647,7 +651,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -1668,7 +1672,11 @@ func (k *Keeper) fire(j pingJob) {
 		k.mu.Lock()
 		rk = oneHourRoute(j.provider, j.e.endpoint, j.route, j.e.model)
 		k.mu.Unlock()
-		if k.oneHourClaim(rk) {
+		if claimed, probe := k.oneHourClaim(rk); claimed {
+			if probe {
+				slog.Info("context-guru: 1-hour probe started on an unproven route",
+					"route", rk, "model", j.model, "session", j.session, "thread", j.thread)
+			}
 			if out, relabelled := apply.RelabelAllTTL1h(body, j.provider); relabelled {
 				if len(out) == 0 || len(body) == 0 || &out[0] != &body[0] {
 					zero(body) // the abandoned plaintext copy
@@ -1676,7 +1684,7 @@ func (k *Keeper) fire(j pingJob) {
 				body, j.oneHourSent = out, true
 			}
 			if !j.oneHourSent {
-				k.oneHourRelease(rk) // nothing to relabel: no probe was sent
+				k.oneHourRelease(rk, "the body had no marker to relabel") // no probe was sent
 			}
 		} else {
 			k.mu.Lock()
@@ -1705,7 +1713,7 @@ func (k *Keeper) fire(j pingJob) {
 	k.pings.Add(1)
 	if err != nil {
 		if j.oneHourSent {
-			k.oneHourRelease(rk) // a failed probe proves nothing
+			k.oneHourRelease(rk, "the ping failed") // a failed probe proves nothing
 		}
 		k.failed.Add(1) // a transport error: counted, not stopped, not a breaker failure
 		retry := k.giveBackFailedPing(j)

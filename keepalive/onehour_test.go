@@ -2,8 +2,10 @@ package keepalive
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -614,5 +616,177 @@ func TestReadSetsTTLIsOffOnceTheColdReturnSwitchedTheRouteOff(t *testing.T) {
 	}
 	if k.ReadSetsTTL(bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5", true) {
 		t.Error("ReadSetsTTL stayed on after the route was switched off")
+	}
+}
+
+// #1243, the band: after a FREE 1-hour ping the clock counts an hour from it, until the thread's next real
+// request or an hour from the ping. OneHourTouches is the one source; the dashboard reads it.
+func touchOf(k *Keeper, key Key) (OneHourTouch, bool) {
+	m := k.OneHourTouches(key.Tenant, false, key.Session)
+	t, ok := m[key.Thread]
+	return t, ok
+}
+
+func TestFreeOneHourPingOnAnUnprovenRouteGivesAnUnprovenHour(t *testing.T) {
+	k, _ := probeThenWait(t)
+	got, ok := touchOf(k, sess1)
+	if !ok {
+		t.Fatal("no 1-hour touch after a free 1-hour ping")
+	}
+	if got.Proven {
+		t.Error("an unproven route reported as proven: the band would not show 1h?")
+	}
+}
+
+func TestFreeOneHourPingOnAProvenRouteGivesAPlainHour(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 0, Output: 1}, http.StatusOK, nil
+	})
+	proveRoute(k)
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	got, ok := touchOf(k, sess1)
+	if !ok || !got.Proven {
+		t.Fatalf("touch = %+v %v, want a proven hour", got, ok)
+	}
+}
+
+// The next real request on the thread ends it: the clock returns to the billed tier.
+func TestARealRequestEndsTheOneHourTouch(t *testing.T) {
+	k, start := probeThenWait(t)
+	if _, ok := touchOf(k, sess1); !ok {
+		t.Fatal("no touch to end")
+	}
+	returnWith(k, sess1, start.Add(10*time.Minute), kaBody, 49500, 100, false)
+	if _, ok := touchOf(k, sess1); ok {
+		t.Error("the touch outlived the thread's next real request")
+	}
+}
+
+// An hour after the ping the entry is cold: the fact is gone.
+func TestTheOneHourTouchEndsAnHourAfterThePing(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 0, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	clock.advance(59 * time.Minute)
+	if _, ok := touchOf(k, sess1); !ok {
+		t.Fatal("the touch ended before the hour")
+	}
+	clock.advance(2 * time.Minute) // 61 minutes after the ping
+	if _, ok := touchOf(k, sess1); ok {
+		t.Error("the touch outlived its hour")
+	}
+}
+
+// A route switched off never shows an hour, even for a touch recorded before it went off.
+func TestASwitchedOffRouteNeverShowsAnHour(t *testing.T) {
+	k, _ := probeThenWait(t)
+	if _, ok := touchOf(k, sess1); !ok {
+		t.Fatal("no touch")
+	}
+	k.mu.Lock()
+	k.oneHourRoutes[oneHourKeyOf()] = &oneHourRouteState{off: true}
+	k.mu.Unlock()
+	if _, ok := touchOf(k, sess1); ok {
+		t.Error("a route that is off still shows an hour")
+	}
+}
+
+// A ping that is not free (it rewrote the prefix) leaves no touch.
+func TestACostlyPingLeavesNoOneHourTouch(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 0, CacheWrite: 49776, CacheWrite1h: 49776, Output: 1}, http.StatusOK, nil
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, 1)
+	if _, ok := touchOf(k, sess1); ok {
+		t.Error("a costly ping left a 1-hour touch")
+	}
+}
+
+// The touch is per session and tenant: another session sees none.
+func TestOneHourTouchesAreScopedToTheSession(t *testing.T) {
+	k, _ := probeThenWait(t)
+	if m := k.OneHourTouches(sess1.Tenant, false, "other-session"); len(m) != 0 {
+		t.Errorf("another session sees %v", m)
+	}
+	if m := k.OneHourTouches("another-tenant", false, sess1.Session); len(m) != 0 {
+		t.Errorf("another tenant sees %v", m)
+	}
+	if m := k.OneHourTouches("another-tenant", true, sess1.Session); len(m) != 1 {
+		t.Errorf("an all-tenant read sees %v, want the touch", m)
+	}
+	var nilK *Keeper
+	if nilK.OneHourTouches("t", false, "s") != nil {
+		t.Error("a nil keeper returned touches")
+	}
+}
+
+// logBuf captures what slog writes while a test runs. It restores the old logger in the cleanup.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func captureLog(t *testing.T) *logBuf {
+	t.Helper()
+	buf := &logBuf{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// The probe leaves a trail at INFO: started (route, model, session, thread), proven, released. It was
+// invisible before: the question "did the probe run" could only be answered by inference.
+func TestTheProbeIsLoggedAtInfo(t *testing.T) {
+	logs := captureLog(t)
+	k, start := probeThenWait(t)
+	got := logs.String()
+	for _, want := range []string{"1-hour probe started on an unproven route", "model=aws/claude-sonnet-5", "session=sess-1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the start line lacks %q:\n%s", want, got)
+		}
+	}
+	returnWith(k, sess1, start.Add(20*time.Minute), kaBody, 49500, 100, false)
+	if got := logs.String(); !strings.Contains(got, "1-hour keep-alive grant proven") {
+		t.Errorf("no proven line:\n%s", got)
+	}
+}
+
+func TestAReleasedProbeIsLoggedAndASwitchOffIsLogged(t *testing.T) {
+	logs := captureLog(t)
+	k, start := probeThenWait(t)
+	returnWith(k, sess1, start.Add(5*time.Minute), kaBody, 49500, 100, false) // inside 5 minutes of the ping
+	if got := logs.String(); !strings.Contains(got, "1-hour probe released") {
+		t.Errorf("no released line:\n%s", got)
+	}
+	k2, start2 := probeThenWait(t)
+	returnWith(k2, sess1, start2.Add(20*time.Minute), kaBody, 0, 50000, false) // cold
+	if got := logs.String(); !strings.Contains(got, "no more 1-hour keep-alive pings on this route") {
+		t.Errorf("no switch-off line:\n%s", got)
 	}
 }

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { REASON_CODES, signature, usd, view } from './model'
+import { REASON_CODES, cacheClock, signature, usd, view } from './model'
 
 const NOW = 1_800_000_000_000
 const entry = (end: number, extra = {}) => ({ end_ts: end, ttl_s: 300, prefix_tokens: 90000, rewrite_usd: 0.5, next_warm_usd: 0.06, next_cold_usd: 0.78, ...extra })
@@ -1238,4 +1238,21 @@ test('a planned ping time that has passed shows "pinging…" and keeps the butto
     expect(await ui.find({ key: 'ping' })).toBeUndefined()
     await ui.unmount()
   }
+})
+
+// #1243: after a free 1-hour keep-alive ping the proxy reports ttl_s 3600 anchored at the ping, and ttl_unproven while
+// the route is not yet proven to grant the tier. The band counts the hour and writes `1h?` after the clock while it is
+// unproven (statusline.py `_cache_segment` writes the same text). Proven, and an ordinary entry, carry no mark.
+test('the cache clock counts an hour from a free 1-hour ping, with 1h? while the route is unproven', async () => {
+  const ping = NOW - 200_000 // the ping, 200 s ago
+  const at = (extra: object, sessionExtra: object = {}) =>
+    view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, ttl_s: 300, ...sessionExtra, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping, ttl_s: 3600, ...extra }] } }, NOW)!
+  const unproven = cacheClock(at({ ttl_unproven: true }).main)!
+  expect(unproven.time).toBe('56:40 1h?') // an hour from the ping, less the 200 s that have passed
+  expect(cacheClock(at({}).main)!.time).toBe('56:40') // proven: a plain hour clock
+  const five = cacheClock(view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping }] } }, NOW)!.main)!
+  expect(five.time).toBe('1:40') // an ordinary 5-minute entry
+  // The main thread's own entry decides: a mark on the session entry (a subagent's touch) does not reach it.
+  expect(cacheClock(at({}, { ttl_unproven: true }).main)!.time).toBe('56:40')
+  expect(at({ ttl_unproven: true }).main.isUnproven).toBe(true)
 })

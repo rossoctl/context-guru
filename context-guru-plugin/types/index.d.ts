@@ -24,6 +24,8 @@ export type ThreadView = {
   ttlS: number
   /** The cache-write tier the proxy uses for this entry (ttl_s 300 or 3600); undefined when the entry does not say. */
   writeTier?: '5m' | '1h'
+  /** The 1-hour clock is a free 1-hour ping's on a route not yet proven to grant it: the clock is drawn with `1h?`. */
+  isUnproven: boolean
   /** Seconds until the next automatic ping, only while it fires before the entry expires. */
   nextPingS?: number
   /** The last touch was a keep-alive ping; a keep-alive plan exists. Together they are the clock's `↻`. */
