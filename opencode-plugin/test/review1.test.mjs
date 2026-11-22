@@ -320,10 +320,11 @@ test("an install.env version with shell characters cannot run a command", async 
   const directory = "/tmp/context-guru-r1-version"
   const state = stateDirectory(directory)
   const marker = join(tmpdir(), `context-guru-injected-${process.pid}`)
-  // A managed binary sits in the state directory. install.json from an earlier run names a hostile tag.
+  // A managed binary sits in the state directory. It reports no version, so the plugin reads
+  // install.json from an earlier run, which names a hostile tag.
   const { copyFileSync, chmodSync } = await import("node:fs")
   mkdirSync(join(state, "bin"), { recursive: true })
-  copyFileSync(stubProxyBinary(), join(state, "bin", "context-guru-proxy"))
+  copyFileSync(stubProxyBinary(undefined, { version: null }), join(state, "bin", "context-guru-proxy"))
   chmodSync(join(state, "bin", "context-guru-proxy"), 0o755)
   writeFileSync(join(state, "install.json"), JSON.stringify({ version: `v1;touch ${marker}`, port: 1 }))
   const previousBin = process.env.CONTEXT_GURU_BIN
