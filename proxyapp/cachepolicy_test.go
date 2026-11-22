@@ -67,3 +67,14 @@ func TestCachePolicyCarriesTheOneHourModes(t *testing.T) {
 		t.Fatalf("policy wrong: %+v", q)
 	}
 }
+
+// A negative D threshold reaches the policy as it is (D off).
+func TestCachePolicyKeepsANegativeRebuildThreshold(t *testing.T) {
+	c, err := config.LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n  keepalive_one_hour_rebuild_tokens: -1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cachePolicy(c.Cache).OneHourRebuildTokens; got != -1 {
+		t.Errorf("OneHourRebuildTokens = %d, want -1", got)
+	}
+}

@@ -173,9 +173,10 @@ func headPrefixTokens(body []byte) int {
 }
 
 // RelabelAllTTL1h re-labels EVERY existing cache breakpoint of a body as a one-hour entry: tools,
-// system and messages. The `1-hour-on-wait` strategy (#1243) uses it on the keep-alive PING body, never
-// on a real request: the ping is the one request that switches a cached prompt from 5 minutes to 1 hour,
-// and on the measured gateway that switch is a read.
+// system and messages. Two callers use it. The keeper uses it on the keep-alive PING body of
+// `1-hour-on-wait` (#1243): the ping is the request that switches a cached prompt from 5 minutes to 1 hour,
+// and on the measured gateway that switch is a read. And BodyOpts uses it on a REAL main-thread request in
+// the 1-hour modes D and C (#1261): such a request writes at 1 hour, so nothing is switched.
 //
 // The same three constraints as upgradeHeadTTL hold, and each is why this is safe:
 //

@@ -158,7 +158,8 @@ type CacheConfig struct {
 	// the 5m to 1h switch is costly (a rewrite), a main thread runs as auto until its first cold rebuild of a
 	// prefix of at least this many tokens. That rebuild is written at 1 hour, and from then on the thread
 	// writes at 1 hour and gets no pings. Simulated at 150,000 tokens: hosted -12% against auto, owner's laptop
-	// -25%. 0 = DefaultKeepAliveOneHourRebuildTokens.
+	// -25%. 0 = DefaultKeepAliveOneHourRebuildTokens. NEGATIVE (-1) turns D off: a costly route then falls back
+	// to plain auto.
 	KeepAliveOneHourRebuildTokens int `yaml:"keepalive_one_hour_rebuild_tokens"`
 	// KeepAliveOneHourAlways is the C opt-in (#1261): the MAIN agent writes at 1 hour from its first request,
 	// on any route. It is an explicit opt-in and never a default: ON MOST USERS IT DOES NOT PAY OFF. Simulated
@@ -354,7 +355,7 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
-	if c.KeepAliveOneHourRebuildTokens <= 0 {
+	if c.KeepAliveOneHourRebuildTokens == 0 {
 		c.KeepAliveOneHourRebuildTokens = DefaultKeepAliveOneHourRebuildTokens
 	}
 	if c.KeepAliveToolWaitMaxPings <= 0 {
@@ -388,7 +389,7 @@ func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMaxBodyBytes < 0 || c.KeepAliveMinPrefixTokens < 0 || c.KeepAliveToolWaitMinPrefixTokens < 0 ||
-		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 || c.KeepAliveOneHourRebuildTokens < 0 ||
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
 		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}

@@ -86,9 +86,9 @@ tested), mode A stops on that route. Mode D takes over:
   marker at 1 hour. It is written at 1 hour.
 - From then on, every request of the thread carries 1-hour markers, and the thread gets **no pings**.
 
-The proxy decides the rebuild **before it sends the request**. The thread's last touch (its last response or
-its last ping) is older than the lifetime of its entry, and its last prefix was at least 150,000 tokens. The
-threshold is `keepalive_one_hour_rebuild_tokens`. After a compaction the real prefix can be smaller than the
+The proxy decides the rebuild **before it sends the request**. The thread's last touch (its last response, a ping that read or re-wrote the
+entry, or a summary or sweep call that took the place of a ping) is older than the lifetime of its entry, and its last prefix was at least 150,000 tokens. The
+threshold is `keepalive_one_hour_rebuild_tokens`. A negative value (`-1`) turns D off: a costly route then uses plain `auto`. After a compaction the real prefix can be smaller than the
 last one: the rebuild is then a little more expensive than planned.
 
 If a 1-hour request that wrote tokens is billed at 5 minutes, the mode stops for that route and model.

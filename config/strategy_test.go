@@ -291,8 +291,10 @@ func TestOneHourRebuildTokensDefaultsTo150000(t *testing.T) {
 	if err != nil || c.Cache.Resolved().KeepAliveOneHourRebuildTokens != 90000 {
 		t.Errorf("a set value is not kept: %v %+v", err, c.Cache)
 	}
-	if _, err := LoadBytes([]byte("cache:\n  keepalive_one_hour_rebuild_tokens: -1\n")); err == nil {
-		t.Error("a negative threshold was accepted")
+	// A negative value turns D off: it is kept as it is, never reset to the default.
+	neg, err := LoadBytes([]byte("cache:\n  keepalive_one_hour_rebuild_tokens: -1\n"))
+	if err != nil || neg.Cache.Resolved().KeepAliveOneHourRebuildTokens != -1 {
+		t.Errorf("-1 (D off) was not kept: %v %+v", err, neg.Cache.Resolved())
 	}
 	if d, _ := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n")); !strings.Contains(func() string { r, _ := LookupStrategy("1-hour-on-wait"); return r.Desc }(), "150,000") || d.Cache.KeepAliveOneHourAlways {
 		t.Error("the 1-hour-on-wait text does not name D's threshold, or it turned C on")

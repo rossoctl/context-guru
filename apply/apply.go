@@ -407,6 +407,40 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// prevent, reproduced in the logs. cg.cache_boundary used to pass mode as an attr of
 	// its own; it does not any more, because that would now render the key twice.
 	ctx = logging.With(ctx, logging.From(ctx).With("mode", string(mode)))
+	// The 1-hour-first relabel (#1261), on the FINAL body of every return below, after the tail mark has run
+	// (this defer is registered BEFORE the tail-mark one, so it runs AFTER it): it relabels every breakpoint, the
+	// tail mark included, whatever value markTail gave it. Here and not
+	// beside the head relabel because it needs the thread and the session, known only once the session id is,
+	// and because it edits messages, whose byte offsets the pipeline's writeback has used by then. Not in
+	// observe mode, not on a bypassed request. The message changes are reported as headttl operations, so the
+	// accountant books the premium and the rescue; tools and system are found by the proxy's envelope diff.
+	var oneHourSession string
+	if mode != components.ModeObserve && !bypass && o.OneHourFirst != nil && explicitBreakpointProvider(provider) {
+		defer func() {
+			// A host that resolves threads but never reached the resolution (an early return) does not
+			// know the thread: ask for nothing.
+			if o.ThreadOf != nil && !res.Trace.ThreadResolved {
+				return
+			}
+			cur := res.Body
+			if cur == nil {
+				cur = o.Body
+			}
+			if !o.OneHourFirst(oneHourSession, res.Trace.Thread.ID, gjson.GetBytes(cur, "model").String(), gjson.GetBytes(cur, "tools.0").Exists()) {
+				return
+			}
+			out, ok := RelabelAllTTL1h(cur, provider)
+			if !ok {
+				return
+			}
+			res.Trace.HeadTTL1h = true // the request asks 1 hour
+			if bytes.Equal(out, cur) {
+				return
+			}
+			res.Trace.Ops = append(res.Trace.Ops, relabelOps(cur, out)...)
+			res.Body, res.Changed = out, true
+		}()
+	}
 	// The tail breakpoint (#795), on the FINAL body of every return below: it must count every
 	// breakpoint the other edits placed (cacheinject, the splice anchor) against the cap of 4.
 	// Deferred after the recover above, so it runs first and the recover still catches a panic in it.
@@ -431,39 +465,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				}
 				res.Body, res.Changed = out, true
 			}
-		}()
-	}
-	// The 1-hour-first relabel (#1261), on the FINAL body of every return below, after the tail mark has run
-	// (registered first, so it runs last): it relabels every breakpoint, the tail mark included. Here and not
-	// beside the head relabel because it needs the thread and the session, known only once the session id is,
-	// and because it edits messages, whose byte offsets the pipeline's writeback has used by then. Not in
-	// observe mode, not on a bypassed request. The message changes are reported as headttl operations, so the
-	// accountant books the premium and the rescue; tools and system are found by the proxy's envelope diff.
-	var oneHourSession string
-	if mode != components.ModeObserve && !bypass && o.OneHourFirst != nil && explicitBreakpointProvider(provider) {
-		defer func() {
-			// A host that resolves threads but never reached the resolution (an early return) does not
-			// know the thread: ask for nothing.
-			if o.ThreadOf != nil && !res.Trace.ThreadResolved {
-				return
-			}
-			cur := res.Body
-			if cur == nil {
-				cur = o.Body
-			}
-			if !o.OneHourFirst(oneHourSession, res.Trace.Thread.ID, gjson.GetBytes(cur, "tools.0").Exists()) {
-				return
-			}
-			out, ok := RelabelAllTTL1h(cur, provider)
-			if !ok {
-				return
-			}
-			res.Trace.HeadTTL1h = true // the request asks 1 hour
-			if bytes.Equal(out, cur) {
-				return
-			}
-			res.Trace.Ops = append(res.Trace.Ops, relabelOps(cur, out)...)
-			res.Body, res.Changed = out, true
 		}()
 	}
 	models := o.Models

@@ -552,27 +552,27 @@ func TestStoredStrategyTurnsOnTheOneHourOnWaitPing(t *testing.T) {
 func TestOneHourFirstHookFollowsThePolicy(t *testing.T) {
 	f := newMgrFixture(t)
 	body := []byte(`{"model":"aws/claude-sonnet-5"}`)
-	hook := func(cache CachePolicy) func(session, threadID string, tools bool) bool {
+	hook := func(cache CachePolicy) func(session, threadID, model string, tools bool) bool {
 		return f.h.oneHourFirstFor(&reqInfo{tn: &Tenancy{ID: "acct", Cache: cache}, body: body, provider: bschemas.Anthropic,
 			endpoint: "http://up", route: "/v1/messages"})
 	}
 	base := CachePolicy{KeepAlive: true, Idle: 240 * time.Second, MaxPings: 2}
-	if h := hook(base); h == nil || h("s1", "", true) {
+	if h := hook(base); h == nil || h("s1", "", "m", true) {
 		t.Error("a policy with no 1-hour mode relabelled a request")
 	}
 	on := base
 	on.OneHourAlways = true
 	h := hook(on)
-	if !h("s2", "", true) {
+	if !h("s2", "", "m", true) {
 		t.Error("the opt-in did not put a new main thread at 1 hour from its first request")
 	}
-	if h("s3", "a:agent", true) || h("s3", "", false) || h("", "", true) {
+	if h("s3", "a:agent", "m", true) || h("s3", "", "m", false) || h("", "", "m", true) {
 		t.Error("a subagent, a request with no tools, or one with no session was relabelled")
 	}
 	// D without a costly route (no probe ran): auto, nothing relabelled.
 	d := base
 	d.OneHourOnWait = true
-	if hook(d)("s4", "", true) {
+	if hook(d)("s4", "", "m", true) {
 		t.Error("1-hour-on-wait relabelled a request on a route that is not costly")
 	}
 }

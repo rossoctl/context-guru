@@ -26,8 +26,8 @@ func firstBody() []byte {
 }
 
 type hookCall struct {
-	session, thread string
-	tools           bool
+	session, thread, model string
+	tools                  bool
 }
 
 func runFirst(t *testing.T, body []byte, threadID string, answer bool, seen *[]hookCall) apply.Result {
@@ -39,9 +39,9 @@ func runFirst(t *testing.T, body []byte, threadID string, answer bool, seen *[]h
 	return apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
 		Provider: bschemas.Anthropic, Body: body, Session: "sess-x",
 		ThreadOf: func(string) thread.Result { return thread.Result{ID: threadID, Source: thread.SourceHeader} },
-		OneHourFirst: func(session, th string, tools bool) bool {
+		OneHourFirst: func(session, th, model string, tools bool) bool {
 			if seen != nil {
-				*seen = append(*seen, hookCall{session, th, tools})
+				*seen = append(*seen, hookCall{session, th, model, tools})
 			}
 			return answer
 		},
@@ -67,8 +67,8 @@ func TestOneHourFirstRelabelsEveryBreakpointWhenTheHostSaysSo(t *testing.T) {
 		t.Error("the trace does not say the request asked for 1h")
 	}
 	// The hook gets the resolved session, the thread, and whether the body declares tools.
-	if len(seen) != 1 || seen[0].thread != "" || !seen[0].tools || seen[0].session == "" {
-		t.Errorf("hook calls = %+v, want one: a session, the primary thread, tools declared", seen)
+	if len(seen) != 1 || seen[0].thread != "" || !seen[0].tools || seen[0].session == "" || seen[0].model != "aws/claude-opus-5" {
+		t.Errorf("hook calls = %+v, want one: a session, the primary thread, the final body's model, tools declared", seen)
 	}
 }
 
@@ -115,5 +115,18 @@ func TestOneHourFirstIsOffWithoutAHook(t *testing.T) {
 	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{Provider: bschemas.Anthropic, Body: firstBody()})
 	if res.Body != nil && gjson.GetBytes(res.Body, "messages.0.content.0.cache_control.ttl").Exists() {
 		t.Error("a request was relabelled with no hook")
+	}
+}
+
+// The relabel runs AFTER the tail mark, whatever value markTail gives the mark: a body whose last message
+// carries no client mark gets the tail mark, and that mark leaves at 1 hour too.
+func TestOneHourFirstRelabelsTheTailMarkToo(t *testing.T) {
+	body := []byte(`{"model":"aws/claude-opus-5","tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
+		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"a"}]},{"role":"assistant","content":[{"type":"text","text":"b"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"c"}]}]}`)
+	res := runFirst(t, body, thread.Primary, true, nil)
+	if res.Body == nil || !apply.AllBreakpointsAskExtendedTTL(res.Body) {
+		t.Fatalf("a breakpoint is left below 1 hour:\n%s", res.Body)
 	}
 }

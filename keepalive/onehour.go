@@ -356,7 +356,8 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 type OneHourMode struct {
 	// Always is the C opt-in.
 	Always bool
-	// RebuildTokens is D's threshold. 0 = 150,000. D applies only on a costly route.
+	// RebuildTokens is D's threshold. 0 = 150,000. NEGATIVE turns D off: a costly route then falls back to
+	// plain auto. D applies only on a costly route.
 	RebuildTokens int64
 }
 
@@ -406,11 +407,11 @@ func (k *Keeper) OneHourFirst(tenant, session, threadID string, provider bschema
 	case st != nil && st.costly:
 		// D: the first cold rebuild of a big prefix.
 		need := mode.RebuildTokens
-		if need <= 0 {
+		if need == 0 {
 			need = DefaultOneHourRebuildTokens
 		}
 		lt, seen := k.lastTouch[key]
-		enter = seen && k.now().Sub(lt.at) > lt.ttl && lt.prefix >= need
+		enter = need > 0 && seen && k.now().Sub(lt.at) > lt.ttl && lt.prefix >= need
 	}
 	if !enter {
 		return false

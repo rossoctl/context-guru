@@ -421,3 +421,26 @@ func TestCacheStateDoesNotLengthenAClockPastTheOneHourPing(t *testing.T) {
 		}
 	}
 }
+
+// #1261, the band for a thread in mode D or C: the request writes at 1 hour (cache_write_1h > 0), so the
+// thread's ttl_s is 3600 from the BILLED tier, with no keeper fact and no "1h?" mark. The read-only turns
+// after it keep the 1-hour tier (the thread's tier is its latest WRITE).
+func TestCacheStateShowsAnHourForAThreadThatWritesAtOneHour(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	w := mkEvent(now-400_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	w.Status, w.CacheWrite, w.CacheWrite1h, w.Provider = 200, 150_000, 150_000, "anthropic"
+	r := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	r.Status, r.CacheRead, r.CacheWrite, r.Provider = 200, 150_500, 0, "anthropic" // a read-only turn: it writes nothing
+	seed(t, rec, w, r)
+	// No SetOneHourTouches: the keeper says nothing about this thread.
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] == true {
+		t.Errorf("session ttl_s/ttl_unproven = %v/%v, want 3600 and no mark", body["ttl_s"], body["ttl_unproven"])
+	}
+	for _, th := range body["threads"].([]any) {
+		if m := th.(map[string]any); m["main"] == true && (m["ttl_s"] != 3600.0 || m["ttl_unproven"] == true) {
+			t.Errorf("main thread ttl_s/ttl_unproven = %v/%v, want 3600 and no mark", m["ttl_s"], m["ttl_unproven"])
+		}
+	}
+}

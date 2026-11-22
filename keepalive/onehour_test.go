@@ -1048,3 +1048,91 @@ func TestADowngradedWriteStopsTheMode(t *testing.T) {
 		t.Errorf("no WARN for the downgrade:\n%s", got)
 	}
 }
+
+// costlyOnly marks the test route costly without a probe, so a thread can be tested alone.
+func costlyOnly(k *Keeper) {
+	k.mu.Lock()
+	k.oneHourRoutes[oneHourKeyOf()] = &oneHourRouteState{costly: true}
+	k.mu.Unlock()
+}
+
+// D must not call a warm entry gone. A committed substitute (a sweep question in place of the ping) READS the
+// entry and renews it for 5 minutes. The thread returns inside that window: a 1-hour request would be a full
+// rewrite on a costly route, so D must not switch. After the window it does (#1262).
+func TestDDoesNotSwitchWhileASubstituteKeepsTheEntryWarm(t *testing.T) {
+	k, fs, clock := testKeeper(t)
+	costlyOnly(k)
+	st := store.NewMemory(store.Options{MaxEntries: 400})
+	asker := &sweepAsker{cacheRead: 48576}
+	registerSweep(t, st, asker, "claude-sonnet-5", sweepConversation(3))
+	recordOne(t, k, kaPolicy(), kaToolBody, clock.now()) // a 49,776-token prefix
+	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
+		t.Fatalf("the due ping did not fire (%d)", n)
+	}
+	waitSweepOutcome(t, k, fs)
+	if k.sweepSubstituted.Load() != 1 || fs.n() != 0 {
+		t.Fatalf("the sweep did not take the ping (substituted %d, ordinary pings %d)", k.sweepSubstituted.Load(), fs.n())
+	}
+	// 481 s after the request, 200 s after the substitute: the entry lives until 281+300 = 581 s.
+	clock.advance(200 * time.Second)
+	if firstFor(k, sess1, true, modeD) {
+		t.Fatal("D switched while the substitute kept the entry warm: that is a 2x rewrite instead of a read")
+	}
+	clock.advance(150 * time.Second) // 350 s after the substitute: gone
+	if !firstFor(k, sess1, true, modeD) {
+		t.Error("D did not switch once the entry was really gone")
+	}
+}
+
+// A ping that MISSED (the entry had died) and re-wrote it started a fresh lifetime: the entry is warm, and a
+// return inside it is not a rebuild.
+func TestDDoesNotSwitchAfterAPingThatRewroteTheEntry(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	costlyOnly(k)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 0, CacheWrite: 49776, Output: 1}, http.StatusOK, nil // the ping missed
+	})
+	start := clock.now()
+	recordWait(k, onWaitPolicy(), sess1, start, "tool_use", []string{"Bash"})
+	clock.advance(240 * time.Second)
+	k.Sweep(clock.now())
+	waitPings(t, k, 1)
+	clock.advance(200 * time.Second) // 440 s after the request, 200 s after the ping that re-wrote the entry
+	if firstFor(k, sess1, true, modeD) {
+		t.Fatal("D switched while a ping's write kept the entry warm")
+	}
+	clock.advance(150 * time.Second)
+	if !firstFor(k, sess1, true, modeD) {
+		t.Error("D did not switch once the entry was really gone")
+	}
+}
+
+// A negative threshold turns D off: a costly route falls back to plain auto.
+func TestANegativeRebuildThresholdTurnsDOff(t *testing.T) {
+	k, _, clock, _ := costlyRoute(t)
+	big := Key{Tenant: "t1", Session: "big"}
+	realRequest(k, big, clock.now(), 49000, 776)
+	clock.advance(30 * time.Minute)
+	off := OneHourMode{RebuildTokens: -1}
+	if firstFor(k, big, true, off) {
+		t.Error("D switched a thread with the threshold at -1")
+	}
+	if !firstFor(k, big, true, modeD) {
+		t.Error("the control: D with a positive threshold does not switch the same thread")
+	}
+}
+
+// The route key uses ONE model: the model of the final body. A thread whose request model differs from the
+// one the route was probed on is a different route and model.
+func TestTheRouteIsKeyedByTheModelOfTheFinalBody(t *testing.T) {
+	k, _, clock, _ := costlyRoute(t)
+	big := Key{Tenant: "t1", Session: "big"}
+	realRequest(k, big, clock.now(), 49000, 776)
+	clock.advance(30 * time.Minute)
+	if k.OneHourFirst(big.Tenant, big.Session, "", bschemas.Anthropic, "", "/v1/messages", "aws/claude-opus-5", true, modeD) {
+		t.Error("a probe of one model made another model's route costly")
+	}
+	if !k.OneHourFirst(big.Tenant, big.Session, "", bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5", true, modeD) {
+		t.Error("the probed model did not switch the big cold thread")
+	}
+}

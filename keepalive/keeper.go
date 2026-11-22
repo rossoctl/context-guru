@@ -1759,14 +1759,15 @@ func (k *Keeper) fire(j pingJob) {
 	if j.oneHourSent {
 		k.judgeOneHour(j, status, u, start)
 	}
-	if status >= 200 && status < 300 && u.CacheRead > 0 {
-		// A ping that read the entry refreshed it: D must not call the entry gone from the last request alone.
+	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
+		// A ping that READ the entry refreshed it, and one that MISSED and re-wrote it started a fresh
+		// lifetime: either way the entry is warm now, and D must not call it gone from the last request alone.
 		ttl := 5 * time.Minute
 		if j.oneHourSent {
 			ttl = time.Hour
 		}
 		k.mu.Lock()
-		k.noteTouchLocked(j.key.id(), k.now(), ttl, 0)
+		k.noteTouchLocked(j.key.id(), k.now(), ttl, u.CacheRead+u.CacheWrite)
 		k.mu.Unlock()
 	}
 	switch k.noteOutcome(j, status, u) {

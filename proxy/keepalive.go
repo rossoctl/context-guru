@@ -14,7 +14,6 @@ import (
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/tenant"
-	"github.com/tidwall/gjson"
 )
 
 // The idle keep-alive itself — when to ping, the gates, the hard deadline, the write-instead-of-
@@ -482,13 +481,12 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 // oneHourFirstFor is the apply hook of the 1-hour modes D and C (#1261), or nil when there is no keep-alive. At
 // the end of apply, for a main-thread request that declares tools, it resolves the account's policy WITH its
 // stored strategy (so a manager's strategy that switches 1-hour-on-wait on counts, like for the pings) and asks
-// the keeper. The model is read from the body apply hands over.
-func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID string, toolsDeclared bool) bool {
+// the keeper. The model comes from apply, which reads it from the final body.
+func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID, model string, toolsDeclared bool) bool {
 	if h == nil || h.keeper == nil || h.keeper.Keeper == nil || r.tn == nil {
 		return nil
 	}
-	model := gjson.GetBytes(r.body, "model").String()
-	return func(session, threadID string, toolsDeclared bool) bool {
+	return func(session, threadID, model string, toolsDeclared bool) bool {
 		if threadID != "" || !toolsDeclared || session == "" {
 			return false // only the main thread is ever relabelled: skip the policy resolution for the rest
 		}
@@ -496,6 +494,7 @@ func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID string, too
 		if !pol.OneHourOnWait && !pol.OneHourAlways {
 			return false
 		}
+		// model is the model of the FINAL body apply hands over, the one Record keys the route state by too.
 		return h.keeper.Keeper.OneHourFirst(r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared,
 			keepalive.OneHourMode{Always: pol.OneHourAlways, RebuildTokens: int64(pol.OneHourRebuildTokens)})
 	}

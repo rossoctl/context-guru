@@ -55,7 +55,7 @@ func relabelled(t *testing.T, client []byte, threadID string) ([]byte, []account
 		Provider: bschemas.Anthropic, Body: client, Session: "s",
 		ThreadOf: func(string) thread.Result { return thread.Result{ID: threadID, Source: thread.SourceHeader} },
 		// The 1-hour-first mode as the host decides it: the main thread, not a subagent.
-		OneHourFirst: func(_, th string, _ bool) bool { return !keepalive.IsSubagentThread(th) },
+		OneHourFirst: func(_, th, _ string, _ bool) bool { return !keepalive.IsSubagentThread(th) },
 	})
 	fwd := res.Body
 	if fwd == nil {

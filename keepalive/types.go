@@ -175,7 +175,7 @@ type Policy struct {
 	OneHourOnWait bool
 	// OneHourRebuildTokens is the D fallback's threshold: on a costly-switch route, a main thread runs as auto
 	// until its first cold rebuild of a prefix of at least this many tokens, which is written at 1 hour (#1261).
-	// 0 = 150,000. Read only with OneHourOnWait.
+	// 0 = 150,000. NEGATIVE turns D off (a costly route falls back to plain auto). Read only with OneHourOnWait.
 	OneHourRebuildTokens int
 	// OneHourAlways is the C opt-in: the main thread writes at 1 hour from its first request, with no pings.
 	// Explicit only; ON MOST USERS IT DOES NOT PAY OFF (hosted +22% against auto, laptop -25%; #1261).
