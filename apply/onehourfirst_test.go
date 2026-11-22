@@ -118,15 +118,38 @@ func TestOneHourFirstIsOffWithoutAHook(t *testing.T) {
 	}
 }
 
-// The relabel runs AFTER the tail mark, whatever value markTail gives the mark: a body whose last message
-// carries no client mark gets the tail mark, and that mark leaves at 1 hour too.
+// The relabel runs AFTER the tail mark, so the mark markTail ADDS leaves at 1 hour too, whatever value markTail
+// gave it. This test runs the tail mark for real: a pipeline with a component turns it on, the client marked an
+// early message, and more than tailMinBytes (4096) of content follows that mark. The mark is ADDED (the count
+// grows), and every breakpoint, the added one included, asks 1 hour.
+//
+// What it pins, and what it does not: markTail copies the client's last mark, so the added mark would be 1 hour
+// in either defer order today. The test fails when the relabel runs BEFORE the tail mark AND markTail stops
+// copying the mark's value (checked by mutation: both together fail it, the new order with that mutation passes).
 func TestOneHourFirstRelabelsTheTailMarkToo(t *testing.T) {
+	filler := strings.Repeat("x", 6000)
 	body := []byte(`{"model":"aws/claude-opus-5","tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
 		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
-		`"messages":[{"role":"user","content":[{"type":"text","text":"a"}]},{"role":"assistant","content":[{"type":"text","text":"b"}]},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]},` +
+		`{"role":"assistant","content":[{"type":"text","text":"` + filler + `"}]},` +
 		`{"role":"user","content":[{"type":"text","text":"c"}]}]}`)
-	res := runFirst(t, body, thread.Primary, true, nil)
-	if res.Body == nil || !apply.AllBreakpointsAskExtendedTTL(res.Body) {
-		t.Fatalf("a breakpoint is left below 1 hour:\n%s", res.Body)
+	p, err := pipe(t, "pipeline: [dedup]\n").Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+		Provider: bschemas.Anthropic, Body: body, Session: "sess-x",
+		ThreadOf:     func(string) thread.Result { return thread.Result{ID: thread.Primary, Source: thread.SourceHeader} },
+		OneHourFirst: func(_, _, _ string, _ bool) bool { return true },
+	})
+	if res.Body == nil {
+		t.Fatal("no body")
+	}
+	before, after := apply.CountBreakpoints(body), apply.CountBreakpoints(res.Body)
+	if after.Total() <= before.Total() {
+		t.Fatalf("the tail mark was not added (breakpoints %d -> %d): the test does not exercise it", before.Total(), after.Total())
+	}
+	if !apply.AllBreakpointsAskExtendedTTL(res.Body) {
+		t.Fatalf("a breakpoint is left below 1 hour, the added tail mark included:\n%s", res.Body)
 	}
 }

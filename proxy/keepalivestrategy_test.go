@@ -613,3 +613,23 @@ func TestStoredStrategyTurnsOnTheOneHourAlwaysMode(t *testing.T) {
 		t.Error("a strategy with the key off switched the account's own setting off")
 	}
 }
+
+// A parked account that keeps D off (-1) keeps it when a manager strategy switches 1-hour-on-wait on: the
+// strategy fills the switch and leaves the account's threshold alone.
+func TestAStoredStrategyLeavesTheAccountsDOffAlone(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+	body := `{"name":"1h on wait","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_on_wait":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	if w, _ := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar); w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourRebuildTokens: -1}, at)
+	if !pol.OneHourOnWait || pol.OneHourRebuildTokens != -1 {
+		t.Errorf("policy = onWait %v rebuild %d, want the switch on and the account's -1 kept", pol.OneHourOnWait, pol.OneHourRebuildTokens)
+	}
+}

@@ -78,3 +78,24 @@ func TestCachePolicyKeepsANegativeRebuildThreshold(t *testing.T) {
 		t.Errorf("OneHourRebuildTokens = %d, want -1", got)
 	}
 }
+
+// A PARKED account (keep-alive off) keeps its own D choice: a negative threshold stays negative in the parked
+// plan, so a manager strategy that switches 1-hour-on-wait on for it does not arm D at the 150,000 default.
+func TestParkedPolicyKeepsANegativeRebuildThreshold(t *testing.T) {
+	c, err := config.LoadBytes([]byte("cache:\n  keepalive: false\n  keepalive_one_hour_rebuild_tokens: -1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cachePolicy(c.Cache)
+	if p.KeepAlive || p.OneHourOnWait || p.OneHourAlways {
+		t.Fatalf("the parked policy switches something on: %+v", p)
+	}
+	if p.OneHourRebuildTokens != -1 {
+		t.Errorf("OneHourRebuildTokens = %d in the parked plan, want -1 (D off)", p.OneHourRebuildTokens)
+	}
+	// An account that did not set it carries the default through the parked plan, as before.
+	d, _ := config.LoadBytes([]byte("cache:\n  keepalive: false\n"))
+	if got := cachePolicy(d.Cache).OneHourRebuildTokens; got != 150000 {
+		t.Errorf("a parked account without the key carries %d, want 150000", got)
+	}
+}
