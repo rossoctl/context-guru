@@ -282,6 +282,17 @@ type oneHourTouch struct {
 	route string
 }
 
+// oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: under an
+// hour old, on a route not switched off. The same test as OneHourTouches. The caller holds k.mu.
+func (k *Keeper) oneHourTouchLiveLocked(id string, now time.Time) bool {
+	t, ok := k.oneHourTouches[id]
+	if !ok || !now.Before(t.at.Add(time.Hour)) {
+		return false
+	}
+	st := k.oneHourRoutes[t.route]
+	return st == nil || !st.off
+}
+
 // OneHourTouch is what the dashboard needs of it.
 type OneHourTouch struct {
 	At time.Time
