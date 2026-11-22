@@ -32,9 +32,9 @@ For the keys and the settings page, see [Keep an idle prompt cache warm](cache-k
   | Write, 1-hour lifetime | 2x |
 
 - **Rebuild.** The cache entry has expired. The next request writes the whole prompt again.
-- **Ping.** A small request that the proxy sends while you are away. It reads the cached prompt and
-  so restarts the lifetime. It costs one read. The proxy sends no ping that would cost more than
-  $0.50.
+- **Ping.** A request that the proxy sends while you are away. It sends the whole prompt and asks for almost no output. It reads the cached prompt and
+  so restarts the lifetime. It costs one read. By default the proxy sends no ping that would cost more than
+  $0.50 (`keepalive_max_usd_per_ping`; a manager strategy can change it).
 - **Main agent.** The thread you talk to. **Subagent.** A thread that the main agent starts.
 - **Prefix.** The part of the prompt that the cache holds. The proxy pings only a prefix that is big
   enough (see the table below).
@@ -44,13 +44,15 @@ One ping (0.1x) pays for itself when it saves a rebuild (1.25x) more than 1 time
 ## Which wait is it?
 
 When a turn ends, the proxy reads **what the thread waits for**. It uses the stop reason, the tool
-names and the number of open background tasks and teammates. It reads no message text.
-The dashboard and the status line show the result as `waiting_for`.
+names and the number of open background tasks and teammates. It finds open tasks and teammates
+from marker strings in the messages and tool results. It does not read the meaning of the text.
+The proxy stores the result as `waiting_for` on each request row. You can read it through the
+dashboard API or the database.
 
 The number of pings and the smallest prefix depend on this cause. "Base" is the base number of
 pings of the strategy (2 for `auto`).
 
-| `waiting_for` | What it means | Main agent: pings, smallest prefix | Subagent: pings, smallest prefix |
+| `waiting_for` (stored value) | What it means | Main agent: pings, smallest prefix | Subagent: pings, smallest prefix |
 |---|---|---|---|
 | `own_tool` | The thread called a tool and waits for the result. | Until the result comes, at most 8. 20k tokens. | The same: at most 8. 20k tokens. |
 | `human` | The turn ended and nothing else is open. Also a call to a tool that asks a person (`AskUserQuestion`, `ExitPlanMode`). | Base + 1. 80k tokens. | Base. 20k tokens. **It is a wait for the main agent, not for a person.** |
@@ -64,7 +66,9 @@ pings of the strategy (2 for `auto`).
   The subagent then waits for its main agent, which is working. The dashboard says `human`, but the
   proxy plans no wait for a person.
 - A thread that has not called any tool yet gets **no ping** (it may be a side call, such as a title).
-- A manager's time windows (working hours) apply only to a main agent that waits for a person.
+- A manager's time windows (working hours) do **not** apply to `own_tool`, `background`, `teammate`,
+  or a subagent's `human` wait. They apply to every other cause: `human` of a main agent, `unknown`,
+  `done` and `retry`.
 - The numbers 8, +3, +1, 20k and 80k are the defaults. You can change them. See
   [the ping count follows the wait](cache-keepalive.md#the-ping-count-follows-what-the-thread-waits-for).
 - A **long wait** is a main agent in `human`, `background`, `teammate` or `unknown`. A tool wait
@@ -123,7 +127,7 @@ and you leave for more than 2 hours.
   2026-11-19). So one read (0.1x) covers a full hour, and no request pays the 2x write.
 - **Pick it when:** you often leave for more than 5 minutes.
 
-The proxy checks the grant. It does not assume it. It checks per provider, route and model.
+The proxy checks the grant. It does not assume it. It checks per provider, endpoint, route and model.
 
 **The test.** The first long wait sends the 1-hour ping as a test. Only one wait tests a route at a
 time. The band shows `1h?` (1 hour, not yet proven) until the test ends. There are three outcomes:
@@ -177,8 +181,8 @@ than planned.
 
 ### `1-hour-head`
 
-- **Does:** asks for 1 hour on the `tools` and `system` blocks only, and only on a request of 50,000
-  tokens or more. It sends **no ping** (the strategy does not spend).
+- **Does:** asks for 1 hour on the `tools` and `system` blocks only, and only on a request body of 200,000
+  bytes or more (about 50,000 tokens at 4 bytes per token; `head_ttl_min_bytes` sets it). It sends **no ping** (the strategy does not spend).
 - **Lifetime:** `tools` and `system`: 1 hour. The message history: 5 minutes, so it goes cold after
   5 minutes of idle time.
 - **Cost trade:** the 1-hour part is a small share of a long prompt. Other sessions often keep it
@@ -206,7 +210,7 @@ A subagent has its own cache entry.
 | `auto`, `1-ping`, `2-ping` | Pings on a 5-minute entry, as in the table above: up to 8 for `own_tool`, base for every other wait. The prefix must be 20k tokens or more. |
 | `1-hour-on-wait` | The same as `auto`. The 1-hour ping and the 1-hour markers never apply to a subagent. |
 | `1-hour-always` | The same as `auto`. The subagent keeps the 5-minute lifetime and the pings. |
-| `1-hour-head` | The 1-hour head on a request of 50,000 tokens or more. No ping. |
+| `1-hour-head` | The 1-hour head on a request body of 200,000 bytes or more (about 50,000 tokens). No ping. |
 | `30-min-ping` | As for the main agent (OpenAI). |
 
 - A subagent that ends its turn waits for its main agent. The dashboard shows `human`, but this wait
@@ -214,7 +218,7 @@ A subagent has its own cache entry.
 - A subagent that waits for background work or a teammate gets the base number of pings. It gets no
   extra ping.
 - A subagent in `done` gets no ping.
-- A manager's time windows never apply to a subagent.
+- A manager's time windows do not apply to a subagent's `human` wait, nor to its `own_tool`, `background` and `teammate` waits. They can apply to its `unknown`, `done` and `retry` causes.
 
 ### Caution: 1-hour writes for subagents
 
@@ -254,8 +258,8 @@ against `auto`, at each model's input price.
 - On the costly route, the result is 15% (hosted) to 18% (laptop) above `1-hour-on-wait` on a free
   switch. The reason: it pays the full rebuild until its first big rebuild.
 - `1-hour-always` on hosted traffic: the 1-hour price premium is $359.02. That is 39% of the cost.
-- **Anthropic first-party API: not tested.** Two outside reports say the switch rewrites the whole
-  prompt there. We have no first-party key to check this.
+- **Anthropic first-party API: not tested.** One outside report (Sonnet 5.5 and Opus 5.5, one run each) says the switch rewrites the whole
+  prompt there. We have not reproduced it. We have no first-party key to check this.
 - Only aggregates are shown. Details: [#1243](https://github.com/rossoctl/context-guru/issues/1243#issuecomment-7037261430)
   and [#1261](https://github.com/rossoctl/context-guru/issues/1261). The `1-hour-on-wait` and `1-hour-always` rows come from [this table in #1261](https://github.com/rossoctl/context-guru/issues/1261#issuecomment-7076076690).
 

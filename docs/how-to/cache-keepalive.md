@@ -88,7 +88,7 @@ cache:
   The message history stays on the 5-minute cache, so it goes cold after 5 idle minutes.
 - `1-hour-on-wait` is `auto`, but on a long wait of the **main agent** the first ping moves the entry to 1 hour and is
   the only ping. On a route where that switch costs a rewrite, it stops the 1-hour pings there instead. A main thread then switches to 1
-  hour at its first rebuild of a prefix of at least `keepalive_one_hour_rebuild_tokens` (150,000; `-1` turns it off), with no pings
+  hour at its first cold rebuild of a prefix of at least `keepalive_one_hour_rebuild_tokens` (150,000; `-1` turns it off), with no pings
   after. A manager's stored strategy can switch it on too (`one_hour_on_wait`). Opt-in; no default changes.
 - `1-hour-always` writes at 1 hour from the first request of the main agent, with no pings on it.
   **On most users it does not pay off:** hosted, 97 main sessions, +22% cost against `auto`, 77 worse, the premium 39% of
