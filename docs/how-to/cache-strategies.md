@@ -216,6 +216,29 @@ A subagent has its own cache entry.
 - A subagent in `done` gets no ping.
 - A manager's time windows never apply to a subagent.
 
+### Caution: 1-hour writes for subagents
+
+Today no strategy puts a subagent on the 1-hour cache, except the head rule of `1-hour-head`.
+`1-hour-on-wait` and `1-hour-always` change the main agent only. A subagent keeps the 5-minute
+cache and the pings of `auto`. In the code, `1-hour-head` has no check for the thread, so it also
+changes the head of a subagent request. We chose to leave subagents on the 5-minute cache for this reason.
+
+A simulation shows why. It counts **subagent threads only** and assumes a provider where the switch
+is a read (Bedrock). These are simulated results, not live measurements. Each is the change in cost
+against `auto`.
+
+| | Hosted traffic (2026-11-10 to 11-12; 387 subagent threads, 7 tenants) | Owner's laptop (2026-11-16 to 11-22; 43 subagent threads) |
+|---|---|---|
+| How long a subagent lives | Median 1.2 minutes. 90% live 14.2 minutes or less. | Median 24.7 minutes. 90% live 180 minutes or less. |
+| Gaps of 5 to 60 minutes | 0.4% of all gaps | 7.9% of all gaps |
+| 1-hour writes from the first request | **37.6% more expensive**. 382 of 387 threads worse. All 7 tenants worse. The 1-hour premium is $41.94 of $142.31. | 10% to 14% cheaper, but 32 of 43 threads are still worse. |
+| One 1-hour ping on a long wait | 2.8% cheaper | 10% to 14% cheaper |
+| 1-hour writes after a rebuild of 150,000 tokens or more | 0.6% more expensive (1 thread switched) | 10% to 14% cheaper |
+
+- Most subagents are short. A 1-hour lifetime rarely pays back for them.
+- 1-hour writes from the first request cost more for most users. Use them with caution.
+- Only long-lived subagents gain.
+
 ## What the 1-hour options cost: simulations
 
 These are **simulations on real traffic, not live measurements.** They count the main agent only.
