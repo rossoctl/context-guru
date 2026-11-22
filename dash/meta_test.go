@@ -117,7 +117,7 @@ func TestMetaRoundTripsThroughTheStore(t *testing.T) {
 		ReasoningEffort: "xhigh", ThinkingMode: "enabled", ThinkingBudget: 8000,
 		Temperature: &zero, TopP: &tenth, MaxTokens: 4096, Stream: true,
 		ToolChoice: "auto", Tools: 7, SystemBlocks: 3,
-		CacheBPSystem: 2, CacheBPTools: 1, CacheBPMessages: 1, CacheBPBlocks: 0,
+		CacheBPSystem: 1, CacheBPTools: 1, CacheBPMessages: 1, CacheBPBlocks: 0, CacheBPRoot: 1,
 		StopReason: "max_tokens",
 	}
 	set := mkEvent(1000, "s-set", "m", 100, 90)
@@ -139,8 +139,9 @@ func TestMetaRoundTripsThroughTheStore(t *testing.T) {
 	if got.Meta != full {
 		t.Errorf("meta round trip = %+v, want %+v", got.Meta, full)
 	}
-	if got.CacheBreakpoints() != 4 {
-		t.Errorf("CacheBreakpoints = %d, want 4", got.CacheBreakpoints())
+	// The total includes the top-level cache_control (#1279), so it matches schema.Breakpoints.Total().
+	if got.CacheBreakpoints() != 4 || got.CacheBPRoot != 1 {
+		t.Errorf("CacheBreakpoints = %d (root %d), want 4 (root 1)", got.CacheBreakpoints(), got.CacheBPRoot)
 	}
 
 	none, err := db.Request(unset.ID, false)

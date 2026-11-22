@@ -76,3 +76,16 @@ func TestHasBlockBreakpoint(t *testing.T) {
 		t.Error("marked block not seen")
 	}
 }
+
+// #1279: the top-level cache_control of automatic caching is one breakpoint, in Root.
+func TestCountBreakpointsCountsTheRootMark(t *testing.T) {
+	body := []byte(`{"cache_control":{"type":"ephemeral","ttl":"1h"},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]}]}`)
+	got := CountBreakpoints(body)
+	if want := (Breakpoints{Blocks: 1, Root: 1}); got != want || got.Total() != 2 {
+		t.Errorf("CountBreakpoints = %+v (total %d), want %+v", got, got.Total(), want)
+	}
+	if CountBreakpoints([]byte(`{"cache_control":"x","messages":[]}`)).Total() != 0 {
+		t.Error("a non-object root cache_control counted")
+	}
+}

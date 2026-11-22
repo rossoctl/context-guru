@@ -664,7 +664,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.cache_bp_system),0), COALESCE(SUM(r.cache_bp_tools),0),
 		COALESCE(SUM(r.cache_bp_messages),0), COALESCE(SUM(r.cache_bp_blocks),0),
 		COALESCE(SUM(CASE WHEN r.cache_bp_system + r.cache_bp_tools
-			+ r.cache_bp_messages + r.cache_bp_blocks > 0 THEN 1 ELSE 0 END),0),
+			+ r.cache_bp_messages + r.cache_bp_blocks + r.cache_bp_root > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.fresh_input + r.cache_read + r.cache_write),0),
 		-- Our own count over the SAME rows that contributed the figure above, plus how many
 		-- rows those are. See Overview.TokensBeforeBilled: a ratio of the two sums is only a

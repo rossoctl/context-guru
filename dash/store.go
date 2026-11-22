@@ -600,7 +600,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
-		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
+		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, cache_bp_root, stop_reason,
 		keepalive_strategy_id, billed_token_factor, thread_id,
 		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
 		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
@@ -609,7 +609,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
 		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
 		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, restored_tokens, currency, ` + strings.Join(requestStoredTokenColumns(), ", ") + `, backend, client_compaction, acc_fallback, ` + strategyMetaCols + `
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `,?,?,?,` + placeholders(strategyMetaN) + `)`)
@@ -674,7 +674,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.Expands, e.ExpandTokens, e.Reverts, e.TokenAccounting, e.CacheMissReason, e.UncompressedReason,
 			e.ReasoningEffort, e.ThinkingMode, e.ThinkingBudget, e.Temperature, e.TopP, e.MaxTokens,
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
-			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
+			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.CacheBPRoot, e.StopReason,
 			strategyID, e.BilledTokenFactor, e.ThreadID,
 			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
 			boolInt(e.AgentCompaction), e.CacheMissCause, boolInt(e.ManualPing), e.ManualSavedUSD,

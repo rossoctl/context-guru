@@ -62,7 +62,32 @@ func envelopeOps(client, forwarded []byte) []accountant.Operation {
 		return nil
 	}
 	ops := toolsOps(gjson.GetBytes(client, "tools").Array(), gjson.GetBytes(forwarded, "tools").Array())
-	return append(ops, systemOps(systemBlocks(client), systemBlocks(forwarded))...)
+	ops = append(ops, systemOps(systemBlocks(client), systemBlocks(forwarded))...)
+	return append(ops, rootTTLOps(client, forwarded)...)
+}
+
+// rootTTLOps reports the relabel of the TOP-LEVEL cache_control to 1h (automatic caching, #1279). The
+// root mark sits in no section, so no section diff finds it: RelabelAllTTL1h changes it and nothing
+// else reports it, and the library would book neither the 1h premium nor the rescue. The change moves
+// no section bytes, so the operation is anchored on the first element of the first section that has
+// one (system, tools, messages) with the same size before and after, which keeps the sum check whole.
+func rootTTLOps(client, forwarded []byte) []accountant.Operation {
+	if !headTTLRelabelled(string(client), string(forwarded)) {
+		return nil
+	}
+	var at accountant.Position
+	var raw string
+	switch sys := systemBlocks(client); {
+	case len(sys) > 0:
+		at, raw = accountant.Position{Section: accountant.SectionSystem}, sys[0]
+	case gjson.GetBytes(client, "tools.0").Exists():
+		at, raw = accountant.Position{Section: accountant.SectionTools}, gjson.GetBytes(client, "tools.0").Raw
+	case gjson.GetBytes(client, "messages.0").Exists():
+		at, raw = accountant.Position{Section: accountant.SectionMessages}, gjson.GetBytes(client, "messages.0").Raw
+	default:
+		return nil
+	}
+	return []accountant.Operation{envelopeOpID("headttl", at, len(raw), len(raw), "headttl:root:"+hashOf(raw))}
 }
 
 // toolsOps matches declarations by name. An unnamed declaration (an Anthropic server tool carries a

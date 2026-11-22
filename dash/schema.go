@@ -393,6 +393,7 @@ CREATE TABLE IF NOT EXISTS requests (
   cache_bp_tools     INTEGER NOT NULL DEFAULT 0,
   cache_bp_messages  INTEGER NOT NULL DEFAULT 0,
   cache_bp_blocks    INTEGER NOT NULL DEFAULT 0,
+  cache_bp_root      INTEGER NOT NULL DEFAULT 0, -- the top-level cache_control of automatic caching (#1279)
   stop_reason        TEXT    NOT NULL DEFAULT ''         -- end_turn|max_tokens|tool_use|refusal|…
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts       ON requests(ts DESC);
@@ -944,6 +945,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// Measured-vs-imported. Additive with a '' default, which doubles as "measured": a row that
 	// predates the column saw the proxy, by definition.
 	{"requests", "source", "TEXT NOT NULL DEFAULT ''"},
+	// The top-level cache_control (#1279). 0 on old rows, which never counted it.
+	{"requests", "cache_bp_root", "INTEGER NOT NULL DEFAULT 0"},
 	{"tool_declarations", "text_gz", "BLOB"},
 	{"tool_declarations", "text_hash", "TEXT"},
 	// 1 marks a deferred tool (Decl.Deferred), MCP or built-in: read off the deferred-tools list,

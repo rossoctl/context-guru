@@ -130,7 +130,7 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project", "price_estimated"}
+	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project", "price_estimated", "cache_bp_root"}
 	// An old database has no project index, and SQLite refuses to drop an indexed column.
 	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_requests_project`); err != nil {
 		t.Fatal(err)

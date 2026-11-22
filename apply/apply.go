@@ -1177,32 +1177,47 @@ func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	}
 }
 
-// bodyAsksExtendedTTL reports whether any cache_control on the wire asks for the 1h tier.
-// Structural, for the same reason hasCacheBreakpoint is: a tool output containing the text
-// "1h" must not extend our idea of the cache lifetime.
+// cacheControlPaths are the gjson paths of every block-level cache_control on the wire.
+var cacheControlPaths = [...]string{
+	"messages.#.content.#.cache_control",
+	"messages.#.cache_control",
+	"system.#.cache_control",
+	"tools.#.cache_control",
+}
+
+// wireCacheControls lists every cache_control object on the wire: the block marks in messages, system
+// and tools, and the TOP-LEVEL mark of Anthropic's automatic caching (the provider then puts one
+// breakpoint on the last cacheable block). It is the one list the TTL readers share
+// (bodyAsksExtendedTTL, AllBreakpointsAskExtendedTTL), so they cannot disagree on a body whose only
+// mark is the top-level one (issue #1279). schema.CountBreakpoints counts the cache_control spellings of the same set.
+// Structural, for the same reason hasCacheBreakpoint is: a tool output containing the text "1h" must
+// not extend our idea of the cache lifetime.
+func wireCacheControls(body []byte) []gjson.Result {
+	var marks []gjson.Result
+	var walk func(v gjson.Result)
+	walk = func(v gjson.Result) {
+		if v.IsArray() {
+			v.ForEach(func(_, vv gjson.Result) bool { walk(vv); return true })
+			return
+		}
+		if v.IsObject() {
+			marks = append(marks, v)
+		}
+	}
+	if root := gjson.GetBytes(body, "cache_control"); root.IsObject() {
+		marks = append(marks, root)
+	}
+	for _, p := range cacheControlPaths {
+		walk(gjson.GetBytes(body, p))
+	}
+	return marks
+}
+
+// bodyAsksExtendedTTL reports whether any cache_control on the wire (the top-level one included) asks
+// for the 1h tier.
 func bodyAsksExtendedTTL(body []byte) bool {
-	for _, p := range []string{
-		"messages.#.content.#.cache_control.ttl",
-		"messages.#.cache_control.ttl",
-		"system.#.cache_control.ttl",
-		"tools.#.cache_control.ttl",
-	} {
-		found := false
-		gjson.GetBytes(body, p).ForEach(func(_, v gjson.Result) bool {
-			if v.IsArray() {
-				v.ForEach(func(_, vv gjson.Result) bool {
-					if vv.String() == "1h" {
-						found = true
-					}
-					return !found
-				})
-			}
-			if v.String() == "1h" {
-				found = true
-			}
-			return !found
-		})
-		if found {
+	for _, m := range wireCacheControls(body) {
+		if m.Get("ttl").String() == "1h" {
 			return true
 		}
 	}
@@ -1211,32 +1226,17 @@ func bodyAsksExtendedTTL(body []byte) bool {
 
 // AllBreakpointsAskExtendedTTL reports whether the body has cache breakpoints and every one of them
 // asks for the 1h tier. A single 5m breakpoint (the default when `ttl` is absent) makes it false:
-// that segment expires in five minutes whatever the others ask. The keeper uses this, with the
-// billed tier, to pick a session's keep-alive schedule.
+// that segment expires in five minutes whatever the others ask. The top-level cache_control of
+// automatic caching is one of the breakpoints. The keeper uses this, with the billed tier, to pick a
+// session's keep-alive schedule.
 func AllBreakpointsAskExtendedTTL(body []byte) bool {
-	total, extended := 0, 0
-	var walk func(v gjson.Result)
-	walk = func(v gjson.Result) {
-		if v.IsArray() {
-			v.ForEach(func(_, vv gjson.Result) bool { walk(vv); return true })
-			return
-		}
-		if v.IsObject() {
-			total++
-			if v.Get("ttl").String() == "1h" {
-				extended++
-			}
+	marks := wireCacheControls(body)
+	for _, m := range marks {
+		if m.Get("ttl").String() != "1h" {
+			return false
 		}
 	}
-	for _, p := range []string{
-		"messages.#.content.#.cache_control",
-		"messages.#.cache_control",
-		"system.#.cache_control",
-		"tools.#.cache_control",
-	} {
-		walk(gjson.GetBytes(body, p))
-	}
-	return total > 0 && total == extended
+	return len(marks) > 0
 }
 
 // cacheIsCold reports whether this session has been idle long enough that its prompt cache
@@ -1389,7 +1389,7 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 }
 
 // hasCacheBreakpoint reports whether the request carries a REAL prompt-cache breakpoint: a
-// structural cache_control / cachePoint field on a message, content block, system block, or tool.
+// structural cache_control / cachePoint field on a message, content block, system block or tool, or the top-level cache_control of automatic caching.
 // It reads the one count (schema.CountBreakpointsEscaped). Only this caller accepts a key spelled
 // with a \u escape; the cap check (schema.CountBreakpoints) stays on the cheaper prefilter.
 // Structural, not a substring scan: a tool output whose text merely contains "cache_control" must
