@@ -593,31 +593,11 @@ func changePoint(raw []bschemas.ChatMessage, h heldAnswer) int {
 // ---------------------------------------------------------------------------------------------------
 // The apply.
 
-// sweepColdRequest is the one test for "the cache is gone": apply's own verdict (Ctx.ColdCache), which
-// carries a clock margin. Shadow mode and the apply use it alike, so shadow reports what the apply
-// would do. CachePhase(0) also calls the minute before the margin cold, which is the wrong error here.
-//
-// It is the SAME test the summary reserve graduates on (ColdApplyPhase, #688): cold, or unknown. One
-// narrowing for the sweep: an unknown phase on a request that still has a known cached prefix
-// (CacheAware with MaxCachedIdx >= 0) is NOT cold. Unknown there means "cannot say how much life is
-// left", not "gone", and a drop would rewrite a live prefix. The summary never removes content from
-// inside the prefix, so it can afford the wider test.
-func sweepColdRequest(c *components.Ctx) bool {
-	if c == nil {
-		return false
-	}
-	p := c.CachePhase(0)
-	if !ColdApplyPhase(p) {
-		return false
-	}
-	return !(p == components.CachePhaseUnknown && c.CacheAware && c.MaxCachedIdx >= 0)
-}
-
-// sweepColdFor is the request's one cache verdict (#1191 D4): sweepColdRequest, with one narrowing. On a
+// sweepColdFor is the request's one cache verdict (#1191 D4): sweepVerdict without its reason. On a
 // route with no known cache lifetime and no cache_control (IBM Bob's), the phase is unknown on every
 // request and counts as cold. The provider's report on the thread's previous turn settles it: a turn
 // that read the cache means the cache is live. The read is a token count, metadata only. It is recorded
-// only when warm is on (ResolveWarmQuestion), so with warm off the verdict is sweepColdRequest exactly.
+// only when warm is on (ResolveWarmQuestion), so with warm off the verdict is the phase test alone.
 // The read is one turn old and has no age limit: after a long idle the first request still counts as
 // live. That is accepted on purpose. That request rewrites the cache, so a question after it reads a
 // live cache, and a held answer meets the warm gate, the stricter one: the worst case is a missed cold
@@ -630,7 +610,7 @@ func sweepColdFor(c *components.Ctx) bool {
 // The reasons of the cache verdict (#1196, the owner's counter). Each request counts exactly one, as the
 // event eventVerdictPrefix + reason. Counts only, no content.
 const (
-	eventVerdictPrefix = "sweep_cold_verdict_"
+	eventVerdictPrefix = "sweep_cache_verdict_"
 	// verdictKnownCold: the phase is known and the cache is gone.
 	verdictKnownCold = "known_cold"
 	// verdictKnownWarm: the phase is known and the cache is live (warm or pre-expiry).
@@ -643,8 +623,18 @@ const (
 	verdictUnknownCold = "unknown_cold"
 )
 
-// sweepVerdict is sweepColdFor with its reason. Both come from one decision, so the counted reason
-// cannot differ from the verdict the sweep acts on.
+// sweepVerdict is the one test for "the cache is gone", with its reason. sweepColdFor returns only the
+// verdict, so the counted reason cannot differ from the verdict the sweep acts on.
+//
+// The base is apply's own verdict (Ctx.ColdCache), which carries a clock margin. Shadow mode and the
+// apply use it alike, so shadow reports what the apply would do. CachePhase(0) also calls the minute
+// before the margin cold, which is the wrong error here.
+//
+// It is the SAME test the summary reserve graduates on (ColdApplyPhase, #688): cold, or unknown. One
+// narrowing for the sweep: an unknown phase on a request that still has a known cached prefix
+// (CacheAware with MaxCachedIdx >= 0) is NOT cold (unknown_prefix). Unknown there means "cannot say how
+// much life is left", not "gone", and a drop would rewrite a live prefix. The summary never removes
+// content from inside the prefix, so it can afford the wider test.
 func sweepVerdict(c *components.Ctx) (cold bool, reason string) {
 	if c == nil {
 		return false, ""
