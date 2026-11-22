@@ -104,6 +104,10 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	}
 	// Claimed under the lock, so two presses racing each other send one ping, not two.
 	k.noteManualLocked(id, now, r.MinGap)
+	// A press sends the held body with its own 5-minute markers, and a read at 5 minutes moves a 1-hour entry
+	// back to 5 minutes (the reason extraWaiting is false on a 1-hour wait). The press is the thread's new last
+	// touch, and it is not a free 1-hour ping: the 1-hour clock ends here, as at a real request (#1258).
+	delete(k.oneHourTouches, id)
 	// Copied out under the lock for the reason pingJob is: the entry may be retired, its body and
 	// credential dropped, while this runs.
 	raw := append([]byte(nil), e.body...)

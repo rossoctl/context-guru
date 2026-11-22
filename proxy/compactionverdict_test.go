@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // #947 review: a result the thread tracker could not judge (no session id, no message list, a

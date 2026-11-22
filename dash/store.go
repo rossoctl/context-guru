@@ -51,6 +51,9 @@ type DB struct {
 	// pointer, sharing one cache across every handle this *DB produces rather than giving each
 	// shallow copy its own, independently-stale one.
 	sizeSpread *cachesplitSizeSpreadCache
+	// sizeStuck is the size rule's memory of a round that deleted rows and freed no space (#1224).
+	// A POINTER for the same reason as sizeSpread: WithContext copies the struct.
+	sizeStuck *sizeStuckState
 }
 
 // WithContext returns a handle whose reads are cancellable, for a caller that has one.
@@ -298,7 +301,7 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}, sizeStuck: &sizeStuckState{}}, nil
 }
 
 // OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
@@ -910,10 +913,16 @@ func (d *DB) PruneWith(now time.Time, o PruneOptions) (int64, error) {
 //     limit. Then the rule trims that session's oldest rows, not the whole session, so the
 //     conversation in progress keeps its recent turns.
 //  5. The floor ends the pass, so a bad measurement cannot empty the database.
+//  6. The stop in point 2 lasts until the file grows (#1224). It used to last one pass: the next
+//     pass saw the same size and deleted another round, and the floor never triggered because the
+//     size never moved. Now the rule remembers the size at the stop (sizeStuckState) and deletes
+//     nothing while the size is within sizeStuckMargin of it. The database may stay over its
+//     limit, and the history stays: the owner's rule is to prefer keeping data.
 func (d *DB) pruneBySize(now time.Time, o PruneOptions) (int64, error) {
 	var deleted int64
 	size, err := d.sizeBytes()
 	if err != nil || size <= o.MaxBytes {
+		d.sizeStuck.clear() // under the limit by itself: the stuck state is over
 		return 0, err
 	}
 	// Free the WAL first, so the size below is the size that deleting rows can change.
@@ -923,7 +932,11 @@ func (d *DB) pruneBySize(now time.Time, o PruneOptions) (int64, error) {
 		return 0, nil
 	}
 	if size, err = d.sizeBytes(); err != nil || size <= o.MaxBytes {
+		d.sizeStuck.clear()
 		return 0, err
+	}
+	if d.sizeStuck.holds(size, sizeStuckMargin(o.MaxBytes)) {
+		return 0, nil
 	}
 	// The backup is taken only now, when rows are certain to go.
 	if o.BeforeDelete != nil && !o.BeforeDelete() {
@@ -968,14 +981,67 @@ func (d *DB) pruneBySize(now time.Time, o PruneOptions) (int64, error) {
 			return deleted, err
 		}
 		if after >= size {
-			slog.Warn("dash: size rule stopped; a round deleted rows and the size did not go down",
+			slog.Warn("dash: size rule stopped; a round deleted rows and the size did not go down; "+
+				"it deletes nothing more until the file grows",
 				"size_before", size, "size_after", after, "max_bytes", o.MaxBytes,
 				"deleted_requests", deleted)
+			d.sizeStuck.set(after)
 			return deleted, nil
 		}
 		size = after
 	}
 	return deleted, nil
+}
+
+// sizeStuckState remembers the size at which the size rule's last pass found that deleting rows
+// freed no space. Zero means "not stuck". Written and read by the janitor only, so the atomics are
+// for the race detector and for WithContext copies, not for contention.
+type sizeStuckState struct {
+	size   atomic.Int64
+	logged atomic.Bool
+}
+
+// sizeStuckMargin is how far the size must grow past the stuck size to re-arm the rule: 1% of the
+// limit, at least 64 KiB (16 pages of 4 KiB). Smaller than that is the noise of a page or two
+// from ordinary writes; a real change is bigger.
+func sizeStuckMargin(maxBytes int64) int64 { return max(maxBytes/100, 64<<10) }
+
+func (s *sizeStuckState) set(size int64) {
+	if s != nil {
+		s.size.Store(max(size, 1))
+		s.logged.Store(false)
+	}
+}
+
+func (s *sizeStuckState) clear() {
+	if s != nil {
+		s.size.Store(0)
+		s.logged.Store(false)
+	}
+}
+
+// holds reports whether the size rule must do nothing: it is stuck and the size has not grown
+// past the margin. Growth past the margin clears the state. It logs the held state once.
+func (s *sizeStuckState) holds(size, margin int64) bool {
+	if s == nil {
+		return false
+	}
+	stuck := s.size.Load()
+	if stuck == 0 {
+		return false
+	}
+	if size > stuck+margin {
+		slog.Info("dash: size rule re-armed; the file grew past the size where deleting freed nothing",
+			"stuck_size_bytes", stuck, "size_bytes", size, "margin_bytes", margin)
+		s.clear()
+		return false
+	}
+	if !s.logged.Swap(true) {
+		slog.Warn("dash: size rule is holding; the last delete freed no space, so it deletes nothing "+
+			"until the file grows; the database stays over its limit and the history is kept",
+			"stuck_size_bytes", stuck, "size_bytes", size, "margin_bytes", margin)
+	}
+	return true
 }
 
 // sizeRound runs one round of the size rule and returns how many request rows it deleted.

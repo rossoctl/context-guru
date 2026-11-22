@@ -12,8 +12,8 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // returnAfterPings prices one warm return that followed one keep-alive ping, the way a host does. The

@@ -4605,6 +4605,37 @@ def installed_proxy_version() -> str:
         return ""
 
 
+_SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+
+
+def _semver_key(text: str) -> tuple | None:
+    """Sort key for a release tag in semantic-version order, or None if it does not parse.
+
+    A leading `v` is allowed. A prerelease sorts below its release (`0.7.5-beta.1 < 0.7.5`).
+    Prerelease parts compare as in semver: numbers by value, below words; fewer parts is lower."""
+    m = _SEMVER.match((text or "").strip())
+    if not m:
+        return None
+    core = tuple(int(x) for x in m.groups()[:3])
+    pre = m.group(4)
+    if pre is None:
+        return core, (1,)
+    parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+    return core, (0, parts)
+
+
+def update_is_newer(latest: str, installed: str) -> bool:
+    """Is release `latest` strictly newer than the installed `installed`?
+
+    `releases/latest` never names a prerelease, so "different" is not "newer": an installed beta
+    differs from the older stable (#1254). If either side does not parse, fall back to the old
+    test (the tags differ, ignoring a leading `v`), so an odd version string still fails open."""
+    a, b = _semver_key(latest), _semver_key(installed)
+    if a is None or b is None:
+        return (latest or "").strip().removeprefix("v") != (installed or "").strip().removeprefix("v")
+    return a > b
+
+
 def cmd_update_check(args) -> int:
     if args.op == "show":
         fields, reason = _read_update_check()
@@ -4618,6 +4649,11 @@ def cmd_update_check(args) -> int:
         emit(result="ok", answer=fields["answer"], skipped=fields["skipped"],
              notified=fields["notified"], latest=fields["latest"],
              installed=installed_proxy_version() or "unknown")
+        return 0
+
+    if args.op == "newer":
+        # Pure: reads no file. start-proxy.sh asks it before it updates or tells the user.
+        emit(result="ok", newer="true" if update_is_newer(args.latest, args.installed) else "false")
         return 0
 
     if args.op == "stamp":
@@ -4863,8 +4899,9 @@ def main() -> int:
     rr.add_argument("name", choices=RECORDED_COMMANDS)
 
     uc = sub.add_parser("update-check")
-    uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
-    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
+    uc.add_argument("op", choices=("show", "stamp", "notify", "answer", "newer"))
+    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp` and `newer`")
+    uc.add_argument("--installed", default="", help="the installed tag; for `newer`")
     uc.add_argument("--answer", default="",
                     help="for `answer`: one of " + ", ".join(UPDATE_ANSWERS))
     uc.add_argument("--version", default="",

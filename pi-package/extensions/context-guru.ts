@@ -5,7 +5,8 @@
 // It only:
 //   0. checks the proxy once when a session starts (a localhost /healthz, in the background, never
 //      awaited by Pi), restarts the service once if it does not answer, and warns once if it is still down.
-//      The session's end stops its own check, the restart child included;
+//      The session's end stops its own check, the restart child included. While it restarts, routed
+//      requests wait for it (at most 10 s), so the first one does not fail on a proxy that is starting;
 //   1. tags each routed request with Pi's own session id (header x-context-guru-session), so the proxy
 //      keeps one session across a compaction instead of splitting it in two;
 //   2. stops Pi's own cache warming for routed models while the proxy's keep-alive is on, so the cache
@@ -23,15 +24,36 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATE_DIR = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-pi");
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "pi_plugin.py");
+const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SCRIPT = join(PACKAGE_DIR, "scripts", "pi_plugin.py");
+/** The package folder of the copy that runs in this Pi process. Two installed copies (two clones, or a
+ *  worktree) both load; without this, Pi renames both commands and /context-guru disappears (#1154). */
+export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
 const SESSION_HEADER = "x-context-guru-session";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
+/** One line per preset, the Claude Code plugin's preset-picker text without its markdown. A test fails
+ *  when the two drift apart. */
+export const PRESET_TEXT: Record<string, string> = {
+  off: "nothing runs, requests go through untouched",
+  conservative: "trims obvious waste — the safe first step into \"carry less\"",
+  medium: "conservative plus a cheap model that keeps only what looks relevant in recent tool output, and a summary " +
+    "prepared in the background that is used only if you come back after the cache expired",
+  high: "medium, but the summary of older turns is used as soon as the context window is nearly full",
+  xhigh: "high plus a deep-adjudication sweep over turns whose cache has already gone cold — the deepest cut",
+  ultrahigh: "Experimental. xhigh plus tool deferral: tools your own last sessions never used are sent as names only, " +
+    "and the model loads one through search when it needs it. Opt-in. Turn it off for one session with " +
+    "ENABLE_TOOL_SEARCH=false",
+};
 const SUBCOMMANDS = ["setup", "status", "preset", "cache-strategy", "update", "uninstall"];
 /** The time limit of each /healthz check at session start (the user's choice). */
 export const START_CHECK_TIMEOUT_MS = 5000;
+/** The longest a routed request waits for a start-check restart that is running (#1149). */
+export const FIRST_REQUEST_WAIT_MS = 10_000;
 
 interface Install {
+  preset?: string;
+  restart_pending?: boolean;
   port?: number;
   base_urls?: Record<string, string>;
   cache_strategy?: string;
@@ -142,6 +164,37 @@ export class StartChecks {
   }
 }
 
+/** Holds routed requests while the session-start check restarts the proxy. Without it the first request
+ *  goes out before the proxy listens, fails 3 times, and Pi's retries make a 1 s prompt take 30 s (#1149).
+ *  Nothing is held while no restart runs, so a healthy proxy adds no wait. */
+export class RestartGate {
+  private held?: Promise<void>;
+
+  hold(): () => void {
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => { release = resolve; });
+    this.held = mine;
+    return () => {
+      release();
+      if (this.held === mine) this.held = undefined;
+    };
+  }
+
+  /** Ends when the restart ends, at the limit, or when `signal` aborts (the user pressed Esc). */
+  async wait(limitMs: number, signal?: AbortSignal): Promise<void> {
+    if (!this.held || signal?.aborted) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    await Promise.race([
+      this.held,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); }),
+      new Promise<void>((resolve) => { onAbort = resolve; signal?.addEventListener("abort", resolve, { once: true }); }),
+    ]);
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 export interface StartCheck {
   port: number;
   /** The reset command to name when the restart does not report one. Undefined when it does not exist. */
@@ -152,6 +205,8 @@ export interface StartCheck {
   /** False once the session has ended: a check for an ended session restarts and says nothing. */
   active: () => boolean;
   notify: (text: string) => void;
+  /** Holds routed requests from the restart until the check after it; returns the release. */
+  hold?: () => () => void;
 }
 
 /** The session-start check: one check, at most one restart, one more check, at most one notice. No loop. */
@@ -159,12 +214,19 @@ export async function checkAtStart(check: StartCheck): Promise<"up" | "restarted
   if (await check.answers()) return "up";
   if (!check.active()) return "ended";
   let facts: Record<string, string> = {};
+  const release = check.hold?.();
+  let answered: boolean;
   try {
-    facts = await check.restart();
-  } catch {
-    // A failed restart is the same as a restart that did not help: check again, then warn.
+    try {
+      facts = await check.restart();
+    } catch {
+      // A failed restart is the same as a restart that did not help: check again, then warn.
+    }
+    answered = await check.answers();
+  } finally {
+    release?.();
   }
-  if (await check.answers()) return "restarted";
+  if (answered) return "restarted";
   if (!check.active()) return "ended";
   check.notify(downNotice(check.port, facts, facts.reset_hatch || check.hatch));
   return "down";
@@ -211,27 +273,47 @@ export function stripsChatGPTFields(install: Install | undefined): boolean {
   return !install?.upstreams?.openai;
 }
 
-/** The one question for a models.json that already sends a provider elsewhere, built from the plan's
- *  paired answers. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
+/** The consent text with the plan's strategy note, so a fallback to `none` is named before the yes. */
+export function consentText(question: string, note: string | undefined): string {
+  return note ? `${question} ${note}.` : question;
+}
+
+/** The question for a models.json that already sends a provider elsewhere, built from the plan's paired
+ *  answers. The title is a short question (#1158); the consent text of each answer is shown in a confirm
+ *  dialog after the pick. `answers` maps each option to its --on-conflict value; KEEP has none. Chain is
  *  offered only when the plan printed it (the proxy can reproduce that URL). */
-export function conflictPrompt(f: Record<string, string>): { title: string; options: string[]; answers: Record<string, string> } {
+export function conflictPrompt(f: Record<string, string>): {
+  title: string; options: string[]; answers: Record<string, string>; consent: Record<string, string>;
+} {
   const options: string[] = [];
   const answers: Record<string, string> = {};
+  const consent: Record<string, string> = {};
   const parts = [`models.json already sends a provider somewhere else: ${conflictWords(f.existing_base_url)}.`];
   if (f.consent_question_chain) {
     options.push(CHAIN);
     answers[CHAIN] = "chain";
-    parts.push(`Chain (usually right): ${f.consent_question_chain}`);
+    consent.chain = consentText(f.consent_question_chain, f.cache_strategy_note);
   } else if (f.chain_refused) {
     parts.push(`Chain is not offered: context-guru cannot forward to that URL the way Pi does (${f.chain_refused}).`);
   }
   if (f.consent_question_replace) {
     options.push(REPLACE);
     answers[REPLACE] = "replace";
-    parts.push(`Replace: ${f.consent_question_replace}`);
+    consent.replace = consentText(f.consent_question_replace, f.cache_strategy_note);
   }
   options.push(KEEP);
-  return { title: parts.join("\n\n"), options, answers };
+  return { title: parts.join("\n\n"), options, answers, consent };
+}
+
+/** The message after a setup that routed Pi. */
+export function setupDoneText(r: Record<string, string>): string {
+  return [
+    `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}: ${r.routes}.`,
+    `Preset ${r.preset}, cache strategy ${r.cache_strategy}. Dashboard: ${r.dashboard}`,
+    ...(r.cache_strategy_note ? [`${r.cache_strategy_note}.`] : []),
+    "Re-select the model with /model (or restart Pi) so this session uses the new route.",
+    `If Pi ever stops being able to talk, run: ${r.reset_hatch}`,
+  ].join("\n");
 }
 
 /** The cache strategy names from the facts of `pi_plugin.py configure --list`. The proxy owns the table, so
@@ -239,6 +321,42 @@ export function conflictPrompt(f: Record<string, string>): { title: string; opti
 export function strategyChoices(facts: Record<string, string>): { names: string[]; error?: string } {
   const names = (facts.strategies ?? "").split(",").filter(Boolean);
   return { names: names.length ? names : ["none"], error: facts.strategy_error || undefined };
+}
+
+/** The message after `uninstall`. A binary the person supplied stays, and the message names it (#1153). */
+export function uninstallText(f: Record<string, string>): string {
+  return `context-guru removed (models.json: ${f.models_restore}, service: ${f.service}). ` +
+    (f.binary_kept ? `Kept your proxy binary ${f.binary_kept}. ` : "") + "Re-select the model with /model, or restart Pi.";
+}
+
+type Message = { text: string; level: "info" | "error" };
+
+/** What a failed proxy start tells the user: the proxy is off, and what to run (#1146). */
+function proxyOff(f: Record<string, string>): string {
+  return `the proxy did not start and is off. Run /context-guru status.${f.log ? ` The log is ${f.log}.` : ""}`;
+}
+
+/** The result of `update --install`. A non-zero exit is never shown as a success (#1155). */
+export function updateMessage(f: Record<string, string>, code: number): Message {
+  if (f.result === "updated" && f.restart === "failed") {
+    return { text: `context-guru updated to ${f.version}, but ${proxyOff(f)}`, level: "error" };
+  }
+  if (f.result === "updated" && code === 0) return { text: `context-guru updated to ${f.version}.`, level: "info" };
+  return { text: ["context-guru update:", f.result ?? "error", f.version, f.reason, f.detail].filter(Boolean).join(" "),
+    level: "error" };
+}
+
+/** The result of `configure --preset` or `--cache-strategy`. */
+export function configureMessage(f: Record<string, string>, code: number, stderr: string): Message {
+  if (f.result === "unchanged") {
+    return { text: `Already set: preset ${f.preset}, cache strategy ${f.cache_strategy}. Nothing changed.`, level: "info" };
+  }
+  if (f.result === "configured" && code === 0) {
+    return { text: `context-guru now runs preset ${f.preset}, cache strategy ${f.cache_strategy}.` +
+      (f.probe ? ` Tool deferral probe: ${f.probe}.` : ""), level: "info" };
+  }
+  if (f.result === "not_applied") return { text: `context-guru: the new setting is saved, but ${proxyOff(f)}`, level: "error" };
+  return { text: `context-guru: ${f.result ?? "error"} ${f.detail ?? stderr.trim()}`, level: "error" };
 }
 
 /** Parse the `key=value` lines pi_plugin.py prints. Later keys win. */
@@ -249,6 +367,34 @@ export function parseFacts(text: string): Record<string, string> {
     if (at > 0) out[line.slice(0, at)] = line.slice(at + 1);
   }
   return out;
+}
+
+/** A preset pick-list option: the name, then what it does (#1156). */
+export function presetLabel(name: string): string {
+  return `${name}: ${PRESET_TEXT[name]}`;
+}
+
+/** The current preset or cache strategy, read fresh: another Pi session may have changed it. Undefined
+ *  while a restart is pending (the last one failed), so choosing the same value restarts again. */
+export function currentSetting(key: "preset" | "cache_strategy", dir: string = STATE_DIR): string | undefined {
+  const fresh = readInstall(dir);
+  return fresh?.restart_pending ? undefined : fresh?.[key];
+}
+
+export function presetFromLabel(label: string | undefined): string | undefined {
+  return label?.split(":", 1)[0];
+}
+
+/** Why a chosen name is not applied: it is unknown, or it is the current setting (a restart would only
+ *  cost a cache rewrite). Undefined when the change goes ahead. */
+export function choiceProblem(kind: "preset" | "cache strategy", value: string, names: string[], current?: string):
+  { text: string; level: "info" | "error" } | undefined {
+  if (!names.includes(value)) {
+    return { text: `Unknown ${kind} '${value}'. ${kind === "preset" ? "Presets" : "Cache strategies"}: ${names.join(", ")}`,
+      level: "error" };
+  }
+  if (value === current) return { text: `Already set: ${kind} ${value}. Nothing changed.`, level: "info" };
+  return undefined;
 }
 
 /** Split `/context-guru` arguments. A bare command (or only spaces) means `status`. */
@@ -263,6 +409,21 @@ export function endKind(reason: string): string | undefined {
 }
 
 export default function contextGuru(pi: ExtensionAPI) {
+  const shared = globalThis as Record<symbol, unknown>;
+  const owner = shared[LOADED];
+  if (typeof owner === "string" && owner !== PACKAGE_DIR) {
+    let warned = false;
+    pi.on("session_start", (_event, ctx) => {
+      if (warned) return;
+      warned = true;
+      const text = `context-guru: two copies of the Pi package are loaded, ${owner} and ${PACKAGE_DIR}. ` +
+        `Only the first one runs. Remove the other one from "packages" in ~/.pi/agent/settings.json.`;
+      if (ctx.hasUI) ctx.ui.notify(text, "warning");
+      else console.warn(text);
+    });
+    return;
+  }
+  shared[LOADED] = PACKAGE_DIR;
   let install = readInstall();
 
   const routed = (ctx: ExtensionContext) => isRouted(install, ctx.model?.baseUrl);
@@ -286,6 +447,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   };
 
   const checks = new StartChecks();
+  const gate = new RestartGate();
 
   /** The strategy names the proxy offered at the last `cache-strategy` command (for completion). */
   let strategyNames: string[] = [];
@@ -314,6 +476,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       // A restart can wait for another session's restart to finish (a lock in pi_plugin.py).
       restart: async () => restartFacts(await run(["restart"], RESTART_TIMEOUT_MS, current.signal)),
       active: current.active,
+      hold: () => gate.hold(),
       notify: (text) => {
         try {
           // Print and JSON modes have no UI. stdout carries the answer there, so the warning goes to stderr.
@@ -334,7 +497,8 @@ export default function contextGuru(pi: ExtensionAPI) {
 
   // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
   // to that same model. An API key (or any other provider) passes through unchanged.
-  pi.on("before_provider_request", (event, ctx) => {
+  pi.on("before_provider_request", async (event, ctx) => {
+    if (routed(ctx)) await gate.wait(FIRST_REQUEST_WAIT_MS, ctx.signal);
     const model = ctx.model;
     if (!model || model.provider !== "openai" || model.api !== "openai-responses" || !routed(ctx)) return undefined;
     if (!stripsChatGPTFields(install)) return undefined;
@@ -351,6 +515,8 @@ export default function contextGuru(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, ctx) => signal(ctx, "SessionStart", "compact"));
 
   pi.on("session_shutdown", (event, ctx) => {
+    // A reload, /new, /resume or /fork loads every copy again, so the first copy to load claims it again.
+    if (shared[LOADED] === PACKAGE_DIR) delete shared[LOADED];
     try {
       checks.end(ctx.sessionManager.getSessionId());
     } catch {
@@ -388,13 +554,13 @@ export default function contextGuru(pi: ExtensionAPI) {
       }
       const choice = await ctx.ui.select(prompt.title, prompt.options);
       const answer = choice ? prompt.answers[choice] : undefined;
-      if (!answer) {
+      if (!answer || !(await ctx.ui.confirm("Route Pi through context-guru?", prompt.consent[answer]))) {
         say(ctx, `Nothing changed.${hatch}`);
         return;
       }
       args.push("--on-conflict", answer);
     } else if (f.result !== "planned") {
-      say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}`, "error");
+      say(ctx, `context-guru setup: ${f.reason ?? f.result ?? plan.stderr.trim()}${f.detail ? `: ${f.detail}` : ""}`, "error");
       return;
     } else {
       // Consent comes from a person. Print mode has no dialog, and no answer is a no.
@@ -402,7 +568,7 @@ export default function contextGuru(pi: ExtensionAPI) {
         say(ctx, `context-guru setup needs an interactive yes. Question: ${f.consent_question}`, "warning");
         return;
       }
-      const yes = await ctx.ui.confirm("Route Pi through context-guru?", f.consent_question);
+      const yes = await ctx.ui.confirm("Route Pi through context-guru?", consentText(f.consent_question, f.cache_strategy_note));
       if (!yes) {
         say(ctx, "Nothing changed.");
         return;
@@ -416,12 +582,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       return;
     }
     await reloadModels(ctx);
-    say(ctx, [
-      `context-guru routes Pi's Anthropic and OpenAI models through port ${r.port}: ${r.routes}.`,
-      `Preset ${r.preset}, cache strategy ${r.cache_strategy}. Dashboard: ${r.dashboard}`,
-      "Re-select the model with /model (or restart Pi) so this session uses the new route.",
-      `If Pi ever stops being able to talk, run: ${r.reset_hatch}`,
-    ].join("\n"));
+    say(ctx, setupDoneText(r));
   };
 
   const status = async (ctx: ExtensionCommandContext) => {
@@ -464,10 +625,8 @@ export default function contextGuru(pi: ExtensionAPI) {
     // As for restart: configure can wait for a session-start restart that holds the lock.
     const out = await run(["configure", flag, value], RESTART_TIMEOUT_MS);
     install = readInstall();
-    const f = out.facts;
-    say(ctx, f.result === "configured"
-      ? `context-guru now runs preset ${f.preset}, cache strategy ${f.cache_strategy}.` + (f.probe ? ` Tool deferral probe: ${f.probe}.` : "")
-      : `context-guru: ${f.result ?? "error"} ${f.detail ?? out.stderr.trim()}`, f.result === "configured" ? "info" : "error");
+    const m = configureMessage(out.facts, out.code, out.stderr);
+    say(ctx, m.text, m.level);
   };
 
   pi.registerCommand("context-guru", {
@@ -486,9 +645,13 @@ export default function contextGuru(pi: ExtensionAPI) {
         case "status":
           return status(ctx);
         case "preset": {
-          const name = await pick(ctx, "Preset (each one includes the one above it)", PRESETS, value);
-          if (name) return configure(ctx, "--preset", name);
-          return say(ctx, `Presets: ${PRESETS.join(", ")}`);
+          if (!value && !ctx.hasUI) return say(ctx, `Presets: ${PRESETS.join(", ")}`);
+          const name = value || presetFromLabel(await ctx.ui.select("Preset (each one includes the one above it)",
+            PRESETS.map(presetLabel)));
+          if (!name) return say(ctx, "Nothing changed.");
+          const problem = choiceProblem("preset", name, PRESETS, currentSetting("preset"));
+          if (problem) return say(ctx, problem.text, problem.level);
+          return configure(ctx, "--preset", name);
         }
         case "cache-strategy": {
           const listed = await run(["configure", "--list"], 30_000);
@@ -501,25 +664,28 @@ export default function contextGuru(pi: ExtensionAPI) {
           if (value && !names.includes(value)) {
             return say(ctx, `context-guru: cache strategy ${value} cannot be set. ${error ?? `Offered: ${names.join(", ")}`}`, "error");
           }
+          if (!value && !ctx.hasUI) return say(ctx, `Cache strategies: ${names.join(", ")}`);
           const name = await pick(ctx, "Cache strategy", names, value);
-          if (name) return configure(ctx, "--cache-strategy", name);
-          return say(ctx, `Cache strategies: ${names.join(", ")}`);
+          if (!name) return say(ctx, "Nothing changed.");
+          const problem = choiceProblem("cache strategy", name, names, currentSetting("cache_strategy"));
+          if (problem) return say(ctx, problem.text, problem.level);
+          return configure(ctx, "--cache-strategy", name);
         }
         case "update": {
           const check = (await run(["update", "--check"], 30_000)).facts;
           if (check.update_available !== "true") return say(ctx, `context-guru proxy ${check.installed_version ?? "?"} is current.`);
           if (!(await agree(ctx, "Update the proxy?",
             `Install ${check.latest_version} (now ${check.installed_version}) and restart the proxy?`))) return;
-          const f = (await run(["update", "--install"], 300_000)).facts;
-          return say(ctx, ["context-guru update:", f.result, f.version, f.reason, f.detail].filter(Boolean).join(" "));
+          const out = await run(["update", "--install"], 300_000);
+          const m = updateMessage(out.facts, out.code);
+          return say(ctx, m.text, m.level);
         }
         case "uninstall": {
           if (!(await agree(ctx, "Remove context-guru?",
-            "Restore models.json, stop and remove the proxy service, and delete the downloaded binary."))) return;
+            "Restore models.json, stop and remove the proxy service, and delete the binary that setup downloaded."))) return;
           const f = (await run(["uninstall"], 60_000)).facts;
           await reloadModels(ctx);
-          return say(ctx, `context-guru removed (models.json: ${f.models_restore}, service: ${f.service}). ` +
-            "Re-select the model with /model, or restart Pi.");
+          return say(ctx, uninstallText(f));
         }
         default:
           return say(ctx, `Unknown subcommand ${sub}. Use one of: ${SUBCOMMANDS.join(", ")}`, "warning");

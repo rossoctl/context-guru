@@ -18,9 +18,9 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // THE QUESTION AT THE KEEP-ALIVE PING (#404, points 1, 2, 11).

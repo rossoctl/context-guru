@@ -13,7 +13,7 @@ import (
 // keys. The Claude Code plugin and the OpenCode plugin used to keep their own copy of this table;
 // they read it from `context-guru-proxy strategies --json` instead.
 //
-// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 30-min-ping (the Codex name).
+// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 1-hour-on-wait, 30-min-ping (the Codex name).
 //
 // RULES
 //   - `cache.strategy: <name>` fills the keys of the table row.
@@ -121,11 +121,27 @@ var Strategies = []Strategy{
 	{
 		Name:      "1-hour-head",
 		Spends:    false,
-		Desc:      "asks for the 1-hour tier on the tools/system breakpoints, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero 1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both of those measurements were on prefixes UNDER the 50k gate this ships with.",
+		Desc:      "asks for the 1-hour tier on the tools/system breakpoints ONLY, and ONLY on requests with a >=50k-token prefix (below that it does nothing at all; the size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). It covers only tools and system, a small part of a long prompt that other sessions often keep warm anyway. The message history stays on the 5-minute cache, and this strategy turns the pings off, so the history goes cold after 5 minutes of idle time and the next turn rebuilds it. For long sessions with idle gaps see 1-hour-on-wait. Whether the 1-hour tier is granted depends on the model and the provider, and it changes over time. Measured with fresh writes: claude-haiku-4-5 granted (36,251 of 36,574 tokens at 1h); claude-sonnet-5 REFUSED on an earlier date (0 of 48,212 written at 1h); on 2026-11-19 the same gateway granted 1h on claude-sonnet-5, claude-sonnet-5-5, claude-opus-4-8, claude-opus-5-5 and claude-haiku-5-5 (about 12.6k tokens each). A zero in Usage.CacheWrite1h counts only on a request that wrote the entry: a head that is only read shows zero too.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"head_ttl_1h", true},
 			{"head_ttl_min_tokens", 50000},
+		},
+	},
+	{
+		Name:      "1-hour-on-wait",
+		Spends:    true,
+		Desc:      "MAIN AGENT ONLY. auto's keep-alive, except that when the main agent has a long wait (a person, a teammate, background work, or an unknown cause) the first idle ping, at the usual time, carries every cache marker at the 1-hour tier and is the ONLY ping of that wait: no 59-minute ping. On the gateway measured on 2026-11-19 that switch is a read, not a rewrite, so one read at 0.1x keeps the whole prompt for 1 hour and no request pays the 2x write premium. Tool waits and every subagent thread behave exactly as auto (5-minute pings). The 1-hour grant is unknown until proven, per provider, route and model: the first long wait is a probe, and the route is proven when the thread returns more than 5 minutes later and still reads the prompt. If the ping rewrites the prompt, or the return is a cold rebuild (expected on Anthropic first-party, not tested), the proxy stops sending 1-hour pings on that route and falls back to auto. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Providers: []string{"anthropic"},
+		Cache: []StrategyKey{
+			{"keepalive", true},
+			{"keepalive_idle_seconds", 240},
+			{"keepalive_max_pings", 2},
+			{"keepalive_max_usd_per_ping", 0.5},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
+			{"keepalive_max_pings_1h", 1},
+			{"keepalive_one_hour_on_wait", true},
 		},
 	},
 	{

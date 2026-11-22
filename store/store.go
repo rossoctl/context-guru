@@ -232,7 +232,7 @@ const (
 	// fires one turn late is the safe direction.
 	BilledPrefix = "cg:bin:"
 	// BilledThreadPrefix is BilledPrefix per THREAD: the billed input of the previous turn of one
-	// thread (internal/thread.Key(session, thread)), so a side request or a subagent that shares the
+	// thread (thread.Key(session, thread)), so a side request or a subagent that shares the
 	// session cannot move the main thread's figure. It is metadata (one integer), read only by the
 	// billed-growth horizon (Ctx.PrevBilledInputThread). BilledPrefix stays the session figure every
 	// other reader uses. Pinned like BilledPrefix, so memory pressure does not erase it between

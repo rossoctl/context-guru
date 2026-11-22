@@ -21,10 +21,10 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 const (
@@ -305,7 +305,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
 		// keying on it would make every side request a new thread and hide real idle expiries.
 		th := ""
-		if strings.HasPrefix(r.thread, "a:") {
+		if thread.IsAgentThread(r.thread) {
 			th = r.thread
 		}
 		tk := threadKey{r.session, r.model, th, r.tools, r.sysBlocks}

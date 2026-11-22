@@ -12956,3 +12956,56 @@ func TestUpdateCheckSkipAndAlwaysAnswersCoexist(t *testing.T) {
 			"both preferences must survive on disk together", facts["answer"], facts["skipped"])
 	}
 }
+
+// #1243. After a free 1-hour keep-alive ping the proxy reports ttl_s 3600, anchored at the ping, and
+// ttl_unproven while the route is not yet proven to grant the tier. The status line counts the hour and
+// draws "1h?" after the clock while it is unproven (the band's cacheClock draws the same text). A proven
+// route and an ordinary 5-minute entry carry no mark.
+func TestStatuslineDrawsAnHourClockAndMarksItWhileUnproven(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+now = 1_700_000_000_000
+def cs(extra, main_extra=None):
+    d = {"last_ts": now - 200_000, "end_ts": now - 199_000, "now_ms": now, "ttl_s": 3600, "model": "m",
+         "prefix_tokens": 486000, "keepalive": True}
+    d.update(extra)
+    return d
+def seg(c):
+    return m._cache_segment(m._cache_view({}, c, 0))
+print(seg(cs({"ttl_unproven": True})))   # unproven: an hour counted from the ping, marked
+print(seg(cs({})))                       # proven: a plain hour clock
+print(seg(cs({"ttl_s": 300, "last_ts": now - 100_000, "end_ts": now - 99_000})))  # an ordinary 5-minute entry
+# The main thread's own entry decides: a subagent's mark must not leak onto it, and the main's must show.
+sess = cs({"ttl_s": 300, "ttl_unproven": True, "last_ts": now - 1000, "end_ts": now - 1000})
+sess["threads"] = [{"id": "", "main": True, "model": "m", "last_ts": now - 200_000, "end_ts": now - 199_000, "ttl_s": 3600}]
+print(m._cache_view({}, m._main_cs(sess), 0)["unproven"])
+sess["threads"][0]["ttl_unproven"] = True
+print(m._cache_view({}, m._main_cs(sess), 0)["unproven"])
+`
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the check: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "56:") || !strings.HasSuffix(strings.TrimSpace(strings.TrimSuffix(lines[0], "↻")), "1h?") {
+		t.Errorf("unproven hour: %q, want a clock near 56:40 then 1h?", lines[0])
+	}
+	if !strings.Contains(lines[1], "56:") || strings.Contains(lines[1], "1h?") {
+		t.Errorf("proven hour: %q, want a plain clock with no mark", lines[1])
+	}
+	if strings.Contains(lines[2], "1h?") || !strings.Contains(lines[2], "3:") {
+		t.Errorf("a 5-minute entry: %q, want its own short clock and no mark", lines[2])
+	}
+	if lines[3] != "False" || lines[4] != "True" {
+		t.Errorf("the mark must follow the main thread's own entry: got %q then %q, want False then True", lines[3], lines[4])
+	}
+}

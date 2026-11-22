@@ -678,7 +678,8 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
         installed = str(rep.facts.get("proxy_version", ""))
         if (latest and latest not in ("unknown", (fields.get("skipped") or "").strip())
                 and fields.get("answer", "ask").strip() != "never"
-                and latest not in (installed, f"v{installed}")):
+                and latest not in (installed, f"v{installed}")
+                and (not installed or settings.update_is_newer(latest, installed))):
             rep.findings.append(Finding(
                 "proxy-update", "low",
                 f"A newer proxy release is available ({latest})",
