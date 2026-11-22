@@ -353,9 +353,9 @@ def inference():
         (quant(0.99, "llm_inference_ttfb_seconds"), "p99")], 0, 13, 12, 8, unit="s", colors={"p50": GREEN, "p95": YELLOW, "p99": RED},
         desc="Time from request to the first byte of a streamed answer. A buffered stream has no true first byte and is left out."))
     P.append(series(9, "Time to first token p95 by model (seconds)", [(quant(0.95, "llm_inference_ttfb_seconds", "model"), "{{model}}")], 12, 13, 12, 8, unit="s"))
-    P.append(series(10, "Output tokens per streamed request", [
-        (f'{rate(tok, "model", tier("output"))} / clamp_min(sum by (model) (rate(llm_inference_requests_total{{{FILTER},stream="true"}}[$__rate_interval])), 1e-9)', "{{model}}")],
-        0, 21, 12, 8, desc="Not a speed. Output tokens divided by streamed requests, by model. A true tokens per second needs the time spent writing, which is not recorded."))
+    P.append(series(10, "Output tokens per request", [
+        (f'{rate(tok, "model", tier("output"))} / clamp_min(sum by (model) (rate(llm_inference_requests_total{{{FILTER},status_class="2xx"}}[$__rate_interval])), 1e-9)', "{{model}}")],
+        0, 21, 12, 8, desc="Not a speed. Output tokens divided by successful requests, streamed or not, by model. The token counter has no stream label, and a failed request bills no output (#1248). A true tokens per second needs the time spent writing, which is not recorded."))
     P.append(series(11, "Time the proxy added (seconds)", [
         (quant(0.5, "llm_inference_added_seconds"), "p50"), (quant(0.95, "llm_inference_added_seconds"), "p95"),
         (quant(0.99, "llm_inference_added_seconds"), "p99")], 12, 21, 12, 8, unit="s", colors={"p50": GREEN, "p95": YELLOW, "p99": RED},
@@ -364,7 +364,7 @@ def inference():
                     desc="Provider cost at request time. Each proxy prices with its own rate table."))
     P.append(stat(13, "Spend priced from a fallback rate", f'{inc("llm_inference_estimated_cost_usd_total")} / clamp_min({inc("llm_inference_cost_usd_total")}, 1e-9)',
                   16, 29, w=8, h=8, unit="percentunit", decimals=1, c=YELLOW, big=True,
-                  desc="Share of spend where the model had no rate of its own. A high value means the money panels are a guess."))
+                  desc="Share of spend priced from a fallback rate: a cache-read rate that no price source states, for a model that is not Claude, filled from a default multiple (R47). A high value means the money panels are a guess."))
     return dash("central-inference", "Inference", "What do the models consume, and how fast do they answer?", P, ["inference"])
 
 

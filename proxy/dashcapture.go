@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -84,6 +85,9 @@ type capture struct {
 	sweepExpandTok int
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
+	// sweepExpandRules counts first expands of a sweep v3 drop by what chose it: a rule name, or "judge"
+	// (#1191). finish adds them to the sweep's component row as sweep_v3_expanded_<rule> events.
+	sweepExpandRules map[string]int
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
@@ -597,6 +601,36 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 			c.sweepFalseExpWarm++
 		}
 	}
+	for rule, n := range note.Rules {
+		if c.sweepExpandRules == nil {
+			c.sweepExpandRules = map[string]int{}
+		}
+		c.sweepExpandRules[rule] += n
+	}
+}
+
+// addSweepExpandEvents puts the first expands of sweep v3 drops, by rule, on the sweep's component row
+// of this request, beside the drops it raised per rule (sweep_v3_dropped_<rule>). The dashboard keeps
+// the row with the request's route and sums its events, so the expand rate per rule reads per route,
+// across a restart (#1191). A request with no sweep row (the sweep was not in its pipeline) keeps only
+// the request-level counts.
+func addSweepExpandEvents(e *dash.Event, rules map[string]int) {
+	for i := range e.Components {
+		row := &e.Components[i]
+		if row.Component != "extract_llm_sweep" {
+			continue
+		}
+		// A copy: the row shares the component report's own map (dash.Event.FromTrace).
+		events := maps.Clone(row.Events)
+		if events == nil {
+			events = map[string]int{}
+		}
+		row.Events = events
+		for rule, n := range rules {
+			row.Events["sweep_v3_expanded_"+rule] += n
+		}
+		return
+	}
 }
 
 // deferFacts is what tool deferral did on one request, for the dashboard row (#869).
@@ -772,6 +806,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	addSweepExpandEvents(e, c.sweepExpandRules)
 	if d := c.deferFacts; d != nil {
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
