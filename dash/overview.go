@@ -349,9 +349,9 @@ type Overview struct {
 	// breakpoint sits decides how much prefix it protects, so a count alone cannot answer the
 	// question: system=2/tools=0/messages=0/blocks=1 and system=0/tools=0/messages=3/blocks=0
 	// are both "three breakpoints" and are not remotely the same prompt. (The fifth location is
-	// top-level: the one cache_control of automatic caching.) These five columns
-	// have existed since the placement work and were readable only one request at a time in
-	// the drawer.
+	// top-level: the one cache_control of automatic caching.) The four
+	// location columns have existed since the placement work; the fifth, cache_bp_root, came with
+	// #1281. They were readable only one request at a time in the drawer.
 	Breakpoints BreakpointTotals `json:"breakpoints"`
 	// CompactionResets is how many turns arrived SMALLER than the previous turn of the same
 	// session — a context-window reset, or the agent compacting its own transcript.
