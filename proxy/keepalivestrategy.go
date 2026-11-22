@@ -158,6 +158,8 @@ func (k *keeper) applyStrategyWindows(tenantID string, pol CachePolicy, now time
 	// A strategy can only turn the 1-hour-on-wait ping ON, never off (#1243), like KeepAlive and HeadTTL1h.
 	// The ping needs the wait plan, which the account policy carries (WaitPlan) and this does not touch.
 	pol.OneHourOnWait = pol.OneHourOnWait || best.OneHourOnWait
+	// The same for 1-hour-always (#1261): a manager may turn it on knowingly; it never turns an account's own off.
+	pol.OneHourAlways = pol.OneHourAlways || best.OneHourAlways
 	return pol, best.ID
 }
 
@@ -373,11 +375,14 @@ type strategyView struct {
 	HeadTTL1h          bool            `json:"head_ttl_1h"`
 	HeadTTLMinTokens   int             `json:"head_ttl_min_tokens"`
 	OneHourOnWait      bool            `json:"one_hour_on_wait"`
-	CreatedBy          string          `json:"created_by"`
-	CreatedAt          int64           `json:"created_at"`
-	UpdatedBy          string          `json:"updated_by"`
-	UpdatedAt          int64           `json:"updated_at"`
-	InWindow           bool            `json:"in_window"`
+	// OneHourAlways (one_hour_always): the main agent writes at 1 hour from its first request, no pings. ON MOST
+	// USERS IT DOES NOT PAY OFF (hosted +22% cost against auto, 77 of 97 sessions worse; laptop -25%). #1261.
+	OneHourAlways bool   `json:"one_hour_always"`
+	CreatedBy     string `json:"created_by"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedBy     string `json:"updated_by"`
+	UpdatedAt     int64  `json:"updated_at"`
+	InWindow      bool   `json:"in_window"`
 }
 
 func viewStrategy(s tenant.Strategy, now time.Time) strategyView {
@@ -386,7 +391,7 @@ func viewStrategy(s tenant.Strategy, now time.Time) strategyView {
 		MinPrefixTokens: s.MinPrefixTokens, MaxUSDPerPing: s.MaxUSDPerPing,
 		Windows: s.Windows, Target: s.Target, Active: s.Active,
 		PredictorID: s.PredictorID, PredictorThreshold: s.PredictorThreshold,
-		HeadTTL1h: s.HeadTTL1h, HeadTTLMinTokens: s.HeadTTLMinTokens, OneHourOnWait: s.OneHourOnWait,
+		HeadTTL1h: s.HeadTTL1h, HeadTTLMinTokens: s.HeadTTLMinTokens, OneHourOnWait: s.OneHourOnWait, OneHourAlways: s.OneHourAlways,
 		CreatedBy: s.CreatedBy, CreatedAt: msOrZero(s.CreatedAt),
 		UpdatedBy: s.UpdatedBy, UpdatedAt: msOrZero(s.UpdatedAt),
 		InWindow: s.InWindow(now),
@@ -433,6 +438,9 @@ type strategyIn struct {
 	HeadTTL1h          bool            `json:"head_ttl_1h"`
 	HeadTTLMinTokens   int             `json:"head_ttl_min_tokens"`
 	OneHourOnWait      bool            `json:"one_hour_on_wait"`
+	// OneHourAlways (one_hour_always): the main agent writes at 1 hour from its first request, no pings. ON MOST
+	// USERS IT DOES NOT PAY OFF (hosted +22% cost against auto, 77 of 97 sessions worse; laptop -25%). #1261.
+	OneHourAlways bool `json:"one_hour_always"`
 }
 
 // ctlCreateKeepAliveStrategy creates a strategy: validated at least as strictly as an
@@ -477,7 +485,7 @@ func (h *Handler) ctlCreateKeepAliveStrategy(w http.ResponseWriter, r *http.Requ
 		MinPrefixTokens: in.MinPrefixTokens, MaxUSDPerPing: in.MaxUSDPerPing,
 		Windows: in.Windows, Target: in.Target, Active: in.Active,
 		PredictorID: in.PredictorID, PredictorThreshold: in.PredictorThreshold,
-		HeadTTL1h: in.HeadTTL1h, HeadTTLMinTokens: in.HeadTTLMinTokens, OneHourOnWait: in.OneHourOnWait,
+		HeadTTL1h: in.HeadTTL1h, HeadTTLMinTokens: in.HeadTTLMinTokens, OneHourOnWait: in.OneHourOnWait, OneHourAlways: in.OneHourAlways,
 	})
 	if err != nil {
 		ctlErr(w, http.StatusBadRequest, err.Error())
@@ -514,6 +522,7 @@ type strategyPatchIn struct {
 	HeadTTL1h          *bool            `json:"head_ttl_1h"`
 	HeadTTLMinTokens   *int             `json:"head_ttl_min_tokens"`
 	OneHourOnWait      *bool            `json:"one_hour_on_wait"`
+	OneHourAlways      *bool            `json:"one_hour_always"`
 }
 
 // ctlPatchKeepAliveStrategy updates any field; takes effect on the next request that
@@ -583,6 +592,9 @@ func (h *Handler) ctlPatchKeepAliveStrategy(w http.ResponseWriter, r *http.Reque
 	if in.OneHourOnWait != nil {
 		next.OneHourOnWait = *in.OneHourOnWait
 	}
+	if in.OneHourAlways != nil {
+		next.OneHourAlways = *in.OneHourAlways
+	}
 	idle := time.Duration(next.IdleSeconds) * time.Second
 	if err := validStrategyBounds(idle, next.MaxPings, next.MinPrefixTokens, next.MaxUSDPerPing,
 		next.HeadTTL1h, next.HeadTTLMinTokens); err != nil {
@@ -606,7 +618,7 @@ func (h *Handler) ctlPatchKeepAliveStrategy(w http.ResponseWriter, r *http.Reque
 		MinPrefixTokens: in.MinPrefixTokens, MaxUSDPerPing: in.MaxUSDPerPing,
 		Windows: in.Windows, Target: in.Target, Active: in.Active,
 		PredictorID: in.PredictorID, PredictorThreshold: in.PredictorThreshold,
-		HeadTTL1h: in.HeadTTL1h, HeadTTLMinTokens: in.HeadTTLMinTokens, OneHourOnWait: in.OneHourOnWait,
+		HeadTTL1h: in.HeadTTL1h, HeadTTLMinTokens: in.HeadTTLMinTokens, OneHourOnWait: in.OneHourOnWait, OneHourAlways: in.OneHourAlways,
 	})
 	if err != nil {
 		ctlErr(w, http.StatusBadRequest, err.Error())
@@ -621,7 +633,7 @@ func (h *Handler) ctlPatchKeepAliveStrategy(w http.ResponseWriter, r *http.Reque
 			MinPrefixTokens: &cur.MinPrefixTokens, MaxUSDPerPing: &cur.MaxUSDPerPing,
 			Windows: &cur.Windows, Target: &cur.Target, Active: &cur.Active,
 			PredictorID: &cur.PredictorID, PredictorThreshold: &cur.PredictorThreshold,
-			HeadTTL1h: &cur.HeadTTL1h, HeadTTLMinTokens: &cur.HeadTTLMinTokens, OneHourOnWait: &cur.OneHourOnWait,
+			HeadTTL1h: &cur.HeadTTL1h, HeadTTLMinTokens: &cur.HeadTTLMinTokens, OneHourOnWait: &cur.OneHourOnWait, OneHourAlways: &cur.OneHourAlways,
 		})
 		ctlErr(w, http.StatusInternalServerError,
 			"could not record this in the audit log, so the update was not applied")

@@ -13,7 +13,7 @@ import (
 // keys. The Claude Code plugin and the OpenCode plugin used to keep their own copy of this table;
 // they read it from `context-guru-proxy strategies --json` instead.
 //
-// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 1-hour-on-wait, 30-min-ping (the Codex name).
+// Names: none, auto, 1-ping, 2-ping, 1-hour-head, 1-hour-on-wait, 1-hour-always, 30-min-ping (the Codex name).
 //
 // RULES
 //   - `cache.strategy: <name>` fills the keys of the table row.
@@ -131,7 +131,7 @@ var Strategies = []Strategy{
 	{
 		Name:      "1-hour-on-wait",
 		Spends:    true,
-		Desc:      "MAIN AGENT ONLY. auto's keep-alive, except that when the main agent has a long wait (a person, a teammate, background work, or an unknown cause) the first idle ping, at the usual time, carries every cache marker at the 1-hour tier and is the ONLY ping of that wait: no 59-minute ping. On the gateway measured on 2026-11-19 that switch is a read, not a rewrite, so one read at 0.1x keeps the whole prompt for 1 hour and no request pays the 2x write premium. Tool waits and every subagent thread behave exactly as auto (5-minute pings). The 1-hour grant is unknown until proven, per provider, route and model: the first long wait is a probe, and the route is proven when the thread returns more than 5 minutes later and still reads the prompt. If the ping rewrites the prompt, or the return is a cold rebuild (expected on Anthropic first-party, not tested), the proxy stops sending 1-hour pings on that route and falls back to auto. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
+		Desc:      "MAIN AGENT ONLY. auto's keep-alive, except that when the main agent has a long wait (a person, a teammate, background work, or an unknown cause) the first idle ping, at the usual time, carries every cache marker at the 1-hour tier and is the ONLY ping of that wait: no 59-minute ping. On the gateway measured on 2026-11-19 that switch is a read, not a rewrite, so one read at 0.1x keeps the whole prompt for 1 hour and no request pays the 2x write premium. Tool waits and every subagent thread behave exactly as auto (5-minute pings). The 1-hour grant is unknown until proven, per provider, route and model: the first long wait is a probe, and the route is proven when the thread returns more than 5 minutes later and still reads the prompt. If the return is a cold rebuild (a silent downgrade), the proxy stops sending 1-hour pings on that route and falls back to auto. If the ping itself rewrites the prompt (expected on Anthropic first-party, not tested), the route is COSTLY: the proxy stops the pings there, and each main thread runs as auto until its first cold rebuild of a prefix of at least 150,000 tokens (keepalive_one_hour_rebuild_tokens). That rebuild is sent with every cache marker at 1 hour, and from then on the thread writes at 1 hour and gets NO pings. The thread that paid the rewrite does the same. Subagents are unchanged. If a 1-hour request that wrote tokens is billed at 5 minutes, that mode stops for the route. Simulated (hosted, 97 main sessions, free switch): A -24%; on a costly route the fallback is -12% against auto, owner's laptop -25%. SPENDS THE CALLER'S CREDENTIAL while nobody is at the keyboard.",
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
@@ -142,6 +142,22 @@ var Strategies = []Strategy{
 			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 			{"keepalive_one_hour_on_wait", true},
+		},
+	},
+	{
+		Name:      "1-hour-always",
+		Spends:    true,
+		Desc:      "OPT-IN ONLY, AND ON MOST USERS IT DOES NOT PAY OFF. The MAIN agent writes at the 1-hour tier from its first request, on any route: every existing cache marker (tools, system, history) of every real main-thread request carries 1 hour, none is added, and the main thread gets NO ping. Subagents keep the 5-minute cache and auto's pings. It pays the 1-hour write premium (2x instead of 1.25x) on every write, and most sessions have few long waits. Simulated on Bedrock-shaped data, main threads only: hosted, 97 main sessions, +22% cost against auto, 77 worse, the premium 39% of the cost; the owner's laptop, 33 sessions, -25%. Pick 1-hour-on-wait first: it was -24% hosted and -36% on the laptop. A 1-hour request that wrote tokens and is billed at 5 minutes stops the mode for the route (a silent downgrade). See #1261. SPENDS THE CALLER'S CREDENTIAL on subagent pings while nobody is at the keyboard.",
+		Providers: []string{"anthropic"},
+		Cache: []StrategyKey{
+			{"keepalive", true},
+			{"keepalive_idle_seconds", 240},
+			{"keepalive_max_pings", 2},
+			{"keepalive_max_usd_per_ping", 0.5},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
+			{"keepalive_max_pings_1h", 1},
+			{"keepalive_one_hour_always", true},
 		},
 	},
 	{

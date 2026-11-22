@@ -325,3 +325,41 @@ func TestStrategyOneHourOnWaitPersistsAndPatches(t *testing.T) {
 		t.Fatalf("after reload: %+v %v", list, err)
 	}
 }
+
+// OneHourAlways (#1261, mode C) round-trips through create, a sparse patch and a reload, like OneHourOnWait.
+func TestStrategyOneHourAlwaysPersistsAndPatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tenant.db")
+	r1, err := Open(path, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	created, err := r1.CreateStrategy("mgr-1", Strategy{
+		Name: "1h always", IdleSeconds: 240, MaxPings: 2, OneHourAlways: true,
+		Windows: []Window{{Start: "00:00", End: "24:00"}}, Target: Target{Mode: TargetAll},
+	})
+	if err != nil || !created.OneHourAlways || created.OneHourOnWait {
+		t.Fatalf("create did not keep one_hour_always alone: %+v %v", created, err)
+	}
+	off := false
+	if u, err := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{OneHourAlways: &off}); err != nil || u.OneHourAlways {
+		t.Fatalf("patch did not turn it off: %+v %v", u, err)
+	}
+	on := true
+	if _, err := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{OneHourAlways: &on}); err != nil {
+		t.Fatal(err)
+	}
+	name := "renamed"
+	if u, _ := r1.UpdateStrategy("mgr-2", created.ID, StrategyPatch{Name: &name}); !u.OneHourAlways {
+		t.Error("a patch of the name reset one_hour_always")
+	}
+	r1.Close()
+	r2, err := Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	list, err := r2.ListStrategies()
+	if err != nil || len(list) != 1 || !list[0].OneHourAlways {
+		t.Fatalf("after reload: %+v %v", list, err)
+	}
+}
