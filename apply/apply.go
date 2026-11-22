@@ -1389,7 +1389,7 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 }
 
 // hasCacheBreakpoint reports whether the request carries a REAL prompt-cache breakpoint: a
-// structural cache_control / cachePoint field on a message, content block, system block, or tool.
+// structural cache_control / cachePoint field on a message, content block, system block or tool, or the top-level cache_control of automatic caching.
 // It reads the one count (schema.CountBreakpointsEscaped). Only this caller accepts a key spelled
 // with a \u escape; the cap check (schema.CountBreakpoints) stays on the cheaper prefilter.
 // Structural, not a substring scan: a tool output whose text merely contains "cache_control" must
