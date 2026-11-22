@@ -87,13 +87,13 @@ cache:
 - `1-hour-head` asks for the 1-hour cache on `tools` and `system` only, and turns the pings off.
   The message history stays on the 5-minute cache, so it goes cold after 5 idle minutes.
 - `1-hour-on-wait` is `auto`, but on a long wait of the **main agent** the first ping moves the entry to 1 hour and is
-  the only ping. On a route where that switch costs a rewrite, it falls back to mode D: a main thread switches to 1
-  hour at its first cold rebuild of a prefix of at least `keepalive_one_hour_rebuild_tokens` (150,000; `-1` turns D off), with no pings
+  the only ping. On a route where that switch costs a rewrite, it stops the 1-hour pings there instead. A main thread then switches to 1
+  hour at its first cold rebuild of a prefix of at least `keepalive_one_hour_rebuild_tokens` (150,000; `-1` turns it off), with no pings
   after. A manager's stored strategy can switch it on too (`one_hour_on_wait`). Opt-in; no default changes.
-- `1-hour-always` (mode C) writes at 1 hour from the first request of the main agent, with no pings on it.
+- `1-hour-always` writes at 1 hour from the first request of the main agent, with no pings on it.
   **On most users it does not pay off:** hosted, 97 main sessions, +22% cost against `auto`, 77 worse, the premium 39% of
   the cost; the owner's laptop -25%. It is an explicit opt-in (`keepalive_one_hour_always`), never a default. A manager's stored strategy can set it too (`one_hour_always`), for local and hosted installs alike, with the same warning: a manager sets it knowingly, and it only turns the mode on.
-- All the modes, for the main agent and for subagents, with the numbers: [Choose a cache strategy](cache-strategies.md).
+- Every strategy, for the main agent and for subagents, with the numbers: [Choose a cache strategy](cache-strategies.md).
 - A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
 - No `strategy` key: nothing changes.
 - An unknown name stops the proxy with a config error.

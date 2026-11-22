@@ -534,7 +534,10 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
         # port — on a shared box possibly a colleague's live session, and on this one the session
         # reading this very note.
         (
-          CONTEXT_GURU_UPGRADE=1 "${HERE}/install.sh" >>"$LOG" 2>&1
+          # Install the tag the check found, not "latest" again: a stale redirect gave this tag, a
+          # fresh one could give another, and the note below names this one (#1276). install.sh
+          # writes the installed tag to the update-check record after a successful install.
+          CONTEXT_GURU_UPGRADE=1 CONTEXT_GURU_VERSION="$UC_LATEST" "${HERE}/install.sh" >>"$LOG" 2>&1
         ) </dev/null >/dev/null 2>&1 &
         disown 2>/dev/null || true
         note "updating the proxy in the background (${HAVE} -> ${UC_LATEST}); takes effect next session"

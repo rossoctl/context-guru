@@ -159,3 +159,92 @@ func TestNestedCacheMarkDoesNotMoveTheHash(t *testing.T) {
 		t.Error("text mentioning cache_control was stripped")
 	}
 }
+
+// A messages value that is not an array must not stop the scan before a later Responses input, so the
+// field order does not change the body (issue #1272, gap 1).
+func TestAccScan_InputAfterNonArrayMessages(t *testing.T) {
+	for _, raw := range []string{
+		`{"tools":[],"system":"s","messages":null,"input":"hi"}`,
+		`{"input":"hi","tools":[],"system":"s","messages":null}`,
+	} {
+		b := accBodies([]byte(raw))
+		if b.Start != [3]int{0, 0, 1} || len(b.Pos) != 2 {
+			t.Fatalf("%s: start = %v pos = %d, want [0 0 1] and 2", raw, b.Start, len(b.Pos))
+		}
+		if b.Pos[0].Bytes != 3 || b.Pos[1].Bytes != 4 {
+			t.Fatalf("%s: sizes %d and %d, want 3 and 4", raw, b.Pos[0].Bytes, b.Pos[1].Bytes)
+		}
+	}
+}
+
+// Only cache-metadata locations are marks. A tool parameter or a tool_use input value named cache_control is
+// part of what the provider caches, so a change to it changes the hash (issue #1272, gap 3).
+func TestAccBodies_DataNamedCacheControlStaysInTheHash(t *testing.T) {
+	hash := func(raw string) any { return accBodies([]byte(raw)).Pos[0].Hash }
+	tool := func(typ, mark string) string {
+		return `{"tools":[{"name":"t","input_schema":{"type":"object","properties":{"cache_control":{"type":"` +
+			typ + `"}}}` + mark + `}],"messages":[{"role":"user","content":"hi"}]}`
+	}
+	if hash(tool("string", "")) == hash(tool("number", "")) {
+		t.Error("a tool parameter named cache_control was stripped from the hash")
+	}
+	if hash(tool("string", "")) != hash(tool("string", `,"cache_control":{"type":"ephemeral"}`)) {
+		t.Error("the tool's own cache_control mark is still in the hash")
+	}
+	use := func(v string) string {
+		return `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"t","input":{"cache_control":"` + v + `"}}]}]}`
+	}
+	if hash(use("a")) == hash(use("b")) {
+		t.Error("a tool_use input value named cache_control was stripped from the hash")
+	}
+	// A mark on the tool_use block itself is still a mark.
+	marked := `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"t","input":{"cache_control":"a"},"cache_control":{"type":"ephemeral"}}]}]}`
+	if hash(use("a")) != hash(marked) {
+		t.Error("the tool_use block's own mark is still in the hash")
+	}
+}
+
+// A top-level cache_control (Anthropic's automatic caching) puts one breakpoint on the body's last position,
+// merged with an explicit mark already there (issue #1272, gap 4).
+func TestAccBreakpoints_AutomaticCaching(t *testing.T) {
+	type bp struct {
+		sec accountant.Section
+		i   int
+		ttl string
+	}
+	for _, c := range []struct {
+		name, raw string
+		want      []bp
+	}{
+		{"one user message",
+			`{"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":"hi"}]}`,
+			[]bp{{accountant.SectionMessages, 0, "5m"}}},
+		{"1h, after messages",
+			`{"messages":[{"role":"user","content":"a"},{"role":"user","content":"b"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`,
+			[]bp{{accountant.SectionMessages, 1, "1h"}}},
+		{"explicit system mark plus automatic",
+			`{"cache_control":{"type":"ephemeral"},"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
+			[]bp{{accountant.SectionSystem, 0, "5m"}, {accountant.SectionMessages, 0, "5m"}}},
+		{"explicit mark on the last message is not listed twice",
+			`{"cache_control":{"type":"ephemeral","ttl":"1h"},"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
+			[]bp{{accountant.SectionMessages, 0, "1h"}}},
+		{"no message positions",
+			`{"cache_control":{"type":"ephemeral"},"system":"s","messages":[]}`,
+			[]bp{{accountant.SectionSystem, 0, "5m"}}},
+		{"only tools",
+			`{"cache_control":{"type":"ephemeral"},"tools":[{"name":"a"},{"name":"b"}],"messages":[]}`,
+			[]bp{{accountant.SectionTools, 1, "5m"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := accBreakpoints([]byte(c.raw))
+			if len(got) != len(c.want) {
+				t.Fatalf("got %+v, want %+v", got, c.want)
+			}
+			for i, w := range c.want {
+				if g := got[i]; g.Pos != (accountant.Position{Section: w.sec, Index: w.i}) || g.TTL != w.ttl {
+					t.Errorf("breakpoint %d: got %+v, want %+v", i, g, w)
+				}
+			}
+		})
+	}
+}
