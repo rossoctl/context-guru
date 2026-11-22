@@ -147,9 +147,10 @@ func (im *InferenceMetrics) Observe(e *dash.Event, elapsed time.Duration) {
 
 	if e.CostUSD > 0 {
 		im.cost.Add(ctx, e.CostUSD, mp)
-		if e.PriceEstimated {
-			im.estimatedCost.Add(ctx, e.CostUSD, mp)
-		}
+		// Only the dollars of the tiers priced from a fallback rate (#1248). It is often 0: add it
+		// anyway, so the series exists and the panel reads 0 and not "no data". Do not feed it
+		// PriceEstimated: that marks the SAVING (penalty_unknown), not the rate.
+		im.estimatedCost.Add(ctx, e.FallbackRateCostUSD, mp)
 	}
 
 	if elapsed > 0 {
