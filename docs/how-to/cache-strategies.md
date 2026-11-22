@@ -123,26 +123,26 @@ and you leave for more than 2 hours.
   2026-11-19). So one read (0.1x) covers a full hour, and no request pays the 2x write.
 - **Pick it when:** you often leave for more than 5 minutes.
 
-The proxy checks the grant. It does not assume it. It checks per provider, route and model:
+The proxy checks the grant. It does not assume it. It checks per provider, route and model.
 
-1. **First long wait.** The 1-hour ping goes out as a test. Only one wait tests a route at a time.
-   The band shows `1h?` (1 hour, not yet proven) until the test ends.
-2. **You return after more than 5 minutes and the prompt is still cached.** The route is proven.
-   The band shows the 1-hour clock without `1h?`.
-3. **You return after more than 5 minutes and the prompt is gone.** The provider did not grant the
-   1-hour lifetime. The proxy stops the 1-hour ping on this route and model, and uses `auto`.
-4. **The ping rewrote the whole prompt** (it read almost nothing and wrote most of it). The switch
-   is costly on this route. We expect this on the Anthropic first-party API, but we have not tested
-   it. See the next section.
+**The test.** The first long wait sends the 1-hour ping as a test. Only one wait tests a route at a
+time. The band shows `1h?` (1 hour, not yet proven) until the test ends. There are three outcomes:
+
+| What the proxy sees | What it means | What the proxy does |
+|---|---|---|
+| The ping reads the prompt and writes almost nothing. You return 5 to 60 minutes later and the prompt is **still cached**. | The provider keeps the 1-hour lifetime. | The route is proven. Every long wait uses the 1-hour ping. The band shows the 1-hour clock without `1h?`. |
+| The ping reads the prompt and writes almost nothing. You return 5 to 60 minutes later and the prompt is **gone** (a rebuild). | The provider **did not keep the 1-hour lifetime**. It quietly gave 5 minutes. | The route is switched off for the life of the proxy. The proxy uses plain `auto` there. It does **not** write at 1 hour: that write would also die after 5 minutes, so it would cost 2x for nothing. |
+| The ping itself reads almost nothing and **writes the whole prompt** at 1 hour. | The provider **charged for the switch**: it rewrites the prompt. We expect this on the Anthropic first-party API. We have not tested it. | The route is marked costly. The proxy sends no more 1-hour pings there. The main agent follows the next section. |
 
 A return inside 5 minutes, after more than 1 hour, on another model, or after a rewrite of the
 prompt by the client (for example a compaction) proves nothing. The proxy tests again later.
 
 If a summary or a sweep call takes the first ping, the 1-hour ping follows it.
 
+
 #### On a route where the switch is costly
 
-1-hour pings stop on that route. The main agent then does this:
+The provider charged for the switch, so 1-hour pings stop on that route. The main agent then does this:
 
 - It runs as `auto` until its first **rebuild of a big prefix**: at least 150,000 tokens.
 - That rebuild goes out with 1-hour markers. The proxy writes the whole prompt at 1 hour (2x).
@@ -156,8 +156,10 @@ than planned.
 
 - **Change the size:** `keepalive_one_hour_rebuild_tokens` (default 150,000).
 - **Turn it off:** `-1`. The route then uses plain `auto`.
-- **Stop:** if a request with 1-hour markers writes tokens but the provider bills them at 5 minutes,
-  the proxy stops this mode for that route and model.
+- **Stop:** this mode has its own check. If a request with 1-hour markers writes tokens but the
+  provider bills them at 5 minutes, the provider did not keep the 1-hour lifetime. The proxy stops
+  this mode for that route and model, and the route uses plain `auto`. A request that wrote nothing
+  proves nothing.
 
 ### `1-hour-always`
 
