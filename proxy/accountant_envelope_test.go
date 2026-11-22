@@ -307,9 +307,8 @@ func TestRootOnlyRelabelReportsAHeadTTLOp(t *testing.T) {
 	}
 }
 
-// The real library books the premium on the write and the rescue on a return 10 minutes later. It needs
-// the accountant to list the root mark as a breakpoint (#1275); until that merges, the library sees
-// no 1h breakpoint and books nothing, so the test skips. Checked by hand on main + #1275: it passes.
+// The real library books the premium on the write and the rescue on a return 10 minutes later. It
+// needs the accountant to list the root mark as a breakpoint (#1275).
 func TestRootOnlyRelabelBooksThePremiumAndTheRescue(t *testing.T) {
 	const rest = `"system":[{"type":"text","text":"HEAD"}],"messages":[{"role":"user","content":"hi"}]`
 	client := []byte(`{"cache_control":{"type":"ephemeral"},` + rest + `}`)
@@ -322,7 +321,7 @@ func TestRootOnlyRelabelBooksThePremiumAndTheRescue(t *testing.T) {
 	st.end(r1, accountant.Thread{ID: "main"}, fwd, ops, facts)
 	res := st.compute(r1, Usage{CacheWrite: 100, CacheWrite1h: 100})
 	if !hasEffect(res, accountant.EffectTTLPremium) {
-		t.Skip("the accountant does not list the root mark as a breakpoint until #1275 merges")
+		t.Errorf("no ttlPremium effect: %+v (checks %+v)", res.CacheEffects, res.Checks)
 	}
 	r2 := st.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", Model: "m", At: t0.Add(10 * time.Minute)}, client)
 	st.end(r2, accountant.Thread{ID: "main"}, fwd, ops, facts)
