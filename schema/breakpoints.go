@@ -40,10 +40,13 @@ type Breakpoints struct {
 	Tools    int // tools.#.cache_control / .cachePoint
 	Messages int // messages.#.cache_control (message level)
 	Blocks   int // messages.#.content.#.cache_control / .cachePoint (content-block level)
+	// Root is 1 when the body has a top-level cache_control (Anthropic's automatic caching). The
+	// provider puts one breakpoint on the last cacheable block, so it counts against the cap.
+	Root int
 }
 
 // Total is the figure the provider's cap (MaxBreakpoints) applies to.
-func (b Breakpoints) Total() int { return b.System + b.Tools + b.Messages + b.Blocks }
+func (b Breakpoints) Total() int { return b.System + b.Tools + b.Messages + b.Blocks + b.Root }
 
 // CountBreakpoints counts every breakpoint the provider will see in this request, by location.
 // It takes the raw wire body, so it sees `system` and `tools` and the marks on `tool_result`
@@ -70,6 +73,10 @@ func countBreakpoints(body []byte, escaped bool) Breakpoints {
 	var b Breakpoints
 	gjson.ParseBytes(body).ForEach(func(key, val gjson.Result) bool {
 		switch key.String() {
+		case "cache_control":
+			if val.IsObject() {
+				b.Root++
+			}
 		case "system":
 			b.System += arrayMarks(val, escaped)
 		case "tools":

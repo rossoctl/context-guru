@@ -211,6 +211,10 @@ func RelabelAllTTL1h(body []byte, provider bschemas.ModelProvider) (out []byte, 
 		next = set
 		return true
 	}
+	// The top-level mark of automatic caching is a mark too (#1279).
+	if !relabel("cache_control", gjson.GetBytes(next, "cache_control")) {
+		return body, false
+	}
 	for _, arr := range headTTLPaths {
 		res := gjson.GetBytes(next, arr)
 		if !res.IsArray() {
