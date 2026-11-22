@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Options configures the dashboard. The zero value is usable: an in-memory

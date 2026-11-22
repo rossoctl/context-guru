@@ -513,10 +513,20 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
       [ -n "$LATEST" ] && UC_LATEST="$LATEST"
     fi
 
+    # Only a STRICTLY NEWER latest counts. `releases/latest` never names a prerelease, so an
+    # installed beta differs from it and is older than nothing (#1254). The comparison lives in
+    # settings.py (semantic-version order). If it gives no answer, fall back to "differs".
+    UC_NEWER=""
+    if [ -n "$UC_LATEST" ] && [ "$UC_LATEST" != "$HAVE" ]; then
+      UC_NEWER=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check newer \
+                   --latest "$UC_LATEST" --installed "$HAVE" 2>/dev/null \
+                   | sed -n 's/^newer=//p' | head -1)
+      [ -n "$UC_NEWER" ] || UC_NEWER=true
+    fi
     # `skipped=` only gates the ASK branch below — it must never block "auto", or a version the
     # user skipped BEFORE later saying "always" would silently suppress every future auto-upgrade
     # too, since skipped is never cleared once set.
-    if [ -n "$UC_LATEST" ] && [ "$UC_LATEST" != "$HAVE" ]; then
+    if [ "$UC_NEWER" = true ]; then
       if [ "$UC_ANSWER" = auto ]; then
         # "always": stage the new binary in the background; it takes effect through the fingerprint
         # below at the NEXT session start, never mid-session. install.sh's swap is safe on disk (an

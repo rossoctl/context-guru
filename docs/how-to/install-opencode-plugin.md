@@ -77,6 +77,20 @@ credential while you are away. Set other values with the tuple form:
 - The plugin writes only `cache.strategy: <name>` to `proxy.yaml`. The proxy fills in the keys.
 - **The proxy must be v0.7.1 or later.** An older binary has no `strategies` command. The plugin then does not start it. It logs an error that says to update the proxy. If the plugin downloaded that binary, `/context-guru-update` installs the latest release. Then restart OpenCode.
 - `none` sends no keep-alive requests.
+- `"fallback": false` turns off the fallback. With the default, `true`, a request goes straight to the provider when the proxy is down. See [When the proxy is down](#when-the-proxy-is-down).
+
+## When the proxy is down
+
+On OpenCode v1, the plugin sends a request straight to the provider when the proxy cannot have received it.
+
+- **When:** the connection to the proxy was refused, or the proxy failed its health check and the request was never sent to it.
+- **Never:** a 4xx or 5xx from the proxy, a reset or time-out after the connection opened, a broken stream, or a cancel. These reach OpenCode unchanged. The plugin never sends one request twice.
+- The direct request has your own headers and body, without the plugin's `x-context-guru-session` header. It gets no context-guru work, and `/stats` does not count it.
+- One request waits about 5 s for a proxy restart (up to 6.5 s when the health check also hangs). Requests that come while the restart runs go direct at once. A binary that exits fails the restart at once. After a failed restart, requests go direct for 30 s and start no new restart.
+- Routing comes back at the first request after the proxy is healthy again. In the 30 s after a failed restart, it comes back when the 30 s end, even if `/context-guru-install` started the proxy earlier.
+- After `/context-guru-uninstall`, open sessions go direct at once.
+- The OpenCode log gets one line when the proxy goes down, with the reason (for example "exited with code 1" or "not healthy in 15 s"), and one line when it is back. A refused connection logs the provider host and the error code only. No line holds headers or bodies, and there is no line for each direct request.
+- `"fallback": false` turns this off. Then requests fail while the proxy is down, and a request can wait about a minute for a restart.
 
 ## What the plugin stores
 
@@ -126,7 +140,7 @@ Both ways run the same script, so the result is the same.
 - `/context-guru-status` shows proxy state and savings.
 - `/context-guru-install` repairs the install.
 - `/context-guru-update` checks for a new proxy binary. It installs after you confirm.
-- `/context-guru-uninstall` stops the proxy and disables routing after you confirm.
+- `/context-guru-uninstall` stops the proxy and disables routing after you confirm. Open sessions send requests straight to the provider at once. With `"fallback": false`, restart OpenCode to stop routing.
 
 If OpenCode already uses a gateway, configure its provider `options.baseURL` normally. The plugin
 passes that URL to context-guru instead of replacing it. It does not overwrite API keys or provider
@@ -155,7 +169,9 @@ the `anthropic` or `openai` provider. Other providers are left untouched by desi
 
 **Requests fail with a connection error.** Read `proxy.log` in the project state directory. The
 plugin does not rewrite provider configuration when the proxy health check fails, so restarting
-OpenCode restores the original provider endpoint.
+OpenCode restores the original provider endpoint. With the default `fallback`, a refused connection
+goes to the provider and does not fail. A connection error then comes from the provider, or you set
+`"fallback": false`.
 
 **You changed your API key, and requests still fail with 401.** The proxy keeps the environment it started with. It does not read a new key. Run `/context-guru-uninstall --yes`, then `/context-guru-install`, and restart OpenCode with the new key set. Or stop the recorded proxy with the `context-guru-reset` script.
 

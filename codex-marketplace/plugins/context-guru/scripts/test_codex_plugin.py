@@ -393,6 +393,15 @@ screen_reader_detection_done = true
                 PLUGIN.install_release_binary("v0.3.4")
         fetch.assert_not_called()
 
+    def test_update_check_does_not_call_a_beta_outdated(self):
+        """releases/latest never names a prerelease, so a beta is not behind the older stable (#1254)."""
+        for installed, latest, want in (
+            ("v0.7.5-beta.1", "v0.7.4", False), ("0.7.5-beta.1", "v0.7.4", False),
+            ("v0.7.5-beta.1", "v0.7.5", True), ("v0.7.5-beta.2", "v0.7.5-beta.1", False),
+            ("v0.7.4", "v0.7.5", True), ("v0.7.5", "v0.7.5", False), ("unknown", "v0.7.5", True),
+        ):
+            self.assertEqual(PLUGIN.release_is_newer(latest, installed), want, (installed, latest))
+
     def test_update_check_is_read_only(self):
         args = type("Args", (), {"check": True, "install": False})()
         with mock.patch.object(PLUGIN, "latest_release_tag", return_value="v1.2.3"), \
@@ -474,6 +483,21 @@ screen_reader_detection_done = true
              mock.patch.object(PLUGIN, "install_release_binary",
                                side_effect=RuntimeError("download failed")):
             self.assertEqual(PLUGIN.update(args), 1)
+
+    def test_update_install_never_goes_backwards_from_a_beta(self):
+        """`update --install` (what update.sh runs) keeps a beta when latest is an older stable (#1254)."""
+        args = type("Args", (), {"check": False, "install": True})()
+        for installed, latest, installs in (("0.7.5-beta.1", "v0.7.4", False), ("0.7.5", "v0.7.5", False),
+                                            ("0.7.5-beta.1", "v0.7.5", True)):
+            fake = type("Done", (), {"returncode": 0, "stdout": f"context-guru-proxy {installed}\n"})()
+            with mock.patch.object(PLUGIN, "latest_release_tag", return_value=latest), \
+                 mock.patch.object(PLUGIN, "find_binary", return_value="/bin/proxy"), \
+                 mock.patch.object(PLUGIN.subprocess, "run", return_value=fake), \
+                 mock.patch.object(PLUGIN, "install_release_binary",
+                                   side_effect=RuntimeError("download failed")) as install:
+                code = PLUGIN.update(args)
+            self.assertEqual(install.called, installs, (installed, latest))
+            self.assertEqual(code, 1 if installs else 0, (installed, latest))
 
     def test_configure_preset_preserves_cache_and_restarts(self):
         PLUGIN.routing_state().parent.mkdir(parents=True)

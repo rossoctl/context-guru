@@ -53,6 +53,19 @@ func Key(session, thread string) string {
 	return session + "\x00" + thread
 }
 
+// agentPrefix starts every thread id that an agent named with its own header.
+const agentPrefix = "a:"
+
+// AgentThread is the thread id of a request whose agent named itself with agentID (the
+// `x-claude-code-agent-id` header, checked with ValidHeaderID). Resolve gives this id to such a
+// request. A host that keys its own state per thread before or without Resolve uses it too, so
+// the rule has one home.
+func AgentThread(agentID string) string { return agentPrefix + agentID }
+
+// IsAgentThread reports whether a thread id was named by the agent's header (see AgentThread):
+// a subagent or an agent-team teammate. The primary thread and every prefix thread are not.
+func IsAgentThread(threadID string) bool { return strings.HasPrefix(threadID, agentPrefix) }
+
 // Source says which rule produced a thread id.
 type Source string
 
@@ -179,6 +192,9 @@ func ValidHeaderID(v string) bool {
 // agentCompaction marks the agent's own compaction request (see the compacting field).
 //
 // A nil tracker, and an empty scope, give the session itself.
+//
+// Each call records the request as its thread's newest turn, so call it once per request. A host
+// calls ResolveSession, which adds the empty-session rule and fails open.
 func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bool) Result {
 	if t == nil || scope == "" {
 		return Result{ID: Primary, Source: SourceSession}
@@ -247,7 +263,7 @@ func (t *Tracker) Resolve(scope, agentID string, body []byte, agentCompaction bo
 	var sideParent *threadState
 	switch {
 	case agentID != "":
-		res = Result{ID: "a:" + agentID, Source: SourceHeader}
+		res = Result{ID: AgentThread(agentID), Source: SourceHeader}
 		if known := s.find(res.ID); known != nil && match != nil && match != known {
 			res.Disagree = true
 		}
@@ -441,7 +457,7 @@ func (s *sessionState) rewrittenTailParent(sums []uint64, model string) *threadS
 // above run only for a request WITHOUT that header, and such a request is never a named thread's:
 // a forked subagent carries its parent's messages plus its own, so it shares the same leading run
 // as the main thread and could otherwise win the search (#519 review).
-func headerThread(th *threadState) bool { return strings.HasPrefix(th.id, "a:") }
+func headerThread(th *threadState) bool { return IsAgentThread(th.id) }
 
 // preferOnTie reports whether a beats b when the stronger evidence ties: the thread whose last
 // request named this request's model first, then the most recent.
@@ -458,7 +474,7 @@ func preferOnTie(a, b *threadState, model string) bool {
 // header, must still get the primary id.
 func (s *sessionState) hasPrefixThread() bool {
 	for _, th := range s.threads {
-		if !strings.HasPrefix(th.id, "a:") {
+		if !IsAgentThread(th.id) {
 			return true
 		}
 	}

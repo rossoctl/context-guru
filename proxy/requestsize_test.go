@@ -218,8 +218,8 @@ func TestCompactEndpointAcceptsOversizedBody(t *testing.T) {
 }
 
 // TestOversizedToolResultQuotingCompactionPhraseStillGetsThroughAtTheHigherCeiling pins a
-// KNOWN, DOCUMENTED tradeoff rather than leaving it a surprise: isAgentCompaction's own doc
-// comment (agentcompaction.go) already accepts that a trailing tool_result quoting the
+// KNOWN, DOCUMENTED tradeoff rather than leaving it a surprise: thread.IsAgentCompaction's doc
+// comment (thread/compaction.go) already accepts that a trailing tool_result quoting the
 // compaction phrase verbatim is a reachable false positive — an agent that reads
 // docs/how-to/agent-compaction.md lands the phrase in its own last message. It unlocks
 // reading up to testMaxCompactionRequestBytes instead of testMaxRequestBytes for that one

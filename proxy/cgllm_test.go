@@ -23,9 +23,9 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // fakeCheapModel is an Anthropic-dialect endpoint for the COMPACTION model: it returns a
@@ -664,7 +664,7 @@ func TestObserveModeRecordsBilledInputUnderTheRequestThread(t *testing.T) {
 		strings.NewReader(summarizableRequest()))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-context-guru-session", "sess-observe-sub")
-	req.Header.Set(agentIDHeader, "sub1")
+	req.Header.Set(thread.AgentHeader, "sub1")
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

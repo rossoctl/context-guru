@@ -36,7 +36,7 @@ var ccTokensLeft = map[string]any{"role": "system", "content": "<total_tokens>15
 
 // TestAgentCompactionIsNotBypassed: the agent's own summarization request goes through the
 // pipeline like any other request. A bypass forwards the original history while the provider
-// cache holds the rewritten one, so it cost a full cache write (see isAgentCompaction). Every
+// cache holds the rewritten one, so it cost a full cache write (see agentcompaction.go). Every
 // case below must be compacted. wantDetected says whether the detector counted it, which is the
 // only thing the detection now changes on this path.
 //

@@ -849,6 +849,7 @@ func Main(hooks Hooks) {
 		h.API().SetWindows(windows)
 		// The keeper's ping plan, so /api/cachestate can say how long a cache is held warm.
 		h.API().SetKeepAlivePlans(h.KeepAlivePlans)
+		h.API().SetOneHourTouches(h.KeepAliveOneHourTouches)
 		// The account's per-wait plan settings, so the calculator replays the policy that runs (#868).
 		h.API().SetWaitPolicy(h.DashWaitPolicy())
 		h.API().SetPingStates(h.KeepAlivePingStates)
@@ -1387,6 +1388,7 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 	}
 	return proxy.CachePolicy{
 		WaitPlan:             plan.WaitPlan,
+		OneHourOnWait:        c.KeepAliveOneHourOnWait,
 		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
 		ToolWaitMinPrefix:    plan.ToolWaitMinPrefix,
 		BackgroundExtraPings: plan.BackgroundExtraPings,

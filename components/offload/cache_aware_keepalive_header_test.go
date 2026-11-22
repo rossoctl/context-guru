@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // The keep-alive summary passes its answer's headers to the keeper only when the call uses the

@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,7 @@ class Sandbox(unittest.TestCase):
             "HOME": str(root), "XDG_STATE_HOME": str(root / "state"),
             "XDG_CONFIG_HOME": str(root / "config"), "PI_CODING_AGENT_DIR": str(root / "agent")})
         self.env.start()
+        os.environ.pop("CONTEXT_GURU_BIN", None)  # a developer's own setting; the patch puts it back
         self.models = root / "agent/models.json"
         self.state = root / "state/context-guru-pi/routing.json"
 
@@ -404,9 +406,9 @@ class Restart(Sandbox):
 
         def run(cmd, **kwargs):
             self.calls.append(cmd)
-            code = 113 if cmd[1] in self.fail else 0
+            code = 113 if cmd[1] in self.fail or cmd[1] == "print" else 0
             if code and kwargs.get("check"):
-                raise subprocess.CalledProcessError(code, cmd)
+                raise subprocess.CalledProcessError(code, cmd, b"", b"launchctl said no\n")
             return subprocess.CompletedProcess(cmd, code, b"", b"")
         self.run_patch = mock.patch.object(pi_plugin.subprocess, "run", side_effect=run)
         self.run_patch.start()
@@ -452,11 +454,12 @@ class Restart(Sandbox):
     def test_launchd_bootstraps_a_plist_that_is_not_loaded(self):
         self.our_plist()
         self.fail = {"kickstart"}
-        # The first kickstart fails, so the plist is loaded; the second kickstart then fails too here.
+        # The kickstart fails, so the plist is loaded. RunAtLoad starts it: no second kickstart (#1146).
         code, facts = self.restart("launchd", lambda port, timeout=1: False)
-        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
-        self.assertEqual(self.calls[1], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
-        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "failed"))
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "print", "bootstrap"])
+        self.assertEqual(self.calls[2], ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(pi_plugin.launchd_plist())])
+        # Loaded, but /healthz never answers here.
+        self.assertEqual((code, facts["result"], facts["service"]), (1, "down", "restarted"))
 
     def test_launchd_bootstrap_then_kickstart_brings_it_up(self):
         self.our_plist()
@@ -467,11 +470,21 @@ class Restart(Sandbox):
             if cmd[1] == "kickstart" and first[0]:
                 first[0] = False
                 return subprocess.CompletedProcess(cmd, 113, b"", b"")
+            if cmd[1] == "print":  # not loaded
+                return subprocess.CompletedProcess(cmd, 113, b"", b"")
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
         with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
             code, facts = self.restart("launchd", [False, True])
-        self.assertEqual([c[1] for c in self.calls], ["kickstart", "bootstrap", "kickstart"])
+        self.assertEqual([c[1] for c in self.calls], ["kickstart", "print", "bootstrap"])
         self.assertEqual((code, facts["result"]), (0, "up"))
+
+    def test_a_failed_bootstrap_at_restart_writes_launchctls_error_to_the_proxy_log(self):
+        self.our_plist()
+        self.fail = {"kickstart", "bootstrap"}
+        code, facts = self.restart("launchd", lambda port, timeout=1: False)
+        self.assertEqual((code, facts["service"]), (1, "failed"))
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("launchctl bootstrap failed (exit 113): launchctl said no", log)
 
     def test_a_plist_we_do_not_own_is_left_alone(self):
         self.our_plist(managed=False)
@@ -797,7 +810,7 @@ class ConfigByName(Sandbox):
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
             code, facts = self.run_main("update", "--check")
         self.assertEqual((code, facts["installed_version"], facts["latest_version"], facts["update_available"]),
-                         (0, "0.7.0", "v0.7.1", "true"))
+                         (0, "0.7.0", "0.7.1", "true"))  # one form for both (#1153)
         pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.1 (commit abc)")})
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
             _, facts = self.run_main("update", "--check")
@@ -806,6 +819,38 @@ class ConfigByName(Sandbox):
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"):
             _, facts = self.run_main("update", "--check")
         self.assertEqual((facts["installed_version"], facts["update_available"]), ("unknown", "true"))
+
+    def test_update_check_does_not_call_a_beta_outdated(self):
+        """releases/latest never names a prerelease, so a beta is not behind the older stable (#1254)."""
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.5-beta.1 (commit abc)")})
+        for latest, want in (("v0.7.4", "false"), ("v0.7.5", "true"), ("v0.7.5-beta.1", "false")):
+            with mock.patch.object(pi_plugin, "latest_release_tag", return_value=latest):
+                _, facts = self.run_main("update", "--check")
+            self.assertEqual((latest, facts["update_available"]), (latest, want))
+
+    def test_update_install_never_goes_backwards_from_a_beta(self):
+        """`update --install` keeps a beta when latest is an older stable (#1254)."""
+        for installed, latest, installs in (("0.7.5-beta.1", "v0.7.4", False), ("0.7.5", "v0.7.5", False),
+                                            ("0.7.5-beta.1", "v0.7.5", True)):
+            pi_plugin.write_record({"port": 8800, "binary": self.fake_binary(f"context-guru-proxy {installed} (commit abc)")})
+            with mock.patch.object(pi_plugin, "latest_release_tag", return_value=latest), \
+                 mock.patch.object(pi_plugin, "managed_binary", return_value=Path(pi_plugin.read_record()["binary"])), \
+                 mock.patch.object(pi_plugin, "install_release_binary",
+                                   side_effect=RuntimeError("download failed")) as install:
+                code, facts = self.run_main("update", "--install")
+            self.assertEqual(install.called, installs, (installed, latest))
+            self.assertEqual(code, 1 if installs else 0, (installed, latest))
+            if not installs:
+                self.assertEqual(facts["result"], "current")
+
+    def test_update_install_refuses_an_unmanaged_binary_before_it_reports_current(self):
+        """A user-supplied binary gets result=refused, exit 2, even when it is not older than latest (#1254)."""
+        pi_plugin.write_record({"port": 8800, "binary": self.fake_binary("context-guru-proxy 0.7.5-beta.1 (commit abc)")})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.4"), \
+             mock.patch.object(pi_plugin, "install_release_binary") as install:
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_not_managed"))
+        install.assert_not_called()
 
     def test_configure_writes_the_config_and_the_record_under_the_restart_lock(self):
         self.installed()
@@ -898,6 +943,18 @@ class ConfigByName(Sandbox):
                          ("1-ping", both, {"openai": "x"}))
         self.assertEqual(started["upstreams"], both)
         self.assertIn("# chained: openai -> proxy -> https://gw.example/openai/v1", pi_plugin.proxy_config().read_text())
+
+    def test_update_whose_proxy_does_not_start_reports_failed_and_names_the_log(self):
+        self.installed(binary=str(pi_plugin.managed_binary()))
+        new = str(pi_plugin.managed_binary())
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"), \
+                mock.patch.object(pi_plugin, "binary_version_text", return_value="0.7.0"), \
+                mock.patch.object(pi_plugin, "install_release_binary", return_value=(new, "v0.7.1")), \
+                mock.patch.object(pi_plugin, "names_strategies", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", return_value=False):
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["restart"]), (1, "updated", "failed"))
+        self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
 
     def test_update_after_an_uninstall_during_the_wait_skips_the_restart(self):
         """Review finding on #1058: no KeyError, and no new record holding only the binary."""
@@ -1065,7 +1122,8 @@ class StrategiesFromTheProxy(Sandbox):
 
     def test_setup_on_a_proxy_that_cannot_list_refuses_a_named_strategy_and_writes_nothing(self):
         binary = self.fake('[ "$1" = --version ] && { echo "context-guru-proxy 0.7.0 (commit x)"; exit 0; }\nexit 1\n')
-        pi_plugin.write_record({"binary": binary})
+        # The person names the binary (D2: setup takes no other binary that it did not download).
+        self.enterContext(mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": binary}))
         for argv in (("setup", "--plan"), ("setup", "--i-consent-to-traffic-interception")):
             code, facts = self.run_main(*argv)
             self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
@@ -1318,6 +1376,444 @@ class ChainMode(Sandbox):
         self.assertIn("models_restore=restored", out.stdout)
         self.assertEqual(json.loads(self.models.read_text()), self.document)
 
+
+class PortCheck(unittest.TestCase):
+    """#1232: setup's port check is the proxy's own bind (SO_REUSEADDR). A port that only has TIME_WAIT
+    connections, as right after the proxy stops, is free; a port with a live listener is not."""
+
+    def listener(self):
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        return sock
+
+    def test_a_port_with_only_time_wait_connections_is_free(self):
+        server = self.listener()
+        self.addCleanup(server.close)
+        port = server.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port))
+        self.addCleanup(client.close)
+        accepted, _ = server.accept()
+        accepted.close()  # the server side closes first, so TIME_WAIT is on the server's port
+        client.recv(1)
+        client.close()
+        server.close()
+        with socket.socket() as plain, self.assertRaises(OSError, msg="a plain bind must fail: TIME_WAIT is there"):
+            plain.bind(("127.0.0.1", port))
+        self.assertTrue(pi_plugin.port_free(port))
+
+    def test_a_port_with_a_live_listener_is_not_free(self):
+        server = self.listener()
+        self.addCleanup(server.close)
+        self.assertFalse(pi_plugin.port_free(server.getsockname()[1]))
+
+    def wildcard(self, family, address):
+        sock = socket.socket(family)
+        self.addCleanup(sock.close)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)  # dual stack, like most servers
+        sock.bind((address, 0))
+        sock.listen()
+        return sock.getsockname()[1]
+
+    def test_a_port_another_program_listens_on_for_all_addresses_is_not_free(self):
+        # On macOS a 127.0.0.1 bind with SO_REUSEADDR succeeds next to this listener, and would take the
+        # other program's local traffic. The check must still say "taken" (review of #1234).
+        self.assertFalse(pi_plugin.port_free(self.wildcard(socket.AF_INET, "0.0.0.0")))
+
+    @unittest.skipUnless(socket.has_ipv6, "no IPv6 on this machine")
+    def test_a_port_with_a_dual_stack_listener_is_not_free(self):
+        self.assertFalse(pi_plugin.port_free(self.wildcard(socket.AF_INET6, "::")))
+
+    def test_the_first_free_port_uses_the_same_check(self):
+        with mock.patch.object(pi_plugin, "port_free", side_effect=lambda p: p == 8790):
+            self.assertEqual(pi_plugin.first_free_port(), 8790)
+
+# What proxy v0.7.3 really prints: every ping strategy serves Anthropic only, so Pi, which routes
+# Anthropic and OpenAI with one strategy, is offered only `none` (#1148).
+TABLE_0_7_3 = {
+    "default": "auto", "aliases": {"5-min-ping": "auto"}, "presets": list(pi_plugin.PRESETS),
+    "strategies": [_row("none", ["any"], False), _row("auto", ["anthropic"]), _row("1-ping", ["anthropic"])],
+}
+
+
+class DefaultStrategyFallback(Sandbox):
+    """A strategy setup picked itself (the default, or the recorded one) that the proxy does not offer
+    for Pi becomes `none`, and setup says so. A strategy the person named is still refused (#1148)."""
+
+    def setUp(self):
+        super().setUp()
+        self.table.stop()  # replace the sandbox's table, so tearDown stops this one
+        self.table = mock.patch.object(pi_plugin, "load_strategy_table", side_effect=lambda binary: TABLE_0_7_3)
+        self.table.start()
+
+    def setup(self, *argv, binary="/bin/true", download=None):
+        with mock.patch.object(pi_plugin, "find_binary", return_value=binary), \
+                mock.patch.object(pi_plugin, "install_release_binary", side_effect=download) as fetch, \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "start_service", return_value=True), \
+                mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=8800):
+            self.fetch = fetch
+            return self.run_main("setup", *argv)
+
+    def download(self):
+        """A download that really leaves the managed binary on disk, as install_release_binary does."""
+        path = pi_plugin.managed_binary()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return str(path), "v0.7.3"
+
+    def test_plan_with_the_default_falls_back_to_none_and_says_why(self):
+        code, facts = self.setup("--plan")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "planned", "none"))
+        self.assertIn("cache strategy auto is not offered for Pi", facts["cache_strategy_note"])
+        self.assertNotIn("quota", facts["consent_question"])
+
+    def test_setup_with_the_default_routes_with_none(self):
+        code, facts = self.setup("--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "routed", "none"))
+        self.assertIn("not offered for Pi", facts["cache_strategy_note"])
+        self.assertEqual(pi_plugin.read_record()["cache_strategy"], "none")
+
+    def test_a_recorded_strategy_that_is_no_longer_offered_falls_back_too(self):
+        pi_plugin.write_record({"cache_strategy": "1-ping"})
+        code, facts = self.setup("--plan")
+        self.assertEqual((code, facts["cache_strategy"]), (0, "none"))
+        self.assertIn("cache strategy 1-ping is not offered for Pi", facts["cache_strategy_note"])
+
+    def test_a_proxy_that_cannot_list_still_refuses_the_default_and_keeps_the_record(self):
+        pi_plugin.write_record({"cache_strategy": "1-ping"})
+        self.table.stop()
+        self.table = mock.patch.object(pi_plugin, "load_strategy_table", side_effect=pi_plugin.StrategyError(
+            "the strategies probe timed out", "proxy_too_old"))
+        self.table.start()
+        code, facts = self.setup("--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "proxy_too_old"))
+        self.assertEqual(pi_plugin.read_record()["cache_strategy"], "1-ping")
+
+    def test_a_busy_lock_after_the_download_keeps_the_binary_another_setup_may_use(self):
+        with mock.patch.object(pi_plugin, "restart_lock", side_effect=pi_plugin.LockBusy("held")):
+            code, facts = self.setup("--i-consent-to-traffic-interception", binary=None, download=self.download)
+        self.assertEqual((code, facts["reason"]), (2, "busy"))
+        self.assertTrue(pi_plugin.managed_binary().exists())
+
+    def test_a_config_conflict_after_the_download_deletes_the_downloaded_binary(self):
+        with mock.patch.object(pi_plugin, "write_proxy_config", side_effect=RuntimeError("not ours")), \
+                mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+            code, facts = self.setup("--i-consent-to-traffic-interception", binary=None, download=self.download)
+        self.assertEqual((code, facts["reason"]), (2, "config_conflict"))
+        self.assertFalse(pi_plugin.managed_binary().exists())
+
+    def test_a_strategy_the_person_named_is_still_refused(self):
+        code, facts = self.setup("--plan", "--cache-strategy", "auto")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "unknown_strategy"))
+
+    def test_setup_with_no_binary_downloads_and_routes_with_none(self):
+        code, facts = self.setup("--i-consent-to-traffic-interception", binary=None, download=self.download)
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "routed", "none"))
+        self.assertIn("not offered for Pi", facts["cache_strategy_note"])
+
+    def test_plan_with_no_binary_says_none_is_used_if_the_download_does_not_offer_the_default(self):
+        code, facts = self.setup("--plan", binary=None)
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "planned", "auto"))
+        self.assertIn("If the proxy that setup downloads does not offer auto for Pi, setup uses none",
+                      facts["consent_question"])
+        self.fetch.assert_not_called()
+
+    def test_a_refusal_after_the_download_deletes_the_downloaded_binary(self):
+        code, facts = self.setup("--i-consent-to-traffic-interception", "--cache-strategy", "auto",
+                                 binary=None, download=self.download)
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "unknown_strategy"))
+        self.fetch.assert_called_once()
+        self.assertFalse(pi_plugin.managed_binary().exists())
+
+
+class StartService(Sandbox):
+    """`start_service`: launchd's `bootout` returns before the job is gone, so a `bootstrap` right after
+    it can fail with error 5 (#1146). `bootstrap` alone starts the proxy (RunAtLoad)."""
+
+    TARGET = f"gui/{os.getuid()}/io.rossoctl.context-guru-pi"
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        # Each command's answers in order, as (exit code, stderr); the last one repeats.
+        self.answers = {"print": [(113, b"")]}
+
+        def run(cmd, **kwargs):
+            self.calls.append(cmd)
+            answers = self.answers.get(cmd[1] if cmd[0] == "launchctl" else cmd[2], [(0, b"")])
+            code, err = answers.pop(0) if len(answers) > 1 else answers[0]
+            if code and kwargs.get("check"):
+                raise subprocess.CalledProcessError(code, cmd, b"", err)
+            return subprocess.CompletedProcess(cmd, code, b"", err)
+        for patch in (mock.patch.object(pi_plugin.subprocess, "run", side_effect=run),
+                      mock.patch.object(pi_plugin.time, "sleep"),
+                      mock.patch.object(pi_plugin, "wait_healthy", return_value=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def start(self, kind="launchd"):
+        with mock.patch.object(pi_plugin, "service_kind", return_value=kind):
+            return pi_plugin.start_service("/bin/proxy", 8800)
+
+    def verbs(self):
+        return [c[1] if c[0] == "launchctl" else " ".join(c[2:4]) for c in self.calls]
+
+    def test_launchd_start_loads_the_plist_once_and_does_not_kickstart_it(self):
+        self.assertTrue(self.start())
+        self.assertEqual(self.verbs(), ["bootout", "print", "bootstrap"])
+        self.assertEqual(self.calls[1], ["launchctl", "print", self.TARGET])
+
+    def test_launchd_start_waits_until_bootout_has_removed_the_job(self):
+        self.answers["print"] = [(0, b""), (0, b""), (113, b"")]
+        self.assertTrue(self.start())
+        self.assertEqual(self.verbs(), ["bootout", "print", "print", "print", "bootstrap"])
+
+    def test_launchd_start_retries_a_bootstrap_that_fails_with_error_5(self):
+        self.answers["bootstrap"] = [(5, b"Bootstrap failed: 5: Input/output error\n"), (0, b"")]
+        self.assertTrue(self.start())
+        self.assertEqual(self.verbs(), ["bootout", "print", "bootstrap", "bootstrap"])
+
+    def test_launchd_start_that_fails_writes_launchctls_error_to_the_proxy_log(self):
+        self.answers["bootstrap"] = [(5, b"Bootstrap failed: 5: Input/output error\n")]
+        self.assertFalse(self.start())
+        self.assertEqual(self.verbs().count("bootstrap"), 3)
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("launchctl bootstrap failed (exit 5): Bootstrap failed: 5: Input/output error", log)
+
+    def test_launchd_start_does_not_retry_another_bootstrap_error(self):
+        self.answers["bootstrap"] = [(113, b"Bootstrap failed: 113\n")]
+        self.assertFalse(self.start())
+        self.assertEqual(self.verbs().count("bootstrap"), 1)
+
+    def test_systemd_start_enables_and_restarts_once_without_a_second_start(self):
+        self.assertTrue(self.start("systemd"))
+        self.assertEqual(self.verbs(), ["daemon-reload", "enable context-guru-pi.service",
+                                        "restart context-guru-pi.service"])
+
+    def test_systemd_start_that_fails_writes_systemctls_error_to_the_proxy_log(self):
+        self.answers["restart"] = [(1, b"Job failed.\n")]
+        self.assertFalse(self.start("systemd"))
+        log = (pi_plugin.state_dir() / "proxy.log").read_text()
+        self.assertIn("systemctl restart failed (exit 1): Job failed.", log)
+
+    def test_a_log_that_cannot_be_written_still_gives_a_failed_start_not_a_crash(self):
+        self.answers["bootstrap"] = [(113, b"no\n")]
+        (pi_plugin.state_dir() / "proxy.log").mkdir(parents=True)  # opening it to append fails
+        self.assertFalse(self.start())
+
+    def test_a_hung_launchctl_print_does_not_block_stop(self):
+        plist = pi_plugin.launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        with open(plist, "wb") as handle:
+            pi_plugin.plistlib.dump({"Label": pi_plugin.LAUNCHD_LABEL, "ContextGuruManaged": True}, handle)
+        real_run = pi_plugin.subprocess.run
+
+        def run(cmd, **kwargs):
+            if cmd[:2] == ["launchctl", "print"]:
+                self.assertIsNotNone(kwargs.get("timeout"))
+                raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            return real_run(cmd, **kwargs)
+        with mock.patch.object(pi_plugin.subprocess, "run", side_effect=run):
+            self.assertEqual(pi_plugin.stop_service(), "stopped")
+        self.assertFalse(plist.exists())
+
+    def test_launchd_stop_waits_until_the_job_is_gone_before_it_returns(self):
+        plist = pi_plugin.launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        with open(plist, "wb") as handle:
+            pi_plugin.plistlib.dump({"Label": pi_plugin.LAUNCHD_LABEL, "ContextGuruManaged": True}, handle)
+        self.answers["print"] = [(0, b""), (113, b"")]
+        self.assertEqual(pi_plugin.stop_service(), "stopped")
+        self.assertEqual(self.verbs(), ["bootout", "print", "print"])
+        self.assertFalse(plist.exists())
+
+
+class FailedStartNamesTheLog(Sandbox):
+    """A command whose proxy start failed names the log that holds the service manager's error."""
+
+    def setUp(self):
+        super().setUp()
+        pi_plugin.write_record({"port": 8800, "preset": "high", "cache_strategy": "none", "binary": "/bin/proxy"})
+
+    def test_configure_that_cannot_start_the_proxy_names_the_log(self):
+        with mock.patch.object(pi_plugin, "start_service", return_value=False), \
+                mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+            code, facts = self.run_main("configure", "--preset", "medium")
+        self.assertEqual((code, facts["result"]), (1, "not_applied"))
+        self.assertEqual(facts["log"], str(pi_plugin.state_dir() / "proxy.log"))
+
+
+class OwnBinary(Sandbox):
+    """D2 (#1152): Pi uses CONTEXT_GURU_BIN, or the binary that setup downloaded. It never takes a
+    context-guru-proxy from PATH: another tool owns that one, and it can be too old or change."""
+
+    def executable(self, name):
+        path = Path(self.tmp.name) / "bin" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def managed(self):
+        path = pi_plugin.managed_binary()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def test_a_proxy_on_path_is_not_used(self):
+        on_path = self.executable("context-guru-proxy")
+        with mock.patch.dict(os.environ, {"PATH": str(on_path.parent)}):
+            self.assertIsNone(pi_plugin.find_binary())
+            self.managed()
+            self.assertEqual(pi_plugin.find_binary(), str(pi_plugin.managed_binary().resolve()))
+
+    def test_context_guru_bin_is_used_first(self):
+        mine = self.executable("my-proxy")
+        self.managed()
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": str(mine)}):
+            self.assertEqual(pi_plugin.find_binary(), str(mine.resolve()))
+
+    def setup_plan(self):
+        with mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "first_free_port", return_value=8800):
+            return self.run_main("setup", "--plan", "--cache-strategy", "none")
+
+    def test_setup_ignores_a_recorded_binary_that_is_neither_managed_nor_named(self):
+        other = self.executable("context-guru-proxy")
+        pi_plugin.write_record({"binary": str(other)})
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [None])  # no binary: setup will download its own
+
+    def test_setup_does_not_trust_a_leftover_download_with_no_install_record(self):
+        self.managed()  # a failed setup left it (#1157); it may be older than the latest release
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [None])
+
+    def test_setup_keeps_its_own_download_when_the_install_record_names_it(self):
+        managed = str(self.managed().resolve())
+        pi_plugin.write_record({"binary": managed, "port": 8800})
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [managed])
+
+    def test_plan_says_which_binary_setup_uses(self):
+        _, facts = self.setup_plan()
+        self.assertEqual(facts["binary"], "download")
+        self.assertIn("Setup downloads the latest context-guru-proxy release.", facts["consent_question"])
+        mine = self.executable("my-proxy")
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": str(mine)}):
+            _, facts = self.setup_plan()
+        self.assertEqual(facts["binary"], str(mine.resolve()))
+        self.assertIn(f"Setup uses the proxy at {mine.resolve()}.", facts["consent_question"])
+
+    def test_a_context_guru_bin_that_names_no_file_is_refused_not_replaced(self):
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": "/no/such/proxy"}):
+            code, facts = self.setup_plan()
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_named_missing"))
+        self.assertIn("/no/such/proxy", facts["detail"])
+
+    def test_context_guru_bin_that_names_the_download_is_used_with_no_record(self):
+        managed = str(self.managed().resolve())
+        seen = []
+        real = pi_plugin.resolve_strategy
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_BIN": managed}), \
+                mock.patch.object(pi_plugin, "resolve_strategy", side_effect=lambda n, e: seen.append(e) or real(n, e)):
+            self.setup_plan()
+        self.assertEqual(seen, [managed])
+
+    def test_update_of_a_binary_setup_did_not_download_says_what_to_do(self):
+        other = self.executable("my-proxy")
+        pi_plugin.write_record({"binary": str(other), "port": 8800})
+        with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.3"):
+            code, facts = self.run_main("update", "--install")
+        self.assertEqual((code, facts["result"], facts["reason"]), (2, "refused", "binary_not_managed"))
+        self.assertIn("run /context-guru setup again", facts["detail"])
+        self.assertIn("If CONTEXT_GURU_BIN is set, unset it", facts["detail"])
+
+    def test_uninstall_names_a_binary_it_keeps(self):
+        other = self.executable("my-proxy")
+        pi_plugin.write_record({"binary": str(other), "port": 8800})
+        with mock.patch.object(pi_plugin, "stop_service", return_value="stopped"):
+            _, facts = self.run_main("uninstall")
+        self.assertEqual(facts["binary_kept"], f"{other} (not downloaded by setup)")
+        self.assertNotIn("binary_removed", facts)
+        self.assertTrue(other.exists())
+
+    def test_uninstall_dry_run_lists_what_it_removes_and_keeps(self):
+        other = self.executable("my-proxy")
+        pi_plugin.write_record({"binary": str(other), "port": 8800})
+        managed = self.managed()
+        _, facts = self.run_main("uninstall", "--dry-run")
+        self.assertEqual(facts["result"], "planned")
+        self.assertEqual(facts["binary_remove"], str(managed))
+        self.assertEqual(facts["binary_kept"], f"{other} (not downloaded by setup)")
+        self.assertTrue(managed.exists())
+
+
+class ConfigureUnchanged(Sandbox):
+    """#1156: choosing the setting that is already set does not restart the proxy. A restart costs one
+    cache rewrite in every open Pi session."""
+
+    def setUp(self):
+        super().setUp()
+        pi_plugin.write_record({"port": 8800, "preset": "medium", "cache_strategy": "auto", "binary": "/bin/true"})
+        pi_plugin.write_proxy_config("medium", "auto")
+
+    def configure(self, *argv, started=True):
+        with mock.patch.object(pi_plugin, "start_service", return_value=started) as start, \
+                mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+            code, facts = self.run_main("configure", *argv)
+        return code, facts, start
+
+    def test_the_current_preset_is_unchanged_and_not_restarted(self):
+        code, facts, start = self.configure("--preset", "medium")
+        self.assertEqual((code, facts["result"], facts["preset"]), (0, "unchanged", "medium"))
+        start.assert_not_called()
+
+    def test_an_alias_of_the_current_strategy_is_unchanged(self):
+        code, facts, start = self.configure("--cache-strategy", "5-min-ping")
+        self.assertEqual((code, facts["result"], facts["cache_strategy"]), (0, "unchanged", "auto"))
+        start.assert_not_called()
+
+    def test_a_retry_after_a_failed_restart_restarts_again(self):
+        code, facts, _ = self.configure("--preset", "high", started=False)
+        self.assertEqual((code, facts["result"]), (1, "not_applied"))
+        self.assertTrue(pi_plugin.read_record()["restart_pending"])
+        code, facts, start = self.configure("--preset", "high")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        start.assert_called_once()
+        self.assertNotIn("restart_pending", pi_plugin.read_record())
+        code, facts, start = self.configure("--preset", "high")
+        self.assertEqual(facts["result"], "unchanged")
+        start.assert_not_called()
+
+    def test_a_missing_config_file_is_written_and_restarted(self):
+        pi_plugin.proxy_config().unlink()
+        code, facts, start = self.configure("--preset", "medium")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        start.assert_called_once()
+        self.assertTrue(pi_plugin.proxy_config().exists())
+
+    def test_a_new_preset_still_restarts(self):
+        code, facts, start = self.configure("--preset", "high")
+        self.assertEqual((code, facts["result"]), (0, "configured"))
+        start.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

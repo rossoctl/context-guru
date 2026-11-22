@@ -53,6 +53,9 @@ type API struct {
 	// pingable says per thread whether a manual ping can be sent. nil = never stated.
 	pingable func(tenantID string, allTenants bool, session string) map[string]PingState
 	kaPlans  func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan
+	// oneHour reads the keeper's "the last touch was a free 1-hour ping" facts for /api/cachestate (#1243).
+	// nil = none.
+	oneHour func(tenantID string, allTenants bool, session string) map[string]OneHourTouch
 	// waitPolicyFn reads a tenant's per-wait ping plan settings for the keep-alive calculator and
 	// recommendation (#868). nil = the shipped plan, on.
 	waitPolicyFn func(tenantID string) keepalive.Policy

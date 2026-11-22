@@ -83,7 +83,7 @@ import (
 
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Key names one tracked THREAD of one session (#423). Thread "" is the primary thread.
@@ -169,6 +169,10 @@ type Policy struct {
 	// behavior before #858: MaxPings for every wait. The zero Policy has it off, so a host that builds a
 	// Policy by hand keeps the old behavior until it asks.
 	WaitPlan bool
+	// OneHourOnWait turns on the 1-hour-on-wait ping (#1243), MAIN AGENT ONLY: for the main thread on the 5-minute tier whose
+	// wait is long (LongWait), the first ping carries every cache marker at 1 hour and is the only ping
+	// of that wait. Needs WaitPlan.
+	OneHourOnWait bool
 	// ToolWaitMaxPings, BackgroundExtraPings and HumanExtraPings tune the plan. Zero means the shipped
 	// default (DefaultToolWaitMaxPings, DefaultBackgroundExtraPings, DefaultHumanExtraPings). Read only
 	// while WaitPlan is on.

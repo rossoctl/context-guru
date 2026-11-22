@@ -6,7 +6,7 @@ small picture; add `details` for the tables.
 ## Who runs a command
 
 You run some commands yourself: Claude does not run them on its own. They are `status`,
-`dashboard`, `doctor`, `session`, `statusline`, `uninstall`, `update` and the five terminal views (`watch`,
+`dashboard`, `doctor`, `session`, `statusline`, `uninstall`, `update`, `install-beta` and the five terminal views (`watch`,
 `timeline`, `chart`, `heatmap`, `fill`). Their skill files set `disable-model-invocation: true`, so they are not in
 the model's skills list and cost no tokens there. If Claude tries one, Claude Code tells it to ask you to run
 `/context-guru:<name>`.
@@ -14,7 +14,7 @@ the model's skills list and cost no tokens there. If Claude tries one, Claude Co
 Claude can still offer the others by itself when your question fits: `insights`, `save-more`,
 `remove-mcp-and-skills`, `preset-picker`, `cache-strategy-picker`, `install` and `cache-campaign`.
 
-In Codex the same commands that exist there (all of the above except `dashboard`, `doctor` and `statusline`) set
+In Codex the same commands that exist there (all of the above except `dashboard`, `doctor`, `statusline` and `install-beta`) set
 `allow_implicit_invocation: false` in their `agents/openai.yaml`. You run them as `$context-guru-<name>`.
 
 | Command | The question | Example first line |
@@ -28,6 +28,7 @@ In Codex the same commands that exist there (all of the above except `dashboard`
 | `/context-guru:doctor` | Is it set up right? | All 7 checks pass. |
 | `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? | So far: your current config saved $9.40 in 30 days (observed). |
 | `/context-guru:remove-mcp-and-skills` | Which MCP servers and skills do I never use? | So far: the 2 items you already removed saved $4.20 (measured, since 2026-09-15). |
+| `/context-guru:install-beta` | Install a beta (pre-release) proxy, and restart onto it? | |
 | `/context-guru:cache-campaign` | Would a keep-alive campaign built from a tenant's history beat what it does today? (managers) | |
 
 ## Save more, from your own history

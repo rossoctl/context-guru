@@ -28,7 +28,7 @@ carrying a transcript that is, by definition, already this large:
 
 - **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
   — may read up to 128 MiB. The proxy finds it by the opening of the agent's summary prompt
-  (`isAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
+  (`thread.IsAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
   32 MiB it is bypassed**: the proxy forwards it untouched, counts it as
   `components.agent_compaction.gates.oversize_bypass`, and still marks the dashboard row
   `agent_compaction`. The pipeline is too slow on a body that large. A measured 40 MiB body took
