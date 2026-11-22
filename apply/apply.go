@@ -1189,7 +1189,7 @@ var cacheControlPaths = [...]string{
 // and tools, and the TOP-LEVEL mark of Anthropic's automatic caching (the provider then puts one
 // breakpoint on the last cacheable block). It is the one list the TTL readers share
 // (bodyAsksExtendedTTL, AllBreakpointsAskExtendedTTL), so they cannot disagree on a body whose only
-// mark is the top-level one (issue #1279). schema.CountBreakpoints counts the same set.
+// mark is the top-level one (issue #1279). schema.CountBreakpoints counts the cache_control spellings of the same set.
 // Structural, for the same reason hasCacheBreakpoint is: a tool output containing the text "1h" must
 // not extend our idea of the cache lifetime.
 func wireCacheControls(body []byte) []gjson.Result {

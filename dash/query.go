@@ -1700,7 +1700,7 @@ var breakdownDims = map[string]string{
 	"cache_miss_reason": "r.cache_miss_reason",
 	"cache_breakpoints": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
 		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks + r.cache_bp_root AS TEXT) END",
-	// The same four columns as a PLACEMENT rather than a count, because the count collapses
+	// The same five columns as a PLACEMENT rather than a count, because the count collapses
 	// the only interesting thing about them. "3 breakpoints" is one group whether they sit in
 	// the system block (protecting the whole prompt after it) or scattered through the
 	// messages (protecting almost nothing), and those are opposite prompts with opposite cache
