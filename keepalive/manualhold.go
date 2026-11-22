@@ -5,7 +5,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // The manual-only hold. The Ping button (manual.go) needs the thread's body and the caller's

@@ -11,9 +11,9 @@ import (
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // SWEEP V3 dry_run, end to end through the real request path. A dry run decides every cut and applies none, so

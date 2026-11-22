@@ -24,11 +24,16 @@ type Usage struct {
 	SearchLoaded  []string
 	SearchDropped int
 	// Live is the request-side facts a learned keep-alive campaign reads at response end (predictive.go). nil on paths that do not set it.
-	Live       *LiveFacts
-	FreshInput int64
-	CacheRead  int64
-	CacheWrite int64
-	Output     int64
+	Live *LiveFacts
+	// PrefixRewritten says the client rewrote the prefix this request sends: the agent's own compaction
+	// came just before it, or the thread tracker found it forks or rewinds another thread's content
+	// (capture.prefixRewritten). A cache miss on such a request has a cause other than the cache tier. Set
+	// by serve beside Live; read by recordTouch.
+	PrefixRewritten bool
+	FreshInput      int64
+	CacheRead       int64
+	CacheWrite      int64
+	Output          int64
 	// CacheWrite1h is the part of CacheWrite the provider billed at the ONE-HOUR write
 	// tier, from `usage.cache_creation.ephemeral_1h_input_tokens`. Zero on every response
 	// that wrote only 5-minute entries, which on this deployment is all of them.
@@ -40,8 +45,10 @@ type Usage struct {
 	// tier for that model downgrades it silently: a normal 200 with a normal-looking
 	// `cache_creation_input_tokens` and nothing to distinguish it from a granted 1h entry.
 	// Measured live on this gateway: aws/claude-haiku-4-5 returned 36,251 of 36,574 written
-	// tokens at the 1h tier, aws/claude-sonnet-5 returned 0 of 48,212. Absent-or-zero here,
-	// with a 1h breakpoint on the wire, means the request was downgraded.
+	// tokens at the 1h tier. Absent-or-zero here with a 1h breakpoint on the wire means EITHER a
+	// refusal OR that the request wrote nothing at that breakpoint (a cache read bills no
+	// write): the head of a warm session is always a read. Read it only on a request that
+	// wrote the entry. The grant varies with model, provider and date (#1243).
 	CacheWrite1h int64
 	// StopReason is the provider's terminal reason for this response, normalized across
 	// dialects (see responseStopReason). It rides on Usage because it comes off the same

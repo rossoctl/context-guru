@@ -10,8 +10,8 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // One table of wire variations for every place that compares a message across requests (#783).
@@ -21,7 +21,7 @@ import (
 type pair struct {
 	name string
 	a, b string
-	// orderSensitive marks a pair that differs only in key order. internal/thread hashes keys in
+	// orderSensitive marks a pair that differs only in key order. Package thread hashes keys in
 	// wire order on purpose (one streaming pass, and a client re-sends its history verbatim), so
 	// it is not held to those pairs. See callers.
 	orderSensitive bool

@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/tidwall/gjson"
 )
 
@@ -83,7 +84,7 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 		req.Header.Set("x-api-key", "sk-test")
 		req.Header.Set("anthropic-version", "2023-06-01")
 		if agent != "" {
-			req.Header.Set(agentIDHeader, agent)
+			req.Header.Set(thread.AgentHeader, agent)
 		}
 		resp, err := srv.Client().Do(req)
 		if err != nil {

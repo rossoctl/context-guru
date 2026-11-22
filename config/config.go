@@ -89,7 +89,7 @@ type ExpandConfig struct {
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
 	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
-	// 1-hour-head, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// 1-hour-head, 1-hour-on-wait, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
 	// no strategy, and the file behaves as it always did. An unknown name is a config error.
 	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
@@ -146,6 +146,14 @@ type CacheConfig struct {
 	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
 	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
 	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
+	// KeepAliveOneHourOnWait turns on the 1-hour-on-wait ping (#1243), MAIN AGENT ONLY. With it, the main
+	// thread on the 5-minute tier, when it waits for a person, a teammate, background work or an unknown cause gets ONE
+	// ping, at the usual first-ping time, with every cache marker relabelled to 1 hour, and no further
+	// ping on that wait. On the gateway measured on 2026-11-19 the switch is a read, not a rewrite,
+	// so the entry lives 1 hour for the price of one read. A tool wait and EVERY subagent thread behave as
+	// without it. The keeper checks the first 1-hour ping's usage and stops the switch on a route where
+	// it costs a rewrite. It needs the wait plan (WaitPlan), which the proxy turns on by default.
+	KeepAliveOneHourOnWait bool `yaml:"keepalive_one_hour_on_wait"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
 	//
@@ -217,16 +225,17 @@ type CacheConfig struct {
 	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
 	// +$60.56 at f=0.30.
 	//
-	// It is still off, because on the models that carry this service's spend the tier does not
-	// arrive. Measured live, one request each with the head labelled 1h:
-	// aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of 36,574 written),
-	// aws/claude-sonnet-5 was silently downgraded (0 of 48,212, and an otherwise normal 200).
-	// So the ttl field DOES reach the provider — Haiku honouring it proves that — and it is
-	// Bedrock's model coverage that refuses: the Claude 4.5 family, not the Opus 5 / 4.8 /
-	// Sonnet 5 this service runs. Zero 1h writes appear in 19,805 production requests, which is
-	// the same fact from the billing side. So this ships implemented, verifiable and off:
-	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
-	// zero on a model the honest projection for it is $0.
+	// It is off by default, and it protects only the head. Whether the provider grants the 1-hour
+	// tier depends on the model and the provider, and it changes over time. Measured with fresh
+	// writes on this gateway: aws/claude-haiku-4-5 GRANTED (ephemeral_1h_input_tokens 36,251 of
+	// 36,574 written); aws/claude-sonnet-5 REFUSED on the earlier date (0 of 48,212 written at 1h,
+	// an otherwise normal 200); on 2026-11-19 direct requests to the same gateway (litellm 1.108.4,
+	// Bedrock), each writing a fresh ~12.6k-token system block with ttl 1h, were GRANTED on
+	// claude-sonnet-5 (12,632), claude-sonnet-5-5 (12,635), claude-opus-4-8 (12,630),
+	// claude-opus-5-5 (12,636) and claude-haiku-5-5 (12,632). So read Usage.CacheWrite1h on a
+	// request that WROTE the entry, per model, and do not assume either way. A zero on a request that
+	// only read the head says nothing: a read writes nothing. The head is a small part of a Claude
+	// Code prompt and other sessions keep it warm, so for long waits see the 1-hour-on-wait strategy.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
 	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
 	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes

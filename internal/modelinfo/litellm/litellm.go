@@ -3,7 +3,7 @@
 // It is the one network call modelinfo makes, which is why it is a sibling package rather than
 // living in modelinfo itself: modelinfo's own resolvers (Static, Table, Chain) do no I/O, and the
 // dispatch.Dispatcher split requires that every core package hold that line. This package is
-// host-side — only proxy, proxyapp and cmd/ import it.
+// host-side — only proxy, proxyapp, cmd/ and its public facade models/litellm import it.
 package litellm
 
 import (

@@ -321,7 +321,7 @@ The bump PR gets the 2 reviews like any other PR. Its squash message lists the c
 
 1. Check that `main` has nothing after the checked commit except the version bump.
 2. **Ask the release owner: is this a beta, or does it replace latest?** Wait for the answer. Do not tag before it.
-   - **A beta.** Name the tag `vX.Y.Z-beta.N`. GoReleaser marks it as a pre-release by itself (`prerelease: auto`). The owner and others test it on their laptops. They install it with `CONTEXT_GURU_VERSION=<tag>`. Users who do not set this variable keep `latest`.
+   - **A beta.** Name the tag `vX.Y.Z-beta.N`. GoReleaser marks it as a pre-release by itself (`prerelease: auto`). The owner and others test it on their laptops. They install it with `/context-guru:install-beta` (script: `context-guru-plugin/scripts/install-beta.sh <tag>`). It uses the beta tag's own `install.sh` and sets the update answer to `never` (#1254). Users who do not install a beta keep `latest`.
    - **A beta that the owner makes latest.** The owner may ask for this later. GitHub never makes a pre-release `latest`. So mark the release as not a pre-release: `gh release edit <tag> --prerelease=false --latest`. The tag and the title keep "beta".
    - **Not a beta.** The release replaces latest at once.
 3. Create an annotated tag on that commit and push it:
