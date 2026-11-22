@@ -1213,10 +1213,6 @@ func bodyAsksExtendedTTL(body []byte) bool {
 // asks for the 1h tier. A single 5m breakpoint (the default when `ttl` is absent) makes it false:
 // that segment expires in five minutes whatever the others ask. The keeper uses this, with the
 // billed tier, to pick a session's keep-alive schedule.
-//
-// A top-level cache_control (Anthropic's automatic caching, which puts one breakpoint on the last
-// cacheable block) is one more mark: a body whose only mark is a top-level 1h one asks for 1h, and
-// a top-level 5m mark next to 1h block marks makes this false (#1272).
 func AllBreakpointsAskExtendedTTL(body []byte) bool {
 	total, extended := 0, 0
 	var walk func(v gjson.Result)
@@ -1233,7 +1229,6 @@ func AllBreakpointsAskExtendedTTL(body []byte) bool {
 		}
 	}
 	for _, p := range []string{
-		"cache_control",
 		"messages.#.content.#.cache_control",
 		"messages.#.cache_control",
 		"system.#.cache_control",
