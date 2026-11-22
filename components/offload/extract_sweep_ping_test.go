@@ -1017,7 +1017,7 @@ func TestTheShadowAskIsReportedOnceUnderConcurrentRequests(t *testing.T) {
 			rep := &components.Report{Component: "extract_llm_sweep"}
 			c := preExpiryCtx("report-once", pingAsker(), slow)
 			c.IdleMs = 5_000
-			e.shadowStep(c, &bschemas.BifrostChatRequest{Input: deepCandidates(3).Input}, rep)
+			e.shadowStep(c, &bschemas.BifrostChatRequest{Input: deepCandidates(3).Input}, rep, sweepColdFor(c))
 			reported.Add(int64(rep.Events[shadowAsked]))
 		}()
 	}
@@ -1061,7 +1061,7 @@ func TestTheColdRecheckIsReportedOnceUnderConcurrentRequests(t *testing.T) {
 			rep := &components.Report{Component: "extract_llm_sweep"}
 			c := preExpiryCtx("recheck-once", pingAsker(), slow)
 			c.ColdCache = true
-			e.shadowStep(c, &bschemas.BifrostChatRequest{Input: deepCandidates(3).Input}, rep)
+			e.shadowStep(c, &bschemas.BifrostChatRequest{Input: deepCandidates(3).Input}, rep, sweepColdFor(c))
 			if _, ok := rep.Events[shadowValid]; ok {
 				rechecks.Add(1)
 			}

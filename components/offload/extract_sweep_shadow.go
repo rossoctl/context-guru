@@ -56,7 +56,7 @@ const (
 //
 // A WARM request reports the ask (once) and leaves the answer held. A COLD request reports the ask if
 // it has not been reported, runs the recheck, reports it, and consumes the answer.
-func (e *ExtractSweep) shadowStep(c *components.Ctx, req *bschemas.BifrostChatRequest, rep *components.Report) {
+func (e *ExtractSweep) shadowStep(c *components.Ctx, req *bschemas.BifrostChatRequest, rep *components.Report, cold bool) {
 	if !e.shadow || c == nil || c.Store == nil || c.Session == "" {
 		return
 	}
@@ -81,7 +81,7 @@ func (e *ExtractSweep) shadowStep(c *components.Ctx, req *bschemas.BifrostChatRe
 			"waiting_for", h.WaitingFor, "wait_tool", h.WaitTool, "cost_usd", h.CostUSD,
 			"model", h.Model, "judged_msgs", h.Judged)
 	}
-	if !sweepColdRequest(c) {
+	if !cold {
 		return
 	}
 	// The recheck is reported once per held answer: the request that wins the claim consumes it, and a
