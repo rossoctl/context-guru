@@ -250,6 +250,20 @@ func TestMissCostIsTheWritePremium(t *testing.T) {
 	}
 }
 
+// A token written at the 1-hour tier costs more than one at the 5-minute tier, so its premium over
+// a read is larger. The miss cost prices each tier at its own rate, as the bill does.
+func TestMissCostPricesTheOneHourTierAtItsOwnRate(t *testing.T) {
+	p := modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6}
+	im, r := newInferenceWith(t, ratePricer{"claude-sonnet-5-5": p})
+	e := missEvent(dash.CacheTTLExpiry, "")
+	e.CacheWrite1h = 400 // 400 of the 1000 written tokens were billed at the 1-hour tier
+	im.Observe(e, time.Second)
+	want := 1000*(3.75e-6-0.3e-6) + 400*p.CacheWrite1hPremium()
+	if got := sumFloat(collectAll(t, r)["llm.cache.miss_cost.usd"]); got < want*0.999 || got > want*1.001 {
+		t.Errorf("miss cost = %v, want %v (5m premium on all writes + 1h premium on the 1h part)", got, want)
+	}
+}
+
 // A model with no rate counts the miss and books no money. It never falls back to another rate.
 func TestUnpricedMissBooksNoMoney(t *testing.T) {
 	im, r := newInferenceWith(t, ratePricer{})
