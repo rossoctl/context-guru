@@ -14,6 +14,7 @@ import (
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/tenant"
+	"github.com/tidwall/gjson"
 )
 
 // The idle keep-alive itself — when to ping, the gates, the hard deadline, the write-instead-of-
@@ -476,6 +477,18 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		return nil
 	}
 	return plan
+}
+
+// oneHourFirstFor is the apply hook of the 1-hour-first mode (#1261), or nil when the account did not opt in
+// to 1-hour-on-wait (or there is no keep-alive). The model is read from the body apply hands over.
+func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID string, toolsDeclared bool) bool {
+	if h == nil || h.keeper == nil || h.keeper.Keeper == nil || r.tn == nil || !r.tn.Cache.OneHourOnWait {
+		return nil
+	}
+	model := gjson.GetBytes(r.body, "model").String()
+	return func(session, threadID string, toolsDeclared bool) bool {
+		return h.keeper.Keeper.OneHourFirst(r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared)
+	}
 }
 
 // readSetsTTL is Keeper.ReadSetsTTL, nil-safe for a deployment with no keep-alive.

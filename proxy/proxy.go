@@ -1504,6 +1504,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				rates:                 h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
 				tn:                    tn,
 				threadOf:              threadOf,
+				endpoint:              up.base,
+				route:                 up.path,
 			})
 			addedMs := float64(added.Microseconds()) / 1000.0
 			cp.noteCG(addedMs)

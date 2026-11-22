@@ -6,6 +6,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
 )
 
 // The 1-hour-on-wait ping (#1243).
@@ -61,7 +62,11 @@ func oneHourRoute(provider bschemas.ModelProvider, endpoint, route, model string
 
 type oneHourRouteState struct {
 	proven, off bool
-	probeUntil  time.Time // a probe holds the route until then; zero = none
+	// costly: the probe showed that the 5m to 1h switch REWRITES the prefix on this route and model. The
+	// 1-hour ping stops here, and instead the main threads that start while this is true write at 1 hour from
+	// their first request (OneHourFirst). off wins over costly.
+	costly     bool
+	probeUntil time.Time // a probe holds the route until then; zero = none
 }
 
 // oneHourProbe is what a free probe leaves for the thread's return.
@@ -78,7 +83,7 @@ func (k *Keeper) oneHourBlocked(provider bschemas.ModelProvider, endpoint, route
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
-	return st != nil && st.off
+	return st != nil && (st.off || st.costly)
 }
 
 // ReadSetsTTL says whether the accountant may be told that a read sets the entry's TTL on this route and
@@ -101,7 +106,7 @@ func (k *Keeper) ReadSetsTTL(provider bschemas.ModelProvider, endpoint, route, m
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
 	switch {
-	case st != nil && st.off:
+	case st != nil && (st.off || st.costly):
 		return false
 	case st != nil && st.proven:
 		return true
@@ -123,7 +128,7 @@ func (k *Keeper) oneHourClaim(rk string) (ok, probe bool) {
 		k.oneHourRoutes[rk] = st
 	}
 	switch {
-	case st.off:
+	case st.off || st.costly:
 		return false, false
 	case st.proven:
 		return true, false
@@ -189,8 +194,7 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		}
 		k.mu.Unlock()
 	case read < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
-		k.oneHourSwitchOff(rk, j.provider, j.route, e.endpoint, e.model, "the probe rewrote the prefix",
-			"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h,
+		k.oneHourMarkCostly(rk, j, "cache_read", u.CacheRead, "cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h,
 			"expected_prefix", int64(prefix))
 	default:
 		k.oneHourRelease(rk, "the ping's usage was neither a free nor a costly switch")
@@ -221,7 +225,7 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 		k.oneHourRoutes[rk] = st
 	}
 	first := !st.off
-	st.off, st.proven, st.probeUntil = true, false, time.Time{}
+	st.off, st.costly, st.proven, st.probeUntil = true, false, false, time.Time{}
 	k.mu.Unlock()
 	if first {
 		slog.Warn("context-guru: no more 1-hour keep-alive pings on this route; the threads fall back to the plain schedule: "+why,
@@ -306,10 +310,101 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 			continue
 		}
 		st := k.oneHourRoutes[t.route]
-		if st != nil && st.off {
+		if st != nil && (st.off || st.costly) {
 			continue
 		}
 		out[t.key.Thread] = OneHourTouch{At: t.at, Proven: st != nil && st.proven}
 	}
 	return out
+}
+
+// THE COSTLY ROUTE: WRITE AT 1 HOUR FROM THE FIRST REQUEST (#1261).
+//
+// When the probe shows that the switch rewrites the prefix, the strategy no longer falls back to auto.
+// A main thread that STARTS while the route is costly asks 1 hour on every existing marker of every real
+// request, from its first one: nothing is ever switched, so nothing is rewritten. Its pings stop (any wait
+// cause, no 59-minute ping): the hour is the cover. Rules:
+//
+//   - the thread that paid the rewrite keeps 1 hour on every later request (its entry is a 1-hour entry);
+//   - a main thread already running at 5 minutes stays on auto until it ends (a switch would cost it a
+//     rewrite): the decision is made ONCE, at the thread's first request that qualifies, and kept;
+//   - a subagent, and any request that does not declare tools, is unchanged;
+//   - a request with 1-hour markers that WROTE tokens but was billed at 5 minutes means the gateway
+//     downgraded the tier: the mode stops for that route and model (checkOneHourFirstDowngrade). A request
+//     that wrote nothing proves nothing.
+//
+// The tools-declared test stands for "the main agent": the thread tracker gives the primary thread to the
+// first thread that declares tools, and an auxiliary request (a title, a quota check) declares none.
+
+// OneHourFirst reports whether this request must carry 1-hour markers on every breakpoint. The host asks
+// at the end of apply, once the thread is known; the answer is made once per thread and kept. Nil-safe.
+func (k *Keeper) OneHourFirst(tenant, session, threadID string, provider bschemas.ModelProvider, endpoint, route, model string, toolsDeclared bool) bool {
+	if k == nil || session == "" || threadID != "" || IsSubagentThread(threadID) || !toolsDeclared {
+		return false
+	}
+	key := Key{Tenant: tenant, Session: session, Thread: threadID}.id()
+	rk := oneHourRoute(provider, endpoint, route, model)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	st := k.oneHourRoutes[rk]
+	costly := st != nil && st.costly && !st.off
+	if v, decided := k.oneHourFirst[key]; decided {
+		return v && costly
+	}
+	if len(k.oneHourFirst) >= MaxTurnKeys {
+		k.oneHourFirst = map[string]bool{}
+	}
+	k.oneHourFirst[key] = costly // a thread that starts on a costly route is in the mode for good; any other is not
+	return costly
+}
+
+// oneHourFirstThread reports whether the thread is in the mode on a route that is still costly.
+func (k *Keeper) oneHourFirstThread(key string, provider bschemas.ModelProvider, endpoint, route, model string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
+	return k.oneHourFirst[key] && st != nil && st.costly && !st.off
+}
+
+// oneHourMarkCostly records that the probe's switch rewrote the prefix. The route goes to the costly mode (no
+// more 1-hour pings; main threads that start now write at 1 hour), and the probing thread, whose entry is now
+// a 1-hour entry, keeps 1 hour on every later request.
+func (k *Keeper) oneHourMarkCostly(rk string, j pingJob, kv ...any) {
+	k.mu.Lock()
+	st := k.oneHourRoutes[rk]
+	if st == nil {
+		st = &oneHourRouteState{}
+		k.oneHourRoutes[rk] = st
+	}
+	first := !st.costly && !st.off
+	st.costly, st.proven, st.probeUntil = !st.off, false, time.Time{}
+	if first {
+		if len(k.oneHourFirst) >= MaxTurnKeys {
+			k.oneHourFirst = map[string]bool{}
+		}
+		if j.thread == "" {
+			k.oneHourFirst[j.key.id()] = true
+		}
+	}
+	endpoint, model := j.e.endpoint, j.e.model
+	k.mu.Unlock()
+	if first {
+		slog.Warn("context-guru: a 1-hour keep-alive ping rewrote the prefix on this route; no more 1-hour pings. "+
+			"Main threads that start now write at 1 hour from their first request, with no pings",
+			append([]any{"provider", string(j.provider), "route", j.route, "endpoint", endpoint, "model", model,
+				"session", j.session, "thread", j.thread}, kv...)...)
+	}
+}
+
+// checkOneHourFirstDowngrade runs on every real request. A thread in the mode that sent 1-hour markers and
+// WROTE tokens, and was billed at 5 minutes, was downgraded by the gateway: the mode stops for the route and
+// model, and the threads go back to auto, with one WARN. A request that wrote nothing proves nothing.
+func (k *Keeper) checkOneHourFirstDowngrade(key string, provider bschemas.ModelProvider, endpoint, route, model string, body []byte, u Usage, usageOK bool) {
+	if !usageOK || u.CacheWrite <= 0 || !k.oneHourFirstThread(key, provider, endpoint, route, model) ||
+		!apply.AllBreakpointsAskExtendedTTL(body) || BilledOneHour(u.CacheWrite, u.CacheWrite1h, true) {
+		return
+	}
+	k.oneHourSwitchOff(oneHourRoute(provider, endpoint, route, model), provider, route, endpoint, model,
+		"a request with 1-hour markers wrote tokens and was billed at 5 minutes (a silent downgrade)",
+		"cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h)
 }

@@ -1,10 +1,12 @@
 package apply
 
 import (
+	"hash/fnv"
 	"log/slog"
 	"strconv"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -241,4 +243,37 @@ func RelabelAllTTL1h(body []byte, provider bschemas.ModelProvider) (out []byte, 
 		return body, false
 	}
 	return next, true
+}
+
+// relabelOps reports the relabel of RelabelAllTTL1h on the MESSAGES section, one rewrite
+// per message whose bytes changed. before and after are the whole bodies. The tools and system
+// sections are reported by the proxy, which diffs them (proxy/accountant_envelope.go); messages
+// cannot be diffed there, because a pipeline component may have edited the same message.
+//
+// The ChangeID starts with "headttl:", the prefix the accountant library finds a held-longer
+// entry by (design section 4.4): without it the library books no rescue for a gap past 5 minutes.
+// It comes from the message as it was before the relabel, so the same message has the same
+// ChangeID on every request.
+func relabelOps(before, after []byte) []accountant.Operation {
+	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
+	if len(b) != len(a) {
+		return nil
+	}
+	var ops []accountant.Operation
+	for i := range b {
+		if b[i].Raw == a[i].Raw {
+			continue
+		}
+		h := fnv.New64a()
+		h.Write([]byte(b[i].Raw))
+		ops = append(ops, accountant.Operation{
+			Kind:       accountant.KindRewrite,
+			Operator:   "context-guru.headttl",
+			At:         accountant.Position{Section: accountant.SectionMessages, Index: i},
+			SizeBefore: accountant.Size{Bytes: len(b[i].Raw)},
+			SizeAfter:  accountant.Size{Bytes: len(a[i].Raw)},
+			ChangeID:   "headttl:" + strconv.FormatUint(h.Sum64(), 16),
+		})
+	}
+	return ops
 }

@@ -558,6 +558,10 @@ type Keeper struct {
 	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock.
 	// Bounded by MaxTurnKeys.
 	oneHourTouches map[string]oneHourTouch
+	// oneHourFirst holds, per THREAD (keyed like live), the decision made at the main thread's first
+	// qualifying request: true = it writes at 1 hour from now on (a thread that started on a costly route, or
+	// the one that paid the probe's rewrite), false = it stays on auto until it ends. Bounded by MaxTurnKeys.
+	oneHourFirst map[string]bool
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -651,7 +655,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, oneHourFirst: map[string]bool{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -864,6 +868,7 @@ func (k *Keeper) Record(r Record) {
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
 	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
 	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
+	k.checkOneHourFirstDowngrade(key, r.Provider, r.Endpoint, r.Route, model, body, u, usageOK)
 	// A client lifecycle signal (host-gated; see MarkEnded) that this session already ended
 	// holds nothing further: this request was in flight when the user left, so its cache entry
 	// is not worth holding. Matched on Key.Session or r.Client, the id the client's own hooks
@@ -893,6 +898,11 @@ func (k *Keeper) Record(r Record) {
 	// being retained on its very next request; anything held for a session that goes quiet
 	// instead is dropped by the hard deadline below, within (K+1)x X.
 	pol := r.Policy
+	// A thread in the 1-hour-first mode (onehour.go) gets NO ping, on any wait cause: its 1-hour entry is the
+	// cover. A manual hold still works.
+	if pol.OneHourOnWait && k.oneHourFirstThread(key, r.Provider, r.Endpoint, r.Route, model) {
+		pol.KeepAlive = false
+	}
 	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
 	// is off, or where the schedule's own gates refuse the thread; it just never gets a schedule.
 	// manualOnly is decided once the gates below have run, so every refusal can name its reason.

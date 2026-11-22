@@ -433,6 +433,39 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			}
 		}()
 	}
+	// The 1-hour-first relabel (#1261), on the FINAL body of every return below, after the tail mark has run
+	// (registered first, so it runs last): it relabels every breakpoint, the tail mark included. Here and not
+	// beside the head relabel because it needs the thread and the session, known only once the session id is,
+	// and because it edits messages, whose byte offsets the pipeline's writeback has used by then. Not in
+	// observe mode, not on a bypassed request. The message changes are reported as headttl operations, so the
+	// accountant books the premium and the rescue; tools and system are found by the proxy's envelope diff.
+	var oneHourSession string
+	if mode != components.ModeObserve && !bypass && o.OneHourFirst != nil && explicitBreakpointProvider(provider) {
+		defer func() {
+			// A host that resolves threads but never reached the resolution (an early return) does not
+			// know the thread: ask for nothing.
+			if o.ThreadOf != nil && !res.Trace.ThreadResolved {
+				return
+			}
+			cur := res.Body
+			if cur == nil {
+				cur = o.Body
+			}
+			if !o.OneHourFirst(oneHourSession, res.Trace.Thread.ID, gjson.GetBytes(cur, "tools.0").Exists()) {
+				return
+			}
+			out, ok := RelabelAllTTL1h(cur, provider)
+			if !ok {
+				return
+			}
+			res.Trace.HeadTTL1h = true // the request asks 1 hour
+			if bytes.Equal(out, cur) {
+				return
+			}
+			res.Trace.Ops = append(res.Trace.Ops, relabelOps(cur, out)...)
+			res.Body, res.Changed = out, true
+		}()
+	}
 	models := o.Models
 	// Tool-schema annotation strip: a top-level field the pipeline never sees (it
 	// operates on `messages`). Done FIRST, before any byte offset into the body is
@@ -519,6 +552,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	oneHourSession = sessionID
 	// The cold decision's clock key, derived ONCE from the transcript as it ARRIVED. It is also
 	// handed to the host on the Trace, so a keep-alive ping touches the key this request reads
 	// even when the host changes the head before sending (tool deferral, #902). With no explicit
