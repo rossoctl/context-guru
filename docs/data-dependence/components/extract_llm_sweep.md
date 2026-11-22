@@ -5,7 +5,7 @@ where: Store: one **held answer** per thread (pinned, `cg:swh:`): for each judge
 off: ❌ **Does nothing.** It asks only at a keep-alive ping, and a ping needs the body stash. With no Store, the held answer is not kept. It costs nothing and removes nothing.
 metadata_only: ✅ **Works for what it does today**: the held answer is metadata, so it is kept and rechecked. **But** the in-memory conversation copies are content, so this level is not metadata only in full (see the memory column).
 everything: ✅ Works: the question at the ping, the held answer, the recheck, shadow mode and the cold apply. The removals need the stash for `expand`.
-decided_by: David Amid, #118; ping-time question and held answer approved 2026-10-25 (#508); cold apply approved 2026-10-25 (#695); warm path approved 2026-10-26 (#491); sweep v3 rules reading tool names, paths and commands in flight approved 2026-10-28 (#491); the stored path hash (a hash of the file path or command in the drop record, never the path) approved 2026-11-01 (#491)
+decided_by: David Amid, #118; ping-time question and held answer approved 2026-10-25 (#508); cold apply approved 2026-10-25 (#695); warm path approved 2026-10-26 (#491); sweep v3 rules reading tool names, paths and commands in flight approved 2026-10-28 (#491); the stored path hash (a hash of the file path or command in the drop record, never the path) approved 2026-11-01 (#491); the previous turn's cache read and the verdict counter: approved by David Amid 2026-11-22 (#1196)
 order: 210
 ---
 
