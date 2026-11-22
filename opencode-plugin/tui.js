@@ -92,8 +92,9 @@ function confirmRestart(api, state, kind, name) {
     onConfirm: async () => {
       api.ui.dialog.clear()
       const restarted = await runCommandScript(state, spec.script, ["set", name, "--restart"])
-      const ok = restarted.status === 0 && /result=restarted/.test(restarted.output)
-      toast(api, ok ? "success" : "error", ok ? `Proxy restarted with ${spec.what} "${name}".` : `Restart not applied. See proxy.log in ${state}`)
+      const already = restarted.status === 0 && /result=already_applied/.test(restarted.output)
+      const ok = restarted.status === 0 && /result=(restarted|already_applied)/.test(restarted.output)
+      toast(api, ok ? "success" : "error", ok ? (already ? `Proxy already uses ${spec.what} "${name}"; no restart needed.` : `Proxy restarted with ${spec.what} "${name}".`) : `Restart not applied. See proxy.log in ${state}`)
     },
   }))
 }

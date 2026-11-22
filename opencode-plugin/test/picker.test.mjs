@@ -71,7 +71,7 @@ test("the default is the proxy default, the alias is read as its new name, and a
   assert.match(head.reason, /not offered for openai/)
   assert.equal(resolveStrategy(FAKE_STRATEGIES, "nonsense", ["anthropic"]).name, "none")
   assert.deepEqual(effectiveSettings("/nonexistent-state", { preset: "ultrahigh", cacheStrategy: "5-min-ping" }), { preset: "ultrahigh", requestedStrategy: "5-min-ping" })
-  assert.deepEqual(effectiveSettings("/nonexistent-state", { preset: "bogus" }), { preset: "off", requestedStrategy: undefined })
+  assert.deepEqual(effectiveSettings("/nonexistent-state", { preset: "bogus" }), { preset: "off", requestedStrategy: undefined, presetReason: 'preset "bogus" is not a known preset; using off' })
 })
 
 test("the proxy gets cache.strategy at start, and the picker files hold only the offered rows", async () => {
