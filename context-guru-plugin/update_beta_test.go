@@ -1,9 +1,12 @@
 package plugin
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -54,6 +57,13 @@ func TestUpdateIsNewerOrdersVersionsLikeSemver(t *testing.T) {
 // It returns the output and whether the stub install ran.
 func updateBranchRun(t *testing.T, installed, latest, answer string) (string, bool) {
 	t.Helper()
+	out, _, ran := updateBranchRunEnv(t, installed, latest, answer)
+	return out, ran
+}
+
+// updateBranchRunEnv is updateBranchRun that also returns what the stub saw: "<UPGRADE> <VERSION>".
+func updateBranchRunEnv(t *testing.T, installed, latest, answer string) (string, string, bool) {
+	t.Helper()
 	requireTool(t, "bash")
 	dir, state, home := t.TempDir(), t.TempDir(), t.TempDir()
 	scripts := filepath.Join(dir, "scripts")
@@ -70,7 +80,7 @@ func updateBranchRun(t *testing.T, installed, latest, answer string) (string, bo
 		}
 	}
 	sentinel := filepath.Join(dir, "install-ran")
-	stub := "#!/bin/sh\necho \"$CONTEXT_GURU_UPGRADE\" > '" + sentinel + "'\n"
+	stub := "#!/bin/sh\necho \"$CONTEXT_GURU_UPGRADE $CONTEXT_GURU_VERSION\" > '" + sentinel + "'\n"
 	if err := os.WriteFile(filepath.Join(scripts, "install.sh"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -91,13 +101,14 @@ func updateBranchRun(t *testing.T, installed, latest, answer string) (string, bo
 	// our own). Without it, the branch was not taken and the stub cannot run.
 	if !strings.Contains(out, "updating the proxy in the background") {
 		_, err := os.Stat(sentinel)
-		return out, err == nil
+		return out, "", err == nil
 	}
 	testutil.WaitFor(t, "the stub install.sh ran", func() bool {
 		_, err := os.Stat(sentinel)
 		return err == nil
 	})
-	return out, true
+	seen, _ := os.ReadFile(sentinel)
+	return out, strings.TrimSpace(string(seen)), true
 }
 
 func TestStartProxyNeverUpdatesABetaToAnOlderStable(t *testing.T) {
@@ -263,5 +274,105 @@ func TestInsightsRaisesNoUpdateFindingForABetaAheadOfLatest(t *testing.T) {
 		if raised != c.raised {
 			t.Errorf("installed %s, latest %s: proxy-update raised=%v, want %v\n%s", c.installed, c.latest, raised, c.raised, out)
 		}
+	}
+}
+
+// TestStartProxyInstallsTheTagItNames (#1276). The notice names the tag the check found. The
+// background install must get that exact tag, not resolve "latest" again.
+func TestStartProxyInstallsTheTagItNames(t *testing.T) {
+	out, seen, ran := updateBranchRunEnv(t, "v0.7.3", "v0.7.4", "always")
+	if !ran || !strings.Contains(out, "(v0.7.3 -> v0.7.4)") {
+		t.Fatalf("no background update (install ran: %v):\n%s", ran, out)
+	}
+	if seen != "1 v0.7.4" {
+		t.Errorf("the install saw %q, want \"1 v0.7.4\" (UPGRADE=1, VERSION=<checked tag>)", seen)
+	}
+}
+
+// releaseFixture builds a fake `curl` and a fake release tarball for tag, with a fake proxy that
+// prints `proxy <tag>`. It serves the releases/latest redirect (as `latest`) and the download.
+func releaseFixture(t *testing.T, tag, latest string) (path string) {
+	t.Helper()
+	fix, bin := t.TempDir(), t.TempDir()
+	arch := map[string]string{"amd64": "amd64", "arm64": "arm64"}[runtime.GOARCH]
+	if arch == "" || (runtime.GOOS != "darwin" && runtime.GOOS != "linux") {
+		t.Skipf("no release fixture for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	name := "context-guru_" + strings.TrimPrefix(tag, "v") + "_" + runtime.GOOS + "_" + arch + ".tar.gz"
+	body := []byte("#!/bin/sh\necho 'context-guru-proxy " + tag + "'\n")
+	f, err := os.Create(filepath.Join(fix, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "pkg/context-guru-proxy", Mode: 0o755, Size: int64(len(body))}); err != nil {
+		t.Fatal(err)
+	}
+	tw.Write(body)
+	tw.Close()
+	gz.Close()
+	f.Close()
+	curl := "#!/bin/sh\nout=''; prev=''\nfor a in \"$@\"; do [ \"$prev\" = -o ] && out=$a; prev=$a; url=$a; done\n" +
+		"if [ \"$out\" = /dev/null ]; then printf 'https://github.com/rossoctl/context-guru/releases/tag/" + latest + "'; exit 0; fi\n" +
+		"cp '" + fix + "'/\"$(basename \"$url\")\" \"$out\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(curl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin + ":" + os.Getenv("PATH")
+}
+
+// runInstallExplicit runs install.sh with an installed proxy `installed`, a pinned `tag` and the
+// given extra env. It returns the output, the state dir and the dest dir.
+func runInstallExplicit(t *testing.T, installed, tag, latest string, extra ...string) (string, string, string) {
+	t.Helper()
+	requireTool(t, "bash")
+	requireTool(t, "python3")
+	path := releaseFixture(t, tag, latest)
+	_, dest := fakeReleaseTools(t, installed, latest)
+	// fakeReleaseTools put its own curl first; the fixture curl must win.
+	path = strings.SplitN(path, ":", 2)[0] + ":" + dest + ":" + os.Getenv("PATH")
+	if err := os.Remove(filepath.Join(dest, "curl")); err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	settingsIn(t, state, t.TempDir(), "update-check", "stamp", "--latest", latest)
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "install.sh"))
+	cmd.Env = sandboxEnv(t, append([]string{"PATH=" + path, "CONTEXT_GURU_DEST=" + dest, "CONTEXT_GURU_STATE=" + state,
+		"CONTEXT_GURU_INSECURE=1", "CONTEXT_GURU_VERSION=" + tag}, extra...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	return string(out), state, dest
+}
+
+// TestUpgradeWritesTheInstalledTagToTheUpdateRecord (#1276).
+func TestUpgradeWritesTheInstalledTagToTheUpdateRecord(t *testing.T) {
+	out, state, _ := runInstallExplicit(t, "v0.7.3", "v0.7.4", "v0.7.3", "CONTEXT_GURU_UPGRADE=1")
+	if got := facts(out)["result"]; got != "installed" {
+		t.Fatalf("result=%q, want installed\n%s", got, out)
+	}
+	shown, _ := settingsIn(t, state, t.TempDir(), "update-check", "show")
+	if shown["latest"] != "v0.7.4" || shown["installed"] != "v0.7.4" {
+		t.Errorf("record after the install: latest=%q installed=%q, want both v0.7.4", shown["latest"], shown["installed"])
+	}
+}
+
+// TestUpgradeRefusesAnExplicitTagThatIsNotNewer (#1276). The #1256 guard also holds for a pinned tag.
+func TestUpgradeRefusesAnExplicitTagThatIsNotNewer(t *testing.T) {
+	for _, tag := range []string{"v0.7.3", "v0.7.2"} {
+		out, _, _ := runInstallExplicit(t, "v0.7.3", tag, "v0.7.3", "CONTEXT_GURU_UPGRADE=1")
+		if got := facts(out)["result"]; got != "present" || strings.Contains(out, "result=installed") {
+			t.Errorf("UPGRADE=1 with pinned %s over v0.7.3: result=%q, want present\n%s", tag, got, out)
+		}
+	}
+}
+
+// TestPinnedTagStillInstallsWithoutUpgrade (#1276). The manual repair path installs any tag.
+func TestPinnedTagStillInstallsWithoutUpgrade(t *testing.T) {
+	out, _, _ := runInstallExplicit(t, "v0.7.3", "v0.7.2", "v0.7.3")
+	if got := facts(out)["result"]; got != "installed" {
+		t.Errorf("pinned older tag without UPGRADE: result=%q, want installed\n%s", got, out)
 	}
 }

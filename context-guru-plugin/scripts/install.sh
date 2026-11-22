@@ -1606,6 +1606,15 @@ if command -v "$BIN" >/dev/null 2>&1; then
     record_installed_version "$have"
     exit 0
   fi
+  # An upgrade never goes backwards, also with an explicit tag (#1276): the background update names
+  # the tag its check found. An older tag than the installed one is refused. Without
+  # CONTEXT_GURU_UPGRADE, an explicit tag still installs (the manual repair path).
+  if [ "$VERSION" != latest ] && [ -n "$have" ] && [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ] && ! latest_is_newer "$VERSION" "$have"; then
+    emit "result=present"
+    emit "note=${have} is not older than the requested release ${VERSION}; nothing to upgrade"
+    record_installed_version "$have"
+    exit 0
+  fi
   if [ -z "$have" ]; then
     emit "note=the installed binary does not support --version; it predates the release channel"
   fi
@@ -1670,6 +1679,11 @@ report_path() {
   emit "result=installed"
   emit "path=${DEST}/${BIN}"
   record_installed_version "$VERSION"
+  # An upgrade also writes the installed tag to the update-check record, so the record never
+  # names an older tag than the one on disk (#1276). Best effort: stamp fails open.
+  if [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ]; then
+    "$(route_here)/settings.py" update-check stamp --latest "$VERSION" >/dev/null 2>&1 || true
+  fi
   # Report — do not fix — a PATH that will not find it. Editing the user's shell rc is a bigger
   # intrusion than this script is entitled to, and the skill can tell them in context.
   case ":${PATH}:" in
