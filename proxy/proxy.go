@@ -462,9 +462,11 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	// The tracker needs a dashboard: the Result is attached to the recorded event.
 	if opts.Dashboard != nil {
 		h.savings = newSavingsTracker()
-		// The key of the start configuration. startAdaptOverride below may replace it with the override's; the
-		// state is restored after it, under the key of the configuration that runs.
-		h.savings.setConfig(accConfigKey(pipe, st != nil && st.Persists(), opts.InjectExpand, opts.BaseConfig))
+		if opts.AccountantState != "" {
+			h.savings.restore(opts.AccountantState, time.Now())
+			h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})
+			go h.savings.keepSaved(opts.AccountantState, h.stateStop, h.stateDone)
+		}
 	}
 	// The restart grace decides by the thread's own last cache refresh — its last request or
 	// a keep-alive ping that read the cache — and not by this process's start (#766). The
@@ -501,12 +503,6 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h.static.Store(&Tenancy{Preset: opts.Preset, Pipe: pipe, Store: st,
 		Shadow: h.shadow, Mode: h.mode(), Cache: opts.Cache})
 	h.startAdaptOverride()
-	h.savings.openConfig()
-	if h.savings != nil && opts.AccountantState != "" {
-		h.savings.restore(opts.AccountantState, time.Now())
-		h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})
-		go h.savings.keepSaved(opts.AccountantState, h.stateStop, h.stateDone)
-	}
 	h.limiter = NewLimiter(opts.Limits)
 	h.dispatcher()
 	if opts.CheapModel != nil {

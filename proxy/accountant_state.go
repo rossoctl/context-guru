@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/expand"
 )
 
 // A thread's state lives in memory in the library. Without a save, every restart drops the active
@@ -39,61 +35,6 @@ type accStateFile struct {
 	// Thinking is the count of each thinking block (savingsTracker.thinking): a key and a number each. A file
 	// written before it has none, and restores with an empty table.
 	Thinking json.RawMessage `json:"thinking,omitempty"`
-	// Config is accConfigKey of the proxy that wrote the file. A snapshot from another configuration is not restored.
-	Config string `json:"config,omitempty"`
-}
-
-// accConfigKey names the configuration whose changes a snapshot holds, hashed: the pipeline's components and flags,
-// the configuration document, and the inputs that decide each declaration the proxy adds. The library ends a change
-// that ADDED content (the expand or adjudicate declaration) only when the client edits before it. A proxy started
-// with another configuration may no longer add it, so the restored change stays active, and every later request of
-// that thread fails the sum check and books no saving (#1169). The key holds no request data.
-//
-// The two declarations follow the rules on the request path (proxy.go): expand is added when the mode allows it, the
-// store persists, and under auto the pipeline can offload (expand.Inject); adjudicate when extract_llm_sweep runs.
-// persists is the store's Persists, which the store flag sets outside the document.
-func accConfigKey(pipe *components.Pipeline, persists bool, injectExpand, doc string) string {
-	if injectExpand == "" {
-		injectExpand = expand.InjectAuto
-	}
-	addsExpand := injectExpand != expand.InjectNever && persists && (injectExpand != expand.InjectAuto || pipe.HasOffload())
-	return docHash(fmt.Sprint(pipe.Names(), pipe.TailBreakpoint(), pipe.InBandBreakpoint(), pipe.FixedRestore(),
-		injectExpand, addsExpand, pipe.Has("extract_llm_sweep"), doc))
-}
-
-// accConfigMixed is the key of state that holds the changes of two configurations: a live swap (an adapt apply or
-// revert) changed the pipeline after the state was restored. No start computes it, so no start restores that state.
-const accConfigMixed = "mixed"
-
-// setConfig names the configuration whose changes the state holds. Before openConfig (the start, where an adapt
-// override may replace the start pipeline) the key is replaced. After it, a different key means the state now holds
-// the changes of both configurations, so the next save writes accConfigMixed. Nil-safe.
-func (s *savingsTracker) setConfig(key string) {
-	if s == nil {
-		return
-	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	if s.configOpen && key != s.config {
-		key = accConfigMixed
-	}
-	s.config = key
-}
-
-// openConfig ends the start: the key is the running configuration's, and the state is restored under it. Nil-safe.
-func (s *savingsTracker) openConfig() {
-	if s == nil {
-		return
-	}
-	s.configMu.Lock()
-	s.configOpen = true
-	s.configMu.Unlock()
-}
-
-func (s *savingsTracker) configKey() string {
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	return s.config
 }
 
 // lastSaved holds the bytes of the last file written, so a save with no change skips the write.
@@ -114,7 +55,7 @@ func (s *savingsTracker) save(path string) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking, Config: s.configKey()})
+	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking})
 	if err != nil {
 		return err
 	}
@@ -202,10 +143,6 @@ func (s *savingsTracker) restore(path string, now time.Time) bool {
 	}
 	if err == nil && age > accStateMaxAge {
 		slog.Info("accountant: state file is older than any cache entry; only the thinking counts are restored", "path", path, "age", age.Round(time.Second))
-		return false
-	}
-	if err == nil && f.Config != s.configKey() {
-		slog.Info("accountant: state file is from another configuration; only the thinking counts are restored", "path", path)
 		return false
 	}
 	if err == nil {

@@ -294,9 +294,6 @@ func (h *Handler) reloadLocal(doc string) error {
 	t := *cur
 	t.Pipe, t.Preset = built.Pipe, built.Preset
 	h.static.Store(&t)
-	// At start this is the override's key. On a live swap the state already holds the old pipeline's changes, so
-	// the next save marks it as mixed and the next start does not restore it (#1169).
-	h.savings.setConfig(accConfigKey(t.Pipe, t.Store != nil && t.Store.Persists(), h.opts.InjectExpand, doc))
 	// A single-tenant proxy has no registry to announce the change, so say it here: the removal list in
 	// the running pipeline just changed, and a cached dashboard read of it is now wrong.
 	if h.api != nil {

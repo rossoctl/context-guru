@@ -274,11 +274,11 @@ func openCodeConversation(turns int) []byte {
 	return b
 }
 
-// A session that runs on under another pipeline after a restart. The saved thread state holds the expand
-// declaration that the first pipeline added (a change with no bytes before). The second pipeline does not add it,
-// and the library ends such a change only when the client edits before it. It stayed active, so every later
-// request failed the sum check with ops=-340 (the declaration's size) and bodies=0, and booked no saving (#1169).
-func TestStateOfAnotherPipelineIsNotRestored(t *testing.T) {
+// A session that runs on under another pipeline after a restart (#1169). The saved thread state holds the expand
+// declaration that the first pipeline added, a change with no bytes before. The second pipeline does not add it. With
+// accountant before v0.4.0 the change stayed active, so every later request failed the sum check with ops=-340 (the
+// declaration's size) and bodies=0, and booked no saving. accountant#93 ends such a change when the host stops adding it.
+func TestNoSumFailureAfterAPresetSwitchAndRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	up := billedUpstream(t)
 	defer up.Close()
@@ -290,10 +290,9 @@ func TestStateOfAnotherPipelineIsNotRestored(t *testing.T) {
 	pricedAfterRestart(t, run("preset: off\n", 3, 4))
 }
 
-// The same through an adapt change: the proxy starts with conservative, the adapt apply swaps in off, and
-// the restart runs off from the saved override. The key must name the configuration that runs, not the one
-// the proxy was started with, so the conservative thread state does not come back.
-func TestStateIsNotRestoredAfterAnAdaptChange(t *testing.T) {
+// The same through an adapt change: the proxy starts with conservative, the adapt apply swaps in off, and the
+// restart runs off from the saved override, with the thread state saved under conservative.
+func TestNoSumFailureAfterAnAdaptChangeAndRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	override := filepath.Join(t.TempDir(), "d.db.adapt.json")
 	const base = "preset: conservative\n"
@@ -335,21 +334,21 @@ func postOpenCodeTurns(t *testing.T, h *Handler, rec *dash.Recorder, tap *accTap
 	return tap.all()
 }
 
-// pricedAfterRestart fails when a request after the restart failed a check, or the second one has no
-// accountant result or fell back. The first is held out as a new thread's estimate.
+// pricedAfterRestart fails when a request after the restart has no accountant result, failed a check, or fell
+// back with check_sum.
 func pricedAfterRestart(t *testing.T, evs []dash.Event) {
 	t.Helper()
 	for i, e := range evs {
-		if res, ok := e.AccountantResult(); ok {
-			for _, c := range res.Checks {
-				t.Errorf("request %d after the restart: check failed: %s %s", i+1, c.Check, c.Detail)
-			}
+		res, ok := e.AccountantResult()
+		if !ok {
+			t.Errorf("request %d after the restart has no accountant result (fallback %q)", i+1, e.AccountantFallback())
+			continue
 		}
-	}
-	if _, ok := evs[1].AccountantResult(); !ok {
-		t.Errorf("second request after the restart has no accountant result (fallback %q)", evs[1].AccountantFallback())
-	}
-	if fb := evs[1].AccountantFallback(); fb != "" {
-		t.Errorf("second request after the restart fell back: %s", fb)
+		for _, c := range res.Checks {
+			t.Errorf("request %d after the restart: check failed: %s %s", i+1, c.Check, c.Detail)
+		}
+		if fb := e.AccountantFallback(); fb == dash.FallbackCheckSum {
+			t.Errorf("request %d after the restart fell back: %s", i+1, fb)
+		}
 	}
 }
