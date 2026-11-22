@@ -598,7 +598,10 @@ func (e *ExtractSweep) Offload(req *bschemas.BifrostChatRequest, rep *components
 	}()
 	// ONE "LIVE" VERDICT for the whole request (#1191 D4): shadow, the cold apply and the warm path all
 	// read it, so they cannot disagree on whether the cache is gone.
-	cold := sweepColdFor(c)
+	cold, why := sweepVerdict(c)
+	if why != "" {
+		rep.Event(eventVerdictPrefix + why)
+	}
 	// SHADOW MODE changes nothing: it reports what the apply would do (extract_sweep_shadow.go).
 	if e.shadow {
 		// Shadow stops NEW applies only. Drops this thread already made stay replayed, byte for byte,

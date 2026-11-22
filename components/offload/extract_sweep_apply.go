@@ -623,10 +623,46 @@ func sweepColdRequest(c *components.Ctx) bool {
 // live cache, and a held answer meets the warm gate, the stricter one: the worst case is a missed cold
 // apply, not a broken cache (#1196 review).
 func sweepColdFor(c *components.Ctx) bool {
-	if !sweepColdRequest(c) {
-		return false
+	cold, _ := sweepVerdict(c)
+	return cold
+}
+
+// The reasons of the cache verdict (#1196, the owner's counter). Each request counts exactly one, as the
+// event eventVerdictPrefix + reason. Counts only, no content.
+const (
+	eventVerdictPrefix = "sweep_cold_verdict_"
+	// verdictKnownCold: the phase is known and the cache is gone.
+	verdictKnownCold = "known_cold"
+	// verdictKnownWarm: the phase is known and the cache is live (warm or pre-expiry).
+	verdictKnownWarm = "known_warm"
+	// verdictUnknownPrefix: the phase is unknown, but the request has a known cached prefix.
+	verdictUnknownPrefix = "unknown_prefix"
+	// verdictUnknownLive: the phase is unknown, and the previous turn read the cache (the #1196 rule).
+	verdictUnknownLive = "unknown_live"
+	// verdictUnknownCold: the phase is unknown, and the previous turn read nothing.
+	verdictUnknownCold = "unknown_cold"
+)
+
+// sweepVerdict is sweepColdFor with its reason. Both come from one decision, so the counted reason
+// cannot differ from the verdict the sweep acts on.
+func sweepVerdict(c *components.Ctx) (cold bool, reason string) {
+	if c == nil {
+		return false, ""
 	}
-	return !(c.CachePhase(0) == components.CachePhaseUnknown && warmLastRead(thread.Key(c.Session, c.Thread)) > 0)
+	p := c.CachePhase(0)
+	if !ColdApplyPhase(p) {
+		return false, verdictKnownWarm
+	}
+	if p != components.CachePhaseUnknown {
+		return true, verdictKnownCold
+	}
+	if c.CacheAware && c.MaxCachedIdx >= 0 {
+		return false, verdictUnknownPrefix
+	}
+	if warmLastRead(thread.Key(c.Session, c.Thread)) > 0 {
+		return false, verdictUnknownLive
+	}
+	return true, verdictUnknownCold
 }
 
 // maxApplyAttempts bounds how often a panicking cold apply gives the answer back.
