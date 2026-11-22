@@ -429,7 +429,7 @@ if [ "\${managed:-no}" != "yes" ]; then
 fi
 # The binary says what it is. install.env can be out of date. A binary that does not know --version
 # may start serving instead, so it gets a loopback port 0 and is stopped after 5 s, as in reportedVersion.
-reported=$( { LISTEN_ADDR=127.0.0.1:0 CONFIG= "$binary" --version 2>/dev/null & pid=$!; ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & watch=$!; wait "$pid"; kill "$watch" 2>/dev/null; } | head -1 | sed -n 's/^context-guru-proxy v\\{0,1\\}\\([0-9][A-Za-z0-9._-]*\\).*/v\\1/p')
+reported=$( { LISTEN_ADDR=127.0.0.1:0 CONFIG= "$binary" --version 2>/dev/null & pid=$!; ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & watch=$!; wait "$pid"; kill "$watch" 2>/dev/null; } 2>/dev/null | head -1 | sed -n 's/^context-guru-proxy v\\{0,1\\}\\([0-9][A-Za-z0-9._-]*\\).*/v\\1/p')
 if [ -n "$reported" ]; then version=$reported; fi
 latest=$(curl -fsSI --max-time 10 "$RELEASES/latest" 2>/dev/null | tr -d '\\r' | sed -n 's/^[Ll]ocation:.*\\/tag\\///p' | head -1)
 case "$latest" in

@@ -186,6 +186,8 @@ test("the update check stops a binary that never answers --version", async () =>
     assert.equal(check.status, 0, check.out)
     assert.match(check.out, /^latest=v0\.7\.3$/m)
     assert.match(check.out, /^result=available$/m)
+    // The stopped binary must not leave a shell job notice ("Killed: 9") in the command output.
+    assert.doesNotMatch(check.out, /Killed/)
   } finally {
     server.close()
     restore()
