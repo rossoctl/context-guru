@@ -8,8 +8,8 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // cachePhaseAt classifies the cache phase of an entry last touched at prevStartedAt, for a

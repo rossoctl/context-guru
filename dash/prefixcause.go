@@ -1,6 +1,6 @@
 package dash
 
-import "github.com/rossoctl/context-guru/internal/thread"
+import "github.com/rossoctl/context-guru/thread"
 
 // PrefixFacts is what one request tells us about its cache prefix, as hashes, counts and flags.
 // No request body is stored. Recorder.ObservePrefix keeps the latest one per thread and compares

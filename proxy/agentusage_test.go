@@ -16,7 +16,7 @@ import (
 func everyFieldSet(t *testing.T) Usage {
 	t.Helper()
 	u := Usage{
-		Searches: 2, SearchLoaded: []string{"Read"}, SearchDropped: 1, Live: &LiveFacts{},
+		Searches: 2, SearchLoaded: []string{"Read"}, SearchDropped: 1, Live: &LiveFacts{}, PrefixRewritten: true,
 		FreshInput: 11, CacheRead: 22, CacheWrite: 33, Output: 44, CacheWrite1h: 5,
 		StopReason: "stop", Backend: "A", ToolUseNames: []string{"Bash"}, ToolUseIncomplete: true,
 		ToolParams: ToolParams{TimeoutMs: 1, HasTimeout: true}, Spawn: Spawn{N: 1},

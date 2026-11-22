@@ -124,7 +124,7 @@ func TestStrategiesJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Default != "auto" || len(v.Strategies) != 6 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
+	if v.Default != "auto" || len(v.Strategies) != 7 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
 		t.Fatalf("bad json: %s", b)
 	}
 }
@@ -141,7 +141,7 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 6 {
+	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 7 {
 		t.Fatalf("bad json: %s", b)
 	}
 	for _, s := range v.Strategies {
@@ -212,8 +212,38 @@ func TestClaudeCodeOfferIsUnchangedByTheOpenAITags(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head"}
+	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head", "1-hour-on-wait"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Claude Code would offer %v, want %v", got, want)
+	}
+}
+
+// #1243: 1-hour-on-wait keeps auto's keep-alive keys and adds the one-hour-on-wait switch.
+func TestOneHourOnWaitStrategy(t *testing.T) {
+	c, err := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadBytes([]byte("cache:\n  strategy: auto\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Cache.KeepAliveOneHourOnWait || c.Cache.HeadTTL1h {
+		t.Fatalf("flags wrong: %+v", c.Cache)
+	}
+	norm := func(x CacheConfig) CacheConfig { x.Strategy, x.KeepAliveOneHourOnWait = "", false; return x }
+	if !reflect.DeepEqual(norm(c.Cache), norm(a.Cache)) {
+		t.Errorf("keep-alive keys differ from auto:\n%+v\n%+v", norm(c.Cache), norm(a.Cache))
+	}
+	if a.Cache.KeepAliveOneHourOnWait {
+		t.Error("auto must not switch it on")
+	}
+	row, _ := LookupStrategy("1-hour-head")
+	if strings.Contains(row.Desc, "SILENTLY DOWNGRADED") || strings.Contains(row.Desc, "$0") ||
+		!strings.Contains(row.Desc, "history") || !strings.Contains(row.Desc, "2026-11-19") || !strings.Contains(row.Desc, "claude-opus-5-5") {
+		t.Errorf("1-hour-head description is wrong: %s", row.Desc)
+	}
+	if on, _ := LookupStrategy("1-hour-on-wait"); !on.Spends {
+		t.Error("1-hour-on-wait sends pings, so it spends")
 	}
 }

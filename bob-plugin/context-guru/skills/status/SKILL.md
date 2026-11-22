@@ -21,6 +21,11 @@ Report these facts in plain words:
   back, `deferred_tokens` is the tool tokens not sent, `add_backs` is the tools a search brought
   back, `wrong_guesses` is the held-back tools a search loaded, `turned_off` and `break` above 0
   mean the proxy stopped deferral at least once since it started. Leave out a line that is not printed.
+- `sweep_v3_dropped_<rule>=` and `sweep_v3_expanded_<rule>=` (only when the sweep runs v3): how many
+  tool outputs each rule, or the judge (`judge`), dropped on Bob's route, and how many of those drops
+  the model asked to get back. They count over the history the dashboard keeps (it prunes old rows),
+  also across a proxy restart. Expanded divided by dropped is the rule's expand rate. Leave out a line
+  that is not printed. `sweep_v3_error=` names a failed read of these counts.
 - `result=ok`: all of these are good, and Bob traffic came in the last 24 hours.
 - `result=no_bob_traffic`: the setup is there, but Bob does not use it. Give `hint=`. Bob may have
   started from a terminal or after a self-update. Quit Bob and open it from the Dock.

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,11 +19,11 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/session"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -84,6 +85,9 @@ type capture struct {
 	sweepExpandTok int
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
+	// sweepExpandRules counts first expands of a sweep v3 drop by what chose it: a rule name, or "judge"
+	// (#1191). finish adds them to the sweep's component row as sweep_v3_expanded_<rule> events.
+	sweepExpandRules map[string]int
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
@@ -107,7 +111,7 @@ type capture struct {
 	meta dash.Meta
 	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
 	predArrival *predictive.Arrival
-	// thread is the session thread this request belongs to (see internal/thread), set by
+	// thread is the session thread this request belongs to (see package thread), set by
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread    string
@@ -138,11 +142,10 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
-	// raisePlan tells the keeper the wait cause the writer found for this turn (#1225); nil: none.
-	// The writer calls it right after its in-order ObserveWith, so the keeper's plan, built at response
-	// time from the counts of the request before, rises to the background count in time (the first
-	// ping is minutes away). Metadata only.
-	raisePlan func(tenant, session, thread, cause string) (int, bool)
+	// early is this request's early wait-cause scan (earlyscan.go); nil: none was started. scanStat is the
+	// handler's counters.
+	early    *earlyScan
+	scanStat *scanStats
 	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
 	terminal []string
 	// The alias derivation's other inputs (#766): the pipeline that will transform this
@@ -185,8 +188,12 @@ type capture struct {
 	// and the accountant figure must not be booked.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
-	pings  *PingStore
-	accReq *accountant.Request
+	pings *PingStore
+	// endpoint and readSets tell the accountant whether a read sets the TTL on this route
+	// (Provider.ReadSetsTTL). readSets is the keeper's readSetsTTL; nil = never.
+	endpoint string
+	readSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
+	accReq   *accountant.Request
 	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
 	// holds its history, so the accountant has no record of it.
 	accServerHeldHistory bool
@@ -240,10 +247,9 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		waits:    h.waits,
 		terminal: h.opts.TerminalTools,
 		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
-		observe:   tn.Mode == components.ModeObserve,
-		authSub:   provider == string(bschemas.Anthropic) && callerIsSubscription(r),
-		hosted:    h.opts.Tenants != nil,
-		raisePlan: h.raiseWaitPlan,
+		observe: tn.Mode == components.ModeObserve,
+		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
+		hosted:  h.opts.Tenants != nil,
 	}
 }
 
@@ -311,6 +317,19 @@ func (c *capture) noteAgentCompaction(v bool) {
 	if c != nil {
 		c.agentComp = v
 	}
+}
+
+// noteReadSets gives the capture the upstream and the keeper's proof, for Provider.ReadSetsTTL. Nil-safe.
+func (c *capture) noteReadSets(endpoint string, f func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool) {
+	if c != nil {
+		c.endpoint, c.readSets = endpoint, f
+	}
+}
+
+// prefixRewritten says the client rewrote the prefix of this request: the agent's own compaction came just
+// before it, or the tracker found the thread forks or rewinds another one. Nil-safe.
+func (c *capture) prefixRewritten() bool {
+	return c != nil && ((c.compKnown && c.compVerdict != "") || c.hasInherit)
 }
 
 // noteThread records which thread of the session this request belongs to.
@@ -582,6 +601,36 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 			c.sweepFalseExpWarm++
 		}
 	}
+	for rule, n := range note.Rules {
+		if c.sweepExpandRules == nil {
+			c.sweepExpandRules = map[string]int{}
+		}
+		c.sweepExpandRules[rule] += n
+	}
+}
+
+// addSweepExpandEvents puts the first expands of sweep v3 drops, by rule, on the sweep's component row
+// of this request, beside the drops it raised per rule (sweep_v3_dropped_<rule>). The dashboard keeps
+// the row with the request's route and sums its events, so the expand rate per rule reads per route,
+// across a restart (#1191). A request with no sweep row (the sweep was not in its pipeline) keeps only
+// the request-level counts.
+func addSweepExpandEvents(e *dash.Event, rules map[string]int) {
+	for i := range e.Components {
+		row := &e.Components[i]
+		if row.Component != "extract_llm_sweep" {
+			continue
+		}
+		// A copy: the row shares the component report's own map (dash.Event.FromTrace).
+		events := maps.Clone(row.Events)
+		if events == nil {
+			events = map[string]int{}
+		}
+		row.Events = events
+		for rule, n := range rules {
+			row.Events["sweep_v3_expanded_"+rule] += n
+		}
+		return
+	}
 }
 
 // deferFacts is what tool deferral did on one request, for the dashboard row (#869).
@@ -679,7 +728,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// never completed with a 2xx. status 0 (never reached an upstream) is deliberately NOT
 	// "failed" — ClassifyWaitingFor's own !usageOK-and-no-stop-reason fallback already reads
 	// that case as WaitingUnknown rather than WaitingRetry.
-	raise := c.raisePlan
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
 	toolParams, spawn := usage.ToolParams, usage.Spawn
@@ -691,9 +739,23 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
 	var normMsgs []bschemas.ChatMessage
 	var normDone bool
+	early, scanStat := c.early, c.scanStat
 	norm := func() []bschemas.ChatMessage {
 		if !normDone {
-			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+			// The scan that ran while the request was upstream already normalized this body: reuse it when it
+			// is ready, else normalize here, as before. The check never blocks.
+			if r := early.result(); r != nil {
+				normMsgs = r.Messages()
+				if scanStat != nil {
+					scanStat.writerEarly.Add(1)
+				}
+			} else {
+				normMsgs = apply.NormalizeMessages(provider, waitBody)
+				if scanStat != nil && early != nil {
+					scanStat.writerOwn.Add(1)
+				}
+			}
+			normDone = true
 		}
 		return normMsgs
 	}
@@ -711,13 +773,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
 			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
-		// The keeper planned this turn from the counts of the request before. Tell it the cause of
-		// this turn when it is background work (#1225). It only raises the count, and never blocks.
-		if raise != nil && waitingFor == waitcause.WaitingBackground {
-			if n, ok := raise(tenantID, sessionID, threadID, waitingFor); ok {
-				e.KAPlannedPings = &n
-			}
-		}
 		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
@@ -751,6 +806,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	addSweepExpandEvents(e, c.sweepExpandRules)
 	if d := c.deferFacts; d != nil {
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
@@ -1125,4 +1181,29 @@ func clientEntrypoint(ua string) string {
 		return "cli"
 	}
 	return "other"
+}
+
+// startEarlyScan starts the early wait-cause scan of body (earlyscan.go). It needs the tracker (the dashboard
+// is on) and a non-empty body. Nil-safe.
+func (c *capture) startEarlyScan(h *Handler, ctx context.Context, provider bschemas.ModelProvider, body []byte) {
+	if c == nil || h == nil || h.waits == nil || len(body) == 0 {
+		return
+	}
+	c.scanStat = &h.scan
+	c.early = startEarlyScan(ctx, provider, body, h.scanGate, h.scanDone)
+}
+
+// stopEarlyScan ends the scan's work in progress when the request is over. Nil-safe.
+func (c *capture) stopEarlyScan() {
+	if c != nil {
+		c.early.stop()
+	}
+}
+
+// earlyOpenTasks is the keeper's non-blocking take of the early scan at response end. Nil-safe.
+func (c *capture) earlyOpenTasks(h *Handler) *keepalive.TaskCounts {
+	if c == nil || h == nil {
+		return nil
+	}
+	return c.early.openTasks(&h.scan)
 }

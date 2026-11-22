@@ -101,6 +101,9 @@ func pingFromReport(r components.KeepAliveReport) accountant.Ping {
 		Usage: accountant.CallUsage{Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
 			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)}, Output: int(r.Output)},
 		At: pingStart(r), Window: r.Window,
+		// The TTL the ping asked: 1 hour for a 1-hour-on-wait ping (every marker relabelled). A plain ping
+		// leaves it 0 (not known): the library then judges the entry by the previous request's markers.
+		TTL: oneHourIf(r.OneHour),
 	}
 }
 
@@ -148,3 +151,11 @@ var (
 	pingOps              = accountant.PingOps
 	accountantStandalone = accountant.ComputeStandalone
 )
+
+// oneHourIf is time.Hour when on, else 0.
+func oneHourIf(on bool) time.Duration {
+	if on {
+		return time.Hour
+	}
+	return 0
+}

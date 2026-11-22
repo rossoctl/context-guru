@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/testutil"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 const twoHours = int64(2 * 60 * 60 * 1000)
