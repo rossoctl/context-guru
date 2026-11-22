@@ -76,7 +76,7 @@ cache:
 ### A named strategy
 
 `cache.strategy` sets several keys at once from a built-in table: `none`, `auto`, `1-ping`,
-`2-ping`, `1-hour-head`, `1-hour-on-wait`, `30-min-ping` (the Codex name). The alias `5-min-ping` means `auto`.
+`2-ping`, `1-hour-head`, `1-hour-on-wait`, `1-hour-always`, `30-min-ping` (the Codex name). The alias `5-min-ping` means `auto`.
 
 ```yaml
 cache:
@@ -86,17 +86,14 @@ cache:
 
 - `1-hour-head` asks for the 1-hour cache on `tools` and `system` only, and turns the pings off.
   The message history stays on the 5-minute cache, so it goes cold after 5 idle minutes.
-- `1-hour-on-wait` (#1243) is `auto` with one change, for the **main agent only**, on a **long wait** (a person,
-  a teammate, background work, or an unknown cause): the first ping, at the usual time, carries every cache marker at the
-  1-hour tier, and it is the **only** ping of that wait (no 59-minute ping). On the gateway measured on
-  2026-11-19 that switch is a read, not a rewrite, so one read at 0.1x keeps the prompt for 1 hour and no
-  request pays the 2x write premium. A tool wait and **every subagent thread** behave as in `auto` (5-minute pings). If a summary or sweep substitute takes that first ping, it renews the entry for only 5 minutes, so the 1-hour ping follows it (never substituted) and the wait still ends at 1 hour. The proxy
-  treats the grant as unknown until it is proven: the first long wait on a provider, endpoint, route and
-  model is a probe. If the thread returns more than 5 minutes later and still reads the prompt, the route
-  is proven. If the return is a cold rebuild, or the ping itself rewrote the prompt (expected on Anthropic
-  first-party, not tested), the route is switched off and falls back to `auto`. A manager's stored
-  strategy can switch it on too (`one_hour_on_wait`), for local and hosted installs alike. Opt-in; no
-  default changes.
+- `1-hour-on-wait` is `auto`, but on a long wait of the **main agent** the first ping moves the entry to 1 hour and is
+  the only ping. On a route where that switch costs a rewrite, it falls back to mode D: a main thread switches to 1
+  hour at its first cold rebuild of a prefix of at least `keepalive_one_hour_rebuild_tokens` (150,000; `-1` turns D off), with no pings
+  after. A manager's stored strategy can switch it on too (`one_hour_on_wait`). Opt-in; no default changes.
+- `1-hour-always` (mode C) writes at 1 hour from the first request of the main agent, with no pings on it.
+  **On most users it does not pay off:** hosted, 97 main sessions, +22% cost against `auto`, 77 worse, the premium 39% of
+  the cost; the owner's laptop -25%. It is an explicit opt-in (`keepalive_one_hour_always`), never a default. A manager's stored strategy can set it too (`one_hour_always`), for local and hosted installs alike, with the same warning: a manager sets it knowingly, and it only turns the mode on.
+- All the modes, for the main agent and for subagents, with the numbers: [Choose a cache strategy](cache-strategies.md).
 - A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
 - No `strategy` key: nothing changes.
 - An unknown name stops the proxy with a config error.

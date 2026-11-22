@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -543,5 +544,92 @@ func TestStoredStrategyTurnsOnTheOneHourOnWaitPing(t *testing.T) {
 	// A strategy cannot turn the account's own setting OFF.
 	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourOnWait: true}, at); !pol.OneHourOnWait {
 		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}
+
+// #1261: the apply hook of the 1-hour modes asks the keeper only for the main thread with tools declared,
+// and only when the account's policy turns a mode on. C (the opt-in) needs no probe.
+func TestOneHourFirstHookFollowsThePolicy(t *testing.T) {
+	f := newMgrFixture(t)
+	body := []byte(`{"model":"aws/claude-sonnet-5"}`)
+	hook := func(cache CachePolicy) func(session, threadID, model string, tools bool) bool {
+		return f.h.oneHourFirstFor(&reqInfo{tn: &Tenancy{ID: "acct", Cache: cache}, body: body, provider: bschemas.Anthropic,
+			endpoint: "http://up", route: "/v1/messages"})
+	}
+	base := CachePolicy{KeepAlive: true, Idle: 240 * time.Second, MaxPings: 2}
+	if h := hook(base); h == nil || h("s1", "", "m", true) {
+		t.Error("a policy with no 1-hour mode relabelled a request")
+	}
+	on := base
+	on.OneHourAlways = true
+	h := hook(on)
+	if !h("s2", "", "m", true) {
+		t.Error("the opt-in did not put a new main thread at 1 hour from its first request")
+	}
+	if h("s3", "a:agent", "m", true) || h("s3", "", "m", false) || h("", "", "m", true) {
+		t.Error("a subagent, a request with no tools, or one with no session was relabelled")
+	}
+	// D without a costly route (no probe ran): auto, nothing relabelled.
+	d := base
+	d.OneHourOnWait = true
+	if hook(d)("s4", "", "m", true) {
+		t.Error("1-hour-on-wait relabelled a request on a route that is not costly")
+	}
+}
+
+// #1261: a manager's stored strategy MAY set 1-hour-always (mode C), like one_hour_on_wait: no hosted/local
+// difference. It only turns it ON. It is the manager's knowing choice: on most users it does not pay off.
+func TestStoredStrategyTurnsOnTheOneHourAlwaysMode(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+
+	body := `{"name":"1h always","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_always":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	w, out := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	if out["one_hour_always"] != true || out["one_hour_on_wait"] != false {
+		t.Errorf("the response does not report one_hour_always alone: %v", out)
+	}
+	id, _ := out["id"].(string)
+	pol, applied := f.h.keeper.applyStrategy(userID, CachePolicy{WaitPlan: true}, at)
+	if applied != id || !pol.OneHourAlways || pol.OneHourOnWait || !pol.WaitPlan {
+		t.Fatalf("the stored strategy did not turn mode C on for a hosted tenant: applied=%q policy=%+v", applied, pol)
+	}
+	w, _ = f.do(t, http.MethodPatch, "/api/keepalive/strategies/"+id, `{"one_hour_always":false}`, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch = %d: %s", w.Code, w.Body)
+	}
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); pol.OneHourAlways {
+		t.Error("the strategy still turned the mode on after it was patched off")
+	}
+	// A strategy cannot turn the account's own setting OFF.
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourAlways: true}, at); !pol.OneHourAlways {
+		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}
+
+// A parked account that keeps D off (-1) keeps it when a manager strategy switches 1-hour-on-wait on: the
+// strategy fills the switch and leaves the account's threshold alone.
+func TestAStoredStrategyLeavesTheAccountsDOffAlone(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+	body := `{"name":"1h on wait","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_on_wait":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	if w, _ := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar); w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourRebuildTokens: -1}, at)
+	if !pol.OneHourOnWait || pol.OneHourRebuildTokens != -1 {
+		t.Errorf("policy = onWait %v rebuild %d, want the switch on and the account's -1 kept", pol.OneHourOnWait, pol.OneHourRebuildTokens)
 	}
 }

@@ -28,6 +28,8 @@ export type ThreadView = {
   writeTier?: '5m' | '1h'
   /** The 1-hour clock is a free 1-hour ping's on a route not yet proven to grant it: the clock is drawn with `1h?`. */
   isUnproven: boolean
+  /** The last touch was a free 1-hour ping: the entry is at 1 hour and a manual ping would shorten it, so no Ping button. */
+  isFreeHourPing: boolean
   /** Seconds until the next automatic ping, only while it fires before the entry expires. */
   nextPingS?: number
   /** The last touch was a keep-alive ping; a keep-alive plan exists. Together they are the clock's `↻`. */

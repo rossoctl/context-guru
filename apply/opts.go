@@ -113,6 +113,12 @@ type Opts struct {
 	// cannot affect anything today because this is off, but it is the one way this field
 	// touches shared behaviour.
 	HeadTTL1h bool
+	// OneHourFirst asks the host whether THIS request must carry the 1-hour tier on EVERY existing cache
+	// breakpoint (tools, system and messages): the 1-hour-on-wait strategy on a route where the switch from 5
+	// minutes costs a rewrite, so the main thread writes at 1 hour from its first request (#1261). It is
+	// asked at the end of apply, once the thread and the session are known, with the model of the FINAL
+	// body (the one the keeper keys its route state by) and whether the body declares tools. It adds no breakpoint and changes no other request. nil never relabels.
+	OneHourFirst func(session, threadID, model string, toolsDeclared bool) bool
 	// HeadTTLMinBytes is the size gate on HeadTTL1h, in bytes of the request body. 0 disables the
 	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
 	// configuration asks for nothing instead of asking on every request.
