@@ -245,11 +245,12 @@ func (im *InferenceMetrics) observeCacheMiss(ctx context.Context, e *dash.Event,
 
 // missCostUSD is the avoidable write premium (docs/metrics/spec.md 5.4): what the written prefix
 // cost above a read of the same tokens. Each write tier is priced at its own rate, as the bill
-// is: every written token pays (5-minute write rate - read rate), and the part billed at the
-// 1-hour tier (CacheWrite1h, a part of CacheWrite) pays the 1-hour premium on top
-// (Price.CacheWrite1hPremium, the one place that premium is taken). Output and fresh input are
-// not in it: a hit would have paid them too. It is zero for a model with no rate. It does not
-// default.
+// is: a 5-minute token pays (5-minute write rate - read rate), and a token billed at the 1-hour
+// tier (CacheWrite1h, a part of CacheWrite) pays (1-hour write rate - read rate), the same
+// split dash/keepalive.go prices a lapse with. Each part is never below zero. Output and fresh
+// input are not in it: a hit would have paid them too. It is zero for a model with no price. A
+// tier rate the price leaves blank is the model's standard multiple of its input rate, as
+// Price.Resolved fills it (#1248).
 func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 	if im.prices == nil || e.CacheWrite <= 0 {
 		return 0
@@ -259,12 +260,13 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 		return 0
 	}
 	p = p.Resolved(e.Model)
+	w1h := min(max(e.CacheWrite1h, 0), e.CacheWrite)
 	usd := 0.0
 	if prem := p.CacheWrite - p.CacheRead; prem > 0 {
-		usd = float64(e.CacheWrite) * prem
+		usd += float64(e.CacheWrite-w1h) * prem
 	}
-	if e.CacheWrite1h > 0 {
-		usd += float64(min(e.CacheWrite1h, e.CacheWrite)) * p.CacheWrite1hPremium()
+	if prem := p.CacheWrite1h() - p.CacheRead; prem > 0 && w1h > 0 {
+		usd += float64(w1h) * prem
 	}
 	return usd
 }

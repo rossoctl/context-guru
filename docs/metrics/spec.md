@@ -359,16 +359,20 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 6. `prefix_change`: the tools, the system prompt, or the effort or thinking settings changed.
 7. `other`: anything else, for example parallel requests (`concurrent`) or a miss with no measured difference.
 
-A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it. It does not guess.
+Rules 3 to 6 apply only when the request wrote cache tokens. A changed prefix that wrote nothing re-created no prefix, so it is `other`. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it. It does not guess.
 
 **The miss cost is the write premium.** It is what the written prefix cost above a read of the same tokens, which is what a hit would have charged:
 
 ```
-miss_cost_usd = cache_write       x (cache_write_5m_rate - cache_read_rate)
-              + cache_write_1h    x (cache_write_1h_rate - cache_write_5m_rate)
+miss_cost_usd = (cache_write - cache_write_1h) x (cache_write_5m_rate - cache_read_rate)
+              +  cache_write_1h                x (cache_write_1h_rate - cache_read_rate)
 ```
 
-`cache_write` is all written tokens. `cache_write_1h` is the part of them billed at the 1-hour tier. Each term is never below zero. Output and fresh input are not in it, because a hit pays them too. A model with no rate counts the miss in `llm_cache_misses_total` and books no money here. It does not use a fallback rate.
+- `cache_write` is all written tokens. `cache_write_1h` is the part of them billed at the 1-hour tier, never more than `cache_write`.
+- Each term is never below zero.
+- Output and fresh input are not in it, because a hit pays them too.
+- **Rates.** A rate the price states is used as it is. A tier rate the price leaves blank is the model's standard multiple of its input rate, as `internal/modelinfo` resolves it (`Price.Resolved`, #1248). No gateway states `cache_write_1h_rate`, so it is always derived (`Price.CacheWrite1hFor`): when the operator sets `Write1hFrac`, it is that multiple of the input rate and never below `cache_write_5m_rate`; else it is 2.0x the input rate (`AnthropicCacheWrite1hFrac`).
+- A model with no price counts the miss in `llm_cache_misses_total` and books no money here.
 
 ### 5.5 Proxy health
 
