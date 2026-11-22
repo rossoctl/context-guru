@@ -110,8 +110,8 @@ func (k *Keeper) ReadSetsTTL(provider bschemas.ModelProvider, endpoint, route, m
 }
 
 // oneHourClaim decides, at fire time, whether this ping may be the 1-hour ping. A proven route always
-// may. An unknown route may for ONE wait at a time (the probe). An off route may not.
-func (k *Keeper) oneHourClaim(rk string) bool {
+// may. An unknown route may for ONE wait at a time (the probe: probe is true then). An off route may not.
+func (k *Keeper) oneHourClaim(rk string) (ok, probe bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[rk]
@@ -124,14 +124,14 @@ func (k *Keeper) oneHourClaim(rk string) bool {
 	}
 	switch {
 	case st.off:
-		return false
+		return false, false
 	case st.proven:
-		return true
+		return true, false
 	case k.now().Before(st.probeUntil):
-		return false // another wait is probing this route
+		return false, false // another wait is probing this route
 	}
 	st.probeUntil = k.now().Add(oneHourProbeTTL)
-	return true
+	return true, true
 }
 
 // oneHourRoutesMax bounds the route map. Routes are few; past it the map starts over.
@@ -164,7 +164,7 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 	expired := start.After(e.refreshedAt.Add(e.cacheTTL()))
 	k.mu.Unlock()
 	if status < 200 || status >= 300 || prefix <= 0 || expired {
-		k.oneHourRelease(rk)
+		k.oneHourRelease(rk, "the ping failed or landed on an entry that had already expired")
 		return
 	}
 	read, write := float64(u.CacheRead), float64(max(u.CacheWrite, u.CacheWrite1h))
@@ -172,6 +172,13 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 	case read >= oneHourFreeRead*prefix && write <= oneHourFreeWrite*prefix:
 		k.mu.Lock()
 		st := k.oneHourRoutes[rk]
+		// The last touch of this thread was a FREE 1-hour ping: until its next real request, or an hour
+		// from the ping, the clock counts an hour from it (OneHourTouches). Kept apart from the entry,
+		// which the keeper forgets after about 8 minutes.
+		if len(k.oneHourTouches) >= MaxTurnKeys {
+			k.oneHourTouches = map[string]oneHourTouch{}
+		}
+		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk}
 		if st != nil && st.proven {
 			e.ttl1h = true // a route proven to grant: from now until the next real request it is a 1-hour session
 		} else {
@@ -186,17 +193,23 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 			"cache_read", u.CacheRead, "cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h,
 			"expected_prefix", int64(prefix))
 	default:
-		k.oneHourRelease(rk)
+		k.oneHourRelease(rk, "the ping's usage was neither a free nor a costly switch")
 	}
 }
 
-// oneHourRelease lets another wait probe the route.
-func (k *Keeper) oneHourRelease(rk string) {
+// oneHourRelease lets another wait probe the route. why names the reason in the INFO line. It logs only
+// when a probe was held (a route that was never probing has nothing to release).
+func (k *Keeper) oneHourRelease(rk, why string) {
 	k.mu.Lock()
+	held := false
 	if st := k.oneHourRoutes[rk]; st != nil && !st.proven {
+		held = !st.probeUntil.IsZero()
 		st.probeUntil = time.Time{}
 	}
 	k.mu.Unlock()
+	if held {
+		slog.Info("context-guru: 1-hour probe released; it proved nothing", "route", rk, "why", why)
+	}
 }
 
 // oneHourSwitchOff turns the route off for the life of the process, with one WARN.
@@ -225,6 +238,7 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 	k.mu.Lock()
 	p, ok := k.oneHourProbes[key]
 	delete(k.oneHourProbes, key)
+	delete(k.oneHourTouches, key) // a real request is the next touch: the 1-hour clock ends
 	k.mu.Unlock()
 	if !ok {
 		return
@@ -236,13 +250,19 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 	// A return on another model, or after the client rewrote the prefix (a compaction, a fork), reads cold
 	// whatever the cache tier is: it proves nothing about the grant. The probe is not resolved.
 	case !usageOK || gap <= 5*time.Minute || gap > time.Hour || prefixRewritten || (model != "" && model != p.model):
-		k.oneHourRelease(p.route)
+		k.oneHourRelease(p.route, "the return came inside 5 minutes, after an hour, on another model, or after the client rewrote the prefix")
 	case float64(u.CacheRead) >= oneHourFreeRead*prefix:
 		k.mu.Lock()
+		newly := false
 		if st := k.oneHourRoutes[p.route]; st != nil && !st.off {
+			newly = !st.proven
 			st.proven, st.probeUntil = true, time.Time{}
 		}
 		k.mu.Unlock()
+		if newly {
+			slog.Info("context-guru: 1-hour keep-alive grant proven; the entry outlived 5 minutes after the ping",
+				"route", p.route, "model", p.model, "cache_read", u.CacheRead, "expected_prefix", p.prefix, "gap", gap.String())
+		}
 	case float64(u.CacheRead) < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
 		// A cold REBUILD: it read almost nothing and wrote the prefix back. A return that read and wrote
 		// nothing (an uncacheable request) is not one.
@@ -251,6 +271,45 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 			"the entry did not outlive 5 minutes after the 1-hour ping (a silent downgrade)",
 			"cache_read", u.CacheRead, "expected_prefix", p.prefix, "gap", gap.String())
 	default:
-		k.oneHourRelease(p.route)
+		k.oneHourRelease(p.route, "the return read part of the prefix")
 	}
+}
+
+// oneHourTouch is the fact "the last touch of this thread was a free 1-hour ping". Metadata only.
+type oneHourTouch struct {
+	key   Key
+	at    time.Time // when the ping started
+	route string
+}
+
+// OneHourTouch is what the dashboard needs of it.
+type OneHourTouch struct {
+	At time.Time
+	// Proven is true when the route is proven to grant the 1-hour tier. While it is false the clock is a
+	// belief the first return will test: the band shows "1h?".
+	Proven bool
+}
+
+// OneHourTouches lists, by thread id, the threads of one session whose last touch was a free 1-hour ping
+// that is under an hour old. A thread drops out at its next real request (Record), at the ping plus an
+// hour, or when its route is switched off: a route that does not grant never shows an hour. Nil-safe.
+func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[string]OneHourTouch {
+	if k == nil || session == "" {
+		return nil
+	}
+	now := k.now()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]OneHourTouch{}
+	for _, t := range k.oneHourTouches {
+		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !now.Before(t.at.Add(time.Hour)) {
+			continue
+		}
+		st := k.oneHourRoutes[t.route]
+		if st != nil && st.off {
+			continue
+		}
+		out[t.key.Thread] = OneHourTouch{At: t.at, Proven: st != nil && st.proven}
+	}
+	return out
 }

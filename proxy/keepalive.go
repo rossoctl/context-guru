@@ -608,6 +608,20 @@ func (h *Handler) KeepAlivePingStates(tenantID string, allTenants bool, session 
 	return out
 }
 
+// KeepAliveOneHourTouches is the keeper's per-thread "the last touch was a free 1-hour ping" facts for one
+// session (dash.API.SetOneHourTouches), so /api/cachestate can count the clock an hour from the ping (#1243).
+func (h *Handler) KeepAliveOneHourTouches(tenantID string, allTenants bool, session string) map[string]dash.OneHourTouch {
+	if h == nil || h.keeper == nil || session == "" {
+		return nil
+	}
+	in := h.keeper.Keeper.OneHourTouches(tenantID, allTenants, session)
+	out := make(map[string]dash.OneHourTouch, len(in))
+	for th, t := range in {
+		out[th] = dash.OneHourTouch{AtMS: t.At.UnixMilli(), Proven: t.Proven}
+	}
+	return out
+}
+
 // KeepAlivePlans is the keeper's ping plan for one session's threads, keyed by thread id, for the
 // status line's "held warm until" (dash.API.SetKeepAlivePlans). Only an entry that will still be
 // pinged has a plan (keepalive.Keeper.Plans). allTenants matches the session in any tenant, for a
