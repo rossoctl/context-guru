@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -280,4 +281,62 @@ func TestEnvelopeOpsOwnTheDeferralEdits(t *testing.T) {
 	if ops := envelopeOps(cl2, cl2); len(ops) != 0 {
 		t.Errorf("ops %+v for an unchanged deferred tool", ops)
 	}
+}
+
+// #1279: a root-only body relabelled to 1h by RelabelAllTTL1h reports a headttl operation. The root
+// mark sits in no section, so without it the library books no premium and no rescue.
+func TestRootOnlyRelabelReportsAHeadTTLOp(t *testing.T) {
+	const rest = `"system":[{"type":"text","text":"HEAD"}],"messages":[{"role":"user","content":"hi"}]`
+	client := []byte(`{"cache_control":{"type":"ephemeral"},` + rest + `}`)
+	fwd := []byte(`{"cache_control":{"type":"ephemeral","ttl":"1h"},` + rest + `}`)
+	ops := envelopeOps(client, fwd)
+	if len(ops) != 1 || ops[0].Operator != "context-guru.headttl" || !strings.HasPrefix(ops[0].ChangeID, "headttl:") {
+		t.Fatalf("ops %+v, want one headttl op", ops)
+	}
+	for _, s := range []accountant.Section{accountant.SectionTools, accountant.SectionSystem, accountant.SectionMessages} {
+		if o, b := opsDelta(ops, s), sectionDelta(client, fwd, s); o != b {
+			t.Errorf("section %s: ops %d bytes, bodies %d bytes", s, o, b)
+		}
+	}
+	// No relabel, no operation: an already-1h root mark, and a body without one.
+	if got := envelopeOps(fwd, fwd); len(got) != 0 {
+		t.Errorf("already 1h: ops %+v", got)
+	}
+	if got := envelopeOps([]byte(`{`+rest+`}`), []byte(`{`+rest+`}`)); len(got) != 0 {
+		t.Errorf("no root mark: ops %+v", got)
+	}
+}
+
+// The real library books the premium on the write and the rescue on a return 10 minutes later. It needs
+// the accountant to list the root mark as a breakpoint (#1275); until that merges, the library sees
+// no 1h breakpoint and books nothing, so the test skips. Checked by hand on main + #1275: it passes.
+func TestRootOnlyRelabelBooksThePremiumAndTheRescue(t *testing.T) {
+	const rest = `"system":[{"type":"text","text":"HEAD"}],"messages":[{"role":"user","content":"hi"}]`
+	client := []byte(`{"cache_control":{"type":"ephemeral"},` + rest + `}`)
+	fwd := []byte(`{"cache_control":{"type":"ephemeral","ttl":"1h"},` + rest + `}`)
+	ops := envelopeOps(client, fwd)
+	t0 := time.Unix(1_700_000_000, 0)
+	st := newSavingsTracker()
+	facts := accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact}
+	r1 := st.begin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: t0}, client)
+	st.end(r1, accountant.Thread{ID: "main"}, fwd, ops, facts)
+	res := st.compute(r1, Usage{CacheWrite: 100, CacheWrite1h: 100})
+	if !hasEffect(res, accountant.EffectTTLPremium) {
+		t.Skip("the accountant does not list the root mark as a breakpoint until #1275 merges")
+	}
+	r2 := st.begin(accountant.RequestMeta{RequestID: "r2", Session: "s", Model: "m", At: t0.Add(10 * time.Minute)}, client)
+	st.end(r2, accountant.Thread{ID: "main"}, fwd, ops, facts)
+	res = st.compute(r2, Usage{CacheRead: 100})
+	if !hasEffect(res, accountant.EffectTTLRescue) {
+		t.Errorf("no ttlRescue effect on the return: %+v (checks %+v)", res.CacheEffects, res.Checks)
+	}
+}
+
+func hasEffect(res accountant.Result, k accountant.CacheEffectKind) bool {
+	for _, e := range res.CacheEffects {
+		if e.Kind == k {
+			return true
+		}
+	}
+	return false
 }

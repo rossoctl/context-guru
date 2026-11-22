@@ -187,7 +187,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
-	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
+	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.cache_bp_root, r.stop_reason,
 	r.thread_id,
 	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
 	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
@@ -224,7 +224,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
-		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
+		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.CacheBPRoot, &e.StopReason,
 		&e.ThreadID,
 		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
 		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
@@ -1699,7 +1699,7 @@ var breakdownDims = map[string]string{
 	"tool_choice":       "r.tool_choice",
 	"cache_miss_reason": "r.cache_miss_reason",
 	"cache_breakpoints": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
-		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks AS TEXT) END",
+		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks + r.cache_bp_root AS TEXT) END",
 	// The same four columns as a PLACEMENT rather than a count, because the count collapses
 	// the only interesting thing about them. "3 breakpoints" is one group whether they sit in
 	// the system block (protecting the whole prompt after it) or scattered through the
@@ -1707,7 +1707,7 @@ var breakdownDims = map[string]string{
 	// economics. Same observe-mode guard as above and for the same reason.
 	"cache_bp_location": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
 		"'system=' || r.cache_bp_system || ' tools=' || r.cache_bp_tools || " +
-		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks END",
+		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks || ' root=' || r.cache_bp_root END",
 	// Which cache lifetime the request asked for. '' is a real third answer (no cache_control
 	// at all) and, on rows written before the column existed, also the default — which is why
 	// Overview reports a coverage count beside every TTL figure.

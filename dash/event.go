@@ -681,6 +681,7 @@ type Meta struct {
 	CacheBPTools    int `json:"cache_bp_tools"`
 	CacheBPMessages int `json:"cache_bp_messages"`
 	CacheBPBlocks   int `json:"cache_bp_blocks"`
+	CacheBPRoot     int `json:"cache_bp_root"` // the top-level cache_control (automatic caching)
 	// StopReason is the provider's own terminal reason, normalized across dialects:
 	// Anthropic `stop_reason` (end_turn|max_tokens|tool_use|stop_sequence|pause_turn|
 	// refusal|model_context_window_exceeded) or OpenAI `choices.0.finish_reason`
@@ -698,7 +699,7 @@ const StopTimeoutEstimated = "timeout_estimated"
 
 // CacheBreakpoints is the total the provider's cap of four applies to.
 func (m Meta) CacheBreakpoints() int {
-	return m.CacheBPSystem + m.CacheBPTools + m.CacheBPMessages + m.CacheBPBlocks
+	return m.CacheBPSystem + m.CacheBPTools + m.CacheBPMessages + m.CacheBPBlocks + m.CacheBPRoot
 }
 
 // redact sanitizes the free-text metadata fields. Every one of them is a value the
@@ -884,6 +885,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.CacheBPTools = tr.Breakpoints.Tools
 	e.CacheBPMessages = tr.Breakpoints.Messages
 	e.CacheBPBlocks = tr.Breakpoints.Blocks
+	e.CacheBPRoot = tr.Breakpoints.Root
 	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
 	e.CacheTTL = tr.CacheTTL
 	e.FilteredDeclTokens = tr.FilteredDeclTokens

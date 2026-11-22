@@ -645,7 +645,7 @@ async function openRequest(id, fromURL) {
     // Placement, not just a count: tools and system render ahead of messages, so a
     // breakpoint's LOCATION decides how much of the prefix it protects. Four labelled slots
     // rather than one run-on string that wrapped mid-clause and read as a sentence.
-    const bpTotal = e.cache_bp_system + e.cache_bp_tools + e.cache_bp_messages + e.cache_bp_blocks;
+    const bpTotal = e.cache_bp_system + e.cache_bp_tools + e.cache_bp_messages + e.cache_bp_blocks + (e.cache_bp_root || 0);
     body.appendChild(el('div', { class: 'kv' },
       // Full width: four labelled slots do not fit a 184px grid cell, and wrapped over
       // three lines they stopped reading as four separate measurements.
@@ -655,7 +655,8 @@ async function openRequest(id, fromURL) {
           el('span', { class: e.cache_bp_system ? 'on' : '' }, 'system ', el('b', { text: num(e.cache_bp_system) })),
           el('span', { class: e.cache_bp_tools ? 'on' : '' }, 'tools ', el('b', { text: num(e.cache_bp_tools) })),
           el('span', { class: e.cache_bp_messages ? 'on' : '' }, 'messages ', el('b', { text: num(e.cache_bp_messages) })),
-          el('span', { class: e.cache_bp_blocks ? 'on' : '' }, 'blocks ', el('b', { text: num(e.cache_bp_blocks) }))))),
+          el('span', { class: e.cache_bp_blocks ? 'on' : '' }, 'blocks ', el('b', { text: num(e.cache_bp_blocks) })),
+          el('span', { class: e.cache_bp_root ? 'on' : '' }, 'top-level ', el('b', { text: num(e.cache_bp_root || 0) }))))),
       kv('Account id', e.tenant_id || '— (single account)')));
 
     // The log lines this request emitted. Text, not a link: Grafana binds loopback on the
