@@ -124,7 +124,7 @@ func TestStrategiesJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Default != "auto" || len(v.Strategies) != 7 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
+	if v.Default != "auto" || len(v.Strategies) != 8 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
 		t.Fatalf("bad json: %s", b)
 	}
 }
@@ -141,7 +141,7 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 7 {
+	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 8 {
 		t.Fatalf("bad json: %s", b)
 	}
 	for _, s := range v.Strategies {
@@ -212,7 +212,7 @@ func TestClaudeCodeOfferIsUnchangedByTheOpenAITags(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head", "1-hour-on-wait"}
+	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head", "1-hour-on-wait", "1-hour-always"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Claude Code would offer %v, want %v", got, want)
 	}
@@ -245,5 +245,56 @@ func TestOneHourOnWaitStrategy(t *testing.T) {
 	}
 	if on, _ := LookupStrategy("1-hour-on-wait"); !on.Spends {
 		t.Error("1-hour-on-wait sends pings, so it spends")
+	}
+}
+
+// #1261: 1-hour-always is the explicit opt-in of C. It keeps auto's keep-alive keys, adds only its own key,
+// never turns on through another strategy or by default, and its text says it does not pay off for most users.
+func TestOneHourAlwaysIsAnExplicitOptIn(t *testing.T) {
+	c, err := LoadBytes([]byte("cache:\n  strategy: 1-hour-always\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := LoadBytes([]byte("cache:\n  strategy: auto\n"))
+	w, _ := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n"))
+	if !c.Cache.KeepAliveOneHourAlways || c.Cache.KeepAliveOneHourOnWait || c.Cache.HeadTTL1h {
+		t.Fatalf("flags wrong: %+v", c.Cache)
+	}
+	if a.Cache.KeepAliveOneHourAlways || w.Cache.KeepAliveOneHourAlways {
+		t.Error("auto or 1-hour-on-wait turned the opt-in on")
+	}
+	if def, _ := LoadBytes([]byte("{}")); def.Cache.KeepAliveOneHourAlways || def.Cache.Resolved().KeepAliveOneHourAlways {
+		t.Error("the default config turned the opt-in on")
+	}
+	norm := func(x CacheConfig) CacheConfig { x.Strategy, x.KeepAliveOneHourAlways = "", false; return x }
+	if !reflect.DeepEqual(norm(c.Cache), norm(a.Cache)) {
+		t.Errorf("keep-alive keys differ from auto:\n%+v\n%+v", norm(c.Cache), norm(a.Cache))
+	}
+	row, _ := LookupStrategy("1-hour-always")
+	for _, want := range []string{"ON MOST USERS IT DOES NOT PAY OFF", "+22%", "77 worse", "39%", "-25%", "#1261"} {
+		if !strings.Contains(row.Desc, want) {
+			t.Errorf("the description lacks %q: %s", want, row.Desc)
+		}
+	}
+	if !row.Spends {
+		t.Error("1-hour-always sends pings for subagents, so it spends")
+	}
+}
+
+// D's threshold: 150,000 tokens by default, settable, never negative.
+func TestOneHourRebuildTokensDefaultsTo150000(t *testing.T) {
+	c, _ := LoadBytes([]byte("{}"))
+	if got := c.Cache.Resolved().KeepAliveOneHourRebuildTokens; got != 150000 {
+		t.Errorf("default = %d, want 150000", got)
+	}
+	c, err := LoadBytes([]byte("cache:\n  keepalive_one_hour_rebuild_tokens: 90000\n"))
+	if err != nil || c.Cache.Resolved().KeepAliveOneHourRebuildTokens != 90000 {
+		t.Errorf("a set value is not kept: %v %+v", err, c.Cache)
+	}
+	if _, err := LoadBytes([]byte("cache:\n  keepalive_one_hour_rebuild_tokens: -1\n")); err == nil {
+		t.Error("a negative threshold was accepted")
+	}
+	if d, _ := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n")); !strings.Contains(func() string { r, _ := LookupStrategy("1-hour-on-wait"); return r.Desc }(), "150,000") || d.Cache.KeepAliveOneHourAlways {
+		t.Error("the 1-hour-on-wait text does not name D's threshold, or it turned C on")
 	}
 }

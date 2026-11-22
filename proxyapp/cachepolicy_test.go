@@ -51,3 +51,19 @@ func TestCachePolicyCarriesOneHourOnWait(t *testing.T) {
 		t.Error("auto must not switch it on")
 	}
 }
+
+// #1261: the D threshold and the C opt-in reach the proxy's policy.
+func TestCachePolicyCarriesTheOneHourModes(t *testing.T) {
+	c, err := config.LoadBytes([]byte("cache:\n  strategy: 1-hour-always\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cachePolicy(c.Cache)
+	if !p.OneHourAlways || p.OneHourOnWait || p.OneHourRebuildTokens != 150000 {
+		t.Fatalf("policy wrong: always=%v onWait=%v rebuild=%d", p.OneHourAlways, p.OneHourOnWait, p.OneHourRebuildTokens)
+	}
+	w, _ := config.LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n  keepalive_one_hour_rebuild_tokens: 90000\n"))
+	if q := cachePolicy(w.Cache); q.OneHourAlways || !q.OneHourOnWait || q.OneHourRebuildTokens != 90000 {
+		t.Fatalf("policy wrong: %+v", q)
+	}
+}

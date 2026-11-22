@@ -479,15 +479,25 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 	return plan
 }
 
-// oneHourFirstFor is the apply hook of the 1-hour-first mode (#1261), or nil when the account did not opt in
-// to 1-hour-on-wait (or there is no keep-alive). The model is read from the body apply hands over.
+// oneHourFirstFor is the apply hook of the 1-hour modes D and C (#1261), or nil when there is no keep-alive. At
+// the end of apply, for a main-thread request that declares tools, it resolves the account's policy WITH its
+// stored strategy (so a manager's strategy that switches 1-hour-on-wait on counts, like for the pings) and asks
+// the keeper. The model is read from the body apply hands over.
 func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID string, toolsDeclared bool) bool {
-	if h == nil || h.keeper == nil || h.keeper.Keeper == nil || r.tn == nil || !r.tn.Cache.OneHourOnWait {
+	if h == nil || h.keeper == nil || h.keeper.Keeper == nil || r.tn == nil {
 		return nil
 	}
 	model := gjson.GetBytes(r.body, "model").String()
 	return func(session, threadID string, toolsDeclared bool) bool {
-		return h.keeper.Keeper.OneHourFirst(r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared)
+		if threadID != "" || !toolsDeclared || session == "" {
+			return false // only the main thread is ever relabelled: skip the policy resolution for the rest
+		}
+		pol, _ := h.keeper.resolvePolicy(r.tn, session, r.provider, r.tn.Cache, predDecision{}, false)
+		if !pol.OneHourOnWait && !pol.OneHourAlways {
+			return false
+		}
+		return h.keeper.Keeper.OneHourFirst(r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared,
+			keepalive.OneHourMode{Always: pol.OneHourAlways, RebuildTokens: int64(pol.OneHourRebuildTokens)})
 	}
 }
 

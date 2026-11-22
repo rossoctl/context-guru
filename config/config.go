@@ -89,7 +89,7 @@ type ExpandConfig struct {
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
 	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
-	// 1-hour-head, 1-hour-on-wait, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// 1-hour-head, 1-hour-on-wait, 1-hour-always, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
 	// no strategy, and the file behaves as it always did. An unknown name is a config error.
 	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
@@ -154,6 +154,18 @@ type CacheConfig struct {
 	// without it. The keeper checks the first 1-hour ping's usage and stops the switch on a route where
 	// it costs a rewrite. It needs the wait plan (WaitPlan), which the proxy turns on by default.
 	KeepAliveOneHourOnWait bool `yaml:"keepalive_one_hour_on_wait"`
+	// KeepAliveOneHourRebuildTokens is the D fallback's threshold of 1-hour-on-wait (#1261). On a route where
+	// the 5m to 1h switch is costly (a rewrite), a main thread runs as auto until its first cold rebuild of a
+	// prefix of at least this many tokens. That rebuild is written at 1 hour, and from then on the thread
+	// writes at 1 hour and gets no pings. Simulated at 150,000 tokens: hosted -12% against auto, owner's laptop
+	// -25%. 0 = DefaultKeepAliveOneHourRebuildTokens.
+	KeepAliveOneHourRebuildTokens int `yaml:"keepalive_one_hour_rebuild_tokens"`
+	// KeepAliveOneHourAlways is the C opt-in (#1261): the MAIN agent writes at 1 hour from its first request,
+	// on any route. It is an explicit opt-in and never a default: ON MOST USERS IT DOES NOT PAY OFF. Simulated
+	// on Bedrock-shaped data (main threads only): hosted, 97 main sessions: +22% cost against auto, 77 of 97
+	// worse, the 1-hour premium 39% of the cost. The owner's laptop: -25%. See the strategy 1-hour-always and
+	// docs/how-to/cache-strategies.md.
+	KeepAliveOneHourAlways bool `yaml:"keepalive_one_hour_always"`
 	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
 	// DefaultKeepAliveMaxUSDPerPing.
 	//
@@ -280,6 +292,9 @@ const (
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	// DefaultKeepAliveMaxBodyBytes mirrors keepalive.MaxBodyBytes (32 MiB).
 	DefaultKeepAliveMaxBodyBytes = 32 << 20
+	// DefaultKeepAliveOneHourRebuildTokens is the D fallback's threshold (#1261): 150,000 tokens.
+	DefaultKeepAliveOneHourRebuildTokens = 150000
+
 	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
 	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait,
 	// background work, a teammate and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
@@ -339,6 +354,9 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
 	}
+	if c.KeepAliveOneHourRebuildTokens <= 0 {
+		c.KeepAliveOneHourRebuildTokens = DefaultKeepAliveOneHourRebuildTokens
+	}
 	if c.KeepAliveToolWaitMaxPings <= 0 {
 		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
 	}
@@ -370,7 +388,7 @@ func (c CacheConfig) validate() error {
 	if c.KeepAliveIdleSeconds < 0 || c.KeepAliveOpenAIIdleSeconds < 0 ||
 		c.KeepAliveMaxPings < 0 || c.HeadTTLMinTokens < 0 || c.HeadTTLMinBytes < 0 ||
 		c.KeepAliveMaxUSDPerPing < 0 || c.KeepAliveMaxBodyBytes < 0 || c.KeepAliveMinPrefixTokens < 0 || c.KeepAliveToolWaitMinPrefixTokens < 0 ||
-		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 ||
+		c.KeepAliveIdleSeconds1h < 0 || c.KeepAliveMaxPings1h < 0 || c.KeepAliveOneHourRebuildTokens < 0 ||
 		c.KeepAliveToolWaitMaxPings < 0 || c.KeepAliveBackgroundExtraPings < 0 || c.KeepAliveHumanExtraPings < 0 {
 		return fmt.Errorf("config: cache: negative values are not meaningful")
 	}

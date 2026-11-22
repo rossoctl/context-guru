@@ -806,7 +806,7 @@ func TestAManualPressEndsTheOneHourTouch(t *testing.T) {
 	}
 }
 
-// ---- #1261: on a costly route, main threads write at 1 hour from their first request ----
+// ---- #1261: D (the fallback on a costly route) and C (the explicit opt-in) ----
 
 // costlyRoute runs a probe whose 1-hour ping REWROTE the prefix. The route is now costly, and the probing
 // thread (sess1) is in the mode.
@@ -823,8 +823,21 @@ func costlyRoute(t *testing.T) (*Keeper, *fakeDispatcher, *testClock, time.Time)
 	return k, fd, clock, start
 }
 
-func firstFor(k *Keeper, key Key, tools bool) bool {
-	return k.OneHourFirst(key.Tenant, key.Session, key.Thread, bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5", tools)
+var (
+	modeD = OneHourMode{RebuildTokens: 40000} // the test requests have a 49,776-token prefix
+	modeC = OneHourMode{Always: true}
+)
+
+func firstFor(k *Keeper, key Key, tools bool, mode OneHourMode) bool {
+	return k.OneHourFirst(key.Tenant, key.Session, key.Thread, bschemas.Anthropic, "", "/v1/messages", "aws/claude-sonnet-5", tools, mode)
+}
+
+// realRequest records a main-thread request that left the thread's entry at the given moment: a real turn
+// with a prefix of CacheRead+CacheWrite.
+func realRequest(k *Keeper, key Key, at time.Time, read, write int64) {
+	k.Record(Record{Key: key, StartedAt: at, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+		Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(),
+		Usage: Usage{CacheRead: read, CacheWrite: write, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
 }
 
 func TestACostlyProbeMakesTheRouteCostlyNotOff(t *testing.T) {
@@ -833,92 +846,168 @@ func TestACostlyProbeMakesTheRouteCostlyNotOff(t *testing.T) {
 	if st := routeState(k); !st.costly || st.off {
 		t.Fatalf("state = %+v, want costly and not off", st)
 	}
-	if got := logs.String(); !strings.Contains(got, "Main threads that start now write at 1 hour") {
-		t.Errorf("no WARN naming the new mode:\n%s", got)
+	if got := logs.String(); !strings.Contains(got, "first cold rebuild of a big prefix") {
+		t.Errorf("no WARN naming the fallback:\n%s", got)
 	}
 }
 
-// Rule 1: a NEW main thread on the costly route relabels from its first request. Rule 2: the thread that paid
-// the rewrite keeps 1 hour. Rule 3: a thread already running at 5 minutes stays on auto. Rule 5: a subagent is
-// unchanged. A request that declares no tools (a title, a quota check) is not the main agent.
-func TestCostlyRouteDecisions(t *testing.T) {
-	k, fd, clock := testKeeper(t)
-	old := Key{Tenant: "t1", Session: "old"}
-	// The old thread's first request arrives BEFORE the route is costly: it stays on auto.
-	if firstFor(k, old, true) {
-		t.Fatal("a thread asked for 1 hour on a route that is not costly")
+// D: on a costly route a main thread stays on auto until its first cold rebuild of a big prefix. The
+// rebuild is decided BEFORE the request goes out: the thread's last touch is older than its entry's lifetime
+// and its last prefix was at least the threshold.
+func TestDSwitchesAThreadAtItsFirstBigColdRebuild(t *testing.T) {
+	k, _, clock, _ := costlyRoute(t)
+	big := Key{Tenant: "t1", Session: "big"}
+	small := Key{Tenant: "t1", Session: "small"}
+	realRequest(k, big, clock.now(), 49000, 776)  // a 49,776-token prefix, above the test threshold
+	realRequest(k, small, clock.now(), 4000, 776) // below it
+	// The entry is still warm: no rebuild yet.
+	clock.advance(4 * time.Minute)
+	if firstFor(k, big, true, modeD) {
+		t.Fatal("a thread was switched while its entry was still warm")
 	}
-	fd.setResp(func(DispatchRequest) (Usage, int, error) {
-		return Usage{CacheRead: 0, CacheWrite: 49776, CacheWrite1h: 49776, Output: 1}, http.StatusOK, nil
-	})
-	start := clock.now()
-	recordWait(k, onWaitPolicy(), sess1, start, "end_turn", nil)
-	k.Sweep(start.Add(240 * time.Second))
-	waitPings(t, k, 1)
-
-	if !firstFor(k, sess1, true) {
-		t.Error("the thread that paid the rewrite does not keep 1 hour on its next request")
+	// A cold rebuild of a SMALL prefix stays auto.
+	clock.advance(10 * time.Minute)
+	if firstFor(k, small, true, modeD) {
+		t.Error("a small prefix was switched")
 	}
-	fresh := Key{Tenant: "t1", Session: "fresh"}
-	if !firstFor(k, fresh, true) || !firstFor(k, fresh, true) {
-		t.Error("a new main thread does not write at 1 hour from its first request, and keep it")
+	// The big thread's entry has expired: its next request is the rebuild, written at 1 hour from now.
+	if !firstFor(k, big, true, modeD) {
+		t.Fatal("the cold rebuild of a big prefix was not sent at 1 hour")
 	}
-	if firstFor(k, old, true) {
-		t.Error("a thread already running at 5 minutes was switched: it would pay a rewrite")
+	if !firstFor(k, big, true, modeD) {
+		t.Error("the thread did not stay at 1 hour after the switch")
 	}
-	if firstFor(k, Key{Tenant: "t1", Session: "fresh", Thread: "a:agent1"}, true) {
+	// A request that does not declare tools, a subagent and a non-primary thread are never switched.
+	if firstFor(k, Key{Tenant: "t1", Session: "big", Thread: "a:x"}, true, modeD) {
 		t.Error("a subagent was relabelled")
 	}
-	if firstFor(k, Key{Tenant: "t1", Session: "aux"}, false) {
+	// The thread that paid the probe's rewrite keeps 1 hour.
+	if !firstFor(k, sess1, true, modeD) {
+		t.Error("the thread that paid the rewrite does not keep 1 hour")
+	}
+}
+
+// A ping that refreshed the entry moves its last touch: the entry is not gone, so there is no rebuild.
+func TestDDoesNotCallARefreshedEntryGone(t *testing.T) {
+	k, fd, clock, _ := costlyRoute(t)
+	fd.setResp(func(DispatchRequest) (Usage, int, error) {
+		return Usage{CacheRead: 49500, CacheWrite: 50, Output: 1}, http.StatusOK, nil
+	})
+	key := Key{Tenant: "t1", Session: "warmed"}
+	recordWait(k, onWaitPolicy(), key, clock.now(), "tool_use", []string{"Bash"}) // a tool wait: plain auto pings
+	n0 := fd.n()
+	clock.advance(240 * time.Second)
+	k.Sweep(clock.now())
+	waitPings(t, k, int64(n0+1))
+	clock.advance(2 * time.Minute) // 6 minutes after the request, 2 after the ping that refreshed the entry
+	if firstFor(k, key, true, modeD) {
+		t.Fatal("the entry was refreshed by a ping 2 minutes ago, and a rebuild was assumed")
+	}
+	clock.advance(4 * time.Minute) // 6 minutes after the ping: gone now
+	if !firstFor(k, key, true, modeD) {
+		t.Error("the entry is gone 6 minutes after its last ping, and no rebuild was assumed")
+	}
+}
+
+// D is the fallback of a COSTLY route only. On a free-switch route (unknown or proven) A applies and D never
+// does.
+func TestDNeverAppliesOnAFreeSwitchRoute(t *testing.T) {
+	k, _, clock := testKeeper(t)
+	key := Key{Tenant: "t1", Session: "big"}
+	realRequest(k, key, clock.now(), 49000, 776)
+	clock.advance(30 * time.Minute)
+	if firstFor(k, key, true, modeD) {
+		t.Error("D switched a thread on a route that is not costly")
+	}
+	proveRoute(k)
+	if firstFor(k, key, true, modeD) {
+		t.Error("D switched a thread on a proven route")
+	}
+}
+
+// C: every new main thread from its first request, on any route, with no probe at all.
+func TestCWritesAtOneHourFromTheFirstRequestOnAnyRoute(t *testing.T) {
+	k, _, _ := testKeeper(t)
+	fresh := Key{Tenant: "t1", Session: "fresh"}
+	if !firstFor(k, fresh, true, modeC) || !firstFor(k, fresh, true, modeC) {
+		t.Error("a new main thread is not at 1 hour from its first request, and keeps it")
+	}
+	if firstFor(k, Key{Tenant: "t1", Session: "fresh", Thread: "a:agent1"}, true, modeC) {
+		t.Error("a subagent was relabelled")
+	}
+	if firstFor(k, Key{Tenant: "t1", Session: "aux"}, false, modeC) {
 		t.Error("a request with no tools declared was relabelled")
 	}
-	if firstFor(k, Key{Tenant: "t1", Session: "p", Thread: "prefix1"}, true) {
+	if firstFor(k, Key{Tenant: "t1", Session: "p", Thread: "prefix1"}, true, modeC) {
 		t.Error("a non-primary thread was relabelled")
 	}
 	var nilK *Keeper
-	if nilK.OneHourFirst("t", "s", "", bschemas.Anthropic, "", "/v1/messages", "m", true) {
+	if nilK.OneHourFirst("t", "s", "", bschemas.Anthropic, "", "/v1/messages", "m", true, modeC) {
 		t.Error("a nil keeper relabelled")
+	}
+	// Without the opt-in nothing changes: a costly probe alone does not start C.
+	k2, _, _, _ := costlyRoute(t)
+	if firstFor(k2, Key{Tenant: "t1", Session: "new"}, true, modeD) {
+		t.Error("a costly probe WITHOUT the opt-in started 1 hour from the first request: it must fall back to D")
 	}
 }
 
-// Rule 4: no pings on a 1-hour main thread, on any wait cause, and no 59-minute ping.
+// A costly probe without the opt-in keeps the route off the 1-hour pings and falls back to auto's plain
+// ping for the next long wait.
+func TestACostlyRouteWithoutTheOptInFallsBackToAuto(t *testing.T) {
+	k, fd, clock, _ := costlyRoute(t)
+	n0 := fd.n()
+	other := Key{Tenant: "t1", Session: "sess-2"}
+	start := clock.advance(time.Hour)
+	recordWait(k, onWaitPolicy(), other, start, "end_turn", nil)
+	k.Sweep(start.Add(240 * time.Second))
+	waitPings(t, k, int64(n0+1))
+	if apply.AllBreakpointsAskExtendedTTL(fd.sent[n0].Body) {
+		t.Error("a 1-hour ping was sent on a costly route")
+	}
+}
+
+// No pings on a main thread in the mode, on any wait cause, and no 59-minute ping. A thread in C stands for
+// both modes: the keeper does not care how a thread entered.
 func TestNoPingsOnAMainThreadInTheMode(t *testing.T) {
 	for _, tc := range []struct {
 		name, stop string
 		names      []string
 	}{{"a person", "end_turn", nil}, {"a tool", "tool_use", []string{"Bash"}}, {"background", "tool_use", []string{"BashOutput", "TaskOutput"}}} {
 		t.Run(tc.name, func(t *testing.T) {
-			k, fd, clock, _ := costlyRoute(t)
-			n0 := fd.n()
+			k, fd, clock := testKeeper(t)
 			other := Key{Tenant: "t1", Session: "sess-2"}
-			if !firstFor(k, other, true) {
+			if !firstFor(k, other, true, modeC) {
 				t.Fatal("a new main thread is not in the mode")
 			}
-			start := clock.advance(time.Hour)
-			recordWait(k, onWaitPolicy(), other, start, tc.stop, tc.names)
+			start := clock.now()
+			pol := onWaitPolicy()
+			pol.OneHourAlways = true
+			recordWait(k, pol, other, start, tc.stop, tc.names)
 			for _, at := range []time.Duration{240, 480, 720, 3540, 3600} {
 				if n := k.Sweep(start.Add(at * time.Second)); n != 0 {
 					t.Fatalf("a ping fired at %ds on a 1-hour main thread (%d)", at, n)
 				}
 			}
-			if fd.n() != n0 {
-				t.Errorf("%d pings were sent", fd.n()-n0)
+			if fd.n() != 0 {
+				t.Errorf("%d pings were sent", fd.n())
 			}
 		})
 	}
 }
 
-// A subagent on the same route keeps auto's pings.
-func TestSubagentKeepsItsPingsOnACostlyRoute(t *testing.T) {
-	k, fd, clock, _ := costlyRoute(t)
-	n0 := fd.n()
+// A subagent keeps auto's pings when C is on.
+func TestSubagentKeepsItsPingsUnderC(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	_ = fd
 	sub := Key{Tenant: "t1", Session: "sess-1", Thread: "a:x"}
-	start := clock.advance(time.Hour)
-	recordWait(k, onWaitPolicy(), sub, start, "end_turn", nil)
+	pol := onWaitPolicy()
+	pol.OneHourAlways = true
+	start := clock.now()
+	recordWait(k, pol, sub, start, "end_turn", nil)
 	if n := k.Sweep(start.Add(240 * time.Second)); n != 1 {
 		t.Fatalf("a subagent got no ping (%d)", n)
 	}
-	waitPings(t, k, int64(n0+1))
 }
 
 // recordFirst records a main-thread request that went out with every marker at 1 hour (the body is the 1-hour
@@ -930,31 +1019,29 @@ func recordFirst(k *Keeper, key Key, at time.Time, u Usage) {
 		Header: kaHeader(), Hold: fakeOf(k).hold(key)})
 }
 
-// Rule 6: a request with 1-hour markers that WROTE tokens and was billed at 5 minutes was downgraded: the mode
-// stops for the route, and the threads go back to auto. A request that wrote nothing proves nothing.
+// A request with 1-hour markers that WROTE tokens and was billed at 5 minutes was downgraded: the mode stops
+// for the route, for C and D alike, and the threads go back to auto. A request that wrote nothing proves
+// nothing.
 func TestADowngradedWriteStopsTheMode(t *testing.T) {
 	logs := captureLog(t)
-	k, _, clock, _ := costlyRoute(t)
+	k, _, clock := testKeeper(t)
 	key := Key{Tenant: "t1", Session: "sess-2"}
-	if !firstFor(k, key, true) {
+	if !firstFor(k, key, true, modeC) {
 		t.Fatal("not in the mode")
 	}
-	// A read of the 1-hour entry writes nothing: it proves nothing.
-	recordFirst(k, key, clock.advance(time.Minute), Usage{CacheRead: 49000, StopReason: "end_turn"})
-	if st := routeState(k); !st.costly || st.off {
+	recordFirst(k, key, clock.advance(time.Minute), Usage{CacheRead: 49000, StopReason: "end_turn"}) // wrote nothing
+	if st := routeState(k); st.off {
 		t.Fatalf("a request that wrote nothing changed the state: %+v", st)
 	}
-	// A write billed at 1 hour is the grant working.
 	recordFirst(k, key, clock.advance(time.Minute), Usage{CacheRead: 40000, CacheWrite: 9000, CacheWrite1h: 9000, StopReason: "end_turn"})
-	if st := routeState(k); !st.costly || st.off {
+	if st := routeState(k); st.off {
 		t.Fatalf("a write billed at 1 hour changed the state: %+v", st)
 	}
-	// A write billed at 5 minutes, with 1-hour markers sent: the gateway downgraded the tier.
 	recordFirst(k, key, clock.advance(time.Minute), Usage{CacheRead: 40000, CacheWrite: 9000, CacheWrite1h: 0, StopReason: "end_turn"})
-	if st := routeState(k); !st.off || st.costly {
+	if st := routeState(k); !st.off {
 		t.Fatalf("a downgraded write did not stop the mode: %+v", st)
 	}
-	if firstFor(k, key, true) || firstFor(k, Key{Tenant: "t1", Session: "new"}, true) {
+	if firstFor(k, key, true, modeC) || firstFor(k, Key{Tenant: "t1", Session: "new"}, true, modeC) {
 		t.Error("the mode still relabels after the downgrade")
 	}
 	if got := logs.String(); !strings.Contains(got, "a silent downgrade") {

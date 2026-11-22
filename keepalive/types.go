@@ -173,6 +173,13 @@ type Policy struct {
 	// wait is long (LongWait), the first ping carries every cache marker at 1 hour and is the only ping
 	// of that wait. Needs WaitPlan.
 	OneHourOnWait bool
+	// OneHourRebuildTokens is the D fallback's threshold: on a costly-switch route, a main thread runs as auto
+	// until its first cold rebuild of a prefix of at least this many tokens, which is written at 1 hour (#1261).
+	// 0 = 150,000. Read only with OneHourOnWait.
+	OneHourRebuildTokens int
+	// OneHourAlways is the C opt-in: the main thread writes at 1 hour from its first request, with no pings.
+	// Explicit only; ON MOST USERS IT DOES NOT PAY OFF (hosted +22% against auto, laptop -25%; #1261).
+	OneHourAlways bool
 	// ToolWaitMaxPings, BackgroundExtraPings and HumanExtraPings tune the plan. Zero means the shipped
 	// default (DefaultToolWaitMaxPings, DefaultBackgroundExtraPings, DefaultHumanExtraPings). Read only
 	// while WaitPlan is on.

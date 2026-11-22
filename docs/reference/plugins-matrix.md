@@ -18,6 +18,7 @@ applies its own filter to the tag.
 | `2-ping` | anthropic, openai | yes |
 | `1-hour-head` | anthropic | no |
 | `1-hour-on-wait` | anthropic | yes |
+| `1-hour-always` | anthropic | yes |
 | `30-min-ping` | openai | yes |
 
 Tag values: `anthropic`, `openai` (the OpenAI Responses route), `openai-chat` (the OpenAI Chat
@@ -29,11 +30,11 @@ Completions route) and `any`. No row uses `openai-chat` yet. The proxy default i
 
 | Plugin (provider) | Filter on `Providers` | Offers | Default |
 |---|---|---|---|
-| Claude Code (Anthropic) | has `anthropic` or `any` | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-on-wait` | `auto` |
+| Claude Code (Anthropic) | has `anthropic` or `any` | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-on-wait`, `1-hour-always` | `auto` |
 | Codex (OpenAI Responses) | not empty, and every tag is `openai` or `any` | `none`, `30-min-ping` | `30-min-ping` |
-| OpenCode (Anthropic) | has `any` or `anthropic` | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-on-wait` | `auto` |
+| OpenCode (Anthropic) | has `any` or `anthropic` | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-on-wait`, `1-hour-always` | `auto` |
 | OpenCode (OpenAI) | has `any` or `openai` | `none`, `auto`, `1-ping`, `2-ping`, `30-min-ping` | `auto` |
-| OpenCode (Anthropic and OpenAI) | has `any`, `anthropic` or `openai` | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-on-wait`, `30-min-ping` | `auto` |
+| OpenCode (Anthropic and OpenAI) | has `any`, `anthropic` or `openai` | `none`, `auto`, `1-ping`, `2-ping`, `1-hour-head`, `1-hour-on-wait`, `1-hour-always`, `30-min-ping` | `auto` |
 | Pi (Anthropic and OpenAI) | has `any`, or has both `anthropic` and `openai` | `none`, `auto`, `1-ping`, `2-ping` | `auto` |
 | IBM Bob (OpenAI Chat Completions) | has `openai-chat` or `any` | `none` | `none` |
 
@@ -46,7 +47,7 @@ Notes:
   config, so it can apply only `none`.
 - **Codex** keeps its own default. Its filter takes only a row whose tags are all `openai` or `any`. The proxy default (`auto`) also lists `anthropic`, so Codex does not offer it.
 - **Claude Code** (`PLUGIN_PROVIDERS` in `context-guru-plugin/scripts/settings.py`) offers
-  `1-hour-head` and `1-hour-on-wait` only for Anthropic.
+  `1-hour-head`, `1-hour-on-wait` and `1-hour-always` only for Anthropic.
 
 ## Presets
 

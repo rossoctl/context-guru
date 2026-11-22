@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -543,5 +544,35 @@ func TestStoredStrategyTurnsOnTheOneHourOnWaitPing(t *testing.T) {
 	// A strategy cannot turn the account's own setting OFF.
 	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourOnWait: true}, at); !pol.OneHourOnWait {
 		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}
+
+// #1261: the apply hook of the 1-hour modes asks the keeper only for the main thread with tools declared,
+// and only when the account's policy turns a mode on. C (the opt-in) needs no probe.
+func TestOneHourFirstHookFollowsThePolicy(t *testing.T) {
+	f := newMgrFixture(t)
+	body := []byte(`{"model":"aws/claude-sonnet-5"}`)
+	hook := func(cache CachePolicy) func(session, threadID string, tools bool) bool {
+		return f.h.oneHourFirstFor(&reqInfo{tn: &Tenancy{ID: "acct", Cache: cache}, body: body, provider: bschemas.Anthropic,
+			endpoint: "http://up", route: "/v1/messages"})
+	}
+	base := CachePolicy{KeepAlive: true, Idle: 240 * time.Second, MaxPings: 2}
+	if h := hook(base); h == nil || h("s1", "", true) {
+		t.Error("a policy with no 1-hour mode relabelled a request")
+	}
+	on := base
+	on.OneHourAlways = true
+	h := hook(on)
+	if !h("s2", "", true) {
+		t.Error("the opt-in did not put a new main thread at 1 hour from its first request")
+	}
+	if h("s3", "a:agent", true) || h("s3", "", false) || h("", "", true) {
+		t.Error("a subagent, a request with no tools, or one with no session was relabelled")
+	}
+	// D without a costly route (no probe ran): auto, nothing relabelled.
+	d := base
+	d.OneHourOnWait = true
+	if hook(d)("s4", "", true) {
+		t.Error("1-hour-on-wait relabelled a request on a route that is not costly")
 	}
 }

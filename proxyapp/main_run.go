@@ -1383,12 +1383,14 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
 	// zero HeadTTLMinBytes must stay zero so a host that never configured this asks for
 	// nothing rather than asking on every request.
-	if !c.KeepAlive && !c.HeadTTL1h {
+	if !c.KeepAlive && !c.HeadTTL1h && !c.KeepAliveOneHourAlways {
 		return plan
 	}
 	return proxy.CachePolicy{
 		WaitPlan:             plan.WaitPlan,
 		OneHourOnWait:        c.KeepAliveOneHourOnWait,
+		OneHourRebuildTokens: r.KeepAliveOneHourRebuildTokens,
+		OneHourAlways:        c.KeepAliveOneHourAlways,
 		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
 		ToolWaitMinPrefix:    plan.ToolWaitMinPrefix,
 		BackgroundExtraPings: plan.BackgroundExtraPings,

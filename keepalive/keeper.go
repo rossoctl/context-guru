@@ -558,10 +558,14 @@ type Keeper struct {
 	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock.
 	// Bounded by MaxTurnKeys.
 	oneHourTouches map[string]oneHourTouch
-	// oneHourFirst holds, per THREAD (keyed like live), the decision made at the main thread's first
-	// qualifying request: true = it writes at 1 hour from now on (a thread that started on a costly route, or
-	// the one that paid the probe's rewrite), false = it stays on auto until it ends. Bounded by MaxTurnKeys.
+	// oneHourFirst holds, per THREAD (keyed like live), the main threads that write at 1 hour from now on
+	// (onehour.go: C from the first request, D from its first big cold rebuild, or the thread that paid the
+	// probe's rewrite). A thread not in it stays on auto. Bounded by MaxTurnKeys.
 	oneHourFirst map[string]bool
+	// lastTouch is, per THREAD (keyed like live), when its entry was last touched and how long it lives, and
+	// the prefix of its last real request: what D needs to see, before a request goes out, that the entry is
+	// gone and the rebuild is big. Bounded by MaxTurnKeys.
+	lastTouch map[string]touchRec
 	// manualHoldMax overrides ManualHoldMax in tests that need a real, short timer; zero means the constant.
 	manualHoldMax time.Duration
 	// reasons records why a thread is NOT held (manualhold.go), for the button's explanation.
@@ -655,7 +659,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, oneHourFirst: map[string]bool{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -869,6 +873,17 @@ func (k *Keeper) Record(r Record) {
 	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
 	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
 	k.checkOneHourFirstDowngrade(key, r.Provider, r.Endpoint, r.Route, model, body, u, usageOK)
+	if usageOK {
+		// What D needs before the next request: when this entry was last touched, how long it lives, and
+		// how big the prefix is. The end of the response is now.
+		ttl := 5 * time.Minute
+		if apply.AllBreakpointsAskExtendedTTL(body) {
+			ttl = time.Hour
+		}
+		k.mu.Lock()
+		k.noteTouchLocked(key, k.now(), ttl, u.CacheRead+u.CacheWrite)
+		k.mu.Unlock()
+	}
 	// A client lifecycle signal (host-gated; see MarkEnded) that this session already ended
 	// holds nothing further: this request was in flight when the user left, so its cache entry
 	// is not worth holding. Matched on Key.Session or r.Client, the id the client's own hooks
@@ -900,7 +915,7 @@ func (k *Keeper) Record(r Record) {
 	pol := r.Policy
 	// A thread in the 1-hour-first mode (onehour.go) gets NO ping, on any wait cause: its 1-hour entry is the
 	// cover. A manual hold still works.
-	if pol.OneHourOnWait && k.oneHourFirstThread(key, r.Provider, r.Endpoint, r.Route, model) {
+	if (pol.OneHourOnWait || pol.OneHourAlways) && k.oneHourFirstThread(key, r.Provider, r.Endpoint, r.Route, model) {
 		pol.KeepAlive = false
 	}
 	// A request that opted in to the Ping button (Policy.ManualHold) is held even where the schedule
@@ -1743,6 +1758,16 @@ func (k *Keeper) fire(j pingJob) {
 	}
 	if j.oneHourSent {
 		k.judgeOneHour(j, status, u, start)
+	}
+	if status >= 200 && status < 300 && u.CacheRead > 0 {
+		// A ping that read the entry refreshed it: D must not call the entry gone from the last request alone.
+		ttl := 5 * time.Minute
+		if j.oneHourSent {
+			ttl = time.Hour
+		}
+		k.mu.Lock()
+		k.noteTouchLocked(j.key.id(), k.now(), ttl, 0)
+		k.mu.Unlock()
 	}
 	switch k.noteOutcome(j, status, u) {
 	case outcomeTransient:

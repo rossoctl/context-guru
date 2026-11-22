@@ -318,27 +318,73 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 	return out
 }
 
-// THE COSTLY ROUTE: WRITE AT 1 HOUR FROM THE FIRST REQUEST (#1261).
+// WRITING AT 1 HOUR ON THE MAIN THREAD: D AND C (#1261).
 //
-// When the probe shows that the switch rewrites the prefix, the strategy no longer falls back to auto.
-// A main thread that STARTS while the route is costly asks 1 hour on every existing marker of every real
-// request, from its first one: nothing is ever switched, so nothing is rewritten. Its pings stop (any wait
-// cause, no 59-minute ping): the hour is the cover. Rules:
+// 1-hour-on-wait (A) pings an entry from 5 minutes to 1 hour. That needs the switch to be free (a read). On
+// a route where the probe found it COSTLY (a rewrite, expected on Anthropic first-party, not tested) the
+// proxy has two other ways to put a main thread on the 1-hour tier, both relabelling every existing marker of
+// every real request to 1 hour (apply.RelabelAllTTL1h; no marker is added):
 //
-//   - the thread that paid the rewrite keeps 1 hour on every later request (its entry is a 1-hour entry);
-//   - a main thread already running at 5 minutes stays on auto until it ends (a switch would cost it a
-//     rewrite): the decision is made ONCE, at the thread's first request that qualifies, and kept;
-//   - a subagent, and any request that does not declare tools, is unchanged;
+//   - D, the fallback of 1-hour-on-wait on a costly route. A main thread runs as auto until its first COLD
+//     REBUILD of a prefix of at least OneHourRebuildTokens (150,000). That rebuild is sent with 1-hour markers,
+//     so it is written at 1 hour, and from then on the thread writes at 1 hour with no pings. The rebuild is
+//     decided BEFORE the request is sent, from what the keeper knows: the thread's last touch (its last
+//     response, or a successful ping) is older than the entry's lifetime (5 minutes, or 1 hour if that request
+//     carried 1-hour markers), and the prefix of that last request (cache read plus write) was at least the
+//     threshold. The rebuild is sized by the previous prefix: after a compaction it can be smaller. Simulated
+//     (150,000): hosted -12% against auto, owner's laptop -25%, but 15% to 18% above A.
+//   - C, the explicit opt-in (OneHourAlways, strategy 1-hour-always): every new main thread writes at 1 hour
+//     from its first request, on any route. ON MOST USERS IT DOES NOT PAY OFF: it pays the 0.75x premium on
+//     every write, and most sessions have few long waits. Simulated on Bedrock-shaped data, main threads only:
+//     hosted, 97 main sessions, +22% cost against auto, 77 worse, the premium 39% of the cost; the owner's
+//     laptop -25% (33 sessions). So it is never a default and never turns on by itself.
+//
+// Rules both share:
+//
+//   - the main thread is the primary thread that declares tools (a title or quota request declares none);
+//     a subagent is never relabelled;
+//   - the thread that paid the probe's rewrite is in the mode too: its entry is a 1-hour entry;
+//   - a thread in the mode gets NO ping on any wait cause, and no 59-minute ping;
 //   - a request with 1-hour markers that WROTE tokens but was billed at 5 minutes means the gateway
 //     downgraded the tier: the mode stops for that route and model (checkOneHourFirstDowngrade). A request
 //     that wrote nothing proves nothing.
 //
-// The tools-declared test stands for "the main agent": the thread tracker gives the primary thread to the
-// first thread that declares tools, and an auxiliary request (a title, a quota check) declares none.
+// C and A together: C wins on a main thread (its 1-hour markers leave nothing to ping), and A still serves a
+// thread that is not in the mode. C on a route where the switch is free is allowed; it only costs more.
 
-// OneHourFirst reports whether this request must carry 1-hour markers on every breakpoint. The host asks
-// at the end of apply, once the thread is known; the answer is made once per thread and kept. Nil-safe.
-func (k *Keeper) OneHourFirst(tenant, session, threadID string, provider bschemas.ModelProvider, endpoint, route, model string, toolsDeclared bool) bool {
+// OneHourMode is what the host passes with each question: the account's resolved choices.
+type OneHourMode struct {
+	// Always is the C opt-in.
+	Always bool
+	// RebuildTokens is D's threshold. 0 = 150,000. D applies only on a costly route.
+	RebuildTokens int64
+}
+
+// DefaultOneHourRebuildTokens is D's default threshold.
+const DefaultOneHourRebuildTokens = 150000
+
+// touchRec is what the keeper remembers of a thread's last touch, to see before sending that its entry is
+// gone (D). Metadata only.
+type touchRec struct {
+	at     time.Time     // the end of the last response, or of a successful ping
+	ttl    time.Duration // the entry's lifetime then: 5 minutes, or 1 hour when its markers were all 1 hour
+	prefix int64         // billed prefix tokens of the last real request: cache read plus write
+}
+
+// noteTouch remembers a thread's last touch. A request sets the prefix; a ping keeps it. Bounded.
+func (k *Keeper) noteTouchLocked(key string, at time.Time, ttl time.Duration, prefix int64) {
+	if len(k.lastTouch) >= MaxTurnKeys {
+		k.lastTouch = map[string]touchRec{}
+	}
+	if prefix <= 0 {
+		prefix = k.lastTouch[key].prefix
+	}
+	k.lastTouch[key] = touchRec{at: at, ttl: ttl, prefix: prefix}
+}
+
+// OneHourFirst reports whether this request must carry 1-hour markers on every breakpoint. The host asks at
+// the end of apply, once the thread is known. Nil-safe.
+func (k *Keeper) OneHourFirst(tenant, session, threadID string, provider bschemas.ModelProvider, endpoint, route, model string, toolsDeclared bool, mode OneHourMode) bool {
 	if k == nil || session == "" || threadID != "" || IsSubagentThread(threadID) || !toolsDeclared {
 		return false
 	}
@@ -347,28 +393,46 @@ func (k *Keeper) OneHourFirst(tenant, session, threadID string, provider bschema
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[rk]
-	costly := st != nil && st.costly && !st.off
-	if v, decided := k.oneHourFirst[key]; decided {
-		return v && costly
+	if st != nil && st.off {
+		return false // the gateway downgraded 1-hour markers here: the mode is over for the route and model
+	}
+	if k.oneHourFirst[key] {
+		return true // decided: the thread stays in the mode
+	}
+	enter := false
+	switch {
+	case mode.Always:
+		enter = true // C: every new main thread, from its first request
+	case st != nil && st.costly:
+		// D: the first cold rebuild of a big prefix.
+		need := mode.RebuildTokens
+		if need <= 0 {
+			need = DefaultOneHourRebuildTokens
+		}
+		lt, seen := k.lastTouch[key]
+		enter = seen && k.now().Sub(lt.at) > lt.ttl && lt.prefix >= need
+	}
+	if !enter {
+		return false
 	}
 	if len(k.oneHourFirst) >= MaxTurnKeys {
 		k.oneHourFirst = map[string]bool{}
 	}
-	k.oneHourFirst[key] = costly // a thread that starts on a costly route is in the mode for good; any other is not
-	return costly
+	k.oneHourFirst[key] = true
+	return true
 }
 
-// oneHourFirstThread reports whether the thread is in the mode on a route that is still costly.
+// oneHourFirstThread reports whether the thread is in the mode on a route that is not off.
 func (k *Keeper) oneHourFirstThread(key string, provider bschemas.ModelProvider, endpoint, route, model string) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	st := k.oneHourRoutes[oneHourRoute(provider, endpoint, route, model)]
-	return k.oneHourFirst[key] && st != nil && st.costly && !st.off
+	return k.oneHourFirst[key] && (st == nil || !st.off)
 }
 
-// oneHourMarkCostly records that the probe's switch rewrote the prefix. The route goes to the costly mode (no
-// more 1-hour pings; main threads that start now write at 1 hour), and the probing thread, whose entry is now
-// a 1-hour entry, keeps 1 hour on every later request.
+// oneHourMarkCostly records that the probe's switch rewrote the prefix. The route goes to the costly mode: no
+// more 1-hour pings, and D is the fallback of its main threads. The probing thread, whose entry is now a
+// 1-hour entry, keeps 1 hour on every later request.
 func (k *Keeper) oneHourMarkCostly(rk string, j pingJob, kv ...any) {
 	k.mu.Lock()
 	st := k.oneHourRoutes[rk]
@@ -390,7 +454,7 @@ func (k *Keeper) oneHourMarkCostly(rk string, j pingJob, kv ...any) {
 	k.mu.Unlock()
 	if first {
 		slog.Warn("context-guru: a 1-hour keep-alive ping rewrote the prefix on this route; no more 1-hour pings. "+
-			"Main threads that start now write at 1 hour from their first request, with no pings",
+			"A main thread now switches to 1 hour at its first cold rebuild of a big prefix (no pings after)",
 			append([]any{"provider", string(j.provider), "route", j.route, "endpoint", endpoint, "model", model,
 				"session", j.session, "thread", j.thread}, kv...)...)
 	}
