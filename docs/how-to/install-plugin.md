@@ -326,3 +326,19 @@ tells you once — it does not keep asking on every later session. You get three
 Check or act on it any time with `/context-guru:update`, without waiting for the next notice. Under
 the hood this is still `install.sh` with `CONTEXT_GURU_UPGRADE=1` (or `CONTEXT_GURU_VERSION=vX.Y.Z`
 to pin a version) — the notice and the skill just save you from remembering that flag exists.
+
+### Install a beta
+
+A beta is a pre-release (`vX.Y.Z-beta.N`). `/context-guru:update` and the plain install never pick one.
+Run `/context-guru:install-beta` (or `install-beta.sh [<tag>]` from the plugin's `scripts` folder). With no tag it
+takes the newest pre-release. It:
+
+- downloads the beta with the **beta tag's own** `install.sh`, and checks the checksum (a bad one stops it);
+- sets the update answer to `never` when it was `always`, because of #1254: auto-update would install the older
+  stable release over the beta. To turn it back on: `settings.py update-check answer --answer always`;
+- says when the installed plugin is older than the beta, and how to update it;
+- restarts the proxy **only** with `--restart` (the skill asks first). A restart cuts every session routed through
+  that port. It stops the proxy by its pidfile, keeps the preset, and waits for `/healthz`.
+
+Until a restart, a running proxy keeps its old binary. To go back, install the previous tag with
+`CONTEXT_GURU_VERSION=<tag>` and `install.sh`.

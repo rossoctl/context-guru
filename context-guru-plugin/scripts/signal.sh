@@ -53,7 +53,13 @@ if ev not in ("SessionEnd", "SessionStart", "Notification") or not re.fullmatch(
 if not (ev == "SessionStart" and kind in ("startup", "fork")):
     # The keep-alive event. startup and fork carry nothing for it (the matcher only runs this hook
     # for them so the opt-out below can be sent).
-    print("/signal " + json.dumps({"session": sid, "event": ev, "kind": kind}))
+    body = {"session": sid, "event": ev, "kind": kind}
+    # The permission mode of the client, a short word from the hook input (default, acceptEdits, plan,
+    # bypassPermissions). Sent only when present; the proxy keeps only a closed set.
+    pm = d.get("permission_mode")
+    if isinstance(pm, str) and re.fullmatch(r"[A-Za-z]{1,32}", pm):
+        body["permission_mode"] = pm
+    print("/signal " + json.dumps(body))
 if ev == "SessionStart" and kind in ("startup", "resume", "fork", "clear") and os.environ.get("TSOFF") == "1":
     # The RAW value, so the proxy can tell a deliberate "false" from "auto" (the wire cannot). A short
     # closed-shape value, never content. The 16-character cut only shortens what is sent: every off

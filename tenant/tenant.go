@@ -1427,6 +1427,11 @@ var migrations = []string{
 	// v12: consent to --record trace recording. Additive, DEFAULT 0, so every existing
 	// account migrates to "not recorded" and has to opt in for itself.
 	`ALTER TABLE tenants ADD COLUMN record_traces INTEGER NOT NULL DEFAULT 0;`,
+
+	// v13: a strategy may optionally switch on the 1-hour-on-wait ping (#1243), the same knob a tenant's
+	// own account config exposes (config.CacheConfig.KeepAliveOneHourOnWait). 0 (the default) leaves the
+	// account's own setting alone, so every existing strategy behaves as before. Additive.
+	`ALTER TABLE keepalive_strategies ADD COLUMN one_hour_on_wait INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func migrate(db *sql.DB) error {

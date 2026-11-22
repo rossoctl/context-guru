@@ -3,7 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 	"os"
 	"path/filepath"
 	"strings"

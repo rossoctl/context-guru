@@ -164,7 +164,7 @@ func TestCacheAwareClaudeCodeStyleMovingCacheControlIsNotStale(t *testing.T) {
 // hold either way, marker-stripping or not.
 //
 // WHICH COUNTER catches it changed after #423 (thread keying) merged with this fix: turn 3's
-// edited message breaks prefix continuity with turn 2 (internal/thread's own detection rule), so
+// edited message breaks prefix continuity with turn 2 (package thread's own detection rule), so
 // turn 3 is classified as a NEW thread rather than a continuation of the one turn 1/2 stashed —
 // correctly, by #423's own logic, since from the thread detector's point of view this looks
 // exactly like a subagent starting a divergent conversation. The new thread has nothing stashed

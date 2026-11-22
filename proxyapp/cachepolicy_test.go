@@ -35,3 +35,19 @@ func TestCachePolicyActivePathCarriesItsResolvedFields(t *testing.T) {
 		t.Errorf("active policy lost a resolved default: %+v", p)
 	}
 }
+
+// #1243: the 1-hour-on-wait strategy reaches the proxy's policy, with auto's keep-alive.
+func TestCachePolicyCarriesOneHourOnWait(t *testing.T) {
+	c, err := config.LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cachePolicy(c.Cache)
+	if !p.OneHourOnWait || !p.KeepAlive || p.HeadTTL1h {
+		t.Fatalf("policy wrong: onWait=%v keepalive=%v head=%v", p.OneHourOnWait, p.KeepAlive, p.HeadTTL1h)
+	}
+	a, _ := config.LoadBytes([]byte("cache:\n  strategy: auto\n"))
+	if cachePolicy(a.Cache).OneHourOnWait {
+		t.Error("auto must not switch it on")
+	}
+}

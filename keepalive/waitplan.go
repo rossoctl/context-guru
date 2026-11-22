@@ -1,10 +1,11 @@
 package keepalive
 
 import (
-	"strings"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // The per-wait ping plan (#858). The ping count is chosen when a turn ends, from what the thread
@@ -41,8 +42,9 @@ const (
 	MaxWaitPings = 11
 )
 
-// IsSubagentThread reports whether a thread id names a subagent. The main thread is "".
-func IsSubagentThread(threadID string) bool { return strings.HasPrefix(threadID, "a:") }
+// IsSubagentThread reports whether a thread id names a subagent. The main thread is "". It is
+// thread.IsAgentThread, so the keeper and the resolver share one rule.
+func IsSubagentThread(threadID string) bool { return thread.IsAgentThread(threadID) }
 
 // WindowsApply reports whether a manager strategy's time windows apply to a thread that waits for
 // cause. Only a wait for a person follows working hours. A tool, a background task, a teammate and
@@ -56,6 +58,22 @@ func WindowsApply(cause string, subagent bool) bool {
 		return !subagent
 	}
 	return true
+}
+
+// LongWait reports whether a thread that waits for cause waits long enough for the 1-hour-on-wait
+// ping (#1243): the MAIN agent, waiting for a person, a teammate, background work, or a cause the proxy
+// cannot name. MAIN AGENT ONLY: a subagent thread is never a long wait here, whatever its cause, and
+// keeps auto's 5-minute pings. A tool wait, a retry and a finished thread are short or over. The
+// classification is waitcause's. This only groups its values.
+func LongWait(cause string, subagent bool) bool {
+	if subagent {
+		return false
+	}
+	switch cause {
+	case waitcause.WaitingHuman, waitcause.WaitingBackground, waitcause.WaitingTeammate, waitcause.WaitingUnknown, "":
+		return true
+	}
+	return false
 }
 
 // WaitPings is the ping count for a thread that waits for cause. With WaitPlan off it is MaxPings.
@@ -121,16 +139,33 @@ func orDefault(v, def int) int {
 	return v
 }
 
+// TaskCounts are the open background-task and teammate-wait counts of a request body, read by the host
+// while the request was upstream (#1225, #1227). Counts only. WaitingFor reads only Background; Teammate is
+// carried for the host's own use and never changes a plan.
+type TaskCounts struct{ Background, Teammate int }
+
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
-// open-task counts (Options.OpenTasks). The open counts are as of the last request the host's
-// tracker observed, which can lag by one request: a stale count reads as "a person", the cheaper plan.
-func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool) string {
+// open-task counts. The background count is the larger of two readings: the host's tracker
+// (Options.OpenTasks), which is as of the request before and carries tasks whose start has left a
+// compacted body, and the count the host read from this turn's own body (open; nil: the host had no
+// result in time). A stale tracker count alone reads a turn that starts background work as "a person",
+// the cheaper plan (#1225).
+//
+// Only the background count is merged. The teammate count is the tracker's alone: a merged teammate
+// count could turn "a person" (base+1 pings, the general floor) into "a teammate" (base pings), which is
+// fewer. With the background count merged, the cause moves only from "a person" or "a teammate" to
+// "background", which gets at least those pings and a floor no higher. Record also takes the larger
+// count of the two causes, so no configuration of the extra pings can lower it.
+func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool, open *TaskCounts) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
 	}
 	bg, tm := 0, 0
 	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(key.Tenant, key.Session, key.Thread)
+	}
+	if open != nil {
+		bg = max(bg, open.Background)
 	}
 	w, _ := waitcause.ClassifyWaitingForTerminal(terminalFor(k.o.TerminalTools, incomplete),
 		names, stopReason, false, usageOK, bg, tm)
@@ -244,4 +279,17 @@ func (k *Keeper) ToolSeen(key Key) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.toolSeen[key.id()]
+}
+
+// OneHourTier reports whether Record would put this response on the 1-hour schedule: the thread was
+// granted the 1-hour lifetime and the provider is not OpenAI. The host asks it before it decides how far to
+// trust a body reading (#1227): the per-wait plan, and so the body reading, does not apply to that tier.
+func (k *Keeper) OneHourTier(key Key, body []byte, u Usage, usageOK bool, provider bschemas.ModelProvider) bool {
+	if k == nil || provider == bschemas.OpenAI {
+		return false
+	}
+	k.mu.Lock()
+	prev := k.tier1h[key.id()]
+	k.mu.Unlock()
+	return ResolveTier(body, u, usageOK, prev)
 }

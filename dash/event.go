@@ -114,6 +114,18 @@ type WaitCauseResult struct {
 	WaitingFor, WaitTool, WakeCause string
 	OpenBackground, OpenTeammate    int
 	MonitorExpiryMs                 int64
+	// The strategy metadata of issue #1198 that is read off the same body and response. All are
+	// "not computed" at their zero value: nil pointers and "".
+	WaitToolTimeoutMs  *int64
+	WaitToolBackground *bool
+	WaitPrompt         string
+	// UserKey is the person's id read off the request body (session.UserKey), still raw. The
+	// writer hashes it into Event.UserHash and drops it; it is never stored or published.
+	UserKey string
+	// SpawnType is the raw subagent_type of the last subagent call (hashed by the writer unless it is a
+	// built-in name); Fanout is how many subagent calls the response made.
+	SpawnType string
+	Fanout    int
 }
 
 // Event is one captured request, as handed to the capture channel. It is built on
@@ -140,10 +152,10 @@ type Event struct {
 	SessionID string `json:"session_id"`
 	// ThreadID names the thread of the session this request belongs to: "" for the session's
 	// primary thread — the main agent, told apart as the first thread without an agent header
-	// that declares tools (see internal/thread) — "a:<agent id>" for a subagent that named itself
+	// that declares tools (see package thread) — "a:<agent id>" for a subagent that named itself
 	// in a header, and "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread
 	// has its own provider cache entry, so recency and miss attribution are per thread; reporting
-	// stays per session. See internal/thread and issue #423.
+	// stays per session. See package thread and issue #423.
 	//
 	// A row keeps the id it was written with. A tool-less request that spoke before the main agent
 	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
@@ -200,6 +212,38 @@ type Event struct {
 	// #424 requirement). Never serialized (there is nothing to marshal); the SIX FIELDS it
 	// fills are what reaches JSON and the database.
 	WaitCause func() WaitCauseResult `json:"-"`
+	// The metadata that predicts when a user returns (#1198). Each is NULL in the database when it was
+	// not computed (the zero value here): absent means unknown, never a guess.
+	//
+	// WaitToolTimeoutMs / WaitToolBackground are the `timeout` and `run_in_background` of the tool
+	// call the thread waits for (WaitTool); no other part of the call's input is read.
+	// WaitPrompt is none|permission|question|other: whether the turn ends on a prompt a person must
+	// answer. TZOffsetMin is the host's UTC offset in minutes (local proxy only; 0 is UTC and is a
+	// real value). Turn counts the thread's real requests from 1; ActiveThreads counts the session's
+	// threads with a real request in the last ActiveThreadsWindow, this one included. The KA*
+	// fields are the ping plan in force for the wait the response starts. UserHash is a keyed hash of
+	// the person's id; the raw id is never kept.
+	WaitToolTimeoutMs  *int64 `json:"wait_tool_timeout_ms,omitempty"`
+	WaitToolBackground *bool  `json:"wait_tool_background,omitempty"`
+	WaitPrompt         string `json:"wait_prompt,omitempty"`
+	TZOffsetMin        *int   `json:"tz_offset_min,omitempty"`
+	Turn               int    `json:"turn,omitempty"`
+	ActiveThreads      int    `json:"active_threads,omitempty"`
+	KAPlannedPings     *int   `json:"ka_planned_pings,omitempty"`
+	KAMinPrefixTokens  *int   `json:"ka_min_prefix_tokens,omitempty"`
+	KAIdleS            *int   `json:"ka_idle_s,omitempty"`
+	// UserHash stays out of the API and the live feed: it is a pseudonymous id, for analysis scans of
+	// the database only.
+	UserHash string `json:"-"`
+	// ClientEntrypoint and PermissionMode describe the session's mode: an unattended run (headless or
+	// bypassPermissions) has no person who waits. SubagentType and ParentFanout describe the subagent
+	// calls THIS response made: the type of the last one and their count.
+	ClientEntrypoint string `json:"client_entrypoint,omitempty"`
+	PermissionMode   string `json:"permission_mode,omitempty"`
+	SubagentType     string `json:"subagent_type,omitempty"`
+	ParentFanout     int    `json:"parent_fanout,omitempty"`
+	spawnRaw         string
+	promptMark       string
 	// Lifecycle is the opt-in lifecycle-signals row (dash/lifecycle.go), nil when the flag is
 	// off; LifecycleFn fills it on the writer goroutine, for the same reason WaitCause runs
 	// there (it rescans the request body). Neither is part of the JSON event.
@@ -293,6 +337,11 @@ type Event struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
+	// FallbackRateCostUSD is the part of CostUSD priced from a fallback rate: a cache-read rate no
+	// source stated, filled from a default multiple (modelinfo.Price.FallbackCost, #1248). It is not
+	// the accountant fallback of Overview.FallbackCostUSD. The metrics read it from the live event.
+	// Not stored.
+	FallbackRateCostUSD float64 `json:"-"`
 	// CGCostUnpriced is set by PriceCG when the request made compaction calls that could not be
 	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: the reprice pass
 	// prices such a row on both halves once the price map loads (issues #920, #1033).
@@ -1005,6 +1054,7 @@ func (e *Event) PriceCG(prices modelinfo.Pricer, main modelinfo.Price, mainPrice
 // priceCost is Price without clearing the accountant state. It reports whether the cost was
 // computed (accounting complete and a price known).
 func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
+	e.FallbackRateCostUSD = 0
 	if !accountingComplete || p.Zero() {
 		if e.TokensBefore > 0 {
 			e.TokenAccounting = AccountingPartial
@@ -1020,6 +1070,9 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
 	// See Price.CostWithCacheWrite1h for the one-hour write premium this folds in.
 	e.CostUSD = p.CostWithCacheWrite1h(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens, e.CacheWrite1h)
+	if e.FallbackRateCostUSD = p.FallbackCost(e.CacheRead); e.FallbackRateCostUSD > e.CostUSD {
+		e.FallbackRateCostUSD = e.CostUSD // a part of the cost, never more (dash's min is for ints)
+	}
 	e.BaselineCostUSD = e.CostUSD
 	// What the PROVIDER's prompt cache saved on this request: every cache-read token was
 	// billed at the read rate instead of the fresh rate it would have cost with no cache at

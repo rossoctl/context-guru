@@ -1,6 +1,6 @@
 // Package waitcause records WHY a thread's conversation went idle and WHY it woke up again —
 // the signal issue #424 asks for so a later change can choose a keep-alive ping budget from
-// real data, instead of today's fixed 2 pings per thread (see internal/thread and #426).
+// real data, instead of today's fixed 2 pings per thread (see package thread and #426).
 //
 // This package does NOT choose a ping budget and does NOT change keep-alive or compaction
 // behaviour. It only reads the request body the agent already sent (and the stop reason /
@@ -113,6 +113,34 @@ const (
 // WaitingOwnTool; and a bare tool_result that answers one of these (the Messages API returns
 // every tool's answer the same way, human or not) means WakeHuman, never WakeToolResult.
 var askHumanTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": true}
+
+// WaitPrompt values: whether the turn ends on a prompt that a person must answer (#1198).
+const (
+	PromptNone       = "none"
+	PromptPermission = "permission"
+	PromptQuestion   = "question"
+	PromptOther      = "other"
+)
+
+// PromptOf reads the prompt a response ends on from its tool names alone. It uses the same set of
+// tools as ClassifyWaitingFor (askHumanTools): any call to one of them means a person must answer,
+// as in a WaitingHuman response. A question tool is "question" and wins over the others; any other
+// tool of the set (a plan approval) is "other"; with none, "none". A permission prompt is not in
+// the response (the client raises it after the response ends), so the client's Notification signal
+// sets that value later. A name list that missed a call (a spliced window) can only under-report.
+func PromptOf(toolUseNames []string) string {
+	out := PromptNone
+	for _, n := range toolUseNames {
+		if !askHumanTools[n] {
+			continue
+		}
+		if n == "AskUserQuestion" {
+			return PromptQuestion
+		}
+		out = PromptOther
+	}
+	return out
+}
 
 // teammateWaitCap is how long an open SendMessage wait is still counted as "open" for
 // Observation.OpenTeammate. Issue #424: "An open teammate wait expires at the ping cap (about
@@ -258,7 +286,7 @@ type threadState struct {
 	last          time.Time
 }
 
-// Bounds mirroring internal/thread.Tracker's own (issue #423's package, which this one keys
+// Bounds mirroring thread.Tracker's own (issue #423's package, which this one keys
 // alongside): a long-lived deployment must not let any of these maps grow forever.
 const (
 	maxThreads     = 20000
@@ -279,7 +307,7 @@ func New() *Tracker {
 	return &Tracker{threads: map[string]*threadState{}, now: time.Now}
 }
 
-// Key names one thread for Observe/RecordOutcome, matching internal/thread.Key's shape (tenant
+// Key names one thread for Observe/RecordOutcome, matching thread.Key's shape (tenant
 // is folded in here because waitcause is tenant-scoped the same way thread identification is).
 func Key(tenant, session, threadID string) string {
 	return tenant + "\x00" + session + "\x00" + threadID
@@ -318,7 +346,7 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm fu
 		// PIPELINE's purposes), but for THIS package that one turn would undercount every
 		// open background task and teammate wait, and could misread "the newest turn" as
 		// the whole wake signal when the real one arrived several turns ago server-side.
-		// Same bailout internal/thread.fingerprint makes, for the same reason, and the one
+		// Same bailout thread.fingerprint makes, for the same reason, and the one
 		// field check this package needs before trusting NormalizeMessages' output as "the
 		// whole conversation" — not a second message parser.
 		return Observation{}
@@ -361,7 +389,7 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm fu
 		// open" guard on each open; a delete of an absent key is a no-op) except the
 		// Skill-anonymous close fallback, which is explicitly guarded by ts.appliedCloses —
 		// see scanOpenState's doc for why that ONE path needs it.
-		scanOpenState(ts, entries, now)
+		scanOpenState(ts, entries, now, nil)
 		obs.OpenBackground, obs.MonitorExpiryMs = countBackgroundLocked(ts, now)
 		obs.OpenTeammate = countTeammatesLocked(ts, now)
 	}()
@@ -429,7 +457,7 @@ func (t *Tracker) threadLocked(key string, now time.Time) *threadState {
 }
 
 // pruneLocked drops threads silent longer than staleAfter, same policy as
-// internal/thread.Tracker.pruneLocked. Caller holds t.mu.
+// thread.Tracker.pruneLocked. Caller holds t.mu.
 func (t *Tracker) pruneLocked(now time.Time) {
 	for k, ts := range t.threads {
 		if now.Sub(ts.last) > staleAfter {
@@ -609,7 +637,9 @@ func hasSystemMarker(text string) bool {
 // side effect on an entry OTHER than the one the signal names, so firing it a second time for
 // the SAME historical signal would wrongly close a second, unrelated task; see
 // threadState.appliedCloses and closeOldestAnon's own idempotency guard.
-func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time) {
+// stop, when non-nil, is polled once per message; a true stops the scan and the function returns false
+// (the state is then partial and the caller must discard it). nil never stops.
+func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time, stop func() bool) bool {
 	openBG := func(id string, dur time.Duration) {
 		if _, exists := ts.openBackground[id]; exists {
 			return // already open — do NOT reset firstSeen on a resend
@@ -657,6 +687,9 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 	}
 
 	for _, e := range entries {
+		if stop != nil && stop() {
+			return false
+		}
 		for _, b := range blocksOf(e) {
 			switch b.kind {
 			case kindToolUse:
@@ -724,6 +757,7 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 			}
 		}
 	}
+	return true
 }
 
 // removeFromAnonOrder drops id from ts.anonOrder, if present. Only ever needed when an entry
@@ -739,7 +773,7 @@ func removeFromAnonOrder(ts *threadState, id string) {
 }
 
 // rememberApplied records a close signature, bounding the map the same crude way
-// internal/thread bounds its own: a single arbitrary eviction rather than a size policy,
+// package thread bounds its own: a single arbitrary eviction rather than a size policy,
 // because losing one old signature early just risks ONE extra (and harmless, since an
 // anonymous Skill task closing slightly early is not a measurement anyone acts on today)
 // close-oldest-anon firing a second time — not a correctness failure of the open/closed

@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS requests (
   open_background    INTEGER,
   open_teammate      INTEGER,
   monitor_expiry_ms  INTEGER,
-  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (proxy isAgentCompaction); 0 on rows written before it
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (thread.IsAgentCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)
@@ -306,6 +306,33 @@ CREATE TABLE IF NOT EXISTS requests (
   -- library priced it or never ran on it. A fallback row books cost and no saving, so the
   -- Overview counts it and leaves it out of the saving share (context-guru#1004).
   acc_fallback            TEXT    NOT NULL DEFAULT '',
+  -- The metadata that predicts when a user returns (#1198). All nullable with no default: NULL is
+  -- "not computed" (a row from before the columns, a keep-alive ping, a value the host cannot know)
+  -- and must stay apart from a real 0. Numbers, flags and enums; no content.
+  -- wait_tool_timeout_ms / wait_tool_background: the timeout and run_in_background of the tool call
+  -- the thread waits for (wait_tool); no other part of the call's input is read.
+  wait_tool_timeout_ms    INTEGER,
+  wait_tool_background    INTEGER,
+  -- none|permission|question|other: the turn ends on a prompt a person must answer. 'permission' is
+  -- set later, by the client's Notification signal (client_signals).
+  wait_prompt             TEXT,
+  tz_offset_min           INTEGER,  -- the host's UTC offset in minutes; the local proxy only
+  turn                    INTEGER,  -- the thread's real requests, counting from 1; survives a restart, but a session whose rows were archived or pruned restarts from the rows that remain
+  active_threads          INTEGER,  -- threads of the session with a real request in the last 10 minutes
+  ka_planned_pings        INTEGER,  -- the ping plan in force for the wait this response starts
+  ka_min_prefix_tokens    INTEGER,
+  ka_idle_s               INTEGER,
+  -- A keyed hash (HMAC-SHA256, 64 bits) of the person's account id, with a per-install secret. A
+  -- pseudonymous id; the raw id is never stored.
+  user_hash               TEXT,
+  -- Session mode and fan-out (#1198): client_entrypoint is cli|headless|sdk|other from the User-Agent;
+  -- permission_mode is default|acceptEdits|plan|bypassPermissions|dontAsk|other from the client's last hook
+  -- signal of the session; subagent_type is a built-in subagent name or 'h:' + a keyed hash of a
+  -- custom one; parent_fanout is how many subagent calls this response made (NULL when none).
+  client_entrypoint       TEXT,
+  permission_mode         TEXT,
+  subagent_type           TEXT,
+  parent_fanout           INTEGER,
   -- What the declaration filter stopped carrying on this request: the token weight of the
   -- tools[] elements it removed under the account's opt-in list. Written ONLY by the filter
   -- itself (apply.Trace.FilteredDeclTokens), never derived from the tool inventory — the
@@ -533,6 +560,22 @@ CREATE TABLE IF NOT EXISTS request_lifecycle (
   granted_ttl       TEXT    NOT NULL DEFAULT '', -- 5m|1h|mixed from the response's cache-write tiers
   ping_n            INTEGER NOT NULL DEFAULT 0
 );
+
+-- Client lifecycle signals (#1198): what the client's hooks told the proxy, one row per accepted event.
+-- A table and not columns on the next request, because a SessionEnd is often the LAST thing a session
+-- sends and no request follows it. Enums and ids only: the event (SessionEnd|SessionStart|Notification),
+-- and its reason or type from a closed set (see proxy/clientsignal.go). ts is epoch ms. Pruned by the
+-- retention age and by a row cap (pruneClientSignals) and removed with its tenant (Purge).
+CREATE TABLE IF NOT EXISTS client_signals (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         INTEGER NOT NULL,
+  tenant_id  TEXT    NOT NULL DEFAULT '',
+  session_id TEXT    NOT NULL DEFAULT '',
+  event      TEXT    NOT NULL,
+  reason     TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_client_signals_session ON client_signals(tenant_id, session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_client_signals_ts ON client_signals(ts);
 
 -- One row per LLM call an expensive component made, with what it cost and what it bought.
 --
@@ -976,6 +1019,21 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	// Why the accountant could not price the request (#1004). '' on an earlier row; backfillAccFallback
 	// marks the earlier rows whose components say they fell back.
 	{"requests", "acc_fallback", "TEXT NOT NULL DEFAULT ''"},
+	// The metadata that predicts when a user returns (#1198). Nullable, no default.
+	{"requests", "wait_tool_timeout_ms", "INTEGER"},
+	{"requests", "wait_tool_background", "INTEGER"},
+	{"requests", "wait_prompt", "TEXT"},
+	{"requests", "tz_offset_min", "INTEGER"},
+	{"requests", "turn", "INTEGER"},
+	{"requests", "active_threads", "INTEGER"},
+	{"requests", "ka_planned_pings", "INTEGER"},
+	{"requests", "ka_min_prefix_tokens", "INTEGER"},
+	{"requests", "ka_idle_s", "INTEGER"},
+	{"requests", "user_hash", "TEXT"},
+	{"requests", "client_entrypoint", "TEXT"},
+	{"requests", "permission_mode", "TEXT"},
+	{"requests", "subagent_type", "TEXT"},
+	{"requests", "parent_fanout", "INTEGER"},
 }
 
 // backfillAccFallback marks, ONCE, the rows written before acc_fallback existed whose request fell back. Such a

@@ -103,7 +103,7 @@ func TestQuotaTrimArchivesInsteadOfDeleting(t *testing.T) {
 	if err := rec.db.insertBatch(spendEvents("heavy", 10, 4, 0.01)); err != nil {
 		t.Fatal(err)
 	}
-	rec.enforceQuotas()
+	rec.enforceQuotas(rec.ensureBackup)
 
 	rows, err := rec.db.tenantRowCount("heavy")
 	if err != nil {
@@ -145,7 +145,7 @@ func TestPerTenantRowQuotaIsEnforced(t *testing.T) {
 		}
 		return 0 // no quota of its own; no global default either
 	})
-	rec.enforceQuotas()
+	rec.enforceQuotas(rec.ensureBackup)
 
 	capped, err := rec.db.tenantRowCount("capped")
 	if err != nil {

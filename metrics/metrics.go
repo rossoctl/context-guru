@@ -988,14 +988,25 @@ type Snapshot struct {
 	// lifecycle log line and are not alertable. Filled by the host at serve time.
 	UsageUnparsed   int64 `json:"usage_unparsed"`
 	UsageUnreadable int64 `json:"usage_unreadable"`
-	StashRefused    int64 `json:"stash_refused"`
-	StashMissing    int64 `json:"stash_missing"`
-	StashExpired    int64 `json:"stash_expired"`
-	StashRevived    int64 `json:"stash_revived"`
-	StashLive       int   `json:"stash_live"`
-	StashCapacity   int   `json:"stash_capacity"`
-	StashBytes      int64 `json:"stash_bytes"`
-	StashMaxBytes   int64 `json:"stash_max_bytes"`
+	// The early wait-cause scan (#1225, #1227), process-wide, filled by the host at serve time. The keeper
+	// takes the scan at response end without waiting: WaitScanUsed turns used its counts, WaitScanNotReady
+	// planned without them (the scan was still running), WaitScanUnknown planned without them (the scan
+	// said unknown: over the work bound, server-held history, a panic, cancelled). The writer's tracker
+	// update reused the scan (WaitScanWriterEarly) or normalized the body itself (WaitScanWriterOwn).
+	// Counts only.
+	WaitScanUsed        int64 `json:"wait_scan_used"`
+	WaitScanNotReady    int64 `json:"wait_scan_not_ready"`
+	WaitScanUnknown     int64 `json:"wait_scan_unknown"`
+	WaitScanWriterEarly int64 `json:"wait_scan_writer_early"`
+	WaitScanWriterOwn   int64 `json:"wait_scan_writer_own"`
+	StashRefused        int64 `json:"stash_refused"`
+	StashMissing        int64 `json:"stash_missing"`
+	StashExpired        int64 `json:"stash_expired"`
+	StashRevived        int64 `json:"stash_revived"`
+	StashLive           int   `json:"stash_live"`
+	StashCapacity       int   `json:"stash_capacity"`
+	StashBytes          int64 `json:"stash_bytes"`
+	StashMaxBytes       int64 `json:"stash_max_bytes"`
 	// ExpandPrefixFlips counts turns where an ESTABLISHED compaction was abandoned because the
 	// agent had expanded that content: a frozen decision existed, so the provider holds the
 	// compacted bytes, and the turn sends the original in full at the same position. That is a

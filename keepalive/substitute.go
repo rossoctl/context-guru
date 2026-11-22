@@ -8,8 +8,8 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // cachePhaseAt classifies the cache phase of an entry last touched at prevStartedAt, for a
@@ -133,6 +133,7 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	e := j.e
 	k.mu.Lock()
 	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
+	route := e.route
 	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, model, ttl1h), e.pol.Idle
 	k.mu.Unlock()
 	window := substituteWindow(info.PreExpirySeconds, ttl, idle)
@@ -164,24 +165,41 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 		return false
 	}
 	// REFRESHING an existing reserve (as opposed to creating a session's first one) only earns
-	// back its own cost when the material it folds in is worth more than the call itself — see
+	// back its own cost when the material it folds in is worth more than the call adds — see
 	// issue #415. Creating the first reserve has no such test: it is compared against "no reserve
 	// at all" (the full-rewrite cold return this whole mechanism exists to avoid), not against a
 	// slightly smaller one, so info.IsRefresh gates this block to the refresh case alone.
+	//
+	// WHAT THE REFRESH ADDS, NOT WHAT THE CALL COSTS (#1144). A refresh at a planned ping takes
+	// the place of a due ping that reads the same prefix, so that read is paid either way. The cost to weigh is the
+	// extra over the ping: the reply. `cost` (the whole call) stays the figure for the spending cap
+	// above. refresh_cost: full keeps the old test, against `cost`.
 	if info.IsRefresh {
 		saving := k.expectedRefreshSavingUSD(model, endpoint, prefix, info.RefreshTailTokens)
-		if saving < cost {
+		extra := k.projectedRefreshExtraUSD(model, prefix, route, endpoint)
+		// The extra cost is the right figure only when the refresh REPLACES a ping that reads the
+		// same bytes: a planned ping (not the extra slot, where a decline sends nothing, so the
+		// refresh adds the whole call) and a candidate on the prefix_ask path (messages and
+		// model.source: config read the prefix at their own price). Anything else weighs the
+		// whole call, as before #1144.
+		weighed := extra
+		if info.RefreshFullCost || j.extra || !info.ReadsPingPrefix {
+			weighed = cost
+		}
+		if saving < weighed {
 			k.summarySubstituteRefreshNotWorthIt.Add(1)
 			slog.Debug("context-guru: cache_aware_summarizer refresh would cost more than it saves; "+
 				"pinging normally instead",
 				"tenant", tenantLabel(j.tenant), "session", j.session,
-				"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving, "projected_cost_usd", cost)
+				"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving,
+				"projected_cost_usd", cost, "extra_cost_usd", extra, "refresh_cost_full", info.RefreshFullCost)
 			return false
 		}
 		k.summarySubstituteRefreshPaid.Add(1)
 		slog.Debug("context-guru: cache_aware_summarizer refresh pays for itself; refreshing the reserve",
 			"tenant", tenantLabel(j.tenant), "session", j.session,
-			"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving, "projected_cost_usd", cost)
+			"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving,
+			"projected_cost_usd", cost, "extra_cost_usd", extra, "refresh_cost_full", info.RefreshFullCost)
 	}
 	start := k.now()
 	res := dispatch(offload.CacheAwareSummarizerCallTimeout())

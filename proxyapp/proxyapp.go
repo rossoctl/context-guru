@@ -48,8 +48,8 @@ import (
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
+	"github.com/rossoctl/context-guru/models"
+	modelslitellm "github.com/rossoctl/context-guru/models/litellm"
 )
 
 // Build identity, as set by the Makefile's -ldflags. A host that wants its own stamp sets its own
@@ -70,44 +70,41 @@ func Commit() string { return buildinfo.Commit }
 // having it.
 func SetupLogging() string { return logging.Setup() }
 
-// Model-window and price resolution. A Resolver answers "how big is this model's context window",
-// and a Pricer answers "what does a token cost on it" — both needed to report savings in money
-// rather than only in tokens.
+// Model-window and price resolution, re-exported from package models so a host built on this
+// facade still compiles. A host that needs only these should import models and models/litellm:
+// they do not link the proxy (issue #1251).
 type (
 	// Resolver resolves a model id to its context window.
-	Resolver = modelinfo.Resolver
+	Resolver = models.Resolver
 	// Chain tries several Resolvers in order, first answer wins.
-	Chain = modelinfo.Chain
+	Chain = models.Chain
 	// Static is the compiled-in table of known models.
-	Static = modelinfo.Static
+	Static = models.Static
 	// Table is a table loaded from a file.
-	Table = modelinfo.Table
-	// LiteLLM resolves against the LiteLLM community price/window map (internal/modelinfo/litellm:
-	// the one network call in this family, kept out of modelinfo itself so that package stays
-	// I/O-free).
-	LiteLLM = litellm.LiteLLM
+	Table = models.Table
+	// LiteLLM resolves against the LiteLLM community price/window map.
+	LiteLLM = modelslitellm.LiteLLM
 	// Price is one model's token prices.
-	Price = modelinfo.Price
+	Price = models.Price
 	// Pricer answers what a model's tokens cost.
-	Pricer = modelinfo.Pricer
+	Pricer = models.Pricer
 )
 
-// DefaultStatic is the compiled-in model table.
-func DefaultStatic() Static { return modelinfo.DefaultStatic() }
+// DefaultStatic is the compiled-in model table. See models.DefaultStatic.
+func DefaultStatic() Static { return models.DefaultStatic() }
 
-// LoadTable reads a model table from a file, so an operator can correct or extend the compiled-in
-// one without a rebuild.
-func LoadTable(path string) (*Table, error) { return modelinfo.LoadTable(path) }
+// LoadTable reads a model table from a file. See models.LoadTable.
+func LoadTable(path string) (*Table, error) { return models.LoadTable(path) }
 
-// NewLiteLLM resolves model windows against a LiteLLM gateway, cached for ttl.
+// NewLiteLLM resolves model windows against a LiteLLM gateway, cached for ttl. See litellm.New in
+// models/litellm.
 func NewLiteLLM(url string, client *http.Client, ttl time.Duration) *LiteLLM {
-	return litellm.NewLiteLLM(url, client, ttl)
+	return modelslitellm.New(url, client, ttl)
 }
 
-// ExactWindow reports a model's window and whether the answer is exact rather than inferred. The
-// distinction matters: a fraction-of-window trigger computed from a guessed window is a guess.
+// ExactWindow reports a model's window and whether the answer is exact. See models.ExactWindow.
 func ExactWindow(r Resolver, ctx context.Context, model string) (tokens int, exact, ok bool) {
-	return modelinfo.Exact(r, ctx, model)
+	return models.ExactWindow(r, ctx, model)
 }
 
 // The cheap-model clients, for the components that call a small model to do their work (extraction

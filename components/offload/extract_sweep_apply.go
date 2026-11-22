@@ -17,10 +17,10 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // THE COLD APPLY (#404, points 3 and 4).
@@ -57,8 +57,10 @@ const (
 	eventApplyPanic           = "sweep_apply_panic"
 	eventFalseRef             = "sweep_false_ref"
 	// The warm path (#491) applies through the same code and counts apart.
-	eventAppliedWarm  = "sweep_applied_warm"
-	eventFalseRefWarm = "sweep_false_ref_warm"
+	eventAppliedWarm = "sweep_applied_warm"
+	// eventV3DroppedPrefix + a rule name (or "judge") counts the v3 drops each one chose, on the request.
+	eventV3DroppedPrefix = "sweep_v3_dropped_"
+	eventFalseRefWarm    = "sweep_false_ref_warm"
 )
 
 // gateApplyAlreadyMarked: a held drop's output carries a marker one of our components made, so it is
@@ -424,6 +426,10 @@ type SweepExpandNote struct {
 	Overlap bool
 	// Warm: the first expand was of a drop applied on a warm request (#491).
 	Warm bool
+	// Rules counts the first expands of sweep v3 drops by what chose each one: a rule name, or "judge".
+	// One per owner thread that had a first expand: with no thread, every owner of the marker gets one,
+	// and each owner raised its own dropped event. The host counts expands per rule with it (#1191).
+	Rules map[string]int
 }
 
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the
@@ -460,6 +466,10 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 			putDrop(st, rec)
 			if rec.Rule != "" {
 				noteV3Expand(rec.Rule)
+				if note.Rules == nil {
+					note.Rules = map[string]int{}
+				}
+				note.Rules[rec.Rule]++
 			}
 			if !note.First {
 				note.First, note.Overlap = true, overlap
@@ -1146,6 +1156,10 @@ func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bs
 		if e.v3 {
 			for _, p := range pending {
 				noteV3Dropped(p.rec.TKind)
+				if p.rec.Rule != "" {
+					// Per rule, on the request: the dashboard keeps it per route, across a restart (#1191).
+					rep.Event(eventV3DroppedPrefix + p.rec.Rule)
+				}
 			}
 		}
 		if warmGated {
