@@ -791,17 +791,80 @@ func TestAReleasedProbeIsLoggedAndASwitchOffIsLogged(t *testing.T) {
 	}
 }
 
-// A manual "Ping now" after a free 1-hour ping sends the held body with 5-minute markers, which moves the
-// entry back to 5 minutes. The press is the thread's new last touch: the 1-hour clock ends (#1258).
-func TestAManualPressEndsTheOneHourTouch(t *testing.T) {
+// A manual "Ping now" sends the held body with 5-minute markers, which would move a 1-hour entry back to
+// 5 minutes. The keeper refuses a press while the thread's free 1-hour touch is live. It sends nothing, claims
+// no gap, and the touch and the clock stay (#1259).
+func TestAManualPressOnALiveOneHourTouchIsRefusedAndChangesNothing(t *testing.T) {
 	k, _ := probeThenWait(t)
-	if _, ok := touchOf(k, sess1); !ok {
-		t.Fatal("no touch to end")
+	before, ok := touchOf(k, sess1)
+	if !ok {
+		t.Fatal("no touch to protect")
 	}
+	sent := fakeOf(k).n()
+	for range 2 { // the second press shows the first claimed no gap
+		if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Hour}); !errors.Is(err, ErrAtOneHour) {
+			t.Fatalf("PingNow = %v, want ErrAtOneHour", err)
+		}
+	}
+	if got := fakeOf(k).n(); got != sent {
+		t.Errorf("a refused press sent %d request(s)", got-sent)
+	}
+	after, ok := touchOf(k, sess1)
+	if !ok || after != before {
+		t.Errorf("touch = %+v %v, want it unchanged: %+v", after, ok, before)
+	}
+}
+
+// A press goes through once the touch is not live: a real request ended it, or its hour passed. The press then
+// clears a stale touch (it is the thread's new last touch) and sends one ping.
+func TestAManualPressAfterTheOneHourTouchEndedStillWorks(t *testing.T) {
+	k, start := probeThenWait(t)
+	returnWith(k, sess1, start.Add(10*time.Minute), kaBody, 49500, 100, false) // a real request ends the touch
+	sent := fakeOf(k).n()
 	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Second}); err != nil {
 		t.Fatalf("PingNow: %v", err)
 	}
-	if _, ok := touchOf(k, sess1); ok {
-		t.Error("the touch outlived a manual press: the clock would count an hour from a 5-minute ping")
+	if got := fakeOf(k).n(); got != sent+1 {
+		t.Errorf("a press sent %d request(s), want 1", got-sent)
+	}
+}
+
+// A touch an hour old is no longer live (the entry is cold): the press is not refused, and it clears the
+// stale fact as it dispatches.
+func TestAManualPressClearsAnExpiredOneHourTouch(t *testing.T) {
+	k, _ := probeThenWait(t)
+	k.mu.Lock()
+	for id, tc := range k.oneHourTouches {
+		tc.at = k.now().Add(-61 * time.Minute)
+		k.oneHourTouches[id] = tc
+	}
+	k.mu.Unlock()
+	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Second}); err != nil {
+		t.Fatalf("PingNow: %v", err)
+	}
+	k.mu.Lock()
+	n := len(k.oneHourTouches)
+	k.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d stale touch(es) left after a dispatched press", n)
+	}
+}
+
+// OneHourTouchLive is the host's view of the same test PingNow applies (#1259): live now, gone after an hour.
+func TestOneHourTouchLiveFollowsTheTouch(t *testing.T) {
+	k, start := probeThenWait(t)
+	if !k.OneHourTouchLive(sess1) {
+		t.Fatal("not live right after a free 1-hour ping")
+	}
+	if k.OneHourTouchLive(Key{Tenant: sess1.Tenant, Session: "other"}) {
+		t.Error("live for another session")
+	}
+	returnWith(k, sess1, start.Add(10*time.Minute), kaBody, 49500, 100, false)
+	if k.OneHourTouchLive(sess1) {
+		t.Error("still live after a real request")
+	}
+	var nilK *Keeper
+	if nilK.OneHourTouchLive(sess1) {
+		t.Error("a nil keeper reported a live touch")
 	}
 }
