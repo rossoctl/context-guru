@@ -134,8 +134,8 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Net by kind (USD per hour)",
-      "description": "rewrite, spend and setting. A spend is a component's own model call and is always a cost.",
+      "title": "Net by kind (USD)",
+      "description": "rewrite, spend and setting. A spend is a component's own model call and is always a cost. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -148,13 +148,14 @@
       },
       "targets": [
         {
-          "expr": "(((sum by (kind)(rate(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) or (sum by (kind)(rate(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) * 0) - ((sum by (kind)(rate(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) or (sum by (kind)(rate(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval]))) * 0)) * 3600",
+          "expr": "(((sum by (kind)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))) or (sum by (kind)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))) * 0) - ((sum by (kind)(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))) or (sum by (kind)(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))) * 0))",
           "legendFormat": "{{kind}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
-          }
+          },
+          "interval": "5m"
         }
       ],
       "fieldConfig": {
@@ -163,7 +164,10 @@
           "custom": {
             "stacking": {
               "mode": "normal"
-            }
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
           }
         },
         "overrides": []

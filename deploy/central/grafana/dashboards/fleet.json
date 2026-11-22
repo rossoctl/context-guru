@@ -362,8 +362,8 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Saved vs added (USD per hour)",
-      "description": "Both sides of the net, as a rate.",
+      "title": "Saved vs added (USD)",
+      "description": "Both sides of the net: saved above zero, added below. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -376,22 +376,24 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
+          "expr": "sum(increase(llm_savings_saved_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))",
           "legendFormat": "saved",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
-          }
+          },
+          "interval": "5m"
         },
         {
-          "expr": "sum(rate(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
+          "expr": "-sum(increase(llm_savings_added_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))",
           "legendFormat": "added",
           "refId": "B",
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
-          }
+          },
+          "interval": "5m"
         }
       ],
       "fieldConfig": {
@@ -399,8 +401,11 @@
           "unit": "currencyUSD",
           "custom": {
             "stacking": {
-              "mode": "none"
-            }
+              "mode": "normal"
+            },
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
           }
         },
         "overrides": [

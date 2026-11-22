@@ -802,8 +802,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Spend per hour, by model",
-      "description": "Provider cost at request time. Each proxy prices with its own rate table.",
+      "title": "Spend by model (USD)",
+      "description": "Provider cost at request time. Each proxy prices with its own rate table. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -816,13 +816,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (model)(rate(llm_inference_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
+          "expr": "sum by (model)(increase(llm_inference_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval]))",
           "legendFormat": "{{model}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
-          }
+          },
+          "interval": "5m"
         }
       ],
       "fieldConfig": {
