@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { REASON_CODES, cacheClock, signature, usd, view } from './model'
+import { REASON_CODES, cacheClock, showPing, signature, usd, view } from './model'
 
 const NOW = 1_800_000_000_000
 const entry = (end: number, extra = {}) => ({ end_ts: end, ttl_s: 300, prefix_tokens: 90000, rewrite_usd: 0.5, next_warm_usd: 0.06, next_cold_usd: 0.78, ...extra })
@@ -1267,4 +1267,20 @@ test('an unproven hour keeps the billed write tier and moves the redraw anchor w
   expect(at({}).main.writeTier).toBe('1h')
   expect(at({ ttl_unproven: true }).main.anchor).not.toBe(at({}).main.anchor)
   expect(signature(at({ ttl_unproven: true }))).not.toBe(signature(at({})))
+})
+
+// #1259: while the entry is at 1 hour from a free 1-hour ping, a press would send 5-minute markers and move it back to
+// 5 minutes, so the Ping button is hidden (proven or not). The next real request brings an ordinary entry, and the
+// button returns. The status line has no Ping button, so this one rule is the whole client side.
+test('the Ping button is hidden on a 1-hour entry from a free 1-hour ping, and returns after the next request', async () => {
+  const ping = NOW - 200_000
+  const at = (extra: object) =>
+    view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, pingable: true, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping, ttl_s: 300, pingable: true, ...extra }] } }, NOW)!
+  expect(showPing(at({}))).toBe(true) // an ordinary 5-minute entry
+  expect(showPing(at({ ttl_s: 3600, free_hour_ping: true, ttl_unproven: true }))).toBe(false) // unproven hour
+  expect(showPing(at({ ttl_s: 3600, free_hour_ping: true }))).toBe(false) // proven hour
+  expect(showPing(at({ ttl_s: 3600 }))).toBe(true) // a real 1-hour write is not a free ping: a press does not shorten it
+  expect(showPing(at({ ttl_s: 300 }))).toBe(true) // the next real request: the flag is gone
+  // The flag moves the redraw anchor, so the band redraws when it flips.
+  expect(at({ ttl_s: 3600, free_hour_ping: true }).main.anchor).not.toBe(at({ ttl_s: 3600 }).main.anchor)
 })

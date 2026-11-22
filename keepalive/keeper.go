@@ -555,7 +555,8 @@ type Keeper struct {
 	// Resolved and deleted by that thread's next real request. Bounded by MaxTurnKeys.
 	oneHourProbes map[string]oneHourProbe
 	// oneHourTouches holds, per THREAD (keyed like live), that its last touch was a free 1-hour ping, until
-	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock.
+	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock, and by PingNow, which refuses a press
+	// while the touch is live (#1259).
 	// Bounded by MaxTurnKeys.
 	oneHourTouches map[string]oneHourTouch
 	// oneHourFirst holds, per THREAD (keyed like live), the main threads that write at 1 hour from now on

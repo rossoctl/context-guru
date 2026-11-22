@@ -366,6 +366,10 @@ func TestCacheStateCountsAnHourFromAFreeOneHourPing(t *testing.T) {
 			if body["ttl_s"] != wantSession {
 				t.Errorf("session ttl_s = %v, want %v", body["ttl_s"], wantSession)
 			}
+			// A sub-agent's free ping lengthens the session clock but never sets the session's button flag.
+			if wantSession == 3600 && body["free_hour_ping"] == true {
+				t.Error("a sub-agent's touch set free_hour_ping on the session entry")
+			}
 		})
 	}
 }
@@ -386,6 +390,17 @@ func TestCacheStateSessionEntryFollowsTheOneHourPing(t *testing.T) {
 	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] != true {
 		t.Errorf("session entry ttl_s/ttl_unproven = %v/%v, want 3600/true", body["ttl_s"], body["ttl_unproven"])
 	}
+	// The flag that hides the Ping button (#1259): set for a free 1-hour ping, proven or not.
+	if body["free_hour_ping"] != true {
+		t.Errorf("free_hour_ping = %v after a free 1-hour ping, want true", body["free_hour_ping"])
+	}
+	a.SetOneHourTouches(func(string, bool, string) map[string]OneHourTouch {
+		return map[string]OneHourTouch{"": {AtMS: now - 100_000, Proven: true}}
+	})
+	_, body = get(t, a, "/api/cachestate?session=s1", "")
+	if body["free_hour_ping"] != true || body["ttl_unproven"] == true {
+		t.Errorf("proven: free_hour_ping/ttl_unproven = %v/%v, want true/unset", body["free_hour_ping"], body["ttl_unproven"])
+	}
 	// An entry already at an hour (the client asked for it) is left alone, and carries no mark.
 	w2 := mkEvent(now-50_000, "s1", "aws/claude-sonnet-5", 1000, 800)
 	w2.Status, w2.CacheWrite, w2.CacheWrite1h = 200, 1000, 1000
@@ -393,6 +408,9 @@ func TestCacheStateSessionEntryFollowsTheOneHourPing(t *testing.T) {
 	_, body = get(t, a, "/api/cachestate?session=s1", "")
 	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] == true {
 		t.Errorf("a real 1h write: ttl_s/ttl_unproven = %v/%v", body["ttl_s"], body["ttl_unproven"])
+	}
+	if body["free_hour_ping"] == true {
+		t.Error("a real 1h write carries free_hour_ping: the button would hide on an entry a press cannot shorten")
 	}
 }
 

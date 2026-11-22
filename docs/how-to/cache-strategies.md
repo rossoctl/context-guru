@@ -102,6 +102,9 @@ request carries 1 hour. No marker is added. The main thread gets **no pings**.
 > write, and most sessions have few long waits. In the simulation below it costs **22% more** than `auto` on
 > hosted traffic: 77 of 97 main sessions are worse, and the premium is 39% of the cost. It is never a
 > default. Pick `1-hour-on-wait` first.
+>
+> A manager can also set it in a stored strategy (`one_hour_always`), for local and hosted installs alike.
+> The same warning applies. A stored strategy only turns the mode on, never off.
 
 It wins when your sessions often idle for more than 5 minutes between turns. On the owner's laptop it saves
 25%.

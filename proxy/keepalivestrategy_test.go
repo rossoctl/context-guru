@@ -576,3 +576,40 @@ func TestOneHourFirstHookFollowsThePolicy(t *testing.T) {
 		t.Error("1-hour-on-wait relabelled a request on a route that is not costly")
 	}
 }
+
+// #1261: a manager's stored strategy MAY set 1-hour-always (mode C), like one_hour_on_wait: no hosted/local
+// difference. It only turns it ON. It is the manager's knowing choice: on most users it does not pay off.
+func TestStoredStrategyTurnsOnTheOneHourAlwaysMode(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+
+	body := `{"name":"1h always","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_always":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	w, out := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	if out["one_hour_always"] != true || out["one_hour_on_wait"] != false {
+		t.Errorf("the response does not report one_hour_always alone: %v", out)
+	}
+	id, _ := out["id"].(string)
+	pol, applied := f.h.keeper.applyStrategy(userID, CachePolicy{WaitPlan: true}, at)
+	if applied != id || !pol.OneHourAlways || pol.OneHourOnWait || !pol.WaitPlan {
+		t.Fatalf("the stored strategy did not turn mode C on for a hosted tenant: applied=%q policy=%+v", applied, pol)
+	}
+	w, _ = f.do(t, http.MethodPatch, "/api/keepalive/strategies/"+id, `{"one_hour_always":false}`, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch = %d: %s", w.Code, w.Body)
+	}
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); pol.OneHourAlways {
+		t.Error("the strategy still turned the mode on after it was patched off")
+	}
+	// A strategy cannot turn the account's own setting OFF.
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourAlways: true}, at); !pol.OneHourAlways {
+		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}

@@ -1432,6 +1432,12 @@ var migrations = []string{
 	// own account config exposes (config.CacheConfig.KeepAliveOneHourOnWait). 0 (the default) leaves the
 	// account's own setting alone, so every existing strategy behaves as before. Additive.
 	`ALTER TABLE keepalive_strategies ADD COLUMN one_hour_on_wait INTEGER NOT NULL DEFAULT 0;`,
+
+	// v14: a strategy may optionally switch on 1-hour-always (#1261, mode C): the main agent writes at 1 hour
+	// from its first request, with no pings. DEFAULT 0 leaves the account's own setting alone, so every
+	// existing strategy behaves as before. Additive. ON MOST USERS IT DOES NOT PAY OFF (hosted +22% against
+	// auto), so it is an explicit choice of the manager, never a default.
+	`ALTER TABLE keepalive_strategies ADD COLUMN one_hour_always INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func migrate(db *sql.DB) error {

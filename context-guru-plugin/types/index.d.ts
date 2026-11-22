@@ -22,10 +22,14 @@ export type ThreadView = {
   /** Seconds until the cache goes cold: the keep-alive plan's horizon while the entry is warm, else remS. */
   untilColdS?: number
   ttlS: number
-  /** The cache-write tier the proxy uses for this entry (ttl_s 300 or 3600); undefined when the entry does not say. */
+  /** The cache-write tier the entry was BILLED at: `5m` or `1h`; undefined when the entry does not say. It follows ttl_s (300 or 3600)
+   * except for an unproven hour (`isUnproven`): ttl_s is 3600 because of a free 1-hour keep-alive ping, but the entry was written at 5
+   * minutes, so this answers `5m`. It answers `1h` once the route is proven. */
   writeTier?: '5m' | '1h'
   /** The 1-hour clock is a free 1-hour ping's on a route not yet proven to grant it: the clock is drawn with `1h?`. */
   isUnproven: boolean
+  /** The last touch was a free 1-hour ping: the entry is at 1 hour and a manual ping would shorten it, so no Ping button. */
+  isFreeHourPing: boolean
   /** Seconds until the next automatic ping, only while it fires before the entry expires. */
   nextPingS?: number
   /** The last touch was a keep-alive ping; a keep-alive plan exists. Together they are the clock's `↻`. */

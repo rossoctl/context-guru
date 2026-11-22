@@ -92,7 +92,7 @@ cache:
   after. A manager's stored strategy can switch it on too (`one_hour_on_wait`). Opt-in; no default changes.
 - `1-hour-always` (mode C) writes at 1 hour from the first request of the main agent, with no pings on it.
   **On most users it does not pay off:** hosted, 97 main sessions, +22% cost against `auto`, 77 worse, the premium 39% of
-  the cost; the owner's laptop -25%. It is an explicit opt-in (`keepalive_one_hour_always`), never a default.
+  the cost; the owner's laptop -25%. It is an explicit opt-in (`keepalive_one_hour_always`), never a default. A manager's stored strategy can set it too (`one_hour_always`), for local and hosted installs alike, with the same warning: a manager sets it knowingly, and it only turns the mode on.
 - All the modes, for the main agent and for subagents, with the numbers: [Choose a cache strategy](cache-strategies.md).
 - A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
 - No `strategy` key: nothing changes.

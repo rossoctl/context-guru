@@ -77,9 +77,10 @@ exit 0
 
 
 class FakeProxy:
-    """A local HTTP server in a thread: /healthz, /api/requests, /signal, and /stats when given."""
+    """A local HTTP server in a thread: /healthz, /api/requests, /signal, and /stats and
+    /api/components when given."""
 
-    def __init__(self, last_bob_ts_ms=None, stats=None):
+    def __init__(self, last_bob_ts_ms=None, stats=None, components=None):
         self.signals = []
         self.paths = []
         owner = self
@@ -99,6 +100,9 @@ class FakeProxy:
                                        "total": len(rows)}).encode()
                 elif self.path == "/stats" and stats is not None:
                     body = json.dumps(stats).encode()
+                elif self.path.startswith("/api/components") and components is not None:
+                    body = (components.encode() if isinstance(components, str)
+                            else json.dumps({"components": components}).encode())
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -940,6 +944,46 @@ class StatusTest(TempHome):
                      "tool_defer_add_backs=2", "tool_defer_wrong_guesses=1",
                      "tool_defer_turned_off=0", "tool_defer_break=0"):
             self.assertIn(line + "\n", out)
+
+    def test_status_shows_the_sweep_drops_and_expands_per_rule_on_bobs_route(self):
+        # #1191, Phase 7 M3: the expand rate after a sweep cut, per rule and per judge. The
+        # dashboard keeps the sweep's events per request with the route, across a restart.
+        import time
+        components = [
+            {"component": "extract_llm_sweep", "events": {
+                "sweep_v3_dropped_judge": 9, "sweep_v3_dropped_file_reread": 4,
+                "sweep_v3_expanded_judge": 1, "sweep_applied_warm": 13}},
+            {"component": "extract", "events": {"sweep_v3_dropped_judge": 99}},
+        ]
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000), components=components) as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(any(p.startswith("/api/components?") and "agent=bob" in p
+                            for p in proxy.paths), proxy.paths)
+        shown = sorted(line for line in out.splitlines() if line.startswith("sweep_v3_"))
+        self.assertEqual(shown, ["sweep_v3_dropped_file_reread=4", "sweep_v3_dropped_judge=9",
+                                 "sweep_v3_expanded_judge=1"])
+
+    def test_status_names_a_failed_read_of_the_sweep_counts(self):
+        # #1203 review: a slow or broken read must not just drop the lines with no word.
+        import time
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000), components="not json") as proxy:
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertIn("sweep_v3_error=JSONDecodeError\n", out)
+
+    def test_status_says_nothing_about_sweep_counts_a_proxy_does_not_serve(self):
+        import time
+        with FakeProxy(last_bob_ts_ms=int(time.time() * 1000)) as proxy:  # /api/components: 404
+            ROUTE.install(self.rc, proxy.port)
+            self.write_record(proxy.port, rc_file=str(self.rc))
+            code, out, _ = self.run_main("status")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("sweep_v3_", out)
 
     def test_status_omits_tool_defer_counts_the_proxy_does_not_report(self):
         import time
