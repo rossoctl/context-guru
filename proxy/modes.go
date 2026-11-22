@@ -71,6 +71,9 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 		CanKeepAlive: func(session, thread string) bool {
 			return h.keeper.canPing(r.tn, session, thread, r.provider)
 		},
+		// The 1-hour-on-wait strategy on a route where the switch costs a rewrite: a main thread writes at 1
+		// hour from its first request (keepalive.Keeper.OneHourFirst, #1261). Only for an account that opted in.
+		OneHourFirst: h.oneHourFirstFor(r),
 	})
 	added := time.Since(start)
 	if res.Body == nil {
@@ -83,6 +86,9 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 // Bundled because an off-path run outlives the *http.Request it came from and must
 // therefore hold a copy of everything, never a pointer into request-scoped state.
 type reqInfo struct {
+	// endpoint and route are the upstream base and path this request goes to. The keeper keys its route state
+	// by them (the 1-hour-on-wait probe).
+	endpoint, route string
 	// threadOf resolves the request's session thread once apply knows the session id; see
 	// apply.Opts.ThreadOf. nil leaves the request to be resolved after the pipeline.
 	threadOf func(session string) thread.Result

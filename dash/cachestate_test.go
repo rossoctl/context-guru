@@ -366,6 +366,10 @@ func TestCacheStateCountsAnHourFromAFreeOneHourPing(t *testing.T) {
 			if body["ttl_s"] != wantSession {
 				t.Errorf("session ttl_s = %v, want %v", body["ttl_s"], wantSession)
 			}
+			// A sub-agent's free ping lengthens the session clock but never sets the session's button flag.
+			if wantSession == 3600 && body["free_hour_ping"] == true {
+				t.Error("a sub-agent's touch set free_hour_ping on the session entry")
+			}
 		})
 	}
 }
@@ -386,6 +390,17 @@ func TestCacheStateSessionEntryFollowsTheOneHourPing(t *testing.T) {
 	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] != true {
 		t.Errorf("session entry ttl_s/ttl_unproven = %v/%v, want 3600/true", body["ttl_s"], body["ttl_unproven"])
 	}
+	// The flag that hides the Ping button (#1259): set for a free 1-hour ping, proven or not.
+	if body["free_hour_ping"] != true {
+		t.Errorf("free_hour_ping = %v after a free 1-hour ping, want true", body["free_hour_ping"])
+	}
+	a.SetOneHourTouches(func(string, bool, string) map[string]OneHourTouch {
+		return map[string]OneHourTouch{"": {AtMS: now - 100_000, Proven: true}}
+	})
+	_, body = get(t, a, "/api/cachestate?session=s1", "")
+	if body["free_hour_ping"] != true || body["ttl_unproven"] == true {
+		t.Errorf("proven: free_hour_ping/ttl_unproven = %v/%v, want true/unset", body["free_hour_ping"], body["ttl_unproven"])
+	}
 	// An entry already at an hour (the client asked for it) is left alone, and carries no mark.
 	w2 := mkEvent(now-50_000, "s1", "aws/claude-sonnet-5", 1000, 800)
 	w2.Status, w2.CacheWrite, w2.CacheWrite1h = 200, 1000, 1000
@@ -393,6 +408,9 @@ func TestCacheStateSessionEntryFollowsTheOneHourPing(t *testing.T) {
 	_, body = get(t, a, "/api/cachestate?session=s1", "")
 	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] == true {
 		t.Errorf("a real 1h write: ttl_s/ttl_unproven = %v/%v", body["ttl_s"], body["ttl_unproven"])
+	}
+	if body["free_hour_ping"] == true {
+		t.Error("a real 1h write carries free_hour_ping: the button would hide on an entry a press cannot shorten")
 	}
 }
 
@@ -419,5 +437,62 @@ func TestCacheStateDoesNotLengthenAClockPastTheOneHourPing(t *testing.T) {
 		if m := th.(map[string]any); m["main"] == true && m["ttl_s"] != 3600.0 {
 			t.Errorf("the ping's own row (30 s after its start) lost the hour: ttl_s = %v", m["ttl_s"])
 		}
+	}
+}
+
+// #1261, the band for a thread in mode D or C: the request writes at 1 hour (cache_write_1h > 0), so the
+// thread's ttl_s is 3600 from the BILLED tier, with no keeper fact and no "1h?" mark. The read-only turns
+// after it keep the 1-hour tier (the thread's tier is its latest WRITE).
+func TestCacheStateShowsAnHourForAThreadThatWritesAtOneHour(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	w := mkEvent(now-400_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	w.Status, w.CacheWrite, w.CacheWrite1h, w.Provider = 200, 150_000, 150_000, "anthropic"
+	r := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+	r.Status, r.CacheRead, r.CacheWrite, r.Provider = 200, 150_500, 0, "anthropic" // a read-only turn: it writes nothing
+	seed(t, rec, w, r)
+	// No SetOneHourTouches: the keeper says nothing about this thread.
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	if body["ttl_s"] != 3600.0 || body["ttl_unproven"] == true {
+		t.Errorf("session ttl_s/ttl_unproven = %v/%v, want 3600 and no mark", body["ttl_s"], body["ttl_unproven"])
+	}
+	for _, th := range body["threads"].([]any) {
+		if m := th.(map[string]any); m["main"] == true && (m["ttl_s"] != 3600.0 || m["ttl_unproven"] == true) {
+			t.Errorf("main thread ttl_s/ttl_unproven = %v/%v, want 3600 and no mark", m["ttl_s"], m["ttl_unproven"])
+		}
+	}
+}
+
+// The thread's tier follows where its LATEST WRITE was billed (cache_write_1h > 0 is the 1-hour tier). A turn of
+// a 1-hour thread (mode D or C) that writes a few new tokens bills them at 1 hour too, so the band keeps 3600.
+// Only a write billed at 5 minutes puts the thread back on 5 minutes (a real downgrade or a 5-minute request).
+func TestCacheStateTierFollowsWhereTheLatestWriteWasBilled(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		write1h      int64
+		want         float64
+		wantMainNote string
+	}{
+		{"a small write billed at 1 hour keeps 1 hour", 600, 3600, ""},
+		{"a small write billed at 5 minutes puts it back on 5 minutes", 0, 300, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, rec := newTestAPI(t, Options{})
+			now := time.Now().UnixMilli()
+			first := mkEvent(now-400_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+			first.Status, first.CacheWrite, first.CacheWrite1h = 200, 150_000, 150_000
+			next := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+			next.Status, next.CacheRead, next.CacheWrite, next.CacheWrite1h = 200, 150_000, 600, tc.write1h
+			seed(t, rec, first, next)
+			_, body := get(t, a, "/api/cachestate?session=s1", "")
+			if body["ttl_s"] != tc.want {
+				t.Errorf("session ttl_s = %v, want %v", body["ttl_s"], tc.want)
+			}
+			for _, th := range body["threads"].([]any) {
+				if m := th.(map[string]any); m["main"] == true && m["ttl_s"] != tc.want {
+					t.Errorf("main thread ttl_s = %v, want %v", m["ttl_s"], tc.want)
+				}
+			}
+		})
 	}
 }

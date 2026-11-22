@@ -478,6 +478,28 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 	return plan
 }
 
+// oneHourFirstFor is the apply hook of the 1-hour modes D and C (#1261), or nil when there is no keep-alive. At
+// the end of apply, for a main-thread request that declares tools, it resolves the account's policy WITH its
+// stored strategy (so a manager's strategy that switches 1-hour-on-wait on counts, like for the pings) and asks
+// the keeper. The model comes from apply, which reads it from the final body.
+func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID, model string, toolsDeclared bool) bool {
+	if h == nil || h.keeper == nil || h.keeper.Keeper == nil || r.tn == nil {
+		return nil
+	}
+	return func(session, threadID, model string, toolsDeclared bool) bool {
+		if threadID != "" || !toolsDeclared || session == "" {
+			return false // only the main thread is ever relabelled: skip the policy resolution for the rest
+		}
+		pol, _ := h.keeper.resolvePolicy(r.tn, session, r.provider, r.tn.Cache, predDecision{}, false)
+		if !pol.OneHourOnWait && !pol.OneHourAlways {
+			return false
+		}
+		// model is the model of the FINAL body apply hands over, the one Record keys the route state by too.
+		return h.keeper.Keeper.OneHourFirst(r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared,
+			keepalive.OneHourMode{Always: pol.OneHourAlways, RebuildTokens: int64(pol.OneHourRebuildTokens)})
+	}
+}
+
 // readSetsTTL is Keeper.ReadSetsTTL, nil-safe for a deployment with no keep-alive.
 func (k *keeper) readSetsTTL(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool {
 	return k != nil && k.Keeper != nil && k.Keeper.ReadSetsTTL(provider, endpoint, route, model, pinged)

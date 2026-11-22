@@ -1378,17 +1378,23 @@ func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
 		HumanExtraPings:      r.KeepAliveHumanExtraPings,
 		// A memory guard, like the plan fields: a manual hold or a manager strategy can arm a hold on a parked account.
 		MaxBodyBytes: r.KeepAliveMaxBodyBytes,
+		// D's threshold rides the parked plan too. It is a threshold, not a switch: alone it turns nothing on. A
+		// manager strategy that switches 1-hour-on-wait on for this account must still find the account's own
+		// choice here, a negative value that keeps D off (a 0 would read as the 150,000 default).
+		OneHourRebuildTokens: r.KeepAliveOneHourRebuildTokens,
 	}
 	// Resolve the defaults only when something is actually switched on. A parked block
 	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
 	// zero HeadTTLMinBytes must stay zero so a host that never configured this asks for
 	// nothing rather than asking on every request.
-	if !c.KeepAlive && !c.HeadTTL1h {
+	if !c.KeepAlive && !c.HeadTTL1h && !c.KeepAliveOneHourAlways {
 		return plan
 	}
 	return proxy.CachePolicy{
 		WaitPlan:             plan.WaitPlan,
 		OneHourOnWait:        c.KeepAliveOneHourOnWait,
+		OneHourRebuildTokens: r.KeepAliveOneHourRebuildTokens,
+		OneHourAlways:        c.KeepAliveOneHourAlways,
 		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
 		ToolWaitMinPrefix:    plan.ToolWaitMinPrefix,
 		BackgroundExtraPings: plan.BackgroundExtraPings,

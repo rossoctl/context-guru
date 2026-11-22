@@ -28,6 +28,9 @@ type CacheState struct {
 	// TTLUnproven is true while ttl_s is 3600 only because of a free 1-hour ping on a route not yet proven to
 	// grant the tier. The clients draw the clock with a "1h?" mark. Omitted otherwise.
 	TTLUnproven bool `json:"ttl_unproven,omitempty"`
+	// FreeHourPing is true while ttl_s is 3600 because the last touch was a free 1-hour ping, proven or not.
+	// A manual ping would move that entry back to 5 minutes, so the clients hide the Ping button. Omitted otherwise.
+	FreeHourPing bool `json:"free_hour_ping,omitempty"`
 	// PrefixTokens is what the last request sent: fresh + cache_read + cache_write. If the cache
 	// is cold, this is what the next send rewrites.
 	PrefixTokens int64 `json:"prefix_tokens"`
@@ -78,6 +81,7 @@ type ThreadCache struct {
 	TTLSeconds int64  `json:"ttl_s"`
 	// TTLUnproven: see CacheState.
 	TTLUnproven  bool    `json:"ttl_unproven,omitempty"`
+	FreeHourPing bool    `json:"free_hour_ping,omitempty"` // see CacheState
 	PrefixTokens int64   `json:"prefix_tokens"`
 	RewriteUSD   float64 `json:"rewrite_usd"`
 	Priced       bool    `json:"priced"`
@@ -161,13 +165,19 @@ func applyOneHour(s *CacheState, touches map[string]OneHourTouch) {
 		t := &s.Threads[i]
 		o, ok := touches[t.ID]
 		// The touch counts only while the thread's last touch is that ping: a newer row means a later touch
-		// moved the entry (defense in depth; the keeper also drops the fact at a press and at a request).
+		// moved the entry (defense in depth; the keeper also drops the fact at a request, and refuses a press while it is live).
 		if !ok || t.TTLSeconds >= hour || t.LastTS > o.AtMS+oneHourSlackMS {
 			continue
 		}
-		t.TTLSeconds, t.TTLUnproven = hour, !o.Proven
+		t.TTLSeconds, t.TTLUnproven, t.FreeHourPing = hour, !o.Proven, true
+		// A thread already at an hour from a real 1-hour write is skipped above and carries no flag, so the button
+		// shows. If it also holds a live free-ping touch, the keeper still refuses the press (ErrAtOneHour): safe,
+		// because that press sends the entry's own 1-hour markers and shortens nothing, but the user sees a 409.
 		if s.LastTS == t.LastTS && s.TTLSeconds < hour {
 			s.TTLSeconds, s.TTLUnproven = hour, !o.Proven
+			// Only the main thread's touch hides the button: a sub-agent's free ping must not hide it for a
+			// main-thread press the keeper would allow.
+			s.FreeHourPing = t.Main
 		}
 	}
 }

@@ -34,6 +34,9 @@ var (
 	// ErrTooCostly means one ping on this thread would cost more than the policy's per-ping
 	// ceiling, the same guard the scheduled path applies (Policy.Ceiling).
 	ErrTooCostly = errors.New("keepalive: a ping on this thread costs more than the per-ping ceiling")
+	// ErrAtOneHour means the thread's entry is at 1 hour after a free 1-hour ping. A press sends 5-minute
+	// markers, and a read at 5 minutes moves the entry back to 5 minutes, so the press would shorten it (#1259).
+	ErrAtOneHour = errors.New("keepalive: this thread's entry is at 1 hour from a free 1-hour ping; a manual ping would shorten it to 5 minutes")
 )
 
 // TooSoonError is the per-thread rate limit: the thread was manually pinged less than MinGap ago.
@@ -102,12 +105,13 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		k.mu.Unlock()
 		return ManualResult{}, ErrTooCostly
 	}
+	// A live free 1-hour ping is refused before anything is claimed or cleared: the press changes nothing (#1259).
+	if k.oneHourTouchLiveLocked(id, now) {
+		k.mu.Unlock()
+		return ManualResult{}, ErrAtOneHour
+	}
 	// Claimed under the lock, so two presses racing each other send one ping, not two.
 	k.noteManualLocked(id, now, r.MinGap)
-	// A press sends the held body with its own 5-minute markers, and a read at 5 minutes moves a 1-hour entry
-	// back to 5 minutes (the reason extraWaiting is false on a 1-hour wait). The press is the thread's new last
-	// touch, and it is not a free 1-hour ping: the 1-hour clock ends here, as at a real request (#1258).
-	delete(k.oneHourTouches, id)
 	// Copied out under the lock for the reason pingJob is: the entry may be retired, its body and
 	// credential dropped, while this runs.
 	raw := append([]byte(nil), e.body...)
@@ -136,6 +140,13 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		k.unclaimManual(id, now)
 		return ManualResult{}, ErrNotHeld
 	}
+	// The press now really dispatches. It sends the held body with its own 5-minute markers, and a read at 5
+	// minutes moves a 1-hour entry back to 5 minutes. The press is the thread's new last touch and is not a free
+	// 1-hour ping, so any stale touch (an hour old, or on a route switched off) ends here, as at a real request
+	// (#1258). A refused or failed-early press never reaches this line.
+	k.mu.Lock()
+	delete(k.oneHourTouches, id)
+	k.mu.Unlock()
 	start := k.now()
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	resp, err := k.o.Dispatcher.Do(ctx, dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,

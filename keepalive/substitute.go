@@ -283,6 +283,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	e.refreshed = u.CacheRead
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		e.refreshedAt = startedAt
+		// The substitute renewed the entry for 5 minutes (its markers are the client's): D must not call the
+		// entry gone from the last request alone.
+		k.noteTouchLocked(j.key.id(), startedAt, 5*time.Minute, u.CacheRead+u.CacheWrite)
 	}
 	k.mu.Unlock()
 	for {

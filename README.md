@@ -110,6 +110,8 @@ More:
 Every command: **[docs/plugin/commands.md](docs/plugin/commands.md)**. Full guide, every status line state and
 troubleshooting: **[rossoctl.github.io/context-guru/plugin](https://rossoctl.github.io/context-guru/plugin/)**.
 
+**You choose how your cache is kept warm.** `auto` pings an idle session so the cache does not go cold. `1-hour-on-wait` moves it to the 1-hour tier on a long wait. One page describes every strategy, for the main agent and for subagents, with the cost of each: [Choose a cache strategy](docs/how-to/cache-strategies.md).
+
 ## Presets
 
 It's an effort ladder — each tier is everything in the one before it, plus more:
