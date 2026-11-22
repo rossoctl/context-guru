@@ -1031,7 +1031,10 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
     const running = existing?.port ? await healthy(existing.port) : false
     let onDisk
     try { onDisk = readFileSync(join(state, "proxy.yaml"), "utf8") } catch {}
-    if (running && existing.fingerprint === fingerprint && onDisk === configText) return { port: existing.port, state }
+    if (running && existing.fingerprint === fingerprint && onDisk === configText) {
+      await safeLog(client, "info", `proxy reused on 127.0.0.1:${existing.port}; recovery: ${join(state, "context-guru-reset")}`)
+      return { port: existing.port, state }
+    }
     // Another setting is wanted: stop this project's old proxy and reuse its port.
     if (running) await stopRecordedProxy(state, existing.port)
 
