@@ -85,6 +85,31 @@ test("status script reports a healthy proxy and its savings", async () => {
   }
 })
 
+// A binary that does not know --version may start serving instead. The status must not wait for it.
+test("status script ends when the binary does not answer --version", async () => {
+  const directory = "/tmp/context-guru-project-hung-version"
+  await registerScripts(directory)
+  const state = stateDirectory(directory)
+  const binary = join(mkdtempSync(join(tmpdir(), "context-guru-hung-")), "context-guru-proxy")
+  writeFileSync(binary, "#!/bin/sh\nexec sleep 60\n")
+  chmodSync(binary, 0o755)
+  writeEnv(state, { state, port: 1, binary, managed: "yes", version: "v0.0.1-test" })
+
+  // Only stdout is a pipe: a stub left running must not hold this test open through stdin or stderr.
+  const child = spawn("sh", [join(state, "context-guru-status")], { stdio: ["ignore", "pipe", "ignore"] })
+  let stdout = ""
+  child.stdout.on("data", (chunk) => { stdout += chunk })
+  const killer = setTimeout(() => child.kill("SIGKILL"), 15000)
+  const started = Date.now()
+  const status = await new Promise((resolve) => child.on("close", (code) => resolve(code)))
+  clearTimeout(killer)
+
+  assert.ok(Date.now() - started < 15000, `status took ${Date.now() - started} ms`)
+  assert.equal(status, 0)
+  assert.match(stdout, /install=present/)
+  assert.match(stdout, /proxy=down/)
+})
+
 test("install script reports an absent install", async () => {
   const directory = "/tmp/context-guru-project-c"
   await registerScripts(directory)

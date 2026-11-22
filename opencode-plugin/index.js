@@ -263,7 +263,7 @@ else
 fi
 if [ -n "\${binary:-}" ] && [ -f "$binary" ]; then
   printf '%s\\n' "binary=$binary" "managed=\${managed:-unknown}" "version=\${version:-unknown}"
-  reported=$("$binary" --version 2>/dev/null | head -1 || true)
+  reported=$( { LISTEN_ADDR=127.0.0.1:0 CONFIG= "$binary" --version 2>/dev/null & pid=$!; ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & watch=$!; wait "$pid"; kill "$watch" 2>/dev/null; } | head -1 || true)
   [ -n "$reported" ] && printf '%s\\n' "binary_reports=$reported"
 fi
 [ -n "\${preset:-}" ] && printf '%s\\n' "preset=$preset" "strategy=\${strategy:-}" "dialects=\${dialects:-}"
