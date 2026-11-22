@@ -232,7 +232,7 @@ against `auto`, at each model's input price.
 - **Anthropic first-party API: not tested.** Two outside reports say the switch rewrites the whole
   prompt there. We have no first-party key to check this.
 - Only aggregates are shown. Details: [#1243](https://github.com/rossoctl/context-guru/issues/1243#issuecomment-7037261430)
-  and [#1261](https://github.com/rossoctl/context-guru/issues/1261).
+  and [#1261](https://github.com/rossoctl/context-guru/issues/1261). The `1-hour-on-wait` and `1-hour-always` rows come from [this table in #1261](https://github.com/rossoctl/context-guru/issues/1261#issuecomment-7076076690).
 
 ## What the band and the status line show
 
