@@ -130,13 +130,16 @@ and you leave for more than 2 hours.
 The proxy checks the grant. It does not assume it. It checks per provider, endpoint, route and model.
 
 **The test.** The first long wait sends the 1-hour ping as a test. Only one wait tests a route at a
-time. The band shows `1h?` (1 hour, not yet proven) until the test ends. There are three outcomes:
+time. The band shows `1h?` (1 hour, not yet proven) until the test ends. There are three outcomes.
 
 | What the proxy sees | What it means | What the proxy does |
 |---|---|---|
 | The ping reads the prompt and writes almost nothing. You return 5 to 60 minutes later and the prompt is **still cached**. | The provider keeps the 1-hour lifetime. | The route is proven. Every long wait uses the 1-hour ping. The band shows the 1-hour clock without `1h?`. |
-| The ping reads the prompt and writes almost nothing. You return 5 to 60 minutes later and the prompt is **gone** (a rebuild). | The provider **did not keep the 1-hour lifetime**. It quietly gave 5 minutes. | The route is switched off for the life of the proxy. The proxy uses plain `auto` there. It does **not** write at 1 hour: that write would also die after 5 minutes, so it would cost 2x for nothing. |
+| The ping reads the prompt and writes almost nothing. You return 5 to 60 minutes later and the prompt is **gone** (a rebuild). | The provider **did not keep the 1-hour lifetime**. It quietly gave 5 minutes. | The route is switched off for the life of the proxy. The proxy uses plain `auto` there. It does **not** write at 1 hour: that write would pay more and still lose the prompt after 5 minutes. |
 | The ping itself reads almost nothing and **writes the whole prompt** at 1 hour. | The provider **charged for the switch**: it rewrites the prompt. We expect this on the Anthropic first-party API. We have not tested it. | The route is marked costly. The proxy sends no more 1-hour pings there. The main agent follows the next section. |
+
+A ping that failed, landed on an entry that had already expired, or was neither of these cases decides
+nothing. The proxy releases the test, and a later wait tests again.
 
 A return inside 5 minutes, after more than 1 hour, on another model, or after a rewrite of the
 prompt by the client (for example a compaction) proves nothing. The proxy tests again later.
@@ -235,10 +238,11 @@ against `auto`.
 |---|---|---|
 | How long a subagent lives | Median 1.2 minutes. 90% live 14.2 minutes or less. | Median 24.7 minutes. 90% live 180 minutes or less. |
 | Gaps of 5 to 60 minutes | 0.4% of all gaps | 7.9% of all gaps |
-| 1-hour writes from the first request | **37.6% more expensive**. 382 of 387 threads worse. All 7 tenants worse. The 1-hour premium is $41.94 of $142.31. | 10% to 14% cheaper, but 32 of 43 threads are still worse. |
-| One 1-hour ping on a long wait | 2.8% cheaper | 10% to 14% cheaper |
-| 1-hour writes after a rebuild of 150,000 tokens or more | 0.6% more expensive (1 thread switched) | 10% to 14% cheaper |
+| 1-hour writes from the first request | **37.6% more expensive**. 382 of 387 threads worse. All 7 tenants worse. The 1-hour premium is $41.94 of $142.31. | **13.6% cheaper**, but 32 of 43 threads are worse. |
+| One 1-hour ping on a long wait | 2.8% cheaper | 10.0% cheaper |
+| 1-hour writes after a rebuild of 150,000 tokens or more | 0.6% more expensive (1 thread switched) | 13.7% cheaper |
 
+- Details: [the subagent simulation in #1261](https://github.com/rossoctl/context-guru/issues/1261#issuecomment-7081747363). The table counts each subagent thread as one unit. The code applies none of these variants to subagents today.
 - Most subagents are short. A 1-hour lifetime rarely pays back for them.
 - 1-hour writes from the first request cost more for most users. Use them with caution.
 - Only long-lived subagents gain.
