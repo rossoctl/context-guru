@@ -462,3 +462,37 @@ func TestCacheStateShowsAnHourForAThreadThatWritesAtOneHour(t *testing.T) {
 		}
 	}
 }
+
+// The thread's tier follows where its LATEST WRITE was billed (cache_write_1h > 0 is the 1-hour tier). A turn of
+// a 1-hour thread (mode D or C) that writes a few new tokens bills them at 1 hour too, so the band keeps 3600.
+// Only a write billed at 5 minutes puts the thread back on 5 minutes (a real downgrade or a 5-minute request).
+func TestCacheStateTierFollowsWhereTheLatestWriteWasBilled(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		write1h      int64
+		want         float64
+		wantMainNote string
+	}{
+		{"a small write billed at 1 hour keeps 1 hour", 600, 3600, ""},
+		{"a small write billed at 5 minutes puts it back on 5 minutes", 0, 300, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, rec := newTestAPI(t, Options{})
+			now := time.Now().UnixMilli()
+			first := mkEvent(now-400_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+			first.Status, first.CacheWrite, first.CacheWrite1h = 200, 150_000, 150_000
+			next := mkEvent(now-100_000, "s1", "aws/claude-sonnet-5", 1000, 800)
+			next.Status, next.CacheRead, next.CacheWrite, next.CacheWrite1h = 200, 150_000, 600, tc.write1h
+			seed(t, rec, first, next)
+			_, body := get(t, a, "/api/cachestate?session=s1", "")
+			if body["ttl_s"] != tc.want {
+				t.Errorf("session ttl_s = %v, want %v", body["ttl_s"], tc.want)
+			}
+			for _, th := range body["threads"].([]any) {
+				if m := th.(map[string]any); m["main"] == true && m["ttl_s"] != tc.want {
+					t.Errorf("main thread ttl_s = %v, want %v", m["ttl_s"], tc.want)
+				}
+			}
+		})
+	}
+}
