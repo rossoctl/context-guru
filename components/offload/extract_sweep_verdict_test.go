@@ -7,7 +7,7 @@ import (
 )
 
 // The owner's counter on #1196: each request counts its cache verdict once, by reason, as the event
-// sweep_cold_verdict_<reason>. One case per reason. The counted reason and the verdict the sweep acts
+// sweep_cache_verdict_<reason>. One case per reason. The counted reason and the verdict the sweep acts
 // on come from one function, so the second check ties them together.
 func TestTheCacheVerdictIsCountedOnceByReason(t *testing.T) {
 	unknown := func(c *components.Ctx) { c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, -1 }

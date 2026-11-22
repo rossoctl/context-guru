@@ -610,7 +610,7 @@ func sweepColdFor(c *components.Ctx) bool {
 // The reasons of the cache verdict (#1196, the owner's counter). Each request counts exactly one, as the
 // event eventVerdictPrefix + reason. Counts only, no content.
 const (
-	eventVerdictPrefix = "sweep_cold_verdict_"
+	eventVerdictPrefix = "sweep_cache_verdict_"
 	// verdictKnownCold: the phase is known and the cache is gone.
 	verdictKnownCold = "known_cold"
 	// verdictKnownWarm: the phase is known and the cache is live (warm or pre-expiry).
