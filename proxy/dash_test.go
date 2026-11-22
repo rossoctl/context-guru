@@ -127,7 +127,13 @@ func fakeUpstreamUsage(t *testing.T, in, cacheRead, cacheWrite int) *httptest.Se
 // dashHandler wires a real pipeline + recorder in front of a fake upstream.
 func dashHandler(t *testing.T, up string, opts dash.Options) (*Handler, *dash.Recorder) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	return dashHandlerCfg(t, up, opts, "preset: codesafe\n")
+}
+
+// dashHandlerCfg is dashHandler with the proxy config given as YAML text.
+func dashHandlerCfg(t *testing.T, up string, opts dash.Options, cfgText string) (*Handler, *dash.Recorder) {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(cfgText))
 	if err != nil {
 		t.Fatal(err)
 	}

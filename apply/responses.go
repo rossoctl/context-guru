@@ -15,10 +15,10 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

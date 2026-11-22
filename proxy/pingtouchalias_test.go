@@ -77,7 +77,7 @@ func TestAPingOnADeferredBodyKeepsTheNextRequestWarm(t *testing.T) {
 				r.Header.Set("Authorization", "Bearer sk-caller-secret")
 				k.recordTouch(alias, tn, "sess-1", "", start.Add(d), sent,
 					upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
-					http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 100}, true)
+					http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 100}, true, nil)
 			}
 			clock.advance(281 * time.Second)
 			if n := k.Sweep(clock.now()); n != 1 {

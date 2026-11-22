@@ -87,10 +87,15 @@ type Strategy struct {
 	// kept for the stored column and the manager API. The proxy reads the value as tokens x 4 BYTES of
 	// the request body (config.HeadTTLBytesPerToken), the size the old gate measured.
 	HeadTTLMinTokens int
-	CreatedBy        string
-	CreatedAt        time.Time
-	UpdatedBy        string
-	UpdatedAt        time.Time
+	// OneHourOnWait switches on the 1-hour-on-wait ping (#1243, main agent only): on a long wait the
+	// first ping carries every cache marker at 1 hour and is the only ping of that wait. False (the
+	// default) leaves the account's own setting in force; a strategy can only turn this ON, never off,
+	// like KeepAlive and HeadTTL1h.
+	OneHourOnWait bool
+	CreatedBy     string
+	CreatedAt     time.Time
+	UpdatedBy     string
+	UpdatedAt     time.Time
 }
 
 // StrategyPatch is a sparse update, matching Patch's own pointer convention: a nil
@@ -108,6 +113,7 @@ type StrategyPatch struct {
 	PredictorThreshold *float64
 	HeadTTL1h          *bool
 	HeadTTLMinTokens   *int
+	OneHourOnWait      *bool
 }
 
 // ErrNoStrategy names no keep-alive strategy.
@@ -324,11 +330,11 @@ func (r *Registry) createStrategy(actorID string, s Strategy) (Strategy, error) 
 	if _, err := r.db.Exec(`INSERT INTO keepalive_strategies
 	  (id,name,idle_seconds,max_pings,min_prefix_tokens,max_usd_per_ping,windows_json,
 	   target_json,active,predictor_id,predictor_threshold,head_ttl_1h,head_ttl_min_tokens,
-	   created_by,created_at,updated_by,updated_at)
-	  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	   one_hour_on_wait,created_by,created_at,updated_by,updated_at)
+	  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.ID, s.Name, s.IdleSeconds, s.MaxPings, s.MinPrefixTokens, s.MaxUSDPerPing,
 		string(windowsJSON), string(targetJSON), boolInt(s.Active), s.PredictorID,
-		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens, s.CreatedBy,
+		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens, boolInt(s.OneHourOnWait), s.CreatedBy,
 		s.CreatedAt.UnixMilli(), s.UpdatedBy, s.UpdatedAt.UnixMilli()); err != nil {
 		return Strategy{}, err
 	}
@@ -380,6 +386,9 @@ func (r *Registry) updateStrategy(actorID, id string, p StrategyPatch) (Strategy
 	if p.HeadTTLMinTokens != nil {
 		s.HeadTTLMinTokens = *p.HeadTTLMinTokens
 	}
+	if p.OneHourOnWait != nil {
+		s.OneHourOnWait = *p.OneHourOnWait
+	}
 	s.UpdatedBy, s.UpdatedAt = actorID, time.Now()
 	windowsJSON, err := json.Marshal(s.Windows)
 	if err != nil {
@@ -392,10 +401,10 @@ func (r *Registry) updateStrategy(actorID, id string, p StrategyPatch) (Strategy
 	if _, err := r.db.Exec(`UPDATE keepalive_strategies SET
 	  name=?, idle_seconds=?, max_pings=?, min_prefix_tokens=?, max_usd_per_ping=?,
 	  windows_json=?, target_json=?, active=?, predictor_id=?, predictor_threshold=?,
-	  head_ttl_1h=?, head_ttl_min_tokens=?, updated_by=?, updated_at=? WHERE id=?`,
+	  head_ttl_1h=?, head_ttl_min_tokens=?, one_hour_on_wait=?, updated_by=?, updated_at=? WHERE id=?`,
 		s.Name, s.IdleSeconds, s.MaxPings, s.MinPrefixTokens, s.MaxUSDPerPing,
 		string(windowsJSON), string(targetJSON), boolInt(s.Active), s.PredictorID,
-		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens, s.UpdatedBy,
+		s.PredictorThreshold, boolInt(s.HeadTTL1h), s.HeadTTLMinTokens, boolInt(s.OneHourOnWait), s.UpdatedBy,
 		s.UpdatedAt.UnixMilli(), s.ID); err != nil {
 		return Strategy{}, err
 	}
@@ -446,20 +455,21 @@ func (r *Registry) ListStrategies() ([]Strategy, error) {
 
 const strategyCols = `id,name,idle_seconds,max_pings,min_prefix_tokens,max_usd_per_ping,
 	windows_json,target_json,active,predictor_id,predictor_threshold,head_ttl_1h,
-	head_ttl_min_tokens,created_by,created_at,updated_by,updated_at`
+	head_ttl_min_tokens,one_hour_on_wait,created_by,created_at,updated_by,updated_at`
 
 func scanStrategy(sc scanner) (Strategy, error) {
 	var out Strategy
 	var windowsJSON, targetJSON string
-	var active, headTTL1h int
+	var active, headTTL1h, oneHourOnWait int
 	var createdAt, updatedAt int64
 	if err := sc.Scan(&out.ID, &out.Name, &out.IdleSeconds, &out.MaxPings, &out.MinPrefixTokens,
 		&out.MaxUSDPerPing, &windowsJSON, &targetJSON, &active, &out.PredictorID,
-		&out.PredictorThreshold, &headTTL1h, &out.HeadTTLMinTokens, &out.CreatedBy, &createdAt,
+		&out.PredictorThreshold, &headTTL1h, &out.HeadTTLMinTokens, &oneHourOnWait, &out.CreatedBy, &createdAt,
 		&out.UpdatedBy, &updatedAt); err != nil {
 		return Strategy{}, err
 	}
 	out.HeadTTL1h = headTTL1h != 0
+	out.OneHourOnWait = oneHourOnWait != 0
 	if windowsJSON != "" {
 		if err := json.Unmarshal([]byte(windowsJSON), &out.Windows); err != nil {
 			return Strategy{}, err

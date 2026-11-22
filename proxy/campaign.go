@@ -32,10 +32,10 @@ import (
 //
 // keepalive-1h and keepalive-1h-once need CachePolicy.HeadTTL1h, and on this
 // deployment's own measurement (apply/headttl.go) Bedrock honors that tier only for
-// aws/claude-haiku-4-5 — every other model this service runs, including the one
-// carrying most of its traffic, is silently downgraded to 5m. Activating a 1h arm
-// blindly would pay the tier's write premium for zero benefit on exactly the traffic
-// that dominates. headTTL1hHonoredModels is checked per tenant before a 1h arm is ever
+// aws/claude-haiku-4-5 — every other model this service runs is a moving target: Sonnet
+// 5 was REFUSED on an earlier date and GRANTED on 2026-11-19, with several newer models (see
+// apply/headttl.go and #1243). Until a model is measured, activating a 1h arm blindly could pay the
+// tier's write premium for no benefit. headTTL1hHonoredModels is checked per tenant before a 1h arm is ever
 // marked activatable.
 
 // campaignDefaultMinPrefixTokens mirrors config.DefaultKeepAliveMinPrefix. proxy does
@@ -86,7 +86,7 @@ const campaignDefaultHeadTTLMinTokens = 50000
 const campaignDefaultPredictorThreshold = 0.5
 
 // headTTL1hHonoredModels are the models this deployment has actually measured granting
-// the 1h cache tier rather than silently downgrading it to 5m (apply/headttl.go). A
+// the 1h cache tier (apply/headttl.go). A
 // campaign will not mark a 1h-tier arm activatable for a tenant whose traffic in the
 // suggest window used any model outside this set. Extend it only after measuring a new
 // model the same way apply/headttl.go's own doc comment did — never by assumption.

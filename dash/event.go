@@ -152,10 +152,10 @@ type Event struct {
 	SessionID string `json:"session_id"`
 	// ThreadID names the thread of the session this request belongs to: "" for the session's
 	// primary thread — the main agent, told apart as the first thread without an agent header
-	// that declares tools (see internal/thread) — "a:<agent id>" for a subagent that named itself
+	// that declares tools (see package thread) — "a:<agent id>" for a subagent that named itself
 	// in a header, and "p:<fingerprint>" for a thread told apart by prefix continuity. Each thread
 	// has its own provider cache entry, so recency and miss attribution are per thread; reporting
-	// stays per session. See internal/thread and issue #423.
+	// stays per session. See package thread and issue #423.
 	//
 	// A row keeps the id it was written with. A tool-less request that spoke before the main agent
 	// held "" at the time, so its row reads "" although the tracker later moved that thread to a
@@ -337,6 +337,11 @@ type Event struct {
 	CostUSD         float64 `json:"cost_usd"`
 	BaselineCostUSD float64 `json:"baseline_cost_usd"`
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
+	// FallbackRateCostUSD is the part of CostUSD priced from a fallback rate: a cache-read rate no
+	// source stated, filled from a default multiple (modelinfo.Price.FallbackCost, #1248). It is not
+	// the accountant fallback of Overview.FallbackCostUSD. The metrics read it from the live event.
+	// Not stored.
+	FallbackRateCostUSD float64 `json:"-"`
 	// CGCostUnpriced is set by PriceCG when the request made compaction calls that could not be
 	// priced, so CGLLMCostUSD is an unknown 0 and not a free one. Not stored: the reprice pass
 	// prices such a row on both halves once the price map loads (issues #920, #1033).
@@ -1049,6 +1054,7 @@ func (e *Event) PriceCG(prices modelinfo.Pricer, main modelinfo.Price, mainPrice
 // priceCost is Price without clearing the accountant state. It reports whether the cost was
 // computed (accounting complete and a price known).
 func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
+	e.FallbackRateCostUSD = 0
 	if !accountingComplete || p.Zero() {
 		if e.TokensBefore > 0 {
 			e.TokenAccounting = AccountingPartial
@@ -1064,6 +1070,9 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
 	// See Price.CostWithCacheWrite1h for the one-hour write premium this folds in.
 	e.CostUSD = p.CostWithCacheWrite1h(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens, e.CacheWrite1h)
+	if e.FallbackRateCostUSD = p.FallbackCost(e.CacheRead); e.FallbackRateCostUSD > e.CostUSD {
+		e.FallbackRateCostUSD = e.CostUSD // a part of the cost, never more (dash's min is for ints)
+	}
 	e.BaselineCostUSD = e.CostUSD
 	// What the PROVIDER's prompt cache saved on this request: every cache-read token was
 	// billed at the read rate instead of the fresh rate it would have cost with no cache at

@@ -18,9 +18,9 @@ import (
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/thread"
 	"gopkg.in/yaml.v3"
 )
 

@@ -9,8 +9,8 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // The summary checkpoint, the single-flight registry and the cold-deferral registry are keyed by
