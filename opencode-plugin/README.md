@@ -49,7 +49,7 @@ On OpenCode 2 the config key is `plugins` (plural); the same local path works:
 ```
 
 For a project-only install, put the same local path in the project's `opencode.json` instead. The
-first startup downloads release v0.7.5 when `context-guru-proxy` is not already on `PATH`,
+first startup downloads release v0.7.6 when `context-guru-proxy` is not already on `PATH`,
 verifies its SHA-256 checksum, and stores it in `~/.local/state/context-guru-opencode/bin/<version>/`.
 All projects share this one copy per version. Each project links to the version it uses.
 `/context-guru-uninstall --purge` removes a shared copy only when no other project still uses it.
