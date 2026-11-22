@@ -38,3 +38,25 @@ func TestOverviewPlacementCountsTheTopLevelMark(t *testing.T) {
 		t.Errorf("root-only request: %+v", solo.Breakpoints)
 	}
 }
+
+// The slot has one name in the UI: the per-request placement breakdown says top-level, as the overview does.
+func TestPlacementBreakdownNamesTheTopLevelSlot(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := mkEvent(1000, "s1", "m", 100, 90)
+	e.CacheBPRoot = 1
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := db.Breakdown(Filter{}, "cache_bp_location")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "system=0 tools=0 messages=0 blocks=0 top-level=1"
+	if len(groups) != 1 || groups[0].Key != want {
+		t.Errorf("groups = %+v, want one group %q", groups, want)
+	}
+}

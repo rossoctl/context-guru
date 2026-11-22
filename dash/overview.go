@@ -348,7 +348,8 @@ type Overview struct {
 	// Breakpoints is the aggregate placement of prompt-cache breakpoints BY LOCATION. Where a
 	// breakpoint sits decides how much prefix it protects, so a count alone cannot answer the
 	// question: system=2/tools=0/messages=0/blocks=1 and system=0/tools=0/messages=3/blocks=0
-	// are both "three breakpoints" and are not remotely the same prompt. These four columns
+	// are both "three breakpoints" and are not remotely the same prompt. (The fifth location is
+	// top-level: the one cache_control of automatic caching.) These five columns
 	// have existed since the placement work and were readable only one request at a time in
 	// the drawer.
 	Breakpoints BreakpointTotals `json:"breakpoints"`
