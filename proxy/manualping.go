@@ -106,6 +106,13 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusNotFound, "unknown session")
 		return
 	}
+	// A live free 1-hour ping comes first: the billed tier below is 5 minutes, so the cold gate would give a press
+	// 5 to 60 minutes after the ping the wrong reason ("cold") for an entry that is still warm (#1259).
+	if h.keeper.Keeper.OneHourTouchLive(keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread}) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "at one hour",
+			"detail": "the cache entry is at 1 hour after a free 1-hour ping; a manual ping would move it back to 5 minutes"})
+		return
+	}
 	if !now.Before(time.UnixMilli(th.EndTS).Add(time.Duration(th.TTLSeconds) * time.Second)) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "cold"})
 		return

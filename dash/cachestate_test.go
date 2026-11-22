@@ -366,6 +366,10 @@ func TestCacheStateCountsAnHourFromAFreeOneHourPing(t *testing.T) {
 			if body["ttl_s"] != wantSession {
 				t.Errorf("session ttl_s = %v, want %v", body["ttl_s"], wantSession)
 			}
+			// A sub-agent's free ping lengthens the session clock but never sets the session's button flag.
+			if wantSession == 3600 && body["free_hour_ping"] == true {
+				t.Error("a sub-agent's touch set free_hour_ping on the session entry")
+			}
 		})
 	}
 }

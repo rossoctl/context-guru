@@ -849,3 +849,22 @@ func TestAManualPressClearsAnExpiredOneHourTouch(t *testing.T) {
 		t.Errorf("%d stale touch(es) left after a dispatched press", n)
 	}
 }
+
+// OneHourTouchLive is the host's view of the same test PingNow applies (#1259): live now, gone after an hour.
+func TestOneHourTouchLiveFollowsTheTouch(t *testing.T) {
+	k, start := probeThenWait(t)
+	if !k.OneHourTouchLive(sess1) {
+		t.Fatal("not live right after a free 1-hour ping")
+	}
+	if k.OneHourTouchLive(Key{Tenant: sess1.Tenant, Session: "other"}) {
+		t.Error("live for another session")
+	}
+	returnWith(k, sess1, start.Add(10*time.Minute), kaBody, 49500, 100, false)
+	if k.OneHourTouchLive(sess1) {
+		t.Error("still live after a real request")
+	}
+	var nilK *Keeper
+	if nilK.OneHourTouchLive(sess1) {
+		t.Error("a nil keeper reported a live touch")
+	}
+}

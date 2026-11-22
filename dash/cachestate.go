@@ -170,8 +170,14 @@ func applyOneHour(s *CacheState, touches map[string]OneHourTouch) {
 			continue
 		}
 		t.TTLSeconds, t.TTLUnproven, t.FreeHourPing = hour, !o.Proven, true
+		// A thread already at an hour from a real 1-hour write is skipped above and carries no flag, so the button
+		// shows. If it also holds a live free-ping touch, the keeper still refuses the press (ErrAtOneHour): safe,
+		// because that press sends the entry's own 1-hour markers and shortens nothing, but the user sees a 409.
 		if s.LastTS == t.LastTS && s.TTLSeconds < hour {
-			s.TTLSeconds, s.TTLUnproven, s.FreeHourPing = hour, !o.Proven, true
+			s.TTLSeconds, s.TTLUnproven = hour, !o.Proven
+			// Only the main thread's touch hides the button: a sub-agent's free ping must not hide it for a
+			// main-thread press the keeper would allow.
+			s.FreeHourPing = t.Main
 		}
 	}
 }

@@ -293,6 +293,17 @@ func (k *Keeper) oneHourTouchLiveLocked(id string, now time.Time) bool {
 	return st == nil || !st.off
 }
 
+// OneHourTouchLive reports whether key's thread is at 1 hour from a live free 1-hour ping. A host reads it to give
+// a refused press the right reason before its own gates. Nil-safe.
+func (k *Keeper) OneHourTouchLive(key Key) bool {
+	if k == nil || key.Session == "" {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.oneHourTouchLiveLocked(key.id(), k.now())
+}
+
 // OneHourTouch is what the dashboard needs of it.
 type OneHourTouch struct {
 	At time.Time
