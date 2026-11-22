@@ -221,7 +221,7 @@ A subagent has its own cache entry.
 Today no strategy puts a subagent on the 1-hour cache, except the head rule of `1-hour-head`.
 `1-hour-on-wait` and `1-hour-always` change the main agent only. A subagent keeps the 5-minute
 cache and the pings of `auto`. In the code, `1-hour-head` has no check for the thread, so it also
-changes the head of a subagent request. We chose to leave subagents on the 5-minute cache for this reason.
+changes the head of a subagent request.
 
 A simulation shows why. It counts **subagent threads only** and assumes a provider where the switch
 is a read (Bedrock). These are simulated results, not live measurements. Each is the change in cost
