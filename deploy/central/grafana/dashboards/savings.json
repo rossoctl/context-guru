@@ -135,7 +135,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Net by kind (USD)",
-      "description": "rewrite, spend and setting. A spend is a component's own model call and is always a cost. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
+      "description": "rewrite, spend and setting. A spend is a component's own model call and is always a cost. Each bar is about the dollars in that bar's time span (increase() extrapolates to the span's edges). The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -167,7 +167,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": []
@@ -290,7 +291,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": []

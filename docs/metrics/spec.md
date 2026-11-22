@@ -394,7 +394,7 @@ Target: **under 2,000 active series per machine.** For 50 machines this is 100,0
 
 ## 6. Dashboards
 
-All dashboards use the central Prometheus. They are Grafana JSON files in `deploy/grafana/dashboards/`. Each panel states its query. Use `$__rate_interval`.
+All dashboards use the central Prometheus. They are Grafana JSON files in `deploy/grafana/dashboards/`. Each panel states its query. A count trend uses `$__rate_interval`. A money trend uses `$__interval` (rule 4).
 
 Filters on every dashboard: `proxy`, `machine`, time range. The default range is the last 7 days. There is no `model` filter: the savings metrics carry no `model` label (section 5.2). A tile such as "Net saved" covers the selected range.
 
@@ -403,7 +403,7 @@ Filters on every dashboard: `proxy`, `machine`, time range. The default range is
 1. **Money first.** The first screen answers "do we save money?" in 5 seconds. The largest tile, at the top left, is **Net saved** over the selected range. Health comes below it.
 2. **One question for each dashboard.** The question is the first line of its section. A panel that does not help answer it moves to another dashboard.
 3. **The same colors everywhere.** Green is saved. Orange is added cost. Red is a loss or a failure. Yellow needs a look. Blue and purple only separate series.
-4. **Counters are never shown raw.** A total uses `increase()` over the selected range. A trend uses `rate()` with `$__rate_interval`.
+4. **Counters are never shown raw.** A total uses `increase()` over the selected range. A count trend uses `rate()` with `$__rate_interval`. A money trend uses `increase()` over `$__interval`, drawn as bars, with a minimum interval of 5 min. Each bar is about the dollars in its span. Never show money as `rate() * 3600`: a dollar counter moves in steps, so one $1.75 write over a 1 min window shows as a $105/h spike (#1273).
 5. **Every panel states its unit and range** in the small text at the top right.
 6. **Estimates stay visible.** The Savings dashboard shows the estimated share (`llm_savings_estimated_total`, section 5.2). No panel hides an estimated figure.
 7. **Losses are read first.** Components with a negative net have their own table on the Savings dashboard.
@@ -424,7 +424,7 @@ Order, top to bottom: the money tiles (net saved and saving rate first), the dai
 | Added cost | stat | `increase(llm_savings_added_usd_total[$__range])` |
 | Spend | stat | `increase(llm_inference_cost_usd_total[$__range])` |
 | Net saved per day | bar | One bar per day for 30 days, whatever the dashboard range. |
-| Saved vs added | time series | both rates, per hour |
+| Saved vs added | bars | saved above zero, added below, USD per bar |
 | Net saved by machine | bar gauge | the best 8 machines |
 | Silent machines | stat | `max by (proxy, machine) (max_over_time(llm_proxy_info[1d])) unless on (proxy, machine) llm_proxy_info`, the same logic as the `MachineSilent` alert. Match on the machine only: a change of `version` or `preset` starts a new `llm_proxy_info` series, and a match on all labels would call an upgraded machine silent for a day. A `promtool` test covers a preset change. |
 | 5xx error rate | stat | 5xx requests / requests |
@@ -440,7 +440,7 @@ The left column ranks components. The table at the bottom right is the one to re
 
 | Panel | Type | Query idea |
 |---|---|---|
-| Saved vs added | time series | both counters, stacked |
+| Saved vs added | bars | both counters, stacked: saved above zero, added below, USD per bar |
 | Net by kind | stacked bars | `kind` = rewrite, spend, setting |
 | Net by component | bar gauge, sorted | top 15 components |
 | Components with negative net | table | `component` where saved - added < 0 |
@@ -462,7 +462,7 @@ The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
 | Misses by cause | stacked bars | `llm_cache_misses_total` by `cause` |
 | Miss cost by cause | bar | `llm_cache_miss_cost_usd_total` |
 | Ping outcomes | stacked bars | by `outcome` |
-| Ping cost vs rescue | time series | cost, rescue and net |
+| Ping cost vs rescue | bars | cost below zero, rescue above, net as a line, USD per bar |
 | Estimated ping cost | stat | `llm_keepalive_estimated_cost_usd_total / llm_keepalive_cost_usd_total` (rule 6) |
 | Pings that paid | stat | `rescue_usd / cost_usd` |
 | Shared-warm tokens | time series | credit not given (#853) |

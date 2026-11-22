@@ -363,7 +363,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Saved vs added (USD)",
-      "description": "Both sides of the net: saved above zero, added below. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
+      "description": "Both sides of the net: saved above zero, added below. Each bar is about the dollars in that bar's time span (increase() extrapolates to the span's edges). The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -405,7 +405,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": [

@@ -145,7 +145,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": []
@@ -257,7 +258,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": [
@@ -435,7 +437,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Keep-alive: cost, rescue and net (USD)",
-      "description": "Do the pings pay? The rescue is a write that became a read, so its value is the write saved minus the read paid. Ping cost is below zero, rescue above, and the line is the net. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
+      "description": "Do the pings pay? The rescue is a write that became a read, so its value is the write saved minus the read paid. Ping cost is below zero, rescue above, and the line is the net. Each bar is about the dollars in that bar's time span (increase() extrapolates to the span's edges). The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -458,7 +460,7 @@
           "interval": "5m"
         },
         {
-          "expr": "(sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"saved\"}[$__interval])) - sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"added\"}[$__interval])))",
+          "expr": "((sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"saved\"}[$__interval])) or vector(0)) - (sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"added\"}[$__interval])) or vector(0)))",
           "legendFormat": "rescue (net of reads)",
           "refId": "B",
           "datasource": {
@@ -468,7 +470,7 @@
           "interval": "5m"
         },
         {
-          "expr": "((sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"saved\"}[$__interval])) - sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"added\"}[$__interval]))) - sum(increase(llm_keepalive_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval])))",
+          "expr": "(((sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"saved\"}[$__interval])) or vector(0)) - (sum(increase(llm_savings_cache_effect_usd_total{proxy=~\"$proxy\", machine=~\"$machine\",effect=\"rescue\",direction=\"added\"}[$__interval])) or vector(0))) - sum(increase(llm_keepalive_cost_usd_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__interval])))",
           "legendFormat": "net",
           "refId": "C",
           "datasource": {
@@ -487,7 +489,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": [

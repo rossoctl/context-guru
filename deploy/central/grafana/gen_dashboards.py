@@ -47,7 +47,7 @@ def rate(metric, by="", extra=""):
 # $1.75 step into a $105/h spike for one minute (#1273). So money over time is shown as the dollars
 # in each bar: increase() over $__interval, with a floor of BAR so each bar spans several pushes.
 BAR = "5m"
-BAR_DESC = " Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes."
+BAR_DESC = " Each bar is about the dollars in that bar's time span (increase() extrapolates to the span's edges). The span grows with the dashboard range and is at least 5 minutes."
 
 
 def bar(metric, by="", extra=""):
@@ -104,7 +104,9 @@ def series(pid, title, targets, x, y, w=12, h=8, unit="short", stack=False, desc
     if time_from:
         d["timeFrom"] = time_from
     if bars:
-        d["fieldConfig"]["defaults"]["custom"].update({"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0})
+        # increase() and rate() at t cover the span that ENDS at t, so the bar ends at t, not centered on it
+        d["fieldConfig"]["defaults"]["custom"].update({"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0,
+                                                       "barAlignment": -1})
     if kind == "bargauge":
         d["options"] = {"orientation": "vertical" if vertical else "horizontal", "displayMode": "basic",
                         "showUnfilled": True, "reduceOptions": {"calcs": ["lastNotNull"]}}
@@ -245,7 +247,9 @@ def savings():
 
 def cache():
     f = FILTER
-    rescue = lambda e: bar("llm_savings_cache_effect_usd_total", extra=e)
+    # or vector(0): with pings and no rescue yet (or no "added" side), the difference would have no
+    # series, and rescue and net would vanish while the ping cost still shows
+    rescue = lambda e: f'({bar("llm_savings_cache_effect_usd_total", extra=e)} or vector(0))'
     P = []
     P.append(series(1, "Cache read ratio", [
         (f'{rate("llm_inference_tokens_total", "model", TIER_READ)} / clamp_min({rate("llm_inference_tokens_total", "model", TIER_PROMPT)}, 1e-9)', "{{model}}")],

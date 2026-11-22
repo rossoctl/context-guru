@@ -342,7 +342,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": [
@@ -803,7 +804,7 @@
       "id": 12,
       "type": "timeseries",
       "title": "Spend by model (USD)",
-      "description": "Provider cost at request time. Each proxy prices with its own rate table. Each bar is the dollars in that bar's time span. The span grows with the dashboard range and is at least 5 minutes.",
+      "description": "Provider cost at request time. Each proxy prices with its own rate table. Each bar is about the dollars in that bar's time span (increase() extrapolates to the span's edges). The span grows with the dashboard range and is at least 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -835,7 +836,8 @@
             },
             "drawStyle": "bars",
             "fillOpacity": 80,
-            "lineWidth": 0
+            "lineWidth": 0,
+            "barAlignment": -1
           }
         },
         "overrides": []
