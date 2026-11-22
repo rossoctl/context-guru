@@ -138,7 +138,7 @@ time. The band shows `1h?` (1 hour, not yet proven) until the test ends. There a
 | The ping reads the prompt and writes almost nothing. You return 5 to 60 minutes later and the prompt is **gone** (a rebuild). | The provider **did not keep the 1-hour lifetime**. It quietly gave 5 minutes. | The route is switched off for the life of the proxy. The proxy uses plain `auto` there. It does **not** write at 1 hour: that write would pay more and still lose the prompt after 5 minutes. |
 | The ping itself reads almost nothing and **writes the whole prompt** at 1 hour. | The provider **charged for the switch**: it rewrites the prompt. We expect this on the Anthropic first-party API. We have not tested it. | The route is marked costly. The proxy sends no more 1-hour pings there. The main agent follows the next section. |
 
-A ping that failed, landed on an entry that had already expired, or was neither of these cases decides
+A ping that failed, landed on an entry that had already expired, or whose usage was neither a free nor a costly switch decides
 nothing. The proxy releases the test, and a later wait tests again.
 
 A return inside 5 minutes, after more than 1 hour, on another model, or after a rewrite of the
@@ -200,7 +200,7 @@ than planned.
 
 ### `30-min-ping`
 
-OpenAI Responses only. The proxy pings shortly before the 30-minute lifetime ends. On a proxy that
+OpenAI Responses only. The proxy pings 28 minutes after the last request, shortly before the 30-minute lifetime ends. On a proxy that
 also serves Anthropic, `keepalive: true` also turns on the Anthropic pings with the defaults.
 
 ## Strategies for subagents
