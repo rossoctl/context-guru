@@ -15,7 +15,18 @@ routed: the proxy has no route for that backend. See [Limits](#limits).
 
 ## Install
 
-Pi installs a package from a local path. Clone this repository, then:
+The easy way, on macOS or Linux: run this in a terminal.
+
+```sh
+curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-pi.sh | bash
+```
+
+It installs or updates Pi (after a yes), installs this package, sets up Pi's connection to Anthropic or your
+gateway (the key goes into the Keychain or the secret store), and turns context-guru on after your yes. Add
+`-s uninstall` after `bash` to remove everything it added. See
+[docs/how-to/install-pi-package.md](../docs/how-to/install-pi-package.md).
+
+By hand: Pi installs a package from a local path. Clone this repository, then:
 
 ```sh
 pi install /path/to/context-guru/pi-package
