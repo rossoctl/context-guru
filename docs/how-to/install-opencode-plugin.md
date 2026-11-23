@@ -32,7 +32,7 @@ It asks before each change:
 It asks for no key. The plugin uses OpenCode's own login (`opencode auth login`).
 It does not change an `opencode.jsonc` or a config file with comments. It prints the entries to add by hand.
 
-To remove everything it added (the plugin, its entries, the proxies, and OpenCode if it installed OpenCode), run:
+To remove it, run the command below. It stops the proxies, removes every entry of this plugin (also one you added by hand), the plugin copy, and OpenCode if it installed OpenCode. Your other entries stay.
 
 ```sh
 curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash -s uninstall

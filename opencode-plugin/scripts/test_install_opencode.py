@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,7 +48,9 @@ class FakeShell:
         self.has_npm = True
         self.npm_install_error = None
         self.proxy = "up"
-        self.run_fails = False
+        self.run_fails = False  # "exit": exit 1 with an error; "error-exit-0": the error with exit 0
+        self.npm_shadowed = False  # an older opencode comes first on PATH, so npm's new one does not run
+        self.opencode_version_text = None
 
     def which(self, name):
         if name == "opencode":
@@ -62,11 +65,12 @@ class FakeShell:
             return subprocess.CompletedProcess(cmd, 0, out, "")
 
         if cmd[:2] == ["opencode", "--version"]:
-            return ok(self.opencode + "\n")
+            return ok((self.opencode_version_text or self.opencode) + "\n")
         if cmd[:2] == ["npm", "install"]:
             if self.npm_install_error:
                 return subprocess.CompletedProcess(cmd, 1, "", self.npm_install_error)
-            self.opencode = cmd[-1].rsplit("@", 1)[1]
+            if not self.npm_shadowed:
+                self.opencode = cmd[-1].rsplit("@", 1)[1]
             return ok()
         if cmd[:2] == ["npm", "uninstall"]:
             self.opencode = None
@@ -76,8 +80,11 @@ class FakeShell:
             state = install_opencode.state_root() / hashlib.sha256(cwd.encode()).hexdigest()[:16]
             state.mkdir(parents=True, exist_ok=True)
             (state / "context-guru-status").write_text("#!/bin/sh\n")
-            if self.run_fails:
+            (state / "context-guru-reset").write_text("#!/bin/sh\n")
+            if self.run_fails == "exit":
                 return subprocess.CompletedProcess(cmd, 1, "", "Error: Anthropic API key is missing.\n")
+            if self.run_fails == "error-exit-0":
+                return ok("Error: Anthropic API key is missing.\n")
             return ok("ok\n")
         if cmd[0] == "sh" and cmd[1].endswith("context-guru-status"):
             return ok(f"install=present\nport=8787\nproxy={self.proxy}\n")
@@ -282,14 +289,64 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("opencode auth login", self.terminal.text())
 
     def test_test_prompt_that_fails_is_not_reported_as_working(self):
-        self.shell.run_fails = True
+        for failure in ("exit", "error-exit-0"):
+            with self.subTest(failure=failure):
+                self.shell.run_fails = failure
 
+                self.installer("y", "y").install()
+
+                text = self.terminal.text()
+                self.assertNotIn("✓ The proxy started, and OpenCode answered", text)
+                self.assertIn("The proxy started, but OpenCode could not answer", text)
+                self.assertIn("Anthropic API key is missing", text)
+                self.assertIn("opencode auth login", text)
+
+    def test_test_prompt_stops_its_own_proxy_and_removes_its_state(self):
         self.installer("y", "y").install()
 
-        text = self.terminal.text()
-        self.assertNotIn("OpenCode goes through it", text)
-        self.assertIn("Anthropic API key is missing", text)
-        self.assertIn("opencode auth login", text)
+        resets = [call for call in self.shell.calls if call[0] == "sh" and call[1].endswith("context-guru-reset")]
+        self.assertEqual(len(resets), 1)
+        project = Path(resets[0][1]).parent
+        self.assertEqual(project.parent, install_opencode.state_root())
+        self.assertFalse(project.exists())
+
+    def test_an_opencode_first_on_path_that_is_still_old_stops_before_consent(self):
+        self.shell.opencode, self.shell.npm_shadowed = "1.17.0", True
+
+        code = self.installer("y").install()  # one question only: the update
+
+        self.assertEqual(code, 1)
+        self.assertIn("still runs OpenCode 1.17.0", self.terminal.text())
+        self.assertIn("/usr/local/bin/opencode", self.terminal.text())
+        self.assertFalse(self.config.exists())
+
+    def test_an_opencode_whose_version_cannot_be_read_is_not_taken_as_missing(self):
+        self.shell.opencode_version_text = "opencode dev build"
+
+        code = self.installer("y").install()  # the update question
+
+        self.assertEqual(code, 1)  # the new version cannot be read either, so it stops
+        record = install_opencode.record_path()
+        self.assertFalse(record.exists() and "opencode_installed" in json.loads(record.read_text()))
+
+    def test_carried_options_with_a_preset_change_the_consent_text(self):
+        clone = Path(self.home.name) / "src/opencode-plugin"
+        clone.mkdir(parents=True)
+        (clone / "index.js").write_text("// opencode-context-guru\n")
+        self.write("opencode.json", {"plugin": [[str(clone / "index.js"), {"preset": "medium"}]]})
+
+        self.installer("n").install()
+
+        self.assertIn("The preset is medium", self.terminal.text())
+        self.assertNotIn("The preset is off", self.terminal.text())
+
+    def test_install_keeps_the_config_file_mode(self):
+        self.write("opencode.json", {"plugin": []})
+        (self.config / "opencode.json").chmod(0o644)
+
+        self.installer("y", "n").install()
+
+        self.assertEqual((self.config / "opencode.json").stat().st_mode & 0o777, 0o644)
 
     # ----------------------------------------------------------------------------- uninstall
     def test_uninstall_removes_only_what_install_added(self):
@@ -340,6 +397,34 @@ class InstallerTest(unittest.TestCase):
         self.installer("y").uninstall()  # one question only: the local data
 
         self.assertEqual(self.npm_calls(), [])
+
+    def test_uninstall_with_a_jsonc_file_still_stops_proxies_and_removes_the_copy(self):
+        self.installer("y", "n").install()
+        project = install_opencode.state_root() / "0123456789abcdef"
+        project.mkdir(parents=True)
+        (project / "context-guru-reset").write_text("#!/bin/sh\n")
+        jsonc = '{\n  // mine\n  "plugin": ["%s"]\n}\n' % (self.plugin_copy / "index.js")
+        (self.config / "opencode.json").write_text(jsonc)
+
+        code = self.installer("y").uninstall()
+
+        self.assertEqual(code, 1)  # not finished: one entry is for the user to remove
+        self.assertIn(["sh", str(project / "context-guru-reset")], self.shell.calls)
+        self.assertEqual((self.config / "opencode.json").read_text(), jsonc)
+        self.assertFalse(self.read("tui.json"))  # the plain file is done
+        self.assertFalse(self.plugin_copy.exists())
+        text = self.terminal.text()
+        self.assertIn(f"remove this entry by hand: \"{self.plugin_copy / 'index.js'}\"", text)
+        self.assertNotIn("To install it by hand", text)
+
+    def test_uninstall_removes_the_stable_entry_when_the_copy_is_already_gone(self):
+        self.write("opencode.json", {"plugin": ["opencode-foo"]})
+        self.installer("y", "n").install()
+        shutil.rmtree(self.plugin_copy)
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.read("opencode.json"), {"plugin": ["opencode-foo"]})
 
     def test_uninstall_removes_a_cloned_copy_entry_too(self):
         clone = Path(self.home.name) / "src/opencode-plugin"

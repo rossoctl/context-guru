@@ -51,6 +51,8 @@ Out of scope:
   `CG_OC_OPENCODE_VERSION` overrides it.
 - Missing: ask "Install OpenCode 1.19.5?". Older than 1.18.29: ask "Update OpenCode <old> to 1.19.5?"; no stops
   (the plugin cannot load). 1.18.29 or later: keep it. When it is not 1.19.5, say that it is not tested.
+- After npm, run `opencode --version` again. When `opencode` is not on `PATH`, or an older one comes first
+  (Homebrew, `~/.opencode/bin`), stop before the consent step and name it.
 - Install with `npm install -g opencode-ai@<version> --registry <registry>`. `<registry>` is
   `https://registry.npmjs.org/` by default; `CG_OC_NPM_REGISTRY` overrides it. Never `sudo`.
 - No npm: stop, and name OpenCode's own install page.
@@ -92,19 +94,23 @@ Out of scope:
      plugin, and add the stable path. An entry is ours when it is a local path to a file whose text has the
      marker `opencode-context-guru`. Two copies must not load.
    - An old entry in tuple form (`[path, {options}]`) keeps its options on the new path.
-   - The record lists each file, whether the installer created it, whether `plugin` was absent, and the
-     entries it removed.
+   - The record lists each file, whether the installer created it, and whether `plugin` was absent. It does
+     not list the entries it replaced: their only copy is the backup of the first install.
    - Each file gets `$schema` only when the installer creates it.
 6. **Finish.** Say "Restart OpenCode". Ask "Send one test prompt? It costs one short request [y/N]". Yes: run
    `opencode run "Reply with the single word: ok"` in a temp folder, show the answer. Then find the
    temp folder's project state folder, and run that project's `context-guru-status` script (it checks `/healthz`). `proxy=up` and an answer: "✓". `opencode run` can print a provider error and exit 0, so an `Error:` in its output counts as no answer. No
-   provider login: name `opencode auth login`.
+   provider login: name `opencode auth login`. Then run that project's `context-guru-reset` and delete its state
+   folder: the check's proxy would idle for 24 h for a folder that is gone.
 
 ## Flow of `uninstall`
 
 1. **Stop the proxies.** Run each `<state root>/<project>/context-guru-reset` that exists. It stops the
-   recorded proxy and releases its shared binary.
-2. **Config.** Remove our entries from both files. Put back nothing else. A `plugin` list the installer created
+   recorded proxy and releases its shared binary. This comes first, so a config file it cannot change does not
+   leave a proxy running.
+2. **Config.** Remove every entry of this plugin from both files, also one the user added by hand, and the
+   recorded path when the copy is gone. Put back nothing else. A file with comments, or an `opencode.jsonc`,
+   is not changed: the installer names the entry to remove by hand, does the other steps, and exits 1. A `plugin` list the installer created
    goes when it is empty. A file the installer created goes when only `$schema` is left.
 3. **Plugin copy.** Delete the stable path.
 4. **Local data.** Ask "Delete context-guru's local data too? [Y/n]". Yes deletes the state root (logs,

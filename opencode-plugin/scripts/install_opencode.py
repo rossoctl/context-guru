@@ -83,11 +83,13 @@ def load_json(path):
 
 
 def write_json(path, value):
-    """Atomic: a temp file in the same folder, then a rename."""
+    """Atomic: a temp file in the same folder, then a rename. The file keeps its mode (mkstemp makes 0600)."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     with os.fdopen(descriptor, "w") as handle:
         handle.write(json.dumps(value, indent=2) + "\n")
+    os.chmod(temp, mode)
     os.replace(temp, path)
 
 
@@ -107,11 +109,14 @@ def entry_path(entry):
     return entry[0] if isinstance(entry, list) and entry and isinstance(entry[0], str) else entry
 
 
-def is_ours(entry):
-    """A local path to a file that is a copy of this plugin. npm names and URLs are never ours."""
+def is_ours(entry, known=()):
+    """A local path to a file that is a copy of this plugin, or a path the installer wrote (`known`, for a copy
+    that is gone). npm names and URLs are never ours."""
     path = entry_path(entry)
     if not isinstance(path, str) or not path.startswith(("/", "~", "file://")):
         return False
+    if path in known:
+        return True
     try:
         return MARKER in Path(path.removeprefix("file://")).expanduser().read_text(errors="replace")
     except OSError:
@@ -148,7 +153,10 @@ class Shell:
 
     def run(self, cmd, cwd=None):
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=cwd, stdin=subprocess.DEVNULL)
+            # OpenCode takes its project folder from PWD as well, so PWD must name the same folder as cwd.
+            env = dict(os.environ, PWD=cwd) if cwd else None
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=cwd, env=env,
+                                  stdin=subprocess.DEVNULL)
         except FileNotFoundError:
             return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: not found")
         except subprocess.TimeoutExpired:
@@ -174,7 +182,7 @@ class Installer:
             self.ensure_opencode()
             self.save_record()
             self.step("Your consent", "What changes when context-guru is on.")
-            if not self.consent():
+            if not self.consent(self.carried_options(documents["opencode.json"]).get("preset", "off")):
                 self.terminal.say("context-guru stays off. Nothing else was changed.")
                 return 0
             self.step("The context-guru plugin", f"It goes to {plugin_dir()}, and into OpenCode's config for every "
@@ -193,15 +201,21 @@ class Installer:
             raise Stop(f"OpenCode reads {jsonc}, and the installer does not change JSONC files.\n{manual_steps()}")
         return {name: load_json(config_dir() / name) for name, _, _ in CONFIGS}
 
+    def opencode_version(self):
+        """(path of `opencode` on PATH, its version text); (None, None) when it is not on PATH."""
+        path = self.shell.which("opencode")
+        if not path:
+            return None, None
+        version = version_tuple(self.shell.run(["opencode", "--version"]).stdout)
+        return path, ".".join(map(str, version)) if version else "of an unknown version"
+
     def ensure_opencode(self):
-        installed = None
-        if self.shell.which("opencode"):
-            installed = version_tuple(self.shell.run(["opencode", "--version"]).stdout)
-        shown = ".".join(map(str, installed)) if installed else None
-        if installed and installed >= MIN_OPENCODE:
+        path, shown = self.opencode_version()
+        if path and version_tuple(shown) and version_tuple(shown) >= MIN_OPENCODE:
             note = "" if shown == TESTED_OPENCODE else f" The plugin is tested on OpenCode {TESTED_OPENCODE} only."
             self.terminal.say(f"OpenCode {shown} is installed.{note}")
             return
+        installed = path is not None
         if not self.shell.which("npm"):
             raise Stop(f"OpenCode {'is too old' if installed else 'is not installed'}, and npm is not here to "
                        f"install it. Install OpenCode {self.target} from {INSTALL_PAGE}, then run this again.")
@@ -218,15 +232,33 @@ class Installer:
                        "To use another registry, set CG_OC_NPM_REGISTRY. This installer never uses sudo.")
         if not installed:
             self.record["opencode_installed"] = True
-        self.terminal.say(f"✓ OpenCode {self.target} {'updated' if installed else 'installed'}.")
+            self.save_record()
+        # npm's global bin can be missing from PATH, or come after an older OpenCode (Homebrew, ~/.opencode/bin).
+        now, now_shown = self.opencode_version()
+        if not now:
+            raise Stop(f"npm installed OpenCode {self.target}, but `opencode` is not on your PATH. Add npm's global "
+                       "bin folder (`npm prefix -g`, then /bin) to PATH, then run this again.")
+        if not version_tuple(now_shown) or version_tuple(now_shown) < MIN_OPENCODE:
+            raise Stop(f"npm installed OpenCode {self.target}, but `opencode` still runs OpenCode {now_shown} "
+                       f"({now}). Remove that one, or put npm's global bin folder first on PATH, then run this again.")
+        self.terminal.say(f"✓ OpenCode {now_shown} {'updated' if installed else 'installed'}.")
 
-    def consent(self):
+    @staticmethod
+    def carried_options(document):
+        """The options of an older entry of this plugin, which the new entry keeps."""
+        entries = document.get("plugin") if isinstance(document.get("plugin"), list) else []
+        return next((entry[1] for entry in entries if is_ours(entry) and isinstance(entry, list) and len(entry) == 2
+                     and isinstance(entry[1], dict)), {})
+
+    def consent(self, preset):
         self.terminal.say(
             "   • In every project, OpenCode's Anthropic and OpenAI requests go through a local context-guru proxy\n"
             "     on 127.0.0.1. Your requests and their answers pass through it.\n"
             "   • While you are away, the proxy sends short keep-alive requests with your own credential, to keep\n"
             "     the prompt cache warm. They cost a little. /context-guru-strategy none turns them off.\n"
-            "   • The preset is off: request bodies go to the provider unchanged. /context-guru-preset changes it.\n"
+            + ("   • The preset is off: request bodies go to the provider unchanged." if preset == "off" else
+               f"   • The preset is {preset} (from your old plugin entry): context-guru trims what it sends.")
+            + " /context-guru-preset changes it.\n"
             "   • If the proxy is down, requests go straight to the provider.")
         return self.yes("Turn context-guru on for OpenCode?", default=False)
 
@@ -249,10 +281,10 @@ class Installer:
                 document["$schema"] = schema
             entries = document.get("plugin") if isinstance(document.get("plugin"), list) else []
             ours = [entry for entry in entries if is_ours(entry)]
-            options = next((entry[1] for entry in ours if isinstance(entry, list) and len(entry) == 2), None)
+            options = self.carried_options(document)
             new = str(target / file)
             document["plugin"] = [entry for entry in entries if not is_ours(entry)]
-            document["plugin"].append([new, options] if options is not None else new)
+            document["plugin"].append([new, options] if options else new)
             write_json(path, document)
             for entry in ours:
                 if entry_path(entry) != new:
@@ -266,8 +298,13 @@ class Installer:
                 folder = os.path.realpath(folder)
                 out = self.shell.run(["opencode", "run", "Reply with the single word: ok"], cwd=folder)
                 self.terminal.say(f"OpenCode answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
-                status = project_state(folder) / "context-guru-status"
+                state = project_state(folder)
+                status, reset = state / "context-guru-status", state / "context-guru-reset"
                 proxy = facts(self.shell.run(["sh", str(status)]).stdout).get("proxy") if status.exists() else None
+                # The check's own proxy would idle for 24 h (and send keep-alive) for a folder that is gone.
+                if reset.exists():
+                    self.shell.run(["sh", str(reset)])
+                shutil.rmtree(state, ignore_errors=True)
             # opencode run can print a provider error and still exit 0, so its text counts too.
             answered = out.returncode == 0 and "Error:" not in out.stdout + out.stderr
             if proxy == "up" and answered:
@@ -284,17 +321,26 @@ class Installer:
     def uninstall(self):
         try:
             self.begin(UNINSTALL_STEPS)
-            documents = self.read_configs()
             record = load_json(record_path())
             self.step("Stop the proxies", "It stops each project's context-guru proxy.")
             resets = sorted(state_root().glob("*/context-guru-reset")) if state_root().exists() else []
             for reset in resets:
                 self.shell.run(["sh", str(reset)])
             self.terminal.say(f"✓ Proxies stopped ({len(resets)} projects).")
-            self.step("Remove the plugin", "It removes the plugin from OpenCode's config. Your other entries stay.")
+            self.step("Remove the plugin", "It removes each context-guru entry from OpenCode's config, also one you "
+                                           "added by hand. Your other entries stay.")
             files = record.get("files") or {}
-            for name, _, schema in CONFIGS:
-                self.remove_entries(config_dir() / name, documents[name], files.get(name) or {}, schema)
+            known = {str(Path(record["plugin"]) / file) for _, file, _ in CONFIGS} if record.get("plugin") else set()
+            by_hand = []
+            for name, file, schema in CONFIGS:
+                path = config_dir() / name
+                try:
+                    self.remove_entries(path, load_json(path), files.get(name) or {}, schema, known)
+                except Stop:
+                    by_hand.append(f"{path}: remove this entry by hand: \"{plugin_dir() / file}\"")
+            jsonc = config_dir() / "opencode.jsonc"
+            if jsonc.exists():
+                by_hand.append(f"{jsonc}: remove a context-guru entry by hand, if it has one")
             if record.get("plugin"):
                 shutil.rmtree(record["plugin"], ignore_errors=True)
                 try:
@@ -316,6 +362,10 @@ class Installer:
                     self.terminal.say("✓ OpenCode uninstalled." if out.returncode == 0 else f"npm: {out.stderr.strip()}")
             else:
                 self.skip("OpenCode itself", "the installer did not install OpenCode, so it stays.")
+            if by_hand:
+                self.terminal.say("context-guru is stopped and its files are gone, but the installer does not change "
+                                  "a file with comments or a JSONC file:\n  " + "\n  ".join(by_hand))
+                return 1
             self.terminal.say("Done. context-guru is removed.")
             return 0
         except Stop as stop:
@@ -323,11 +373,11 @@ class Installer:
             return 1
 
     @staticmethod
-    def remove_entries(path, document, record, schema):
+    def remove_entries(path, document, record, schema, known):
         entries = document.get("plugin")
-        if not isinstance(entries, list) or not any(is_ours(entry) for entry in entries):
+        if not isinstance(entries, list) or not any(is_ours(entry, known) for entry in entries):
             return
-        document["plugin"] = [entry for entry in entries if not is_ours(entry)]
+        document["plugin"] = [entry for entry in entries if not is_ours(entry, known)]
         if not document["plugin"] and record.get("had_plugin") is False:
             del document["plugin"]
         if record.get("created") and set(document) <= {"$schema"} and document.get("$schema", schema) == schema:
