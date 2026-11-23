@@ -1,6 +1,6 @@
 name: OpenCode plugin
 
-# Node tests for opencode-plugin/. Decoupled from ci.yaml, like docs.yaml: no Go, no CGO. It runs
+# Node tests for opencode-plugin/, and the Python tests of its one-command installer. Decoupled from ci.yaml, like docs.yaml: no Go, no CGO. It runs
 # only when the plugin, its test, or this file changes. The tests use stub proxies and no network.
 
 on:
@@ -27,3 +27,5 @@ jobs:
           node-version: '22'
       - run: node --check opencode-plugin/index.js && node --check opencode-plugin/tui.js
       - run: node --test opencode-plugin/test/*.test.mjs
+      - run: python3 -m unittest discover -s opencode-plugin/scripts -p 'test_*.py'
+      - run: python3 -m unittest discover -s opencode-plugin/release -p 'test_*.py'

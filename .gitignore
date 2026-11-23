@@ -204,3 +204,5 @@ CLAUDE.local.md
 
 # The Pi installer package, built by the release workflow before GoReleaser (pi-package/release/package.sh ... pi-dist).
 /pi-dist/
+# The OpenCode installer tarball, built by the release workflow before GoReleaser (opencode-plugin/release/package.sh).
+/opencode-dist/
