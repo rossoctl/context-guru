@@ -103,6 +103,7 @@ class Bootstrap(Release):
         self.assertEqual(argv[0].rsplit("/", 2)[-2:], ["scripts", "install_pi.py"])
         self.assertEqual(argv[1:3], ["install", "--source"])
         self.assertTrue(argv[3].endswith("/pi-package"))
+        self.assertEqual(argv[4], "--downloaded")
         self.assertEqual((self.out / "stdin").read_text(), "y")
 
     def test_uninstall_is_handed_over_too(self):
@@ -145,6 +146,16 @@ class Bootstrap(Release):
                               env=env, timeout=60)
         self.assertEqual(done.returncode, 1)
         self.assertIn("no terminal", done.stderr)
+
+    def test_dev_tty_without_a_controlling_terminal_runs_nothing(self):
+        # /dev/tty is readable by its mode even with no terminal; the bootstrap must open it to know.
+        env = dict(os.environ, CG_PI_RELEASE_URL=self.url, CG_PI_TTY="/dev/tty", CG_PI_PYTHON=str(self.recorder),
+                   CG_TEST_OUT=str(self.out))
+        done = subprocess.run(["/bin/bash"], input=BOOTSTRAP.read_text(), text=True, capture_output=True, env=env,
+                              timeout=60, start_new_session=True)  # a new session has no controlling terminal
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("no terminal", done.stderr)
+        self.assertIsNone(self.handed())
 
     def test_the_temp_folder_is_removed_afterwards(self):
         tmpdir = self.root / "tmp"

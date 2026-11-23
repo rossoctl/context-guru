@@ -46,6 +46,8 @@ class FakeShell:
         self.npm_install_error = None
         self.setup_results = ["routed"]
         self.plan = "planned"
+        self.plan_preset, self.plan_strategy, self.restore = "off", "auto", "restored"
+        self.keychain_has_item = True
 
     def which(self, name):
         if name == "pi":
@@ -75,6 +77,8 @@ class FakeShell:
         if cmd[:2] == ["pi", "remove"]:
             self.test.settings_packages(remove=cmd[2])
             return ok(f"Removed {cmd[2]}\n")
+        if cmd[:2] == ["security", "find-generic-password"]:
+            return subprocess.CompletedProcess(cmd, 0 if self.keychain_has_item else 44, "", "")
         if cmd[0] in ("security", "secret-tool"):
             return ok()
         if cmd[:2] == ["python3", PLUGIN]:
@@ -88,13 +92,17 @@ class FakeShell:
             if self.plan == "needs_decision":
                 return ("result=needs_decision\nconsent_question_chain=CHAIN-CONSENT-TEXT\n"
                         "consent_question_replace=REPLACE-TEXT\n")
-            return "result=planned\nconsent_question=PLAN-CONSENT-TEXT\n"
+            if self.plan == "refused":
+                return "result=refused\nreason=binary_named_missing\ndetail=CONTEXT_GURU_BIN names /nope\n"
+            return f"result=planned\npreset={self.plan_preset}\ncache_strategy={self.plan_strategy}\nconsent_question=PLAN-CONSENT-TEXT\n"
         if args[0] == "setup":
             result = self.setup_results.pop(0) if self.setup_results else "routed"
-            return (f"result={result}\nport=8787\n" if result == "routed"
+            return (f"result={result}\nport=8787\npreset=off\n" if result == "routed"
                     else "result=error\nreason=health_check_failed\nlog=/state/proxy.log\n")
         if args[0] == "uninstall":
-            return "result=removing\nmodels_restore=restored\nservice=stopped\nresult=removed\n"
+            return f"result=removing\nmodels_restore={self.restore}\nservice=stopped\nresult=removed\n"
+        if args[0] == "configure":
+            return f"result=configured\npreset={args[-1]}\n"
         if args[0] == "status":
             return "result=ok\nport=8787\nproxy_up=true\npreset=off\ncache_strategy=auto\n"
         raise AssertionError(f"unexpected plugin call: {args}")
@@ -283,7 +291,7 @@ class Connection(Sandbox):
         stored = [(cmd, stdin) for cmd, stdin in self.shell.calls if cmd[0] == "security"]
         self.assertEqual(stored[0][0], ["security", "-i"])
         self.assertIn(CANARY, stored[0][1])
-        self.assertIn("add-generic-password -U -s context-guru-pi-anthropic -a tester", stored[0][1])
+        self.assertIn('add-generic-password -U -s context-guru-pi-anthropic -a "tester" -w', stored[0][1])
 
     def test_linux_uses_secret_tool_on_stdin(self):
         self.platform = "Linux"
@@ -486,6 +494,140 @@ class Uninstall(Sandbox):
         self.assertEqual(code, 0)
         self.assertIn(["pi", "remove", str(clone)], self.shell.ran("pi", "remove"))
         self.assertEqual(self.shell.ran("security", "delete-generic-password"), [])
+
+
+class ReviewRound1(Sandbox):
+    """Findings of the first review of #1294."""
+
+    OLD = {"baseUrl": "https://old-gw.example.com", "authHeader": True, "apiKey": "!old-cmd",
+           "headers": {"x-team": "a"}, "models": [{"id": "old-model"}]}
+
+    def test_a_connection_not_kept_is_replaced_and_uninstall_puts_it_back(self):
+        self.shell.pi_version = "1.6.0"
+        before = {"providers": {"anthropic": dict(self.OLD)}}
+        self.write_models(before)
+        # Do not keep; the Anthropic API (no URL); default model; consent; no test prompt.
+        code, terminal = self.install(answers=["n", "", "", "y", "n"], secrets=[CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        anthropic = self.models()["providers"]["anthropic"]
+        for stale in ("baseUrl", "authHeader", "headers", "models"):
+            self.assertNotIn(stale, anthropic)  # the new key must not go to the old gateway
+        self.assertTrue(anthropic["apiKey"].startswith("!security "))
+        done = self.installer(FakeTerminal(["y"])).uninstall()
+        self.assertEqual(done, 0)
+        self.assertEqual(self.models(), before)
+
+    def test_the_retry_keeps_the_strategy_and_the_preset_the_consent_named(self):
+        self.shell.pi_version = "1.6.0"
+        self.shell.plan_preset, self.shell.plan_strategy = "medium", "none"
+        self.shell.setup_results = ["failed", "routed"]
+        code, terminal = self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        setups = [cmd for cmd in self.shell.ran("python3", PLUGIN) if cmd[2] == "setup" and "--plan" not in cmd]
+        self.assertEqual(len(setups), 2)
+        for cmd in setups:
+            self.assertEqual(cmd[cmd.index("--cache-strategy") + 1], "none")
+        self.assertIn(["python3", PLUGIN, "configure", "--preset", "medium"], self.shell.ran("python3", PLUGIN))
+
+    def test_a_refused_plan_stops_with_its_reason_and_asks_no_consent(self):
+        self.shell.pi_version = "1.6.0"
+        self.shell.plan = "refused"
+        code, terminal = self.install(answers=["https://gw.example.com", "", "m"], secrets=[CANARY])
+        self.assertEqual(code, 1)
+        self.assertIn("binary_named_missing", self.everything_printed(terminal))
+        self.assertNotIn("Turn context-guru on?", self.everything_printed(terminal))
+
+    def test_a_broken_models_json_stops_with_the_file_name(self):
+        self.shell.pi_version = "1.6.0"
+        (self.agent / "models.json").write_text("{not json")
+        code, terminal = self.install()
+        self.assertEqual(code, 1)
+        self.assertIn("models.json is not valid JSON", self.everything_printed(terminal))
+
+    def test_uninstall_keeps_the_local_data_when_the_route_was_not_put_back(self):
+        self.shell.pi_version = "1.6.0"
+        self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.shell.restore = "models_unreadable"
+        terminal = FakeTerminal(["y"])
+        code = self.installer(terminal).uninstall()
+        self.assertEqual(code, 1)
+        self.assertTrue((self.root / "state/context-guru-pi").exists())
+        self.assertIn("context-guru-reset", self.everything_printed(terminal))
+
+    def test_a_routed_connection_names_the_real_upstream_not_the_proxy(self):
+        self.shell.pi_version = "1.6.0"
+        self.write_models({"providers": {"anthropic": {"baseUrl": "http://127.0.0.1:8787/anthropic", "apiKey": "!x"}}})
+        state = self.root / "state/context-guru-pi"
+        state.mkdir(parents=True)
+        (state / "install.json").write_text(json.dumps({"upstreams": {"anthropic": "https://gw.example.com"}}))
+        _, terminal = self.install(answers=["", "y", "n"])
+        self.assertIn("Pi already connects to Anthropic at gw.example.com", self.everything_printed(terminal))
+
+    def test_the_keychain_item_is_read_back_and_a_missing_one_changes_nothing(self):
+        self.shell.pi_version = "1.6.0"
+        self.shell.keychain_has_item = False
+        code, terminal = self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.models())
+
+    def test_a_user_name_with_a_space_is_quoted_in_the_key_command(self):
+        self.shell.pi_version = "1.6.0"
+        with mock.patch.dict(os.environ, {"USER": "first last"}):
+            self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.assertEqual(self.models()["providers"]["anthropic"]["apiKey"],
+                         "!security find-generic-password -s context-guru-pi-anthropic -a 'first last' -w")
+
+    def test_a_second_install_keeps_the_note_that_the_first_one_created_models_json(self):
+        self.shell.pi_version = "1.6.0"
+        self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.install(answers=["n", "https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.installer(FakeTerminal(["y"])).uninstall()
+        self.assertIsNone(self.models())
+
+
+class Steps(Sandbox):
+    """Each phase shows "Step N of M · <name>" and one line on what it does; a skipped step says why."""
+
+    def steps(self, terminal):
+        return [line.split("\n")[0] for line in terminal.shown if line.startswith("Step ")]
+
+    def test_install_shows_nine_numbered_steps_in_order_after_the_download(self):
+        self.shell.pi_version = "1.6.0"
+        terminal = FakeTerminal(["https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        installer = self.installer(terminal)
+        installer.downloaded = True
+        self.assertEqual(installer.install(), 0)
+        self.assertEqual(self.steps(terminal), [
+            "Step 1 of 9 · Download context-guru for Pi", "Step 2 of 9 · Check this computer", "Step 3 of 9 · Pi",
+            "Step 4 of 9 · The context-guru package for Pi", "Step 5 of 9 · Pi's connection to Anthropic",
+            "Step 6 of 9 · Check the key", "Step 7 of 9 · Save the key and the connection",
+            "Step 8 of 9 · Turn context-guru on", "Step 9 of 9 · Check that it works"])
+        shown = self.everything_printed(terminal)
+        self.assertIn("It adds the /context-guru command to Pi", shown)
+        self.assertIn("1 token", shown)
+
+    def test_without_the_bootstrap_there_are_eight_steps(self):
+        self.shell.pi_version = "1.6.0"
+        _, terminal = self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.assertEqual(self.steps(terminal)[0], "Step 1 of 8 · Check this computer")
+        self.assertEqual(self.steps(terminal)[-1], "Step 8 of 8 · Check that it works")
+
+    def test_a_kept_connection_skips_the_key_steps_and_says_so(self):
+        self.shell.pi_version = "1.6.0"
+        self.write_models({"providers": {"anthropic": {"baseUrl": "https://gw.example.com", "apiKey": "!mine"}}})
+        _, terminal = self.install(answers=["", "y", "n"])
+        shown = self.everything_printed(terminal)
+        self.assertIn("Step 5 of 8 · Check the key — skipped: you kept your connection.", shown)
+        self.assertIn("Step 6 of 8 · Save the key and the connection — skipped: you kept your connection.", shown)
+
+    def test_uninstall_shows_its_numbered_steps(self):
+        self.shell.pi_version = "1.6.0"
+        self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        terminal = FakeTerminal(["y"])
+        self.installer(terminal).uninstall()
+        self.assertEqual(self.steps(terminal)[:2], ["Step 1 of 6 · Turn context-guru off",
+                                                     "Step 2 of 6 · Remove the context-guru package"])
+        self.assertEqual(self.steps(terminal)[-1].split(" — ")[0], "Step 6 of 6 · Pi itself")
 
 
 class TheKeyStaysSecret(Sandbox):

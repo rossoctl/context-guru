@@ -51,11 +51,14 @@ Out of scope:
 | `pi-package/scripts/test_install_pi.py` | Unit tests: npm, pi, the secret store, the network and `pi_plugin.py` are faked at their boundary. |
 | `pi-package/release/test_release.py` | The bootstrap piped into bash, with a local HTTP server as the release (as Bob's test does). |
 | `.github/workflows/release.yaml` | Build the tarball before GoReleaser publishes; upload the tarball, the sums and `install-pi.sh`. |
-| `pi-package/README.md`, `docs/how-to/pi.md` (the install page) | The one command first; the manual steps stay below it. |
+| `pi-package/README.md`, `docs/how-to/install-pi-package.md` | The one command first; the manual steps stay below it. |
+| `docs/data-dependence/features/pi-installer.md` | Its data-dependence row (no customer data). |
 
 ## Flow of `install`
 
-Each step either finishes or stops with a message and the reason. Nothing is changed before step 6.
+Each step either finishes or stops with a message and the reason. Pi changes only after a yes (step 2). The
+package is installed in step 3. Pi's connection (`models.json`, `settings.json`, the stored key) changes only in
+step 6, after the key check.
 
 1. **Checks.** `python3` and `node` exist; Node is 22.19 or later (Pi 1.5.2 and 1.6.0 need it). A terminal
    exists for the questions. Otherwise stop and say what to install.
@@ -74,8 +77,10 @@ Each step either finishes or stops with a message and the reason. Nothing is cha
      `@rossoctl/context-guru-pi`), with `pi remove`. Two copies must not load (#1207).
    - `pi install <stable path>`.
 4. **Connection.** Read `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR/models.json`).
-   - It already has an Anthropic route (a `baseUrl`, or an `apiKey`): show it (host only, no key) and ask
-     "Keep this connection?" (default yes). Yes skips to step 6.
+   - It already has an Anthropic route (a `baseUrl`, or an `apiKey`): show its host (the gateway behind the
+     proxy when context-guru routes Pi; no key) and ask "Keep this connection?" (default yes). Yes skips to
+     step 7. No: the new connection replaces `apiKey`, `baseUrl`, `authHeader`, `headers` and `models`, so the
+     new key never goes to the old endpoint.
    - Else ask: "Gateway URL (empty for the Anthropic API)". For a gateway also: "Does it want the key as
      Authorization: Bearer? [Y/n]" and "Model id at the gateway".
    - "Key:" read without echo (`getpass` on the terminal).
@@ -88,10 +93,12 @@ Each step either finishes or stops with a message and the reason. Nothing is cha
    - `models.json` gets `baseUrl` and `authHeader` for a gateway, and a `models` entry for the gateway's model
      id. `settings.json` gets `defaultProvider`/`defaultModel` only when it has none.
    - A backup of both files goes to `<state>/installer-backup/` first. Writes are atomic, mode 0600.
-   - A record, `<state>/installer.json`, lists what the installer wrote (keys, store item, package path), so
-     `uninstall` removes only that.
+   - A record, `<state>/installer.json`, lists each key the installer changed with its old and its new value
+     (the store item and the package path too), so `uninstall` puts back exactly what was there.
 7. **Setup.** `pi_plugin.py setup --plan`, then show the consent text (the chain one for a gateway) and ask
-   "Turn context-guru on? [y/N]". Yes: `setup --i-consent-to-traffic-interception [--on-conflict chain]`.
+   "Turn context-guru on? [y/N]". Yes: `setup --i-consent-to-traffic-interception [--on-conflict chain]
+   --cache-strategy <the plan's strategy>`, and `configure --preset <the plan's preset>` when setup started
+   another one. A plan that is neither `planned` nor `needs_decision` stops with its reason.
    - `health_check_failed` (#1288, a cold first start): run `pi_plugin.py uninstall` (it stops the half
      service), wait 10 s, run setup once more. Still failing: stop, say Pi itself works, name the log.
    - No: stop. Pi is installed and connected; context-guru is off. Say how to turn it on later.
@@ -103,10 +110,13 @@ Each step either finishes or stops with a message and the reason. Nothing is cha
 1. `pi_plugin.py uninstall` (restores the route in `models.json`, stops and removes the service, deletes the
    downloaded proxy).
 2. `pi remove <stable path>`, and delete the package folder.
-3. With the record: delete the secret-store item; remove from `models.json` and `settings.json` only the keys
-   the installer wrote, and only when they still have the value it wrote (a value the user changed stays).
+3. With the record: delete the secret-store item; in `models.json` and `settings.json`, put back the old value
+   of each key the installer changed (or remove a key that was absent), only while it still has the value the
+   installer wrote (a value the user changed stays). A `models.json` the installer created goes when empty.
+   If `pi_plugin.py uninstall` could not put the route back, stop here and name the reset command.
 4. Ask "Uninstall Pi too?" (default no) only when the record says the installer installed Pi.
-5. Delete `<state>` when nothing else is in it.
+5. Ask "Delete context-guru's local data too?" (default yes): yes deletes `<state>` (log, dashboard
+   database); no deletes only the installer's record and backups.
 
 ## Security
 

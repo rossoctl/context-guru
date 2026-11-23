@@ -35,7 +35,8 @@ main() {
     Darwin | Linux) ;;
     *) stop "this installer is for macOS and Linux." ;;
   esac
-  [ -r "$tty" ] || stop "no terminal to ask you. Run it in a terminal window."
+  # Open it, not just test it: /dev/tty is readable by mode even when there is no controlling terminal.
+  { : < "$tty"; } 2>/dev/null || stop "no terminal to ask you. Run it in a terminal window."
   command -v "$python" >/dev/null 2>&1 || stop "python3 is needed. Install Python 3, then run this again."
   local check
   if command -v shasum >/dev/null 2>&1; then check="shasum -a 256 -c -s"
@@ -71,7 +72,8 @@ main() {
   [ -f "$installer" ] || stop "the download has no installer."
 
   local code=0
-  "$python" "$installer" "$action" --source "$work/unpacked/pi-package" < "$tty" || code=$?
+  # --downloaded: the installer shows this download as step 1 of its numbered steps.
+  "$python" "$installer" "$action" --source "$work/unpacked/pi-package" --downloaded < "$tty" || code=$?
   rm -rf "$work"
   trap - EXIT
   return "$code"
