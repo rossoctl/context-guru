@@ -201,3 +201,6 @@ CLAUDE.local.md
 
 # The Bob release zip, built by the release workflow before GoReleaser (make bob-release BOB_DIST=bob-dist).
 /bob-dist/
+
+# The Pi installer package, built by the release workflow before GoReleaser (pi-package/release/package.sh ... pi-dist).
+/pi-dist/
