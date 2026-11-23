@@ -277,7 +277,8 @@ async function waitForHealthy(port) {
 
 // A shell function for the scripts that need STATE and ROOT set. release_shared PATH removes a shared
 // copy of the proxy when no other project still uses it: no other project's symlink points at it, and
-// no other project's install.env records its version.
+// no other project's install.env records its version. It then removes the version folder and bin/
+// only when they are empty, so a folder that holds anything else stays.
 const RELEASE_SHARED = `release_shared() {
   case "$1" in "$ROOT"/bin/*/context-guru-proxy) ;; *) return 0 ;; esac
   shared_version=$(basename "$(dirname "$1")")
@@ -289,6 +290,7 @@ const RELEASE_SHARED = `release_shared() {
   done
   rm -f "$1"
   rmdir "$(dirname "$1")" 2>/dev/null || true
+  rmdir "$ROOT/bin" 2>/dev/null || true
 }`
 
 function resetScript(state) {

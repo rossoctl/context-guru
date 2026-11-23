@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
@@ -196,6 +196,59 @@ test("purge keeps a shared copy that another project records, and the last purge
     assert.equal(last.status, 0, last.out)
     assert.equal(existsSync(shared("v0.7.3")), false, "the last purge kept the shared copy")
     assert.equal(existsSync(join(SHARED_BIN, "v0.7.3")), false)
+  })
+})
+
+// Purges every test project in ROOT, with `last` last.
+async function purgeAll(last) {
+  for (const name of readdirSync(ROOT)) {
+    const other = join(ROOT, name)
+    if (other === last || name === "bin" || !existsSync(join(other, "context-guru-uninstall"))) continue
+    await run(join(other, "context-guru-uninstall"), ["--yes", "--purge"])
+  }
+  return run(join(last, "context-guru-uninstall"), ["--yes", "--purge"])
+}
+
+// #1238
+test("the last purge removes the empty version folder and the empty shared bin folder", async () => {
+  await withReleases(["0.7.3"], "0.7.3", async ({ start }) => {
+    const a = await start("/tmp/context-guru-shared-bin-last")
+
+    const last = await purgeAll(a)
+
+    assert.equal(last.status, 0, last.out)
+    assert.equal(existsSync(join(SHARED_BIN, "v0.7.3")), false)
+    assert.equal(existsSync(SHARED_BIN), false, "the last purge left an empty bin folder")
+  })
+})
+
+test("a purge that keeps a shared copy for another project keeps its folder", async () => {
+  await withReleases(["0.7.3"], "0.7.3", async ({ start }) => {
+    const a = await start("/tmp/context-guru-shared-bin-keep-a")
+    await start("/tmp/context-guru-shared-bin-keep-b")
+
+    const purge = await run(join(a, "context-guru-uninstall"), ["--yes", "--purge"])
+
+    assert.equal(purge.status, 0, purge.out)
+    assert.deepEqual(versionsOnDisk(), ["v0.7.3"])
+    assert.ok(existsSync(shared("v0.7.3")), "purge in A removed the copy that B uses")
+  })
+})
+
+test("the last purge keeps the shared bin folder when it holds another file", async () => {
+  await withReleases(["0.7.3"], "0.7.3", async ({ start }) => {
+    const a = await start("/tmp/context-guru-shared-bin-stray")
+    const stray = join(SHARED_BIN, "notes.txt")
+    writeFileSync(stray, "not ours\n")
+    try {
+      const last = await purgeAll(a)
+
+      assert.equal(last.status, 0, last.out)
+      assert.equal(existsSync(join(SHARED_BIN, "v0.7.3")), false)
+      assert.equal(readFileSync(stray, "utf8"), "not ours\n")
+    } finally {
+      rmSync(stray, { force: true })
+    }
   })
 })
 
