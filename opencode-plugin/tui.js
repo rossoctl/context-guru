@@ -2,7 +2,7 @@
 // with a "tui" export; that module cannot also export "server", so this is a second file.
 // It only draws dialogs. Every switch runs the same "set NAME [--restart]" script as the chat
 // commands, through runCommandScript, so the native path and the chat path cannot differ.
-import { parsePickerOutput, runCommandScript, stateDirectory } from "./index.js"
+import { isDisabled, parsePickerOutput, runCommandScript, stateDirectory } from "./index.js"
 
 const KINDS = {
   preset: {
@@ -139,7 +139,8 @@ export function registerPickerCommands(api, directory) {
 
 async function tui(api) {
   const directory = api.state?.path?.directory
-  if (!directory) return
+  // After an uninstall, a disabled project shows no Context Guru entry in the palette.
+  if (!directory || isDisabled(stateDirectory(directory))) return
   registerPickerCommands(api, directory)
 }
 

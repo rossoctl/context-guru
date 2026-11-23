@@ -100,6 +100,11 @@ The plugin registers six commands:
 | `/context-guru-preset` | Chat command. Lists the presets, switches after your yes in the chat. The native dialog is in the `ctrl+p` palette |
 | `/context-guru-strategy` | Chat command. Lists the cache strategies, switches after your yes in the chat. The native dialog is in the `ctrl+p` palette |
 
+After `/context-guru-uninstall --yes` and an OpenCode restart, the plugin registers no command and
+no `ctrl+p` entry for the project. Until the restart, `/context-guru-status` prints `enabled=no`.
+To turn context-guru on again, run `sh <state directory>/context-guru-install` from any shell, then
+restart OpenCode. The start log names the script path.
+
 The two pickers save your choice first. A restart applies it. A restart costs one cache rewrite
 in every open session of this project, so the command asks first. If you say no, the choice
 applies at the next OpenCode start.

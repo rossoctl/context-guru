@@ -159,7 +159,8 @@ test("disabled marker leaves providers untouched", async () => {
   await hooks.config(config)
 
   assert.equal(config.provider.anthropic.options.baseURL, "https://api.anthropic.com")
-  assert.ok(config.command["context-guru-status"])
+  // Issue #1290: a disabled project registers no command at start.
+  assert.equal(config.command, undefined)
 })
 
 test("update script checks, then downloads and swaps the binary", async () => {
