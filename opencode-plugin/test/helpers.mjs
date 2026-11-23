@@ -1,16 +1,23 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { connect } from "node:net"
 import { join } from "node:path"
 
+// Waits until the port refuses a new connection: the proxy's listener is gone. A failed /healthz is not
+// enough. A proxy that is still exiting can reset that request and then accept the next one, and the
+// plugin sends a request to the provider only when the connection is refused.
 export async function waitUntilUnhealthy(port) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) })
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    } catch {
-      return
-    }
+  const deadline = Date.now() + 10000
+  while (Date.now() < deadline) {
+    const refused = await new Promise((resolve) => {
+      const socket = connect({ port, host: "127.0.0.1", timeout: 500 })
+      socket.once("connect", () => { socket.destroy(); resolve(false) })
+      socket.once("timeout", () => { socket.destroy(); resolve(false) })
+      socket.once("error", (error) => resolve(error.code === "ECONNREFUSED"))
+    })
+    if (refused) return
+    await new Promise((resolve) => setTimeout(resolve, 50))
   }
   assert.fail(`proxy on port ${port} did not stop`)
 }
