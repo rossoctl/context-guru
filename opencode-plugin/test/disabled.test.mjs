@@ -92,6 +92,20 @@ test("a start without the disabled marker registers all six commands", async () 
   assert.deepEqual(guruCommands(config), COMMANDS)
 })
 
+// The agent follows the uninstall command text. It must say what the script says (#1291 review, round 2).
+test("the uninstall command text names the install script and says fallback: false only matters if you set it", async () => {
+  const directory = "/tmp/context-guru-disabled-c"
+  const hooks = await plugin.server(context(directory))
+  const config = { provider: { custom: { options: { baseURL: "https://example.test" } } } }
+
+  await hooks.config(config)
+  const text = config.command["context-guru-uninstall"].template
+
+  assert.ok(text.includes(`sh "${join(stateDirectory(directory), "context-guru-install")}" and restart OpenCode`), text)
+  assert.match(text, /only if they set the plugin option fallback: false themselves/i)
+  assert.doesNotMatch(text, /with the plugin option fallback: false, they must/)
+})
+
 test("the TUI plugin registers no command for a disabled project", async () => {
   const directory = "/tmp/context-guru-disabled-c"
   disable(directory)

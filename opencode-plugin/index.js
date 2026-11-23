@@ -827,7 +827,7 @@ const COMMAND_SPECS = [
     description: "Stop the context-guru proxy and disable routing",
     script: "context-guru-uninstall",
     intro: "Uninstall context-guru from this project.",
-    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider (with the plugin option fallback: false, they must restart OpenCode first), and that /context-guru-install undoes this. Never run it with --yes without asking first.",
+    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider. Only if they set the plugin option fallback: false themselves (it is on by default), they must restart OpenCode first. Tell them how to undo it: /context-guru-install in this session, or after an OpenCode restart (when the context-guru commands are gone) run sh " + path.replace(/context-guru-uninstall("?)$/, "context-guru-install$1") + " and restart OpenCode. Never run it with --yes without asking first.",
   },
   {
     name: "context-guru-preset",
