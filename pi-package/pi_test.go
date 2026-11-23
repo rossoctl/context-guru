@@ -19,6 +19,17 @@ func TestPiControllerPythonTests(t *testing.T) {
 	}
 }
 
+// The one-command installer's bootstrap (release/install-pi.sh) and its packager, against a local release.
+func TestPiReleaseBootstrapTests(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
+	}
+	cmd := exec.Command("python3", "-I", "-W", "ignore", "-m", "unittest", "discover", "-s", "release", "-p", "test_*.py")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("release tests: %v\n%s", err, out)
+	}
+}
+
 func TestPiExtensionNodeTests(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
