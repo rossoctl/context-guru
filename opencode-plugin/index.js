@@ -541,7 +541,7 @@ if [ "$yes" -ne 1 ]; then
   printf '%s\\n' "action=stop-proxy" "action=disable-routing"
   [ "$purge" -eq 1 ] && printf '%s\\n' "action=purge-binary-and-state"
   printf '%s\\n' "apply=sh $STATE/context-guru-uninstall --yes"
-  printf '%s\\n' "note=open OpenCode sessions send requests straight to the provider at once; with the plugin option fallback: false, providers unroute when OpenCode next restarts; /context-guru-install undoes this"
+  printf '%s\\n' "note=open OpenCode sessions send requests straight to the provider at once; only if you set the plugin option fallback: false yourself (it is on by default), providers unroute when OpenCode next restarts; sh $STATE/context-guru-install undoes this"
   exit 0
 fi
 if [ -f "$STATE/proxy.pid" ]; then
@@ -571,9 +571,9 @@ if [ "$purge" -eq 1 ]; then
 else
   printf '%s\\n' "result=uninstalled" "purged=no" "binary_kept=\${binary:-}"
 fi
-printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; with the plugin option fallback: false, restart OpenCode so providers stop routing through the proxy"
+printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; only if you set the plugin option fallback: false yourself (it is on by default), restart OpenCode so providers stop routing through the proxy"
 printf '%s\\n' "note=after an OpenCode restart, the /context-guru- commands are gone; to turn context-guru on again, run: sh $STATE/context-guru-install, then restart OpenCode"
-printf '%s\\n' "undo=/context-guru-install"
+printf '%s\\n' "undo=sh $STATE/context-guru-install, then restart OpenCode"
 `
 }
 

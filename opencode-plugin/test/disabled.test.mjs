@@ -162,6 +162,10 @@ test("uninstall, then a restart has no commands; the install script brings all s
     port = Number((await sh(join(state, "context-guru-status"))).stdout.match(/^port=(\d+)$/m)[1])
     const uninstalled = await sh(join(state, "context-guru-uninstall"), ["--yes"])
     assert.match(uninstalled.stdout, /result=uninstalled/)
+    // The way back must still work after a restart, when /context-guru-install is gone: name the script.
+    assert.ok(uninstalled.stdout.includes(`undo=sh ${join(state, "context-guru-install")}, then restart OpenCode`), uninstalled.stdout)
+    // The fallback note must not read as if fallback: false were set (a real agent told the user it was).
+    assert.match(uninstalled.stdout, /only if you set the plugin option fallback: false yourself/)
     await waitUntilUnhealthy(port)
 
     const afterUninstall = await startV1(directory)
