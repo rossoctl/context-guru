@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE))
 import install_pi  # noqa: E402
 
 CANARY = "sk-ant-CANARY-0123456789-never-print-me"
+PROXY = "http://127.0.0.1:8787/anthropic"
 PLUGIN = str(HERE / "pi_plugin.py")
 
 
@@ -48,6 +49,7 @@ class FakeShell:
         self.plan = "planned"
         self.plan_preset, self.plan_strategy, self.restore = "off", "auto", "restored"
         self.keychain_has_item = True
+        self.realistic, self.routing = False, None
 
     def which(self, name):
         if name == "pi":
@@ -87,7 +89,43 @@ class FakeShell:
             return ok("ok\n")
         raise AssertionError(f"unexpected command: {cmd}")
 
+    def route(self):
+        """Like models_route.install: the proxy URL in models.json, the user's value kept as `previous`."""
+        models = self.test.models() or {}
+        entry = models.setdefault("providers", {}).setdefault("anthropic", {})
+        current = entry.get("baseUrl")
+        if current and current != PROXY:
+            self.routing = {"previous": current, "upstream": current}  # a clash: chain behind it
+        elif not self.routing:
+            self.routing = {"previous": None, "upstream": "https://api.anthropic.com"}
+        # else: no clash, and pi_plugin keeps its recorded upstream (recorded_upstreams), like the real one
+        entry["baseUrl"] = PROXY
+        self.test.write_models(models)
+
+    def unroute(self):
+        if not self.routing:
+            return "no_record"
+        models = self.test.models() or {}
+        entry = models.get("providers", {}).get("anthropic", {})
+        if self.routing["previous"] is None:
+            entry.pop("baseUrl", None)
+        else:
+            entry["baseUrl"] = self.routing["previous"]
+        self.test.write_models(models)
+        self.routing = None
+        return "restored"
+
     def plugin(self, args):
+        if self.realistic and args[:2] == ["setup", "--plan"]:
+            current = ((self.test.models() or {}).get("providers", {}).get("anthropic", {}) or {}).get("baseUrl")
+            if current and current != PROXY:
+                return "result=needs_decision\nconsent_question_chain=CHAIN-CONSENT-TEXT\npreset=off\ncache_strategy=auto\n"
+            return "result=planned\nconsent_question=PLAN-CONSENT-TEXT\npreset=off\ncache_strategy=auto\n"
+        if self.realistic and args[0] == "setup":
+            self.route()
+            return "result=routed\nport=8787\npreset=off\n"
+        if self.realistic and args[0] == "uninstall":
+            return f"result=removing\nmodels_restore={self.unroute()}\nservice=stopped\nresult=removed\n"
         if args[:2] == ["setup", "--plan"]:
             if self.plan == "needs_decision":
                 return ("result=needs_decision\nconsent_question_chain=CHAIN-CONSENT-TEXT\n"
@@ -387,7 +425,7 @@ class Setup(Sandbox):
         code, terminal = self.install(answers=self.answers(), secrets=[CANARY])
         self.assertEqual(code, 0, self.everything_printed(terminal))
         calls = [cmd[2] for cmd in self.shell.ran("python3", PLUGIN)]
-        self.assertEqual(calls, ["setup", "setup", "uninstall", "setup", "status"])
+        self.assertEqual(calls, ["setup", "setup", "uninstall", "setup", "setup", "status"])
 
     def test_two_failed_setups_stop_and_say_pi_still_works(self):
         self.shell.pi_version = "1.6.0"
@@ -525,8 +563,7 @@ class ReviewRound1(Sandbox):
         self.assertEqual(code, 0, self.everything_printed(terminal))
         setups = [cmd for cmd in self.shell.ran("python3", PLUGIN) if cmd[2] == "setup" and "--plan" not in cmd]
         self.assertEqual(len(setups), 2)
-        for cmd in setups:
-            self.assertEqual(cmd[cmd.index("--cache-strategy") + 1], "none")
+        self.assertEqual(setups[1][setups[1].index("--cache-strategy") + 1], "none")
         self.assertIn(["python3", PLUGIN, "configure", "--preset", "medium"], self.shell.ran("python3", PLUGIN))
 
     def test_a_refused_plan_stops_with_its_reason_and_asks_no_consent(self):
@@ -628,6 +665,54 @@ class Steps(Sandbox):
         self.assertEqual(self.steps(terminal)[:2], ["Step 1 of 6 · Turn context-guru off",
                                                      "Step 2 of 6 · Remove the context-guru package"])
         self.assertEqual(self.steps(terminal)[-1].split(" — ")[0], "Step 6 of 6 · Pi itself")
+
+
+class ReviewRound2(Sandbox):
+    """A second run while context-guru routes Pi, with "n" to "Keep this connection?" (review 2 of #1294)."""
+
+    def setUp(self):
+        super().setUp()
+        self.shell.pi_version = "1.6.0"
+        self.shell.realistic = True
+
+    def first_install(self, gateway):
+        answers = [gateway, "", "m", "y", "n"] if gateway else ["", "", "y", "n"]
+        code, terminal = self.install(answers=answers, secrets=[CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        self.assertEqual(self.models()["providers"]["anthropic"]["baseUrl"], PROXY)
+
+    def test_a_new_gateway_on_a_routed_pi_turns_context_guru_off_first(self):
+        self.first_install("https://old-gw.example.com")
+        code, terminal = self.install(answers=["n", "https://new-gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        self.assertEqual(self.shell.routing["upstream"], "https://new-gw.example.com")
+        self.installer(FakeTerminal(["y"])).uninstall()
+        self.assertNotIn("127.0.0.1", json.dumps(self.models()))  # never a dead proxy URL after uninstall
+
+    def test_the_anthropic_api_on_a_routed_pi_does_not_keep_the_old_gateway(self):
+        self.first_install("https://old-gw.example.com")
+        code, terminal = self.install(answers=["n", "", "", "y", "n"], secrets=[CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        self.assertEqual(self.shell.routing["upstream"], "https://api.anthropic.com")
+        self.assertEqual(self.http_seen[-1][0], "https://api.anthropic.com/v1/messages")
+        self.installer(FakeTerminal(["y"])).uninstall()
+        self.assertNotIn("127.0.0.1", json.dumps(self.models() or {}))
+
+    def test_a_second_install_from_the_api_to_a_gateway_leaves_no_proxy_url(self):
+        self.first_install("")
+        self.install(answers=["n", "https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.installer(FakeTerminal(["y"])).uninstall()
+        self.assertNotIn("127.0.0.1", json.dumps(self.models() or {}))
+
+    def test_the_retry_plans_again_after_its_uninstall(self):
+        self.shell.realistic = False
+        self.shell.setup_results = ["failed", "routed"]
+        self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        calls = [cmd[2:] for cmd in self.shell.ran("python3", PLUGIN)]
+        self.assertEqual([c[0] + (" --plan" if "--plan" in c else "") for c in calls],
+                         ["setup --plan", "setup", "uninstall", "setup --plan", "setup", "status"])
+        self.assertNotIn("--cache-strategy", calls[1])  # the first setup reads the strategy itself
+        self.assertIn("--cache-strategy", calls[4])     # the retry passes the one the consent named
 
 
 class TheKeyStaysSecret(Sandbox):

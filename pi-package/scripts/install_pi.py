@@ -266,6 +266,17 @@ class Installer:
                 self.skip("Check the key", "you kept your connection.")
                 self.skip("Save the key and the connection", "you kept your connection.")
                 return
+            if str(current.get("baseUrl", "")).startswith("http://127.0.0.1:"):
+                # Pi goes through context-guru now. Turn it off first: that puts the real endpoint back in
+                # models.json, so the new connection replaces that endpoint (not the proxy URL), and the next
+                # setup starts without the old upstream in its record.
+                self.terminal.say("context-guru routes Pi now. It is turned off first, so that the new connection "
+                                  "replaces your real endpoint.")
+                off = self.plugin_run("uninstall")
+                if off.get("models_restore") not in ("restored", "no_record"):
+                    raise Stop(f"context-guru could not put Pi's endpoint back ({off.get('models_restore')}). "
+                               f"Nothing else was changed. To put Pi back, run: sh {pi_plugin.reset_hatch()}")
+                models = load_json(pi_plugin.models_path())
         gateway = self.terminal.ask("Gateway URL (press Enter for the Anthropic API):").strip().rstrip("/")
         gateway = gateway.removesuffix("/v1") if gateway else ""
         bearer = bool(gateway) and self.yes("Does the gateway want the key as Authorization: Bearer?", default=True)
@@ -410,17 +421,20 @@ class Installer:
             self.terminal.say("context-guru stays off. Pi works without it. To turn it on later, type "
                               "/context-guru setup in Pi.")
             return False
-        # The settings the consent named, on every call: a retry after an uninstall has no record left to read.
-        args = ["setup", "--i-consent-to-traffic-interception"] + (["--on-conflict", "chain"] if chain else []) + (
-            ["--cache-strategy", plan["cache_strategy"]] if plan.get("cache_strategy") else [])
-        result = self.plugin_run(*args)
+        consent = ["setup", "--i-consent-to-traffic-interception"]
+        result = self.plugin_run(*consent, *(["--on-conflict", "chain"] if chain else []))
         if result.get("result") != "routed" and result.get("reason") == "health_check_failed":
-            # #1288: a cold first start of a new proxy can miss setup's check. Stop the half service, then once more.
-            # setup says health_check_failed for any failed start, so the cause is not known here.
+            # #1288: a cold first start of a new proxy can miss setup's check. setup says health_check_failed for
+            # any failed start, so the cause is not known here. Stop the half service, then plan and set up once
+            # more. The uninstall deletes pi_plugin's record and puts the endpoint back, so the retry plans again
+            # (chain or not) and names the strategy the consent named: the record is gone.
             self.terminal.say("The proxy did not answer in time. Trying once more in 10 seconds…")
             self.plugin_run("uninstall")
             self.sleep(RETRY_WAIT_SECONDS)
-            result = self.plugin_run(*args)
+            again = self.plugin_run("setup", "--plan")
+            chain = again.get("result") == "needs_decision"
+            strategy = ["--cache-strategy", plan["cache_strategy"]] if plan.get("cache_strategy") else []
+            result = self.plugin_run(*consent, *(["--on-conflict", "chain"] if chain else []), *strategy)
         if result.get("result") != "routed":
             raise Stop(f"setup did not finish ({result.get('reason', result.get('result', 'unknown'))}). "
                        f"context-guru is off. Pi works without it. Log: {result.get('log', 'none')}")
@@ -453,8 +467,11 @@ class Installer:
             details = ", ".join(f"{name}: {off[fact]}" for name, fact in (("models.json", "models_restore"),
                                                                           ("service", "service")) if fact in off)
             if off.get("models_restore") not in (None, "restored", "no_record"):
-                raise Stop(f"the route in models.json was not put back ({off['models_restore']}). Nothing else was "
-                           f"removed. To put Pi back, run: sh {pi_plugin.reset_hatch()}")
+                # pi_plugin has stopped the service and put back the routes it could; a route changed by hand
+                # stays. The installer's own files stay too, so a second run can finish.
+                raise Stop(f"context-guru is stopped, but a route in models.json was not put back "
+                           f"({off['models_restore']}). The installer removed nothing else. Run the uninstall again "
+                           f"to finish, or put Pi back with: sh {pi_plugin.reset_hatch()}")
             self.terminal.say(f"✓ context-guru is off{f' ({details})' if details else ''}.")
             self.step("Remove the context-guru package", "It removes the /context-guru command from Pi.")
             ours = Path(record["package"]) if record.get("package") else None
