@@ -874,6 +874,17 @@ func (k *Keeper) Record(r Record) {
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
 	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
 	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
+	// The same line that ended the keeper's 1-hour touch ends the tier carried in the stored clock: an
+	// ACCEPTED real request is the next touch (#1350). A request that failed never gets here, so both records
+	// of the fact stay, together. Where this is never reached (a timeout, a cancel, no Record call) they stay
+	// together too, and both end an hour after the ping.
+	if r.Store != nil {
+		alias := r.TouchAlias
+		if alias == "" {
+			alias = apply.TouchAliasFor(r.Key.Tenant, body, r.Provider)
+		}
+		apply.ConfirmRealTouch(r.Store, alias)
+	}
 	k.checkOneHourFirstDowngrade(key, r.Provider, r.Endpoint, r.Route, model, body, u, usageOK)
 	if usageOK {
 		// What D needs before the next request: when this entry was last touched, how long it lives, and

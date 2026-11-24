@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/waitcause"
@@ -270,11 +271,10 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	// cache_state: pre_expiry reads, and only when it read or wrote something: a write re-created
 	// the entry and started a fresh lifetime (#580).
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
-		// The question carries the thread's own markers: it leaves the entry at the tier the entry has.
-		k.mu.Lock()
-		oneHour := e.ttl1h || e.pol.HeadTTL1h
-		k.mu.Unlock()
-		j.touch(provider, startedAt.UnixMilli(), oneHour)
+		// The question is built from the forwarded body, so it carries that body's own markers: a read with
+		// plain markers moves a 1-hour entry back to 5 minutes (the same rule as PingNow). The tier is the one
+		// those markers state, not the one the entry holds.
+		j.touch(provider, startedAt.UnixMilli(), apply.AllBreakpointsAskExtendedTTL(j.raw))
 	}
 	var cost float64
 	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
@@ -289,7 +289,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 		e.refreshedAt = startedAt
 		// The substitute renewed the entry at the tier its markers carry (the client's): D must not call the
 		// entry gone from the last request alone.
-		k.noteTouchLocked(j.key.id(), startedAt, cacheLifetime(j.provider, model, e.ttl1h || e.pol.HeadTTL1h), u.CacheRead+u.CacheWrite)
+		k.noteTouchLocked(j.key.id(), startedAt, cacheLifetime(j.provider, model, apply.AllBreakpointsAskExtendedTTL(j.raw)), u.CacheRead+u.CacheWrite)
 	}
 	k.mu.Unlock()
 	for {

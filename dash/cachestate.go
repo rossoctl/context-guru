@@ -295,7 +295,7 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 const maxCacheThreads = 16
 
 // threadTTLs maps each thread of the session to the TTL its latest cache write was billed at: 1800
-// on OpenAI GPT-5.6+, 3600 for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then uses 300).
+// on OpenAI GPT-5.6+, 3600 for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then takes the base lifetime of its provider and model: 300, or 1800 on OpenAI GPT-5.6+).
 func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	q, args := cacheTTLQuery(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)

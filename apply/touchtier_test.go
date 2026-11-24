@@ -41,6 +41,8 @@ func runTouches(t *testing.T, provider bschemas.ModelProvider, model string, ste
 	run := func(at time.Duration) {
 		BodyOpts(context.Background(), pipe, st, Opts{Provider: provider, Body: body, Tracker: tr,
 			Tenant: "t", Now: base.Add(at)})
+		// The host's Record confirms an accepted request: it ends the carried 1-hour ping.
+		ConfirmRealTouch(st, TouchAliasFor("t", body, provider))
 	}
 	run(0)
 	cold = nil
@@ -230,5 +232,44 @@ func TestBilledLifetimeMsAfterAFreeOneHourPing(t *testing.T) {
 		if got := BilledLifetimeMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
 			t.Errorf("BilledLifetimeMs(%s, %s, %v) = %d, want %d", tc.provider, tc.model, tc.oneHour, got, tc.want)
 		}
+	}
+}
+
+// A real request writes its own clock but carries the 1-hour ping that stood before it, until the host confirms the
+// request was accepted. Chained unconfirmed requests keep carrying it. A new touch (a ping) replaces it.
+func TestARealRequestCarriesTheOneHourPingUntilConfirmed(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	RecordCacheTouchAliasTier(st, "a", 2000, true)
+	aliasSeenState(st, "a", 3000)
+	if got := get(); got != "3000^2000" {
+		t.Fatalf("record = %q, want 3000^2000", got)
+	}
+	aliasSeenState(st, "a", 4000)
+	if got := get(); got != "4000^2000" {
+		t.Fatalf("a second unconfirmed request: %q, want 4000^2000", got)
+	}
+	ConfirmRealTouch(st, "a")
+	if got := get(); got != "4000" {
+		t.Fatalf("after the confirm: %q, want a plain 4000", got)
+	}
+	ConfirmRealTouch(st, "a") // nothing carried: nothing changes
+	if got := get(); got != "4000" {
+		t.Fatalf("a second confirm changed the record: %q", got)
+	}
+	aliasSeenState(st, "a", 5000)
+	RecordCacheTouchAliasTier(st, "a", 6000, false) // a later ping is the last touch, with no carry
+	if got := get(); got != "6000" {
+		t.Fatalf("a later 5-minute touch: %q, want 6000", got)
+	}
+	// An older binary parses none of the suffixed shapes and reads 0: never cold.
+	if v := parseSeenState([]byte("3000^2000")); v.at != 3000 || v.carriedAt != 2000 {
+		t.Errorf("parse = %+v", v)
+	}
+	if _, err := strconv.ParseInt("3000^2000", 10, 64); err == nil {
+		t.Error("fixture: the carried value must not parse as a plain integer")
+	}
+	if v := parseSeenState([]byte("3000^x")); v != (seenState{}) {
+		t.Errorf("an unreadable carry read as %+v", v)
 	}
 }

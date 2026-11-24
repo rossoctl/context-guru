@@ -182,7 +182,12 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		// The last touch of this thread was a FREE 1-hour ping: until its next real request, or an hour
 		// from the ping, the clock counts an hour from it (OneHourTouches). Kept apart from the entry,
 		// which the keeper forgets after about 8 minutes.
+		var dropped []oneHourTouch
 		if len(k.oneHourTouches) >= MaxTurnKeys {
+			// The wholesale reset drops the keeper's touches; their stored mirrors end with them.
+			for _, t := range k.oneHourTouches {
+				dropped = append(dropped, t)
+			}
 			k.oneHourTouches = map[string]oneHourTouch{}
 		}
 		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk,
@@ -196,6 +201,9 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, provider: j.provider, model: e.model, at: start, prefix: e.prefix}
 		}
 		k.mu.Unlock()
+		for _, t := range dropped {
+			apply.EndTouchTier(t.st, t.alias, t.at.UnixMilli())
+		}
 	case read < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
 		k.oneHourMarkCostly(rk, j, "cache_read", u.CacheRead, "cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h,
 			"expected_prefix", int64(prefix))

@@ -3,6 +3,7 @@ package keepalive
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -191,5 +192,95 @@ func TestASubAgentRequestKeepsTheMainThreadsOneHourTouch(t *testing.T) {
 		Usage: Usage{CacheRead: 40000, CacheWrite: 100, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(sub)})
 	if _, ok := touchOf(k, sess1); !ok {
 		t.Error("a sub-agent request ended the main thread's 1-hour touch")
+	}
+}
+
+// pingedThread builds the field shape: a request, then a free 1-hour ping at +4 minutes.
+func pingedThread(t *testing.T) (*coldRig, time.Time) {
+	t.Helper()
+	r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+	proveRoute(r.k)
+	t0 := r.clock.now()
+	r.request(t0)
+	r.record(t0, "end_turn", onWaitPolicy())
+	r.clock.advance(240 * time.Second)
+	r.k.Sweep(r.clock.now())
+	waitPings(t, r.k, 1)
+	if _, ok := touchOf(r.k, sess1); !ok {
+		t.Fatal("fixture: no free 1-hour touch")
+	}
+	return r, t0
+}
+
+// recordStatus hands the keeper the end of a real request that ended with status.
+func (r *coldRig) recordStatus(at time.Time, status int) {
+	r.k.Record(Record{Key: sess1, StartedAt: at, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+		Route: "/v1/messages", Status: status, UsageOK: status == 200, Policy: onWaitPolicy(),
+		Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
+		Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias})
+}
+
+// A real request that FAILS touched nothing at the provider, so the ping's hour still runs. Apply wrote the plain
+// clock before the forward, so the tier must be carried until the keeper confirms an accepted request. Every
+// failure path leaves the keeper's touch and the stored tier together: a 429, a 5xx and a 4xx never reach the
+// line that ends them, and a timeout, a cancel or no Record call never reach it either.
+func TestAFailedRealRequestKeepsTheOneHourPing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int // 0: the host never called Record (a timeout or a cancel)
+	}{{"429", 429}, {"500", 500}, {"400", 400}, {"no Record call", 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, t0 := pingedThread(t)
+			r.request(t0.Add(6 * time.Minute)) // apply writes its clock before the forward
+			if tc.status != 0 {
+				r.recordStatus(t0.Add(6*time.Minute), tc.status)
+			}
+			if _, ok := touchOf(r.k, sess1); !ok {
+				t.Fatal("a failed request ended the keeper's touch")
+			}
+			if cold, _ := r.request(t0.Add(13 * time.Minute)); cold {
+				t.Fatal("a return after a failed request read COLD on an entry the ping holds for an hour")
+			}
+		})
+	}
+}
+
+// An accepted real request is the next touch: it ends both records, and 7 minutes later the entry is cold.
+func TestAnAcceptedRealRequestEndsBothRecordsOfTheTier(t *testing.T) {
+	r, t0 := pingedThread(t)
+	r.request(t0.Add(6 * time.Minute))
+	r.recordStatus(t0.Add(6*time.Minute), 200)
+	if _, ok := touchOf(r.k, sess1); ok {
+		t.Error("the keeper kept its touch after an accepted request")
+	}
+	if cold, _ := r.request(t0.Add(13 * time.Minute)); !cold {
+		t.Error("the stored tier outlived an accepted real request")
+	}
+}
+
+// A substitute question carries the forwarded body's own markers. Plain markers move a 1-hour entry back to 5
+// minutes, so the touch must not claim the hour, even on a thread whose entry the keeper holds at 1 hour.
+func TestASubstituteTouchTakesItsTierFromTheBodysMarkers(t *testing.T) {
+	r, _ := pingedThread(t)
+	hour, _ := apply.RelabelAllTTL1h([]byte(kaBody), bschemas.Anthropic)
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{{"plain markers", []byte(kaBody), ""}, {"1-hour markers", hour, ":1h"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r.k.mu.Lock()
+			e := r.k.live[sess1.id()]
+			e.ttl1h = true
+			r.k.mu.Unlock()
+			st := store.NewMemory(store.Options{})
+			j := pingJob{e: e, tenant: e.tenant, session: e.session, key: e.key, st: st, touchAlias: "al",
+				provider: bschemas.Anthropic, raw: tc.raw}
+			r.k.recordSubstitutePing(j, "", Usage{CacheRead: 40_000, Output: 1}, 5, r.clock.now(), 0, nil)
+			b, _ := st.Get(store.SeenPrefix + "al")
+			if got := string(b); got != strconv.FormatInt(r.clock.now().UnixMilli(), 10)+tc.want {
+				t.Errorf("clock = %q, want the time and tier %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -618,7 +618,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// Read ONCE, used twice: the restart grace the boundary consults and the cold
 			// decision below are one fact — this request's cache lifetime — and must not be
 			// derived twice (see ttlTier for the last time two readers disagreed).
-			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
+			model := gjson.GetBytes(body, "model").String()
+			ttl, lifetimeKind := CacheLifetime(provider, model, body)
 			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			// The alias session id: the same conversation reaches us under it when the explicit
 			// session header comes and goes (see the clock note below). The restart grace asks
@@ -670,8 +671,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if alias != sessionID {
 				loadSessionState(st, alias)
 			}
-			aliasAt, aliasOneHour := aliasSeenTier(st, alias, nowMs)
-			touchOneHour := lastTouchOneHour(aliasAt, aliasOneHour, prevAt)
+			seen := aliasSeenState(st, alias, nowMs)
+			aliasAt := seen.at
+			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			if aliasAt > prevAt {
 				prevAt = aliasAt
 			}
@@ -699,8 +701,13 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				// A free 1-hour ping was the last touch: the provider holds the entry for the 1-hour
 				// lifetime from it, whatever tier this thread's own request asks (#1350). The guards above
 				// are the floor; the lifetime and the verdict come from the one function.
-				facts := CacheFacts{Provider: provider, Model: gjson.GetBytes(body, "model").String(),
+				facts := CacheFacts{Provider: provider, Model: model,
 					LastOneHour: touchOneHour, Floor: ttl}
+				// A free 1-hour ping stands under a real request the host has not confirmed (it failed, or
+				// nobody told us): the failed request touched nothing, so the ping's hour still runs.
+				if seen.carriedAt > 0 && time.Duration(nowMs-seen.carriedAt)*time.Millisecond < EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true}) {
+					facts.LastOneHour = true
+				}
 				ttl = EntryLifetime(facts)
 				coldCache = IsCold(facts, prevAt, nowMs)
 			}
@@ -1285,15 +1292,59 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 // request, as the clock does, and one record carries the time and the tier of the last touch: they cannot
 // disagree.
 func aliasSeenTier(st store.Store, alias string, nowMs int64) (prev int64, prevOneHour bool) {
+	v := aliasSeenState(st, alias, nowMs)
+	return v.at, v.oneHour
+}
+
+// seenState is what a cg:seen: value says about the last touch.
+type seenState struct {
+	at      int64 // the time of the last touch
+	oneHour bool  // that touch left the entry at the 1-hour tier
+	// carriedAt is the time of a free 1-hour ping that still stands under a real request nobody has confirmed
+	// (ConfirmRealTouch). 0 = none.
+	carriedAt int64
+}
+
+// aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
+// that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
+// provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
+// accepted (ConfirmRealTouch, the keeper's Record), the same line that ends the keeper's own touch. So both
+// records of the fact end at ONE event and cannot disagree, whatever the failure path (#1350).
+func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
 	if st == nil || nowMs <= 0 {
-		return 0, false
+		return seenState{}
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		prev, prevOneHour = parseSeen(b)
+		prev = parseSeenState(b)
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
-	return prev, prevOneHour
+	v := strconv.FormatInt(nowMs, 10)
+	switch {
+	case prev.oneHour:
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10)
+	case prev.carriedAt > 0:
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10)
+	}
+	st.Put(k, []byte(v))
+	return prev
+}
+
+// seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
+const seenCarrySep = "^"
+
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that a real request was
+// accepted, so the entry's tier is now that request's own. The time stays. Nothing changes when nothing is
+// carried. The keeper calls it where it ends its own touch.
+func ConfirmRealTouch(st store.Store, alias string) {
+	if st == nil || alias == "" {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		if v := parseSeenState(b); v.carriedAt > 0 {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
 }
 
 // seenOneHourSuffix marks a clock value whose last touch left the entry at the 1-hour tier. Written by
@@ -1302,13 +1353,29 @@ const seenOneHourSuffix = ":1h"
 
 // parseSeen reads a cg:seen: value: milliseconds, and the tier suffix. A value it cannot read is 0.
 func parseSeen(b []byte) (ms int64, oneHour bool) {
-	v := strings.TrimSuffix(string(b), seenOneHourSuffix)
-	oneHour = len(v) != len(b)
-	ms, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0, false
+	v := parseSeenState(b)
+	return v.at, v.oneHour
+}
+
+// parseSeenState reads all three shapes of a value: "<ms>", "<ms>:1h" and "<ms>^<pingMs>". One it cannot read
+// is the zero state, which is never cold.
+func parseSeenState(b []byte) (v seenState) {
+	str := string(b)
+	if i := strings.Index(str, seenCarrySep); i >= 0 {
+		c, err := strconv.ParseInt(str[i+1:], 10, 64)
+		if err != nil {
+			return seenState{}
+		}
+		v.carriedAt, str = c, str[:i]
 	}
-	return ms, oneHour
+	trimmed := strings.TrimSuffix(str, seenOneHourSuffix)
+	v.oneHour = len(trimmed) != len(str)
+	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return seenState{}
+	}
+	v.at = ms
+	return v
 }
 
 // RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
@@ -1363,15 +1430,7 @@ func parseSeen(b []byte) (ms int64, oneHour bool) {
 // path hashed. A body the host changed after apply ran (tool deferral appends the names list to the
 // head) gives another alias, so such a host passes the one apply derived to RecordCacheTouchAlias.
 func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64) {
-	if st == nil || nowMs <= 0 || len(body) == 0 {
-		return
-	}
-	norm := normalizeSessionMessages(provider, body)
-	if len(norm) == 0 {
-		return
-	}
-	sys, firstUser := schema.SessionHead(norm)
-	RecordCacheTouchAlias(st, session.Scoped(tenant, "", sys, firstUser), nowMs)
+	RecordCacheTouchTier(st, tenant, body, provider, nowMs, false)
 }
 
 // RecordCacheTouchAlias is RecordCacheTouch for a caller that holds the alias already: Trace.TouchAlias,
@@ -1413,8 +1472,8 @@ func EndTouchTier(st store.Store, alias string, atMs int64) {
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		if ms, oneHour := parseSeen(b); oneHour && ms == atMs {
-			st.Put(k, []byte(strconv.FormatInt(atMs, 10)))
+		if v := parseSeenState(b); (v.oneHour && v.at == atMs) || (v.carriedAt > 0 && v.carriedAt == atMs) {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
 }
