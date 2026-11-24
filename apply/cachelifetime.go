@@ -34,12 +34,22 @@ const (
 func CacheLifetime(provider bschemas.ModelProvider, model string, body []byte) (time.Duration, CacheLifetimeKind) {
 	if explicitBreakpointProvider(provider) {
 		// The tier is the one the body REQUESTED; the shared rule maps it to a lifetime.
-		return modelinfo.CacheLifetime(string(provider), model, bodyAsksExtendedTTL(body)), CacheLifetimeExact
+		return LifetimeAtTier(provider, model, bodyAsksExtendedTTL(body)), CacheLifetimeExact
 	}
 	if modelinfo.OpenAI30MinuteCache(string(provider), model) {
 		return OpenAIMinimumCacheTTL, CacheLifetimeMinimum
 	}
 	return 0, CacheLifetimeUnknown
+}
+
+// LifetimeAtTier is how long the provider keeps an entry after a touch that left it at the given tier, for
+// the model. It is the ONE place a host asks that question, and it adds nothing to modelinfo.CacheLifetime
+// but the provider type: no code outside modelinfo writes "5 minutes", "1 hour" or "30 minutes" for a cache
+// lifetime (#1350). oneHour is the tier the touch LEFT the entry at, which is what the host knows: the tier
+// a request asked for, the tier a ping's markers asked for, or the tier the provider billed. A provider with
+// a fixed lifetime ignores it.
+func LifetimeAtTier(provider bschemas.ModelProvider, model string, oneHour bool) time.Duration {
+	return modelinfo.CacheLifetime(string(provider), model, oneHour)
 }
 
 // restartGrace is the restart grace for a thread whose first request after the restart carries

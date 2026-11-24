@@ -879,10 +879,7 @@ func (k *Keeper) Record(r Record) {
 	if usageOK {
 		// What D needs before the next request: when this entry was last touched, how long it lives, and
 		// how big the prefix is. The end of the response is now.
-		ttl := 5 * time.Minute
-		if apply.AllBreakpointsAskExtendedTTL(body) {
-			ttl = time.Hour
-		}
+		ttl := cacheLifetime(r.Provider, model, apply.AllBreakpointsAskExtendedTTL(body))
 		k.mu.Lock()
 		k.noteTouchLocked(key, k.now(), ttl, u.CacheRead+u.CacheWrite)
 		k.mu.Unlock()
@@ -1028,7 +1025,7 @@ func (k *Keeper) Record(r Record) {
 	// apart, so more pings would hold the credential for hours. A strategy that asks for the 1-hour head
 	// tier carries a 1-hour Idle even when the gateway granted 5 minutes; its count is the manager's.
 	guard := pol.WaitPlan && pol.On() && provider != bschemas.OpenAI
-	planned := guard && !ttl1h && pol.Idle < 300*time.Second
+	planned := guard && !ttl1h && pol.Idle < OneHourIdleFloor
 	wait, planBaseWait := "", ""
 	oneHour, planPings := false, 0
 	if guard {
@@ -1578,6 +1575,10 @@ type pingJob struct {
 	// oneHour is e.oneHour, copied out under the lock. oneHourSent is set in fire when the body really
 	// went out relabelled (a body with no marker goes out as it is), and read by record1.
 	oneHour, oneHourSent bool
+	// sentOneHour is set in fire (and Press) from the body that really went out: every breakpoint asked
+	// the 1-hour tier. It is the tier the touch leaves the entry at (RecordCacheTouchAliasTier): a
+	// relabelled 1-hour ping, or a plain ping of a body that already writes at 1 hour.
+	sentOneHour bool
 	// vary is the output-budget step this ping was actually sent with (Keeper.nextVaryLocked), set
 	// in fire at dispatch time and read by record1 for the audit row.
 	vary int
@@ -1724,6 +1725,7 @@ func (k *Keeper) fire(j pingJob) {
 			k.mu.Unlock()
 		}
 	}
+	j.sentOneHour = apply.AllBreakpointsAskExtendedTTL(body)
 	start := k.now()
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	resp, err := k.o.Dispatcher.Do(ctx, dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,
@@ -1765,10 +1767,7 @@ func (k *Keeper) fire(j pingJob) {
 	if status >= 200 && status < 300 && (u.CacheRead > 0 || max(u.CacheWrite, u.CacheWrite1h) > 0) {
 		// A ping that READ the entry refreshed it, and one that MISSED and re-wrote it started a fresh
 		// lifetime: either way the entry is warm now, and D must not call it gone from the last request alone.
-		ttl := 5 * time.Minute
-		if j.oneHourSent {
-			ttl = time.Hour
-		}
+		ttl := cacheLifetime(j.provider, j.model, j.sentOneHour)
 		k.mu.Lock()
 		k.noteTouchLocked(j.key.id(), k.now(), ttl, u.CacheRead+max(u.CacheWrite, u.CacheWrite1h))
 		k.mu.Unlock()
@@ -1989,7 +1988,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
 	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
-		j.touch(provider, startedAt.UnixMilli())
+		j.touch(provider, startedAt.UnixMilli(), j.sentOneHour)
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
@@ -2597,10 +2596,15 @@ func (k *Keeper) fireSubstitute(j pingJob) bool {
 // touch records that this job's request refreshed the provider's entry at nowMs, on the clock the
 // request path reads. It uses the alias the host derived from the arriving request when there is
 // one; else it derives the key from the job's body (#902).
-func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64) {
+//
+// oneHour is the tier the request left the entry at: the cold decision counts the 1-hour lifetime from a
+// touch that left it there (#1350), and the 5-minute one from a touch that did not. A touch always states
+// its tier: the last touch is the one that counts, so a 5-minute touch after a 1-hour ping moves the entry
+// back (#1258).
+func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
 	if j.touchAlias != "" {
-		apply.RecordCacheTouchAlias(j.st, j.touchAlias, nowMs)
+		apply.RecordCacheTouchAliasTier(j.st, j.touchAlias, nowMs, oneHour)
 		return
 	}
-	apply.RecordCacheTouch(j.st, j.tenant, j.raw, provider, nowMs)
+	apply.RecordCacheTouchTier(j.st, j.tenant, j.raw, provider, nowMs, oneHour)
 }

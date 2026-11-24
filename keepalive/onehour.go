@@ -71,10 +71,11 @@ type oneHourRouteState struct {
 
 // oneHourProbe is what a free probe leaves for the thread's return.
 type oneHourProbe struct {
-	route  string
-	model  string    // the model the probe's request named, to see a model switch on the return
-	at     time.Time // when the ping started
-	prefix int64     // the billed prefix of the request it copied
+	route    string
+	provider bschemas.ModelProvider // for the two lifetimes the return is judged against
+	model    string                 // the model the probe's request named, to see a model switch on the return
+	at       time.Time              // when the ping started
+	prefix   int64                  // the billed prefix of the request it copied
 }
 
 // oneHourBlocked reports whether the route is switched off. Record uses it: a route that is off gets the
@@ -183,14 +184,14 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		if len(k.oneHourTouches) >= MaxTurnKeys {
 			k.oneHourTouches = map[string]oneHourTouch{}
 		}
-		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk}
+		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk, ttl: cacheLifetime(j.provider, e.model, true)}
 		if st != nil && st.proven {
 			e.ttl1h = true // a route proven to grant: from now until the next real request it is a 1-hour session
 		} else {
 			if len(k.oneHourProbes) >= MaxTurnKeys {
 				k.oneHourProbes = map[string]oneHourProbe{}
 			}
-			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, model: e.model, at: start, prefix: e.prefix}
+			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, provider: j.provider, model: e.model, at: start, prefix: e.prefix}
 		}
 		k.mu.Unlock()
 	case read < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
@@ -248,12 +249,16 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 		return
 	}
 	gap := startedAt.Sub(p.at)
+	// The two lifetimes the return is judged against: the base tier (the entry would be gone without the
+	// grant) and the 1-hour tier (past it nothing proves anything). From the one table, for the probe's own
+	// provider and model, so no number is written here.
+	base, hour := cacheLifetime(p.provider, p.model, false), cacheLifetime(p.provider, p.model, true)
 	prefix := float64(p.prefix)
 	write := float64(max(u.CacheWrite, u.CacheWrite1h))
 	switch {
 	// A return on another model, or after the client rewrote the prefix (a compaction, a fork), reads cold
 	// whatever the cache tier is: it proves nothing about the grant. The probe is not resolved.
-	case !usageOK || gap <= 5*time.Minute || gap > time.Hour || prefixRewritten || (model != "" && model != p.model):
+	case !usageOK || gap <= base || gap > hour || prefixRewritten || (model != "" && model != p.model):
 		k.oneHourRelease(p.route, "the return came inside 5 minutes, after an hour, on another model, or after the client rewrote the prefix")
 	case float64(u.CacheRead) >= oneHourFreeRead*prefix:
 		k.mu.Lock()
@@ -284,13 +289,14 @@ type oneHourTouch struct {
 	key   Key
 	at    time.Time // when the ping started
 	route string
+	ttl   time.Duration // the 1-hour lifetime for the thread's provider and model, from cacheLifetime
 }
 
 // oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: under an
 // hour old, on a route not switched off. The same test as OneHourTouches. The caller holds k.mu.
 func (k *Keeper) oneHourTouchLiveLocked(id string, now time.Time) bool {
 	t, ok := k.oneHourTouches[id]
-	if !ok || !now.Before(t.at.Add(time.Hour)) {
+	if !ok || !now.Before(t.at.Add(t.ttl)) {
 		return false
 	}
 	st := k.oneHourRoutes[t.route]
@@ -328,7 +334,7 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 	defer k.mu.Unlock()
 	out := map[string]OneHourTouch{}
 	for _, t := range k.oneHourTouches {
-		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !now.Before(t.at.Add(time.Hour)) {
+		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !now.Before(t.at.Add(t.ttl)) {
 			continue
 		}
 		st := k.oneHourRoutes[t.route]

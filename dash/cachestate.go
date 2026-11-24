@@ -160,7 +160,7 @@ const oneHourSlackMS = 2 * 60 * 1000
 // Prices keep the tier the entry was billed at: the next request writes its own tier, not the ping's.
 // It changes nothing for an entry already at an hour or more (a client that asks 1h itself).
 func applyOneHour(s *CacheState, touches map[string]OneHourTouch) {
-	const hour = int64(time.Hour / time.Second)
+	const hour = int64(modelinfo.AnthropicCacheTTL1h / time.Second)
 	for i := range s.Threads {
 		t := &s.Threads[i]
 		o, ok := touches[t.ID]
@@ -255,7 +255,7 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 			&base, &cost, &cgllm, &split, &kaSv, &ping, &manualSaved, &manualCost, &deferNet); err != nil {
 			return nil, nil, err
 		}
-		t.TTLSeconds = 300
+		t.TTLSeconds = int64(modelinfo.AnthropicCacheTTL5m / time.Second)
 		if ttl, ok := ttls[t.ID]; ok {
 			t.TTLSeconds = ttl
 		}

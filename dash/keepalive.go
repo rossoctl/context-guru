@@ -1687,7 +1687,7 @@ func planReaches(pol keepalive.Policy, e expiry) bool {
 	n, idle := pol.SpanPings(e.facts)
 	ttl := e.ttl
 	if e.facts.OneHour {
-		ttl = time.Hour
+		ttl = modelinfo.AnthropicCacheTTL1h
 	}
 	return covers(idle.Seconds(), n, e.gap, ttl)
 }
@@ -1784,7 +1784,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	// Known gap: this also turns the per-cause floor off (one general floor), while the keeper at 300 s or
 	// more keeps the per-cause floor and only the base count. So at 300 s or more the replay can
 	// under-count pings on 20k-80k tool waits and subagent spans.
-	if idleSeconds >= 300 {
+	if idleSeconds >= modelinfo.AnthropicCacheTTL5m.Seconds() {
 		wait.WaitPlan = false
 	}
 	wait.MaxPings, wait.Idle = k, time.Duration(idleSeconds*float64(time.Second))
@@ -2188,7 +2188,7 @@ func (d *DB) keepAliveRecommend(f Filter, wait keepalive.Policy, fit *FiveHourFi
 		var v float64
 		for _, m := range bySession[s] {
 			save := sc.Save5m
-			if m.ttl >= time.Hour || m.facts.OneHour {
+			if m.ttl >= modelinfo.AnthropicCacheTTL1h || m.facts.OneHour {
 				save = sc.Save1h
 			}
 			if planned {

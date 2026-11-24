@@ -293,6 +293,22 @@ History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it b
 `keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every
 substitute kind.
 
+### One source for the cache lifetime
+
+No code writes "5 minutes", "30 minutes" or "1 hour" for a provider's cache lifetime. Two places hold the
+facts:
+
+- **The table:** `modelinfo.CacheLifetime(provider, model, oneHour)`. `apply.LifetimeAtTier` and
+  `keepalive.cacheLifetime` wrap it. It gives the lifetime for a provider, a model and a tier. A
+  provider with a fixed lifetime (OpenAI GPT-5.6+, 30 minutes) ignores the tier.
+- **The tier of the last touch:** the `cg:seen:<alias>` clock records the time of the last touch of the
+  entry. A keep-alive request that left the entry at the 1-hour tier writes `<ms>:1h`. A real request, or a
+  5-minute touch, writes the plain `<ms>`. So the tier lasts until the next touch, and a 5-minute
+  touch moves the entry back (#1258). The cold check reads both (#1350). It counts the lifetime of that
+  tier from the touch. Without this, 5 minutes after a free 1-hour ping the check read "cold" on a warm
+  entry, and a cold-only cut made the provider write the whole prefix again.
+
+
 ## Session keying
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
