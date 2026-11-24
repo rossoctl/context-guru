@@ -45,6 +45,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
+	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
@@ -1955,8 +1956,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	var deferSearches searchTally
 	// WHY, when the answer is no. `usage_reported=false` meant five different things — two
 	// benign, three a measurement outage — and nothing distinguished them, so a run that had
-	// stopped accounting tokens on every request read as healthy (#200). See usageMiss.
-	usageWhy := usageMissNoBody
+	// stopped accounting tokens on every request read as healthy (#200). See respfacts.Miss.
+	usageWhy := respfacts.MissNoBody
 	// status/rounds/expanded exist for the lifecycle log line: the upstream status is
 	// the one fact about a request an operator asks for first, and until now it reached
 	// the dashboard row and nothing else.
@@ -2292,11 +2293,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tee != nil {
 				recBody, recIsSSE = teeBody(tee, isSSE, &recIncomplete)
 			}
-			// noteUsageMiss, not a bare assignment: usageOK is sticky-true across expand rounds
+			// respfacts.NoteMiss, not a bare assignment: usageOK is sticky-true across expand rounds
 			// while this was last-write-wins, so a request whose round 1 parsed usage and whose
 			// round 2 continuation carried none logged `usage_reported=true usage_miss=absent`.
 			// A pair that can contradict itself undoes the reason for having the reason.
-			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok)
+			usageWhy = respfacts.NoteMiss(usageWhy, why, usageOK || ok)
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -2391,7 +2392,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tee != nil {
 				recBody, recIsSSE = teeBody(tee, isSSE, &recIncomplete)
 			}
-			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok) // see the other stream path
+			usageWhy = respfacts.NoteMiss(usageWhy, why, usageOK || ok) // see the other stream path
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -2424,11 +2425,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			u.Backend = agentU.Backend
 		}
 		if ok {
-			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
+			usage, usageOK, usageWhy = u, true, respfacts.NoteMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 			usage.Backend = u.Backend       // a reply with no usage still has a backend label
-			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
+			usageWhy = respfacts.NoteMiss(usageWhy, why, usageOK)
 		}
 		if di != nil {
 			deferSearches.Add(isSSE, respBody)
@@ -2796,7 +2797,7 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 // therefore record nothing: the recorder must not see a route that has no turn.
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
-func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
 	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
 }
 
@@ -2814,7 +2815,7 @@ func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Res
 // streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
 // the shared parser's usage reading (readAgentUsage). think, when not nil, is the thinking collector
 // (thinkCollector), and it reads every byte the client gets.
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2882,7 +2883,7 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 }
 
 // stream is the no-recording path: every existing caller keeps its exact behaviour.
-func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (time.Time, Usage, usageMiss, bool) {
+func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (time.Time, Usage, respfacts.Miss, bool) {
 	return h.streamRec(w, resp, nil)
 }
 
@@ -3068,7 +3069,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// for want of a stash slot is counted by the COMPONENT, whatever store instance refused it.
 	// Process-wide like the counters below: the parser is package-level, so whatever tenant's
 	// response carried the unreadable usage, this is the process's total.
-	snap.UsageUnparsed, snap.UsageUnreadable = UsageGaps()
+	snap.UsageUnparsed, snap.UsageUnreadable = respfacts.UsageGaps()
 	snap.StashRefused = offload.StashRefusals()
 	snap.WaitScanUsed, snap.WaitScanNotReady, snap.WaitScanUnknown = int64(h.scan.used.Load()), int64(h.scan.notReady.Load()), int64(h.scan.unknown.Load())
 	snap.WaitScanWriterEarly, snap.WaitScanWriterOwn = int64(h.scan.writerEarly.Load()), int64(h.scan.writerOwn.Load())
