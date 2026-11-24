@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -233,6 +234,7 @@ func spendSignInBudget(t *testing.T) *hostedFixture {
 // And the rate limit is the second layer: it bounds how fast an attacker can request
 // fresh codes to buy more guesses. Applied per email AND per client address.
 func TestSignInAttemptsAreRateLimited(t *testing.T) {
+	testutil.RequireTiming(t)
 	f := spendSignInBudget(t)
 	// A DIFFERENT address from the same client is limited too, because the client
 	// address has its own bucket — otherwise one host grinds the whole directory.

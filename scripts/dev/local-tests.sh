@@ -10,6 +10,10 @@
 # A step that fails only on tests named in scripts/release/known-laptop-failures.txt does not make
 # the result "fail". The comment names those tests.
 #
+# Timing tests (CG_TIMING_TESTS=1) run only when the PR adds or changes one. See
+# scripts/dev/timing-tests-needed.sh. The comment says which. The integrator runs them in heavy CI
+# and in Part A.
+#
 # --dry-run     print the comment instead of posting it.
 # --reuse <dir> do not run the suites; read the summary and logs that part-a.sh left in <dir>.
 #
@@ -46,8 +50,9 @@ fi
 
 out=${reuse:-$(mktemp -d "${TMPDIR:-/tmp}/local-tests-pr$pr.XXXXXX")}
 if [ -z "$reuse" ]; then
-  echo "running the suites; logs in $out"
-  "$here/../release/part-a.sh" "$out" || true
+  if [ "$("$here/timing-tests-needed.sh")" = run ]; then timing=1; else timing=0; fi
+  echo "running the suites (timing tests: $timing); logs in $out"
+  CG_TIMING_TESTS=$timing "$here/../release/part-a.sh" "$out" || true
 fi
 sum=$out/summary.txt
 [ -s "$sum" ] || { echo "ERROR: no summary at $sum" >&2; exit 2; }
@@ -60,6 +65,13 @@ if [ "$sumsha" != "$head" ]; then
   exit 2
 fi
 done_rc=$(sed -n 's/^DONE rc=//p' "$sum" | tail -1)
+# part-a.sh records whether the timing tests ran. A summary from an older part-a.sh has no line.
+case $(sed -n 's/^timing-tests //p' "$sum" | head -1) in
+  1) if [ "$("$here/timing-tests-needed.sh")" = run ]; then timing_line="timing tests: run (this PR adds or changes one)"
+     else timing_line="timing tests: run"; fi ;;
+  0) timing_line="timing tests: skipped (integrator runs them)" ;;
+  *) timing_line="timing tests: unknown (the summary has no timing-tests line)" ;;
+esac
 
 known=$(grep -vE '^\s*(#|$)' "$here/../release/known-laptop-failures.txt")
 result=pass
@@ -77,8 +89,16 @@ while read -r state name _; do
     ok) rows+="| $name | pass |"$'\n' ;;
     flaky) rows+="| $name | pass (flaky: passed on the 2nd run) |"$'\n' ;;
     FAILED)
+      # part-a.sh ran the step twice. The rerun decides, as in its flaky rule: a test that failed
+      # only on the 1st run is flaky, not a failure. Without a rerun log, the 1st log decides.
       log=$out/$name.log
+      [ -f "$out/$name.rerun.log" ] && log=$out/$name.rerun.log
       failing=$(grep -oE '^--- FAIL: [A-Za-z0-9_]+' "$log" 2>/dev/null | awk '{print $3}' | sort -u)
+      if [ "$log" != "$out/$name.log" ]; then
+        first=$(grep -oE '^--- FAIL: [A-Za-z0-9_]+' "$out/$name.log" 2>/dev/null | awk '{print $3}' | sort -u)
+        flaky1=$(comm -23 <(printf '%s\n' "$first" | sed '/^$/d') <(printf '%s\n' "$failing" | sed '/^$/d'))
+        [ -z "$flaky1" ] || notes+="- $name: flaky on the 1st run, passed on the rerun: $(tr '\n' ' ' <<<"$flaky1")"$'\n'
+      fi
       unknown=$(comm -23 <(printf '%s\n' "$failing" | sed '/^$/d') <(printf '%s\n' "$known" | sort -u))
       if [ -n "$failing" ] && [ -z "$unknown" ] && ! grep -qE '^(panic:|FAIL\s.*\[build failed\]|FAIL\s.*timed out)' "$log"; then
         rows+="| $name | known laptop failure: $(tr '\n' ' ' <<<"$failing")|"$'\n'
@@ -103,6 +123,7 @@ body=$(mktemp "${TMPDIR:-/tmp}/local-tests-body.XXXXXX")
   printf '%s' "$rows"
   echo
   echo "Skipped: TestBobReleasePythonSuite (Bob plugin on hold, #1221)."
+  echo "$timing_line"
   [ -z "$notes" ] || { echo; printf '%s' "$notes"; }
 } > "$body"
 

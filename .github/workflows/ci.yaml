@@ -58,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "1"
+      # The integrator's run: the timing tests run here (testutil.RequireTiming).
+      CG_TIMING_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -167,6 +169,9 @@ jobs:
   record:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    env:
+      # The integrator's run: the timing tests run here (testutil.RequireTiming).
+      CG_TIMING_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

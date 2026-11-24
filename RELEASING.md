@@ -223,6 +223,8 @@ The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh -
 - before a merge of a PR that waits on a fix of `main`;
 - always before a cut.
 
+**The heavy jobs run the timing tests.** The jobs `build-test` and `record` set `CG_TIMING_TESTS=1`. A timing test asserts a wall-clock bound or races a rate limit. It fails on a busy machine with nothing wrong in the code, so a PR owner does not run it by default. Owner decision (David Amid, 2026-11-24): "put the switch, but dont run them on local-tests.sh, only run them by integrator. if a PR contributes a new timing test then it runs the timing tests as well".
+
 A release is cut only on a commit with a green heavy run **and** a passing Part A (step 5). A failure on `main` is fixed forward: a new PR with the fix. Nobody reverts to make it green.
 
 A defect in `main` that the PR under review did not cause gets its own issue, its own branch from `main` and its own PR. It never rides on another PR's branch. The release owner decides whether it goes into the release.
@@ -252,6 +254,7 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
 - the `-tags cg_record` race tests, as CI runs them.
 
 Notes:
+- **Part A runs the timing tests.** `part-a.sh` sets `CG_TIMING_TESTS=1` unless the caller sets it. `scripts/dev/local-tests.sh` sets it itself (see CLAUDE.md, "Timing tests").
 - **Part A skips `TestBobReleasePythonSuite` (in `race-rest`).** The owner put the Bob plugin on hold on 2026-11-18. The summary names the skip. Remove the skip in `scripts/release/part-a.sh` when the owner resumes the plugin ([#1221](https://github.com/rossoctl/context-guru/issues/1221)).
 - **The run takes about 70 to 90 minutes on a laptop, so run it detached.** Its summary file always ends with `DONE rc=<n>`, also on a failure. Wait for that line; a marker written only on success makes a failure look like a hang.
 - **Copy the code into an empty directory.** A copy tool that only adds files leaves a deleted test in place, and it keeps running.
