@@ -1,4 +1,4 @@
-package proxy
+package inband
 
 import (
 	"errors"
@@ -46,17 +46,17 @@ func ccUsage(id string) string {
 
 const ccDone = "data: [DONE]\n\n"
 
-func ccSplicer() (*sseSplicer, *httptest.ResponseRecorder) {
+func ccSplicer() (*SSESplicer, *httptest.ResponseRecorder) {
 	rec := httptest.NewRecorder()
-	sp := newChatSSESplicer(rec)
+	sp := NewChatSSESplicer(rec, testCopyHeaders)
 	return sp, rec
 }
 
 var ccProxyTools = []string{adjudicate.ToolName, tooldefer.ClientSearchName}
 
-func ccPass(sp *sseSplicer, stream string) (whole, withheld []byte, called []string) {
-	sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-	return sp.pass(strings.NewReader(stream), expand.ToolName, ccProxyTools...)
+func ccPass(sp *SSESplicer, stream string) (whole, withheld []byte, called []string) {
+	sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
+	return sp.Pass(strings.NewReader(stream), expand.ToolName, ccProxyTools...)
 }
 
 // Text only: the client gets the stream byte for byte, and nothing is withheld.
@@ -73,7 +73,7 @@ func TestChatSpliceTextStreamsUntouched(t *testing.T) {
 			if withheld != nil || len(called) != 0 || string(whole) != tc.stream {
 				t.Fatalf("withheld=%q called=%v", withheld, called)
 			}
-			sp.terminate(nil)
+			sp.Terminate(nil)
 			if got := rec.Body.String(); got != tc.stream {
 				t.Fatalf("the client must get the stream byte for byte:\n got  %q\n want %q", got, tc.stream)
 			}
@@ -101,7 +101,7 @@ func TestChatSpliceWithholdsOurCallAndSplicesTheFollowUp(t *testing.T) {
 	if rec.Body.String() != pre {
 		t.Fatalf("the text before our call must stream at once, verbatim: %q", rec.Body.String())
 	}
-	if !sp.opened() {
+	if !sp.Opened() {
 		t.Fatal("the client holds text: the response is not a buffered one")
 	}
 	// The follow-up calls the loaded tool.
@@ -111,7 +111,7 @@ func TestChatSpliceWithholdsOurCallAndSplicesTheFollowUp(t *testing.T) {
 	if w2 != nil || len(c2) != 0 {
 		t.Fatalf("round 2 withheld %q", w2)
 	}
-	sp.terminate(withheld)
+	sp.Terminate(withheld)
 	out := rec.Body.String()
 	if strings.Contains(out, tooldefer.ClientSearchName) || strings.Contains(out, `"id":"r2"`) {
 		t.Fatalf("the client sees our call or a second id: %q", out)
@@ -137,8 +137,8 @@ func TestChatSpliceWithholdsOurCallAndSplicesTheFollowUp(t *testing.T) {
 func TestChatSpliceOpeningCallIsBuffered(t *testing.T) {
 	sp, rec := ccSplicer()
 	_, withheld, _ := ccPass(sp, ccRole("a")+ccCallStart("a", 0, "c1", tooldefer.ClientSearchName)+ccFinish("a", "tool_calls")+ccDone)
-	if withheld == nil || sp.opened() || rec.Body.String() != ccRole("a") {
-		t.Fatalf("opened=%v body=%q", sp.opened(), rec.Body.String())
+	if withheld == nil || sp.Opened() || rec.Body.String() != ccRole("a") {
+		t.Fatalf("opened=%v body=%q", sp.Opened(), rec.Body.String())
 	}
 }
 
@@ -156,8 +156,8 @@ func TestChatSpliceMixedResponseHandsBackVerbatim(t *testing.T) {
 	if len(called) != 1 {
 		t.Fatalf("called = %v", called)
 	}
-	sp.handBack(withheld)
-	sp.terminate(withheld)
+	sp.HandBack(withheld)
+	sp.Terminate(withheld)
 	if got := rec.Body.String(); got != stream {
 		t.Fatalf("prefix + hand-back must rebuild the stream:\n got  %q\n want %q", got, stream)
 	}
@@ -198,7 +198,7 @@ func TestChatSpliceMalformedChunkFailsOpen(t *testing.T) {
 		t.Fatalf("body=%q withheld=%q", rec.Body.String(), withheld)
 	}
 	// The serve loop cannot rebuild a stream like this, so it hands back: no byte is lost.
-	sp.handBack(withheld)
+	sp.HandBack(withheld)
 	if rec.Body.String() != pre+held {
 		t.Fatalf("lost bytes: %q", rec.Body.String())
 	}
@@ -209,7 +209,7 @@ func TestChatSpliceTerminatesATruncatedTurn(t *testing.T) {
 	sp, rec := ccSplicer()
 	_, withheld, _ := ccPass(sp, ccRole("a")+ccText("a", "hi")+ccCallStart("a", 0, "c1", tooldefer.ClientSearchName))
 	ccPass(sp, ccRole("b")+ccText("b", "more"))
-	sp.terminate(withheld)
+	sp.Terminate(withheld)
 	if !strings.HasSuffix(rec.Body.String(), "without a terminator\"}}\n\n") {
 		t.Fatalf("no error chunk: %q", rec.Body.String())
 	}
@@ -282,12 +282,12 @@ func TestChatSpliceOneRoundCutGetsAnErrorChunk(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sp, rec := ccSplicer()
-			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-			_, withheld, _ := sp.pass(tc.body(tc.sent), expand.ToolName, ccProxyTools...)
+			sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
+			_, withheld, _ := sp.Pass(tc.body(tc.sent), expand.ToolName, ccProxyTools...)
 			if withheld != nil {
 				t.Fatalf("withheld = %q", withheld)
 			}
-			sp.terminate(withheld)
+			sp.Terminate(withheld)
 			if got := rec.Body.String(); got != tc.sent+errChunk {
 				t.Fatalf("the client must get its bytes and then an error chunk:\n got  %q\n want %q", got, tc.sent+errChunk)
 			}
@@ -301,7 +301,7 @@ func TestChatSpliceOneRoundCleanCloseStaysExact(t *testing.T) {
 	stream := ccRole("a") + ccText("a", "Hello")
 	sp, rec := ccSplicer()
 	_, withheld, _ := ccPass(sp, stream)
-	sp.terminate(withheld)
+	sp.Terminate(withheld)
 	if got := rec.Body.String(); got != stream {
 		t.Fatalf("the client must get the stream byte for byte:\n got  %q\n want %q", got, stream)
 	}
