@@ -31,6 +31,10 @@ const (
 	// a 1.25x WRITE, the charge the mechanism exists to avoid.
 	MinOverrideIdle = 60 * time.Second
 	MaxOverrideIdle = modelinfo.AnthropicCacheLifetime5m - 10*time.Second
+	// OneHourIdleFloor is the Idle at or above which a policy is an EXPLICIT 1-hour schedule (a
+	// strategy with HeadTTL1h): no 5-minute Idle can reach it, because MaxOverrideIdle refuses it.
+	// Such a policy does not take the per-wait plan.
+	OneHourIdleFloor = 300 * time.Second
 	// The ping-count band. The upper end is bounded again, and more tightly, by MaxOverrideHold.
 	MinOverridePings = 1
 	MaxOverridePings = 11

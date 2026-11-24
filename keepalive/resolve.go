@@ -112,7 +112,7 @@ func EffectiveWaitPlan(account Policy, strategies []tenant.Strategy, tenantID st
 	campaignOn bool) Policy {
 	pol := account.WaitPlanOnly()
 	if best := BestStrategy(strategies, tenantID, now, !campaignOn); best != nil {
-		if time.Duration(best.IdleSeconds)*time.Second >= 300*time.Second {
+		if time.Duration(best.IdleSeconds)*time.Second >= OneHourIdleFloor {
 			return Policy{}
 		}
 		return pol

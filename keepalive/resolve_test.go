@@ -226,3 +226,14 @@ func TestFromConfigParkedBlockKeepsOnlyThePlan(t *testing.T) {
 		t.Fatalf("a head TTL gate must stay 0 while HeadTTL1h is off: %d", h.HeadTTLMinBytes)
 	}
 }
+
+func TestKnownPredictorIDsReturnsACopy(t *testing.T) {
+	got := KnownPredictorIDs()
+	got["x-test"] = true
+	if err := ValidPredictorRef("x-test", 0.5); err == nil {
+		t.Fatal("writing to the returned map must not register a predictor in the library")
+	}
+	if err := ValidPredictorRefIn(got, "x-test", 0.5); err != nil {
+		t.Fatalf("a caller-supplied set must be honoured: %v", err)
+	}
+}

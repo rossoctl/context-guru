@@ -125,11 +125,16 @@ const (
 
 var (
 	validStrategyBounds = keepalive.ValidStrategyBounds
-	validPredictorRef   = keepalive.ValidPredictorRef
 	validWindows        = keepalive.ValidWindows
-	// knownPredictorIDs is the same map as keepalive's.
-	knownPredictorIDs = keepalive.KnownPredictorIDs
+	// knownPredictorIDs is this package's own copy of keepalive's registered names, so a test that
+	// registers a name does not change the library's map.
+	knownPredictorIDs = keepalive.KnownPredictorIDs()
 )
+
+// validPredictorRef is keepalive.ValidPredictorRefIn over this package's copy.
+func validPredictorRef(predictorID string, threshold float64) error {
+	return keepalive.ValidPredictorRefIn(knownPredictorIDs, predictorID, threshold)
+}
 
 // keepAliveStrategyCtlRoutes is this feature's control-plane table, appended to
 // ctlRoutes in control.go. Every route is ctlManager and audited, table-driven exactly

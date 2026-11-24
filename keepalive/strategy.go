@@ -181,7 +181,7 @@ func validIdleBand(idle, maxIdle time.Duration, lifetimeSeconds int) error {
 	return nil
 }
 
-// KnownPredictorIDs is the set of predictor names a strategy may reference. It is kept in lockstep
+// knownPredictorIDs is the set of predictor names a strategy may reference. It is kept in lockstep
 // with the predictor switch by a test, so accepting a strategy at creation can never promise a
 // gate the keeper cannot evaluate.
 //
@@ -190,20 +190,35 @@ func validIdleBand(idle, maxIdle time.Duration, lifetimeSeconds int) error {
 // Measured (docs/results/kv-ttl-predictor-arms.md) as +1.54% vs fixed-5m pooled (CI95
 // [0.60%, 2.79%]), not distinguishable from a trained logistic regression on the same window,
 // which is why it is a rule rather than a model.
-var KnownPredictorIDs = map[string]bool{"stop-reason-gated": true}
+var knownPredictorIDs = map[string]bool{"stop-reason-gated": true}
 
-// ValidPredictorRef checks predictorID against KnownPredictorIDs (empty is always valid: no
+// KnownPredictorIDs returns a copy of the registered predictor names, so no caller shares the
+// package's own map.
+func KnownPredictorIDs() map[string]bool {
+	out := make(map[string]bool, len(knownPredictorIDs))
+	for id, v := range knownPredictorIDs {
+		out[id] = v
+	}
+	return out
+}
+
+// ValidPredictorRef checks predictorID against the registered names (empty is always valid: no
 // predictor gate) and the threshold's own shape.
 //
 // A named predictor with a threshold <= 0 is refused: the probability functions only return values
 // in [0,1], so `p >= threshold` is true for every prediction at 0, and the gate would still ping
 // on the arm's own schedule without gating anything.
 func ValidPredictorRef(predictorID string, threshold float64) error {
+	return ValidPredictorRefIn(knownPredictorIDs, predictorID, threshold)
+}
+
+// ValidPredictorRefIn is ValidPredictorRef against a caller-supplied set of registered names.
+func ValidPredictorRefIn(known map[string]bool, predictorID string, threshold float64) error {
 	s := tenant.Strategy{PredictorID: predictorID, PredictorThreshold: threshold}
 	if err := s.ValidatePredictor(); err != nil {
 		return err
 	}
-	if predictorID != "" && !KnownPredictorIDs[predictorID] {
+	if predictorID != "" && !known[predictorID] {
 		return fmt.Errorf("%q is not a registered predictor; no predictor-gated strategies "+
 			"can be created yet", predictorID)
 	}
