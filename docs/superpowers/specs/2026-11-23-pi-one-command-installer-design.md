@@ -109,8 +109,10 @@ step 6, after the key check.
 
 ## Flow of `uninstall`
 
-1. `pi_plugin.py uninstall` (restores the route in `models.json`, stops and removes the service, deletes the
-   downloaded proxy).
+1. When context-guru routes Pi and Pi windows are open (`pgrep -u <uid>`), name them and ask "Go on
+   anyway? [y/N]": a window keeps its settings in memory (#1341). No stops. Then `pi_plugin.py uninstall`
+   (restores the route in `models.json`, stops and removes the service, deletes the downloaded proxy). The
+   extension in a window that stays open switches to the real endpoint on its next prompt.
 2. `pi remove <stable path>`, and delete the package folder.
 3. With the record: delete the secret-store item; in `models.json` and `settings.json`, put back the old value
    of each key the installer changed (or remove a key that was absent), only while it still has the value the
