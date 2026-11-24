@@ -162,10 +162,25 @@ the person. The team knows who holds the role at any time.
   and branch, as in [Branches, worktrees and force-push](#branches-worktrees-and-force-push).
 - **The main session runs `offload-review`.** See [Review process](#review-process).
 
+### Timing tests
+
+- **A timing test asserts a wall-clock bound or races a rate limit.** It starts with
+  `testutil.RequireTiming(t)` (Go) or uses `timingOnly` from `opencode-plugin/test/helpers.mjs`
+  (node). It runs only with `CG_TIMING_TESTS=1`.
+- **`scripts/dev/local-tests.sh` skips the timing tests.** It runs them only when the PR adds or
+  changes one (`scripts/dev/timing-tests-needed.sh` decides, from the diff). The integrator runs
+  them in heavy CI and in Part A. That covers the Go tests and the OpenCode node tests (the step
+  `node-timing`).
+- **Gate a test only if its result depends on time or load.** Do not gate a test that uses a fake
+  clock, or a long timeout as a safety net.
+
 ### A PR is ready when
 
 - It has 2 approvals at its final head.
-- CI is green.
+- CI is green. A PR runs only the fast jobs (lint-build, purego, trivy).
+- The heavy tests passed on the laptop at the head. Run `scripts/dev/local-tests.sh <pr>` in the
+  PR's worktree. It posts one comment with `<!-- local-tests sha=<head> result=pass -->`. A new
+  commit, even comment-only, needs a new run. It takes 70 to 90 minutes: run it detached.
 - It merges cleanly on `main`.
 - Every behavior change is named at the top of the PR and has a human developer's yes. See
   [Behavior changes need a human's permission](RELEASING.md#behavior-changes-need-a-humans-permission).

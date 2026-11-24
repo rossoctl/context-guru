@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // TestOverviewSessionScopedMatchesTableWide locks in the #492 invariant that makes the fix
@@ -173,6 +175,7 @@ func TestOverviewSessionScopedQueriesDoNotScanWholeTable(t *testing.T) {
 // would not reliably do once the fixture is large enough. Generous on purpose — this is a
 // backstop for the plan-based test above, not the primary assertion.
 func TestOverviewSessionScopedStaysFastWithManyOtherSessions(t *testing.T) {
+	testutil.RequireTiming(t)
 	target := "target-session"
 	db := openTestDB(t)
 	if err := db.insertBatch([]*Event{mkEvent(1000, target, "m", 100, 60)}); err != nil {

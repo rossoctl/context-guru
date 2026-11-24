@@ -14,6 +14,12 @@ on:
       - opencode-plugin/**
       - .github/workflows/opencode-plugin.yaml
 
+# Cancel a PR run that a newer push replaced. Push and schedule runs use the commit sha in the
+# group, so each one has its own group. Without that, GitHub drops a queued run of the same group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
