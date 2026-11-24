@@ -555,11 +555,12 @@ type Keeper struct {
 	// oneHourProbes holds, per THREAD (keyed like live), the free probe the thread left for its return.
 	// Resolved and deleted by that thread's next real request. Bounded by MaxTurnKeys.
 	oneHourProbes map[string]oneHourProbe
-	// oneHourTouches holds, per THREAD (keyed like live), that its last touch was a free 1-hour ping, until
-	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock, and by PingNow, which refuses a press
-	// while the touch is live (#1259).
+	// oneHourThreads is the index of the threads whose last ping was a free 1-hour ping: per THREAD (keyed like
+	// live), where the one record of that fact lives (the store and the alias) and the route. It holds no tier and
+	// no time: the store's cg:seen: value is the only record of both. Read by OneHourTouches for the cache clock,
+	// and by PingNow, which refuses a press while the ping is live (#1259), each through apply.LiveOneHourPing.
 	// Bounded by MaxTurnKeys.
-	oneHourTouches map[string]oneHourTouch
+	oneHourThreads map[string]oneHourThread
 	// oneHourFirst holds, per THREAD (keyed like live), the main threads that write at 1 hour from now on
 	// (onehour.go: C from the first request, D from its first big cold rebuild, or the thread that paid the
 	// probe's rewrite). A thread not in it stays on auto. Bounded by MaxTurnKeys.
@@ -661,7 +662,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourThreads: map[string]oneHourThread{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -874,10 +875,10 @@ func (k *Keeper) Record(r Record) {
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
 	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
 	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
-	// The same line that ended the keeper's 1-hour touch ends the tier carried in the stored clock: an
-	// ACCEPTED real request is the next touch (#1350). A request that failed never gets here, so both records
-	// of the fact stay, together. Where this is never reached (a timeout, a cancel, no Record call) they stay
-	// together too, and both end an hour after the ping.
+	// An ACCEPTED real request is the next touch (#1350): it ends the tier carried in the stored clock, the
+	// one record of the fact (#1365). A request that failed never gets here, so the record stays. Where this is
+	// never reached (a timeout, a cancel, no Record call) it stays too, and ends an hour after the ping. The
+	// thread's index entry went with resolveOneHourProbe above: it only says where to look.
 	if r.Store != nil {
 		alias := r.TouchAlias
 		if alias == "" {

@@ -190,17 +190,21 @@ func TestTheTierSuffixFailsOpenForAnOlderReader(t *testing.T) {
 	}
 }
 
-func TestEndTouchTierKeepsTheTimeAndLeavesALaterTouchAlone(t *testing.T) {
+func TestEndTouchTierKeepsTheTimeAndEndsAPlainPingOnly(t *testing.T) {
 	st := store.NewMemory(store.Options{})
-	RecordCacheTouchAliasTier(st, "a", 2000, true)
-	EndTouchTier(st, "a", 1000) // another touch: nothing
-	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000:1h" {
-		t.Fatalf("a different touch's end changed the record: %q", b)
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	RecordCacheTouchAliasTier(st, "a", 2000, false)
+	EndTouchTier(st, "a")
+	if got := get(); got != "2000" {
+		t.Fatalf("ending a plain value changed it: %q", got)
 	}
-	EndTouchTier(st, "a", 2000)
-	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000" {
-		t.Fatalf("record = %q, want a plain 2000", b)
+	RecordCacheTouchAliasTier(st, "a", 3000, true)
+	EndTouchTier(st, "a")
+	if got := get(); got != "3000" {
+		t.Fatalf("record = %q, want a plain 3000", got)
 	}
+	EndTouchTier(st, "none") // no record: nothing, no panic
+	EndTouchTier(nil, "a")
 }
 
 func TestEntryLifetimeIsTheOneDecision(t *testing.T) {
@@ -292,13 +296,74 @@ func TestEndTouchTierEndsACarriedPingToo(t *testing.T) {
 	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
 	RecordCacheTouchAliasTier(st, "a", 2000, true)
 	aliasSeenState(st, "a", 3000) // a real request: "3000^2000"
-	EndTouchTier(st, "a", 1999)   // another ping: nothing
-	if got := get(); got != "3000^2000" {
-		t.Fatalf("a different ping's end changed the record: %q", got)
-	}
-	EndTouchTier(st, "a", 2000)
+	EndTouchTier(st, "a")
 	if got := get(); got != "3000" {
 		t.Fatalf("record = %q, want a plain 3000", got)
+	}
+}
+
+// The one record of the fact, read by every host reader. A plain value, an unreadable value and no value all say
+// "no ping": an unreadable record never reads as a tier. The time is the ping's, also under a carry.
+func TestStandingOneHourPingReadsTheOneRecord(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	put := func(v string) { st.Put(store.SeenPrefix+"a", []byte(v)) }
+	for _, tc := range []struct {
+		name, v string
+		at      int64
+		ok      bool
+	}{
+		{"a ping", "2000:1h", 2000, true},
+		{"a carried ping", "3000^2000", 2000, true},
+		{"a plain clock", "2000", 0, false},
+		{"garbage", "x:1h", 0, false},
+		{"a bad carry", "3000^x", 0, false},
+		{"an empty value", "", 0, false},
+	} {
+		put(tc.v)
+		if at, ok := StandingOneHourPing(st, "a"); at != tc.at || ok != tc.ok {
+			t.Errorf("%s: StandingOneHourPing(%q) = %d, %v, want %d, %v", tc.name, tc.v, at, ok, tc.at, tc.ok)
+		}
+	}
+	if _, ok := StandingOneHourPing(st, "other"); ok {
+		t.Error("a missing record read as a ping")
+	}
+	if _, ok := StandingOneHourPing(nil, "a"); ok {
+		t.Error("a nil store read as a ping")
+	}
+	if _, ok := StandingOneHourPing(st, ""); ok {
+		t.Error("an empty alias read as a ping")
+	}
+}
+
+// LiveOneHourPing asks the one lifetime function: an hour on Anthropic, and no longer.
+func TestLiveOneHourPingEndsWithTheHour(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	RecordCacheTouchAliasTier(st, "a", 1_000_000, true)
+	hour := time.Hour.Milliseconds()
+	for _, tc := range []struct {
+		now  int64
+		live bool
+	}{{1_000_000 + 1, true}, {1_000_000 + hour - 1, true}, {1_000_000 + hour, false}, {1_000_000 + 2*hour, false}} {
+		at, live := LiveOneHourPing(st, "a", bschemas.Anthropic, "claude-sonnet-5", tc.now)
+		if live != tc.live || (live && at != 1_000_000) {
+			t.Errorf("at +%d ms: live=%v at=%d, want live=%v", tc.now-1_000_000, live, at, tc.live)
+		}
+	}
+}
+
+// Asking is not touching: the dashboard polls, and a poll must not renew the record's store lifetime. An older
+// clock that outlived its time would be read by the next cold check as a real, old touch.
+func TestStandingOneHourPingDoesNotSlideTheStoreLifetime(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	st := store.NewMemory(store.Options{TTLSeconds: 600})
+	st.SetClock(func() time.Time { return clock })
+	RecordCacheTouchAliasTier(st, "a", 1_000_000, true)
+	for range 5 { // 5 polls, 4 minutes apart: 20 minutes in all
+		clock = clock.Add(4 * time.Minute)
+		StandingOneHourPing(st, "a")
+	}
+	if _, ok := st.Get(store.SeenPrefix + "a"); ok {
+		t.Error("polling kept a record alive past its store lifetime")
 	}
 }
 

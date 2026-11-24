@@ -146,7 +146,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	// 1-hour ping, so any stale touch (an hour old, or on a route switched off) ends here, as at a real request
 	// (#1258). A refused or failed-early press never reaches this line.
 	k.mu.Lock()
-	delete(k.oneHourTouches, id)
+	delete(k.oneHourThreads, id)
 	k.mu.Unlock()
 	job.sentOneHour = apply.AllBreakpointsAskExtendedTTL(body)
 	start := k.now()

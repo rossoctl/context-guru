@@ -285,33 +285,39 @@ func TestASubstituteTouchTakesItsTierFromTheBodysMarkers(t *testing.T) {
 	}
 }
 
-// The touch map is bounded. That is a capacity event, not a fact about any entry: it must not end the stored tier
-// of a live touch, or the cold check reads a warm 1-hour entry as cold and a cold cut rewrites it.
+// The thread index is bounded. That is a capacity event, not a fact about any entry: it must not end the stored tier
+// of a live touch, or the cold check reads a warm 1-hour entry as cold and a cold cut rewrites it. The index drops
+// first the threads the STORE says no longer hold a live free ping.
 func TestTheCapacityBoundDoesNotEndALiveTouchsTier(t *testing.T) {
 	r, t0 := pingedThread(t)
 	now := r.clock.now()
-	r.k.mu.Lock()
-	live := r.k.oneHourTouches[sess1.id()] // the real touch, with its store and alias
-	r.k.oneHourTouches = map[string]oneHourTouch{}
-	old := now.Add(-2 * time.Hour)
-	for i := 0; i < MaxTurnKeys-1; i++ { // dead touches fill the map first
-		id := "dead" + strconv.Itoa(i)
-		r.k.oneHourTouches[id] = oneHourTouch{key: Key{Tenant: "t", Session: id}, at: old, provider: bschemas.Anthropic, model: "m"}
+	big := store.NewMemory(store.Options{MaxEntries: 4 * MaxTurnKeys})
+	put := func(id string, at time.Time) oneHourThread {
+		alias := "al-" + id
+		apply.RecordCacheTouchAliasTier(big, alias, at.UnixMilli(), true)
+		return oneHourThread{key: Key{Tenant: "t", Session: id}, provider: bschemas.Anthropic, model: "m", st: big, alias: alias}
 	}
-	r.k.oneHourTouches[sess1.id()] = live
-	r.k.makeRoomForTouchLocked(now.Add(0)) // evicts the dead ones, keeps the live one
-	n := len(r.k.oneHourTouches)
-	_, kept := r.k.oneHourTouches[sess1.id()]
-	// Now every touch is live: the map starts over, and the stored tier must stay.
+	r.k.mu.Lock()
+	live := r.k.oneHourThreads[sess1.id()] // the real thread, with its store and alias
+	r.k.oneHourThreads = map[string]oneHourThread{}
+	for i := 0; i < MaxTurnKeys-1; i++ { // threads whose stored ping is an hour old fill the index first
+		id := "dead" + strconv.Itoa(i)
+		r.k.oneHourThreads[id] = put(id, now.Add(-2*time.Hour))
+	}
+	r.k.oneHourThreads[sess1.id()] = live
+	r.k.makeRoomForThreadLocked(now) // evicts the dead ones, keeps the live one
+	n := len(r.k.oneHourThreads)
+	_, kept := r.k.oneHourThreads[sess1.id()]
+	// Now every thread is live: the index starts over, and the stored tier must stay.
 	for i := 0; i < MaxTurnKeys; i++ {
 		id := "live" + strconv.Itoa(i)
-		r.k.oneHourTouches[id] = oneHourTouch{key: Key{Tenant: "t", Session: id}, at: now, provider: bschemas.Anthropic, model: "m"}
+		r.k.oneHourThreads[id] = put(id, now)
 	}
-	// The map starts over only when all are live: the real touch is among them and is dropped from the keeper.
-	r.k.makeRoomForTouchLocked(now)
+	// The index starts over only when all are live: the real thread is among them and is dropped from the index.
+	r.k.makeRoomForThreadLocked(now)
 	r.k.mu.Unlock()
 	if !kept || n != 1 {
-		t.Errorf("the bound dropped a live touch: kept=%v, %d left, want only the live one", kept, n)
+		t.Errorf("the bound dropped a live thread: kept=%v, %d left, want only the live one", kept, n)
 	}
 	if cold, _ := r.request(t0.Add(13 * time.Minute)); cold {
 		t.Error("the capacity bound ended the stored tier: a warm 1-hour entry read cold")

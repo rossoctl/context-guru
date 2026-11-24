@@ -55,7 +55,7 @@ func testKeeper(t *testing.T) (*Keeper, *fakeDispatcher, *testClock) {
 }
 
 // testKeeperWith is testKeeper with a hook to set further Options (Prices, Spare).
-func testKeeperWith(t *testing.T, tweak func(*Options)) (*Keeper, *fakeDispatcher, *testClock) {
+func testKeeperWith(t testing.TB, tweak func(*Options)) (*Keeper, *fakeDispatcher, *testClock) {
 	t.Helper()
 	fd := newFake(okPing)
 	clock := &testClock{at: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)}

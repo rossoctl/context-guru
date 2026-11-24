@@ -1315,8 +1315,8 @@ type seenState struct {
 // aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
 // that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
 // provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
-// accepted (ConfirmRealTouch, the keeper's Record), the same line that ends the keeper's own touch. So both
-// records of the fact end at ONE event and cannot disagree, whatever the failure path (#1350).
+// accepted (ConfirmRealTouch, the keeper's Record). The store value is the ONE record of the fact: the keeper
+// keeps no tier and no time of its own, so no failure path can leave two records apart (#1350, #1365).
 func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
 	if st == nil || nowMs <= 0 {
 		return seenState{}
@@ -1473,19 +1473,59 @@ func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider b
 	RecordCacheTouchAliasTier(st, TouchAliasFor(tenant, body, provider), nowMs, oneHour)
 }
 
-// EndTouchTier ends the 1-hour tier of the touch made at atMs, keeping its time: the plain clock value stays.
-// The keeper calls it when the route that gave the tier is switched off, so the stored fact and the keeper's
-// own never disagree. A later touch (another time or tier) is left alone.
-func EndTouchTier(st store.Store, alias string, atMs int64) {
+// EndTouchTier ends the free 1-hour ping that stands under the alias's clock, keeping the clock's time: the plain
+// value stays. It ends a plain `:1h` and a carried ping alike, and does nothing for a plain value. The keeper
+// calls it when the route that gave the tier is switched off, so the cold check never keeps an hour for a tier
+// no route granted. It is the only way the keeper ends a tier: the store record is the one record of the fact.
+func EndTouchTier(st store.Store, alias string) {
 	if st == nil || alias == "" {
 		return
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		if v := parseSeenState(b); (v.oneHour && v.at == atMs) || (v.carriedAt > 0 && v.carriedAt == atMs) {
+		if v := parseSeenState(b); v.oneHour || v.carriedAt > 0 {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
+}
+
+// StandingOneHourPing reads the one record of the fact "the last touch of this entry was a free 1-hour ping":
+// the time that ping started, and whether one stands. It is the `:1h` value (the ping is the last touch) or the
+// carry under a real request nobody has confirmed (the request touched nothing yet). A plain value, a value it
+// cannot read and a missing value all say no: an unreadable record never reads as a tier. It does not slide the
+// store's TTL (store.PeekValue): asking is not a touch.
+//
+// Every reader asks this, not a copy of the fact: the dashboard's cache clock, the manual-ping refusal and the
+// probe. The cold check reads the same value through aliasSeenState, where it also writes its own clock.
+func StandingOneHourPing(st store.Store, alias string) (atMs int64, ok bool) {
+	if st == nil || alias == "" {
+		return 0, false
+	}
+	b, got := store.PeekValue(st, store.SeenPrefix+alias)
+	if !got {
+		return 0, false
+	}
+	v := parseSeenState(b)
+	switch {
+	case v.carriedAt > 0:
+		return v.carriedAt, true
+	case v.oneHour && v.at > 0:
+		return v.at, true
+	}
+	return 0, false
+}
+
+// LiveOneHourPing is StandingOneHourPing that also asks the one lifetime function: the ping counts until
+// EntryLifetime of the 1-hour tier for this provider and model has passed since it started.
+func LiveOneHourPing(st store.Store, alias string, provider bschemas.ModelProvider, model string, nowMs int64) (atMs int64, live bool) {
+	at, ok := StandingOneHourPing(st, alias)
+	if !ok {
+		return 0, false
+	}
+	if nowMs >= at+EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true}).Milliseconds() {
+		return 0, false
+	}
+	return at, true
 }
 
 // RecordCacheTouchAliasTier is RecordCacheTouchAlias with the tier of the touch.

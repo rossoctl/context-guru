@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -78,11 +79,11 @@ func recordWait(k *Keeper, pol Policy, key Key, at time.Time, stop string, names
 	u := Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "tool_use"}
 	k.Record(Record{Key: key, StartedAt: at.Add(-time.Second), Body: []byte(kaBody), Provider: bschemas.Anthropic,
 		Route: "/v1/messages", Status: http.StatusOK, Usage: u, UsageOK: true, Policy: pol,
-		ToolUseNames: []string{"Bash"}, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
+		ToolUseNames: []string{"Bash"}, Header: kaHeader(), Hold: fakeOf(k).hold(key), Store: storeOf(k)})
 	u.StopReason = stop
 	k.Record(Record{Key: key, StartedAt: at, Body: []byte(kaBody), Provider: bschemas.Anthropic,
 		Route: "/v1/messages", Status: http.StatusOK, Usage: u, UsageOK: true, Policy: pol,
-		ToolUseNames: names, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
+		ToolUseNames: names, Header: kaHeader(), Hold: fakeOf(k).hold(key), Store: storeOf(k)})
 }
 
 // A long wait gets ONE ping at the usual time with every marker at 1 hour, and no second ping.
@@ -515,7 +516,8 @@ func TestFailedSubstituteLeavesOneOneHourPing(t *testing.T) {
 // returnWith records the thread's return with full control of the request: the model and whether the client
 // rewrote the prefix. The usage is a cold rebuild unless read is large.
 func returnWith(k *Keeper, key Key, at time.Time, body string, read, write int64, rewritten bool) {
-	k.Record(Record{Key: key, StartedAt: at, Body: []byte(body), Provider: bschemas.Anthropic,
+	alias := realRequestClock(k, key, body, at) // apply writes its clock before the forward
+	k.Record(Record{Key: key, StartedAt: at, Body: []byte(body), Provider: bschemas.Anthropic, Store: storeOf(k), TouchAlias: alias,
 		Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(), PrefixRewritten: rewritten,
 		Usage: Usage{CacheRead: read, CacheWrite: write, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
 }
@@ -830,23 +832,23 @@ func TestAManualPressAfterTheOneHourTouchEndedStillWorks(t *testing.T) {
 }
 
 // A touch an hour old is no longer live (the entry is cold): the press is not refused, and it clears the
-// stale fact as it dispatches.
+// stale index entry as it dispatches.
 func TestAManualPressClearsAnExpiredOneHourTouch(t *testing.T) {
 	k, _ := probeThenWait(t)
 	k.mu.Lock()
-	for id, tc := range k.oneHourTouches {
-		tc.at = k.now().Add(-61 * time.Minute)
-		k.oneHourTouches[id] = tc
+	for _, th := range k.oneHourThreads {
+		// The stored ping is 61 minutes old: the one record says the hour has passed.
+		th.st.Put(store.SeenPrefix+th.alias, []byte(strconv.FormatInt(k.now().Add(-61*time.Minute).UnixMilli(), 10)+":1h"))
 	}
 	k.mu.Unlock()
 	if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: time.Second}); err != nil {
 		t.Fatalf("PingNow: %v", err)
 	}
 	k.mu.Lock()
-	n := len(k.oneHourTouches)
+	n := len(k.oneHourThreads)
 	k.mu.Unlock()
 	if n != 0 {
-		t.Errorf("%d stale touch(es) left after a dispatched press", n)
+		t.Errorf("%d stale index entries left after a dispatched press", n)
 	}
 }
 

@@ -309,6 +309,24 @@ facts:
   tier from the touch. Without this, 5 minutes after a free 1-hour ping the check read "cold" on a warm
   entry, and a cold-only cut made the provider write the whole prefix again.
 
+That value is the **only** record of the fact "the last touch of this thread was a free 1-hour ping" (#1365).
+`apply.StandingOneHourPing` and `apply.LiveOneHourPing` read it. The dashboard's cache clock, the manual-ping
+refusal and the probe ask them, and the cold check reads the same value. The keeper keeps only an index of
+thread to alias (and the route that made the ping), so it knows where to look. The index holds no tier and no
+time, so it cannot disagree with the store. Each event writes the store record once:
+
+| Event | Write |
+| --- | --- |
+| a free 1-hour ping | `<ms>:1h` |
+| a real request (before the forward) | `<ms>` or, over a standing ping, `<ms>^<pingMs>` (the carry) |
+| an accepted real request | the carry ends: `<ms>` (`apply.ConfirmRealTouch`) |
+| a failed real request | nothing: the carry stays, the ping's hour runs on |
+| a 5-minute touch, a manual press | `<ms>` |
+| a route switch-off | the ping's tier ends, the time stays (`apply.EndTouchTier`) |
+| the index's capacity bound | nothing: only the index loses a thread, the record expires by `EntryLifetime` |
+
+Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.
+
 
 ## Session keying
 
