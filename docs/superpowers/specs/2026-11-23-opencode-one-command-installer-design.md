@@ -56,7 +56,8 @@ Out of scope:
 - A pre-release counts as its release: `1.20.0-beta.1` is 1.20.0, so it is never downgraded.
 - A version the installer cannot read (a dev build): it never offers npm, which could downgrade it. It asks "Go
   on with this OpenCode?".
-- No npm: an OpenCode of 1.18.29 or later stays. Else stop, and name OpenCode's own install page.
+- No npm, or `npm view` fails (a blocked registry, `E401`): an OpenCode of 1.18.29 or later stays, with a note. Else
+  stop, and name OpenCode's own install page or `CG_OC_NPM_REGISTRY`.
 - After npm, run `opencode --version` again. When `opencode` is not on `PATH`, or an older one comes first
   (Homebrew, `~/.opencode/bin`), stop before the consent step and name it.
 - Install with `npm install -g opencode-ai@<version> --registry <registry>`. `<registry>` is

@@ -204,7 +204,7 @@ class Installer:
 
     @staticmethod
     def tested_note(shown):
-        return "" if shown == TESTED_OPENCODE else f"The plugin is tested on OpenCode {TESTED_OPENCODE} only."
+        return "" if shown == TESTED_OPENCODE else f" The plugin is tested on OpenCode {TESTED_OPENCODE} only."
 
     def opencode_version(self):
         """(path of `opencode` on PATH, its version text); (None, None) when it is not on PATH."""
@@ -218,7 +218,7 @@ class Installer:
         out = self.shell.run(["npm", "view", OPENCODE_NPM, "version", f"--registry={self.registry}"])
         if out.returncode != 0 or not version_tuple(out.stdout):
             raise Stop(f"npm cannot read the latest OpenCode version from {self.registry}:\n{out.stderr.strip()}\n"
-                       "To use another registry, set CG_OC_NPM_REGISTRY. Nothing was changed.")
+                       "To use another registry, set CG_OC_NPM_REGISTRY.")
         return out.stdout.strip()
 
     def ensure_opencode(self):
@@ -233,14 +233,22 @@ class Installer:
             return
         if not self.shell.which("npm"):
             if version and version >= MIN_OPENCODE:
-                self.terminal.say(f"OpenCode {shown} is installed. {self.tested_note(shown)}")
+                self.terminal.say(f"OpenCode {shown} is installed.{self.tested_note(shown)}")
                 return
             raise Stop(f"OpenCode {'is too old' if path else 'is not installed'}, and npm is not here to install "
                        f"it. Install the latest OpenCode from {INSTALL_PAGE}, then run this again.")
-        latest = self.latest_opencode()
-        target = ".".join(map(str, version_tuple(latest)))
+        try:
+            latest = self.latest_opencode()
+        except Stop as stop:
+            if not (version and version >= MIN_OPENCODE):
+                raise Stop(f"{stop} Nothing was changed.") from None
+            # Nothing needs npm here: a broken registry must not block a supported OpenCode.
+            self.terminal.say(f"The installer cannot check for a newer OpenCode: {stop}")
+            self.terminal.say(f"OpenCode {shown} stays.{self.tested_note(shown)}")
+            return
+        target = latest  # as npm prints it: a pre-release tag keeps its suffix
         if version and version >= version_tuple(latest):
-            self.terminal.say(f"OpenCode {shown} is installed. {self.tested_note(shown)}")
+            self.terminal.say(f"OpenCode {shown} is installed.{self.tested_note(shown)}")
             return
         if path:
             if not self.yes(f"Update OpenCode {shown} to {target}?", default=True):
@@ -267,6 +275,11 @@ class Installer:
         if not version_tuple(now_shown) or version_tuple(now_shown) < MIN_OPENCODE:
             raise Stop(f"npm installed OpenCode {self.target}, but `opencode` still runs OpenCode {now_shown} "
                        f"({now}). Remove that one, or put npm's global bin folder first on PATH, then run this again.")
+        if version_tuple(now_shown) < version_tuple(target):
+            self.terminal.say(f"npm installed OpenCode {target}, but `opencode` still runs OpenCode {now_shown} ({now}). "
+                              "That one works with the plugin. To use the new one, put npm's global bin folder first "
+                              "on PATH.")
+            return
         self.terminal.say(f"✓ OpenCode {now_shown} {'updated' if path else 'installed'}.")
 
     @staticmethod

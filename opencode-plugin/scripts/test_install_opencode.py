@@ -108,7 +108,6 @@ class InstallerTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         os.environ.pop("CONTEXT_GURU_STATE", None)
-        os.environ.pop("CG_OC_OPENCODE_VERSION", None)
         self.addCleanup(self.home.cleanup)
         self.shell = FakeShell()
         self.config = root / "config/opencode"
@@ -257,7 +256,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("OpenCode 1.19.5 is installed", self.terminal.text())
 
     def test_npm_that_cannot_read_the_latest_version_names_the_registry_setting(self):
-        self.shell.npm_view_error = "E401 Unable to authenticate"
+        self.shell.opencode, self.shell.npm_view_error = None, "E401 Unable to authenticate"
 
         code = self.installer().install()
 
@@ -265,6 +264,18 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("E401 Unable to authenticate", self.terminal.text())
         self.assertIn("CG_OC_NPM_REGISTRY", self.terminal.text())
         self.assertFalse(self.config.exists())
+
+    def test_npm_that_cannot_read_the_latest_version_keeps_a_supported_opencode(self):
+        self.shell.opencode, self.shell.npm_view_error = "1.19.5", "E401 Unable to authenticate"
+
+        code = self.installer("y", "n").install()  # no OpenCode question
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.npm_installs(), [])
+        text = self.terminal.text()
+        self.assertIn("cannot check for a newer OpenCode", text)
+        self.assertIn("CG_OC_NPM_REGISTRY", text)
+        self.assertIn("OpenCode 1.19.5 stays", text)
 
     def test_an_npm_failure_shows_npms_message_and_never_uses_sudo(self):
         self.shell.opencode, self.shell.npm_install_error = None, "EACCES: permission denied"
@@ -302,6 +313,30 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("1.18.29", self.terminal.text())
         self.assertFalse(self.config.exists())
+
+    def test_the_install_uses_the_latest_version_as_npm_prints_it(self):
+        self.shell.opencode, self.shell.latest = None, "1.21.0-rc.1"
+
+        self.installer("y", "y", "n").install()
+
+        self.assertEqual(self.npm_installs()[0][-1], "opencode-ai@1.21.0-rc.1")
+
+    def test_an_older_opencode_first_on_path_is_not_reported_as_updated(self):
+        self.shell.opencode, self.shell.npm_shadowed = "1.19.5", True
+
+        code = self.installer("y", "n").install()  # update yes, consent no
+
+        self.assertEqual(code, 0)
+        text = self.terminal.text()
+        self.assertNotIn("✓ OpenCode 1.19.5 updated", text)
+        self.assertIn("still runs OpenCode 1.19.5", text)
+
+    def test_the_tested_opencode_line_has_no_trailing_space(self):
+        self.shell.opencode = self.shell.latest = "1.19.5"
+
+        self.installer("n").install()
+
+        self.assertIn("OpenCode 1.19.5 is installed.", self.terminal.shown)
 
     def test_the_latest_opencode_stays_and_names_the_tested_version(self):
         code = self.installer("y", "n").install()
