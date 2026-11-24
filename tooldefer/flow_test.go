@@ -177,10 +177,68 @@ func TestFlowApplyGates(t *testing.T) {
 		t.Fatalf("a second probe ran: %v", probes)
 	}
 	// Another provider's wire: no probe, no change, even with an ask pending.
-	asks = 0
+	f.TakeProbeAsk = func() bool { return true }
 	f.Provider = bschemas.Gemini
 	f.Wire = "gemini"
 	if _, di := f.Apply("s", "", body, body); di != nil || len(probes) != 1 {
 		t.Fatalf("a foreign wire reached deferral: %v %v", di, probes)
+	}
+}
+
+func flowOver(t *testing.T, doc string, e Env, provider bschemas.ModelProvider, wire string) Flow {
+	t.Helper()
+	f, _ := testFlow(t, doc)
+	f.Provider, f.Wire = provider, wire
+	f.Route = "r"
+	f.Upstream = "u"
+	f.Parts = func() Parts { return Parts{Env: e, Hist: NewMem(nil), Ledger: &Ledger{}} }
+	return f
+}
+
+// A host with no probe callback still works: a model with no verdict is never deferred, and the
+// request goes out unchanged. With a verdict the same flow defers.
+func TestFlowApplyWithoutAProbeCallbackDefersNothing(t *testing.T) {
+	e := env(t, threeUnused())
+	f := flowOver(t, "preset: ultrahigh\n", e, bschemas.Anthropic, cgschema.WireAnthropic)
+	f.StartProbe = nil
+	f.TakeProbeAsk = func() bool { return true } // the ask path starts a probe too
+	in := body(catalogue(), "")
+	got, di := f.Apply("s", "", in, in)
+	if di != nil || string(got) != string(in) {
+		t.Fatalf("a model with no verdict was changed: %v", di)
+	}
+	// Control: with a verdict the flow defers, so the test above reached the probe step.
+	passProbe(e, ProbeKey{"u", "claude-sonnet-5-5", "r"})
+	if _, di := f.Apply("s2", "", in, in); di == nil || !di.Outcome.Changed {
+		t.Fatal("control: a probed model was not deferred")
+	}
+}
+
+// Our own search on a Chat Completions request: the flow decides, rewrites, keeps the thread's
+// facts in Info, and books a forced tool as an add-back.
+func TestFlowApplyClientSearch(t *testing.T) {
+	e := env(t, unusedHist())
+	f := flowOver(t, "preset: ultrahigh\n", e, bschemas.OpenAI, cgschema.WireOpenAI)
+	in := chatBody()
+	got, di := f.Apply("s", "", in, in)
+	if di == nil || !di.Search || di.Session != "s" || di.Tenant != "t" || di.Model != "gpt-5.5" ||
+		strings.Join(di.Outcome.Deferred, ",") != "Monitor,Workflow" {
+		t.Fatalf("di = %+v", di)
+	}
+	if string(di.Orig) != string(in) || wireToolNames(cgschema.WireOpenAI, got) != "Bash,Read,"+ClientSearchName {
+		t.Fatalf("tools = %s", wireToolNames(cgschema.WireOpenAI, got))
+	}
+	forced := []byte(strings.Replace(string(chatBody()), `"messages":`, `"tool_choice":{"type":"function","function":{"name":"Workflow"}},"messages":`, 1))
+	got, di = f.Apply("s", "", forced, forced)
+	if di == nil || !strings.Contains(wireToolNames(cgschema.WireOpenAI, got), "Workflow") {
+		t.Fatalf("forced tool not declared: %s", got)
+	}
+	if e.Gate.AddBacks.Load() != 1 {
+		t.Fatalf("add-backs = %d, want 1", e.Gate.AddBacks.Load())
+	}
+	// Off: nothing changes.
+	off := flowOver(t, "preset: xhigh\n", e, bschemas.OpenAI, cgschema.WireOpenAI)
+	if got, di := off.Apply("s9", "", in, in); di != nil || string(got) != string(in) {
+		t.Fatal("deferral off changed a client-search request")
 	}
 }

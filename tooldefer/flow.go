@@ -62,7 +62,8 @@ type Flow struct {
 	// nil means never.
 	TakeProbeAsk func() bool
 	// StartProbe runs a probe in the background. The host sends it through its Dispatcher, with the
-	// credential of the request that is in flight.
+	// credential of the request that is in flight. nil means no probe runs: a model with no
+	// verdict is never deferred, so the request goes out unchanged.
 	StartProbe func(key ProbeKey)
 }
 
@@ -71,6 +72,13 @@ func (f Flow) project(p bschemas.ModelProvider, body []byte) string {
 		return ""
 	}
 	return f.ProjectFor(p, body)
+}
+
+// probe starts a probe when the host gave a way to run one.
+func (f Flow) probe(key ProbeKey) {
+	if f.StartProbe != nil {
+		f.StartProbe(key)
+	}
 }
 
 func nowMs() int64 { return time.Now().UnixMilli() }
@@ -91,7 +99,7 @@ func (f Flow) Apply(session, threadID string, orig, body []byte) ([]byte, *Info)
 		// run it earlier.
 		model := gjson.GetBytes(orig, "model").String()
 		if AnthropicModel(model) {
-			f.StartProbe(ProbeKey{Upstream: f.Upstream, Model: model, Route: f.Route})
+			f.probe(ProbeKey{Upstream: f.Upstream, Model: model, Route: f.Route})
 		}
 	}
 	if !on {
@@ -123,10 +131,10 @@ func (f Flow) Apply(session, threadID string, orig, body []byte) ([]byte, *Info)
 		})
 	}
 	if o.NeedProbe {
-		f.StartProbe(key)
+		f.probe(key)
 	}
 	if o.NeedClientProbe {
-		f.StartProbe(ckey)
+		f.probe(ckey)
 	}
 	if o.ClientDisabled != "" {
 		// No query text: the reason and a prefix of the description hash only.

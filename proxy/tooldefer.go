@@ -261,10 +261,7 @@ func (h *Handler) deferFallback() store.Store {
 }
 
 // deferEnv is the deferral environment for tn.
-func (h *Handler) deferEnv(tn *Tenancy) tooldefer.Env {
-	ds := h.toolDefer()
-	return tooldefer.Env{Store: tn.Store, Fallback: h.deferFallback(), History: ds.hist, Gate: h.deferGate(), Prober: ds.prober}
-}
+func (h *Handler) deferEnv(tn *Tenancy) tooldefer.Env { return h.deferParts(tn).Env }
 
 // deferParts is the deferral state for tn, for the library's flow. tn may be nil for a call that
 // reads no record (the retry, the ledger). It builds the state, so it runs only for a request
