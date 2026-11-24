@@ -1392,9 +1392,6 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		orig := body
 		// The thread of a session, read off `orig`, the request as the agent sent it. apply calls it
 		// once the session id is known, and serve resolves the observe-mode thread with it.
-		threadOf := func(sess string) thread.Result {
-			return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
-		}
 		// Tool deferral's facts for this request (#485), nil when it did not change the request.
 		var di *deferInfo
 		// lifecycle.Prepare runs the steps before the forward in their one right order and fails
@@ -1403,7 +1400,12 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		prep := lifecycle.Prepare(lifecycle.Pre{
 			Wire: wire, Provider: provider, Mode: tn.Mode, Bypassed: bypassed, Pipe: tn.Pipe,
 			Store: tn.Store, InjectExpand: h.opts.InjectExpand,
-			Orig: orig, ThreadOf: threadOf,
+			Orig: orig,
+			MakeThreadOf: func() func(string) thread.Result {
+				return func(sess string) thread.Result {
+					return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
+				}
+			},
 			// A client that received our own expand tool_use answered it itself, with an error. The
 			// repair puts the content the model asked for where that error is, BEFORE the pipeline
 			// reads the transcript, so offload does not compact it straight back into the marker
@@ -1419,7 +1421,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// response side failed to withhold the call and the request side caught it.
 			OnRepair: func(n int) { lg.Debug("cg.expand_repair", "restored", n) },
 			OnStray:  func(n int) { lg.Debug("cg.adjudicate_stray", "answered", n) },
-			Apply: func(b []byte) ([]byte, time.Duration, apply.Trace) {
+			Apply: func(b []byte, threadOf func(string) thread.Result) ([]byte, time.Duration, apply.Trace) {
 				return h.applyMode(&reqInfo{
 					// cp.llmCtx: context-guru's OWN compaction-model spend under this context
 					// is charged to this request's row, and to no other tenant's.
@@ -1443,10 +1445,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					route:                 up.path,
 				})
 			},
-			Observed: func(th thread.Result, tr apply.Trace, added time.Duration) {
-				addedMs := float64(added.Microseconds()) / 1000.0
-				cp.noteCG(addedMs)
+			Applied: func(tr apply.Trace, added time.Duration) {
+				cp.noteCG(float64(added.Microseconds()) / 1000.0)
 				cp.noteTrace(tr)
+			},
+			Observed: func(th thread.Result, tr apply.Trace, added time.Duration) {
 				// The thread is known before the savings tracker is told of the request: the first
 				// request after the agent's own compaction is found here (thread.Result.AfterCompaction,
 				// #947). It was read off `orig`, the request as the agent sent it.
@@ -1540,7 +1543,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			cp.accDrop()
 		}
 		body = prep.Body
-		preBody, anchor, tr, added, threadID := prep.PreBody, prep.Anchor, prep.Trace, prep.Added, prep.ThreadID
+		preBody, anchor, tr, added, threadID, threadOf := prep.PreBody, prep.Anchor, prep.Trace, prep.Added, prep.ThreadID, prep.ThreadOf
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
