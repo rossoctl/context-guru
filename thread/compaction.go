@@ -1,7 +1,6 @@
 package thread
 
 import (
-	"net/http"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -27,7 +26,7 @@ import (
 //   - Codex rust-v0.172.0 — core/src/compact.rs; the template is
 //     prompts/templates/compact/prompt.md ("You are performing a CONTEXT CHECKPOINT
 //     COMPACTION."). Local compaction sends it as the last Responses `input` user item. This is
-//     only the fallback: Codex also marks the request itself (see IsAgentCompactionRequest).
+//     only the fallback: Codex also marks the request itself (agent/codex IsCompaction).
 //   - OpenCode v2.4.1 (and v1.19.6, which imports the same function) — buildPrompt() in
 //     packages/core/src/session/compaction.ts. v2 appends it as the last user message; v1
 //     (packages/opencode/src/session/compaction.ts) sends it as the only user message. Two
@@ -64,41 +63,13 @@ var agentCompactionPhrases = []string{
 	"The messages above are earlier context from an ongoing conversation. Later messages are stored separately",
 }
 
-// HeaderRequestKind is set by a client plugin on the client's own compaction request, with the value
-// RequestKindCompaction. The OpenCode and Pi plugins set it. The proxy strips every x-context-guru-*
-// header before it forwards a request. It is metadata only: no request text is read.
-const (
-	HeaderRequestKind     = "x-context-guru-request-kind"
-	RequestKindCompaction = "compaction"
-)
-
-// codexTurnMetadata is the header (and the Responses `client_metadata` key) in which Codex
-// describes each request. Its JSON value holds "request_kind":"compaction" on the compaction request,
-// local and remote alike (Codex rust-v0.172.0, core/src/responses_metadata.rs: REQUEST_KIND_KEY,
-// CompactionTurnMetadata, X_CODEX_TURN_METADATA_HEADER in core/src/client.rs).
-const codexTurnMetadata = "x-codex-turn-metadata"
-
-// IsAgentCompactionRequest is IsAgentCompaction plus the signals that need no text: the
-// plugin header (HeaderRequestKind) and Codex's own turn metadata (header, or `client_metadata` in
-// the body). A marked request is a compaction whatever its text says. Pass the result to Resolve as
-// agentCompaction. h may be nil.
-func IsAgentCompactionRequest(h http.Header, body []byte) bool {
-	if h != nil {
-		if strings.EqualFold(strings.TrimSpace(h.Get(HeaderRequestKind)), RequestKindCompaction) {
-			return true
-		}
-		if codexMarksCompaction(h.Get(codexTurnMetadata)) {
-			return true
-		}
-	}
-	if codexMarksCompaction(gjson.GetBytes(body, "client_metadata").Get(codexTurnMetadata).String()) {
-		return true
-	}
-	return IsAgentCompaction(body)
-}
-
-func codexMarksCompaction(meta string) bool {
-	return meta != "" && gjson.Get(meta, "request_kind").String() == "compaction"
+// IsAgentCompactionHint is IsAgentCompaction plus a hint from the host. markedByClient is true when
+// the client marked the request as its own compaction: the host reads that from headers it owns
+// (see agent/all MarkedCompaction). A marked request is a compaction whatever its text says. A host
+// with no headers passes false, and the phrase match is the fallback. Pass the result to Resolve as
+// agentCompaction.
+func IsAgentCompactionHint(markedByClient bool, body []byte) bool {
+	return markedByClient || IsAgentCompaction(body)
 }
 
 // IsAgentCompaction reports whether body is the agent asking the model to summarize the

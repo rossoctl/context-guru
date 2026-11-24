@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"net/http"
+
 	"github.com/rossoctl/accountant"
 
+	agentall "github.com/rossoctl/context-guru/agent/all"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -15,4 +18,10 @@ func compactionVerdict(th thread.Result) accountant.CompactionTrigger {
 		return accountant.CompactionUnknown
 	}
 	return ""
+}
+
+// isClientCompaction is the proxy's wiring of the compaction detector: the marks the client sets
+// (agentall.MarkedCompaction), then the prompt match. The logic lives in the library packages.
+func isClientCompaction(r *http.Request, body []byte) bool {
+	return thread.IsAgentCompactionHint(agentall.MarkedCompaction(r.Header, body), body)
 }

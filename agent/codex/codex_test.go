@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -53,6 +54,32 @@ func TestIdentifyRefusesOtherCallers(t *testing.T) {
 	} {
 		if got, ok := Identify(h); ok || got != (Fields{}) {
 			t.Errorf("%s: Identify = %+v, %v; want zero, false", name, got, ok)
+		}
+	}
+}
+
+func TestIsCompaction(t *testing.T) {
+	meta := func(kind string) string { return `{"request_kind":"` + kind + `","turn_id":"t"}` }
+	body := func(kind string) []byte {
+		b, _ := json.Marshal(map[string]any{"input": []any{}, "client_metadata": map[string]string{"x-codex-turn-metadata": meta(kind)}})
+		return b
+	}
+	hdr := func(v string) http.Header { h := http.Header{}; h.Set("x-codex-turn-metadata", v); return h }
+	for _, tc := range []struct {
+		name string
+		h    http.Header
+		body []byte
+		want bool
+	}{
+		{"header", hdr(meta("compaction")), []byte(`{}`), true},
+		{"header, turn", hdr(meta("turn")), []byte(`{}`), false},
+		{"header, not json", hdr("nope"), []byte(`{}`), false},
+		{"body client_metadata", nil, body("compaction"), true},
+		{"body client_metadata, turn", nil, body("turn"), false},
+		{"nothing", nil, []byte(`{"input":[]}`), false},
+	} {
+		if got := IsCompaction(tc.h, tc.body); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

@@ -1,9 +1,6 @@
 package thread
 
-import (
-	"net/http"
-	"testing"
-)
+import "testing"
 
 // The direct cases of IsAgentCompaction. The proxy's end-to-end tests (proxy/agentcompaction_test.go)
 // cover the same rule on the wire.
@@ -46,35 +43,17 @@ func TestIsAgentCompaction(t *testing.T) {
 	}
 }
 
-// The signals that need no request text: the plugin header and Codex's own turn metadata.
-func TestIsAgentCompactionRequest(t *testing.T) {
-	plain := `{"messages":[{"role":"user","content":"hi"}]}`
-	meta := func(kind string) string { return `{"request_kind":"` + kind + `","turn_id":"t"}` }
-	for _, tc := range []struct {
-		name   string
-		header map[string]string
-		body   string
-		want   bool
-	}{
-		{"plugin header", map[string]string{HeaderRequestKind: "compaction"}, plain, true},
-		{"plugin header, other kind", map[string]string{HeaderRequestKind: "title"}, plain, false},
-		{"codex header", map[string]string{"x-codex-turn-metadata": meta("compaction")}, `{"input":[]}`, true},
-		{"codex header, turn", map[string]string{"x-codex-turn-metadata": meta("turn")}, `{"input":[]}`, false},
-		{"codex header, not json", map[string]string{"x-codex-turn-metadata": "nope"}, plain, false},
-		{"codex client_metadata", nil, `{"input":[],"client_metadata":{"x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"}}`, true},
-		{"codex client_metadata, turn", nil, `{"input":[],"client_metadata":{"x-codex-turn-metadata":"{\"request_kind\":\"turn\"}"}}`, false},
-		{"phrase fallback", nil, `{"input":"You are performing a CONTEXT CHECKPOINT COMPACTION. x"}`, true},
-		{"nothing", nil, plain, false},
-	} {
-		h := http.Header{}
-		for k, v := range tc.header {
-			h.Set(k, v)
-		}
-		if got := IsAgentCompactionRequest(h, []byte(tc.body)); got != tc.want {
-			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
-		}
+// The host's hint wins; with no hint the phrase match is the fallback.
+func TestIsAgentCompactionHint(t *testing.T) {
+	plain := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	phrase := []byte(`{"input":"You are performing a CONTEXT CHECKPOINT COMPACTION. x"}`)
+	if !IsAgentCompactionHint(true, plain) {
+		t.Error("marked, plain body: want true")
 	}
-	if IsAgentCompactionRequest(nil, []byte(plain)) {
-		t.Error("nil header, plain body: want false")
+	if IsAgentCompactionHint(false, plain) {
+		t.Error("unmarked, plain body: want false")
+	}
+	if !IsAgentCompactionHint(false, phrase) {
+		t.Error("unmarked, phrase body: want true")
 	}
 }

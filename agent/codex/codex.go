@@ -9,6 +9,8 @@ package codex
 import (
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 // Name is the client name on the dashboard.
@@ -52,4 +54,25 @@ func Identify(h http.Header) (Fields, bool) {
 func hasCodexPrefix(s string) bool {
 	s = strings.TrimSpace(s)
 	return len(s) >= len("codex") && strings.EqualFold(s[:len("codex")], "codex")
+}
+
+// turnMetadata is the header, and the Responses `client_metadata` key, in which Codex describes
+// each request. Its JSON value holds "request_kind":"compaction" on the compaction request, local
+// and remote alike (openai/codex rust-v0.172.0: core/src/responses_metadata.rs REQUEST_KIND_KEY and
+// CompactionTurnMetadata, core/src/client.rs X_CODEX_TURN_METADATA_HEADER).
+const turnMetadata = "x-codex-turn-metadata"
+
+// IsCompaction reports whether Codex marked this request as its own compaction: the turn metadata in
+// the header h, or in the body's `client_metadata` (the form a WebSocket request carries). It reads
+// metadata only, no request text. A nil h and an unmarked request give false; the host then falls
+// back to the prompt match in the thread package.
+func IsCompaction(h http.Header, body []byte) bool {
+	if h != nil && marksCompaction(h.Get(turnMetadata)) {
+		return true
+	}
+	return marksCompaction(gjson.GetBytes(body, "client_metadata").Get(turnMetadata).String())
+}
+
+func marksCompaction(meta string) bool {
+	return meta != "" && gjson.Get(meta, "request_kind").String() == "compaction"
 }

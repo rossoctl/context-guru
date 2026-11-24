@@ -1369,7 +1369,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// compactions pass through. The counter is a report with Skipped set because the
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
-		agentCompaction := thread.IsAgentCompactionRequest(r.Header, body)
+		agentCompaction := isClientCompaction(r, body)
 		if !bypassed && agentCompaction {
 			gate := "detected"
 			if int64(len(body)) > maxRequestBytes {
@@ -1802,7 +1802,7 @@ func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride
 		refuseTooLarge(w, maxCompactionRequestBytes)
 		return nil, false
 	}
-	if !unconditionalOverride && !thread.IsAgentCompactionRequest(r.Header, body) {
+	if !unconditionalOverride && !isClientCompaction(r, body) {
 		refuseTooLarge(w, maxRequestBytes)
 		return nil, false
 	}
