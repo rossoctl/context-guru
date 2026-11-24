@@ -414,7 +414,7 @@ func TestCtlGetCampaignTenantDrilldownRendersAGenuineZeroRateNotAnOmittedOne(t *
 
 // The 1h-tier model-honoring gate must work with the REAL, DB-backed check
 // (tenantHonorsHeadTTL1h), not just the fake closures every other test injects directly
-// into resolveCampaignCell. This is the actual mechanism that decides whether a
+// into campaign.ResolveCell. This is the actual mechanism that decides whether a
 // keepalive-1h/1h-once cell is safe to activate for a given tenant's real traffic.
 func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 	f := newMgrFixture(t)
@@ -481,7 +481,7 @@ func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 }
 
 // keepalive-5m-once, stop-reason-gated, and keepalive-1h-once were, until now, only
-// ever driven through campaign.ArmFor/resolveCampaignCell directly in unit tests, never
+// ever driven through campaign.ArmFor/campaign.ResolveCell directly in unit tests, never
 // through the real create-campaign HTTP route with an assertion on every field of the
 // resulting tenant.Strategy — precisely the gap that let stop-reason-gated ship with no
 // PredictorThreshold at all (a silent zero value that makes predictorFor's gate a
@@ -492,7 +492,7 @@ func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 // registration is rate-limited to 3/minute per client address (registrationsPerMinute)
 // and this fixture has no way to vary the address per signUpJar call; a single tenant
 // with cells at different hours resolves into separate, uncoalesced strategies just as
-// well, since coalesceCampaignCells groups by (tenant, arm) before ever looking at hours.
+// well, since campaign.Coalesce groups by (tenant, arm) before ever looking at hours.
 func TestCtlCreateCampaignEveryArmCarriesItsOwnLiveParameters(t *testing.T) {
 	f := newMgrFixture(t)
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
@@ -632,7 +632,7 @@ func TestCampaignTenantSummariesOnlyCountsPredictedUSDForActivatedCells(t *testi
 }
 
 // An out-of-range hour_utc in an uploaded payload must never become a real, live-but-
-// dead strategy: resolveCampaignCell's bounds check should catch it before it's ever
+// dead strategy: campaign.ResolveCell's bounds check should catch it before it's ever
 // coalesced, and validateGroupStrategy is defense in depth in case it somehow weren't.
 // End to end, through the real route, on top of the unit tests for each layer.
 func TestCtlCreateCampaignOutOfRangeHourIsNotActivatedAsADeadStrategy(t *testing.T) {

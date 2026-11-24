@@ -226,13 +226,13 @@ func TestResolveCampaignCellInsufficientDataDoesNotBlockBaselineArms(t *testing.
 func TestWeekdaysFromNamesFallsBackToCanonicalWeekWhenNothingIsRecognized(t *testing.T) {
 	for _, names := range [][]string{nil, {}, {"Someday", "Otherday"}} {
 		got := WeekdaysFromNames(names)
-		if len(got) != len(DefaultWeekdays) {
-			t.Errorf("WeekdaysFromNames(%v) = %v, want the canonical %v", names, got, DefaultWeekdays)
+		if len(got) != len(DefaultWeekdays()) {
+			t.Errorf("WeekdaysFromNames(%v) = %v, want the canonical %v", names, got, DefaultWeekdays())
 			continue
 		}
-		for i, d := range DefaultWeekdays {
+		for i, d := range DefaultWeekdays() {
 			if got[i] != d {
-				t.Errorf("WeekdaysFromNames(%v) = %v, want the canonical %v", names, got, DefaultWeekdays)
+				t.Errorf("WeekdaysFromNames(%v) = %v, want the canonical %v", names, got, DefaultWeekdays())
 				break
 			}
 		}
@@ -487,5 +487,19 @@ func TestCellOutcomeAndTenantCell(t *testing.T) {
 	}
 	if !ArmEnforceable(kvcache.StrategyKeepAlive5m) || ArmEnforceable("nonsense-arm") {
 		t.Error("ArmEnforceable disagrees with ArmFor")
+	}
+}
+
+// The fallback week is a copy: a caller that changes it does not change the next call.
+func TestWeekdaysFallbackIsACopy(t *testing.T) {
+	a := WeekdaysFromNames(nil)
+	a[0] = time.Saturday
+	if b := WeekdaysFromNames(nil); b[0] != time.Sunday {
+		t.Errorf("a caller's edit reached the next call: %v", b)
+	}
+	c := DefaultWeekdays()
+	c[1] = time.Saturday
+	if d := DefaultWeekdays(); d[1] != time.Monday {
+		t.Errorf("DefaultWeekdays shares its slice: %v", d)
 	}
 }

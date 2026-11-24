@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,13 @@ const (
 	legacyIdle5m = int(kvcache.DefaultPingIdle / time.Second)
 	legacyIdle1h = int(kvcache.DefaultPingIdle1h / time.Second)
 )
+
+// headTTLMinTokens is the size gate of a 1h-tier arm. A stored strategy keeps the token-named field (database column and manager API), which
+// the head-TTL gate reads as tokens x config.HeadTTLBytesPerToken bytes: 50,000 tokens is the 200,000-byte gate. The tokens constant is
+// DEPRECATED in config, but it is the right one here: the strategy field is still in tokens, and the value is config.DefaultHeadTTLMinBytes / 4.
+// Every 1h-tier arm needs a positive value: a 1h strategy with a zero floor pings on the 1-hour schedule but never promotes the head to the
+// 1-hour tier (the host's bounds check refuses that pair).
+const headTTLMinTokens = config.DefaultHeadTTLMinTokens
 
 // defaultPredictorThreshold is stop-reason-gated's own live threshold. A named predictor with a non-positive threshold is refused by the host's
 // validator, because it would make the gate a no-op.
@@ -98,11 +106,11 @@ func ArmFor(arm string) Arm {
 		// legacyIdle1h is the simulator's own default cadence for this arm.
 		return Arm{Activatable: true, NeedsModelHonoring: true, HeadTTL1h: true,
 			IdleSeconds: legacyIdle1h, MaxPings: config.DefaultKeepAliveMaxPings,
-			HeadTTLMinTokens: config.DefaultHeadTTLMinTokens,
+			HeadTTLMinTokens: headTTLMinTokens,
 			MinPrefixTokens:  legacyMinPrefixTokens}
 	case kvcache.StrategyKeepAlive1hOnce:
 		return Arm{Activatable: true, NeedsModelHonoring: true, HeadTTL1h: true,
-			IdleSeconds: legacyIdle1h, MaxPings: 1, HeadTTLMinTokens: config.DefaultHeadTTLMinTokens,
+			IdleSeconds: legacyIdle1h, MaxPings: 1, HeadTTLMinTokens: headTTLMinTokens,
 			MinPrefixTokens: legacyMinPrefixTokens}
 	}
 	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
@@ -263,16 +271,19 @@ func DuplicateCell(resolved []*Resolved) *Resolved {
 	return nil
 }
 
-// DefaultWeekdays is the work week every suggest cell's PredictedUSD is
+// defaultWeekdays is the work week every suggest cell's PredictedUSD is
 // actually backtested against, on either input source: the live path always sets
 // KVCacheSuggestions.Weekdays to this exact set (dash's own kvSuggestWeekdays), and the
 // upload path accepts a hand-edited copy of that same payload. It is the fallback
 // WeekdaysFromNames uses when it cannot recover any day at all from the input, rather
 // than "no restriction" — see WeekdaysFromNames' own doc comment for why "every day" is
 // the one outcome that must never happen silently here.
-var DefaultWeekdays = []time.Weekday{
+var defaultWeekdays = []time.Weekday{
 	time.Sunday, time.Monday, time.Tuesday, time.Wednesday, time.Thursday,
 }
+
+// DefaultWeekdays returns a copy of that work week, so a caller cannot change the next caller's days.
+func DefaultWeekdays() []time.Weekday { return slices.Clone(defaultWeekdays) }
 
 // WeekdaysFromNames converts a suggest payload's Weekdays (["Sunday", "Monday", ...])
 // into tenant.Window's []time.Weekday. An unrecognized name is silently dropped rather
@@ -300,7 +311,7 @@ func WeekdaysFromNames(names []string) []time.Weekday {
 		}
 	}
 	if len(out) == 0 {
-		return DefaultWeekdays
+		return DefaultWeekdays()
 	}
 	return out
 }

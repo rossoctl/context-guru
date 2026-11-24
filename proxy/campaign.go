@@ -435,7 +435,7 @@ func (h *Handler) resolveCampaignSuggest(r *http.Request, in campaignCreateIn) (
 }
 
 // tenantHonorsHeadTTL1h reports whether every model tenantID used, in the same window a
-// live suggest call would have scanned, is honors the 1h tier (campaign.HonorsHeadTTL1h). Fails CLOSED: no
+// live suggest call would have scanned, honors the 1h tier (campaign.HonorsHeadTTL1h). Fails CLOSED: no
 // models found (unknown traffic, or the dashboard unreachable) means "not confirmed",
 // never "assume yes" — the same direction every other check in this file errs in.
 func (h *Handler) tenantHonorsHeadTTL1h(r *http.Request, tenantID string, since, until int64) bool {
