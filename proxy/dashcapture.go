@@ -652,8 +652,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.WaitCause = func() dash.WaitCauseResult {
 		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
-		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
-			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		waitingFor, waitTool := waitcause.ClassifyWaitingForClient(
+			c.agent, terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
 		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,

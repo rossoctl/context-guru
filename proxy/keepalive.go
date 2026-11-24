@@ -8,6 +8,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/keepalive"
@@ -337,6 +338,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 	if k == nil || tn == nil {
 		return nil
 	}
+	cl := agent.Identify(r.Header)
 	// keepalive.Keeper.Record departs the thread's open request (the one arrive opened) on every
 	// return path of its own. A panic in this function BEFORE it hands off would skip that and
 	// leave the thread paused until restart, so depart here unless the hand-off happened. Not an
@@ -400,7 +402,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 			Account: pol, Tracked: tracked, OpenAI: provider == bschemas.OpenAI,
 			Subagent: keepalive.IsSubagentThread(threadID), Open: open, Prefix: u.CacheRead + u.CacheWrite,
 			CauseOf: func(o *keepalive.TaskCounts) string {
-				return k.Keeper.WaitingFor(wkey, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, o)
+				return k.Keeper.WaitingFor(wkey, cl, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, o)
 			},
 			OneHourTier: func() bool {
 				return k.Keeper.OneHourTier(wkey, body, keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
@@ -429,7 +431,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Preset: tn.Preset,
+		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Identity: cl, Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}

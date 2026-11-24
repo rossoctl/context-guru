@@ -4,6 +4,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/waitcause"
 )
@@ -156,7 +157,8 @@ func orDefault(v, def int) int {
 type TaskCounts struct{ Background, Teammate int }
 
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
-// open-task counts. The background count is the larger of two readings: the host's tracker
+// open-task counts. cl is the client (agent.Identify; the zero Client names none): it decides what an end_turn with nothing open reads
+// (waitcause.HumanFallback). The background count is the larger of two readings: the host's tracker
 // (Options.OpenTasks), which is as of the request before and carries tasks whose start has left a
 // compacted body, and the count the host read from this turn's own body (open; nil: the host had no
 // result in time). A stale tracker count alone reads a turn that starts background work as "a person",
@@ -167,7 +169,7 @@ type TaskCounts struct{ Background, Teammate int }
 // fewer. With the background count merged, the cause moves only from "a person" or "a teammate" to
 // "background", which gets at least those pings and a floor no higher. Record also takes the larger
 // count of the two causes, so no configuration of the extra pings can lower it.
-func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool, open *TaskCounts) string {
+func (k *Keeper) WaitingFor(key Key, cl agent.Client, names []string, incomplete bool, stopReason string, usageOK bool, open *TaskCounts) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
 	}
@@ -178,7 +180,7 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 	if open != nil {
 		bg = max(bg, open.Background)
 	}
-	w, _ := waitcause.ClassifyWaitingForTerminal(terminalFor(k.o.TerminalTools, incomplete),
+	w, _ := waitcause.ClassifyWaitingForClient(cl, terminalFor(k.o.TerminalTools, incomplete),
 		names, stopReason, false, usageOK, bg, tm)
 	// A response that stopped for a tool call waits for that tool, even when the name list missed
 	// the call (a spliced sniff window): the classifier reads such a response as a wait for a person.
