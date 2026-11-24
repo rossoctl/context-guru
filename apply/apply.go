@@ -666,7 +666,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// Read ONCE, used twice: the restart grace the boundary consults and the cold
 			// decision below are one fact — this request's cache lifetime — and must not be
 			// derived twice (see ttlTier for the last time two readers disagreed).
-			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
+			model := gjson.GetBytes(body, "model").String()
+			ttl, lifetimeKind := CacheLifetime(provider, model, body)
 			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			// The alias session id: the same conversation reaches us under it when the explicit
 			// session header comes and goes (see the clock note below). The restart grace asks
@@ -718,7 +719,16 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if alias != sessionID {
 				loadSessionState(st, alias)
 			}
-			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
+			seen := aliasSeenState(st, alias, nowMs)
+			aliasAt := seen.at
+			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
+			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
+			// request that wrote no alias clock (a bypassed one) has moved the entry since.
+			carriedAt := int64(0)
+			if seen.carriedAt > 0 && seen.at >= prevAt {
+				carriedAt = seen.carriedAt
+			}
+			if aliasAt > prevAt {
 				prevAt = aliasAt
 			}
 			// The TTL record is read under BOTH ids too, and the two guards have to compose or
@@ -742,7 +752,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				if a := sessionTTL(st, alias, ttl); a > ttl {
 					ttl = a
 				}
-				coldCache = cacheIsCold(prevAt, nowMs, ttl)
+				// A free 1-hour ping was the last touch: the provider holds the entry for the 1-hour
+				// lifetime from it, whatever tier this thread's own request asks (#1350). The guards above
+				// are the floor; the lifetime and the verdict come from the one function.
+				facts := CacheFacts{Provider: provider, Model: model,
+					LastOneHour: touchOneHour, Floor: ttl}
+				// A free 1-hour ping stands under a real request the host has not confirmed (it failed, or
+				// nobody told us): the failed request touched nothing, so the ping's hour still runs.
+				// The same margin as the verdict (coldMargin): the carry ends where a plain tier would.
+				if carriedAt > 0 && time.Duration(nowMs-carriedAt)*time.Millisecond < EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true})+coldMargin {
+					facts.LastOneHour = true
+				}
+				ttl = EntryLifetime(facts)
+				coldCache = IsCold(facts, prevAt, nowMs)
 			}
 			// A minimum only proves warmth before its boundary; past it the
 			// entry may still exist. Never lift TailOnlyCold on that guess.
@@ -1314,16 +1336,104 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 // single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
 // clock ever needs the boundary too.
 func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
+	at, _ := aliasSeenTier(st, alias, nowMs)
+	return at
+}
+
+// aliasSeenTier is aliasSeen that also returns the tier of the touch it replaced: true when that touch was a
+// keep-alive request that left the entry at the 1-hour tier (RecordCacheTouchAliasTier).
+//
+// A REAL request writes the plain clock, with no tier. So the tier lives exactly until the next real
+// request, as the clock does, and one record carries the time and the tier of the last touch: they cannot
+// disagree.
+func aliasSeenTier(st store.Store, alias string, nowMs int64) (prev int64, prevOneHour bool) {
+	v := aliasSeenState(st, alias, nowMs)
+	return v.at, v.oneHour
+}
+
+// seenState is what a cg:seen: value says about the last touch.
+type seenState struct {
+	at      int64 // the time of the last touch
+	oneHour bool  // that touch left the entry at the 1-hour tier
+	// carriedAt is the time of a free 1-hour ping that still stands under a real request nobody has confirmed
+	// (ConfirmRealTouch). 0 = none.
+	carriedAt int64
+}
+
+// aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
+// that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
+// provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
+// accepted (ConfirmRealTouch, the keeper's Record), the same line that ends the keeper's own touch. So both
+// records of the fact end at ONE event and cannot disagree, whatever the failure path (#1350).
+func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
 	if st == nil || nowMs <= 0 {
-		return 0
+		return seenState{}
 	}
 	k := store.SeenPrefix + alias
-	var prev int64
 	if b, ok := st.Get(k); ok {
-		prev, _ = strconv.ParseInt(string(b), 10, 64)
+		prev = parseSeenState(b)
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+	v := strconv.FormatInt(nowMs, 10)
+	switch {
+	case prev.oneHour:
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10)
+	case prev.carriedAt > 0:
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10)
+	}
+	st.Put(k, []byte(v))
 	return prev
+}
+
+// seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
+const seenCarrySep = "^"
+
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that a real request was
+// accepted, so the entry's tier is now that request's own. The time stays. Nothing changes when nothing is
+// carried. The keeper calls it where it ends its own touch.
+func ConfirmRealTouch(st store.Store, alias string) {
+	if st == nil || alias == "" {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
+		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
+		// clock, so its `:1h` stays) errs warm only: no cut.
+		if v := parseSeenState(b); v.carriedAt > 0 {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
+}
+
+// seenOneHourSuffix marks a clock value whose last touch left the entry at the 1-hour tier. Written by
+// RecordCacheTouchAliasTier only.
+const seenOneHourSuffix = ":1h"
+
+// parseSeen reads a cg:seen: value: milliseconds, and the tier suffix. A value it cannot read is 0.
+func parseSeen(b []byte) (ms int64, oneHour bool) {
+	v := parseSeenState(b)
+	return v.at, v.oneHour
+}
+
+// parseSeenState reads all three shapes of a value: "<ms>", "<ms>:1h" and "<ms>^<pingMs>". One it cannot read
+// is the zero state, which is never cold.
+func parseSeenState(b []byte) (v seenState) {
+	str := string(b)
+	if i := strings.Index(str, seenCarrySep); i >= 0 {
+		c, err := strconv.ParseInt(str[i+1:], 10, 64)
+		if err != nil {
+			return seenState{}
+		}
+		v.carriedAt, str = c, str[:i]
+	}
+	trimmed := strings.TrimSuffix(str, seenOneHourSuffix)
+	v.oneHour = len(trimmed) != len(str)
+	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return seenState{}
+	}
+	v.at = ms
+	return v
 }
 
 // RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
@@ -1378,20 +1488,65 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 // path hashed. A body the host changed after apply ran (tool deferral appends the names list to the
 // head) gives another alias, so such a host passes the one apply derived to RecordCacheTouchAlias.
 func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64) {
-	if st == nil || nowMs <= 0 || len(body) == 0 {
-		return
-	}
-	norm := normalizeSessionMessages(provider, body)
-	if len(norm) == 0 {
-		return
-	}
-	sys, firstUser := schema.SessionHead(norm)
-	RecordCacheTouchAlias(st, session.Scoped(tenant, "", sys, firstUser), nowMs)
+	RecordCacheTouchTier(st, tenant, body, provider, nowMs, false)
 }
 
 // RecordCacheTouchAlias is RecordCacheTouch for a caller that holds the alias already: Trace.TouchAlias,
-// derived from the request as it arrived. It writes the same clock under the given key, monotone.
+// derived from the request as it arrived. It writes the same clock under the given key, monotone. The touch
+// carries no tier: it ends any 1-hour tier an earlier touch left.
 func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
+	RecordCacheTouchAliasTier(st, alias, nowMs, false)
+}
+
+// TouchAliasFor is the alias (the cold clock's key) a request body derives, "" when it derives none. It is
+// the same derivation RecordCacheTouch uses, so a caller that must find the clock again later (the keeper
+// ending a 1-hour tier) cannot drift from it.
+func TouchAliasFor(tenant string, body []byte, provider bschemas.ModelProvider) string {
+	if len(body) == 0 {
+		return ""
+	}
+	norm := normalizeSessionMessages(provider, body)
+	if len(norm) == 0 {
+		return ""
+	}
+	sys, firstUser := schema.SessionHead(norm)
+	return session.Scoped(tenant, "", sys, firstUser)
+}
+
+// RecordCacheTouchTier is RecordCacheTouch that also says the tier the touch left the entry at.
+func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
+	if st == nil || nowMs <= 0 {
+		return
+	}
+	RecordCacheTouchAliasTier(st, TouchAliasFor(tenant, body, provider), nowMs, oneHour)
+}
+
+// EndTouchTier ends the 1-hour tier of the touch made at atMs, keeping its time: the plain clock value stays.
+// The keeper calls it when the route that gave the tier is switched off, so the stored fact and the keeper's
+// own never disagree. A later touch (another time or tier) is left alone.
+func EndTouchTier(st store.Store, alias string, atMs int64) {
+	if st == nil || alias == "" {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		if v := parseSeenState(b); (v.oneHour && v.at == atMs) || (v.carriedAt > 0 && v.carriedAt == atMs) {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
+}
+
+// RecordCacheTouchAliasTier is RecordCacheTouchAlias with the tier of the touch.
+//
+// oneHour says the touch left the provider's entry at the 1-hour tier: a free 1-hour keep-alive ping
+// (1-hour-on-wait) read the prefix and moved the entry from 5 minutes to 1 hour. A request that carries
+// 1-hour markers does not need it: it states its own tier, and sessionTTL keeps it. Until the next touch
+// the cold decision then counts the entry's lifetime from this touch at the 1-hour lifetime
+// (lastTouchOneHour), not at the 5 minutes the thread's own requests ask for.
+//
+// A touch with oneHour false is the new LAST touch and ends the tier: a manual 5-minute ping moves a
+// 1-hour entry back to 5 minutes (#1258). The clock stays monotone: an older touch changes nothing.
+func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHour bool) {
 	if st == nil || nowMs <= 0 || alias == "" {
 		return
 	}
@@ -1400,11 +1555,22 @@ func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
 	// record is that later is warmer.
 	k := store.SeenPrefix + alias
 	if b, got := st.Get(k); got {
-		if prev, err := strconv.ParseInt(string(b), 10, 64); err == nil && prev >= nowMs {
+		if prev, _ := parseSeen(b); prev >= nowMs {
 			return
 		}
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+	v := strconv.FormatInt(nowMs, 10)
+	if oneHour {
+		v += seenOneHourSuffix
+	}
+	st.Put(k, []byte(v))
+}
+
+// lastTouchOneHour reports whether the LAST touch of this prefix's entry (a real request counts) left it at
+// the 1-hour tier: the clock's own record says so, and no other clock (the thread's tracker) is later.
+// prevAt is the latest clock the caller read, before the alias's clock joined it.
+func lastTouchOneHour(aliasAt int64, aliasOneHour bool, prevAt int64) bool {
+	return aliasOneHour && aliasAt > 0 && aliasAt >= prevAt
 }
 
 // sessionTTL is cacheTTL widened to the LONGEST lifetime this PREFIX has ever asked for.

@@ -175,6 +175,8 @@ type capture struct {
 	hosted bool
 	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
 	kaRefreshedAt time.Time
+	// kaRefreshedOneHour: the entry's last touch was a live free 1-hour ping (kaArrival).
+	kaRefreshedOneHour bool
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -560,7 +562,7 @@ func (c *capture) noteKeepAlive(ka kaArrival) {
 	defer c.timed("noteKeepAlive")()
 	if c != nil {
 		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
-		c.kaRefreshedAt = ka.refreshedAt
+		c.kaRefreshedAt, c.kaRefreshedOneHour = ka.refreshedAt, ka.refreshedOneHour
 	}
 }
 
@@ -928,7 +930,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
-	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
+	e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
 	// saving is the accountant library's rescue, not computed from these.
@@ -1051,27 +1053,20 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
-// the last real request, cut short by a ping that refreshed the entry later than that request.
+// entryAgeMs and cacheAttributionTTLMs are the library's (apply.EntryAgeMs, apply.BilledLifetimeMs): the
+// proxy passes facts, and the lifetime rule lives with the cold check (#1350).
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
-	if refreshedAt.IsZero() || sinceMs <= 0 {
-		return sinceMs
-	}
-	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
-		return age
-	}
-	return sinceMs
+	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
 
-// cacheAttributionTTLMs is the lifetime of the entry this request tried to read. oneHour is the
-// tier the provider BILLED that entry at (the whole write at 1h on the thread's previous request),
-// not the tier a request asked for: a one-hour ask the provider billed at five minutes stays
-// five minutes. false (also "unknown") keeps the five-minute lifetime.
+// attributionTTLMs is the lifetime the miss verdict judges against: the entry is at 1 hour when its last
+// write was billed there, or when its last touch was a free 1-hour ping (#1350).
+func (c *capture) attributionTTLMs(provider, model string, prevOneHour bool) int64 {
+	return cacheAttributionTTLMs(provider, model, prevOneHour || (c != nil && c.kaRefreshedOneHour))
+}
+
 func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
-	if _, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil); kind != apply.CacheLifetimeExact {
-		return 0
-	}
-	return modelinfo.CacheLifetime(provider, model, oneHour).Milliseconds()
+	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, oneHour)
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
