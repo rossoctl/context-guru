@@ -928,7 +928,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 
 	// The envelope rewrites (tail split, tool-schema strip) already rewrote `body`, so
 	// the result must be forwarded even if no component changes a message.
-	changed := systemSplit || toolSchema || filteredDecls > 0
+	changed := systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 	// Each changed message's new bytes, keyed by its index in the body's messages array,
 	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
 	// sjson.SetBytes into the whole body per changed message, which copies the entire

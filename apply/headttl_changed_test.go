@@ -43,3 +43,31 @@ func TestHeadTTLRelabelCountsAsChangedOnTheMessagesPath(t *testing.T) {
 		t.Fatal("Changed = false, but the body holds the head-TTL relabel")
 	}
 }
+
+// The equal-count path: no component changes a message (midsum declines under its 4-message
+// threshold), and the head-TTL relabel is the only change. Changed must still be true.
+func TestHeadTTLRelabelCountsAsChangedOnTheEqualCountPath(t *testing.T) {
+	pad := strings.Repeat("context ", 30000)
+	body := `{"model":"aws/claude-opus-5",` +
+		`"tools":[{"name":"Bash","description":"` + pad + `","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],` +
+		`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}},` +
+		`{"type":"text","text":"Current branch: main","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[
+		{"role":"user","content":"first"},
+		{"role":"assistant","content":"ok"},
+		{"role":"user","content":[{"type":"text","text":"final","cache_control":{"type":"ephemeral"}}]}
+	]}`
+	p, err := pipe(t, "pipeline: [midsum]\n").Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+		Provider: bschemas.Anthropic, Body: []byte(body), HeadTTL1h: true, HeadTTLMinBytes: 200000,
+	})
+	if !res.Trace.HeadTTL1h || !strings.Contains(string(res.Body), `"ttl":"1h"`) {
+		t.Fatalf("precondition: the body must hold the 1h relabel (trace %v)", res.Trace.HeadTTL1h)
+	}
+	if !res.Changed {
+		t.Fatal("Changed = false, but the body holds the head-TTL relabel")
+	}
+}
