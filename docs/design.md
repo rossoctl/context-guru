@@ -317,12 +317,12 @@ time, so it cannot disagree with the store. Each event writes the store record o
 
 | Event | Write |
 | --- | --- |
-| a free 1-hour ping | `<ms>:1h` |
-| a real request (before the forward) | `<ms>` or, over a standing ping, `<ms>^<pingMs>` (the carry) |
+| a free 1-hour ping | `<ms>:1h:<tag>` (`<tag>` is a hash of the route that made it) |
+| a real request (before the forward) | `<ms>` or, over a standing ping, `<ms>^<pingMs>:<tag>` (the carry) |
 | an accepted real request | the carry that request wrote ends: `<ms>` (`apply.ConfirmRealTouch`, by the request's own clock time) |
 | a failed real request | nothing: the carry stays, the ping's hour runs on |
 | a 5-minute touch, a manual press | `<ms>` |
-| a route switch-off | the ping's tier ends, the time stays (`apply.EndTouchTier`) |
+| a route switch-off | the tier of a ping stamped with that route's tag ends, the time stays (`apply.EndTouchTier`). A later ping of another route stays. |
 | the index's capacity bound | nothing: only the index loses a thread, the record expires by `EntryLifetime` |
 
 Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.

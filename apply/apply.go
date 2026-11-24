@@ -20,6 +20,8 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"maps"
@@ -1315,6 +1317,9 @@ type seenState struct {
 	// carriedAt is the time of a free 1-hour ping that still stands under a real request nobody has confirmed
 	// (ConfirmRealTouch). 0 = none.
 	carriedAt int64
+	// tag names the route that made the 1-hour ping ("" = not named). A route switch-off ends only a ping that
+	// carries its own tag (EndTouchTier), so it can never end a later ping another route made.
+	tag string
 }
 
 // aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
@@ -1333,9 +1338,9 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 	v := strconv.FormatInt(nowMs, 10)
 	switch {
 	case prev.oneHour:
-		v += seenCarrySep + strconv.FormatInt(prev.at, 10)
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10) + tagSuffix(prev.tag)
 	case prev.carriedAt > 0:
-		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10)
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10) + tagSuffix(prev.tag)
 	}
 	st.Put(k, []byte(v))
 	return prev
@@ -1376,25 +1381,46 @@ func parseSeen(b []byte) (ms int64, oneHour bool) {
 	return v.at, v.oneHour
 }
 
-// parseSeenState reads all three shapes of a value: "<ms>", "<ms>:1h" and "<ms>^<pingMs>". One it cannot read
-// is the zero state, which is never cold.
+// parseSeenState reads all the shapes of a value: "<ms>", "<ms>:1h", "<ms>:1h:<tag>", "<ms>^<pingMs>" and
+// "<ms>^<pingMs>:<tag>". One it cannot read is the zero state, which is never cold. An older reader fails to
+// parse any suffixed shape and reads 0, which is never cold either.
 func parseSeenState(b []byte) (v seenState) {
 	str := string(b)
 	if i := strings.Index(str, seenCarrySep); i >= 0 {
-		c, err := strconv.ParseInt(str[i+1:], 10, 64)
+		rest := str[i+1:]
+		if j := strings.Index(rest, ":"); j >= 0 {
+			v.tag, rest = rest[j+1:], rest[:j]
+		}
+		c, err := strconv.ParseInt(rest, 10, 64)
 		if err != nil {
 			return seenState{}
 		}
 		v.carriedAt, str = c, str[:i]
+	} else if i := strings.Index(str, seenOneHourSuffix); i >= 0 {
+		v.oneHour, v.tag = true, strings.TrimPrefix(str[i+len(seenOneHourSuffix):], ":")
+		str = str[:i]
 	}
-	trimmed := strings.TrimSuffix(str, seenOneHourSuffix)
-	v.oneHour = len(trimmed) != len(str)
-	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	ms, err := strconv.ParseInt(str, 10, 64)
 	if err != nil {
 		return seenState{}
 	}
 	v.at = ms
 	return v
+}
+
+// tagSuffix is the written form of a route tag: ":<tag>", or nothing when there is none.
+func tagSuffix(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return ":" + tag
+}
+
+// RouteTag is the short name of a route a 1-hour ping is stamped with. It is a hash, so the store value holds no
+// provider, endpoint or model text.
+func RouteTag(route string) string {
+	h := sha256.Sum256([]byte(route))
+	return hex.EncodeToString(h[:4])
 }
 
 // RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
@@ -1483,16 +1509,17 @@ func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider b
 }
 
 // EndTouchTier ends the free 1-hour ping that stands under the alias's clock, keeping the clock's time: the plain
-// value stays. It ends a plain `:1h` and a carried ping alike, and does nothing for a plain value. The keeper
-// calls it when the route that gave the tier is switched off, so the cold check never keeps an hour for a tier
-// no route granted. It is the only way the keeper ends a tier: the store record is the one record of the fact.
-func EndTouchTier(st store.Store, alias string) {
-	if st == nil || alias == "" {
+// value stays. It ends a plain `:1h` and a carried ping alike, and only one stamped with tag, the route that made
+// it (RouteTag). A later ping of another route, a ping with no tag and a plain value stay. The keeper calls it
+// when the route that gave the tier is switched off, so the cold check never keeps an hour for a tier
+// no route granted, and never loses one a different route granted. It is the only way the keeper ends a tier: the store record is the one record of the fact.
+func EndTouchTier(st store.Store, alias, tag string) {
+	if st == nil || alias == "" || tag == "" {
 		return
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		if v := parseSeenState(b); v.oneHour || v.carriedAt > 0 {
+		if v := parseSeenState(b); (v.oneHour || v.carriedAt > 0) && v.tag == tag {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
@@ -1548,6 +1575,13 @@ func LiveOneHourPing(st store.Store, alias string, provider bschemas.ModelProvid
 // A touch with oneHour false is the new LAST touch and ends the tier: a manual 5-minute ping moves a
 // 1-hour entry back to 5 minutes (#1258). The clock stays monotone: an older touch changes nothing.
 func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHour bool) {
+	RecordCacheTouchAliasRoute(st, alias, nowMs, oneHour, "")
+}
+
+// RecordCacheTouchAliasRoute is RecordCacheTouchAliasTier that also stamps a 1-hour touch with the tag of the
+// route that made it (RouteTag), so a switch-off of that route can end it and no other. The tag is ignored for
+// a 5-minute touch.
+func RecordCacheTouchAliasRoute(st store.Store, alias string, nowMs int64, oneHour bool, tag string) {
 	if st == nil || nowMs <= 0 || alias == "" {
 		return
 	}
@@ -1562,7 +1596,7 @@ func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHou
 	}
 	v := strconv.FormatInt(nowMs, 10)
 	if oneHour {
-		v += seenOneHourSuffix
+		v += seenOneHourSuffix + tagSuffix(tag)
 	}
 	st.Put(k, []byte(v))
 }

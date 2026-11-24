@@ -2,6 +2,7 @@ package keepalive
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,4 +245,25 @@ func TestAnEarlierRequestsConfirmLeavesALaterRequestsCarryInTheKeeper(t *testing
 		Hold: fakeOf(r.k).hold(subKey), Store: r.st, TouchAlias: aAlias, TouchAtMs: aAt})
 	// C fails: no Record. The ping's hour stands.
 	r.agree(t0.Add(13*time.Minute), true, "after an earlier request's confirm and a failed later request")
+}
+
+// The switch-off of one route must not end a LATER 1-hour ping that another route wrote under the same alias, even
+// while a thread of the first route is still in the index (#1365). That would read a warm entry as cold.
+func TestASwitchOffNeverEndsAnotherRoutesLaterPing(t *testing.T) {
+	r, t0 := pingedThread(t) // the thread's ping is route 1's, and the thread is still indexed
+	other := oneHourRoute(bschemas.Anthropic, "https://other", "/v1/messages", "aws/claude-sonnet-5")
+	apply.RecordCacheTouchAliasRoute(r.st, r.alias, t0.Add(5*time.Minute).UnixMilli(), true, apply.RouteTag(other))
+	r.k.oneHourSwitchOff(oneHourKeyOf(), bschemas.Anthropic, "/v1/messages", "", "aws/claude-sonnet-5", "test")
+	if cold, _ := r.request(t0.Add(13 * time.Minute)); cold {
+		t.Error("the switch-off of route 1 ended route 2's later ping: a warm entry read cold")
+	}
+}
+
+// The ping the keeper really sends is stamped with its own route, so the switch-off of that route finds it.
+func TestTheKeepersPingIsStampedWithItsRoute(t *testing.T) {
+	r, _ := pingedThread(t)
+	b, _ := r.st.Get(store.SeenPrefix + r.alias)
+	if want := ":1h:" + apply.RouteTag(oneHourKeyOf()); !strings.HasSuffix(string(b), want) {
+		t.Errorf("record = %q, want it to end in %q", b, want)
+	}
 }

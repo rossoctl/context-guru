@@ -185,7 +185,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		// A ping that read the entry refreshed it; one that wrote re-created it and started a fresh
 		// lifetime (#580). The same rule record1 applies, and the same two clocks it moves. The
 		// switch above returns on 429, 5xx, 4xx and on no usage, so in practice only a 2xx reaches here.
-		job.touch(job.provider, start.UnixMilli(), job.sentOneHour)
+		job.touch(job.provider, start.UnixMilli(), job.sentOneHour, oneHourRoute(job.provider, endpoint, job.route, job.model))
 		k.mu.Lock()
 		e.refreshedAt = start
 		// An automatic entry's schedule restarts from a ping that read the cache. A write does not

@@ -258,7 +258,7 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 	}
 	k.mu.Unlock()
 	for _, t := range ended {
-		apply.EndTouchTier(t.st, t.alias)
+		apply.EndTouchTier(t.st, t.alias, apply.RouteTag(t.route))
 	}
 	if first {
 		slog.Warn("context-guru: no more 1-hour keep-alive pings on this route; the threads fall back to the plain schedule: "+why,

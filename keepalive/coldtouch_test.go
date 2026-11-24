@@ -279,8 +279,12 @@ func TestASubstituteTouchTakesItsTierFromTheBodysMarkers(t *testing.T) {
 				provider: bschemas.Anthropic, raw: tc.raw}
 			r.k.recordSubstitutePing(j, "", Usage{CacheRead: 40_000, Output: 1}, 5, r.clock.now(), 0, nil)
 			b, _ := st.Get(store.SeenPrefix + "al")
-			if got := string(b); got != strconv.FormatInt(r.clock.now().UnixMilli(), 10)+tc.want {
-				t.Errorf("clock = %q, want the time and tier %q", got, tc.want)
+			want := strconv.FormatInt(r.clock.now().UnixMilli(), 10) + tc.want
+			if tc.want != "" { // a 1-hour touch is stamped with its route
+				want += ":" + apply.RouteTag(oneHourRoute(bschemas.Anthropic, e.endpoint, e.route, e.model))
+			}
+			if got := string(b); got != want {
+				t.Errorf("clock = %q, want the time, tier and route %q", got, want)
 			}
 		})
 	}

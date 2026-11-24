@@ -191,21 +191,76 @@ func TestTheTierSuffixFailsOpenForAnOlderReader(t *testing.T) {
 	}
 }
 
-func TestEndTouchTierKeepsTheTimeAndEndsAPlainPingOnly(t *testing.T) {
+func TestEndTouchTierKeepsTheTimeAndEndsOnlyAPingOfItsOwnRoute(t *testing.T) {
 	st := store.NewMemory(store.Options{})
 	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
-	RecordCacheTouchAliasTier(st, "a", 2000, false)
-	EndTouchTier(st, "a")
+	r1, r2 := RouteTag("route-1"), RouteTag("route-2")
+	RecordCacheTouchAliasRoute(st, "a", 2000, false, r1) // a 5-minute touch: no tier, no tag
+	EndTouchTier(st, "a", r1)
 	if got := get(); got != "2000" {
 		t.Fatalf("ending a plain value changed it: %q", got)
 	}
-	RecordCacheTouchAliasTier(st, "a", 3000, true)
-	EndTouchTier(st, "a")
+	RecordCacheTouchAliasRoute(st, "a", 3000, true, r2) // the ping of ANOTHER route
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "3000:1h:"+r2 {
+		t.Fatalf("the switch-off of route 1 changed route 2's ping: %q", got)
+	}
+	EndTouchTier(st, "a", "") // no tag: ends nothing
+	if got := get(); got != "3000:1h:"+r2 {
+		t.Fatalf("an empty tag ended a ping: %q", got)
+	}
+	EndTouchTier(st, "a", r2)
 	if got := get(); got != "3000" {
 		t.Fatalf("record = %q, want a plain 3000", got)
 	}
-	EndTouchTier(st, "none") // no record: nothing, no panic
-	EndTouchTier(nil, "a")
+	RecordCacheTouchAliasTier(st, "a", 4000, true) // a ping with no tag stays under any switch-off
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "4000:1h" {
+		t.Fatalf("an untagged ping was ended: %q", got)
+	}
+	EndTouchTier(st, "none", r1) // no record: nothing, no panic
+	EndTouchTier(nil, "a", r1)
+}
+
+// The tag rides along when a real request carries the ping, and a carried ping of another route stays too.
+func TestTheRouteTagSurvivesTheCarry(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	r1, r2 := RouteTag("route-1"), RouteTag("route-2")
+	RecordCacheTouchAliasRoute(st, "a", 2000, true, r1)
+	aliasSeenState(st, "a", 3000)
+	aliasSeenState(st, "a", 4000)
+	if got := get(); got != "4000^2000:"+r1 {
+		t.Fatalf("carry = %q", got)
+	}
+	if at, ok := StandingOneHourPing(st, "a"); !ok || at != 2000 {
+		t.Fatalf("StandingOneHourPing = %d, %v", at, ok)
+	}
+	EndTouchTier(st, "a", r2)
+	if got := get(); got != "4000^2000:"+r1 {
+		t.Fatalf("another route's switch-off ended the carry: %q", got)
+	}
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "4000" {
+		t.Fatalf("record = %q, want a plain 4000", got)
+	}
+}
+
+// A tagged value is one more shape an older binary cannot read: it reads 0, which is never cold.
+func TestATaggedValueFailsOpenForAnOlderReader(t *testing.T) {
+	for _, v := range []string{"1700000000000:1h:abcd1234", "1700000000000^1699999990000:abcd1234"} {
+		if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+			t.Errorf("fixture: %q must not parse as a plain integer", v)
+		}
+		if got := parseSeenState([]byte(v)); got.tag != "abcd1234" || got.at != 1700000000000 {
+			t.Errorf("parse(%q) = %+v", v, got)
+		}
+	}
+	for _, v := range []string{"x:1h:abcd", "5^x:abcd", ":1h:abcd"} {
+		if got := parseSeenState([]byte(v)); got != (seenState{}) {
+			t.Errorf("parse(%q) = %+v, want the zero state", v, got)
+		}
+	}
 }
 
 func TestEntryLifetimeIsTheOneDecision(t *testing.T) {
@@ -296,17 +351,6 @@ func TestARealRequestCarriesTheOneHourPingUntilConfirmed(t *testing.T) {
 	}
 }
 
-func TestEndTouchTierEndsACarriedPingToo(t *testing.T) {
-	st := store.NewMemory(store.Options{})
-	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
-	RecordCacheTouchAliasTier(st, "a", 2000, true)
-	aliasSeenState(st, "a", 3000) // a real request: "3000^2000"
-	EndTouchTier(st, "a")
-	if got := get(); got != "3000" {
-		t.Fatalf("record = %q, want a plain 3000", got)
-	}
-}
-
 // The one record of the fact, read by every host reader. A plain value, an unreadable value and no value all say
 // "no ping": an unreadable record never reads as a tier. The time is the ping's, also under a carry.
 func TestStandingOneHourPingReadsTheOneRecord(t *testing.T) {
@@ -322,6 +366,8 @@ func TestStandingOneHourPingReadsTheOneRecord(t *testing.T) {
 		{"a plain clock", "2000", 0, false},
 		{"garbage", "x:1h", 0, false},
 		{"a bad carry", "3000^x", 0, false},
+		{"a tagged ping", "2000:1h:abcd", 2000, true},
+		{"a tagged carry", "3000^2000:abcd", 2000, true},
 		{"an empty value", "", 0, false},
 	} {
 		put(tc.v)

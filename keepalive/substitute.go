@@ -274,7 +274,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 		// The question is built from the forwarded body, so it carries that body's own markers: a read with
 		// plain markers moves a 1-hour entry back to 5 minutes (the same rule as PingNow). The tier is the one
 		// those markers state, not the one the entry holds.
-		j.touch(provider, startedAt.UnixMilli(), apply.AllBreakpointsAskExtendedTTL(j.raw))
+		j.touch(provider, startedAt.UnixMilli(), apply.AllBreakpointsAskExtendedTTL(j.raw), oneHourRoute(provider, endpoint, route, model))
 	}
 	var cost float64
 	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {

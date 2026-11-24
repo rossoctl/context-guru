@@ -2002,7 +2002,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
 	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
-		j.touch(provider, startedAt.UnixMilli(), j.sentOneHour)
+		j.touch(provider, startedAt.UnixMilli(), j.sentOneHour, oneHourRoute(provider, endpoint, route, model))
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
@@ -2615,10 +2615,14 @@ func (k *Keeper) fireSubstitute(j pingJob) bool {
 // touch that left it there (#1350), and the 5-minute one from a touch that did not. A touch always states
 // its tier: the last touch is the one that counts, so a 5-minute touch after a 1-hour ping moves the entry
 // back (#1258).
-func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
+//
+// route is the route key (oneHourRoute) of the request. A 1-hour touch is stamped with its tag, so a switch-off of
+// that route ends this touch and never one another route wrote.
+func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64, oneHour bool, route string) {
+	tag := apply.RouteTag(route)
 	if j.touchAlias != "" {
-		apply.RecordCacheTouchAliasTier(j.st, j.touchAlias, nowMs, oneHour)
+		apply.RecordCacheTouchAliasRoute(j.st, j.touchAlias, nowMs, oneHour, tag)
 		return
 	}
-	apply.RecordCacheTouchTier(j.st, j.tenant, j.raw, provider, nowMs, oneHour)
+	apply.RecordCacheTouchAliasRoute(j.st, touchAliasOf(j), nowMs, oneHour, tag)
 }
