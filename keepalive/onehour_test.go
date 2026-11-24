@@ -516,8 +516,8 @@ func TestFailedSubstituteLeavesOneOneHourPing(t *testing.T) {
 // returnWith records the thread's return with full control of the request: the model and whether the client
 // rewrote the prefix. The usage is a cold rebuild unless read is large.
 func returnWith(k *Keeper, key Key, at time.Time, body string, read, write int64, rewritten bool) {
-	alias, atMs := realRequestClock(k, key, body, at) // apply writes its clock before the forward
-	k.Record(Record{Key: key, StartedAt: at, Body: []byte(body), Provider: bschemas.Anthropic, Store: storeOf(k), TouchAlias: alias, TouchAtMs: atMs,
+	alias, atMs, seq := realRequestClock(k, key, body, at) // apply writes its clock before the forward
+	k.Record(Record{Key: key, StartedAt: at, Body: []byte(body), Provider: bschemas.Anthropic, Store: storeOf(k), TouchAlias: alias, TouchAtMs: atMs, TouchSeq: seq,
 		Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(), PrefixRewritten: rewritten,
 		Usage: Usage{CacheRead: read, CacheWrite: write, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(key)})
 }

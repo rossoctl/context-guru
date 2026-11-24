@@ -232,7 +232,7 @@ func TestAnEarlierRequestsConfirmLeavesALaterRequestsCarryInTheKeeper(t *testing
 	r.record(t0, "end_turn", onWaitPolicy()) // the thread waits: its ping is due at +4 minutes
 	// A: another thread with the same content head writes its clock BEFORE the ping.
 	r.request(t0.Add(time.Minute))
-	aAlias, aAt := r.alias, r.atMs
+	aAlias, aAt, aSeq := r.alias, r.atMs, r.seq
 	r.clock.advance(240 * time.Second)
 	r.k.Sweep(r.clock.now())
 	waitPings(t, r.k, 1)               // the free ping writes :1h after A's clock
@@ -242,7 +242,7 @@ func TestAnEarlierRequestsConfirmLeavesALaterRequestsCarryInTheKeeper(t *testing
 	r.k.Record(Record{Key: subKey, StartedAt: t0.Add(time.Minute), Body: []byte(kaBody), Provider: bschemas.Anthropic,
 		Route: "/v1/messages", Status: 200, UsageOK: true, Policy: onWaitPolicy(),
 		Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
-		Hold: fakeOf(r.k).hold(subKey), Store: r.st, TouchAlias: aAlias, TouchAtMs: aAt})
+		Hold: fakeOf(r.k).hold(subKey), Store: r.st, TouchAlias: aAlias, TouchAtMs: aAt, TouchSeq: aSeq})
 	// C fails: no Record. The ping's hour stands.
 	r.agree(t0.Add(13*time.Minute), true, "after an earlier request's confirm and a failed later request")
 }

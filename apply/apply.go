@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -235,6 +236,8 @@ type Trace struct {
 	// hands it back to ConfirmRealTouch, so a confirm ends only the carry its OWN request wrote. 0 when this
 	// request wrote no clock (a bypassed one).
 	TouchAtMs int64
+	// TouchSeq numbers that write (the carry it makes holds it). The host hands it back with TouchAtMs.
+	TouchSeq int64
 	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
 	Thread         thread.Result
 	ThreadResolved bool
@@ -677,8 +680,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if alias != sessionID {
 				loadSessionState(st, alias)
 			}
-			seen := aliasSeenState(st, alias, nowMs)
-			tr.TouchAtMs = nowMs // aliasSeenState wrote this request's own clock at nowMs (when st persists)
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
 			aliasAt := seen.at
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
@@ -1320,6 +1323,10 @@ type seenState struct {
 	// tag names the route that made the 1-hour ping ("" = not named). A route switch-off ends only a ping that
 	// carries its own tag (EndTouchTier), so it can never end a later ping another route made.
 	tag string
+	// seq names the request that wrote a carry (touchSeq, one per request of this process). A confirm ends only a
+	// carry with its own time AND its own seq, so two requests that wrote in the same millisecond cannot end
+	// each other's carry. 0 = none.
+	seq int64
 }
 
 // aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
@@ -1328,9 +1335,21 @@ type seenState struct {
 // accepted (ConfirmRealTouch, the keeper's Record). The store value is the ONE record of the fact: the keeper
 // keeps no tier and no time of its own, so no failure path can leave two records apart (#1350, #1365).
 func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
+	prev, _ = aliasSeenWrite(st, alias, nowMs)
+	return prev
+}
+
+// touchSeq numbers the real requests that write a clock in this process. A carry holds the number of the request
+// that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
+// errs toward the old behavior (a shared confirm), not toward a new failure.
+var touchSeq atomic.Int64
+
+// aliasSeenWrite is aliasSeenState that also returns the number of this request's write (0 when none was made).
+func aliasSeenWrite(st store.Store, alias string, nowMs int64) (prev seenState, seq int64) {
 	if st == nil || nowMs <= 0 {
-		return seenState{}
+		return seenState{}, 0
 	}
+	seq = touchSeq.Add(1)
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
 		prev = parseSeenState(b)
@@ -1338,12 +1357,12 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 	v := strconv.FormatInt(nowMs, 10)
 	switch {
 	case prev.oneHour:
-		v += seenCarrySep + strconv.FormatInt(prev.at, 10) + tagSuffix(prev.tag)
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
 	case prev.carriedAt > 0:
-		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10) + tagSuffix(prev.tag)
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
 	}
 	st.Put(k, []byte(v))
-	return prev
+	return prev, seq
 }
 
 // seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
@@ -1354,10 +1373,11 @@ const seenCarrySep = "^"
 //
 // It ends only the carry that request wrote (the value's own time is atMs). Another request on the same alias may
 // have written its clock since, over a ping that came after this request's clock: that carry is not this
-// request's to end, and if that request then fails, the ping's hour must stand (#1365). atMs 0 (this request wrote
-// no clock) ends nothing. The keeper calls it where it ends its own index entry.
-func ConfirmRealTouch(st store.Store, alias string, atMs int64) {
-	if st == nil || alias == "" || atMs <= 0 {
+// request's to end, and if that request then fails, the ping's hour must stand (#1365). The value's request number
+// (seq) makes the match exact: two requests that wrote in one millisecond cannot end each other's carry. atMs 0
+// (this request wrote no clock) ends nothing. The keeper calls it where it ends its own index entry.
+func ConfirmRealTouch(st store.Store, alias string, atMs, seq int64) {
+	if st == nil || alias == "" || atMs <= 0 || seq <= 0 {
 		return
 	}
 	k := store.SeenPrefix + alias
@@ -1365,7 +1385,7 @@ func ConfirmRealTouch(st store.Store, alias string, atMs int64) {
 		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
 		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
 		// clock, so its `:1h` stays) errs warm only: no cut.
-		if v := parseSeenState(b); v.carriedAt > 0 && v.at == atMs {
+		if v := parseSeenState(b); v.carriedAt > 0 && v.at == atMs && v.seq == seq {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
@@ -1391,6 +1411,13 @@ func parseSeenState(b []byte) (v seenState) {
 		if j := strings.Index(rest, ":"); j >= 0 {
 			v.tag, rest = rest[j+1:], rest[:j]
 		}
+		if j := strings.Index(rest, seenSeqSep); j >= 0 {
+			q, err := strconv.ParseInt(rest[j+1:], 10, 64)
+			if err != nil {
+				return seenState{}
+			}
+			v.seq, rest = q, rest[:j]
+		}
 		c, err := strconv.ParseInt(rest, 10, 64)
 		if err != nil {
 			return seenState{}
@@ -1406,6 +1433,16 @@ func parseSeenState(b []byte) (v seenState) {
 	}
 	v.at = ms
 	return v
+}
+
+// seenSeqSep marks the number of the request that wrote a carry: "<ms>^<pingMs>#<seq>".
+const seenSeqSep = "#"
+
+func seqSuffix(seq int64) string {
+	if seq <= 0 {
+		return ""
+	}
+	return seenSeqSep + strconv.FormatInt(seq, 10)
 }
 
 // tagSuffix is the written form of a route tag: ":<tag>", or nothing when there is none.
