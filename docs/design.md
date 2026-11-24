@@ -298,8 +298,9 @@ substitute kind.
 No code writes "5 minutes", "30 minutes" or "1 hour" for a provider's cache lifetime. Two places hold the
 facts:
 
-- **The table:** `modelinfo.CacheLifetime(provider, model, oneHour)`. `apply.LifetimeAtTier` and
-  `keepalive.cacheLifetime` wrap it. It gives the lifetime for a provider, a model and a tier. A
+- **The table:** `modelinfo.CacheLifetime(provider, model, oneHour)`. `apply.EntryLifetime(CacheFacts)` and
+  `apply.IsCold` are the one decision that wraps it; every reader (the cold check, the keeper, the dashboard)
+  calls them. It gives the lifetime for a provider, a model and a tier. A
   provider with a fixed lifetime (OpenAI GPT-5.6+, 30 minutes) ignores the tier.
 - **The tier of the last touch:** the `cg:seen:<alias>` clock records the time of the last touch of the
   entry. A keep-alive request that left the entry at the 1-hour tier writes `<ms>:1h`. A real request, or a
