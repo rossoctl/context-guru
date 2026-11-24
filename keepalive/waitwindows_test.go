@@ -78,7 +78,7 @@ func TestResolveWithWindowsNeverPlansFewerPingsThanToday(t *testing.T) {
 	}
 }
 
-func TestResolveWithWindowsAnOneHourIdleDropsTheReading(t *testing.T) {
+func TestResolveWithWindowsAOneHourIdleDropsTheReading(t *testing.T) {
 	// The wide reading chose a 1-hour strategy (Idle >= 300 s): it does not take the plan, so the
 	// reading does not apply, today's policy stands and the open counts are dropped.
 	account := Policy{KeepAlive: true, WaitPlan: true, MaxPings: 3, Idle: 240 * time.Second, MinPrefixTokens: 1000}

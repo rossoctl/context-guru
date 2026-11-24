@@ -1,7 +1,5 @@
 package keepalive
 
-import "time"
-
 // WindowsInput is what ResolveWithWindows reads. The host fills the callbacks from its own state
 // (the tracker, the request's usage and body), so each is called lazily and only where the
 // resolver needs it.
@@ -43,7 +41,7 @@ type WindowsInput struct {
 // the reading did not apply).
 func ResolveWithWindows(in WindowsInput) (Policy, string, *TaskCounts) {
 	open := in.Open
-	planEligible := func(p Policy) bool { return p.WaitPlan && p.On() && p.Idle < 300*time.Second }
+	planEligible := func(p Policy) bool { return p.WaitPlan && p.On() && p.Idle < OneHourIdleFloor }
 	ignoreWindows, ignoreToday := false, false
 	if in.Account.WaitPlan && in.Tracked {
 		ignoreToday = !WindowsApply(in.CauseOf(nil), in.Subagent)

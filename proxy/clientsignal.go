@@ -57,9 +57,6 @@ import (
 // end marks' lifetime and per-tenant cap are package keepalive's (lifecycle.go).
 const maxLifecycleBody = 4096
 
-// compactRaceMargin is keepalive.CompactRaceMargin.
-const compactRaceMargin = keepalive.CompactRaceMargin
-
 func clientSignalEnabled() bool {
 	return clientSignalsSwitchOn() && !keepAliveDisabled()
 }
@@ -173,11 +170,14 @@ func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) boo
 		// whose hook id differs from the proxy's session key, always uses that route.
 		k.pred.sessionEnded(tenantID, scoped, now, r.Cutoff)
 	})
-	slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", res.Retired, "applied", res.Applied)
+	// The same debug line as before the move: an acted event reports what it retired, any other reports applied=false.
 	if res.Applied {
+		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", res.Retired)
 		k.signalApplied.Add(1)
+		return true
 	}
-	return res.Applied
+	slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "applied", false)
+	return false
 }
 
 // toolSearchSignal receives the raw ENABLE_TOOL_SEARCH value of one session, from the plugin's

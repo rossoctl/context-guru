@@ -155,14 +155,16 @@ func NormalizeSignal(event, kind string) (string, bool) {
 
 // SignalResult is what ApplyClientSignal did.
 type SignalResult struct {
-	// Applied is true when the event changed anything.
+	// Applied is true when the event is one the keeper acts on (SessionEnd, or SessionStart with
+	// kind "compact"). It stays true when nothing was live to retire.
 	Applied bool
-	// Ended is true when the session was marked ended (SessionEnd).
+	// Ended is true when the session was marked ended (SessionEnd only).
 	Ended bool
-	// Retired is how many live entries it retired.
+	// Retired is how many live entries the retirement removed. It can be 0 when Applied is true.
 	Retired int
-	// Cutoff is the start-time cutoff of a compact retirement, or zero when every thread of the
-	// session was retired.
+	// Cutoff is zero for SessionEnd, which retires every thread of the session. For a compact it is
+	// the arrival time less CompactRaceMargin: only the main thread's entries whose last request
+	// started before it are retired.
 	Cutoff time.Time
 }
 
