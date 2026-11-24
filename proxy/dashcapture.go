@@ -1050,8 +1050,8 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs and cacheAttributionTTLMs are the library's (apply.EntryAgeMs, apply.BilledLifetimeMs): the
-// proxy passes facts, and the lifetime rule lives with the cold check (#1350).
+// entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold
+// check (#1350). attributionTTLMs, below, does the same for apply.BilledLifetimeMs.
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
 	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
