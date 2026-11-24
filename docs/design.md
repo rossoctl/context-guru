@@ -481,7 +481,7 @@ constructor verbatim. A `preset` expands to a default pipeline; explicit fields 
 Unknown keys are rejected.
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }

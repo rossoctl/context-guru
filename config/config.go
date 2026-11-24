@@ -583,8 +583,19 @@ func (c *Config) applyPreset() error {
 // 234,437, `below_min_tokens` 64,831, **acted 0 of 5,752 requests**, and an independent
 // sweep found 0 convertible candidates in 11.67M tokens. It was costing 1.53 ms and a
 // TextTokens call per tool message to convert nothing.
+//
+// CURRENT AND OBSOLETE PRESETS (#1345). Six presets are current: off, conservative, medium,
+// high, xhigh, ultrahigh. They are the effort ladder the plugin preset pickers offer. The
+// other 15 are OBSOLETE: cache, safe, balanced, aggressive, coding, mcp, agent, general,
+// summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm. They stay in
+// this map so old configs load and published numbers stay reproducible. They run exactly as
+// before. Do not pick one for a new setup, and do not copy one into a doc example. `house` is
+// still the binary and tenant default; it runs the same pipeline as `conservative`. Any
+// wording below that calls an obsolete preset "recommended" is historical.
 var presets = map[string][]string{
 	"off": {}, // passthrough: no components (baseline / A-B control)
+	// OBSOLETE (#1345): cache, safe, balanced, aggressive, coding, mcp, agent, general,
+	// summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm.
 	// cache: the volatile-tail split and NOTHING else. This is the preset a stranger
 	// evaluating context-guru on their own Claude Code sessions is pointed at, and the
 	// reason it exists is that it can be verified by reading this one line: no content is
@@ -610,10 +621,13 @@ var presets = map[string][]string{
 	//
 	// Anthropic-family only, and the docs say so: cachesplit is a no-op on implicit
 	// prefix-cache backends (vLLM, llm-d) — see apply/prefixsplit.go.
-	"cache":      {"cachesplit"},
+	// OBSOLETE (#1345).
+	"cache": {"cachesplit"},
+	// OBSOLETE (#1345): safe, balanced, aggressive.
 	"safe":       {"format", "textclean", "searchfold", "cachesplit"},
 	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "cachesplit"},
 	"aggressive": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "linecap", "cachesplit"},
+	// OBSOLETE (#1345): coding, mcp.
 	// coding: deterministic only, no model calls. It named `skeleton` until 2026-08 — which is behind the
 	// `cg_skeleton` build tag and therefore NOT registered in a normal binary, so
 	// `preset: coding` failed to build with `unknown component "skeleton"` for every user
@@ -622,6 +636,7 @@ var presets = map[string][]string{
 	// (see docs/results/measured-2026-08.md).
 	"coding": {"format", "textclean", "searchfold", "dedup", "cmdfilter", "extract", "linecap", "cachesplit"},
 	"mcp":    {"format", "textclean", "smartcrush", "cachesplit"},
+	// OBSOLETE (#1345): agent.
 	// agent: tuned for long agentic sessions (e.g. Claude Code on SWE-bench),
 	// where the dominant cost is the transcript of tool outputs (file reads)
 	// re-sent every turn. mask (drop old tool outputs) is the biggest lever
@@ -630,7 +645,7 @@ var presets = map[string][]string{
 	// + dedup add relevance/supersession/dup wins; cachesplit keeps the shared system
 	// prefix cacheable. Order: lossless first, then offload old-then-large, cache last.
 	"agent": {"format", "textclean", "searchfold", "dedup", "failed_run", "mask", "extract", "extract_llm", "cachesplit"},
-	// general: the recommended all-round pipeline, safe+effective for any agent/
+	// OBSOLETE (#1345): general. Historical note: it was the recommended all-round pipeline, safe+effective for any agent/
 	// benchmark. Ordered by pipeline semantics: the lossless trio first (format,
 	// textclean, searchfold — textclean is the plain-text one, and plain text is what most
 	// tool output is: 1,724 of 1,748 distinct outputs in the captures measured here)
@@ -644,6 +659,7 @@ var presets = map[string][]string{
 	// two overlapping old-context reducers (mask is the one kept; summarize
 	// is its own preset — see docs/components.md redundancy notes).
 	"general": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "linecap", "cachesplit"},
+	// OBSOLETE (#1345): summarize, summarizer1509.
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
 	"summarize": {"summarize"},
@@ -657,6 +673,7 @@ var presets = map[string][]string{
 	// a configurable head — now lives in `summarize` itself, so a fork would duplicate ~500 lines
 	// of summarizer to deliver three YAML values.
 	"summarizer1509": {"summarize"},
+	// OBSOLETE (#1345): agentdiet.
 	// agentdiet reproduces the published AgentDiet baseline (arXiv:2509.23586, FSE
 	// 2026) so it can be A/B'd against our own reducers on the same traffic. Its
 	// tuned thresholds live in presetConfigs; it runs with `format` only, because
@@ -664,7 +681,8 @@ var presets = map[string][]string{
 	// stacking our offloaders beside it would reduce the same tool outputs first and
 	// there would be nothing left to attribute.
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
-	// codesmart / codesafe are the SWE-bench study's winning configs and the RECOMMENDED
+	// OBSOLETE (#1345): codesmart, codesafe.
+	// codesmart / codesafe are the SWE-bench study's winning configs and were the RECOMMENDED
 	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
 	// proxyapp/main_run.go). Asserting it here is how five documents came to repeat
 	// it: the claim was copied from three lines away from the flag that disproves it. Their
@@ -673,6 +691,8 @@ var presets = map[string][]string{
 	// /compact?preset=) resolving them.
 	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap", "cachesplit"},
 	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "linecap", "cachesplit"},
+	// OBSOLETE (#1345): house, housellm. `house` is still the binary and tenant default, and
+	// `conservative` below is the same pipeline under a current name.
 	// house / housellm are the SERVICE configs: `house` is what every account runs unless
 	// it says otherwise (tenant.DefaultConfigYAML is this document), `housellm` is the same
 	// pipeline with the compaction-model pass added, applied per account on request.
