@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/tenant"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // closedStrategy covers every tenant but its window is shut at t0 (12:00 UTC).

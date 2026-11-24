@@ -3,7 +3,7 @@ package keepalive
 import (
 	"testing"
 
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The prefix floor follows the wait cause: 20k for a tool wait and for any subagent wait, 80k for the

@@ -4,8 +4,8 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The per-wait ping plan (#858). The ping count is chosen when a turn ends, from what the thread

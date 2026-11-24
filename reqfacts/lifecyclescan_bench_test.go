@@ -1,4 +1,4 @@
-package proxy
+package reqfacts
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // bigAgentBody is an Anthropic transcript of about 300K tokens (~1.2 MB): 300 tool turns.
@@ -48,6 +48,6 @@ func BenchmarkWriterBodyScansNormalizeOnce(b *testing.B) {
 			return msgs
 		}
 		waitcause.New().ObserveWith("t", "s", "th", body, norm)
-		scanLifecycle(norm, body)
+		ScanLifecycle(norm, body)
 	}
 }

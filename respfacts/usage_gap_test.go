@@ -404,7 +404,7 @@ func TestTheMissReasonNeverContradictsUsageReported(t *testing.T) {
 
 // EVERY Miss VALUE MUST BE A DELIBERATE CHOICE, benign or counted.
 //
-// Alertable() and the counter increment used to be two independent lists — a predicate and a switch.
+// alertable() and the counter increment used to be two independent lists — a predicate and a switch.
 // Widening only the predicate, exactly the edit someone adding a 6th value would make, passed the
 // entire suite: the shape record started firing on the new case while no counter moved. They are one
 // map now, so they cannot drift; this test covers the other half, which construction cannot — that
@@ -436,9 +436,9 @@ func TestEveryUsageMissIsClassifiedAsBenignOrCounted(t *testing.T) {
 			t.Errorf("%v is neither listed benign nor counted, so it is silently benign by "+
 				"omission — decide: add it to `benign` here, or give it a counter in usageCounters", m)
 		}
-		if counted != m.Alertable() {
-			t.Errorf("%v: Alertable()=%v disagrees with usageCounters membership=%v — the two have "+
-				"drifted apart again", m, m.Alertable(), counted)
+		if counted != m.alertable() {
+			t.Errorf("%v: alertable()=%v disagrees with usageCounters membership=%v — the two have "+
+				"drifted apart again", m, m.alertable(), counted)
 		}
 	}
 	// And the map holds nothing outside the declared range, which would be an entry for a value that

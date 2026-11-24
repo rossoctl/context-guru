@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )

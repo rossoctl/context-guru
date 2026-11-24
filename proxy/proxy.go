@@ -31,25 +31,25 @@ import (
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/inband"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
-	"github.com/rossoctl/context-guru/internal/respfacts"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
+	"github.com/rossoctl/context-guru/reqfacts"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
@@ -57,6 +57,7 @@ import (
 	"github.com/rossoctl/context-guru/thinkcount"
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
+	"github.com/rossoctl/context-guru/waitcause"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
@@ -368,7 +369,7 @@ type Handler struct {
 	// closure finish() builds and hands to dash.Event.WaitCause — off the request path
 	// entirely, not merely off the upstream forward. A pure scan of the same body (earlyscan.go) runs
 	// while the request is upstream; the keeper plans from it and the writer reuses it, but only the
-	// writer writes the tracker. See internal/waitcause,
+	// writer writes the tracker. See waitcause,
 	// noteWaitBody/finish in dashcapture.go, and dash/capture.go's write().
 	waits *waitcause.Tracker
 	// scan counts the early wait-cause scan's outcomes (earlyscan.go); scanGate is a test hook that holds
@@ -908,7 +909,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// request's row, not to whichever tenant is in flight when the call returns.
 	// The shared option build (lifecycle.Request): the same window, C and tracker as the chat path.
 	// C is resolved beside the window because the fill fraction belongs over it rather than over
-	// the window — see internal/compactionpoint.
+	// the window — see compactionpoint.
 	o := lifecycle.Request{
 		Provider: provider, Body: body, Session: r.Header.Get("x-context-guru-session"), Tenant: tn.ID,
 		Models: models, Window: window, WindowExact: windowExact,
@@ -1346,7 +1347,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.
-		cp.noteMeta(metaFromBody(body))
+		cp.noteMeta(reqfacts.MetaFromBody(body))
 		// Which PROJECT this request belongs to — the directory the agent was started in, stated
 		// in the prompt. Off the pristine body too: a pipeline that compacts the environment
 		// block would otherwise make the project vanish on the requests it acted on.
@@ -1922,7 +1923,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 					// A multi-round continuation OVERWRITES respBody each round, so what
 					// survived is the last round, not the whole answer. Rounds records the
 					// count; this records that the body is therefore partial.
-					inc = joinIncomplete(inc, record.IncompleteTruncated)
+					inc = record.JoinIncomplete(inc, record.IncompleteTruncated)
 				}
 				errMsg := ""
 				if status >= 400 || status == 0 {
@@ -2151,7 +2152,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// Wiring only path A would leave a non-Anthropic --record user with turns that
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
-			// is the honest outcome; see fillResponse.
+			// is the honest outcome; see record.TurnFromCall.
 			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, nil) // no Anthropic stream here: nothing to collect
 			if !sseBuffered {
 				sseFirstByte = first
@@ -2318,7 +2319,7 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 }
 
 // resolveCompactionPoint is C for this request's model: the operator's compaction_point from the MODEL_PRICES
-// table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
+// table when one is stated, else the bootstrap table of compactionpoint. Both paths (/v1/messages
 // and /compact) go through it, as they do for the window.
 func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
 	return lifecycle.ResolveCompactionPoint(ctx, h.opts.Windows, gjson.GetBytes(body, "model").String(), window)

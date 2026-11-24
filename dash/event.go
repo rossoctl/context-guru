@@ -8,6 +8,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
+	"github.com/rossoctl/context-guru/reqfacts"
 )
 
 // Token-accounting honesty levels. A request is only `complete` when the provider
@@ -178,7 +179,7 @@ type Event struct {
 	AliasFn func() string `json:"-"`
 	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
 	// from the request body and the response's own tool calls/stop reason, by string match
-	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
+	// and structural tool_use reads, no LLM. See waitcause, which defines every
 	// value and never guesses: a signal this proxy's client (Claude Code) does not send, or
 	// another agent/provider entirely, reads "unknown" rather than a label chosen for it.
 	// This package NEVER reads these columns to choose a keep-alive ping budget or change
@@ -631,64 +632,9 @@ type Event struct {
 	ContentCap int `json:"-"`
 }
 
-// Meta is the request's own metadata — the knobs the CLIENT chose, plus the stop
-// reason the provider answered with. Captured because they are the levers that explain
-// a cost: reasoning effort and thinking budget buy output tokens, and where the
-// cache_control breakpoints sit decides how much of the prefix was billed as a read
-// rather than a write, which is the whole subject of this project.
-//
-// Real columns rather than a JSON blob, deliberately. Every field here is either
-// GROUPED BY in an aggregate (effort, thinking mode, stop reason, tool_choice, the
-// breakpoint counts) or a scalar rendered on the request row; a JSON column would put
-// json_extract() in the middle of every one of those queries and give the free-text tail
-// somewhere to hide from the redactor. There is no long tail to justify one.
-//
-// Anthropic and OpenAI spell the same knobs differently; capture normalizes them (see
-// proxy.metaFromBody) so one column means one thing across dialects.
-type Meta struct {
-	// ReasoningEffort is Anthropic's `output_config.effort` or OpenAI's
-	// `reasoning_effort` — low|medium|high|xhigh|max, "" when unset. NOT a synonym for
-	// thinking: on current Anthropic models effort is the depth control and
-	// thinking.budget_tokens is the removed predecessor, so both are recorded.
-	ReasoningEffort string `json:"reasoning_effort"`
-	// ThinkingMode is Anthropic `thinking.type` — adaptive|enabled|disabled, "" absent.
-	ThinkingMode string `json:"thinking_mode"`
-	// ThinkingBudget is `thinking.budget_tokens` (pre-4.6 models only; 0 = unset).
-	ThinkingBudget int `json:"thinking_budget"`
-	// Temperature and TopP are POINTERS, and the column is NULLABLE, because "the client
-	// did not set it" and "the client set it to 0" are different facts and 0 is a
-	// legitimate value for both. A sentinel would make a deterministic request
-	// indistinguishable from an unspecified one.
-	Temperature *float64 `json:"temperature"`
-	TopP        *float64 `json:"top_p"`
-	// MaxTokens is the client's output cap (`max_tokens`, or OpenAI's
-	// `max_completion_tokens`); 0 = unset.
-	MaxTokens int  `json:"max_tokens"`
-	Stream    bool `json:"stream"`
-	// ToolChoice is the normalized forcing mode: auto|any|none|required|tool for the
-	// object form, or the bare string OpenAI sends. The forced tool's NAME is
-	// deliberately not stored — it is unbounded client text with no aggregate use.
-	ToolChoice string `json:"tool_choice"`
-	// Tools is how many tools the request declared; SystemBlocks how many blocks the
-	// top-level `system` array carried (1 for a bare string).
-	Tools        int `json:"tools"`
-	SystemBlocks int `json:"system_blocks"`
-	// The prompt-cache breakpoints ON ARRIVAL, by location: `tools` and `system` render
-	// ahead of `messages`, so location decides how much prefix a breakpoint protects.
-	// Zero on a request the pipeline never inspected (observe mode), like every other
-	// pipeline-derived field on such a row.
-	CacheBPSystem   int `json:"cache_bp_system"`
-	CacheBPTools    int `json:"cache_bp_tools"`
-	CacheBPMessages int `json:"cache_bp_messages"`
-	CacheBPBlocks   int `json:"cache_bp_blocks"`
-	CacheBPRoot     int `json:"cache_bp_root"` // the top-level cache_control (automatic caching)
-	// StopReason is the provider's own terminal reason, normalized across dialects:
-	// Anthropic `stop_reason` (end_turn|max_tokens|tool_use|stop_sequence|pause_turn|
-	// refusal|model_context_window_exceeded) or OpenAI `choices.0.finish_reason`
-	// (stop|length|tool_calls|content_filter). "" when the response carried none.
-	// StopTimeoutEstimated is the one value the proxy writes itself (#754).
-	StopReason string `json:"stop_reason"`
-}
+// Meta is the request's own metadata and the stop reason. The type lives in
+// reqfacts, which reads it off a request body. dash stores it.
+type Meta = reqfacts.Meta
 
 // StopTimeoutEstimated is the stop_reason of a keep-alive ping row that ran to the keeper's ping
 // timeout with no answer (#754). The provider probably billed it, so the row books the keeper's
@@ -697,19 +643,14 @@ type Meta struct {
 // knows what the provider did with it.
 const StopTimeoutEstimated = "timeout_estimated"
 
-// CacheBreakpoints is the total the provider's cap of four applies to.
-func (m Meta) CacheBreakpoints() int {
-	return m.CacheBPSystem + m.CacheBPTools + m.CacheBPMessages + m.CacheBPBlocks + m.CacheBPRoot
-}
-
-// redact sanitizes the free-text metadata fields. Every one of them is a value the
+// redactMeta sanitizes the free-text metadata fields. Every one of them is a value the
 // CLIENT chose, so each is attacker-influenced and none may reach the database
 // unchecked — a request carrying `"reasoning_effort": "<a real api key>"` would
 // otherwise write that key to disk, and to the SSE feed, forever.
 //
 // The numeric and boolean fields need no check: they were parsed as numbers, so they
 // cannot carry a string at all.
-func (m *Meta) redact() {
+func redactMeta(m *Meta) {
 	m.ReasoningEffort = metaEnum(m.ReasoningEffort)
 	m.ThinkingMode = metaEnum(m.ThinkingMode)
 	m.ToolChoice = metaEnum(m.ToolChoice)
@@ -728,7 +669,7 @@ func (m *Meta) redact() {
 //
 // Idempotent, so a double call cannot corrupt a row.
 func (e *Event) Redact() {
-	e.Meta.redact()
+	redactMeta(&e.Meta)
 	// The launch directory is client-chosen; sanitise the field itself so the feed and the
 	// inventory writer see what the requests table stores.
 	e.Project = ProjectPath(e.Project)

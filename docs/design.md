@@ -20,7 +20,7 @@ infrastructure the components sit on.
 | `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, the rules for which request books no figure, the `Recorder` (`Begin`/`End`/`Price`: the per-thread state and the finish-time pricing), the `PingStore`, and the state-file format (`SnapshotState`/`RestoreState`) |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
-| `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client |
+| `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client. Its test helpers are in `internal/inbandtest` |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
@@ -36,6 +36,12 @@ infrastructure the components sit on.
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
 | `lifecycle/` | the order of the steps around one request, for every host: `Prepare` (expand repair, stray adjudication answers, anchor, pipeline, thread, keep-alive arrival, tool injection, tool deferral), `Finish` (keep-alive touch, deferral ledger, deferred summary, warm question, billed input), `CompactionGate`, `Request.Opts` (the option build shared by the request path, observe and `/compact`), `SelfRates`, `RatesFor`, `ResolveWindow`, `ResolveCompactionPoint`. The host gives function values for what needs its own state |
 | `thread/` | tells apart the threads of one session (main agent, subagents, forks): `Tracker.Resolve` (agent header, then prefix continuity, then the session), `Key`, `AgentThread`, `ValidHeaderID`, `IsAgentCompaction`. A host sets `apply.Opts.ThreadOf` from it; see that field for the host contract |
+| `reqfacts/` | the facts a request states: `Meta` (`MetaFromBody`) and `Lifecycle` (`ScanLifecycle`). `dash.Meta` and `dash.LifecycleReq` are aliases of them |
+| `respfacts/` | the facts a response states, from a body or a stream: usage (`ParseUsage`, `ParseSSEUsage`) and the reason a usage reading is missing (`Miss`) |
+| `compactionpoint/` | where a client compacts its own context, by client and model: `Point`, `For`, `Resolve`. Read by `components/offload`; `lifecycle.ResolveCompactionPoint` returns it |
+| `providerusage/` | the billed token tiers of one response (fresh, cache read, cache write by lifetime): `Parse`, `Tiers`. Returned by `respfacts`; read by `keepalive` and `cheapmodel` |
+| `waitcause/` | what a thread waits for after a reply (a person, a tool, a subagent): `Tracker`, `Scan`, `ClassifyWaitingFor`. `keepalive` and `campaign` read it, and a host feeds it |
+| `adjudicate/` | the in-band tool the cheap model answers through: `ToolName`, the tool definition, and the stray-call answer (`StrayAnswer`, `ResponseCallIDs`). Used by `accwire`, `cheapmodel` and `inband` |
 | `thinkcount/` | the token count of each thinking block, for the accountant: reads a response's signatures and `thinking_tokens` (JSON, or a stream as it goes by) and keeps a bounded table by signature hash, which the host passes to `accountant.NewBodyCounted` |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
 | `dash/` | the persistent observability layer: SQLite store, off-hot-path capture, SSE hub, JSON API, embedded UI |

@@ -1,22 +1,27 @@
-package proxy
+package reqfacts
 
 import (
 	"github.com/tidwall/gjson"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/schema"
 )
 
-// scanLifecycle reads the tool_results a request answers, from the same normalized
+// Lifecycle is what a request body says about the wait it ended: the tool results it answers.
+type Lifecycle struct {
+	ResultCount, ResultBytes int
+	ResultError              bool
+}
+
+// ScanLifecycle reads the tool_results a request answers, from the same normalized
 // conversation the pipeline and waitcause use: every role=tool message after the last
 // assistant turn. Count and bytes come from there; is_error is the one thing the normalizer
 // drops, so it is read straight off the last Anthropic user message. Runs on the dashboard
 // writer goroutine, never the request path.
 // norm yields the normalized conversation (shared with waitcause so the body is normalized
 // once per request).
-func scanLifecycle(norm func() []bschemas.ChatMessage, body []byte) (q dash.LifecycleReq) {
+func ScanLifecycle(norm func() []bschemas.ChatMessage, body []byte) (q Lifecycle) {
 	defer func() { recover() }() //nolint:errcheck // fail open: a body it cannot read yields no facts
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {
 		return q // server-held history: `input` is only the newest turn

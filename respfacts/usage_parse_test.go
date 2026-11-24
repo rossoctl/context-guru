@@ -3,7 +3,7 @@ package respfacts
 import (
 	"testing"
 
-	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/providerusage"
 )
 
 func TestParseUsageAnthropic(t *testing.T) {

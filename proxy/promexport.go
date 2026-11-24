@@ -12,13 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/store"
 )
 

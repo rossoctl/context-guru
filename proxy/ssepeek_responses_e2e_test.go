@@ -3,7 +3,7 @@ package proxy
 import (
 	"bytes"
 	"fmt"
-	"github.com/rossoctl/context-guru/inband/inbandtest"
+	"github.com/rossoctl/context-guru/internal/inbandtest"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"io"
 	"net/http"

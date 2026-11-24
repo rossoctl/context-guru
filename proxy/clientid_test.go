@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"net/http/httptest"
 	"testing"
 )

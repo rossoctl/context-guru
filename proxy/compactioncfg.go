@@ -11,7 +11,7 @@ import (
 
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
+	"github.com/rossoctl/context-guru/compactionpoint"
 )
 
 // The user's own Claude Code auto-compact settings (#948).
@@ -22,7 +22,7 @@ import (
 // No per-session or per-request report, no stored copy: nothing to purge.
 //
 // WHERE: the host, because only the host can read the user's files and env. The rule that turns the
-// raw values into C stays in internal/compactionpoint (ClaudeCode.Resolve), which never imports
+// raw values into C stays in compactionpoint (ClaudeCode.Resolve), which never imports
 // proxy.
 //
 // WHICH ENV. The plugin starts the proxy from the SessionStart hook (start-proxy.sh, `setsid` or
