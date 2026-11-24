@@ -20,6 +20,7 @@ infrastructure the components sit on.
 | `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, and the rules for which request books no figure |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
+| `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |

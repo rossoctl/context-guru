@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"fmt"
+	"github.com/rossoctl/context-guru/inband/inbandtest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -399,10 +400,10 @@ func TestClientSearchRoundCapKeepsTheCall(t *testing.T) {
 // #879: on a streamed Chat Completions answer, text reaches the client as it arrives and only a call
 // to our search is held. The follow-up streams as the rest of the same answer.
 func TestClientSearchStreamsAndSplicesInBand(t *testing.T) {
-	r1 := ccRole("r1") + ccText("r1", "Let me look.") + ccCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
-		ccCallArgs("r1", 0, `{"names":["Workflow"]}`) + ccFinish("r1", "tool_calls") + ccUsage("r1") + ccDone
-	r2 := ccRole("r2") + ccCallStart("r2", 0, "c2", "Workflow") + ccCallArgs("r2", 0, `{"x":"go"}`) +
-		ccFinish("r2", "tool_calls") + ccUsage("r2") + ccDone
+	r1 := inbandtest.CCRole("r1") + inbandtest.CCText("r1", "Let me look.") + inbandtest.CCCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
+		inbandtest.CCCallArgs("r1", 0, `{"names":["Workflow"]}`) + inbandtest.CCFinish("r1", "tool_calls") + inbandtest.CCUsage("r1") + inbandtest.CCDone
+	r2 := inbandtest.CCRole("r2") + inbandtest.CCCallStart("r2", 0, "c2", "Workflow") + inbandtest.CCCallArgs("r2", 0, `{"x":"go"}`) +
+		inbandtest.CCFinish("r2", "tool_calls") + inbandtest.CCUsage("r2") + inbandtest.CCDone
 	up := &csUpstream{script: []string{r1, r2}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -415,10 +416,10 @@ func TestClientSearchStreamsAndSplicesInBand(t *testing.T) {
 	if st != http.StatusOK || strings.Contains(out, tooldefer.ClientSearchName) {
 		t.Fatalf("client got %d %q", st, out)
 	}
-	if !strings.HasPrefix(out, ccRole("r1")+ccText("r1", "Let me look.")) {
+	if !strings.HasPrefix(out, inbandtest.CCRole("r1")+inbandtest.CCText("r1", "Let me look.")) {
 		t.Fatalf("the text must reach the client verbatim, ahead of the splice: %q", out)
 	}
-	if strings.Count(out, ccDone) != 1 || strings.Contains(out, `"id":"r2"`) {
+	if strings.Count(out, inbandtest.CCDone) != 1 || strings.Contains(out, `"id":"r2"`) {
 		t.Fatalf("the client must see one answer: %q", out)
 	}
 	msg, ok := expand.AggregateSSE("openai", []byte(out))
@@ -444,7 +445,7 @@ func TestClientSearchStreamsAndSplicesInBand(t *testing.T) {
 
 // A streamed answer with no call of ours goes to the client byte for byte, in one upstream round.
 func TestClientSearchStreamTextPassesThrough(t *testing.T) {
-	r1 := ccRole("r1") + ccReason("r1", "hmm") + ccText("r1", "Hello") + ccFinish("r1", "stop") + ccUsage("r1") + ccDone
+	r1 := inbandtest.CCRole("r1") + inbandtest.CCReason("r1", "hmm") + inbandtest.CCText("r1", "Hello") + inbandtest.CCFinish("r1", "stop") + inbandtest.CCUsage("r1") + inbandtest.CCDone
 	up := &csUpstream{script: []string{r1}}
 	us := httptest.NewServer(up)
 	defer us.Close()
@@ -463,9 +464,9 @@ func TestClientSearchStreamTextPassesThrough(t *testing.T) {
 // A streamed mixed answer: the client's call streams, ours is handed back after it, and the next
 // request answers it, as on the buffered path.
 func TestClientSearchStreamMixedCall(t *testing.T) {
-	r1 := ccRole("r1") + ccCallStart("r1", 0, "c1", "Bash") + ccCallArgs("r1", 0, `{"x":"ls"}`) +
-		ccCallStart("r1", 1, "c2", tooldefer.ClientSearchName) + ccCallArgs("r1", 1, `{"names":["Monitor"]}`) +
-		ccFinish("r1", "tool_calls") + ccDone
+	r1 := inbandtest.CCRole("r1") + inbandtest.CCCallStart("r1", 0, "c1", "Bash") + inbandtest.CCCallArgs("r1", 0, `{"x":"ls"}`) +
+		inbandtest.CCCallStart("r1", 1, "c2", tooldefer.ClientSearchName) + inbandtest.CCCallArgs("r1", 1, `{"names":["Monitor"]}`) +
+		inbandtest.CCFinish("r1", "tool_calls") + inbandtest.CCDone
 	up := &csUpstream{script: []string{r1}}
 	us := httptest.NewServer(up)
 	defer us.Close()

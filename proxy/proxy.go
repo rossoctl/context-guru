@@ -40,6 +40,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/inband"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -1602,9 +1603,6 @@ func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.
 // nil when the dashboard is off.
 func (h *Handler) API() *dash.API { return h.api }
 
-// maxExpandRounds caps the expand continuation loop (headroom's default).
-const maxExpandRounds = 3
-
 // maxRequestBytes caps an inbound request body so a single huge POST can't exhaust
 // proxy memory (the body is buffered and token-counted several times). Generous
 // enough for very long agent transcripts; requests above it get 413 — unless
@@ -1707,27 +1705,18 @@ func refuseTooLarge(w http.ResponseWriter, limit int64) {
 // every later turn. Nothing is charged to the process-wide bounce counter, which counts expand
 // CALLS, and ten repairs of one stale error are one call.
 func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture, sessionOf func(body []byte) string) ([]byte, int) {
-	out, restored := expand.RepairToolResults(wire, body, func(hashID string) (string, bool) {
-		return expand.Resolve(tn.Store, hashID)
-	})
-	if len(restored) == 0 {
-		return out, 0
+	s := h.expandSinks(cp)
+	s.Bounce = nil // a repair is never a bounce: see inband.RepairExpandErrors
+	return inband.RepairExpandErrors(wire, body, tn.Store, sessionOf, s)
+}
+
+// expandSinks wires the library's expand accounting to the dashboard row and the process counter.
+func (h *Handler) expandSinks(cp *capture) inband.Sinks {
+	s := inband.Sinks{NoteExpand: cp.noteExpand, NoteSweepExpand: cp.noteSweepExpand}
+	if h.agg != nil {
+		s.Bounce = h.agg.RecordExpand
 	}
-	// Lazy: the derivation re-parses the transcript, and a repair is rare. Derived from the repaired
-	// body, because that is what the pipeline will see.
-	session := sessionOf(out)
-	for _, orig := range restored {
-		// Charge the row only the FIRST time this original comes back. Repairing the same
-		// stale error on ten later turns is one recovery, not ten.
-		if !offload.KeptVerbatim(tn.Store, session, orig) {
-			cp.noteExpand(schema.TextTokens(orig))
-			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
-			// first-time rule as the line above: the repair runs again on every later turn.
-			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig), ""))
-		}
-		offload.MarkKeptVerbatim(tn.Store, session, orig)
-	}
-	return out, len(restored)
+	return s
 }
 
 var errNoUpstream = errors.New("no upstream configured")
@@ -1739,7 +1728,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // Streaming (SSE) keeps streaming while it does. An Anthropic event stream is forwarded
 // event by event and forwarding stops at the content_block_start that calls the expand
 // tool; the continuation's blocks are then spliced into the same open response, renumbered
-// past the blocks already sent (sseSplicer, ssepeek.go). Nothing is buffered to decide
+// past the blocks already sent (sseSplicer, inband/sse.go). Nothing is buffered to decide
 // this, and the client's first byte is the upstream's first event. Both outcomes are
 // counted (agg.RecordSSE → /stats sse_streamed / sse_buffered), and a response is filed as
 // buffered only when the model opened with the call, so the client really did wait for the
@@ -1770,7 +1759,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// So for a tools-bearing client this is true from the FIRST turn, and the old "no offload
 	// yet → no tool → no buffering" fast path is gone with it. What replaced it is narrower
 	// and does the same job: sseSplicer withholds only the block that calls the expand tool
-	// and streams everything else as it arrives (see ssepeek.go). Of the other dialects, only a
+	// and streams everything else as it arrives (see inband/sse.go). Of the other dialects, only a
 	// Chat Completions stream that declares our own tool search is spliced (#879).
 	// Advertised covers BOTH proxy-injected tools. The response loop is what keeps a
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
@@ -1783,7 +1772,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// A Responses stream with our search is spliced only for a stateless request (#884): the
 	// client sends the full input each turn, so it never chains on the id of this response and
 	// round 1's id can stand for the whole stream. A request that may chain keeps the buffering.
-	respSplice := searchOn && schema.IsResponses(wire) && statelessResponses(body)
+	respSplice := searchOn && schema.IsResponses(wire) && inband.StatelessResponses(body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -1817,7 +1806,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	var lastUpStart time.Time
 	// sp is nil until an Anthropic event stream needs splicing, and then lives for the rest
 	// of the client request: every later round is written into the response it opened.
-	var sp *sseSplicer
+	var sp *inband.SSESplicer
 	// The events the current round withheld, hoisted out of the loop: once a stream is open,
 	// EVERY way this request can end has to end it with a complete turn, and these are the
 	// bytes that do it. prevWithheld keeps the round before's, because a continuation round
@@ -2038,28 +2027,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// Tool deferral changed this request and the provider refused it: the client must never see
 		// that 400 (Claude Code would turn its own search off for the session). Send the request
 		// without deferral, once, before answering. Round 0 only: a later round is the proxy's own.
-		if round == 0 && err == nil && resp != nil && di != nil &&
-			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
-			resp.Body.Close()
-			refused := resp.StatusCode
-			body = di.Orig
-			resp, err = h.doUpstream(r, up, body)
-			stubbed := false
-			// The missing-reference repair reads Anthropic shapes: not on our search's OpenAI wires.
-			if err == nil && !di.Search {
-				if fixed, ok := repairOnMissingRef(resp, body); ok {
-					// The original failed the same way: it names a tool `tools` lacks. Send it once
-					// more with a stub for that tool, so the client never sees our 400 (#871). The
-					// refusal was then not deferral's, so deferral stays on (originalOK false).
-					body, stubbed = fixed, true
-					resp, err = h.doUpstream(r, up, body)
-				}
+		if round == 0 && di != nil {
+			var retried bool
+			resp, err, body, retried = inband.RetryRefused(resp, err, body, inband.Refused{
+				Orig: di.Orig, Search: di.Search,
+				Do:   func(b []byte) (*http.Response, error) { return h.doUpstream(r, up, b) },
+				Book: func(status int, errBody []byte, ok bool) { h.deferRetry(di, status, errBody, ok) },
+			})
+			if retried {
+				// The original declares no search tool of ours: nothing to hold or answer from here on.
+				di, searchOn, respSplice = nil, false, false
 			}
-			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
-			h.deferRetry(di, refused, errBody, ok)
-			// The original declares no search tool of ours: nothing to hold or answer from here on.
-			di, searchOn, respSplice = nil, false, false
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than
@@ -2096,8 +2074,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				if withheld != nil {
 					countLeak(called)
 				}
-				sp.handBack(withheld)
-				sp.terminate(withheld)
+				sp.HandBack(withheld)
+				sp.Terminate(withheld)
 				return
 			}
 			// The client gets a fixed string, NOT err.Error(). http.Client returns a
@@ -2161,32 +2139,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		switch {
 		case isSSE && (provider == bschemas.Anthropic || (searchOn && wire == schema.WireOpenAI) || respSplice):
 			// Forward the events as they arrive and stop at the expand call, rather than
-			// buffering the response to find out whether it holds one. See ssepeek.go.
+			// buffering the response to find out whether it holds one. See inband/sse.go.
 			// Chat Completions with our own tool search (#879) takes the same splice: its text
 			// streams at once, and only a call to a proxy tool is held.
 			sse = true
 			if sp == nil {
 				if respSplice {
-					sp = newResponsesSSESplicer(w)
+					sp = inband.NewResponsesSSESplicer(w, copyHeaders)
 				} else if provider == bschemas.Anthropic {
-					sp = newSSESplicer(w)
+					sp = inband.NewSSESplicer(w, copyHeaders)
 				} else {
-					sp = newChatSSESplicer(w)
+					sp = inband.NewChatSSESplicer(w, copyHeaders)
 				}
 			}
-			sp.round(resp)
+			sp.Round(resp)
 			// The PREVIOUS round's withheld events, because pass is about to overwrite
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
 			if searchOn {
-				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName)
+				respBody, withheld, called = sp.Pass(resp.Body, expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName)
 			} else {
-				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+				respBody, withheld, called = sp.Pass(resp.Body, expand.ToolName, adjudicate.ToolName)
 			}
 			resp.Body.Close()
 			switch {
-			case len(called) > 0 && !sp.opened():
+			case len(called) > 0 && !sp.Opened():
 				// The model OPENED with the call, so the client holds a message_start and
 				// nothing else and waits for the whole continuation. That is a buffered
 				// response, and its first byte has to stay unset: filing the message_start's
@@ -2194,10 +2172,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// mislabelling sse_ttfb_ms_avg_buffered exists to expose.
 				sseBuffered, sseFirstByte = true, time.Time{}
 			case !sseBuffered:
-				sseFirstByte = sp.first
+				sseFirstByte = sp.FirstByte()
 			}
 			lg.Debug("cg.sse_splice", "round", round, "proxy_calls", strings.Join(called, ","),
-				"blocks_sent", sp.blocks, "bytes", len(respBody))
+				"blocks_sent", sp.Blocks(), "bytes", len(respBody))
 			if h.recorder != nil {
 				// sp.pass returns the round's raw event stream (the continuation loop below
 				// aggregates it too), so the writer must aggregate it: recIsSSE is true. A nil
@@ -2288,7 +2266,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// that second case the client has our tool_use, which is the leak these counters
 			// exist for.
 			countLeak(called)
-			sp.terminate(prevWithheld)
+			sp.Terminate(prevWithheld)
 			return
 		}
 		// bail is what the client gets when the loop cannot answer after all. On a spliced
@@ -2311,12 +2289,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if withheld != nil {
 				countLeak(called)
 			}
-			sp.handBack(withheld)
+			sp.HandBack(withheld)
 			// Idempotent via sp.ended: if those events closed the turn this is a no-op, and
 			// if the round was truncated it is the only thing that closes it.
-			sp.terminate(withheld)
+			sp.Terminate(withheld)
 		}
-		if round >= maxExpandRounds {
+		if round >= inband.MaxExpandRounds {
 			// The cap is reached, so this call cannot be answered — the client gets it, and
 			// bail is what counts that. Withholding first and handing back is the same bytes
 			// as streaming the round whole, and it is the only way the leak is visible.
@@ -2341,162 +2319,50 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
-		// Calls to our own tool search (#825). Together with a client tool call, the turn goes to the
-		// client whole (the loop cannot run the client's tool): the tools are added back now, and the
-		// next request answers our call (tooldefer.ApplySearch). Alone, they are answered below.
-		var searches []tooldefer.SearchCall
-		var searchSet map[string]bool
-		var searchNow []string
+		turn := inband.Turn{
+			Wire: wire, Body: body, Msg: msg, Store: tn.Store, Session: session, ThreadID: threadID,
+			Anchor: anchor, InBandBreakpoint: tn.Pipe.InBandBreakpoint(),
+			Sinks: h.expandSinks(cp),
+		}
 		if searchOn && di != nil {
-			var client bool
-			searches, client = tooldefer.SearchCalls(wire, msg, expand.ToolName, adjudicate.ToolName)
-			if len(searches) > 0 {
-				var names []string
-				for _, c := range searches {
-					names = append(names, c.Names...)
-				}
-				searchSet, searchNow = h.searchLoad(tn, di, names)
-				deferSearches.N += len(searches)
-				deferSearches.Loaded = append(deferSearches.Loaded, searchNow...)
-				lg.Debug("cg.tooldefer_search_call", "round", round, "calls", len(searches), "added_back", len(searchNow),
-					"with_client_tool", client)
-				if client || searchSet == nil {
-					if client {
-						h.deferGate().MixedSearches.Add(int64(len(searches)))
-						// Kept by call id, so the next request answers them even if it chains on
-						// previous_response_id and does not carry the calls.
-						h.noteSearchCalls(tn, di, searches)
-					}
-					bail()
-					return
-				}
+			turn.Search = &inband.Search{
+				Orig: di.Orig,
+				Load: func(names []string) (map[string]bool, []string) { return h.searchLoad(tn, di, names) },
+				Mixed: func(calls []tooldefer.SearchCall) {
+					h.deferGate().MixedSearches.Add(int64(len(calls)))
+					// Kept by call id, so the next request answers them even if it chains on
+					// previous_response_id and does not carry the calls.
+					h.noteSearchCalls(tn, di, calls)
+				},
 			}
 		}
-
-		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName, tooldefer.ClientSearchName)
-		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
-		// called PROXY tools only: by the time the request-path repair runs, the client has already
-		// received a tool_use for a tool it does not implement, already answered "not found", and
-		// already lost the turn.
-		//
-		// NOT on every path, and the exception is worth more than the claim it replaces. When the model
-		// calls this tool AND a client tool in the same assistant turn, otherTools is true, the bail()
-		// below hands the round to the client whole, and our tool_use reaches it raw — exactly as it did
-		// before this change. That is a deliberate deferral, not an oversight: answering in band means
-		// continuing the turn upstream, and this loop cannot continue a turn whose other tool_use only
-		// the CLIENT can execute. It would have to invent a result for the client's tool or drop the
-		// client's call, and both are worse than one lost turn. adjudicate.AnswerStrayCalls repairs it
-		// on the NEXT request instead: the substitute answer lands, is_error clears, the client's own
-		// tool_result is untouched, and the stray is counted — so fail-open holds and the price is one
-		// agent turn, not a broken session. Pinned by TestAdjudicateStrayCoCalledWithClientToolLeaks.
-		//
-		// So AnswerStrayCalls backstops TWO different things: this co-call path, which the loop DOES
-		// see and declines, and a round the loop genuinely cannot reconstruct (SSE aggregation failed,
-		// or maxExpandRounds is spent). An earlier version of this comment said the backstop was only
-		// for "a path this loop does not see", which was false for the first of those.
-		strays := adjudicate.ResponseCallIDs(wire, msg)
-		if (len(calls) == 0 && len(strays) == 0 && len(searches) == 0) || otherTools {
-			bail() // normal answer (or a CLIENT tool) — hand it over unchanged
+		ans := inband.Answer(turn)
+		if ans.Searches > 0 {
+			deferSearches.N += ans.Searches
+			deferSearches.Loaded = append(deferSearches.Loaded, ans.SearchLoaded...)
+			lg.Debug("cg.tooldefer_search_call", "round", round, "calls", ans.Searches, "added_back", len(ans.SearchLoaded),
+				"with_client_tool", ans.SearchClient)
+		}
+		expanded += ans.Resolved
+		if ans.Reached {
+			// The reversibility loop is the hardest thing here to diagnose after the fact:
+			// a model calls expand, an id has aged out of the store, and the symptom is a
+			// confused agent rather than an error. So log what it asked for against what came
+			// back — `unresolved > 0` is the tell.
+			lg.Debug("cg.expand", "round", round, "calls", ans.Calls,
+				"resolved", ans.Resolved, "unresolved", ans.Calls-ans.Resolved)
+		}
+		if ans.Bail {
+			bail()
 			return
 		}
-		// Build a tool_result for EVERY expand call — the provider requires one per
-		// tool_call_id or the continuation is malformed. Expired/unknown ids get an
-		// explicit placeholder rather than being omitted.
-		resolved := map[string]string{}
-		// Every stray adjudication call gets the same definite, uninteresting answer, so the model can
-		// finish its turn instead of waiting on a tool nobody will run.
-		for _, id := range strays {
-			resolved[id] = adjudicate.StrayAnswer
+		// Counted only once the continuation exists, NOT when the answer was composed (see inband.Answer).
+		if ans.Strays > 0 {
+			adjudicate.NoteAnsweredInBand(ans.Strays)
+			lg.Debug("cg.adjudicate_stray", "answered_in_band", ans.Strays, "round", round)
 		}
-		for _, c := range searches {
-			resolved[c.ID] = tooldefer.SearchAnswer(c.Names, searchSet)
-		}
-		got := 0
-		for _, c := range calls {
-			if orig, ok := expand.Resolve(tn.Store, c.HashID); ok {
-				resolved[c.CallID] = orig
-				got++
-				// The agent needed this content back — don't re-compact it on later turns
-				// (that would loop it straight back into another expand). Keep it verbatim.
-				offload.MarkKeptVerbatim(tn.Store, session, orig)
-				// And, under fixed restore, where to give it back from now on. The mark above stays:
-				// it is the fail-open behaviour for any turn on which the anchor cannot be honoured.
-				if anchor != nil {
-					expand.RecordAnchor(tn.Store, session, expand.Anchor{ID: c.HashID, At: anchor.At, Fp: anchor.Fp})
-				}
-				back := schema.TextTokens(orig)
-				if h.agg != nil {
-					h.agg.RecordExpand(back) // bounce: offload had to come back
-				}
-				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
-				// And, when the marker is one the sweep made, charged to the sweep (#404 point 7): the
-				// false-drop signal, and what comes off the sweep's credit.
-				cp.noteSweepExpand(back, offload.NoteSweepExpand(tn.Store, c.HashID, back, thread.Key(session, threadID)))
-			} else {
-				// Classified as well as counted: the response loop and the request-path repair
-				// both reach here, and an id this proxy could have minted with nothing behind it
-				// is our own broken reversibility promise rather than the model inventing one.
-				// See expand/unresolved.go.
-				expand.NoteUnresolved(c.HashID)
-				resolved[c.CallID] = expand.Unavailable(c.HashID)
-			}
-		}
-		expanded += got
-		// The reversibility loop is the hardest thing here to diagnose after the fact:
-		// a model calls expand, an id has aged out of the store, and the symptom is a
-		// confused agent rather than an error. So log what it asked for against what came
-		// back — `unresolved > 0` is the tell.
-		lg.Debug("cg.expand", "round", round, "calls", len(calls),
-			"resolved", got, "unresolved", len(calls)-got)
-		next, ok := expand.Continuation(wire, body, msg, resolved)
-		if ok && len(searchNow) > 0 && di != nil {
-			// The loaded tools go at the end of `tools`, as on every later request of the thread
-			// (tooldefer.RewriteSearch), taken from the request before our rewrite.
-			next, ok = tooldefer.AppendTools(wire, next, di.Orig, searchNow)
-		}
-		if !ok {
-			bail() // malformed shapes — fail open, hand the response over unchanged
-			return
-		}
-		if tn.Pipe.InBandBreakpoint() {
-			// The follow-up ends with content the client never sent. The client's last message
-			// breakpoint moves onto it, so the provider caches it (#784). Off by default: the
-			// client's next request does not carry this content, so nothing reads the entry.
-			// No-op off Anthropic.
-			next = apply.MarkInBandFollowUp(wire, next)
-		}
-		// Counted only once the continuation exists, NOT when the answer was composed. Incrementing
-		// before this point double-counted: a Continuation failure bails, the tool_use reaches the
-		// client after all, and the request-path repair then counts the very same stray a second time
-		// on the next turn. The counter is meant to be one-per-stray-call however it was answered.
-		if len(strays) > 0 {
-			adjudicate.NoteAnsweredInBand(len(strays))
-			lg.Debug("cg.adjudicate_stray", "answered_in_band", len(strays), "round", round)
-		}
-		// got == 0 CONTINUES, and that is the change that let the expand tool be advertised
-		// on every request in a session (expand.InjectAuto). `resolved` already carries a
-		// placeholder for every unresolved id, so the continuation is well formed whether
-		// anything came back or not, and the model gets to finish its turn by reading "that
-		// id is no longer available" — which is a turn that completes.
-		//
-		// Replaying the raw response here instead handed the CLIENT a bare tool_use for a
-		// tool the client does not implement. On an agent's own compaction request that
-		// reads as a summary that came back empty, and three of those disable auto-compact
-		// for the session — so the advertise condition was narrowed to marker-bearing turns
-		// to avoid ever reaching this line. It bought that safety with the whole prompt-cache
-		// prefix, on every turn where the marker set changed. The cost of paying it here
-		// instead is one bounded upstream round (maxExpandRounds still caps the loop), and
-		// only when a model asks for an id that has aged out of the store.
-		body = next // loop: re-invoke with the originals in hand
+		body = ans.Next // loop: re-invoke with the originals in hand
 	}
-}
-
-// statelessResponses reports whether a Responses request never relies on the server keeping
-// the response: store is false and there is no previous_response_id. Codex over HTTP sends
-// exactly this. A missing store field means the API default, which is true.
-func statelessResponses(body []byte) bool {
-	st := gjson.GetBytes(body, "store")
-	return st.Exists() && st.Type == gjson.False && !gjson.GetBytes(body, "previous_response_id").Exists()
 }
 
 // writeRaw replays a fully-buffered upstream response (SSE or JSON) to the client
