@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
+  stripsChatGPTFields, strategyChoices, type StartCheck, settingsPath, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
   uninstallText, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
@@ -569,4 +569,9 @@ test("the two-copies warning names the settings.json that Pi uses", () => {
     if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = before;
   }
+});
+
+test("settingsPath names Pi's own settings.json, or the one in PI_CODING_AGENT_DIR", () => {
+  assert.equal(settingsPath({}), "~/.pi/agent/settings.json");
+  assert.equal(settingsPath({ PI_CODING_AGENT_DIR: "/tmp/agent" }), "/tmp/agent/settings.json");
 });

@@ -26,6 +26,11 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 const STATE_DIR = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-pi");
 const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(PACKAGE_DIR, "scripts", "pi_plugin.py");
+/** The settings.json that Pi uses: $PI_CODING_AGENT_DIR/settings.json when that is set (#1289). */
+export function settingsPath(env: Record<string, string | undefined> = process.env): string {
+  return env.PI_CODING_AGENT_DIR ? join(env.PI_CODING_AGENT_DIR, "settings.json") : "~/.pi/agent/settings.json";
+}
+
 /** The package folder of the copy that runs in this Pi process. Two installed copies (two clones, or a
  *  worktree) both load; without this, Pi renames both commands and /context-guru disappears (#1154). */
 export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
@@ -417,8 +422,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       if (warned) return;
       warned = true;
       const text = `context-guru: two copies of the Pi package are loaded, ${owner} and ${PACKAGE_DIR}. ` +
-        `Only the first one runs. Remove the other one from "packages" in ` +
-        `${process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "settings.json") : "~/.pi/agent/settings.json"}.`;
+        `Only the first one runs. Remove the other one from "packages" in ${settingsPath()}.`;
       if (ctx.hasUI) ctx.ui.notify(text, "warning");
       else console.warn(text);
     });

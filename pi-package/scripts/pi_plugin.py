@@ -146,14 +146,25 @@ def healthy(port, timeout=1):
         return False
 
 
-def wait_healthy(port, tries=200):
-    """True once /healthz answers, checking every 0.1 s, about 20 s in all. A proxy that answers at once adds
-    no wait; the first start of a freshly downloaded binary can take more than 5 s (#1288)."""
-    for _ in range(tries):
-        if healthy(port):
+# How long a start waits for /healthz. A warm start (restart, configure) keeps 5 s, so a restart or configure
+# that waited for the lock still ends inside the extension's 60 s limit. A cold start (setup, update: a new
+# binary) waits up to 20 s: the first start of a freshly downloaded binary can take more than 5 s (#1288).
+WARM_START_SECONDS = 5
+COLD_START_SECONDS = 20
+
+
+def wait_healthy(port, seconds=None):
+    """True once /healthz answers, checking every 0.1 s until a deadline. Each check gets at most the time
+    that is left, so a proxy that accepts but does not answer cannot stretch the wait. A proxy that answers at
+    once adds no wait."""
+    deadline = time.monotonic() + (WARM_START_SECONDS if seconds is None else seconds)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if healthy(port, timeout=min(1, remaining)):
             return True
-        time.sleep(0.1)
-    return False
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
 
 def first_free_port():
@@ -638,7 +649,7 @@ def launchd_bootstrap(domain, plist):
             time.sleep(0.5)
 
 
-def start_service(executable, port, upstreams=None):
+def start_service(executable, port, upstreams=None, cold_start=False):
     """Install and start the user service. Returns True once /healthz answers."""
     root = state_dir()
     root.mkdir(parents=True, exist_ok=True)
@@ -690,7 +701,7 @@ def start_service(executable, port, upstreams=None):
             return False
     else:
         return False
-    return wait_healthy(port)
+    return wait_healthy(port, COLD_START_SECONDS if cold_start else WARM_START_SECONDS)
 
 
 def restart_service():
@@ -941,7 +952,7 @@ def setup(args):
     def drop_download():
         """A setup that stops under the lock and before the start leaves no binary behind: the next
         setup would use it, even when a newer release exists (#1157). After a failed start the binary
-        stays, because the service names it."""
+        stays: the service names it, or, after a failed first setup, the next setup downloads again (#1157)."""
         if downloaded:
             managed_binary().unlink(missing_ok=True)
             facts(binary="removed")
@@ -972,7 +983,7 @@ def setup(args):
             facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
             return 2
         # Proxy first, routing second: a route written while nothing answers makes every request fail.
-        if not start_service(executable, port, upstreams):
+        if not start_service(executable, port, upstreams, cold_start=True):
             extra = {}
             if not record.get("port"):
                 # A first setup: remove the service it just started, so nothing is left running with no
@@ -1252,7 +1263,7 @@ def update(args):
         write_record(record)
         # Re-render with the NEW binary: it decides whether the config names the strategy.
         config = rerender_config(record, executable)
-    restarted = start_service(executable, int(record["port"]), recorded_upstreams(record))
+    restarted = start_service(executable, int(record["port"]), recorded_upstreams(record), cold_start=True)
     if not restarted:
         facts(result="updated", version=version, config=config, restart="failed", log=state_dir() / "proxy.log")
         return 1
