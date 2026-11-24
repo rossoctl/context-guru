@@ -21,7 +21,7 @@ const (
 	accStateMaxAge = time.Hour
 	// accStateEvery is how often the state is saved while running, so a kill -9 or a crash loses minutes, not all.
 	accStateEvery = time.Minute
-	// accStateVersion is the version of the proxy's own part of the state: how accBodies hashes a body. Change it
+	// accStateVersion is the version of the proxy's own part of the state: how accwire hashes a body. Change it
 	// whenever that hash changes. The library snapshot has its own version inside. A file with another version is
 	// ignored (issue #917). Version 1 was the unwrapped library snapshot, so a file from before the wrap fails the
 	// check too. Version 2 is the wrap with the hash that leaves out cache marks, nested ones included.

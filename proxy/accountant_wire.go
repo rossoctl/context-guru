@@ -8,6 +8,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
@@ -187,7 +188,7 @@ func (c *capture) accBilled(forwarded []byte) []byte {
 // set that grows or shrinks mid-thread re-reports each surviving tool under its own stable ID. One merged operation
 // would carry a hash of the whole set, so any change of the set would orphan it.
 func (c *capture) envelopeOpsFor(billed []byte) []accountant.Operation {
-	ops := envelopeOps(c.accClient, billed)
+	ops := accwire.For(c.accClient).EnvelopeOps(c.accClient, billed)
 	if c.accPreDefer == nil {
 		return ops
 	}
