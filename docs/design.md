@@ -22,7 +22,7 @@ infrastructure the components sit on.
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
-| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`) |
+| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`); also `IsClientCompaction(h, body)`, the one call that tells a host a request is the client's own compaction |
 | `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`), and its control plane (`Gateway`, `ControlPlane`): the profile's region strip and the model-info window parse |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
