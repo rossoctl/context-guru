@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -243,7 +244,7 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 		}
 		if prev, ok := tails[tail]; ok && prev.match != e.match {
 			// Two providers at one rate and one window are not a guess.
-			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
+			if !reflect.DeepEqual(prev.price, e.price) || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
 				ambiguous[tail] = true
 			}
 			continue

@@ -91,6 +91,11 @@ type Price struct {
 	// premium), and the operator Table applies the same rule. The 1-hour tier is billed only by
 	// Claude models, which use their published multiples.
 	CacheReadFallback bool `json:"-"`
+
+	// Tiers hold the rates a request bills above a prompt size (see PriceTier and At). Empty means
+	// one flat rate. Not part of the wire form, so a price's JSON does not change. A Price with
+	// tiers cannot be compared with ==.
+	Tiers []PriceTier `json:"-"`
 }
 
 // CacheReadFor is the cache-READ rate per token for a model. This is the ONE place the rule lives.

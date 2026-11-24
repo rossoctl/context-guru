@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -172,7 +173,7 @@ func TestLiteLLMPrices(t *testing.T) {
 		t.Fatal("Price(aws/claude-sonnet-5) not resolved")
 	}
 	want := modelinfo.Price{Input: 2e-06, Output: 1e-05, CacheRead: 2e-07, CacheWrite: 2.5e-06}
-	if p != want {
+	if !reflect.DeepEqual(p, want) {
 		t.Errorf("price = %+v; want %+v", p, want)
 	}
 	// A model with no published cache rates must not be priced as if a cached
@@ -290,15 +291,85 @@ func TestLiteLLMPriceFindsDatedAndWrappedIDs(t *testing.T) {
 		"us-gov.anthropic.claude-sonnet-5-v1:0",
 	} {
 		got, ok := l.Price(ctx, id)
-		if !ok || got != want {
+		if !ok || !reflect.DeepEqual(got, want) {
 			t.Errorf("Price(%q) = %+v, %v; want %+v", id, got, ok, want)
 		}
 	}
 	// A different model must not be mistaken for it: the date and the wrapper are stripped, nothing else.
 	// A plain id that ends in a version is a model of its own, not Bedrock's suffix.
 	for _, id := range []string{"claude-sonnet-5-5-20260101", "us.anthropic.totally-absent-xyz-v1:0", "claude-sonnet-5-v2"} {
-		if p, ok := l.Price(ctx, id); ok && p == want {
+		if p, ok := l.Price(ctx, id); ok && reflect.DeepEqual(p, want) {
 			t.Errorf("Price(%q) resolved to claude-sonnet-5's price", id)
+		}
+	}
+}
+
+const tierSample = `{
+  "gpt-5.5": {"max_input_tokens": 1050000, "input_cost_per_token": 5e-06, "output_cost_per_token": 3e-05,
+              "cache_read_input_token_cost": 5e-07,
+              "input_cost_per_token_above_272k_tokens": 1e-05,
+              "output_cost_per_token_above_272k_tokens": 4.5e-05,
+              "cache_read_input_token_cost_above_272k_tokens": 1e-06,
+              "input_cost_per_token_above_272k_tokens_priority": 2e-05,
+              "input_cost_per_token_above_272k_tokens_batches": 5e-06},
+  "gpt-5.6-x": {"input_cost_per_token": 4e-06, "output_cost_per_token": 2e-05,
+              "input_cost_per_token_above_200k_tokens": 6e-06},
+  "claude-haiku-5-5": {"input_cost_per_token": 1e-07, "output_cost_per_token": 5e-07,
+              "cache_read_input_token_cost": 1e-08, "cache_creation_input_token_cost": 1.25e-07},
+  "claude-sonnet-5": {"input_cost_per_token": 3e-06, "output_cost_per_token": 1.5e-05},
+  "gpt-5.4-mini": {"input_cost_per_token": 7.5e-07, "output_cost_per_token": 4.5e-06}
+}`
+
+func tierPrice(t *testing.T, id string) modelinfo.Price {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(tierSample))
+	}))
+	defer srv.Close()
+	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
+	var got modelinfo.Price
+	testutil.WaitFor(t, "price "+id, func() bool {
+		p, ok := l.Price(context.Background(), id)
+		got = p
+		return ok
+	})
+	return got
+}
+
+func TestLiteLLMParsesAboveTiers(t *testing.T) {
+	// A stated feed tier: absolute rates, other price modes (_priority, _batches) ignored.
+	p := tierPrice(t, "gpt-5.5")
+	if len(p.Tiers) != 1 || p.Tiers[0].AbovePromptTokens != 272_000 {
+		t.Fatalf("Tiers = %+v, want one at 272000", p.Tiers)
+	}
+	hi := p.At(272_001)
+	if hi.Input != 1e-05 || hi.Output != 4.5e-05 || hi.CacheRead != 1e-06 {
+		t.Errorf("At(272001) = %+v", hi)
+	}
+	if lo := p.At(272_000); lo.Input != 5e-06 {
+		t.Errorf("At(272000).Input = %g, want base", lo.Input)
+	}
+	// Any _above_<N>k_tokens line; unstated rates scale with the input ratio (1.5x here).
+	q := tierPrice(t, "gpt-5.6-x")
+	if len(q.Tiers) != 1 || q.Tiers[0].AbovePromptTokens != 200_000 {
+		t.Fatalf("Tiers = %+v, want one at 200000", q.Tiers)
+	}
+	if got := q.At(200_001); got.Input != 6e-06 || math.Abs(got.Output-3e-05) > 1e-18 {
+		t.Errorf("At(200001) = %+v, want Input 6e-6 Output 3e-5", got)
+	}
+}
+
+func TestLiteLLMAppliesBuiltinTiersOnlyWhenFeedStatesNone(t *testing.T) {
+	h := tierPrice(t, "claude-haiku-5-5")
+	if len(h.Tiers) != 1 || h.Tiers[0].AbovePromptTokens != 100_000 {
+		t.Fatalf("haiku Tiers = %+v, want built-in at 100000", h.Tiers)
+	}
+	if got := h.At(100_001).Input; math.Abs(got-5e-07) > 1e-18 {
+		t.Errorf("haiku At(100001).Input = %g, want 5e-7", got)
+	}
+	for _, id := range []string{"claude-sonnet-5", "gpt-5.4-mini"} {
+		if p := tierPrice(t, id); len(p.Tiers) != 0 {
+			t.Errorf("%s Tiers = %+v, want none", id, p.Tiers)
 		}
 	}
 }
