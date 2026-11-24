@@ -14,10 +14,10 @@ State is from `origin/main` at the time of writing. An open PR is a note, not a 
 | Client | Subagent thread | Wait cause | Session key | Lifecycle signals | Compaction detection | Label |
 |---|---|---|---|---|---|---|
 | Claude Code | covered | covered | covered | covered | covered | covered |
-| Codex | fallback (#1318) | fallback (#1318) | fallback: content hash (#1322) | covered | fallback: not detected (#1314) | covered |
-| OpenCode | fallback (#1318) | fallback (#1318) | covered: plugin header | fallback: none sent (#1317) | fallback: not detected (#1314) | fallback: first User-Agent token (#1312) |
-| Pi | fallback (#1318) | fallback (#1318) | covered: plugin header | covered | fallback: not detected (#1314) | fallback: first User-Agent token (#1312) |
-| Bob | fallback | fallback | covered | fallback: start and compact only | covered | covered |
+| Codex | covered by #1318 (open): `x-codex-parent-thread-id`, `thread-id` | covered by #1318 (open): `request_user_input`, background-terminal text | fallback: content hash (covered by #1322, open: `session-id` header) | covered (no notification) | fallback: not detected (#1314) | covered |
+| OpenCode | covered by #1318 (open): `x-opencode-parent-session-id` | fallback (#1318 reads `unknown`, not `human`) | covered: plugin header | covered by #1317 (open, approved) | fallback: not detected (#1314) | fallback: first User-Agent token (#1312) |
+| Pi | fallback (#1318 adds no Pi signal) | fallback (#1318 reads `unknown`, not `human`) | covered: plugin header | covered | fallback: not detected (#1314) | fallback: first User-Agent token (#1312) |
+| Bob | fallback | fallback: reads `human` | covered | fallback: start and compact only | covered | covered |
 
 Notes:
 
@@ -35,7 +35,11 @@ A host without a client signal gives the generic result.
 | Host | Subagent thread | Wait cause | Session key | Lifecycle signals | Compaction detection | Label |
 |---|---|---|---|---|---|---|
 | proxy | per client, as above | per client, as above | per client, as above | per client, as above | per client, as above | per client, as above |
-| bifrost adapter | fallback: no headers | fallback: no headers | covered: host sets the session | fallback: no `/signal` route | fallback: no headers | n/a |
-| Cortex | fallback | fallback | fallback | fallback | fallback | n/a |
+| bifrost adapter | fallback: no headers | fallback: no headers | covered: host sets the session from `x-context-guru-session` | fallback: no `/signal` route | fallback: no headers | n/a |
+| Cortex | **none: primary only**, worse than the proxy's prefix fallback (no `Opts.ThreadOf`) | fallback | covered: host id (`pctx.SessionID` or the A2A contextId); a request with no session is skipped | n/a: no `/signal` route in the plugin | fallback | n/a |
 
-The Cortex row is not checked against Cortex code. The owner of Cortex must confirm it.
+- **Cortex** source: `core/plugins/contextguru/plugin.go` in `rossoctl/cortex`. It wires no thread
+  tracker, so every request is the primary thread. It has `pctx.Headers`, so `agent.Identify`
+  works there once #1312 lands.
+- **bifrost adapter:** `resolveSession` sees only a session id from the host context. It never sees
+  request headers, so `agent.Identify` needs the transport to pass them.
