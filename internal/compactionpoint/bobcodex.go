@@ -7,7 +7,7 @@ import (
 )
 
 // Bob is the auto-compact setting of Bob Shell (#963). A host fills it once, at start-up
-// (proxy.ReadBobCompact). Read is true only when the host did the read (local mode, switch not off).
+// (compactionpoint.ReadBob). Read is true only when the host did the read (local mode, switch not off).
 // The zero value changes nothing.
 //
 // VERIFIED FROM THE SHIPPED CLIENT, Bob Shell 1.0.3 (bundle/bob.js, read only, not from memory):
@@ -107,7 +107,7 @@ func (b Bob) Resolve(window, bobWindow int) (Point, bool) {
 }
 
 // Codex is the user's own auto-compact setting of Codex CLI (#963). A host fills it once, at
-// start-up (proxy.ReadCodexCompact). The zero value changes nothing.
+// start-up (compactionpoint.ReadCodex). The zero value changes nothing.
 //
 // VERIFIED FROM THE SHIPPED CLIENT'S SOURCE, github.com/openai/codex tag rust-v0.160.0 (read only;
 // `codex --version` on the laptop says 0.160.0):
