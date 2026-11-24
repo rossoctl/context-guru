@@ -167,11 +167,12 @@ func TestARealRequestsKeepAliveCandidateSurvivesAndAPingDispatchesIt(t *testing.
 	// AND: a following ping actually dispatches it, rather than merely leaving a candidate
 	// sitting unused in the registry. The keeper runs on a test clock with an inline runner, so
 	// advancing the clock past Idle makes the ping due and Sweep sends it. No real tick, no wait.
+	// This no longer covers the production ticker: its loop only calls Sweep, so the test calls Sweep.
 	// The keeper records a turn in serve's defer, AFTER the response reaches the client: wait until
 	// it holds turn 2 (turn 1 is refused by the gate), or Sweep finds nothing to ping.
 	testutil.WaitForState(t, "the keeper holds turn 2", func() bool { return h.keeper.Stats().Live >= 1 },
 		func() string { return fmt.Sprintf("%+v", h.keeper.Stats()) })
-	h.keeper.Sweep(clock.advance(3 * time.Second))
+	sweepAfter(h.keeper, clock, 3*time.Second)
 	if st := h.keeper.Stats(); st.SummarySubstituted == 0 {
 		t.Fatalf("the ping never dispatched the candidate: live=%d pings=%d skipped=%d summarySubstituted=%d noCandidate=%d checkpointExists=%d phaseMismatch=%d overBudget=%d failed=%d",
 			st.Live, st.Pings, st.Skipped, st.SummarySubstituted, st.SummarySubstituteNoCandidate, st.SummarySubstituteCheckpointExists,

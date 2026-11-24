@@ -117,7 +117,7 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 	case <-time.After(30 * time.Second): //timing:ok safety bound on a channel, not a delay
 		t.Fatal("the slow request never arrived")
 	}
-	h.keeper.Sweep(clock.advance(61 * time.Second)) // the main thread is due; the subagent's call is still open
+	sweepAfter(h.keeper, clock, 61*time.Second) // the main thread is due; the subagent's call is still open
 	if n := pings.Load(); n != 1 {
 		t.Errorf("%d main-thread pings while a subagent request was in flight, want 1 (on time)", n)
 	}
@@ -540,4 +540,17 @@ func TestA403BlocksTheKeyOnThatModelOnly(t *testing.T) {
 			t.Errorf("%d: forget left the credential blocked", c.status)
 		}
 	}
+}
+
+// sweepAfter sweeps d after the real "now". A keeper that serves real HTTP stamps each entry with
+// the real time, but the test clock was anchored at the start of the test. Sweeping at
+// clock+d makes the ping due only if the setup took less than d minus Idle of real time, and a
+// loaded box breaks that. So it re-anchors the test clock to the real time first (never back).
+func sweepAfter(k *keeper, clock *testClock, d time.Duration) {
+	clock.mu.Lock()
+	if now := time.Now(); now.After(clock.at) {
+		clock.at = now
+	}
+	clock.mu.Unlock()
+	k.Sweep(clock.advance(d))
 }
