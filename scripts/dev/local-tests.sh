@@ -80,13 +80,14 @@ rows=
 # fails only on known laptop failures stays a pass). Any other rc is a run that stopped (143) or
 # broke: fail. Every step that part-a.sh runs must also have a line, or the run stopped short.
 case $done_rc in 0|1) ;; *) result=fail; rows+="| (run) | **FAIL**: stopped, DONE rc=$done_rc |"$'\n' ;; esac
-for st in $(grep -oE '^step [a-z0-9-]+' "$here/../release/part-a.sh" | awk '{print $2}'); do
-  grep -qE "^(ok|flaky|FAILED) +$st( |\$)" "$sum" || { result=fail; rows+="| $st | **FAIL**: no result line |"$'\n'; }
+for st in $(grep -oE '^[[:space:]]*step [a-z0-9-]+' "$here/../release/part-a.sh" | awk '{print $2}'); do
+  grep -qE "^(ok|flaky|FAILED|skip) +$st( |\$)" "$sum" || { result=fail; rows+="| $st | **FAIL**: no result line |"$'\n'; }
 done
 notes=
 while read -r state name _; do
   case $state in
     ok) rows+="| $name | pass |"$'\n' ;;
+    skip) rows+="| $name | skipped (timing tests off: the integrator runs them) |"$'\n' ;;
     flaky) rows+="| $name | pass (flaky: passed on the 2nd run) |"$'\n' ;;
     FAILED)
       # part-a.sh ran the step twice. The rerun decides, as in its flaky rule: a test that failed
@@ -110,7 +111,7 @@ while read -r state name _; do
         notes+=$'\n'"Log tail of $name:"$'\n\n```\n'"$tail"$'\n```\n'
       fi ;;
   esac
-done < <(grep -E '^(ok|flaky|FAILED) ' "$sum")
+done < <(grep -E '^(ok|flaky|FAILED|skip) ' "$sum")
 grep -qE '^(ok|flaky|FAILED) ' "$sum" || result=fail
 
 body=$(mktemp "${TMPDIR:-/tmp}/local-tests-body.XXXXXX")

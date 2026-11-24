@@ -169,7 +169,8 @@ the person. The team knows who holds the role at any time.
   (node). It runs only with `CG_TIMING_TESTS=1`.
 - **`scripts/dev/local-tests.sh` skips the timing tests.** It runs them only when the PR adds or
   changes one (`scripts/dev/timing-tests-needed.sh` decides, from the diff). The integrator runs
-  them in heavy CI and in Part A.
+  them in heavy CI and in Part A. That covers the Go tests and the OpenCode node tests (the step
+  `node-timing`).
 - **Gate a test only if its result depends on time or load.** Do not gate a test that uses a fake
   clock, or a long timeout as a safety net.
 

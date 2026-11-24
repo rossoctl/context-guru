@@ -65,6 +65,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The OpenCode plugin's timing tests run only here and in Part A. The opencode-plugin workflow
+      # runs the rest of its tests on every PR, without CG_TIMING_TESTS.
+      - name: OpenCode plugin timing tests
+        run: node --test opencode-plugin/test/*.test.mjs
       - name: Test & coverage
         run: |
           make cover

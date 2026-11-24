@@ -14,6 +14,8 @@
 # because the integrator runs this script. scripts/dev/local-tests.sh sets it to 0 or 1 itself. The
 # summary records the value in a "timing-tests" line.
 #
+# The step node-timing needs node 22 (the opencode-plugin workflow uses it too).
+#
 # GO: the go binary (default: go on PATH, else /usr/local/go/bin/go).
 set -uo pipefail
 out=${1:-$PWD/.part-a}
@@ -70,5 +72,12 @@ step race-plugin   env CGO_ENABLED=1 "$GO" test -race -timeout 30m ./context-gur
 # The Bob plugin is on hold (#1221): skip its install suite. Remove the skip when the owner resumes it.
 step race-rest     env CGO_ENABLED=1 "$GO" test -race -timeout 20m -skip TestBobReleasePythonSuite $rest
 step race-record   env CGO_ENABLED=1 "$GO" test -race -timeout 40m -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
+# The OpenCode plugin's node tests. Only the timing tests need this step: the opencode-plugin workflow
+# runs the rest on every PR. With CG_TIMING_TESTS=0 the step is skipped, and the summary says so.
+if [ "$CG_TIMING_TESTS" = 1 ]; then
+  step node-timing env CG_TIMING_TESTS=1 node --test opencode-plugin/test/*.test.mjs
+else
+  echo "skip    node-timing (CG_TIMING_TESTS=$CG_TIMING_TESTS: the timing tests are off)" >> "$sum"
+fi
 echo "$skipnote" >> "$sum"
 exit "$rc"

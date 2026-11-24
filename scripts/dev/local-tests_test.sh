@@ -8,7 +8,7 @@ cd "$root"
 H=$(git rev-parse HEAD)
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 fails=0
-steps=$(grep -oE '^step [a-z0-9-]+' scripts/release/part-a.sh | awk '{print $2}')
+steps=$(grep -oE '^[[:space:]]*step [a-z0-9-]+' scripts/release/part-a.sh | awk '{print $2}')
 mk() { { echo "commit $1"; for s in $steps; do echo "ok      $s"; done; } > "$d/summary.txt"; }
 # expect <name> <want-rc> <want-text> : run local-tests.sh on the fixture in $d
 expect() {
@@ -36,6 +36,14 @@ mk deadbeef; echo "DONE rc=0" >> "$d/summary.txt"; expect sha-mismatch 2 "Nothin
 # The timing-tests line in the comment comes from the summary part-a.sh wrote.
 mk "$H"; { sed -n 1p "$d/summary.txt"; echo "timing-tests 0"; sed 1d "$d/summary.txt"; } > "$d/s2" && mv "$d/s2" "$d/summary.txt"; echo "DONE rc=0" >> "$d/summary.txt"; expect timing-skipped 0 "timing tests: skipped (integrator runs them)"
 mk "$H"; { sed -n 1p "$d/summary.txt"; echo "timing-tests 1"; sed 1d "$d/summary.txt"; } > "$d/s2" && mv "$d/s2" "$d/summary.txt"; echo "DONE rc=0" >> "$d/summary.txt"; expect timing-run 0 "timing tests: run"
+
+# The node-timing step: skipped when the timing tests are off, a normal row when they are on.
+mk "$H"; sed -i.bak 's/^ok      node-timing.*/skip    node-timing (CG_TIMING_TESTS=0: the timing tests are off)/' "$d/summary.txt"; echo "DONE rc=0" >> "$d/summary.txt"; expect node-timing-skipped 0 "| node-timing | skipped"
+mk "$H"; sed -i.bak 's/^ok      node-timing/FAILED  node-timing (twice)/' "$d/summary.txt"; echo "DONE rc=1" >> "$d/summary.txt"
+printf -- 'not ok 1 - a timing test\n' > "$d/node-timing.log"; expect node-timing-failed 1 "result=fail"
+rm -f "$d/node-timing.log"
+# A summary with no node-timing line is a run that stopped short.
+mk "$H"; sed -i.bak '/node-timing/d' "$d/summary.txt"; echo "DONE rc=0" >> "$d/summary.txt"; expect node-timing-missing 1 "node-timing | **FAIL**: no result line"
 
 # timing-tests-needed.sh: decide from a diff, in a scratch repo.
 r=$(mktemp -d); trap 'rm -rf "$d" "$r"' EXIT
