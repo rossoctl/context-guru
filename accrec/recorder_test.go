@@ -123,8 +123,8 @@ func TestPrice(t *testing.T) {
 	})
 	t.Run("several rounds book nothing and keep the earlier reason", func(t *testing.T) {
 		r := NewRecorder()
-		out := r.Price(recOneRequest(r, 1, ThreadOf("main", "", false)), PriceIn{Status: 200, Rounds: 2, Usage: usage})
-		if out.Priced || out.NoResult != "" {
+		out := r.Price(recOneRequest(r, 1, ThreadOf("main", "", false)), PriceIn{Status: 200, Rounds: 2, NoResult: "earlier_reason", Usage: usage})
+		if out.Priced || out.NoResult != "earlier_reason" {
 			t.Fatalf("priced=%v noResult=%q", out.Priced, out.NoResult)
 		}
 	})
