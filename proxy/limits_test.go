@@ -2,8 +2,93 @@ package proxy
 
 import (
 	"errors"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+// fakeClock is a settable clock for a limiter. Safe for concurrent use.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// midMinute returns a fixed time 30 seconds into a minute and 30 minutes into an hour.
+func midMinute() time.Time { return time.Date(2026, 1, 15, 10, 30, 30, 0, time.UTC) }
+
+// fixLimiterClocks pins every limiter of the fixture's handler to one fake clock fixed at t.
+// Call it before the first request. It returns the clock, so a test may advance it.
+func (f *hostedFixture) fixLimiterClocks(t time.Time) *fakeClock {
+	c := &fakeClock{t: t}
+	for _, l := range []*Limiter{f.h.limiter, f.h.regLim, f.h.authLim, f.h.pwLim, f.h.codeLim} {
+		l.now = c.now
+	}
+	return c
+}
+
+// The window is a fixed calendar minute. A burst that crosses a minute boundary gets a
+// fresh budget, and a burst inside one minute does not.
+func TestLimiterWindowResetsAtTheMinuteBoundary(t *testing.T) {
+	c := &fakeClock{t: midMinute()}
+	l := NewLimiter(Limits{RequestsPerMinute: 2})
+	l.now = c.now
+	for i := 0; i < 2; i++ {
+		if _, err := l.Acquire("t"); err != nil {
+			t.Fatalf("request %d refused inside the budget: %v", i+1, err)
+		}
+	}
+	if _, err := l.Acquire("t"); err == nil {
+		t.Fatal("a third request in the same minute was not refused")
+	}
+	c.advance(29 * time.Second) // 10:30:59, still the same minute
+	if _, err := l.Acquire("t"); err == nil {
+		t.Fatal("the window reset before the minute ended")
+	}
+	c.advance(2 * time.Second) // 10:31:01, next minute
+	for i := 0; i < 2; i++ {
+		if _, err := l.Acquire("t"); err != nil {
+			t.Fatalf("request %d refused after the minute boundary: %v", i+1, err)
+		}
+	}
+	if _, err := l.Acquire("t"); err == nil {
+		t.Fatal("the new window did not refuse its third request")
+	}
+}
+
+// The hourly action window resets at the hour boundary, and the retry text counts from
+// the fake clock.
+func TestAllowActionWindowResetsAtTheHourBoundary(t *testing.T) {
+	c := &fakeClock{t: midMinute()}
+	l := NewLimiter(Limits{})
+	l.now = c.now
+	if err := l.AllowAction("k", "arms", 1); err != nil {
+		t.Fatalf("first action refused: %v", err)
+	}
+	err := l.AllowAction("k", "arms", 1)
+	if err == nil {
+		t.Fatal("second action in the same hour was not refused")
+	}
+	if want := "retry in 1771s"; !strings.Contains(err.Error(), want) { // 29m29s left, rounded up
+		t.Errorf("error %q lacks %q", err.Error(), want)
+	}
+	c.advance(30 * time.Minute) // 11:00:30
+	if err := l.AllowAction("k", "arms", 1); err != nil {
+		t.Fatalf("action refused after the hour boundary: %v", err)
+	}
+}
 
 func TestRateLimitRefusesPastTheWindow(t *testing.T) {
 	l := NewLimiter(Limits{RequestsPerMinute: 3})
@@ -25,7 +110,7 @@ func TestRateLimitRefusesPastTheWindow(t *testing.T) {
 	}
 	// The message must say when to retry; a bare 429 is indistinguishable from the
 	// service being broken, and the caller cannot see our logs.
-	if got := err.Error(); got == "" || !contains(got, "retry in") {
+	if got := err.Error(); got == "" || !strings.Contains(got, "retry in") {
 		t.Errorf("rate-limit message does not say when to retry: %q", got)
 	}
 	// Another tenant is unaffected — the limit is per account, not global.

@@ -9,9 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -184,57 +182,35 @@ func TestCodeGuessesAreCappedOverHTTP(t *testing.T) {
 // spendSignInBudget signs an account up and burns its sign-in budget, returning the
 // fixture whose limiter has just refused an attempt.
 //
-// The retry inside is not flake tolerance. It is the limiter's actual shape: the window is
-// a FIXED calendar minute — `tenantLimiter.windowStart` is `now.Truncate(time.Minute)` and
-// the count resets when the minute rolls over (see limits.go) — not a sliding minute
-// starting at the first attempt. A probe placed across a boundary therefore spends its
-// attempts out of two consecutive budgets, four and then four, and neither half reaches
-// the bound of five. It observes "unlimited" from a limiter behaving exactly as designed,
-// and the only way to tell that apart from a real bypass is to notice the crossing. A
-// fresh fixture gets a fresh limiter, and two crossings in a row does not happen.
+// The limiter's window is a FIXED calendar minute (see limits.go), not a sliding one. A
+// real clock lets a probe cross a boundary and spend its attempts out of two budgets. This
+// fixture pins every limiter to a fake clock in the middle of a minute, so that cannot
+// happen. TestLimiterWindowResetsAtTheMinuteBoundary covers the crossing on purpose.
 //
-// Worth stating what this makes true of the limiter itself, since a reader could take the
-// assertion below for something stronger: a fixed window permits up to TWICE the nominal
-// rate in a burst straddling a boundary — ten attempts in a couple of seconds, not five.
+// A fixed window permits up to TWICE the nominal rate in a burst straddling a boundary.
 // On a sign-in path where every attempt already pays a 64 MiB argon2 and the mailed code
-// is destroyed after five wrong guesses, that factor of two is not what decides whether
-// brute force is viable, so it is documented rather than designed out.
+// is destroyed after five wrong guesses, that factor of two does not decide whether brute
+// force is viable, so it is documented rather than designed out.
 func spendSignInBudget(t *testing.T) *hostedFixture {
 	t.Helper()
 	const attempts = passwordAttemptsPerMinute + 3
-	for try := 0; ; try++ {
-		f := ctlFixture(t)
-		f.signUp(t, "a@ibm.com", "laptop")
-		minute, start := time.Now().Truncate(time.Minute), time.Now()
-		for i := 0; i < attempts; i++ {
-			w, _ := f.do(t, "POST", "/api/login",
-				`{"email":"a@ibm.com","password":"wrong-one-here"}`, nil)
-			if w.Code == http.StatusTooManyRequests {
-				return f
-			}
+	f := ctlFixture(t)
+	f.fixLimiterClocks(midMinute())
+	f.signUp(t, "a@ibm.com", "laptop")
+	for i := 0; i < attempts; i++ {
+		w, _ := f.do(t, "POST", "/api/login",
+			`{"email":"a@ibm.com","password":"wrong-one-here"}`, nil)
+		if w.Code == http.StatusTooManyRequests {
+			return f
 		}
-		elapsed := time.Since(start)
-		// The limiter is charged BEFORE the argon2 verify (deliberately — 64 MiB per
-		// attempt is itself an amplifier), so each allowed attempt pays a full KDF. A
-		// machine contended enough to spend a whole minute on these is reporting itself,
-		// not the code.
-		if elapsed >= time.Minute {
-			t.Skipf("inconclusive: %d attempts took %v, longer than the window itself. "+
-				"Re-run on a less loaded machine.", attempts, elapsed)
-		}
-		if !time.Now().Truncate(time.Minute).Equal(minute) && try < 2 {
-			t.Logf("the minute rolled over mid-probe (%v), so the budget reset underneath "+
-				"it; retrying on a fresh limiter", elapsed)
-			continue
-		}
-		t.Fatalf("%d password attempts went unlimited in %v, inside one window", attempts, elapsed)
 	}
+	t.Fatalf("%d password attempts went unlimited inside one window", attempts)
+	return f
 }
 
 // And the rate limit is the second layer: it bounds how fast an attacker can request
 // fresh codes to buy more guesses. Applied per email AND per client address.
 func TestSignInAttemptsAreRateLimited(t *testing.T) {
-	testutil.RequireTiming(t)
 	f := spendSignInBudget(t)
 	// A DIFFERENT address from the same client is limited too, because the client
 	// address has its own bucket — otherwise one host grinds the whole directory.
