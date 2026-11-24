@@ -1459,7 +1459,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
 			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
 			threadOf = func(sess string) thread.Result {
-				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
+				return h.threadFor(r, cl, tn.ID, sess, orig, agentCompaction, lg)
 			}
 			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
 			// EVERY component, cache_aware_summarizer and extract_llm_sweep included — this is "as
@@ -1501,7 +1501,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			if !tr.ThreadResolved {
 				// apply returned before resolving the session's thread (no message list, an
 				// observe-mode or bypassed request): resolve it here, as before.
-				th = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
+				th = h.threadFor(r, cl, tn.ID, tr.Session, orig, agentCompaction, lg)
 			}
 			threadID = th.ID
 			cp.noteThread(th)
@@ -1670,7 +1670,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
+		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
 			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias)
 	}
 }
@@ -1874,7 +1874,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
 	wire := schema.WireFor(string(provider), up.path)
 	// The agent that owns the route may correct the shared parser's usage reading
 	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
@@ -2060,7 +2060,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
 				// The id the shadow pipeline derives (post-transform), not the raw body's: see
 				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, identify(r), up.path, body),
+				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, cl, up.path, body),
 					wire, provider, false, body); sid != "" {
 					apply.RecordBilledInput(tn.Shadow, sid, billed)
 					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
