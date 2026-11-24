@@ -344,6 +344,10 @@ func touchAliasOf(j pingJob) string {
 	return apply.TouchAliasFor(j.tenant, j.raw, j.provider)
 }
 
+// The keeper reads the store while it holds k.mu (here, in OneHourTouches and in makeRoomForThreadLocked). That
+// costs one map lookup on store.Memory. A slow store would hold the lock for each read, one per thread of the
+// asked session: such a host must give the keeper a store with a fast PeekValue.
+//
 // oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: the store
 // says a ping stands and is under an hour old (apply.LiveOneHourPing), on a route not switched off. The same test
 // as OneHourTouches. The caller holds k.mu.

@@ -126,6 +126,9 @@ func Peek(s Store, key string) bool {
 // payload. A reader that only reports a fact (the dashboard asking "was the last touch a free 1-hour ping")
 // must not slide the TTL of a clock record, or its polling would keep a dead clock alive and a later cold
 // check would read an old time instead of "unknown".
+//
+// The no-slide guarantee holds only for a store that implements this. Today that is Memory alone. PeekValue falls
+// back to Get for any other store, and Get slides the TTL.
 type ValuePeeker interface {
 	// PeekValue returns the payload of a present, unexpired key, without sliding the TTL or reordering the LRU.
 	// It never removes an expired entry and never reads the disk copy.

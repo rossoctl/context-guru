@@ -681,7 +681,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				loadSessionState(st, alias)
 			}
 			seen, seq := aliasSeenWrite(st, alias, nowMs)
-			tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			if seq > 0 { // seq is 0 when no clock was written (no store)
+				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
 			aliasAt := seen.at
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
@@ -1617,7 +1619,7 @@ func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHou
 
 // RecordCacheTouchAliasRoute is RecordCacheTouchAliasTier that also stamps a 1-hour touch with the tag of the
 // route that made it (RouteTag), so a switch-off of that route can end it and no other. The tag is ignored for
-// a 5-minute touch.
+// a 5-minute touch. tag must come from RouteTag (hex): a tag with "^", "#" or ":" would break the value's shape.
 func RecordCacheTouchAliasRoute(st store.Store, alias string, nowMs int64, oneHour bool, tag string) {
 	if st == nil || nowMs <= 0 || alias == "" {
 		return

@@ -564,8 +564,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
 				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
-			if at := aliasSeen(st, alias, nowMs); at > prevAt {
-				prevAt = at
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 {
+				res.TouchAtMs, res.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
+			if seen.at > prevAt {
+				prevAt = seen.at
 			}
 			if prevAt > 0 && nowMs >= prevAt {
 				idleMs = nowMs - prevAt

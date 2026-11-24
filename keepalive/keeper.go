@@ -427,6 +427,8 @@ type Record struct {
 	TouchAlias string
 	// TouchAtMs is the time that request wrote under TouchAlias (apply.Trace.TouchAtMs). Record ends only the carry
 	// written at that time (apply.ConfirmRealTouch). 0: the request wrote no clock, and nothing ends.
+	// A host that runs apply MUST pass Trace.TouchAtMs and Trace.TouchSeq. Without them the confirm is a no-op, and
+	// a free 1-hour ping stays under the clock until its hour ends, with no error.
 	TouchAtMs int64
 	// TouchSeq numbers that write (apply.Trace.TouchSeq), so the confirm is exact within one millisecond.
 	TouchSeq int64
