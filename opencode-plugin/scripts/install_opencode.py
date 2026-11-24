@@ -85,7 +85,9 @@ def load_json(path):
 
 
 def write_json(path, value):
-    """Atomic: a temp file in the same folder, then a rename. The file keeps its mode (mkstemp makes 0600)."""
+    """Atomic: a temp file in the same folder, then a rename. The file keeps its mode (mkstemp makes 0600). A
+    symlink (a dotfiles repo) stays: the write goes to the file it points to."""
+    path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")

@@ -430,6 +430,19 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("The preset is medium", self.terminal.text())
         self.assertNotIn("The preset is off", self.terminal.text())
 
+    def test_install_writes_through_a_symlinked_config_and_keeps_the_link(self):
+        dotfiles = Path(self.home.name) / "dotfiles/opencode.json"
+        dotfiles.parent.mkdir(parents=True)
+        dotfiles.write_text('{"plugin": ["opencode-foo"]}\n')
+        self.config.mkdir(parents=True)
+        (self.config / "opencode.json").symlink_to(dotfiles)
+
+        self.installer("y", "n").install()
+
+        self.assertTrue((self.config / "opencode.json").is_symlink())
+        self.assertEqual(json.loads(dotfiles.read_text())["plugin"],
+                         ["opencode-foo", str(self.plugin_copy / "index.js")])
+
     def test_install_keeps_the_config_file_mode(self):
         self.write("opencode.json", {"plugin": []})
         (self.config / "opencode.json").chmod(0o644)
