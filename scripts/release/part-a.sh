@@ -8,7 +8,7 @@
 # "flaky" when the second run passed, and "FAILED" when both failed.
 #
 # The whole run takes about 70 to 90 minutes on a laptop. The race steps have these limits: proxy 20m,
-# dash 25m, plugin 30m, rest 20m, record 40m. Run it detached, and wait for the DONE line.
+# dash 40m, plugin 30m, rest 20m, record 40m. Run it detached, and wait for the DONE line.
 #
 # CG_TIMING_TESTS: the timing tests (testutil.RequireTiming) run when it is 1. The default here is 1,
 # because the integrator runs this script. scripts/dev/local-tests.sh sets it to 0 or 1 itself. The
