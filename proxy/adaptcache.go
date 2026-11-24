@@ -294,17 +294,9 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 	var options []any
 	labelOf := map[string]string{}
 	heldPer := map[string][]float64{}
-	bestID, bestNet := "", math.Inf(-1)
-	var bestCI [2]float64
-	bestDiff := 0.0
-	gateID, failID, failWhy := "", "", ""
-	gateNet, gateDiff, failNet := 0.0, 0.0, 0.0
-	var gateCI [2]float64
+	picker := campaign.NewPicker()
 	curPings, curPingUSD := 0.0, 0.0
 	inTally := map[string]campaign.Tally{}
-	// the one line the report owes when gateway dollars and the builder's calibrated gate disagree: for the adapted option that leads in gateway dollars
-	var disagree []string
-	disID, disNet := "", 0.0
 	for _, s := range strats {
 		label, detail := s.label, s.detail
 		if l, ok := adaptLabels[s.id]; ok {
@@ -346,6 +338,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		row["held_out"] = ho
 		options = append(options, row)
 		heldPer[s.id] = hp
+		opt := campaign.Option{ID: s.id, Adapted: s.adapted, Net: ht.Net, Diff: campaign.SumOf(d), CI: ci}
 		if s.adapted {
 			// The campaign builder's own gate, on the same rows in the same units: positive, and a paired session interval above zero against the
 			// shipped default, blanket K3 and the fleet plan. An option that fails it would run in shadow if applied.
@@ -353,47 +346,19 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 			_, _, fl := campaign.ScoreRows(facts, test, fixed(s.fleet(), se), &fp)
 			pass, why := campaign.ShipGate(he, campaign.GateLegs(k3, fl, defEng, s.fleet()), ss)
 			ho["builder_gate"] = map[string]any{"pass": pass, "failed": why, "unit": "engine_usd"}
-			if realBeats := ci[0] > 0; realBeats != pass && (disID == "" || ht.Net > disNet) {
-				disID, disNet, disagree = s.id, ht.Net, nil
-				if realBeats {
-					disagree = append(disagree, fmt.Sprintf("%s leads the default in gateway dollars (%+.2f [%.2f, %.2f]) but fails the builder's calibrated gate; the gate decides, so it would run in shadow unless applied anyway.", s.id, campaign.SumOf(d), ci[0], ci[1]))
-				} else {
-					disagree = append(disagree, fmt.Sprintf("%s passes the builder's calibrated gate, but in gateway dollars its lead over the default (%+.2f [%.2f, %.2f]) is not clear of zero.", s.id, campaign.SumOf(d), ci[0], ci[1]))
-				}
-			}
-			if pass && (gateID == "" || ht.Net > gateNet) {
-				gateID, gateNet, gateDiff, gateCI = s.id, ht.Net, campaign.SumOf(d), ci
-			}
-			if !pass && (failID == "" || ht.Net > failNet) {
-				failID, failNet, failWhy = s.id, ht.Net, strings.Join(why, "; ")
-			}
+			opt.GatePass, opt.GateWhy = pass, why
 		}
-		if s.id != "never" && ht.Net > bestNet {
-			bestID, bestNet, bestCI, bestDiff = s.id, ht.Net, ci, campaign.SumOf(d)
-		}
+		picker.Add(opt)
 	}
-	beats := bestID != "default" && bestCI[0] > 0
-	var summary string
+	pick := picker.Result()
+	bestID, bestCI, bestDiff, gateCI, gateDiff, gateID := pick.BestID, pick.BestCI, pick.BestDiff, pick.GateCI, pick.GateDiff, pick.GateID
+	disagree := pick.Disagree
+	beats := pick.BeatsDefault()
+	summary := pick.Summary()
 	var recommendation any
-	switch {
-	case bestID == "":
-		summary = "There is too little history to compare strategies; keep the default."
-	case gateID != "":
-		summary = fmt.Sprintf("%s beats the default by $%.2f [%.2f, %.2f] on your last 30%% of decisions (plan tuned only on what came before) and passes the campaign builder's gate (it also beats blanket K3 and the fleet plan).",
-			gateID, gateDiff, gateCI[0], gateCI[1])
+	if pick.Recommends() {
 		recommendation = map[string]any{"option": gateID, "change": "keep-alive: default -> " + labelOf[gateID] + " (" + gateID + ")", "net_delta_usd": r2(gateDiff), "effective": "now",
 			"reason": "it beat the default, blanket K3 and the fleet plan on held-out data"}
-	case beats && failID == bestID:
-		summary = fmt.Sprintf("%s is $%.2f [%.2f, %.2f] ahead of the default on your last 30%% of decisions, but it does not pass the campaign builder's gate (in the builder's calibrated dollars: %s), so applying it would only run it in shadow. Keep the default.",
-			bestID, bestDiff, bestCI[0], bestCI[1], failWhy)
-	case beats:
-		summary = fmt.Sprintf("%s is $%.2f [%.2f, %.2f] ahead of the default on your last 30%% of decisions, but it is a fixed plan, shown for comparison, and no adapted plan passes the campaign builder's gate. Keep the default.",
-			bestID, bestDiff, bestCI[0], bestCI[1])
-	case bestID == "default":
-		summary = "The default keep-alive is the best strategy on your held-out data; keep it."
-	default:
-		summary = fmt.Sprintf("No strategy beats the default on held-out data: the best, %s, is $%.2f ahead on your last 30%% of decisions, but the 95%% interval [%.2f, %.2f] includes zero. Keep the default.",
-			bestID, bestDiff, bestCI[0], bestCI[1])
 	}
 	// The decision is relative: best vs the default vs your current setting, held-out, same replay. Absolute dollars are secondary.
 	pair := func(a, b string) map[string]any {
