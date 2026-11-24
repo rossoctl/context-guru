@@ -10,25 +10,18 @@ import (
 
 	"github.com/rossoctl/context-guru/agent"
 	_ "github.com/rossoctl/context-guru/agent/bob"
-	"github.com/rossoctl/context-guru/agent/codex"
-	"github.com/rossoctl/context-guru/thread"
 )
 
-// MarkedCompaction reports whether the client marked this request as its own compaction, by a mark
-// that needs no text: a context-guru plugin header, or a built-in agent's own request metadata
-// (Codex). A host that has no headers (the bifrost adapter today) passes a nil h and gets false.
-//
-// Temporary home: when agent.Identify lands (#1312), it returns this mark as part of the Client
-// (for example Client.Compaction), and this function becomes a thin wrapper or goes away.
+// MarkedCompaction reports whether the client marked this request as its own compaction. It is a thin
+// wrapper: it identifies the client from h, then calls agent.MarkedCompaction. A host that already
+// holds the Client calls agent.MarkedCompaction. A nil h gives false.
 func MarkedCompaction(h http.Header, body []byte) bool {
-	return agent.PluginMarksCompaction(h) || codex.IsCompaction(h, body)
+	return agent.MarkedCompaction(agent.Identify(h), body)
 }
 
-// IsClientCompaction reports whether body is the client's own compaction request: the client's
-// mark first, then the prompt match in the thread package. It is the ONE call for a host. The proxy
-// passes r.Header, a plugin host such as Cortex passes pctx.Headers, and the bifrost adapter passes
-// nil, which leaves the prompt match as the fallback. Pass the result to the thread Tracker as
-// agentCompaction.
+// IsClientCompaction is agent.IsClientCompaction for a host that has headers and no Client yet (a
+// plugin host such as Cortex passes pctx.Headers; the bifrost adapter passes nil, which leaves the
+// prompt match as the fallback).
 func IsClientCompaction(h http.Header, body []byte) bool {
-	return thread.IsAgentCompactionHint(MarkedCompaction(h, body), body)
+	return agent.IsClientCompaction(agent.Identify(h), body)
 }

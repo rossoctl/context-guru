@@ -65,7 +65,7 @@ var agentCompactionPhrases = []string{
 
 // IsAgentCompactionHint is IsAgentCompaction plus a hint from the host. markedByClient is true when
 // the client marked the request as its own compaction: the host reads that from headers it owns
-// (see agent/all MarkedCompaction). A marked request is a compaction whatever its text says. A host
+// (see agent.MarkedCompaction). A marked request is a compaction whatever its text says. A host
 // with no headers passes false, and the phrase match is the fallback. Pass the result to Resolve as
 // agentCompaction.
 func IsAgentCompactionHint(markedByClient bool, body []byte) bool {

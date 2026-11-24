@@ -39,7 +39,7 @@ func HeaderAgentID(v string) (id string, ok bool) {
 //     host can log it. The result is always usable; err never means "drop the request".
 //
 // agentID is HeaderAgentID's result. body and agentCompaction are as for Resolve: pass the
-// request as the agent sent it, and agent/all.IsClientCompaction of that same headers and body (the mark, then the prompt match).
+// request as the agent sent it, and agent.IsClientCompaction of that same Client and body (the mark, then the prompt match).
 func (t *Tracker) ResolveSession(tenant, session, agentID string, body []byte, agentCompaction bool) (res Result, err error) {
 	if session == "" {
 		return Result{ID: Primary, Source: SourceSession}, nil

@@ -145,3 +145,28 @@ func TestModelAgentOfKeepsThePiProviderToken(t *testing.T) {
 		}
 	}
 }
+
+func TestCompactionMark(t *testing.T) {
+	if Identify(nil).Compaction {
+		t.Error("no headers must give no mark")
+	}
+	if !Identify(hdr("User-Agent", "node", "x-context-guru-request-kind", "compaction")).Compaction {
+		t.Error("the plugin header must mark a compaction")
+	}
+	meta := `{"request_kind":"compaction"}`
+	c := Identify(hdr("User-Agent", "codex_cli_rs/1", "x-codex-turn-metadata", meta))
+	if !c.Compaction || !MarkedCompaction(c, nil) {
+		t.Errorf("Codex turn metadata in the header must mark: %+v", c)
+	}
+	// A WebSocket request carries it in the body: the header mark is false, MarkedCompaction reads the body.
+	c = Identify(hdr("User-Agent", "codex_cli_rs/1"))
+	body := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"}}`)
+	if c.Compaction || !MarkedCompaction(c, body) {
+		t.Errorf("body mark: Compaction=%v marked=%v", c.Compaction, MarkedCompaction(c, body))
+	}
+	// Any other client's body mark and header mark do not count.
+	other := Identify(hdr("User-Agent", "curl/8", "x-codex-turn-metadata", meta))
+	if other.Compaction || MarkedCompaction(other, body) {
+		t.Errorf("a non-Codex caller must not mark: %+v", other)
+	}
+}

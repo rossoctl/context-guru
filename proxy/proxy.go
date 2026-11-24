@@ -832,7 +832,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// Unconditional: every caller of this endpoint wants exactly this — a body already
 	// larger than maxRequestBytes is the normal, intended input here (its whole job is to
 	// shrink whatever it's given), never a reason to reject up front.
-	body, ok := readGatedBody(w, r, true)
+	body, ok := readGatedBody(w, r, cl, true)
 	if !ok {
 		return
 	}
@@ -1288,7 +1288,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// Not unconditional: only the agent's OWN compaction request (agent/all.IsClientCompaction,
 		// checked inside readGatedBody) may read past maxRequestBytes here — everything
 		// else still gets refused at the default ceiling exactly as before.
-		body, ok := readGatedBody(w, r, false)
+		body, ok := readGatedBody(w, r, cl, false)
 		if !ok {
 			return
 		}
@@ -1341,7 +1341,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// compactions pass through. The counter is a report with Skipped set because the
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
-		agentCompaction := isClientCompaction(r, body)
+		agentCompaction := isClientCompaction(cl, body)
 		if !bypassed && agentCompaction {
 			gate := "detected"
 			if int64(len(body)) > maxRequestBytes {
@@ -1755,7 +1755,7 @@ var maxCompactionRequestBytes int64 = 128 << 20 // 128 MiB
 //
 // Returns ok=false once a response has already been written; the caller must return
 // immediately without writing anything further.
-func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride bool) (body []byte, ok bool) {
+func readGatedBody(w http.ResponseWriter, r *http.Request, cl agent.Client, unconditionalOverride bool) (body []byte, ok bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
@@ -1774,7 +1774,7 @@ func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride
 		refuseTooLarge(w, maxCompactionRequestBytes)
 		return nil, false
 	}
-	if !unconditionalOverride && !isClientCompaction(r, body) {
+	if !unconditionalOverride && !isClientCompaction(cl, body) {
 		refuseTooLarge(w, maxRequestBytes)
 		return nil, false
 	}

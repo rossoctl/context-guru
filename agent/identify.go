@@ -54,6 +54,10 @@ type Client struct {
 	AgentID string
 	// AgentIDHeader names the header AgentID came from, or "".
 	AgentIDHeader string
+	// Compaction is true when the headers mark this request as the client's own compaction: a context-guru
+	// plugin header (OpenCode, Pi), or Codex's turn metadata header. A mark in the body (Codex over a
+	// WebSocket) needs the body: see MarkedCompaction.
+	Compaction bool
 	// ParentID is the id of the parent agent's thread or session, or "" for a main thread.
 	// Codex: x-codex-parent-thread-id. OpenCode: x-opencode-parent-session-id.
 	ParentID string
@@ -75,6 +79,7 @@ func Identify(h http.Header) Client {
 	ua := h.Get("User-Agent")
 	c := Client{Label: label(ua), Entrypoint: entrypoint(ua)}
 	c.SDK = c.Label
+	c.Compaction = PluginMarksCompaction(h)
 	l := strings.ToLower(strings.TrimSpace(ua))
 
 	// The subagent header is read whatever the client: only Claude Code sends it.
@@ -93,6 +98,7 @@ func Identify(h http.Header) Client {
 			c.Label, c.Name = codex.Name, codex.Name
 			c.SessionID = f.SessionID
 			c.ParentID = f.ParentID
+			c.Compaction = c.Compaction || codex.IsCompaction(h, nil)
 			if c.AgentID == "" && f.AgentID != "" {
 				c.AgentID, c.AgentIDHeader = f.AgentID, "thread-id"
 			}
@@ -177,4 +183,19 @@ func ModelAgentOf(label, provider string) string {
 		return label
 	}
 	return provider
+}
+
+// MarkedCompaction reports whether the client marked this request as its own compaction, by a mark that
+// needs no request text: the headers (Client.Compaction), or Codex's body metadata. body is the request
+// as the client sent it.
+func MarkedCompaction(c Client, body []byte) bool {
+	return c.Compaction || (c.Name == ClientCodex && codex.BodyMarksCompaction(body))
+}
+
+// IsClientCompaction reports whether body is the client's own compaction request: the client's mark
+// first, then the prompt match in the thread package. It is the one call for a host that holds a
+// Client. Pass the result to the thread Tracker as agentCompaction. A host with no headers passes
+// Identify(nil), which leaves the prompt match as the fallback.
+func IsClientCompaction(c Client, body []byte) bool {
+	return thread.IsAgentCompactionHint(MarkedCompaction(c, body), body)
 }
