@@ -201,9 +201,11 @@ class Sandbox(unittest.TestCase):
         self.http_seen.append((url, dict(headers), body))
         return self.http_codes.pop(0) if len(self.http_codes) > 1 else self.http_codes[0]
 
-    def installer(self, terminal):
+    def installer(self, terminal, confirm_folders=False):
+        # The sandbox always sets PI_CODING_AGENT_DIR; only the Folders tests ask about it.
         return install_pi.Installer(terminal=terminal, shell=self.shell, http=self.http, source=self.source,
-                                    plugin=PLUGIN, platform=self.platform, sleep=lambda s: None)
+                                    plugin=PLUGIN, platform=self.platform, sleep=lambda s: None,
+                                    confirm_folders=confirm_folders)
 
     def install(self, answers=(), secrets=()):
         terminal = FakeTerminal(answers, secrets)
@@ -713,6 +715,60 @@ class ReviewRound2(Sandbox):
                          ["setup --plan", "setup", "uninstall", "setup --plan", "setup", "status"])
         self.assertNotIn("--cache-strategy", calls[1])  # the first setup reads the strategy itself
         self.assertIn("--cache-strategy", calls[4])     # the retry passes the one the consent named
+
+
+class Folders(Sandbox):
+    """#1319: the installer names the folders it uses, and asks when PI_CODING_AGENT_DIR moves Pi's settings."""
+
+    def run_install(self, answers, secrets=()):
+        terminal = FakeTerminal(answers, secrets)
+        return self.installer(terminal, confirm_folders=True).install(), terminal
+
+    def test_a_moved_pi_folder_is_named_and_no_stops_before_any_change(self):
+        code, terminal = self.run_install(["n"])
+        shown = self.everything_printed(terminal)
+        self.assertEqual(code, 1)
+        self.assertIn(f"PI_CODING_AGENT_DIR is set: Pi's settings are in {self.agent}", shown)
+        self.assertIn("Use these folders? [y/N]", shown)
+        self.assertIn("open a new terminal", shown)
+        self.assertEqual(self.shell.ran("npm", "view"), [])  # nothing ran after the check
+        self.assertEqual(self.shell.ran("pi", "install"), [])
+
+    def test_a_yes_goes_on_with_those_folders(self):
+        self.shell.pi_version = "1.6.0"
+        code, terminal = self.run_install(["y", "https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        self.assertTrue((self.agent / "models.json").exists())
+
+    def test_without_the_variable_there_is_no_question_and_the_folders_are_named(self):
+        self.shell.pi_version = "1.6.0"
+        home_agent = self.root / ".pi/agent"
+        home_agent.mkdir(parents=True)
+        with mock.patch.dict(os.environ):
+            del os.environ["PI_CODING_AGENT_DIR"]
+            code, terminal = self.run_install(["https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        shown = self.everything_printed(terminal)
+        self.assertEqual(code, 0, shown)
+        self.assertNotIn("Use these folders?", shown)
+        self.assertIn(f"Pi's settings: {home_agent}", shown)
+        self.assertIn(f"context-guru's data: {self.root / 'state/context-guru-pi'}", shown)
+
+    def test_the_end_names_the_pi_program_and_what_to_do_if_the_terminal_finds_another(self):
+        self.shell.pi_version = "1.6.0"
+        _, terminal = self.run_install(["y", "https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        shown = self.everything_printed(terminal)
+        self.assertIn("Start Pi with: pi (/usr/local/bin/pi)", shown)
+        self.assertIn("open a new terminal", shown)
+
+    def test_uninstall_asks_the_same_question_so_a_test_folder_install_can_be_removed(self):
+        self.shell.pi_version = "1.6.0"
+        self.run_install(["y", "https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        terminal = FakeTerminal(["n"])
+        self.assertEqual(self.installer(terminal, confirm_folders=True).uninstall(), 1)
+        self.assertEqual(self.shell.ran("python3", PLUGIN, "uninstall"), [])
+        terminal = FakeTerminal(["y", "y"])
+        self.assertEqual(self.installer(terminal, confirm_folders=True).uninstall(), 0)
+        self.assertIn(["python3", PLUGIN, "uninstall"], self.shell.ran("python3", PLUGIN))
 
 
 class TheKeyStaysSecret(Sandbox):
