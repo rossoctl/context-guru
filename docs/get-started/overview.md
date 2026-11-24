@@ -69,7 +69,7 @@ flowchart TD
   holds rewind data (`cache_key → original`) and sticky ids.
 - **Session** — the key that ties turns of one conversation together (an
   explicit host id, else a content hash).
-- **Preset** — a named default pipeline (e.g. `balanced`, `agent`) that explicit
+- **Preset** — a named default pipeline (e.g. `conservative`, `medium`) that explicit
   config fields override.
 - **Expand loop** — the host-glue continuation that resolves a `<<cg:HASH>>`
   marker from the Store when the model calls `context_guru_expand`.
@@ -82,7 +82,7 @@ The deep dive lives in [Architecture](../design.md).
 
 - :material-rocket-launch: **[Quickstart: Proxy](quickstart-proxy.md)**
 
-    Build the binary, run `--preset balanced`, point an agent at it, and check
+    Build the binary, run `--preset conservative`, point an agent at it, and check
     savings.
 
 - :material-scissors-cutting: **[Components](../components.md)**

@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -533,7 +534,7 @@ func (h *Handler) renderMetrics() string {
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
-		unparsedUsage, unreadableUsage := UsageGaps()
+		unparsedUsage, unreadableUsage := respfacts.UsageGaps()
 		// The two accounting-outage counters (#200). Process-wide, so outside the store cast for
 		// the same reason the stash pair is: the parser is package-level.
 		promHeaderProc(&b, "cg_usage_unparsed_total",

@@ -1,4 +1,4 @@
-package proxy
+package respfacts
 
 import "testing"
 
@@ -48,8 +48,8 @@ func TestStreamedUsageReadsTheTrueSplit(t *testing.T) {
 			split{717, 6656, 0, 9}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			u, why, _ := parseSSEUsageWhy([]byte(tc.sse))
-			if why != usageMissNone {
+			u, why, _ := ParseSSEUsage([]byte(tc.sse))
+			if why != MissNone {
 				t.Fatalf("not parsed: %v", why)
 			}
 			got := split{u.FreshInput, u.CacheRead, u.CacheWrite, u.Output}

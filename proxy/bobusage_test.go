@@ -11,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
@@ -30,14 +31,15 @@ const (
 		`"cached_tokens":20315,"text_tokens":4},"total_tokens":20430}`
 )
 
-// bobBase is what the shared parser makes of a block, as parseUsageWhy builds it.
+// bobBase is what the shared parser makes of a block, as respfacts.ParseUsage builds it.
 func bobBase(t *testing.T, raw string) Usage {
 	t.Helper()
-	u, why := parseUsageWhy([]byte(`{"usage":` + raw + `}`))
-	if why != usageMissNone {
+	tiers, why := respfacts.ParseUsage([]byte(`{"usage":` + raw + `}`))
+	if why != respfacts.MissNone {
 		t.Fatalf("shared parser rejected the block: %v", why)
 	}
-	return u
+	return Usage{FreshInput: tiers.FreshInput, CacheRead: tiers.CacheRead, CacheWrite: tiers.CacheWrite,
+		CacheWrite1h: tiers.CacheWrite1h, Output: tiers.Output}
 }
 
 func sameUsage(a, b Usage) bool {

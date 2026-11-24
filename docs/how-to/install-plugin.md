@@ -199,7 +199,7 @@ restores from a `context-guru-settings-json/` folder beside each settings file â
 one you ran it in already has its environment. Start a new session.
 
 **A prompt hangs with no output at all.** A dead proxy on a routed project. Start it by hand
-(`context-guru-proxy --listen 127.0.0.1:8787 --preset cache`) or remove `env.ANTHROPIC_BASE_URL`
+(`context-guru-proxy --listen 127.0.0.1:8787 --preset conservative`) or remove `env.ANTHROPIC_BASE_URL`
 from `.claude/settings.local.json` to get working immediately.
 
 **Requests fail with a connection error.** The proxy isn't running and this project is routed.

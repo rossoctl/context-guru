@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, recoverStaleRoute, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
+  stripsChatGPTFields, strategyChoices, type StartCheck, settingsPath, recoverStaleRoute, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
   uninstallText, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
@@ -552,6 +552,28 @@ test("a configure that worked names the preset and the strategy", () => {
 
 test("a configure with no facts shows stderr", () => {
   assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
+});
+
+test("the two-copies warning names the settings.json that Pi uses", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  const before = process.env.PI_CODING_AGENT_DIR;
+  g[LOADED] = "/clone-a/pi-package";
+  process.env.PI_CODING_AGENT_DIR = "/tmp/test-agent";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    second.emit("session_start");
+    assert.ok(second.notices[0].includes('"packages" in /tmp/test-agent/settings.json'), second.notices[0]);
+  } finally {
+    delete g[LOADED];
+    if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = before;
+  }
+});
+
+test("settingsPath names Pi's own settings.json, or the one in PI_CODING_AGENT_DIR", () => {
+  assert.equal(settingsPath({}), "~/.pi/agent/settings.json");
+  assert.equal(settingsPath({ PI_CODING_AGENT_DIR: "/tmp/agent" }), "/tmp/agent/settings.json");
 });
 
 /** A model registry and a session for recoverStaleRoute: models.json can name the proxy or the real endpoint. */

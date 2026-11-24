@@ -86,7 +86,7 @@ func PingSavings(r components.KeepAliveReport, st PingSink, calls PingCalls) (re
 // oneHourIf is time.Hour when on, else 0.
 func oneHourIf(on bool) time.Duration {
 	if on {
-		return time.Hour
+		return OneHourTTL
 	}
 	return 0
 }

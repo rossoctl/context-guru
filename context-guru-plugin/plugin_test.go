@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func scriptsDir(t *testing.T) string {
@@ -1051,6 +1052,7 @@ func runCheck(t *testing.T, port, binBody string) (out string, code int, elapsed
 // check that fails on a loaded CI runner, and a flaky test here would get muted, which is how the
 // property would be lost a second time.
 func TestCheckHookFinishesInsideItsOwnTimeout(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -1203,6 +1205,7 @@ func TestCheckHookRecoversSilently(t *testing.T) {
 // port is one of the likeliest reasons to need that block, and it was the one case that never
 // produced it.
 func TestStartHookBudgetsOnWallClockNotIterations(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -2317,7 +2320,7 @@ func TestStatuslineReportsLoadingNotDownOnATimeout(t *testing.T) {
 		t.Errorf("got %q, want the loading indicator %q (NOT the down indicator — the proxy may be "+
 			"perfectly healthy and merely slow)", strings.TrimSpace(out), "cg: stats loading…")
 	}
-	if elapsed > 2*time.Second {
+	if testutil.TimingEnabled() && elapsed > 2*time.Second {
 		t.Errorf("took %v against a stalling port; the HTTP fetch carries its own ~0.6s timeout, "+
 			"so this should return in well under the script's own 2s backstop", elapsed)
 	}

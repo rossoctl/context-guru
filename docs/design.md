@@ -20,6 +20,7 @@ infrastructure the components sit on.
 | `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, and the rules for which request books no figure |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
+| `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
@@ -294,6 +295,23 @@ History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it b
 `keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every
 substitute kind.
 
+### One source for the cache lifetime
+
+No code writes "5 minutes", "30 minutes" or "1 hour" for a provider's cache lifetime. Two places hold the
+facts:
+
+- **The table:** `modelinfo.CacheLifetime(provider, model, oneHour)`. `apply.EntryLifetime(CacheFacts)` and
+  `apply.IsCold` are the one decision that wraps it; every reader (the cold check, the keeper, the dashboard)
+  calls them. It gives the lifetime for a provider, a model and a tier. A
+  provider with a fixed lifetime (OpenAI GPT-5.6+, 30 minutes) ignores the tier.
+- **The tier of the last touch:** the `cg:seen:<alias>` clock records the time of the last touch of the
+  entry. A keep-alive request that left the entry at the 1-hour tier writes `<ms>:1h`. A real request, or a
+  5-minute touch, writes the plain `<ms>`. So the tier lasts until the next touch, and a 5-minute
+  touch moves the entry back (#1258). The cold check reads both (#1350). It counts the lifetime of that
+  tier from the touch. Without this, 5 minutes after a free 1-hour ping the check read "cold" on a warm
+  entry, and a cold-only cut made the provider write the whole prefix again.
+
+
 ## Session keying
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
@@ -463,7 +481,7 @@ constructor verbatim. A `preset` expands to a default pipeline; explicit fields 
 Unknown keys are rejected.
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }

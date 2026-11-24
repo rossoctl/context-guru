@@ -1,8 +1,6 @@
 package accrec
 
 import (
-	"time"
-
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
@@ -28,6 +26,13 @@ type PingLookup interface {
 	Peek(key string) (accountant.PingFacts, bool)
 }
 
+// BaseTTL and OneHourTTL are the two Anthropic lifetimes, from the one table (modelinfo). The proxy reads
+// them here and writes no duration of its own (#1350).
+const (
+	BaseTTL    = modelinfo.AnthropicCacheTTL5m
+	OneHourTTL = modelinfo.AnthropicCacheTTL1h
+)
+
 // EntryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
 // ping for the thread since its last request is read from pings (nil = none; the capture drops it
 // once the request is priced) and supplies
@@ -45,12 +50,13 @@ type PingLookup interface {
 // library prices the request (context-guru#919).
 func EntryFacts(provider bschemas.ModelProvider, model string, forwarded []byte, pings PingLookup,
 	session string, t accountant.Thread) accountant.EntryFacts {
-	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
+	facts := accountant.EntryFacts{TTL: BaseTTL, Lifetime: accountant.LifetimeUnknown}
 	// The kind comes from the cold gate's rule. The duration is taken again with the keeper's tier
 	// (every breakpoint asks 1h): apply.CacheLifetime lengthens it for a single 1h ask.
 	switch ttl, kind := apply.CacheLifetime(provider, model, forwarded); kind {
 	case apply.CacheLifetimeExact:
-		facts.TTL, facts.Lifetime = modelinfo.CacheLifetime(string(provider), model, apply.AllBreakpointsAskExtendedTTL(forwarded)),
+		facts.TTL, facts.Lifetime = apply.EntryLifetime(apply.CacheFacts{Provider: provider, Model: model,
+			LastOneHour: apply.AllBreakpointsAskExtendedTTL(forwarded)}),
 			accountant.LifetimeExact
 	case apply.CacheLifetimeMinimum:
 		facts.TTL, facts.Lifetime = ttl, accountant.LifetimeMinimum
@@ -77,7 +83,7 @@ func EntryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 // key is the thread's PingKey. It returns lower=true when the caller must set the facts' TTL to 5 minutes
 // and lower the TTL of every 1h breakpoint of the record with it. The tier store learns from the usage.
 func BilledTTL(tiers *TierStore, key string, f accountant.EntryFacts, cacheWrite, cacheWrite1h int64) (lower bool) {
-	if f.Lifetime != accountant.LifetimeExact || f.TTL <= 5*time.Minute {
+	if f.Lifetime != accountant.LifetimeExact || f.TTL <= BaseTTL {
 		return false
 	}
 	prev, known := tiers.Get(key)

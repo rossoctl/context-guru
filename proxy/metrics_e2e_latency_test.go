@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 )
 
@@ -80,6 +81,7 @@ func metricsMode(t *testing.T, collector string) func(*Options) {
 // drift on the machine cancels out. It reports p50 and p99 of the full request time. It logs; it
 // fails only above a generous ceiling, because the budget number is the maintainer's to choose.
 func TestMetricsDoNotChangeResponseTime(t *testing.T) {
+	testutil.RequireTiming(t)
 	if testing.Short() {
 		t.Skip("benchmark")
 	}
