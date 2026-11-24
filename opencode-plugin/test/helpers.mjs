@@ -53,6 +53,11 @@ const listen = process.argv.indexOf("--listen")
 const port = Number(process.argv[listen + 1].split(":")[1])
 createServer((request, response) => {
   if (request.url === "/healthz") response.end("ok")
+  else if (request.url === "/signal" && request.method === "POST") {
+    let body = ""
+    request.on("data", (chunk) => { body += chunk })
+    request.on("end", () => { if (process.env.CG_TEST_RECORD) require("node:fs").appendFileSync(process.env.CG_TEST_RECORD, JSON.stringify({ label: "signal", contentType: request.headers["content-type"], body }) + String.fromCharCode(10)); response.statusCode = 204; response.end() })
+  }
   else { response.statusCode = 404; response.end() }
 }).listen(port, "127.0.0.1")
 `)
