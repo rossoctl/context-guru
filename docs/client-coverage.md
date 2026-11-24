@@ -36,10 +36,12 @@ A host without a client signal gives the generic result.
 |---|---|---|---|---|---|---|
 | proxy | per client, as above | per client, as above | per client, as above | per client, as above | per client, as above | per client, as above |
 | bifrost adapter | fallback: no headers | fallback: no headers | covered: host sets the session from `x-context-guru-session` | fallback: no `/signal` route | fallback: no headers | n/a |
-| Cortex | **none: primary only**, worse than the proxy's prefix fallback (no `Opts.ThreadOf`) | fallback | covered: host id (`pctx.SessionID` or the A2A contextId); a request with no session is skipped | n/a: no `/signal` route in the plugin | fallback | n/a |
+| Cortex | **none: primary only**, worse than the proxy's prefix fallback (no `Opts.ThreadOf`). The effect is narrower: only per-thread component state and accounting, which falls back to its own "main" rule | n/a: no keep-alive in Cortex | covered: host id (`pctx.SessionID` or the A2A contextId); a request with no session is skipped | n/a: no `/signal` route in the plugin | fallback | n/a |
 
 - **Cortex** source: `core/plugins/contextguru/plugin.go` in `rossoctl/cortex`. It wires no thread
   tracker, so every request is the primary thread. It has `pctx.Headers`, so `agent.Identify`
   works there once #1312 lands.
 - **bifrost adapter:** `resolveSession` sees only a session id from the host context. It never sees
   request headers, so `agent.Identify` needs the transport to pass them.
+- **Cortex gap:** wire `apply.Opts.ThreadOf` with `thread.ResolveSession` and
+  `agent.Identify(pctx.Headers)`. Owner: Cortex repo. A follow-up issue is to be opened.
