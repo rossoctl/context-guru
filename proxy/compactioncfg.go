@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
 	"os"
 	"runtime"
-	"strings"
 
 	"github.com/tidwall/gjson"
 
@@ -41,11 +41,18 @@ const ClaudeCompactOffEnv = compactionpoint.OffEnv
 // ReadClaudeCompact reads the settings from env and the user's settings files. getenv and home are
 // injected for tests. It never fails: an unreadable or odd file is skipped (fail open).
 func ReadClaudeCompact(getenv func(string) string, home string) compactionpoint.ClaudeCode {
-	return compactionpoint.ReadClaude(getenv, home, hostFS)
+	return compactionpoint.ReadClaude(getenv, home, hostOpen)
 }
 
-// hostFS is the real file system, rooted at "/". The library reads settings files through it.
-var hostFS = os.DirFS("/")
+// hostOpen opens a settings file with os.Open, so every path means what it always meant. The
+// library reads settings files through it. Only tests may write this variable.
+var hostOpen compactionpoint.Open = func(path string) (fs.File, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
 
 // compactionPointFor is C for this request: the user's own setting, read at start-up, when it
 // changes C for the request's model; else the operator's compaction_point in the price table, else the
@@ -88,7 +95,7 @@ func (h *Handler) bobWindow(model string) int {
 	return h.bobWin[model]
 }
 
-const bobWindowMax = compactionpoint.MaxBobWindows
+const bobWindowMax = bob.MaxModelWindows
 
 // noteBobModelInfo records bob.ModelWindows(body). A body that is not that shape records nothing.
 func (h *Handler) noteBobModelInfo(body []byte) { h.noteBobWindows(bob.ModelWindows(body)) }
@@ -96,7 +103,7 @@ func (h *Handler) noteBobModelInfo(body []byte) { h.noteBobWindows(bob.ModelWind
 // noteBobWindows records the agent's window catalog (agent.ControlReply.Windows). An empty catalog,
 // or one over bobWindowMax entries, records nothing. A window <= 0 is dropped.
 func (h *Handler) noteBobWindows(windows map[string]int) {
-	got := compactionpoint.CleanBobWindows(windows)
+	got := compactionpoint.CleanBobWindows(windows, bobWindowMax)
 	if got == nil {
 		return
 	}
@@ -111,18 +118,7 @@ func (h *Handler) noteBobWindows(windows map[string]int) {
 // Bob's own default (0.5) applies when nothing is set. Same switch as the others: off gives the zero
 // value. It never fails.
 func ReadBobCompact(getenv func(string) string, home string) compactionpoint.Bob {
-	return compactionpoint.ReadBob(getenv, home, bobSystemSettingsPath(getenv), hostFS)
-}
-
-// bobSystemSettingsPath is the client's own rule (getSystemSettingsPath in bob.js).
-func bobSystemSettingsPath(getenv func(string) string) string {
-	if p := strings.TrimSpace(getenv("BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH")); p != "" {
-		return p
-	}
-	if runtime.GOOS == "darwin" {
-		return "/Library/Application Support/Bob-Shell/settings.json"
-	}
-	return "/etc/bob-shell/settings.json"
+	return compactionpoint.ReadBob(getenv, home, runtime.GOOS, hostOpen)
 }
 
 // ReadCodexCompact reads three top-level keys of $CODEX_HOME/config.toml (default ~/.codex) (#963):
@@ -131,5 +127,5 @@ func bobSystemSettingsPath(getenv func(string) string) string {
 // only `key = value` lines before the first [table] header, and skips anything it does not
 // understand (fail open). Same switch as the others.
 func ReadCodexCompact(getenv func(string) string, home string) compactionpoint.Codex {
-	return compactionpoint.ReadCodex(getenv, home, hostFS)
+	return compactionpoint.ReadCodex(getenv, home, hostOpen)
 }

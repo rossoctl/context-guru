@@ -19,10 +19,6 @@ import (
 // OffEnv turns the start-up read off ("off", "0" or "false"). C then comes from the table.
 const OffEnv = "CONTEXT_GURU_CLIENT_COMPACT_CONFIG"
 
-// MaxBobWindows is the most models CleanBobWindows keeps. It equals bob.MaxModelWindows (the
-// agent's own cap); the host keeps the cap here too, in case the agent changes.
-const MaxBobWindows = 512
-
 func readOff(getenv func(string) string) bool {
 	switch strings.ToLower(strings.TrimSpace(getenv(OffEnv))) {
 	case "off", "0", "false":
@@ -93,10 +89,11 @@ func (s Settings) Pick(userAgent, model string, window int, bobWindow func(model
 }
 
 // CleanBobWindows returns the catalog to store, or nil when nothing should be stored. An empty
-// catalog, or one over MaxBobWindows entries, stores nothing. A window <= 0 is dropped. The result
+// catalog, or one over max entries, stores nothing. The host passes the agent's own cap
+// (bob.MaxModelWindows), so the cap has one definition. A window <= 0 is dropped. The result
 // is a copy: the caller keeps no handle on the agent's map.
-func CleanBobWindows(windows map[string]int) map[string]int {
-	if len(windows) == 0 || len(windows) > MaxBobWindows {
+func CleanBobWindows(windows map[string]int, max int) map[string]int {
+	if len(windows) == 0 || len(windows) > max {
 		return nil
 	}
 	got := make(map[string]int, len(windows))
@@ -120,14 +117,14 @@ func short(s string) string {
 	return s
 }
 
-// openAbs opens an absolute OS path in fsys. fsys is rooted at "/" (os.DirFS("/") for a host).
-func openAbs(fsys fs.FS, path string) (fs.File, error) {
-	return fsys.Open(strings.TrimPrefix(filepath.ToSlash(path), "/"))
-}
+// Open opens a file by the OS path the library names. A host passes a function that calls os.Open,
+// so each path means what it meant before: a relative path is relative to the working directory, a
+// `.` or `..` element works, and a Windows drive path works. A test passes an in-memory one.
+type Open func(path string) (fs.File, error)
 
 // readSmall reads a settings file of at most 4 MiB, or nil. A missing file is the normal case.
-func readSmall(fsys fs.FS, path string) []byte {
-	f, err := openAbs(fsys, path)
+func readSmall(open Open, path string) []byte {
+	f, err := open(path)
 	if err != nil {
 		return nil
 	}
@@ -143,9 +140,9 @@ func readSmall(fsys fs.FS, path string) []byte {
 }
 
 // ReadClaude reads Claude Code's auto-compact settings from env and the user's settings files (#948).
-// getenv, home and fsys are injected. It never fails: an unreadable or odd file is skipped (fail
+// getenv, home and open are injected. It never fails: an unreadable or odd file is skipped (fail
 // open). Project settings files depend on the directory the client runs in, so they are not read.
-func ReadClaude(getenv func(string) string, home string, fsys fs.FS) ClaudeCode {
+func ReadClaude(getenv func(string) string, home string, open Open) ClaudeCode {
 	if readOff(getenv) {
 		return ClaudeCode{}
 	}
@@ -170,12 +167,12 @@ func ReadClaude(getenv func(string) string, home string, fsys fs.FS) ClaudeCode 
 	}
 	// ~/.claude.json first, then settings.json: the settings file wins (the client's own order puts
 	// userSettings above the legacy global config).
-	if b := readSmall(fsys, globalCfg); b != nil {
+	if b := readSmall(open, globalCfg); b != nil {
 		if v := gjson.GetBytes(b, "autoCompactEnabled"); v.Type == gjson.True || v.Type == gjson.False {
 			c.SettingsEnabled = fmt.Sprint(v.Bool())
 		}
 	}
-	if b := readSmall(fsys, settings); b != nil {
+	if b := readSmall(open, settings); b != nil {
 		if v := gjson.GetBytes(b, "autoCompactWindow"); v.Type == gjson.Number || v.Type == gjson.String {
 			c.SettingsWindow = short(v.String())
 		}
@@ -204,11 +201,11 @@ func ReadClaude(getenv func(string) string, home string, fsys fs.FS) ClaudeCode 
 }
 
 // ReadBob reads Bob Shell's model.compressionThreshold (#963) from the user settings file
-// ~/.bob/settings.json and the system settings file at systemPath, which wins in the client's
-// merge. The host finds systemPath (it depends on the OS and env). The project file is not read.
+// ~/.bob/settings.json and the system settings file (BobSystemSettingsPath), which wins in the
+// client's merge. goos is the host's runtime.GOOS. The project file is not read.
 // Read is true whenever the read ran, so Bob's own default (0.5) applies when nothing is set. Same
 // off switch as the others. It never fails.
-func ReadBob(getenv func(string) string, home, systemPath string, fsys fs.FS) Bob {
+func ReadBob(getenv func(string) string, home, goos string, open Open) Bob {
 	if readOff(getenv) {
 		return Bob{}
 	}
@@ -217,12 +214,12 @@ func ReadBob(getenv func(string) string, home, systemPath string, fsys fs.FS) Bo
 	if home != "" {
 		paths = append(paths, filepath.Join(home, ".bob", "settings.json"))
 	}
-	paths = append(paths, systemPath)
+	paths = append(paths, BobSystemSettingsPath(getenv, goos))
 	for _, p := range paths { // later wins: system over user
 		if !filepath.IsAbs(p) {
 			continue
 		}
-		if raw := readSmall(fsys, p); raw != nil {
+		if raw := readSmall(open, p); raw != nil {
 			if v := gjson.GetBytes(raw, "model.compressionThreshold"); v.Type == gjson.Number || v.Type == gjson.String {
 				b.Threshold = short(v.String())
 			}
@@ -231,12 +228,24 @@ func ReadBob(getenv func(string) string, home, systemPath string, fsys fs.FS) Bo
 	return b
 }
 
+// BobSystemSettingsPath is the client's own rule (getSystemSettingsPath in bob.js). goos is
+// runtime.GOOS of the host.
+func BobSystemSettingsPath(getenv func(string) string, goos string) string {
+	if p := strings.TrimSpace(getenv("BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH")); p != "" {
+		return p
+	}
+	if goos == "darwin" {
+		return "/Library/Application Support/Bob-Shell/settings.json"
+	}
+	return "/etc/bob-shell/settings.json"
+}
+
 // ReadCodex reads three top-level keys of $CODEX_HOME/config.toml (default ~/.codex) (#963):
 // model_auto_compact_token_limit, model_auto_compact_token_limit_scope and
 // model_post_turn_compact_threshold_percent. It is a small line scanner, not a TOML parser: it reads
 // only `key = value` lines before the first [table] header, and skips anything it does not
 // understand (fail open). Same off switch as the others.
-func ReadCodex(getenv func(string) string, home string, fsys fs.FS) Codex {
+func ReadCodex(getenv func(string) string, home string, open Open) Codex {
 	if readOff(getenv) {
 		return Codex{}
 	}
@@ -250,7 +259,7 @@ func ReadCodex(getenv func(string) string, home string, fsys fs.FS) Codex {
 	if !filepath.IsAbs(dir) {
 		return Codex{}
 	}
-	f, err := openAbs(fsys, filepath.Join(dir, "config.toml"))
+	f, err := open(filepath.Join(dir, "config.toml"))
 	if err != nil {
 		return Codex{}
 	}
