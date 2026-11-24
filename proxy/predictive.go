@@ -17,9 +17,8 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -30,7 +29,7 @@ import (
 //
 //	off     loaded but inert
 //	shadow  decides on live traffic, logs and scores what it WOULD have done, changes nothing
-//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings). The spacing stays the tenant's own interval, or campaignKeepAlive5mIdle when none is set;
+//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings). The spacing stays the tenant's own interval, or the shipped 240 s (config.DefaultKeepAliveIdle) when none is set;
 //	        kvcache.DefaultPingIdle is only the spacing the decision is scored at
 //
 // The decision costs microseconds and needs only what the proxy sees when a response ends, so it runs inline in keeper.record.
@@ -44,10 +43,7 @@ const (
 	campaignModeShadow = "shadow"
 	campaignModeActive = "active"
 
-	// The closed-form replay constants of scripts/campaign/cgpredict.py (plan_eval): the provider cliff, the scheduling lateness, a ping's duration, and the fitted benefit scale.
-	cfTC, cfLate, cfPingDur = 296.5, 1.0, 2.0
-	// cfScale and cfPingScale are scripts/campaign/engine_calibration.json (benefit_scale, ping_scale); a test keeps them equal.
-	cfScale, cfPingScale = 0.948, 1.346
+	// The replay constants (campaign.Cliff, campaign.BenefitScale, ...) live in the campaign library package.
 
 	predPendingMax = 4096
 	predResolveTTL = 2 * time.Hour
@@ -277,20 +273,18 @@ func (pc *predCampaign) resolveLocked(p predPending, gap float64, returned bool)
 
 // resolveStopLocked is resolveLocked when the client ended the session stop seconds after the response ended: pings that would start later are never sent.
 func (pc *predCampaign) resolveStopLocked(p predPending, gap float64, returned bool, stop float64) {
-	fired, rescued := planOutcome(p.k, p.x, float64(p.endMs-p.startMs)/1000, gap, returned, stop)
+	sc := campaign.ScoreDecision(p.k, p.x, float64(p.endMs-p.startMs)/1000, gap, returned, stop, p.ping, p.stake)
+	fired, rescued, net := sc.Fired, sc.Rescued, sc.NetUSD
 	st := &pc.stats
 	st.Resolved++
 	st.WouldPings += int64(fired)
-	cost := cfPingScale * float64(fired) * p.ping
-	st.EstPingUSD += cost
-	net := -cost
+	st.EstPingUSD += sc.PingUSD
 	if returned {
 		st.Returned++
 	}
 	if rescued {
 		st.Rescues++
-		st.EstRescUSD += cfScale * p.stake
-		net += cfScale * p.stake
+		st.EstRescUSD += sc.RescUSD
 	}
 	st.EstNetUSD += net
 	if pc.logf != nil {
@@ -357,7 +351,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	if a == nil { // the request started before the campaign was loaded, or on a path that did not carry its arrival
 		a = pc.tr.Arrive(predictive.Request{Tenant: tenantID, Session: session, Thread: thread, TsMs: startedAt.UnixMilli()})
 	}
-	if pRead <= 0 || pWrite <= pRead {
+	if !campaign.Priced(pRead, pWrite) {
 		pc.mu.Lock()
 		pc.stats.NoPrice++
 		pc.mu.Unlock()
@@ -380,13 +374,10 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	pc.tr.Ended(a, resp)
 	pingCost := resp.PingCost()
 	st := startedAt.UTC()
-	facts := predictive.Facts{Family: familyOf(model), StopReason: u.StopReason, Model: model, Agent: resp.Agent, PrefixTok: float64(resp.Prefix), PingCost: pingCost,
-		HourUTC: float64(st.Hour()), DowUTC: float64(st.Weekday())}
+	facts := campaign.NewFacts(model, u.StopReason, resp.Agent, int64(resp.Prefix), pingCost, st.Hour(), int(st.Weekday()))
 	pc.mu.Lock()
 	spec := pc.spec // an auto campaign's refresh swaps it (refreshAutoCampaigns)
 	pc.mu.Unlock()
-	rule := spec.RuleFor(&facts)
-	kk, idle := 0, kvcache.DefaultPingIdle.Seconds()
 	var row *predictive.Row
 	if pc.model != nil { // the tracker must see every response, whichever rule the segment applies
 		row = predictive.NewRow()
@@ -394,13 +385,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	} else {
 		pc.tr.Release(a, resp) // plan-only campaign: no features, and no history to accumulate
 	}
-	switch rule.Kind {
-	case predictive.RuleModel:
-		d := predictive.Decide(pc.model, row, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: pWrite, PRead: pRead, PingCost: pingCost})
-		kk, idle = d.K, pc.model.Rule().XS
-	case predictive.RulePlan:
-		kk, idle = spec.PlanOf(rule)
-	}
+	kk, idle := campaign.Choose(spec, pc.model, row, &facts, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: pWrite, PRead: pRead, PingCost: pingCost})
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.stats.Decisions++
@@ -415,13 +400,9 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	if pc.npend < predPendingMax {
 		pc.npend++
 		tk := session + "\x00" + thread
-		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: float64(resp.Prefix) * (pWrite - pRead), ping: pingCost})
+		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: campaign.Stake(int64(resp.Prefix), pRead, pWrite), ping: pingCost})
 	}
 	return predDecision{campaign: pc, k: kk, idleS: idle, active: pc.meta.Mode == campaignModeActive && !optedOut}, true
-}
-
-func familyOf(model string) string {
-	return predictive.FamilyOf(model)
 }
 
 // campaignStrategyID tags the pings a campaign bought on their dash rows.
@@ -429,31 +410,7 @@ func campaignStrategyID(id string) string { return "campaign:" + id }
 
 // apply writes an ACTIVE campaign's decision into the entry's policy. Account-level bounds (the per-ping dollar ceiling) are left alone.
 func (d predDecision) apply(pol CachePolicy) CachePolicy {
-	if !d.active {
-		return pol
-	}
-	if d.k <= 0 {
-		pol.KeepAlive = false
-		return pol
-	}
-	// The campaign decides HOW MANY pings, never their spacing: that stays the tenant's configured keep-alive interval (the shipped 240 s when none
-	// is configured), so a campaign never pings later than it (live, pings 275-280 s after a response miss the cache 19% of the time) nor more
-	// often than the tenant's own policy would.
-	idle := pol.Idle
-	if idle <= 0 {
-		idle = campaignKeepAlive5mIdle * time.Second
-	}
-	pol.KeepAlive, pol.Idle, pol.MaxPings = true, idle, d.k
-	// A campaign is scored on five-minute economics (cfTC, PWrite5m), so its k is a count of
-	// five-minute windows. On a thread billed at the one-hour tier the keeper swaps in the one-hour
-	// schedule (Policy.ForOneHour); k then only bounds it from above, as an override's does.
-	k1h := pol.MaxPings1h
-	if k1h <= 0 {
-		k1h = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
-	}
-	pol.MaxPings1h = min(k1h, d.k)
-	pol.MinPrefixTokens, pol.PredictorID, pol.PredictorThreshold = 0, "", 0
-	return pol
+	return campaign.Apply(pol, d.k, d.active)
 }
 
 // listCampaignIDs returns campaign ids on disk, newest first.

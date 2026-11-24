@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -226,24 +225,6 @@ func TestCacheCampaignWithTheLightGBMModel(t *testing.T) {
 	}
 	if s, _ := f.h.keeper.pred.forTenant(tid).snapshot(); s.Decisions != 3 {
 		t.Errorf("stats %+v", s)
-	}
-}
-
-// The shadow scorer's constants are the ones the build's replay was calibrated with.
-func TestShadowConstantsMatchTheEngineCalibration(t *testing.T) {
-	b, err := os.ReadFile("../scripts/campaign/engine_calibration.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c struct {
-		Benefit float64 `json:"benefit_scale"`
-		Ping    float64 `json:"ping_scale"`
-	}
-	if err := json.Unmarshal(b, &c); err != nil {
-		t.Fatal(err)
-	}
-	if c.Benefit != cfScale || c.Ping != cfPingScale {
-		t.Fatalf("calibration file has %v / %v, proxy/predictive.go has %v / %v", c.Benefit, c.Ping, cfScale, cfPingScale)
 	}
 }
 
