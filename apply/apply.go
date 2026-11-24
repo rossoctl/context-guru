@@ -21,8 +21,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"reflect"
 	"slices"
@@ -33,6 +35,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -361,6 +364,51 @@ func ExplicitSession(header string, body []byte, host ...string) string {
 		r := md.Get(k)
 		return r.Str, r.Type == gjson.String
 	}, host...)
+}
+
+// SessionHeader is the header a client or its plugin names the session with. It wins over every other id.
+const SessionHeader = "x-context-guru-session"
+
+// ExplicitSessionFor is the explicit session id for one request, for a host that has the request headers.
+// The order is fixed here, so every host gets the same answer:
+//
+//  1. the SessionHeader header;
+//  2. the body's own ids (session.Explicit), when the header is empty;
+//  3. the id of the agent that owns the route (route.SessionID(h), for example Bob's X-Task-Id);
+//  4. the client's own id from its headers (cl.SessionID: Codex session-id, OpenCode x-opencode-session-id).
+//
+// 3 and 4 come after every other id. A route with no agent id and a client with no id give the header
+// unchanged. cl is agent.Identify(h), computed once per request by the host.
+//
+// route may be nil (a host that has no route agent). A panic in route.SessionID gives no id for it:
+// the request keeps the session it has without one (fail open). In Cortex there is no route agent:
+// pass nil, and pass the host's own session id (pctx.SessionID) as the header value when it is set.
+func ExplicitSessionFor(h http.Header, route agent.Agent, cl agent.Client, body []byte) string {
+	sess := h.Get(SessionHeader)
+	id := routeSessionID(h, route)
+	if id == "" {
+		id = cl.SessionID
+	}
+	if id == "" {
+		return sess
+	}
+	return ExplicitSession(sess, body, id)
+}
+
+// routeSessionID is route.SessionID(h), fail open.
+func routeSessionID(h http.Header, route agent.Agent) (id string) {
+	if route == nil {
+		return ""
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			slog.Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", route), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return route.SessionID(h)
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode

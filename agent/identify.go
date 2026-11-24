@@ -11,8 +11,9 @@ import (
 	"github.com/rossoctl/context-guru/thread"
 )
 
-// Identify is the one library entry point that names the client behind a request. A host (the
-// proxy, the bifrost adapter, Cortex) passes the request headers. Library code takes the Client it
+// Identify is the one library entry point that names the client behind a request. Every host (the
+// proxy, the bifrost adapter, Cortex) calls Identify once per request, with the request headers, and
+// passes the Client down. Library code takes the Client it
 // returns, never a raw User-Agent. It uses headers only (the User-Agent and the clients' own marks),
 // never the route path: Claude Code, Codex, OpenCode and Pi share routes, and a host can mount routes
 // elsewhere. The per-client rules live in agent/claudecode, agent/codex, agent/opencode and agent/pi.
@@ -58,7 +59,9 @@ type Client struct {
 	ParentID string
 }
 
-// IdentifyUserAgent is Identify for a caller that has only a User-Agent (the dashboard).
+// IdentifyUserAgent is Identify for a caller that has nothing but a stored User-Agent, such as a
+// dashboard row. A request path must call Identify with the headers instead: the client marks
+// (Pi, Codex ids) are in the headers, not in the User-Agent.
 func IdentifyUserAgent(ua string) Client {
 	if ua == "" {
 		return Identify(nil)
@@ -75,7 +78,8 @@ func Identify(h http.Header) Client {
 	l := strings.ToLower(strings.TrimSpace(ua))
 
 	// The subagent header is read whatever the client: only Claude Code sends it.
-	if id := claudecode.AgentID(h); thread.ValidHeaderID(id) {
+	// thread.HeaderAgentID is the one parser of the id's form: a header that is present but unusable gives "".
+	if id, _ := thread.HeaderAgentID(claudecode.AgentID(h)); id != "" {
 		c.AgentID, c.AgentIDHeader = id, claudecode.AgentHeader
 	}
 

@@ -227,7 +227,7 @@ type capture struct {
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
 // is off — every call site is nil-safe, so the disabled path costs one nil check.
-func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenancy) *capture {
+func (h *Handler) newCapture(r *http.Request, cl agent.Client, provider, route string, tn *Tenancy) *capture {
 	defer timedSpan("newCapture")()
 	if h.rec == nil {
 		return nil
@@ -242,7 +242,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 	return &capture{
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
-		agent: identify(r), start: time.Now(),
+		agent: cl, start: time.Now(),
 		llm:      &cheapmodel.Sink{},
 		unique:   map[string]int{},
 		waits:    h.waits,

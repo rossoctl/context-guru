@@ -117,6 +117,8 @@ func ExplicitID(cands ...string) string {
 // re-rolled only by /clear). Both survive the agent's context compaction, which the derived
 // hash does not. A request carrying both resolves to user_id, by this order. The Bob IDE
 // sends neither. Its id is a header, which Explicit takes as a host id after these.
+// TODO: `user_id` in its JSON-object form is a Claude Code rule. Move it behind agent/claudecode (for
+// example claudecode.SessionFromBody) when a body-level hook exists.
 var metadataKeys = [...]string{"user_id", "taskId"}
 
 // Explicit is the ONE rule for which explicit id a request carries: the header first, then

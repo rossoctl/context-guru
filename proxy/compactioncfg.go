@@ -13,6 +13,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
@@ -131,7 +132,7 @@ func short(s string) string {
 	return s
 }
 
-// compactionPointFor is C for this request: the user's own setting, read at start-up, when it
+// compactionPointFor is C for this request (cl is the request's client, agent.Identify, computed once): the user's own setting, read at start-up, when it
 // changes C for the request's model; else the operator's compaction_point in the price table, else the
 // bootstrap table. A hosted proxy (Options.Tenants)
 // never has a user setting. Fail open: any odd value gives the table.
@@ -148,10 +149,10 @@ func short(s string) string {
 // first, the same style as the table in compactionpoint.For. So a key for claude-opus-5 also applies
 // to a newer id that contains it (claude-opus-5-1). That is the client's own rule too: its canonical
 // model name matches dated and variant spellings.
-func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
+func (h *Handler) compactionPointFor(r *http.Request, cl agent.Client, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
 	if h.opts.Tenants == nil && r != nil {
-		switch identify(r).Name {
+		switch cl.Name {
 		case "claude":
 			if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
 				return p

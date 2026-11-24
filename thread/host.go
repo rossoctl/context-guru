@@ -11,7 +11,8 @@ import (
 // in agent/claudecode (its SubagentID method); the name stays here for existing callers.
 const AgentHeader = claudecode.AgentHeader
 
-// HeaderAgentID turns a raw AgentHeader value into the agentID that Resolve and ResolveSession
+// HeaderAgentID is the one parser of an agent id's form. agent.Identify calls it with the Claude Code
+// header value (claudecode.AgentID), so the Client's AgentID is already checked. It turns a raw AgentHeader value into the agentID that Resolve and ResolveSession
 // take. It trims the value. It gives "" when the header is absent, and also when ValidHeaderID
 // refuses it: a header that is present but unusable falls back to prefix continuity. It must not
 // become a key, and it must not merge the request into another thread. ok is false only for that
