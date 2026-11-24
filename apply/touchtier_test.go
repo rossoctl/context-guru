@@ -600,3 +600,35 @@ func TestAnOlderReaderReadsEveryNewShapeAsNotCold(t *testing.T) {
 		}
 	}
 }
+
+// The 3 shapes v0.7.8 (#1357) writes read the same after the upgrade, field by field: the time, the tier and the
+// carry. No tag and no request number appear for them.
+func TestTheShapesV078WritesReadTheSameAfterTheUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		shape, value string
+		at, carried  int64
+		oneHour      bool
+	}{
+		{"plain", "1699999000000", 1699999000000, 0, false},
+		{"a ping, tier 1 hour", "1699999000000:1h", 1699999000000, 0, true},
+		{"a real request over a ping, carried", "1699999000000^1699998000000", 1699999000000, 1699998000000, false},
+	} {
+		got := parseSeenState([]byte(tc.value))
+		if got != (seenState{at: tc.at, carriedAt: tc.carried, oneHour: tc.oneHour}) {
+			t.Errorf("%s: parseSeenState(%q) = %+v, want at=%d carried=%d oneHour=%v with no tag and no seq",
+				tc.shape, tc.value, got, tc.at, tc.carried, tc.oneHour)
+		}
+		// And the public readers say the same about the ping.
+		st := store.NewMemory(store.Options{})
+		st.Put(store.SeenPrefix+"a", []byte(tc.value))
+		wantPing := tc.oneHour || tc.carried > 0
+		at, ok := StandingOneHourPing(st, "a")
+		wantAt := tc.at
+		if tc.carried > 0 {
+			wantAt = tc.carried
+		}
+		if ok != wantPing || (ok && at != wantAt) {
+			t.Errorf("%s: StandingOneHourPing = %d, %v, want %d, %v", tc.shape, at, ok, wantAt, wantPing)
+		}
+	}
+}
