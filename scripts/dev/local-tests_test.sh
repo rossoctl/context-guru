@@ -29,7 +29,8 @@ mk deadbeef; echo "DONE rc=0" >> "$d/summary.txt"; expect sha-mismatch 2 "Nothin
 mkdir "$d/bin"; printf '#!/bin/sh\nexit 1\n' > "$d/bin/gh"; chmod +x "$d/bin/gh"
 out=$(PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
 if [ "$rc" = 2 ] && ! grep -q "NOT READY" <<<"$out"; then echo "ok   check-ready-gh-error"; else echo "FAIL check-ready-gh-error (rc=$rc)"; fails=1; fi
-# A gh that works for the PR and reviews but fails for the comments must also exit 2.
+# A gh that works for every call except the comments must exit 2, and must not say "no local-tests
+# comment". Every other call succeeds, so a later failure cannot hide a swallowed comments error.
 cat > "$d/bin/gh" <<'GH'
 #!/bin/sh
 case "$*" in
@@ -37,9 +38,10 @@ case "$*" in
   *issues/*/comments*) exit 1 ;;
   *reviews*) echo '<!-- offload-review reviewer=1 round=1 sha=abc123 backend=x verdict=approve -->'; echo '<!-- offload-review reviewer=2 round=1 sha=abc123 backend=x verdict=approve -->' ;;
   *check-runs*) printf 'completed\tsuccess\tpurego\tgithub-actions\n' ;;
+  *pulls/*/commits*) exit 0 ;;
   *) exit 1 ;;
 esac
 GH
 out=$(PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
-if [ "$rc" = 2 ] && grep -q "could not read the comments" <<<"$out"; then echo "ok   check-ready-comments-error"; else echo "FAIL check-ready-comments-error (rc=$rc)"; echo "$out" | tail -3; fails=1; fi
+if [ "$rc" = 2 ] && grep -q "could not read the comments" <<<"$out" && ! grep -q "no local-tests comment" <<<"$out"; then echo "ok   check-ready-comments-error"; else echo "FAIL check-ready-comments-error (rc=$rc)"; echo "$out" | tail -3; fails=1; fi
 exit "$fails"
