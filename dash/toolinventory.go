@@ -49,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/internal/skills"
@@ -61,21 +62,21 @@ import (
 // grouped on, exactly like `kind` on request_components.
 const (
 	// KindTool is a plain client-side tool (Claude Code's built-ins, an agent's own).
-	KindTool = "tool"
+	KindTool = config.KindTool
 	// KindMCPTool is one tool of an MCP server, named `mcp__<server>__<tool>`; Server
 	// carries the server half so a per-server rollup needs no string work at read time.
-	KindMCPTool = "mcp_tool"
+	KindMCPTool = config.KindMCPTool
 	// KindServerTool is a provider-side tool (`web_search_*`, `code_execution_*`,
 	// `memory_*`, the `mcp_toolset` connector): declared with a `type` and usually no
 	// input_schema, and not removable the way a client tool is.
-	KindServerTool = "server_tool"
+	KindServerTool = config.KindServerTool
 	// KindSkill is one skill from the Skill tool's prose listing.
-	KindSkill = "skill"
+	KindSkill = config.KindSkill
 	// KindSkillListing is ONE marker row per declaration set carrying the listing's own
 	// token cost and the PARSE STATE in Server (SkillsOK | SkillsUnknown). It is what
 	// keeps a failed parse from reading as "this session declared no skills": with
 	// state=unknown there are no KindSkill rows and the reader must say so.
-	KindSkillListing = "skill_listing"
+	KindSkillListing = config.KindSkillListing
 	// KindSystemPrompt is ONE marker row per distinct system prompt a session carried: name
 	// is a hash of the text, tokens is its measured BPE cost, and text_gz holds the prompt
 	// itself when consent allows. It is not a declaration, and it lives in this table
