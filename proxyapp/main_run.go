@@ -103,7 +103,7 @@ func Main(hooks Hooks) {
 		addrFlag  = flag.String("listen", envOr("LISTEN_ADDR", ":4000"), "address to listen on")
 		showVer   = flag.Bool("version", false, "print version and exit")
 		cfgPath   = flag.String("config", envOr("CONFIG", ""), "path to context-guru YAML config")
-		preset    = flag.String("preset", envOr("PRESET", "house"), "preset to use when --config is absent. Current: off, conservative, medium, high, xhigh, ultrahigh. The default, house, runs the same pipeline as conservative. Obsolete presets (cache, safe, balanced, aggressive, coding, mcp, agent, general, summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm) still load")
+		preset    = flag.String("preset", envOr("PRESET", "conservative"), "preset to use when --config is absent. Current: off, conservative, medium, high, xhigh, ultrahigh. The default is conservative. The obsolete name house runs the same pipeline. Obsolete presets (cache, safe, balanced, aggressive, coding, mcp, agent, general, summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm) still load")
 		openai    = flag.String("openai-upstream", envOr("OPENAI_UPSTREAM", "https://api.openai.com"), "OpenAI upstream base URL")
 		anthropic = flag.String("anthropic-upstream", envOr("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "Anthropic upstream base URL")
 		// Not a whole-request timeout on purpose: a streaming turn that is still producing

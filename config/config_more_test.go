@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -398,5 +399,38 @@ func TestCacheTailBreakpointReachesThePipeline(t *testing.T) {
 		if pipe.TailBreakpoint() != want {
 			t.Errorf("%q: TailBreakpoint() = %v, want %v", doc, pipe.TailBreakpoint(), want)
 		}
+	}
+}
+
+// `house` is the obsolete name of the old default. It must resolve to exactly what
+// `conservative` runs: same pipeline, same component blocks. Changing the default preset's
+// name must not change what runs (#1345).
+func TestHouseIsAnAliasOfConservative(t *testing.T) {
+	h, err := LoadBytes([]byte("preset: house\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadBytes([]byte("preset: conservative\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(h.Pipeline, c.Pipeline) {
+		t.Errorf("pipeline: house %v, conservative %v", h.Pipeline, c.Pipeline)
+	}
+	if !reflect.DeepEqual(h.Components, c.Components) {
+		t.Errorf("components differ: house %v, conservative %v", h.Components, c.Components)
+	}
+	hp, _ := PresetPipeline("house")
+	cp, _ := PresetPipeline("conservative")
+	if !reflect.DeepEqual(hp, cp) {
+		t.Errorf("PresetPipeline: house %v, conservative %v", hp, cp)
+	}
+	// The pipeline that the old default ran, written out, so a retune of both names fails here.
+	want := []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"}
+	if !reflect.DeepEqual(c.Pipeline, want) {
+		t.Errorf("conservative pipeline = %v, want the old house pipeline %v", c.Pipeline, want)
+	}
+	if n := c.Components["extract"]; n.Kind == 0 {
+		t.Errorf("conservative has no extract block")
 	}
 }

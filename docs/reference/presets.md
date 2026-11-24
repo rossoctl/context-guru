@@ -19,8 +19,8 @@ Six presets are current. They form one ladder. Each step adds to the step below 
 | Deepest cut. Adds the model sweep of old tool outputs. | `xhigh` |
 | Deepest cut and tool deferral. Opt-in, experimental. | `ultrahigh` |
 
-`house` is the default of the proxy binary and of new hosted accounts. It runs the same
-pipeline as `conservative`. It is [obsolete](#obsolete-presets) as a name, and still works.
+`conservative` is the default of the proxy binary and of new hosted accounts. The old default
+name, `house`, runs the same pipeline. It is [obsolete](#obsolete-presets) as a name, and still works.
 
 ## What each one runs
 
@@ -57,7 +57,7 @@ in `/stats`, never content. See [`config/config.go`](../design.md#config-registr
 
 | Preset | Use a current preset instead |
 |---|---|
-| `house` | `conservative` (same pipeline). `house` is still the binary default. |
+| `house` | `conservative` (same pipeline). `house` was the binary default before `conservative`. |
 | `housellm` | `xhigh` (adds the summarizer to it) or `medium`. |
 | `cache`, `safe`, `balanced`, `coding`, `mcp`, `codesafe` | `conservative` (no model calls). |
 | `codesmart`, `aggressive`, `agent`, `general` | `medium` or `high`. |
@@ -201,9 +201,9 @@ Pipelines below are taken exactly from the `presets` map in `config/config.go`. 
 
 | Preset | Ordered pipeline | When to use |
 |---|---|---|
-| `house` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | **Obsolete name; still the default**, for the standalone proxy and for every hosted tenant that has not chosen otherwise. Deterministic all the way through: no model call, so it adds no upstream spend and no latency to anyone else's agent on a shared box. `toolfilter` carries an empty removal list until an account names something. The order is the operator's, not this file's lossless-first rule — see the note below the table. |
+| `house` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | **Obsolete name** of the old default. It is now an alias of `conservative`, which is the default for the standalone proxy and for every hosted tenant that has not chosen otherwise. Deterministic all the way through: no model call, so it adds no upstream spend and no latency to anyone else's agent on a shared box. `toolfilter` carries an empty removal list until an account names something. The order is the operator's, not this file's lossless-first rule — see the note below the table. |
 | `housellm` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | `house` plus **both** compaction-model passes, applied per account on request. `extract_llm` works the uncached tail on any turn; `extract_llm_sweep` asks the request's own model **at the keep-alive ping**, in place of the ping, which old tool outputs are spent. It holds the answer and **removes content only on a cold request** (or, after a changed prefix, only after the change point). Each removal leaves a `<<cg:HASH>>` marker, and `expand` gives the original back. With no keep-alive there is no question. The bounds that apply: the sweep asks about at most 12 outputs per question, `extract_llm`'s `llm_max_per_request: 8` with its economic gate, and a 3,000-token request trigger. |
-| `conservative` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | The Claude Code plugin picker's tier 1, and `house` verbatim (see above) under a name that reads as an effort level rather than a product name. Deterministic, no model calls. |
+| `conservative` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | The default, and the Claude Code plugin picker's tier 1. `house` is its obsolete alias. Deterministic, no model calls. |
 | `medium` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 2: `conservative` plus `extract_llm` (`housellm` minus its cold-cache sweep), plus [`cache_aware_summarizer`](../components/advanced-offload.md#two-ways-to-use-cache_state) with `cache_state: pre_expiry`. The summary is prepared in the background, in place of one keep-alive ping, and kept in reserve. It is used only when the user comes back after the cache expired, so the history never changes while the user works. Spends on its own, gated by `extract_llm`'s economic gate and 3,000-token trigger, and by the summarizer's 90%-of-window trigger. Needs keep-alive to prepare a summary; with cache strategy `none` the summarizer almost never acts. |
 | `high` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 3: `medium` with `cache_aware_summarizer` at its default `cache_state: any`. The summary is made at 90% of the window and used on the next request, warm or cold. `summarize` is no longer in any picker tier; it stays available by name (see [Two ways to use `cache_state`](../components/advanced-offload.md#two-ways-to-use-cache_state) for when it is the better choice). |
 | `xhigh` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 4, and the deepest cut it offers: `high` plus `extract_llm_sweep` (it asks at the keep-alive ping and removes content only on a cold request), i.e. `housellm` plus [`cache_aware_summarizer`](../components/advanced-offload.md#two-ways-to-use-cache_state) at its default trigger (`min_request_frac: 0.9`, `cache_state: any`). The summarizer sends the conversation itself plus one appended instruction, so its call reads the provider's cached prefix instead of paying full price. On Anthropic traffic it depends on #402, #406, #413 and #431. |

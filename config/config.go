@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/rossoctl/context-guru/components"
@@ -589,8 +590,8 @@ func (c *Config) applyPreset() error {
 // other 15 are OBSOLETE: cache, safe, balanced, aggressive, coding, mcp, agent, general,
 // summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm. They stay in
 // this map so old configs load and published numbers stay reproducible. They run exactly as
-// before. Do not pick one for a new setup, and do not copy one into a doc example. `house` is
-// still the binary and tenant default; it runs the same pipeline as `conservative`. Any
+// before. Do not pick one for a new setup, and do not copy one into a doc example. `conservative`
+// is the binary and tenant default. `house` is an alias of it and runs the same pipeline. Any
 // wording below that calls an obsolete preset "recommended" is historical.
 var presets = map[string][]string{
 	"off": {}, // passthrough: no components (baseline / A-B control)
@@ -683,7 +684,7 @@ var presets = map[string][]string{
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
 	// OBSOLETE (#1345): codesmart, codesafe.
 	// codesmart / codesafe are the SWE-bench study's winning configs and were the RECOMMENDED
-	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
+	// pipelines — but neither is the proxy default, which is `conservative` (see the --preset flag in
 	// proxyapp/main_run.go). Asserting it here is how five documents came to repeat
 	// it: the claim was copied from three lines away from the flag that disproves it. Their
 	// tuned per-component
@@ -691,9 +692,9 @@ var presets = map[string][]string{
 	// /compact?preset=) resolving them.
 	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap", "cachesplit"},
 	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "linecap", "cachesplit"},
-	// OBSOLETE (#1345): house, housellm. `house` is still the binary and tenant default, and
-	// `conservative` below is the same pipeline under a current name.
-	// house / housellm are the SERVICE configs: `house` is what every account runs unless
+	// OBSOLETE (#1345): house, housellm. `house` is not listed in this literal. init() below
+	// copies it from `conservative`, which is the source of truth and the binary default.
+	// house / housellm were the SERVICE configs: `conservative` is what every account runs unless
 	// it says otherwise (tenant.DefaultConfigYAML is this document), `housellm` is the same
 	// pipeline with the compaction-model pass added, applied per account on request.
 	//
@@ -714,13 +715,12 @@ var presets = map[string][]string{
 	// on the same 1,795-request corpus, house vs house+linecap: +152,615 tokens, +0.797 pp,
 	// 14.5% of what was reachable. Real, and an order of magnitude short of "the largest
 	// deterministic lever", which is what the gross number reads as.
-	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
 	// codesmart/housellm chooser. Each tier is a strict superset of the one below it (#417):
-	//   conservative = house, verbatim. No summarizer.
+	//   conservative = the source of truth for the old `house` alias. No summarizer.
 	//   medium       = housellm minus extract_llm_sweep, plus cache_aware_summarizer with
 	//                  cache_state: pre_expiry — the conservative mode. It prepares a summary in
 	//                  the background (in place of one keep-alive ping), keeps it in reserve, and
@@ -758,7 +758,7 @@ var presets = map[string][]string{
 // reader relies on when deciding whether the published numbers describe the shipped
 // default. They describe an ancestor of it. Treat any preset change as a reason to
 // re-measure, not as a documentation edit.
-//   - codesmart (the winning cache-aware config; NOT the proxy default, which is `house`): the LLM
+//   - codesmart (the winning cache-aware config; NOT the proxy default, which is `conservative`): the LLM
 //     relevance-trimmer extract_llm routed to the CHEAP model (model.source: config,
 //     nil-when-unset ⇒ it silently no-ops to deterministic — see docs), gated at 3000
 //     tok so most turns make no model call, ≤4 calls/req; the free deterministic extract
@@ -821,14 +821,6 @@ components:
 components:
   collapse:
     max_tokens: 3000`,
-	// house: the service default, deterministic all the way through — no model call, so it
-	// adds no upstream spend and no latency to anyone else's agent on a shared box.
-	// tenant.DefaultConfigYAML is this pipeline with `mode: sync`, and a test there asserts
-	// the two cannot drift apart.
-	"house": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
-components:
-  extract:
-    min_tokens: 400`,
 	// housellm: house plus the compaction-model pass, as measured on this service.
 	//
 	// WHAT THIS COMPONENT ACTUALLY DOES HERE, measured on production traffic rather than
@@ -950,8 +942,12 @@ components:
     min_tokens: 1000`,
 	// conservative/medium/high/xhigh — the plugin picker's effort ladder. See the comment beside
 	// their entries in the `presets` map above for what distinguishes each tier; the per-component
-	// blocks below are `house`'s and `housellm`'s, copied verbatim rather than re-derived, so a
-	// future retune of either source preset does not silently drift these out of sync.
+	// blocks below are `conservative`'s own and `housellm`'s copy, copied verbatim rather than re-derived, so a
+	// future retune of the source preset does not silently drift these out of sync.
+	// `conservative` is the service default: deterministic all the way through, no model call, so
+	// it adds no upstream spend and no latency to anyone else's agent on a shared box.
+	// tenant.DefaultConfigYAML is this pipeline with `mode: sync`, and a test there asserts
+	// the two cannot drift apart. The obsolete name `house` is copied from this entry by init().
 	"conservative": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
 components:
   extract:
@@ -1135,3 +1131,11 @@ func (c *Config) NewStore() store.Store {
 
 // WaitPlanOn reports whether the per-wait ping plan is on (#858). Absent is on.
 func (c CacheConfig) WaitPlanOn() bool { return c.KeepAliveWaitPlan == nil || *c.KeepAliveWaitPlan }
+
+// init makes `house`, the obsolete name of the old default, an alias of `conservative`. It runs
+// the same pipeline with the same component blocks. Existing configs that say `preset: house`
+// load exactly as before.
+func init() {
+	presets["house"] = slices.Clone(presets["conservative"])
+	presetConfigs["house"] = presetConfigs["conservative"]
+}
