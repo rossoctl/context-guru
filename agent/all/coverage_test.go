@@ -32,7 +32,7 @@ const clientHeading = "## By client"
 // parseClientRows returns the lower-cased first cell of each row of the first table after the
 // "## By client" heading. A missing heading or an empty table is an error, never an empty result.
 func parseClientRows(doc string) (map[string]bool, error) {
-	_, after, found := strings.Cut(doc, "\n"+clientHeading+"\n")
+	_, after, found := strings.Cut("\n"+doc, "\n"+clientHeading+"\n")
 	if !found {
 		return nil, fmt.Errorf("no %q heading", clientHeading)
 	}
@@ -67,8 +67,11 @@ func TestParseClientRowsFailsLoudly(t *testing.T) {
 	if _, err := parseClientRows("# T\n\n| Other | A |\n|---|---|\n| X | y |\n"); err == nil {
 		t.Error("a page without the heading must fail")
 	}
-	if _, err := parseClientRows("## By client\n\nno table\n\n## By host\n\n" + table); err == nil {
+	if _, err := parseClientRows("# T\n\n## By client\n\nno table\n\n## By host\n\n" + table); err == nil {
 		t.Error("a heading without a table must fail, not read the next table")
+	}
+	if rows, err := parseClientRows("## By client\n\n" + table); err != nil || !rows["bob"] {
+		t.Errorf("a heading at the start of the page: rows = %v, err = %v; want bob", rows, err)
 	}
 	rows, err := parseClientRows("| Early | A |\n|---|---|\n| X | y |\n\n## By client\n\n" + table)
 	if err != nil || !rows["bob"] || rows["x"] {
@@ -91,9 +94,6 @@ func clientRows(t *testing.T) map[string]bool {
 
 func TestClientCoverageHasARowForEveryAgent(t *testing.T) {
 	rows := clientRows(t)
-	if len(rows) == 0 {
-		t.Fatalf("%s: no client rows", coverageDoc)
-	}
 	registered := map[string]bool{}
 	for _, a := range agent.All() {
 		name := strings.ToLower(a.Name())
