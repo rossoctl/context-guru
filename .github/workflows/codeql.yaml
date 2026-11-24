@@ -9,6 +9,12 @@ on:
     # Weekly, Monday 05:17 UTC. New queries ship without a code change.
     - cron: "17 5 * * 1"
 
+# Cancel a PR run that a newer push replaced. Push and schedule runs use the commit sha in the
+# group, so each one has its own group. Without that, GitHub drops a queued run of the same group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The `main` ruleset has a code_scanning rule (tool CodeQL). It waits for results
 # from this workflow. No paths-ignore here: the rule needs a result on every PR.
 permissions:
