@@ -175,6 +175,10 @@ type PriceIn struct {
 	// BeforeCompute, when set, runs once, just before the library prices the request and only when it will. The
 	// host uses it to set the entry's billed tier on its facts (BilledTTL), which Compute reads.
 	BeforeCompute func()
+	// AfterCompute, when set, runs once with the result, right after the library priced the request and before the
+	// rescue counter and the ping-facts drop. It does not run when the request books no figure. The host books the
+	// result here (event, metrics), so those side effects keep their order.
+	AfterCompute func(accountant.Result)
 	// Session and Thread are the ping store's key. KaPings is how many pings went out in the gap this request ended.
 	// PingWindow is the window of the ping facts the request read when it opened, "" if it read none.
 	Session, Thread string
@@ -206,6 +210,9 @@ func (s *Recorder) Price(req *accountant.Request, in PriceIn) PriceOut {
 	}
 	if res, ok := s.ComputeSafe(req, in.Usage); ok {
 		out.Result, out.Priced = res, true
+		if in.AfterCompute != nil {
+			in.AfterCompute(res)
+		}
 	} else {
 		out.NoResult = ComputePanicked
 	}

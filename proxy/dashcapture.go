@@ -961,14 +961,15 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		out := c.savings.Price(c.accReq, accrec.PriceIn{
 			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
 			BeforeCompute: func() { c.accBilledTTL(usage) },
-			Session:       c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
+			// The event and the metrics are booked before the rescue counter and the ping-facts drop, as they always were.
+			AfterCompute: func(res accountant.Result) {
+				e.SetAccountant(res)
+				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
+					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
+			},
+			Session: c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
 		})
 		c.accNoResult = out.NoResult
-		if out.Priced {
-			e.SetAccountant(out.Result)
-			c.observeMetrics(out.Result, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
-				CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
-		}
 	}
 	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
 	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block

@@ -135,6 +135,27 @@ func TestPrice(t *testing.T) {
 			t.Fatalf("priced=%v noResult=%q", out.Priced, out.NoResult)
 		}
 	})
+	t.Run("the host books the result before the rescue counter and the ping-facts drop", func(t *testing.T) {
+		r, pings := NewRecorder(), NewPingStore()
+		pings.Put(PingKey("s", "main"), accountant.PingFacts{PingWindow: "w1"})
+		req := recOneRequest(r, 1, ThreadOf("main", "", false))
+		calls := 0
+		r.Price(req, PriceIn{Status: 200, Rounds: 1, Usage: usage, KaPings: 1, Session: "s", Thread: "main", Pings: pings,
+			AfterCompute: func(accountant.Result) {
+				calls++
+				if _, ok := pings.Peek(PingKey("s", "main")); !ok {
+					t.Error("the ping facts were spent before AfterCompute")
+				}
+				if r.RescueFactsMissing() != 0 {
+					t.Error("the rescue counter ran before AfterCompute")
+				}
+			}})
+		if calls != 1 || r.RescueFactsMissing() != 1 {
+			t.Fatalf("AfterCompute calls=%d rescue=%d, want 1 and 1", calls, r.RescueFactsMissing())
+		}
+		r.Price(recOneRequest(r, 2, ThreadOf("main", "", false)), PriceIn{Status: 429, Rounds: 1, Usage: usage,
+			AfterCompute: func(accountant.Result) { t.Error("AfterCompute ran for a request that books nothing") }})
+	})
 	t.Run("pings with no facts are counted", func(t *testing.T) {
 		r := NewRecorder()
 		r.Price(recOneRequest(r, 1, ThreadOf("main", "", false)), PriceIn{Status: 200, Rounds: 1, Usage: usage, KaPings: 2})
