@@ -275,7 +275,7 @@ func AdaptKnobGrid() map[string]map[string][]int {
 	return out
 }
 
-// IsAdaptCandidate reports whether name is one of AdaptCandidates.
+// IsAdaptCandidate reports whether name is one of the adapt candidates.
 func IsAdaptCandidate(name string) bool {
 	for _, c := range adaptCandidates {
 		if c == name {
