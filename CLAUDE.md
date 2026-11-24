@@ -100,8 +100,9 @@ logic goes in a library package.
 
 ## Client-specific code
 
-Clients (Claude Code, Codex, OpenCode, Pi, Bob) differ in headers, session ids and prompts. Use
-this test: **if a rule names one client, it lives in `agent.Identify` (#1312), and nowhere else.**
+Clients with agent rules (Claude Code, Codex, OpenCode, Pi, Bob) differ in headers, session ids and
+prompts. Other names that the dashboard shows as labels (cursor, cline, aider, gemini-cli) have no
+rules. Use this test: **if a rule names one client, it lives in `agent.Identify` (#1312), and nowhere else.**
 
 **Client rules. Keep them in `agent.Identify` and the agent packages:**
 

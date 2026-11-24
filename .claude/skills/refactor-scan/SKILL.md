@@ -83,7 +83,9 @@ A rule that names one client belongs in `agent.Identify` (#1312). Use the test i
   `git diff <last-tag>..origin/main -- '*.go'`. A full run reads every Go file.
 - **Signs:** `Header.Get("x-<vendor>-`, `claude-code`, `codex`, `opencode`, `bobshell` or a
   client's prompt phrase outside `agent/`; library code that reads User-Agent; a rule that finds a
-  client by route path; a client rule with no stated fallback.
+  client by route path; a client rule with no stated fallback. Pi has no plain-string sign, because
+  "pi" matches too much code. Look for the `x-context-guru-client` value Pi sends (in `agent/pi`, #1331)
+  outside `agent/`.
 - **Report** each one like a duplicate: the rule, its `file:line`, and the agent package it
   belongs in. Say whether the code also leaks a host boundary. Report it once, as a client rule.
 - A client rule that is already in #1321 or its child issues is not reported again.

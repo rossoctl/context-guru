@@ -25,7 +25,7 @@ Notes:
   Claude Code markers. Other clients read as the main agent waiting for a person until #1318 lands.
 - **Pi and OpenCode** send the session key in `x-context-guru-session`. The plugin sets it.
 - **Bob** is on hold. Its fallbacks stay as they are.
-- **#1331** adds one `client.Identify` per request, the OpenCode and Pi labels and the OpenCode
+- **#1331** adds one `agent.Identify` per request, the OpenCode and Pi labels and the OpenCode
   session id from `x-opencode-session-id`. Update this table when it merges.
 
 ## By host
