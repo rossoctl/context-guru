@@ -83,13 +83,11 @@ func newToolfilter(raw []byte) (components.Component, error) {
 	// and so no map iteration can leak into anything a reader compares.
 	sort.Strings(out)
 	tf := Toolfilter{remove: out}
-	switch cfg.Defer {
-	case "", "off":
-	case "auto":
-		tf.defers = true
-	default:
-		return nil, fmt.Errorf("toolfilter: defer is %q; want auto or off", cfg.Defer)
+	on, err := DeferMode(cfg.Defer)
+	if err != nil {
+		return nil, err
 	}
+	tf.defers = on
 	for _, n := range cfg.Keep {
 		if n = strings.TrimSpace(n); n == "" {
 			continue
@@ -141,6 +139,19 @@ func (Toolfilter) Enabled(*components.Ctx) bool { return true }
 
 // Removed is the opt-in list, sorted. apply calls it; nothing else should.
 func (t Toolfilter) Removed() []string { return t.remove }
+
+// DeferMode is the one decision on toolfilter's `defer` value: `auto` turns deferral on, "" and
+// `off` leave it off, anything else is an error. The component, and any reader of a configuration
+// document that does not build the pipeline (tooldefer.DocOn), call it.
+func DeferMode(v string) (on bool, err error) {
+	switch v {
+	case "", "off":
+		return false, nil
+	case "auto":
+		return true, nil
+	}
+	return false, fmt.Errorf("toolfilter: defer is %q; want auto or off", v)
+}
 
 // Defers reports whether tool deferral is on (`defer: auto`). The host reads it.
 func (t Toolfilter) Defers() bool { return t.defers }
