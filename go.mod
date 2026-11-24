@@ -6,7 +6,7 @@ go 1.26.4
 // plus the proxy engine the context-guru-proxy binary embeds.
 require github.com/maximhq/bifrost/core v1.7.0
 
-// accountant prices context operations. This module's tests import it and its shared test cases.
+// accountant prices context operations. The proxy and the dashboard import it, and the tests import its shared test cases.
 require github.com/rossoctl/accountant v0.6.0
 
 require (
