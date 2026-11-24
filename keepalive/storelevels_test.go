@@ -11,6 +11,10 @@ import (
 // (the dashboard clock, the manual-ping refusal, the cold check 13 minutes after the first request) for each kind
 // of store the proxy can have: a Memory store (every storage level that keeps state), store.Nop (the store is
 // switched off, so tn.Store is Nop, never nil in the proxy) and a nil store (a host with none).
+//
+// With a store that keeps nothing, the keeper answers as it did on main: the dashboard shows the hour and the
+// manual ping is refused (its own fallback, storeOffAt). The cold check cannot read what was never stored, so it
+// reads cold there, on main and now (#1350 is not fixable with no store).
 func TestTheThreeReadersAtEachStoreKind(t *testing.T) {
 	for _, tc := range []struct {
 		name                  string
@@ -18,8 +22,8 @@ func TestTheThreeReadersAtEachStoreKind(t *testing.T) {
 		dash, refused, notCld bool
 	}{
 		{"memory", store.NewMemory(store.Options{}), true, true, true},
-		{"nop", store.Nop{}, false, false, false},
-		{"nil", nil, false, false, false},
+		{"nop", store.Nop{}, true, true, false},
+		{"nil", nil, true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})

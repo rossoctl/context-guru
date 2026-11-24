@@ -87,3 +87,18 @@ func TestPeekValueReturnsThePayloadWithoutRenewingIt(t *testing.T) {
 		t.Error("a store with no capability and no data returned a value")
 	}
 }
+
+// Keeps tells a store that holds nothing (nil, Nop) from one that does, by type, not by a missed Get.
+func TestKeepsIsTrueOnlyForAStoreThatCanHoldAValue(t *testing.T) {
+	var nilStore Store
+	var nilNop *Nop
+	for name, tc := range map[string]struct {
+		s    Store
+		want bool
+	}{"nil": {nilStore, false}, "Nop": {Nop{}, false}, "*Nop": {&Nop{}, false}, "typed nil *Nop": {nilNop, false},
+		"Memory": {NewMemory(Options{}), true}} {
+		if got := Keeps(tc.s); got != tc.want {
+			t.Errorf("%s: Keeps = %v, want %v", name, got, tc.want)
+		}
+	}
+}

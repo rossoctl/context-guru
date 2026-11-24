@@ -122,6 +122,19 @@ func Peek(s Store, key string) bool {
 	return ok
 }
 
+// Keeps reports whether s can remember a value at all. It is false for a nil store and for Nop, the store of a
+// tenant with storage switched off: there a Put is dropped and a Get always misses. It is a type test on purpose.
+// "Get returned false" would also say it for a key that expired or was never written, and a reader must tell the
+// two apart: a missing record in a store that keeps things means "no fact", and a store that keeps nothing never
+// held the fact.
+func Keeps(s Store) bool {
+	switch s.(type) {
+	case nil, Nop, *Nop:
+		return false
+	}
+	return true
+}
+
 // ValuePeeker is an OPTIONAL Store capability: reading a live value WITHOUT touching it. It is Peeker with the
 // payload. A reader that only reports a fact (the dashboard asking "was the last touch a free 1-hour ping")
 // must not slide the TTL of a clock record, or its polling would keep a dead clock alive and a later cold

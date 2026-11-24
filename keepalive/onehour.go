@@ -184,8 +184,12 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		// alias) and which route made the ping. Kept apart from the entry, which the keeper forgets after
 		// about 8 minutes.
 		k.makeRoomForThreadLocked(start)
-		k.oneHourThreads[j.key.id()] = oneHourThread{key: j.key, route: rk,
+		th := oneHourThread{key: j.key, route: rk,
 			provider: j.provider, model: e.model, st: j.st, alias: touchAliasOf(j)}
+		if !store.Keeps(j.st) {
+			th.storeOffAt = start.UnixMilli() // the store holds nothing: see storeOffAt
+		}
+		k.oneHourThreads[j.key.id()] = th
 		if st != nil && st.proven {
 			e.ttl1h = true // a route proven to grant: from now until the next real request it is a 1-hour session
 		} else {
@@ -329,10 +333,24 @@ type oneHourThread struct {
 	// st and alias are the record: cg:seen:<alias>, "<ms>:1h" or "<ms>^<pingMs>".
 	st    store.Store
 	alias string
+	// storeOffAt is the time of the ping, in milliseconds, ONLY when the store keeps nothing (store.Keeps is
+	// false: storage switched off, or a host with no store). Then there is no stored record to read, and the keeper
+	// answers as it did before the store was the one record: from this. With a real store it is always 0, and the
+	// store alone says the tier and the time (a test pins it). It is a fallback for a store that holds nothing,
+	// never a second opinion next to a store that does.
+	storeOffAt int64
 }
 
 // standing is the time of the live free 1-hour ping the store holds for this thread, asked of the one function.
 func (t oneHourThread) standing(now time.Time) (atMs int64, live bool) {
+	if !store.Keeps(t.st) {
+		// Storage is off: nothing was stored, so nothing can be read. The ping time kept at the ping stands for
+		// the hour, as before. The same lifetime function decides when it ends.
+		if t.storeOffAt <= 0 || now.UnixMilli() >= t.storeOffAt+apply.EntryLifetime(apply.CacheFacts{Provider: t.provider, Model: t.model, LastOneHour: true}).Milliseconds() {
+			return 0, false
+		}
+		return t.storeOffAt, true
+	}
 	return apply.LiveOneHourPing(t.st, t.alias, t.provider, t.model, now.UnixMilli())
 }
 

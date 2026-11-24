@@ -128,6 +128,9 @@ func TestTheThreadIndexHoldsNoTierAndNoTime(t *testing.T) {
 	typ := reflectTypeOfThread()
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
+		if f.Name == "storeOffAt" { // the one fallback, for a store that keeps nothing: see TestWithARealStoreTheIndexHoldsNoTime
+			continue
+		}
 		if f.Type.String() == "time.Time" || f.Type.Kind().String() == "bool" || f.Type.String() == "time.Duration" ||
 			f.Type.Kind().String() == "int64" || f.Type.Kind().String() == "int" {
 			t.Errorf("oneHourThread.%s (%s) is a tier or a time: the store's record is the only one", f.Name, f.Type)
@@ -265,5 +268,64 @@ func TestTheKeepersPingIsStampedWithItsRoute(t *testing.T) {
 	b, _ := r.st.Get(store.SeenPrefix + r.alias)
 	if want := ":1h:" + apply.RouteTag(oneHourKeyOf()); !strings.HasSuffix(string(b), want) {
 		t.Errorf("record = %q, want it to end in %q", b, want)
+	}
+}
+
+// The fallback time is for a store that keeps nothing only. With a real store the index holds no time at all.
+func TestWithARealStoreTheIndexHoldsNoTime(t *testing.T) {
+	r, _ := pingedThread(t)
+	r.k.mu.Lock()
+	defer r.k.mu.Unlock()
+	for id, th := range r.k.oneHourThreads {
+		if th.storeOffAt != 0 {
+			t.Errorf("thread %s: the index holds a time (%d) next to a real store", id, th.storeOffAt)
+		}
+	}
+}
+
+// With a store that keeps nothing the fallback follows the same rules as before: an accepted request ends it, a
+// failed one does not, a route switch-off and a costly route hide it, and it ends with the hour.
+func TestWithNoStoreTheFallbackFollowsTheOldRules(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   store.Store
+	}{{"nop", store.Nop{}}, {"nil", nil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ping := func(t *testing.T) (*coldRig, time.Time) {
+				r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+				r.st = tc.st
+				proveRoute(r.k)
+				t0 := r.clock.now()
+				r.request(t0)
+				r.record(t0, "end_turn", onWaitPolicy())
+				r.clock.advance(240 * time.Second)
+				r.k.Sweep(r.clock.now())
+				waitPings(t, r.k, 1)
+				if _, ok := touchOf(r.k, sess1); !ok {
+					t.Fatal("fixture: no free 1-hour touch")
+				}
+				return r, t0
+			}
+			r, t0 := ping(t)
+			r.request(t0.Add(6 * time.Minute))
+			r.recordStatus(t0.Add(6*time.Minute), 500) // failed: the hour stands
+			if _, ok := touchOf(r.k, sess1); !ok {
+				t.Error("a failed request ended the hour")
+			}
+			r.recordStatus(t0.Add(6*time.Minute), 200) // accepted: it ends
+			if _, ok := touchOf(r.k, sess1); ok {
+				t.Error("an accepted request left the hour")
+			}
+			r, _ = ping(t)
+			r.k.oneHourSwitchOff(oneHourKeyOf(), bschemas.Anthropic, "/v1/messages", "", "aws/claude-sonnet-5", "test")
+			if _, ok := touchOf(r.k, sess1); ok || r.k.OneHourTouchLive(sess1) {
+				t.Error("a route that is off still shows or refuses")
+			}
+			r, _ = ping(t)
+			r.clock.advance(time.Hour)
+			if _, ok := touchOf(r.k, sess1); ok || r.k.OneHourTouchLive(sess1) {
+				t.Error("the hour did not end")
+			}
+		})
 	}
 }

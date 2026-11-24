@@ -327,6 +327,8 @@ time, so it cannot disagree with the store. Each event writes the store record o
 
 Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.
 
+The one exception is a store that keeps nothing (`store.Keeps` is false: storage switched off, or no store). There is no record to read, so the keeper's index also holds the ping time (`storeOffAt`) and the cache clock and the manual-ping refusal answer from it, as before #1365. With a real store that field is always 0.
+
 
 ## Session keying
 
