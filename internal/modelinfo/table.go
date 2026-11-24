@@ -45,7 +45,9 @@ type tableEntry struct {
 	// a `/` or a `.`. Only those may match by containment; see lookup.
 	qualified bool
 	price     Price
-	window    int
+	// flat means the entry states one rate for every prompt size, so Price adds no built-in tier.
+	flat   bool
+	window int
 	// compactionPoint is the operator's compaction point in billed tokens, or 0.
 	compactionPoint int
 }
@@ -77,6 +79,9 @@ type tableFileModel struct {
 	// CacheWrite1hFrac is the 1-hour cache-write rate as a multiple of In. 0 (unset) means
 	// AnthropicCacheWrite1hFrac. A gateway that bills the 1-hour write at the input rate sets 1.0.
 	CacheWrite1hFrac float64 `yaml:"cache_write_1h_frac"`
+	// Flat turns the built-in prompt-size tiers off for this entry. Set it when the gateway bills
+	// one flat rate for every prompt size. Unset, the built-in tiers apply (see Price.WithTiers).
+	Flat bool `yaml:"flat"`
 	// Window optionally overrides the context window for a model the public map
 	// does not list either (a preview id), so fraction triggers still scale.
 	Window int `yaml:"window"`
@@ -190,7 +195,7 @@ func ParseTable(b []byte) (*Table, error) {
 			p.WriteFrac = 1.0
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
-			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window, compactionPoint: m.CompactionPoint})
+			qualified: strings.ContainsAny(match, "/."), price: p, flat: m.Flat, window: m.Window, compactionPoint: m.CompactionPoint})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -337,7 +342,11 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	// The fill uses the QUERIED model, not the match pattern: a family entry such as
 	// `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5` on
 	// `aws/claude-sonnet-5-5`, serves models with different read tiers.
-	return e.price.Resolved(model).WithTiers(model), true
+	p := e.price.Resolved(model)
+	if !e.flat {
+		p = p.WithTiers(model)
+	}
+	return p, true
 }
 
 // Window returns an operator-supplied context window, for models the public map

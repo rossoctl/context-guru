@@ -146,3 +146,43 @@ func TestTablePriceGetsBuiltinTier(t *testing.T) {
 		t.Errorf("claude-sonnet-5 must stay flat, got %+v", p.Tiers)
 	}
 }
+
+func TestTableFlatKeyTurnsTiersOff(t *testing.T) {
+	tb, err := ParseTable([]byte(`models:
+  - match: gpt-5.5
+    in: 5
+    out: 30
+    flat: true
+  - match: gpt-5.6*
+    in: 4
+    out: 20
+  - match: azure/gpt-5.5*
+    in: 5
+    out: 30
+    flat: true
+  - match: claude-haiku-5-5
+    in: 0.1
+    out: 0.5
+    flat: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for model, wantTier := range map[string]bool{
+		"gpt-5.5":          false, // flat: true
+		"gpt-5.6-sol":      true,  // key absent: built-in tier; a flat neighbour does not leak
+		"azure/gpt-5.5-x":  false, // flat family entry
+		"claude-haiku-5-5": true,  // flat: false
+	} {
+		p, ok := tb.Price(nil, model)
+		if !ok || p.HasTiers() != wantTier {
+			t.Errorf("%s: ok=%v HasTiers=%v, want %v", model, ok, p.HasTiers(), wantTier)
+		}
+	}
+}
+
+func TestTableFlatKeyMustBeABool(t *testing.T) {
+	if _, err := ParseTable([]byte("models:\n  - match: gpt-5.5\n    in: 5\n    out: 30\n    flat: maybe\n")); err == nil {
+		t.Error("flat: maybe loaded; want an error")
+	}
+}
