@@ -1050,20 +1050,16 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs and cacheAttributionTTLMs are the library's (apply.EntryAgeMs, apply.BilledLifetimeMs): the
-// proxy passes facts, and the lifetime rule lives with the cold check (#1350).
+// entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold
+// check (#1350). attributionTTLMs, below, does the same for apply.BilledLifetimeMs.
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
 	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
 
-// attributionTTLMs is the lifetime the miss verdict judges against: the entry is at 1 hour when its last
-// write was billed there, or when its last touch was a free 1-hour ping (#1350).
+// attributionTTLMs passes the two facts to apply.BilledLifetimeMs, which decides the lifetime the miss verdict
+// judges against: the tier the last write was billed at, and whether the last touch was a live free 1-hour ping.
 func (c *capture) attributionTTLMs(provider, model string, prevOneHour bool) int64 {
-	return cacheAttributionTTLMs(provider, model, prevOneHour || (c != nil && c.kaRefreshedOneHour))
-}
-
-func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
-	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, oneHour)
+	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, prevOneHour, c != nil && c.kaRefreshedOneHour)
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so

@@ -225,23 +225,25 @@ func TestEntryLifetimeIsTheOneDecision(t *testing.T) {
 	}
 }
 
-// The miss attribution reads the lifetime through BilledLifetimeMs. After a free 1-hour ping the host passes
-// the tier true (kaArrival.refreshedOneHour), and the lifetime is 1 hour, not the 5 minutes the last write was
-// billed at. A minimum (OpenAI) is not an exact lifetime: 0.
-func TestBilledLifetimeMsAfterAFreeOneHourPing(t *testing.T) {
+// The miss attribution reads the lifetime through BilledLifetimeMs: the proxy passes two facts, the tier the last
+// write was billed at and whether the last touch was a live free 1-hour ping, and apply decides. Either one says 1
+// hour. A minimum (OpenAI GPT-5.6) is not an exact lifetime: 0 for all four.
+func TestBilledLifetimeMsDecidesFromTheTwoFacts(t *testing.T) {
+	const m5, h1 = int64(300_000), int64(3_600_000)
 	for _, tc := range []struct {
 		provider bschemas.ModelProvider
 		model    string
-		oneHour  bool
-		want     int64
+		want     [4]int64 // billed false/refreshed false, false/true, true/false, true/true
 	}{
-		{bschemas.Anthropic, "claude-sonnet-5", false, 300_000},
-		{bschemas.Anthropic, "claude-sonnet-5", true, 3_600_000},
-		{bschemas.Bedrock, "aws/claude-sonnet-5", true, 3_600_000},
-		{bschemas.OpenAI, "gpt-5.6", true, 0},
+		{bschemas.Anthropic, "claude-sonnet-5", [4]int64{m5, h1, h1, h1}},
+		{bschemas.Bedrock, "aws/claude-sonnet-5", [4]int64{m5, h1, h1, h1}},
+		{bschemas.OpenAI, "gpt-5.6", [4]int64{0, 0, 0, 0}},
 	} {
-		if got := BilledLifetimeMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
-			t.Errorf("BilledLifetimeMs(%s, %s, %v) = %d, want %d", tc.provider, tc.model, tc.oneHour, got, tc.want)
+		for i, w := range tc.want {
+			billed, refreshed := i >= 2, i%2 == 1
+			if got := BilledLifetimeMs(tc.provider, tc.model, billed, refreshed); got != w {
+				t.Errorf("BilledLifetimeMs(%s, %s, billed=%v, refreshed=%v) = %d, want %d", tc.provider, tc.model, billed, refreshed, got, w)
+			}
 		}
 	}
 }
