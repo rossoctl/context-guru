@@ -224,7 +224,6 @@ func TestToolDeferTenantAfterStartBuildsTheState(t *testing.T) {
 // GLM note on #872. The start waits one bound in all (startWait), for the load and every seed
 // together: two seeds that never end return at the bound, not at twice it, and never hang.
 func TestWaitAllIsOneBound(t *testing.T) {
-	testutil.RequireTiming(t)
 	never1, never2 := make(chan struct{}), make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -232,7 +231,10 @@ func TestWaitAllIsOneBound(t *testing.T) {
 	if waitAll(ctx, never1) {
 		t.Fatal("reported done")
 	}
-	if waitAll(ctx, never1, never2) || time.Since(t0) > time.Second {
+	if waitAll(ctx, never1, never2) {
+		t.Fatal("reported done")
+	}
+	if testutil.TimingEnabled() && time.Since(t0) > time.Second {
 		t.Fatalf("waited %v for one 50 ms bound", time.Since(t0))
 	}
 	closed := make(chan struct{})

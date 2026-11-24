@@ -17,11 +17,9 @@ import {
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
 
-// Timing tests assert a wall-clock bound. They fail on a busy machine with nothing wrong in the code.
-// They run only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
-const timingOnly = {
-  skip: process.env.CG_TIMING_TESTS !== "1" && "timing test: set CG_TIMING_TESTS=1 to run it",
-}
+// A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+// CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+const timing = process.env.CG_TIMING_TESTS === "1";
 
 const install = {
   port: 8800,
@@ -241,14 +239,14 @@ test("the health check is a GET to localhost /healthz, true only on 200", async 
   assert.equal(await proxyAnswers(port, 1000), false);
 });
 
-test("a proxy that accepts but never answers fails the check at the time limit", timingOnly, async () => {
+test("a proxy that accepts but never answers fails the check at the time limit", async () => {
   const server = createServer(() => undefined);
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const port = (server.address() as AddressInfo).port;
   try {
     const start = Date.now();
     assert.equal(await proxyAnswers(port, 200), false);
-    assert.ok(Date.now() - start < 2000);
+    if (timing) assert.ok(Date.now() - start < 2000);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -266,7 +264,7 @@ test("each check has a time limit, 5 seconds by default", async () => {
   assert.ok(signal, "the request carries a time limit");
 });
 
-test("a stopped check ends at once, before its time limit", timingOnly, async () => {
+test("a stopped check ends at once, before its time limit", async () => {
   const server = createServer(() => undefined);
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const port = (server.address() as AddressInfo).port;
@@ -276,7 +274,7 @@ test("a stopped check ends at once, before its time limit", timingOnly, async ()
     const pending = proxyAnswers(port, 5000, fetch, stop.signal);
     setTimeout(() => stop.abort(), 50);
     assert.equal(await pending, false);
-    assert.ok(Date.now() - start < 1000);
+    if (timing) assert.ok(Date.now() - start < 1000);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -358,13 +356,13 @@ test("a request waits for a running restart and goes as soon as it ends", async 
   assert.equal(went, true);
 });
 
-test("a request waits at most the limit, 10 seconds by default", timingOnly, async () => {
+test("a request waits at most the limit, 10 seconds by default", async () => {
   assert.equal(FIRST_REQUEST_WAIT_MS, 10_000);
   const gate = new RestartGate();
   gate.hold(); // never released
   const start = Date.now();
   await gate.wait(30);
-  assert.ok(Date.now() - start < 500);
+  if (timing) assert.ok(Date.now() - start < 500);
 });
 
 test("the start check holds requests only while it restarts, also when the restart throws", async () => {

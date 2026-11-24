@@ -125,7 +125,6 @@ func TestOnlyAnthropicStrategiesAreOffered(t *testing.T) {
 // not fail on `strategies`: it starts serving. The plugin must stop it at the limit, on a loopback
 // port that cannot collide, and say plainly to update the proxy. It must not fall back to a table.
 func TestAnOldProxyBinaryGetsTheUpdateMessageWithinTheTimeLimit(t *testing.T) {
-	testutil.RequireTiming(t)
 	bin, marker := oldProxyBin(t)
 	facts, code, took := settingsWithBin(t, bin, []string{"CONTEXT_GURU_STRATEGIES_TIMEOUT=1"}, "strategy", "list")
 	if code == 0 || facts["reason"] != "proxy_too_old" {
@@ -134,7 +133,7 @@ func TestAnOldProxyBinaryGetsTheUpdateMessageWithinTheTimeLimit(t *testing.T) {
 	if !strings.Contains(facts["note"], "update the proxy to v0.7.1 or later") {
 		t.Errorf("the error does not say to update the proxy to v0.7.1: %q", facts["note"])
 	}
-	if took > 8*time.Second {
+	if testutil.TimingEnabled() && took > 8*time.Second {
 		t.Errorf("took %s; the time limit was 1 s", took)
 	}
 	if got := readFileString(t, marker); !strings.Contains(got, "LISTEN_ADDR=127.0.0.1:0") {

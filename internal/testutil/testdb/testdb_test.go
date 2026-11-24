@@ -44,7 +44,6 @@ func TestReopenKeepsTheRows(t *testing.T) {
 
 // A file locked by another connection must fail with the SQLite error inside the bound.
 func TestOpenFailsWithTheRealErrorOnALockedFile(t *testing.T) {
-	testutil.RequireTiming(t)
 	path := filepath.Join(t.TempDir(), "a.db")
 	// A rollback-journal file with an exclusive lock held: the switch to WAL cannot get a lock.
 	locker, err := sql.Open("sqlite", "file:"+path)
@@ -64,7 +63,7 @@ func TestOpenFailsWithTheRealErrorOnALockedFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("open succeeded on a locked file")
 	}
-	if d := time.Since(start); d > openBound+2*time.Second {
+	if d := time.Since(start); testutil.TimingEnabled() && d > openBound+2*time.Second {
 		t.Fatalf("open took %v, want at most %v", d, openBound+2*time.Second)
 	}
 	if !strings.Contains(err.Error(), "locked") && !strings.Contains(err.Error(), "busy") {

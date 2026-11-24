@@ -11,7 +11,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-versio
 process.env.CONTEXT_GURU_PORT_START = "9800"
 
 import plugin, { stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy, timingOnly } from "./helpers.mjs"
+import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
 
 const PLATFORMS = { darwin: "darwin", linux: "linux" }
 const ARCHITECTURES = { arm64: "arm64", x64: "amd64" }
@@ -164,7 +164,7 @@ test("update installs the latest release over a too-old managed binary that has 
 })
 
 // A binary that does not know --version may start serving instead of answering. The update check must not wait for it.
-test("the update check stops a binary that never answers --version", timingOnly, async () => {
+test("the update check stops a binary that never answers --version", async () => {
   const directory = "/tmp/context-guru-versions-hung"
   const state = stateDirectory(directory)
   const restore = isolatePath()
@@ -182,7 +182,7 @@ test("the update check stops a binary that never answers --version", timingOnly,
     const started = Date.now()
     const check = await run(join(state, "context-guru-update"))
 
-    assert.ok(Date.now() - started < 15000, `the check took ${Date.now() - started} ms`)
+    if (process.env.CG_TIMING_TESTS === "1") assert.ok(Date.now() - started < 15000, `the check took ${Date.now() - started} ms`)
     assert.equal(check.status, 0, check.out)
     assert.match(check.out, /^latest=v0\.7\.3$/m)
     assert.match(check.out, /^result=available$/m)

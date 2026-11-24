@@ -75,10 +75,9 @@ esac
 exit 0
 """
 
-# A timing test asserts a wall-clock bound. It fails on a busy machine with nothing wrong in the code.
-# It runs only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
-timing_only = unittest.skipUnless(os.environ.get("CG_TIMING_TESTS") == "1",
-                                  "timing test: set CG_TIMING_TESTS=1 to run it")
+# A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+# CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+TIMING = os.environ.get("CG_TIMING_TESTS") == "1"
 
 
 class FakeProxy:
@@ -1568,7 +1567,6 @@ class BinaryCheckTest(TempHome):
         self.assertEqual(reasons, [f"{folder / 'context-guru-proxy'} cannot list cache "
                                    "strategies (needs v0.7.1 or later)"])
 
-    @timing_only
     def test_an_old_binary_that_serves_for_strategies_is_skipped_within_the_timeout(self):
         folder = self.root / "oldbin"
         folder.mkdir()
@@ -1580,7 +1578,8 @@ class BinaryCheckTest(TempHome):
         reasons, start = [], time.monotonic()
         with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1):
             self.assertIsNone(PLUGIN.find_binary(reasons))
-        self.assertLess(time.monotonic() - start, 5)
+        if TIMING:
+            self.assertLess(time.monotonic() - start, 5)
         self.assertIn("cannot list cache strategies", reasons[0])
 
     def test_the_managed_binary_is_still_used_and_probed_once(self):
@@ -1899,7 +1898,6 @@ class SecondReviewTest(TempHome):
         self.assertEqual(code, 1)
         self.assertIn("result=setup_incomplete", out)
 
-    @timing_only
     def test_ensure_fits_the_hook_timeout_when_launchctl_hangs(self):
         import time
         self.write_record(dead_port())
@@ -1909,7 +1907,8 @@ class SecondReviewTest(TempHome):
         os.environ["CG_TEST_SLOW_KICKSTART"] = "30"
         start = time.monotonic()
         self.assertEqual(self.run_main("ensure"), (0, "", ""))
-        self.assertLess(time.monotonic() - start, 4.5)
+        if TIMING:
+            self.assertLess(time.monotonic() - start, 4.5)
 
     def test_bootstrap_waits_until_launchd_lets_the_label_go(self):
         loaded = self.root / "loaded"
