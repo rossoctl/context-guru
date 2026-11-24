@@ -13,7 +13,6 @@ import (
 // proxy's Usage type. The fields below are views of the Recorder's own pieces, so the host code reads them by name.
 type savingsTracker struct {
 	*accrec.Recorder
-	billed1h *accrec.TierStore
 	thinking *thinkcount.Table
 	clients  *sync.Map
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
@@ -27,7 +26,7 @@ type endRecord = accrec.EndRecord
 
 func newSavingsTracker() *savingsTracker {
 	r := accrec.NewRecorder()
-	s := &savingsTracker{Recorder: r, billed1h: r.Tiers, thinking: r.Thinking, clients: &r.Clients}
+	s := &savingsTracker{Recorder: r, thinking: r.Thinking, clients: &r.Clients}
 	r.OnEnd = func(req *accountant.Request, rec endRecord) {
 		if s.onEnd != nil {
 			s.onEnd(req, rec)

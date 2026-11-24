@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 )
 
@@ -192,5 +193,51 @@ func TestStateRoundTripAndRefusals(t *testing.T) {
 	}
 	if res := NewRecorder().RestoreState([]byte("{not json"), time.Minute); res.Restored || res.Err == nil {
 		t.Fatalf("a bad file must be refused: %+v", res)
+	}
+}
+
+func TestBilledForwardedKeepsTheBodyWhenNothingIsDeferred(t *testing.T) {
+	fw := recBody(mustRecMsg("user", "x"))
+	if b, nr := BilledForwarded(fw, nil); string(b) != string(fw) || nr != "" {
+		t.Fatalf("nil preDefer: %q %q", b, nr)
+	}
+	if b, nr := BilledForwarded(fw, fw); string(b) != string(fw) || nr != "" {
+		t.Fatalf("no deferred tool: %q %q", b, nr)
+	}
+}
+
+func TestRecordNamesTheThreadAndKeepsTheFacts(t *testing.T) {
+	r := NewRecorder()
+	m0 := mustRecMsg("user", "first")
+	body := recBody(m0)
+	req := r.Begin(recMeta(1, "s"), body)
+	var seen string
+	r.OnEnd = func(*accountant.Request, EndRecord) { seen = "ended" }
+	out := r.Record(req, RecordIn{Meta: recMeta(1, "s"), Client: body, Forwarded: body, ThreadID: "main",
+		ReadSets: func(_ bschemas.ModelProvider, _, _, _ string, pinged bool) bool { return true }})
+	if out.Thread != ThreadID("main") || out.NoResult != "" || seen != "ended" || !out.Facts.Provider.ReadSetsTTL {
+		t.Fatalf("%+v %q", out, seen)
+	}
+}
+
+func TestLowerTTLIsNilSafe(t *testing.T) {
+	r := NewRecorder()
+	f := accountant.EntryFacts{TTL: time.Hour}
+	if got := r.LowerTTL(nil, "s", "main", f, 100, 0); got.TTL != time.Hour {
+		t.Fatalf("a nil request changed the facts: %+v", got)
+	}
+}
+
+func TestLowerTTLLowersTheFactsToTheBilledTier(t *testing.T) {
+	r := NewRecorder()
+	req := recOneRequest(r, 1, ThreadOf("main", "", false))
+	asked := accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact}
+	// The request asked for 1h and the gateway billed the write at 5m (no 1h tokens).
+	if got := r.LowerTTL(req, "s", "main", asked, 300, 0); got.TTL != BaseTTL {
+		t.Fatalf("TTL = %v, want %v", got.TTL, BaseTTL)
+	}
+	// A write billed at 1h keeps the asked tier.
+	if got := r.LowerTTL(req, "s", "other", asked, 300, 300); got.TTL != time.Hour {
+		t.Fatalf("TTL = %v, want 1h", got.TTL)
 	}
 }

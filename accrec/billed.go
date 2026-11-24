@@ -140,3 +140,23 @@ func EnvelopeOpsFor(client, billed, preDefer []byte) []accountant.Operation {
 	}
 	return out
 }
+
+// BilledForwarded is the body the accountant records for a request. A request that tool deferral did not change
+// returns the forwarded body. A deferral whose stub cannot be placed (a stub that would not be smaller than its
+// definition) also returns the forwarded body, and noResult is DeferralUnplaced, so the event books no figure and the
+// sum check does not turn it into a wrong one. A tool the client deferred itself is left as it is (OwnDeferred).
+// preDefer is the body deferral read, nil on a request it did not change.
+func BilledForwarded(forwarded, preDefer []byte) (body []byte, noResult string) {
+	if preDefer == nil {
+		return forwarded, ""
+	}
+	own := OwnDeferred(forwarded, preDefer)
+	if len(own) == 0 {
+		return forwarded, ""
+	}
+	b, ok := BilledBody(forwarded, own)
+	if !ok {
+		return forwarded, DeferralUnplaced
+	}
+	return b, ""
+}
