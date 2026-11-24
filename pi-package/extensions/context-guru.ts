@@ -409,6 +409,19 @@ export function endKind(reason: string): string | undefined {
   return ({ quit: "prompt_input_exit", new: "clear", resume: "resume", fork: "other" } as Record<string, string>)[reason];
 }
 
+/** How long a compaction mark lasts. A summary that hangs, or ends with no event, must not mark the session
+ *  for ever. */
+export const COMPACTION_MARK_MS = 10 * 60 * 1000;
+
+/** True when the session started a compaction less than COMPACTION_MARK_MS ago. An old entry is dropped. */
+export function isCompacting(marks: Map<string, number>, session: string, now: number): boolean {
+  const since = marks.get(session);
+  if (since === undefined) return false;
+  if (now - since < COMPACTION_MARK_MS) return true;
+  marks.delete(session);
+  return false;
+}
+
 export default function contextGuru(pi: ExtensionAPI) {
   const shared = globalThis as Record<symbol, unknown>;
   const owner = shared[LOADED];
@@ -429,7 +442,7 @@ export default function contextGuru(pi: ExtensionAPI) {
 
   const routed = (ctx: ExtensionContext) => isRouted(install, ctx.model?.baseUrl);
   /** Pi sessions whose own summary request is running (session_before_compact until session_compact(_failed)). */
-  const compacting = new Set<string>();
+  const compacting = new Map<string, number>();
 
   const signal = (ctx: ExtensionContext, event: string, kind: string) => {
     const port = install?.port;
@@ -499,11 +512,11 @@ export default function contextGuru(pi: ExtensionAPI) {
     // Pi's own summary request runs between session_before_compact and session_compact(_failed), on the
     // same stream function as a turn (agent-session.js: compact(..., this.agent.streamFunction, ...),
     // @earendil-works/pi-coding-agent 1.6.0). The proxy reads this mark, not the prompt.
-    if (compacting.has(session)) event.headers[KIND_HEADER] = "compaction";
+    if (isCompacting(compacting, session, Date.now())) event.headers[KIND_HEADER] = "compaction";
   });
 
   pi.on("session_before_compact", (_event, ctx) => {
-    compacting.add(ctx.sessionManager.getSessionId());
+    compacting.set(ctx.sessionManager.getSessionId(), Date.now());
   });
   pi.on("session_compact_failed", (_event, ctx) => {
     compacting.delete(ctx.sessionManager.getSessionId());
@@ -535,6 +548,7 @@ export default function contextGuru(pi: ExtensionAPI) {
     // A reload, /new, /resume or /fork loads every copy again, so the first copy to load claims it again.
     if (shared[LOADED] === PACKAGE_DIR) delete shared[LOADED];
     try {
+      compacting.delete(ctx.sessionManager.getSessionId());
       checks.end(ctx.sessionManager.getSessionId());
     } catch {
       // No session id: nothing of ours to stop.

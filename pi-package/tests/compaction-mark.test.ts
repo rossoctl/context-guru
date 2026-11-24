@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 
 const state = mkdtempSync(join(tmpdir(), "cg-pi-mark-"));
 mkdirSync(join(state, "context-guru-pi"), { recursive: true });
@@ -48,4 +48,27 @@ test("the summary request carries the compaction mark, and no other request does
   pi.emit("session_before_compact");
   pi.emit("session_compact_failed");
   assert.equal(pi.headers()["x-context-guru-request-kind"], undefined);
+});
+
+test("a session that shuts down mid-compaction is not marked when it resumes", () => {
+  const pi = loaded();
+  pi.emit("session_before_compact");
+  assert.equal(pi.headers()["x-context-guru-request-kind"], "compaction");
+  pi.emit("session_shutdown", { reason: "resume" });
+  assert.equal(pi.headers()["x-context-guru-request-kind"], undefined);
+});
+
+test("a compaction that never ends stops marking after its time limit", () => {
+  const pi = loaded();
+  const t0 = Date.now();
+  const now = mock.method(Date, "now", () => t0);
+  try {
+    pi.emit("session_before_compact");
+    now.mock.mockImplementation(() => t0 + 60_000);
+    assert.equal(pi.headers()["x-context-guru-request-kind"], "compaction");
+    now.mock.mockImplementation(() => t0 + 11 * 60_000);
+    assert.equal(pi.headers()["x-context-guru-request-kind"], undefined);
+  } finally {
+    now.mock.restore();
+  }
 });

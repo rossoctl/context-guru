@@ -1387,8 +1387,11 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
         output.headers["x-context-guru-session"] = input.sessionID
         signaler.noteSession(input.sessionID)
       }
-      // OpenCode 1 runs its summary request as the built-in "compaction" agent
-      // (packages/opencode/src/session/compaction.ts, v1.19.6). The proxy reads this mark, not the prompt.
+      // OpenCode 1 runs its summary request as the built-in "compaction" agent: it is named in
+      // packages/opencode/src/agent/agent.ts (name: "compaction") and fetched in
+      // packages/opencode/src/session/compaction.ts (agents.get("compaction")), v1.19.6. The proxy reads
+      // this mark, not the prompt. This keys on the agent NAME, so a user agent with the same name is
+      // marked too. The opposite miss (no mark) is covered by the prompt match in the proxy.
       if (input.agent === "compaction") output.headers["x-context-guru-request-kind"] = "compaction"
     },
   }

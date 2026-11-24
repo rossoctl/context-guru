@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS requests (
   open_background    INTEGER,
   open_teammate      INTEGER,
   monitor_expiry_ms  INTEGER,
-  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (thread.IsAgentCompaction); 0 on rows written before it
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (agent/all.IsClientCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)

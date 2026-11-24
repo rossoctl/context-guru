@@ -64,10 +64,18 @@ const turnMetadata = "x-codex-turn-metadata"
 
 // IsCompaction reports whether Codex marked this request as its own compaction: the turn metadata in
 // the header h, or in the body's `client_metadata` (the form a WebSocket request carries). It reads
-// metadata only, no request text. A nil h and an unmarked request give false; the host then falls
-// back to the prompt match in the thread package.
+// metadata only, no request text. It answers only for a caller that Identify accepts as Codex, as the
+// ids do: any client could send the header. A nil h, a non-Codex caller and an unmarked request give
+// false; the host then falls back to the prompt match in the thread package.
+//
+// `client_metadata` is a JSON object of string values (`Option<HashMap<String, String>>`, openai/codex
+// codex-rs/codex-api/src/common.rs, ResponsesApiRequest and ResponseCreateWsRequest). The turn
+// metadata is one such value: itself a JSON text, so the match reads it as a string.
 func IsCompaction(h http.Header, body []byte) bool {
-	if h != nil && marksCompaction(h.Get(turnMetadata)) {
+	if _, ok := Identify(h); !ok {
+		return false
+	}
+	if marksCompaction(h.Get(turnMetadata)) {
 		return true
 	}
 	return marksCompaction(gjson.GetBytes(body, "client_metadata").Get(turnMetadata).String())

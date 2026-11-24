@@ -512,8 +512,9 @@ func TestAgentCompactionMarkedByTheClientIsCounted(t *testing.T) {
 
 	for _, hdr := range []map[string]string{
 		{"x-context-guru-request-kind": "compaction"},
-		{"x-codex-turn-metadata": `{"request_kind":"compaction"}`},
-		{"x-codex-turn-metadata": `{"request_kind":"turn"}`},
+		{"User-Agent": "codex_cli_rs/0.172.0", "x-codex-turn-metadata": `{"request_kind":"compaction"}`},
+		{"User-Agent": "codex_cli_rs/0.172.0", "x-codex-turn-metadata": `{"request_kind":"turn"}`},
+		{"x-codex-turn-metadata": `{"request_kind":"compaction"}`}, // not Codex: ignored
 		{},
 	} {
 		body := openAIBody(map[string]any{"role": "user", "content": "an ordinary turn"})
