@@ -44,4 +44,4 @@ A host without a client signal gives the generic result.
 - **bifrost adapter:** `resolveSession` sees only a session id from the host context. It never sees
   request headers, so `agent.Identify` needs the transport to pass them.
 - **Cortex gap:** wire `apply.Opts.ThreadOf` with `thread.ResolveSession` and
-  `agent.Identify(pctx.Headers)`. Owner: Cortex repo. A follow-up issue is to be opened.
+  `agent.Identify(pctx.Headers)`. Owner: Cortex repo. A follow-up issue is to be decided with the Cortex integration owner.
