@@ -1,49 +1,52 @@
 package proxy
 
 import (
-	"bytes"
-	"log/slog"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
-	"github.com/rossoctl/context-guru/accwire"
-
 	"github.com/rossoctl/context-guru/thinkcount"
 )
 
-// savingsTracker runs the accountant calls around one request. It holds the one Trackers
-// of the proxy: a thread's state lives there between requests.
+// savingsTracker is the proxy's host of the accrec.Recorder. The Recorder holds the accountant logic and the
+// state of every thread. This type adds what only the proxy has: the state file (accountant_state.go) and the
+// proxy's Usage type. The fields below are views of the Recorder's own pieces, so the host code reads them by name.
 type savingsTracker struct {
-	trackers *accountant.Trackers
-	siblings *accrec.SiblingStore // each thread's last forwarded body, for EntryFacts.SharedWarm
-	// clients holds the hash of each open request's client body, by request, from begin to end.
-	clients sync.Map // *accountant.Request -> clientHash
+	*accrec.Recorder
+	billed1h *accrec.TierStore
+	thinking *thinkcount.Table
+	clients  *sync.Map
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
 	onEnd func(*accountant.Request, endRecord)
 	// written is the last state file's bytes, for save to skip an unchanged write.
 	written lastSaved
-	// billed1h is the tier each thread's last write was billed at, for accBilledTTL (issue #1078).
-	billed1h *accrec.TierStore
-	// rescueFactsMissing counts priced requests that followed keep-alive pings but found no ping facts.
-	rescueFactsMissing atomic.Int64
-	// thinking holds the token count of each thinking block a response made, by its signature's key, so a block
-	// the client sends back is priced at its own count (issue #1187, accountant design D16). Saved with the state.
-	thinking *thinkcount.Table
+}
+
+// endRecord is what end gave EndRequest (accrec.EndRecord).
+type endRecord = accrec.EndRecord
+
+func newSavingsTracker() *savingsTracker {
+	r := accrec.NewRecorder()
+	s := &savingsTracker{Recorder: r, billed1h: r.Tiers, thinking: r.Thinking, clients: &r.Clients}
+	r.OnEnd = func(req *accountant.Request, rec endRecord) {
+		if s.onEnd != nil {
+			s.onEnd(req, rec)
+		}
+	}
+	return s
 }
 
 // recordThinking stores the thinking counts of one billed response. Nil-safe.
 func (s *savingsTracker) recordThinking(r thinkcount.Response) {
 	if s != nil {
-		s.thinking.Record(r)
+		s.Recorder.RecordThinking(r)
 	}
 }
 
 // noteRescueFactsMissing counts one priced request that followed pings and found no ping facts. Nil-safe.
 func (s *savingsTracker) noteRescueFactsMissing() {
 	if s != nil {
-		s.rescueFactsMissing.Add(1)
+		s.Recorder.NoteRescueFactsMissing()
 	}
 }
 
@@ -52,94 +55,33 @@ func (s *savingsTracker) RescueFactsMissing() int64 {
 	if s == nil {
 		return 0
 	}
-	return s.rescueFactsMissing.Load()
+	return s.Recorder.RescueFactsMissing()
 }
 
-// clientHash is what begin built from the client body, kept until end so a request that was forwarded unchanged does
-// not hash the same bytes again. Hashing a 600 KB body costs 3 to 4 ms.
-type clientHash struct {
-	meta accountant.RequestMeta // the library keeps its record private, so end reads the meta from here
-	raw  []byte
-	body accountant.Body
-	bps  []accountant.Breakpoint
-}
-
-// endRecord is what end gave EndRequest. The library keeps its record in unexported fields, so a test
-// that checks the bodies the library saw reads them here.
-type endRecord struct {
-	Client, Forwarded accountant.Body
-	Breakpoints       []accountant.Breakpoint
-}
-
-// drop forgets the client hash of a request that will never end: a panic between accBegin and accEnd makes the proxy
-// send the original body, and end is the only other place that removes the entry. Nil-safe.
+// drop forgets the client hash of a request that will never end. Nil-safe.
 func (s *savingsTracker) drop(req *accountant.Request) {
-	if s != nil && req != nil {
-		s.clients.Delete(req)
+	if s != nil {
+		s.Recorder.Drop(req)
 	}
 }
 
-func newSavingsTracker() *savingsTracker {
-	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: accrec.NewSiblingStore(), billed1h: accrec.NewTierStore(),
-		thinking: thinkcount.NewTable(0)}
-}
-
-// begin opens the request record with the client body, before any component ran. The Trackers bound
-// their own memory (accountant design §6.1, Memory), so there is nothing to sweep here.
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
-	body, bps := accwire.For(client).Parse(client, s.thinking.Lookup)
-	req := s.trackers.BeginRequest(meta, body, bps)
-	s.clients.Store(req, clientHash{meta: meta, raw: client, body: body, bps: bps})
-	return req
+	return s.Recorder.Begin(meta, client)
 }
 
-// end records the operations, then the thread and the forwarded body. Every op is added, replays
-// included: the library replaces an active change by the reported op with the same ChangeID
-// (accountant internal/engine/compute.go, items()), so a change is priced once and unique_change never fires.
-// Skipping a replay here would lose the op whenever Compute ends the change on this request.
 func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forwarded []byte, ops []accountant.Operation, facts accountant.EntryFacts) endRecord {
-	for _, op := range ops {
-		req.Add(op)
-	}
-	var fwd accountant.Body
-	var bps []accountant.Breakpoint
-	var client accountant.Body
-	var meta accountant.RequestMeta
-	if v, ok := s.clients.LoadAndDelete(req); ok {
-		client, meta = v.(clientHash).body, v.(clientHash).meta
-		if bytes.Equal(v.(clientHash).raw, forwarded) {
-			fwd, bps = client, v.(clientHash).bps
-		} else {
-			fwd, bps = accwire.For(forwarded).Parse(forwarded, s.thinking.Lookup)
-		}
-	} else {
-		fwd, bps = accwire.For(forwarded).Parse(forwarded, s.thinking.Lookup)
-	}
-	facts.SharedWarm = s.siblings.SharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
-	req.EndRequest(th, fwd, bps, facts)
-	rec := endRecord{Client: client, Forwarded: fwd, Breakpoints: bps}
-	if s.onEnd != nil {
-		s.onEnd(req, rec)
-	}
-	return rec
+	return s.Recorder.End(req, th, forwarded, ops, facts)
 }
 
-// computeSafe is compute for the request path. The library asks the host to wrap Compute, and this repo's rule is
-// to fail open: a panic here would unwind through finish and lose the cg.request log line and the dashboard row
-// of a request that was already forwarded. It reports ok=false instead, the request is recorded with no saving
-// (PriceMode falls back with no_result), and the panic is logged. Tests call compute, so a panic still fails them.
-func (s *savingsTracker) computeSafe(req *accountant.Request, u Usage) (res accountant.Result, ok bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Error("accountant: Compute panicked; the request is recorded with no saving", "panic", r)
-			res, ok = accountant.Result{}, false
-		}
-	}()
-	return s.compute(req, u), true
+// usage converts the proxy's Usage to the Recorder's.
+func (u Usage) accrec() accrec.Usage {
+	return accrec.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h}
 }
 
-// compute prices the request. It stores the new ThreadState (so a shadow run still advances it).
+func (s *savingsTracker) computeSafe(req *accountant.Request, u Usage) (accountant.Result, bool) {
+	return s.Recorder.ComputeSafe(req, u.accrec())
+}
+
 func (s *savingsTracker) compute(req *accountant.Request, u Usage) accountant.Result {
-	return req.Compute(accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead),
-		CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)})
+	return s.Recorder.Compute(req, u.accrec())
 }

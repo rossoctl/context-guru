@@ -1231,7 +1231,7 @@ func gzipSSE(t *testing.T, plain string) []byte {
 // setup) gzips its streaming /v1/messages responses. Forwarding the client's own
 // Accept-Encoding header upstream verbatim (the bug) means Go's http.Transport never
 // auto-decompresses, so resp.Body is raw gzip for BOTH the client-forward path and the
-// usage sniffer — usage silently reports usageMissAbsent (classified benign, so nothing
+// usage sniffer — usage silently reports respfacts.MissAbsent (classified benign, so nothing
 // alerts) on every request against that upstream, which in turn means keep-alive's
 // pingable() gate (keyed off CacheRead+CacheWrite) never passes either.
 //

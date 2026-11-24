@@ -8,7 +8,7 @@
 # "flaky" when the second run passed, and "FAILED" when both failed.
 #
 # The whole run takes about 70 to 90 minutes on a laptop. The race steps have these limits: proxy 20m,
-# dash 25m, plugin 30m, rest 20m, record 40m. Run it detached, and wait for the DONE line.
+# dash 40m, plugin 30m, rest 20m, record 40m. Run it detached, and wait for the DONE line.
 #
 # CG_TIMING_TESTS: the timing tests (testutil.RequireTiming) run when it is 1. The default here is 1,
 # because the integrator runs this script. scripts/dev/local-tests.sh sets it to 0 or 1 itself. The
@@ -66,7 +66,8 @@ step vet-record    "$GO" vet -tags cg_record ./...
 # as CI runs it: the pure-Go build is the one that ships.
 step depguard      env CGO_ENABLED=0 "$GO" test -run TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf -count=1 ./proxyapp/
 step race-proxy    env CGO_ENABLED=1 "$GO" test -race -timeout 20m ./proxy/...
-step race-dash     env CGO_ENABLED=1 "$GO" test -race -timeout 25m ./dash/...
+# 40m, like race-record: on the shared laptop (load 190-400) dash took 1507-1514 s and hit 25m twice.
+step race-dash     env CGO_ENABLED=1 "$GO" test -race -timeout 40m ./dash/...
 step race-plugin   env CGO_ENABLED=1 "$GO" test -race -timeout 30m ./context-guru-plugin
 # shellcheck disable=SC2086 # $rest is a list of packages
 # The Bob plugin is on hold (#1221): skip its install suite. Remove the skip when the owner resumes it.

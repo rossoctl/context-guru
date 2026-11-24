@@ -60,9 +60,9 @@ func TestThePresetDefaultIsEncodedOnce(t *testing.T) {
 			"offer one default while every script assumed the other", got, want)
 	}
 
-	// NOT included, deliberately: proxyapp.Main (proxyapp/main_run.go) defaults --preset to `house`. That
+	// NOT included, deliberately: proxyapp.Main (proxyapp/main_run.go) defaults --preset to `conservative` (`house` is an obsolete alias of it). That
 	// is a SIXTH encoding of a default and it is meant to differ, because it is a default for a
-	// different product - the standalone proxy binary, whose service default is `house`
+	// different product - the standalone proxy binary, whose service default is `conservative`
 	// (tenant.DefaultConfigYAML is that pipeline). The plugin never relies on it: every path that
 	// launches a proxy passes --preset explicitly, so the binary's default is unreachable from here.
 	// Pinned in prose rather than in an assertion so nobody "fixes" the two into agreement and

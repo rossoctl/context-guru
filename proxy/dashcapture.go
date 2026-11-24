@@ -959,31 +959,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
-		// The rules for which request books no figure are accrec.ShouldCompute's: a rejected status, a deferral
-		// that could not be placed, and several upstream rounds. DropUnbilledSavings zeroed the tokens above;
-		// skipping the compute leaves the event with no Result, so PriceMode books no dollars either
-		// (acc_fallback no_result). PingSavings refuses a non-2xx ping the same way.
-		compute, why := accrec.ShouldCompute(c.status, c.rounds, c.accNoResult)
-		if !compute {
-			c.accNoResult = why
-		}
-		if compute {
-			c.accBilledTTL(usage)
-			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
+		// The rules for which request books no figure are accrec.Recorder.Price's: a rejected status, a deferral
+		// that could not be placed, several upstream rounds and a panic in the library. DropUnbilledSavings zeroed
+		// the tokens above; a request with no figure leaves the event with no Result, so PriceMode books no dollars
+		// either (acc_fallback no_result). PingSavings refuses a non-2xx ping the same way.
+		out := c.savings.Price(c.accReq, accrec.PriceIn{
+			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
+			BeforeCompute: func() { c.accBilledTTL(usage) },
+			// The event and the metrics are booked before the rescue counter and the ping-facts drop, as they always were.
+			AfterCompute: func(res accountant.Result) {
 				e.SetAccountant(res)
 				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
 					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
-			} else {
-				c.accNoResult = accrec.ComputePanicked
-			}
-			// Pings went out in the gap this request ended, yet no ping facts were found for its thread:
-			// the credit for them is lost. Count it, so a host that does not wire the ping side shows.
-			if c.kaPings > 0 && c.accPingWindow == "" {
-				c.savings.noteRescueFactsMissing()
-			}
-			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accrec.PingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
-		}
+			},
+			Session: c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
+		})
+		c.accNoResult = out.NoResult
 	}
 	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
 	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
@@ -1053,20 +1044,16 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs and cacheAttributionTTLMs are the library's (apply.EntryAgeMs, apply.BilledLifetimeMs): the
-// proxy passes facts, and the lifetime rule lives with the cold check (#1350).
+// entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold
+// check (#1350). attributionTTLMs, below, does the same for apply.BilledLifetimeMs.
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
 	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
 
-// attributionTTLMs is the lifetime the miss verdict judges against: the entry is at 1 hour when its last
-// write was billed there, or when its last touch was a free 1-hour ping (#1350).
+// attributionTTLMs passes the two facts to apply.BilledLifetimeMs, which decides the lifetime the miss verdict
+// judges against: the tier the last write was billed at, and whether the last touch was a live free 1-hour ping.
 func (c *capture) attributionTTLMs(provider, model string, prevOneHour bool) int64 {
-	return cacheAttributionTTLMs(provider, model, prevOneHour || (c != nil && c.kaRefreshedOneHour))
-}
-
-func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
-	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, oneHour)
+	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, prevOneHour, c != nil && c.kaRefreshedOneHour)
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
