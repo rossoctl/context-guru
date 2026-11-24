@@ -1048,27 +1048,14 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
-// the last real request, cut short by a ping that refreshed the entry later than that request.
+// entryAgeMs and cacheAttributionTTLMs are the library's (apply.EntryAgeMs, apply.BilledLifetimeMs): the
+// proxy passes facts, and the lifetime rule lives with the cold check (#1350).
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
-	if refreshedAt.IsZero() || sinceMs <= 0 {
-		return sinceMs
-	}
-	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
-		return age
-	}
-	return sinceMs
+	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
 
-// cacheAttributionTTLMs is the lifetime of the entry this request tried to read. oneHour is the
-// tier the provider BILLED that entry at (the whole write at 1h on the thread's previous request),
-// not the tier a request asked for: a one-hour ask the provider billed at five minutes stays
-// five minutes. false (also "unknown") keeps the five-minute lifetime.
 func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
-	if _, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil); kind != apply.CacheLifetimeExact {
-		return 0
-	}
-	return modelinfo.CacheLifetime(provider, model, oneHour).Milliseconds()
+	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, oneHour)
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
