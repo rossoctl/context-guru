@@ -66,7 +66,7 @@ func TestLiteLLMParsesAboveTiers(t *testing.T) {
 	if lo := p.At(272_000); lo.Input != 5e-06 {
 		t.Errorf("At(272000).Input = %g, want base", lo.Input)
 	}
-	// Any _above_<N>k_tokens line; unstated rates scale with the input ratio (1.5x here).
+	// Any _above_<N>k_tokens line; an unstated rate takes the built-in multiple (OpenAI output 1.5x).
 	q := tierPrice(t, "gpt-5.6-x")
 	if q.Tiers[0].AbovePromptTokens != 200_000 || q.Tiers[1].AbovePromptTokens != 0 {
 		t.Fatalf("Tiers = %+v, want one at 200000", q.Tiers)
