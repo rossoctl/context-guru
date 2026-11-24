@@ -91,11 +91,9 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	if c.accReq == nil {
 		return
 	}
-	t := accountant.Thread{ID: accrec.ThreadID(th.ID)}
+	parent, hasParent := th.InheritsFrom()
+	t := accrec.ThreadOf(th.ID, parent, hasParent)
 	c.accThread = t.ID
-	if parent, ok := th.InheritsFrom(); ok {
-		t.Parent = accrec.ThreadID(parent)
-	}
 	// The envelope changes report no operation of their own: envelopeOps finds them from the two
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
 	// with a message splice.

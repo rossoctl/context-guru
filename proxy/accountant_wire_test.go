@@ -268,7 +268,7 @@ func TestNoDashboardBuildsNoTracker(t *testing.T) {
 // caller goes on (issue #918).
 func TestAccBeginRecoversAndDrops(t *testing.T) {
 	s := newSavingsTracker()
-	s.trackers = nil // BeginRequest on a nil Trackers panics
+	s.Trackers = nil // BeginRequest on a nil Trackers panics
 	c := &capture{savings: s}
 	c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s"}, benchBody())
 	c.accEnd(thread.Result{ID: thread.Primary}, benchBody(), nil)
@@ -289,7 +289,7 @@ func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
 	}))
 	defer up.Close()
 	h, _, _ := accHandler(t, up.URL)
-	h.savings.trackers = nil
+	h.savings.Trackers = nil
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
