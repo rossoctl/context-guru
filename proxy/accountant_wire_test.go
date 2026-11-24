@@ -304,3 +304,21 @@ func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
 		t.Errorf("status %d, upstream calls %d, want 200 and 1", resp.StatusCode, got)
 	}
 }
+
+// accEndNow copies the reason the Recorder gives into the capture, and leaves the field alone when there is none.
+func TestAccEndNowCopiesTheNoResultReason(t *testing.T) {
+	body := []byte(`{"model":"m","tools":[{"name":"b","defer_loading":true}],"messages":[{"role":"user","content":"hi"}]}`)
+	run := func(preDefer []byte) *capture {
+		c := &capture{savings: newSavingsTracker(), accPreDefer: preDefer, accClient: body}
+		c.accMeta = accountant.RequestMeta{RequestID: "r1", Session: "s"}
+		c.accReq = c.savings.begin(c.accMeta, body)
+		c.accEndNow(thread.Result{ID: thread.Primary}, body, nil)
+		return c
+	}
+	if c := run([]byte(`{}`)); c.accNoResult != accDeferralUnplaced {
+		t.Errorf("an unplaced deferral: accNoResult = %q, want %q", c.accNoResult, accDeferralUnplaced)
+	}
+	if c := run(nil); c.accNoResult != "" {
+		t.Errorf("no deferral: accNoResult = %q, want none", c.accNoResult)
+	}
+}
