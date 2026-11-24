@@ -1928,7 +1928,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	advertised := expand.HasTool(wire, body) || adjudicate.HasTool(wire, body)
 	// Our own tool search (#825) is a proxy tool too: its calls are answered in band, so the
 	// response is held whenever the request declares it.
-	searchOn := di != nil && di.search && tooldefer.HasClientSearch(wire, body)
+	searchOn := di != nil && di.Search && tooldefer.HasClientSearch(wire, body)
 	advertised = advertised || searchOn
 	// A Responses stream with our search is spliced only for a stateless request (#884): the
 	// client sends the full input each turn, so it never chains on the id of this response and
@@ -2193,11 +2193,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 			resp.Body.Close()
 			refused := resp.StatusCode
-			body = di.orig
+			body = di.Orig
 			resp, err = h.doUpstream(r, up, body)
 			stubbed := false
 			// The missing-reference repair reads Anthropic shapes: not on our search's OpenAI wires.
-			if err == nil && !di.search {
+			if err == nil && !di.Search {
 				if fixed, ok := repairOnMissingRef(resp, body); ok {
 					// The original failed the same way: it names a tool `tools` lacks. Send it once
 					// more with a stub for that tool, so the client never sees our 400 (#871). The
@@ -2430,7 +2430,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
 		}
 		if di != nil {
-			deferSearches.add(isSSE, respBody)
+			deferSearches.Add(isSSE, respBody)
 		}
 		if isSSE && sp != nil && withheld == nil {
 			// The whole round is already on the wire. Either it never called a proxy tool, or
@@ -2506,8 +2506,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					names = append(names, c.Names...)
 				}
 				searchSet, searchNow = h.searchLoad(tn, di, names)
-				deferSearches.n += len(searches)
-				deferSearches.loaded = append(deferSearches.loaded, searchNow...)
+				deferSearches.N += len(searches)
+				deferSearches.Loaded = append(deferSearches.Loaded, searchNow...)
 				lg.Debug("cg.tooldefer_search_call", "round", round, "calls", len(searches), "added_back", len(searchNow),
 					"with_client_tool", client)
 				if client || searchSet == nil {
@@ -2602,7 +2602,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		if ok && len(searchNow) > 0 && di != nil {
 			// The loaded tools go at the end of `tools`, as on every later request of the thread
 			// (tooldefer.RewriteSearch), taken from the request before our rewrite.
-			next, ok = tooldefer.AppendTools(wire, next, di.orig, searchNow)
+			next, ok = tooldefer.AppendTools(wire, next, di.Orig, searchNow)
 		}
 		if !ok {
 			bail() // malformed shapes — fail open, hand the response over unchanged
