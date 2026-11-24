@@ -12,8 +12,8 @@ import (
 
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The dashboard replays the per-wait ping plan (#868). These tests keep that replay equal to the keeper.

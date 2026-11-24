@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // cachePhaseAt classifies the cache phase of an entry last touched at prevStartedAt, for a
@@ -270,7 +271,10 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	// cache_state: pre_expiry reads, and only when it read or wrote something: a write re-created
 	// the entry and started a fresh lifetime (#580).
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
-		j.touch(provider, startedAt.UnixMilli())
+		// The question is built from the forwarded body, so it carries that body's own markers: a read with
+		// plain markers moves a 1-hour entry back to 5 minutes (the same rule as PingNow). The tier is the one
+		// those markers state, not the one the entry holds.
+		j.touch(provider, startedAt.UnixMilli(), apply.AllBreakpointsAskExtendedTTL(j.raw))
 	}
 	var cost float64
 	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
@@ -283,9 +287,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	e.refreshed = u.CacheRead
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		e.refreshedAt = startedAt
-		// The substitute renewed the entry for 5 minutes (its markers are the client's): D must not call the
+		// The substitute renewed the entry at the tier its markers carry (the client's): D must not call the
 		// entry gone from the last request alone.
-		k.noteTouchLocked(j.key.id(), startedAt, 5*time.Minute, u.CacheRead+u.CacheWrite)
+		k.noteTouchLocked(j.key.id(), startedAt, cacheLifetime(j.provider, model, apply.AllBreakpointsAskExtendedTTL(j.raw)), u.CacheRead+u.CacheWrite)
 	}
 	k.mu.Unlock()
 	for {

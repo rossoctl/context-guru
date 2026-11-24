@@ -260,7 +260,7 @@ with the expand call is withheld.
 
 `sse_expand_after_stream` is the counter that keeps that trade honest. If it is a meaningful
 fraction of `sse_streamed`, the peek is letting real expand calls through and the fix is to
-splice the continuation into the live stream instead (see `proxy/ssepeek.go`).
+splice the continuation into the live stream instead (see `inband/sse.go`).
 
 #### Freeze-replay health
 
@@ -480,7 +480,7 @@ configuration is on screen:
 ```json
 {
   "scope": "server",
-  "config": { "preset": "codesmart", "pipeline": ["format", "…"], "…": "…" },
+  "config": { "preset": "conservative", "pipeline": ["format", "…"], "…": "…" },
   "description": "The configuration this proxy resolved at startup. …"
 }
 ```
@@ -856,7 +856,7 @@ Always explicit — nothing infers it from the rest of the configuration.
 ### Example
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
@@ -874,7 +874,7 @@ for every component's config block.
 
 | Flag / env | Default | Purpose |
 |---|---|---|
-| `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. `codesmart` is the SWE-bench arm and must be asked for by name. |
+| `--preset` / `PRESET` | `conservative` | Pipeline preset when no `--config`. The six current presets are `off`, `conservative`, `medium`, `high`, `xhigh` and `ultrahigh`. `conservative` is the default. The obsolete name `house` runs the same pipeline. Other presets are [obsolete](presets.md#obsolete-presets) but still load. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
 | `--listen` / `LISTEN_ADDR` | `:4000` | Listen address. The flag exists so the port is visible in `ps` and to a supervisor; before it, the address reached the process only through the environment. |
 | `--version` | — | Print version and commit, then exit. |
@@ -1026,7 +1026,7 @@ DASHBOARD_DB=/var/lib/context-guru/dashboard.db \
 DASHBOARD_RETENTION=720h \
 DASHBOARD_MAX_BYTES=2147483648 \
 DASHBOARD_TRUSTED_CIDRS=10.0.0.0/8,192.168.0.0/16 \
-context-guru-proxy --preset codesmart
+context-guru-proxy --preset conservative
 ```
 
 ### Hosted mode, cold storage, and disk pressure

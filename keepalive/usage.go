@@ -1,14 +1,14 @@
 package keepalive
 
 import (
-	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/providerusage"
 	"github.com/tidwall/gjson"
 )
 
 // PingUsage reads what a ping's response billed. Pings always send stream:false, so this is one
 // JSON document, never a stream. Anthropic's input_tokens excludes the cached tiers; OpenAI
 // Responses' input_tokens includes cached_tokens, so fresh is the difference. Both rules live in
-// internal/providerusage, which the proxy's own response parser uses too.
+// providerusage, which the proxy's own response parser uses too.
 //
 // Reading the response is wire format, not I/O, which is why it lives in the core: every host
 // hands back the raw body and the keeper decides what it billed.

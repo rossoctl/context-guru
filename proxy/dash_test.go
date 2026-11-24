@@ -34,7 +34,7 @@ func TestCacheAttributionOnlyUsesKnownExpiry(t *testing.T) {
 		{"openai", "gpt-5.5", 0},
 		{"gemini", "gemini-3-pro", 0},
 	} {
-		if got := cacheAttributionTTLMs(tc.provider, tc.model, false); got != tc.want {
+		if got := (*capture)(nil).attributionTTLMs(tc.provider, tc.model, false); got != tc.want {
 			t.Errorf("%s/%s: TTL = %d, want %d", tc.provider, tc.model, got, tc.want)
 		}
 	}
@@ -52,7 +52,7 @@ func TestCacheAttributionTTLFollowsTheBilledTier(t *testing.T) {
 		{"anthropic", "claude-sonnet-5", false, (5 * time.Minute).Milliseconds()},
 		{"openai", "gpt-5.5", true, 0},
 	} {
-		if got := cacheAttributionTTLMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
+		if got := (*capture)(nil).attributionTTLMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
 			t.Errorf("%s/%s oneHour=%v: TTL = %d, want %d", tc.provider, tc.model, tc.oneHour, got, tc.want)
 		}
 	}

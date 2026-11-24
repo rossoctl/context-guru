@@ -628,7 +628,7 @@ the compaction.
 
 ## Default configuration
 
-Every new tenant starts on **`house`** — the structural offloaders with no model call
+Every new tenant starts on **`conservative`** (formerly named `house`) — the structural offloaders with no model call
 anywhere in the path:
 
 ```yaml

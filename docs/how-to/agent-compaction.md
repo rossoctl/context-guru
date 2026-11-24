@@ -82,7 +82,7 @@ and the summarize trigger then follow your setting, not the built-in table.
 - **Which requests:** each client's setting applies only to requests with that client's User-Agent.
   Other requests use the table.
 - **Units:** the client counts tokens its own way. Context Guru takes the client's threshold as
-  provider-billed tokens, factor 1.0. This factor is not measured. See `internal/compactionpoint`.
+  provider-billed tokens, factor 1.0. This factor is not measured. See `compactionpoint`.
 - **To turn it off,** set `CONTEXT_GURU_CLIENT_COMPACT_CONFIG=off` in the proxy's env.
 - A hosted proxy reads nothing.
 

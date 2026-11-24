@@ -6,7 +6,7 @@ question honestly — **what value is context-guru providing?** — including wh
 answer is "less than you hoped".
 
 ```sh
-context-guru-proxy --preset general --dashboard
+context-guru-proxy --preset conservative --dashboard
 # open http://localhost:4000/dashboard/
 ```
 

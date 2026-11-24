@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // Tally is one strategy's replay over a set of rows.

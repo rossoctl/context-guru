@@ -181,6 +181,8 @@ the person. The team knows who holds the role at any time.
 - The heavy tests passed on the laptop at the head. Run `scripts/dev/local-tests.sh <pr>` in the
   PR's worktree. It posts one comment with `<!-- local-tests sha=<head> result=pass -->`. A new
   commit, even comment-only, needs a new run. It takes 70 to 90 minutes: run it detached.
+  A laptop failure of a test listed in `scripts/release/pending-timing-fixes.txt` does not block the
+  PR, as long as the PR does not change that test's package. Check the list by hand.
 - It merges cleanly on `main`.
 - Every behavior change is named at the top of the PR and has a human developer's yes. See
   [Behavior changes need a human's permission](RELEASING.md#behavior-changes-need-a-humans-permission).
