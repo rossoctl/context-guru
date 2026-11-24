@@ -614,7 +614,7 @@ func (a *Aggregator) RecordSSE(ttfbMs float64, buffered bool) {
 // interception of an expand call that arrives after the response's first content block, in
 // exchange for not delaying ~33% of responses by ~21 seconds. If this counter is a
 // meaningful fraction of sse_streamed, the trade is wrong and the fix is the SSE splice
-// described in proxy/ssepeek.go. It is an UPPER bound: a model that writes the tool's name
+// described in inband/sse.go. It is an UPPER bound: a model that writes the tool's name
 // in prose is counted too.
 func (a *Aggregator) RecordSSEExpandAfterStream() {
 	a.mu.Lock()

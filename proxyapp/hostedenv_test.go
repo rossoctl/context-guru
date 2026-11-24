@@ -1,15 +1,12 @@
 package proxyapp
 
 import (
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestMain doubles as the harness for booting the REAL main() in a subprocess.
@@ -33,20 +30,24 @@ func TestMain(m *testing.M) {
 }
 
 // runMain boots main() in a subprocess with env, and returns its combined output.
-// exited is false when the process was still running at the deadline — i.e. it booted
-// and started serving, which for a refusal test is the failure.
-func runMain(t *testing.T, wait time.Duration, env ...string) (out string, code int, exited bool) {
+// exited is false when the process logged its "listening" line before it exited, i.e. it booted
+// and started serving. For a refusal test that is the failure. The child is then killed.
+//
+// The verdict never depends on a clock. runMain waits for the process to exit or to listen,
+// whichever comes first. The safety bound is childBound, so a slow boot or a late refusal under
+// load keeps its true meaning. If neither happens in the bound, runMain fails the test.
+func runMain(t *testing.T, env ...string) (out string, code int, exited bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0]) //nolint:gosec // the test binary itself
-	cmd.Env = append(os.Environ(), "CG_TEST_RUN_MAIN=1", "LISTEN_ADDR=127.0.0.1:0")
-	cmd.Env = append(cmd.Env, env...)
-	b, _ := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		return string(b), 0, false // killed at the deadline: it was serving happily
+	c := startChild(t, "127.0.0.1:0", env)
+	switch c.waitListening(t, "") {
+	case childListening:
+		// code is not an exit code here: the child still runs. Callers must read it only when exited.
+		return c.buf.String(), 0, false
+	case childTimedOut:
+		t.Fatalf("the proxy neither listened nor exited within %v:\n%s", childBound, c.buf.String())
 	}
-	return string(b), cmd.ProcessState.ExitCode(), true
+	<-c.exited
+	return c.buf.String(), c.cmd.ProcessState.ExitCode(), true
 }
 
 // hostedEnv is the minimum a hosted boot needs: an allow-list naming no key_env (so
@@ -76,7 +77,7 @@ func TestHostedModeRefusesCaptureEnv(t *testing.T) {
 	for _, v := range []string{"CONTEXT_GURU_DUMP", "CONTEXT_GURU_CAPTURE"} {
 		t.Run(v, func(t *testing.T) {
 			env := append(hostedEnv(t), v+"="+filepath.Join(t.TempDir(), "leak.jsonl"))
-			out, code, exited := runMain(t, 15*time.Second, env...)
+			out, code, exited := runMain(t, env...)
 			if !exited {
 				t.Fatalf("hosted mode BOOTED with %s set; it must refuse to start.\noutput:\n%s", v, out)
 			}
@@ -94,11 +95,11 @@ func TestHostedModeRefusesCaptureEnv(t *testing.T) {
 // tenant and the file is the operator's own traffic.
 func TestSingleTenantKeepsCaptureEnv(t *testing.T) {
 	dump := filepath.Join(t.TempDir(), "dump.jsonl")
-	// A short wait on purpose: the property is "it did NOT refuse", and a refusal
-	// happens in the first moments of boot. Still serving at the deadline is the pass.
-	out, code, exited := runMain(t, 4*time.Second, "CONTEXT_GURU_DUMP="+dump, "CONTEXT_GURU_CAPTURE="+dump)
-	if exited && code != 0 {
-		t.Fatalf("single-tenant mode refused to start with the capture hooks set (exit %d):\n%s", code, out)
+	// The property is "it did NOT refuse". runMain waits for the "listening" line, which is the
+	// proof of a boot. An exit before that line is a refusal.
+	out, code, exited := runMain(t, "CONTEXT_GURU_DUMP="+dump, "CONTEXT_GURU_CAPTURE="+dump)
+	if exited {
+		t.Fatalf("single-tenant mode exited with the capture hooks set (exit %d), want it to boot:\n%s", code, out)
 	}
 }
 
@@ -106,7 +107,7 @@ func TestSingleTenantKeepsCaptureEnv(t *testing.T) {
 // default only when it is not the zero value, so "(default N)" on this line is exactly
 // the assertion "the quota is in force out of the box".
 func TestRowQuotaDefaultIsNonZero(t *testing.T) {
-	out, _, _ := runMain(t, 20*time.Second, "CG_TEST_MAIN_ARGS=-h")
+	out, _, _ := runMain(t, "CG_TEST_MAIN_ARGS=-h")
 	// One flag's usage block: its own line plus the indented description, up to the
 	// next flag. Scoped so a LATER flag's default cannot satisfy the assertion.
 	block := regexp.MustCompile(`(?s)\n  -dashboard-max-rows-per-tenant.*?(\n  -|$)`).FindString(out)

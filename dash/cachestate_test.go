@@ -496,3 +496,25 @@ func TestCacheStateTierFollowsWhereTheLatestWriteWasBilled(t *testing.T) {
 		})
 	}
 }
+
+// #1350. A thread with no recorded write takes its lifetime from the provider and the model, not from a
+// fixed 5 minutes: an OpenAI GPT-5.6+ thread that only read the automatic cache shows its 30 minutes.
+func TestCacheThreadWithNoWriteTakesItsLifetimeFromTheProviderAndModel(t *testing.T) {
+	a, rec := newTestAPI(t, Options{})
+	now := time.Now().UnixMilli()
+	row := func(ago int64, thread, provider, model string) *Event {
+		e := mkEvent(now-ago, "s1", model, 1000, 1000)
+		e.Status, e.ThreadID, e.CacheRead, e.CacheWrite, e.Provider = 200, thread, 5000, 0, provider
+		return e
+	}
+	seed(t, rec, row(60_000, "a:O", "openai", "gpt-5.6"), row(40_000, "a:A", "anthropic", "claude-sonnet-5"))
+	_, body := get(t, a, "/api/cachestate?session=s1", "")
+	got := map[string]float64{}
+	for _, x := range body["threads"].([]any) {
+		th := x.(map[string]any)
+		got[th["id"].(string)] = th["ttl_s"].(float64)
+	}
+	if got["a:O"] != 1800 || got["a:A"] != 300 {
+		t.Errorf("ttl_s = %v, want a:O 1800 (OpenAI GPT-5.6) and a:A 300", got)
+	}
+}

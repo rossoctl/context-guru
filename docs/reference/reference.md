@@ -260,7 +260,7 @@ with the expand call is withheld.
 
 `sse_expand_after_stream` is the counter that keeps that trade honest. If it is a meaningful
 fraction of `sse_streamed`, the peek is letting real expand calls through and the fix is to
-splice the continuation into the live stream instead (see `proxy/ssepeek.go`).
+splice the continuation into the live stream instead (see `inband/sse.go`).
 
 #### Freeze-replay health
 

@@ -146,9 +146,9 @@ def facts(text):
 
 class Installer:
     def __init__(self, terminal, shell, http, source, plugin=PLUGIN_SCRIPT, platform=None, sleep=time.sleep,
-                 downloaded=False):
+                 downloaded=False, confirm_folders=False):
         self.terminal, self.shell, self.http, self.source = terminal, shell, http, Path(source)
-        self.downloaded, self.steps = downloaded, ()
+        self.downloaded, self.steps, self.confirm_folders = downloaded, (), confirm_folders
         self.plugin, self.platform, self.sleep = plugin, platform or platform_module.system(), sleep
         self.registry = os.environ.get("CG_PI_NPM_REGISTRY") or PUBLIC_REGISTRY
         self.record = {}
@@ -160,6 +160,7 @@ class Installer:
             self.record = load_json(installer_record_path())
             self.step("Check this computer", "Pi needs Node.js 22.19 or later. Nothing changes in this step.")
             self.check_node()
+            self.check_folders()
             self.step("Pi", "Pi is the AI coding agent that context-guru works in. This step installs or updates Pi, "
                             "after your yes.")
             self.ensure_pi()
@@ -185,6 +186,62 @@ class Installer:
             raise Stop("Pi needs Node.js 22.19 or later. Install it from https://nodejs.org, then run this again. "
                        "Nothing was changed.")
 
+    def open_pi_windows(self):
+        """Process ids of running Pi windows. macOS shows Pi as `pi`; on Linux node can keep its own name, so the
+        path of Pi's program is matched too."""
+        pids = set()
+        user = ["-u", str(os.getuid())]  # only this user's windows: an uninstall cannot affect another user's
+        for cmd in (["pgrep", *user, "-x", "pi"], ["pgrep", *user, "-f", "pi-coding-agent/dist"]):
+            out = self.shell.run(cmd)
+            if out.returncode == 0:
+                pids.update(int(line) for line in out.stdout.split() if line.isdigit())
+        pids.discard(os.getpid())
+        return sorted(pids)
+
+    @staticmethod
+    def windows_text(pids):
+        return (f"{len(pids)} Pi window{'s are' if len(pids) != 1 else ' is'} open "
+                f"(process {', '.join(str(p) for p in pids)})")
+
+    @staticmethod
+    def routed():
+        """True when context-guru routes Pi now: a proxy URL in models.json, or context-guru's own record."""
+        try:
+            providers = load_json(pi_plugin.models_path()).get("providers", {})
+        except Stop:
+            providers = {}
+        urls = [entry.get("baseUrl", "") for entry in providers.values() if isinstance(entry, dict)]
+        return any(str(url).startswith("http://127.0.0.1:") for url in urls) or bool(pi_plugin.read_record().get("port"))
+
+    def ask_before_turning_off(self, refusal="nothing was changed."):
+        """#1341: a Pi window that is open while context-guru goes off keeps its address in memory, and every
+        request of it fails until it restarts. A window with a newer package switches by itself on its next prompt;
+        an older one does not. Ask first."""
+        pids = self.open_pi_windows() if self.routed() else []
+        if not pids:
+            return
+        self.terminal.say(f"{self.windows_text(pids)}. Close them first: a window that is open now can keep "
+                          "context-guru's address, and its requests fail until you restart it.")
+        if not self.yes("Go on anyway?", default=False):
+            raise Stop(f"{refusal} Close the open Pi windows, then run this again.")
+
+    def check_folders(self):
+        """Name the folders this run uses. A terminal left from a test can move Pi's settings with
+        PI_CODING_AGENT_DIR; then ask, and stop on no, before any change (#1319)."""
+        self.terminal.say(f"Pi's settings: {pi_plugin.agent_dir()}")
+        self.terminal.say(f"context-guru's data: {pi_plugin.state_dir()}")
+        moved = os.environ.get("PI_CODING_AGENT_DIR")
+        default = Path.home() / ".pi/agent"
+        if not (self.confirm_folders and moved) or Path(os.path.abspath(pi_plugin.agent_dir())) == default:
+            return
+        self.terminal.say(f"PI_CODING_AGENT_DIR is set: Pi's settings are in {pi_plugin.agent_dir()}, not in "
+                          f"{default}." + (f" XDG_STATE_HOME is set too: {os.environ['XDG_STATE_HOME']}."
+                                                              if os.environ.get("XDG_STATE_HOME") else ""))
+        if not self.yes("Use these folders?", default=False):
+            # Only a new terminal: a test can also have put another pi first on PATH, which unset does not undo.
+            raise Stop("nothing was changed. If this terminal is left from a test, open a new terminal and run "
+                       "this again there.")
+
     def latest_pi(self):
         out = self.shell.run(["npm", "view", PI_NPM, "version", f"--registry={self.registry}"])
         if out.returncode != 0 or not version_tuple(out.stdout):
@@ -196,7 +253,15 @@ class Installer:
         installed = None
         if self.shell.which("pi"):
             installed = self.shell.run(["pi", "--version"]).stdout.strip()
-        latest = self.latest_pi()
+        try:
+            latest = self.latest_pi()
+        except Stop as stop:
+            if not installed:
+                raise
+            # Nothing needs npm here: a registry that fails (E401, a blocked network) must not block an installed Pi.
+            self.terminal.say(f"The installer cannot check for a newer Pi: {str(stop).removesuffix(' Nothing was changed.')}")
+            self.terminal.say(f"Pi {installed} stays.")
+            return
         if installed and version_tuple(installed) and version_tuple(installed) >= version_tuple(latest):
             self.terminal.say(f"Pi {installed} is installed.")
             return
@@ -272,6 +337,8 @@ class Installer:
                 # setup starts without the old upstream in its record.
                 self.terminal.say("context-guru routes Pi now. It is turned off first, so that the new connection "
                                   "replaces your real endpoint.")
+                # Pi and the package may already have changed in this run, so do not claim that nothing did.
+                self.ask_before_turning_off(refusal="context-guru was not turned off.")
                 off = self.plugin_run("uninstall")
                 if off.get("models_restore") not in ("restored", "no_record"):
                     raise Stop(f"context-guru could not put Pi's endpoint back ({off.get('models_restore')}). "
@@ -452,16 +519,26 @@ class Installer:
         if self.yes("Send one short test prompt through Pi now?", default=False):
             out = self.shell.run(["pi", "-p", "Reply with the single word: ok"], stdin="")
             self.terminal.say(f"Pi answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
-        self.terminal.say("Done. Start Pi with: pi")
+        pids = self.open_pi_windows()
+        if pids:
+            one = len(pids) == 1
+            self.terminal.say(f"{self.windows_text(pids)}. Restart {'it' if one else 'them'} if "
+                              f"{'it' if one else 'they'} started before context-guru was on: Pi reads its settings "
+                              "only when it starts.")
+        where = self.shell.which("pi")
+        self.terminal.say(f"Done. Start Pi with: pi{f' ({where})' if where else ''}. If your terminal does not find "
+                          "this one (for example after Pi was installed or updated), open a new terminal.")
 
     # ----------------------------------------------------------------------------- uninstall
     def uninstall(self):
         try:
             self.begin(UNINSTALL_STEPS)
+            self.check_folders()
             record = load_json(installer_record_path())
             plugin = self.plugin if Path(self.plugin).exists() else str(self.source / "scripts/pi_plugin.py")
             self.step("Turn context-guru off", "It puts Pi's models.json back to Pi's own endpoints, and stops and "
                                                "removes the background service.")
+            self.ask_before_turning_off()
             # context-guru off first: this puts the route back in models.json and stops the service.
             off = facts(self.shell.run(["python3", plugin, "uninstall"]).stdout)
             details = ", ".join(f"{name}: {off[fact]}" for name, fact in (("models.json", "models_restore"),
@@ -584,7 +661,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     # setup runs from the installed copy, not from the download: it copies its reset command from there.
     installer = Installer(Terminal(), Shell(), http_post, args.source, plugin=str(package_dir() / "scripts/pi_plugin.py"),
-                          downloaded=args.downloaded)
+                          downloaded=args.downloaded, confirm_folders=True)
     return installer.install() if args.action == "install" else installer.uninstall()
 
 

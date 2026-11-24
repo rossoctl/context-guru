@@ -126,3 +126,87 @@ func (k *Keeper) RetireSessionStartedBefore(tenant, session string, cutoff time.
 	}
 	return n
 }
+
+// CompactRaceMargin bounds how late a SessionStart compact event may arrive after the request that
+// follows the compaction started. Measured hook-to-proxy delivery is 0.2-0.8 s; the old prefix's
+// last request (the compaction call itself) started tens of seconds earlier. Known limitation: a
+// ping also moves startedAt, so an old-prefix entry pinged within the margin is not retired by the
+// event and is pinged at most once more before its next idle check stops it.
+const CompactRaceMargin = 2 * time.Second
+
+// signalEvents is the closed set of accepted lifecycle events; anything else is refused, so a client
+// cannot smuggle a free-text field through the signal route.
+var signalEvents = map[string]bool{"SessionEnd": true, "SessionStart": true, "Notification": true}
+
+// signalKinds is the closed set of accepted reason and notification types.
+var signalKinds = map[string]bool{"": true, "clear": true, "resume": true, "logout": true, "prompt_input_exit": true, "other": true,
+	"startup": true, "compact": true, "fork": true, "permission_prompt": true, "elicitation_dialog": true, "idle_prompt": true}
+
+// NormalizeSignal checks a client lifecycle event against the closed sets and returns the kind to
+// use. A SessionEnd reason a newer client adds still means the session ended, so it reads as
+// "other" instead of being refused and silently losing the feature. ok is false for an event or a
+// kind outside the sets.
+func NormalizeSignal(event, kind string) (string, bool) {
+	if event == "SessionEnd" && !signalKinds[kind] {
+		kind = "other"
+	}
+	return kind, signalEvents[event] && signalKinds[kind]
+}
+
+// SignalResult reports what ApplyClientSignal changed for one client event.
+type SignalResult struct {
+	// Applied is true when the event is one the keeper acts on (SessionEnd, or SessionStart with
+	// kind "compact"). It stays true when nothing was live to retire.
+	Applied bool
+	// Ended is true when the session was marked ended (SessionEnd only).
+	Ended bool
+	// Retired is how many live entries the retirement removed. It can be 0 when Applied is true.
+	Retired int
+	// Cutoff is zero for SessionEnd, which retires every thread of the session. For a compact it is
+	// the arrival time less CompactRaceMargin: only the main thread's entries whose last request
+	// started before it are retired.
+	Cutoff time.Time
+}
+
+// ApplyClientSignal applies one client lifecycle event to the session and says what it did.
+//
+//   - SessionEnd, any reason (even clear or resume): retires every entry of the id the event names,
+//     because that id will not send its next request from this process, then marks it ended. If it
+//     does (a resumed session), the request starts after the mark and is tracked normally (EndedAfter).
+//   - SessionStart with kind "compact": compaction replaced the conversation, so every entry held for
+//     the session caches the old prefix, which no later request will send. The session itself goes
+//     on, so there is no end mark. The hook sends in the background, so the event can arrive after
+//     the post-compaction request started: only entries whose last request started CompactRaceMargin
+//     before the arrival are the old prefix.
+//   - Everything else is accepted and never acted on. Notification: offline, the pings sent on
+//     tool-wait rows that outlast 60 s (the nearest proxy for "blocked on a human") net positive, so
+//     a rule that stops them would lose money.
+//
+// afterRetire runs after the retirement and before the end mark, so a host can tell a campaign the
+// session ended (nil is allowed).
+func (k *Keeper) ApplyClientSignal(tenantID, scoped, event, kind string, now time.Time,
+	afterRetire func(SignalResult)) SignalResult {
+	if k == nil {
+		return SignalResult{}
+	}
+	var res SignalResult
+	switch {
+	case event == "SessionEnd":
+		before := k.Stats().Live
+		k.RetireSession(tenantID, scoped)
+		res = SignalResult{Applied: true, Ended: true, Retired: before - k.Stats().Live}
+		if afterRetire != nil {
+			afterRetire(res)
+		}
+		k.MarkEnded(tenantID, scoped, now)
+	case event == "SessionStart" && kind == "compact":
+		before := k.Stats().Live
+		res.Cutoff = now.Add(-CompactRaceMargin)
+		k.RetireSessionStartedBefore(tenantID, scoped, res.Cutoff)
+		res.Applied, res.Retired = true, before-k.Stats().Live
+		if afterRetire != nil {
+			afterRetire(res)
+		}
+	}
+	return res
+}

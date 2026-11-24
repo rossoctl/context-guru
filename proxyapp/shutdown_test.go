@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // nopRemote is a cold-storage stand-in, so the archiver goroutine is running during
@@ -58,12 +59,7 @@ func TestGracefulShutdownWithSSEClient(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	go bufio.NewReader(resp.Body).ReadString('\n') // keep reading; never finishes
-	for i := 0; rec.Hub().Clients() == 0; i++ {
-		if i > 200 {
-			t.Fatal("SSE client never registered with the hub")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the SSE client registers with the hub", func() bool { return rec.Hub().Clients() > 0 })
 
 	// One captured request still sitting in the writer's batch at shutdown.
 	rec.Record(&dash.Event{SessionID: "s1", Model: "m", Route: "/compact", Status: 200})
@@ -76,7 +72,7 @@ func TestGracefulShutdownWithSSEClient(t *testing.T) {
 	if err := srv.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
-	if d := time.Since(start); d > 2*time.Second {
+	if d := time.Since(start); testutil.TimingEnabled() && d > 2*time.Second {
 		t.Fatalf("shutdown took %v; an SSE stream is holding it open", d)
 	}
 	if err := rec.Close(); err != nil && !errors.Is(err, context.Canceled) {

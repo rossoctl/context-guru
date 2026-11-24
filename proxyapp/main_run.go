@@ -37,6 +37,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/modelinfo/litellm"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/proxy"
 	"github.com/rossoctl/context-guru/proxyapp/metricspush"
@@ -1361,65 +1362,11 @@ func buildHostedTenantConfig(doc []byte, e components.Emitter) (proxy.BuiltConfi
 	return buildTenantConfig(doc, e)
 }
 
-// cachePolicy maps the configuration document's `cache:` block onto the proxy's own type.
-// The mapping lives here rather than in `proxy` for the reason ConfigBuilder exists: the
-// proxy package does not depend on the configuration loader.
+// cachePolicy maps the configuration document's `cache:` block onto the proxy's own type. The
+// mapping is keepalive.FromConfig, so every host resolves the same defaults. It is called here
+// because the proxy package does not depend on the configuration loader.
 func cachePolicy(c config.CacheConfig) proxy.CachePolicy {
-	r := c.Resolved()
-	// The per-wait ping plan (#858) rides on EVERY policy, a parked one too, because a manager
-	// strategy can switch the keep-alive on for an account whose own block has it off, and the plan
-	// then still has to apply. These fields alone never turn the keep-alive on (Policy.On reads
-	// KeepAlive).
-	plan := proxy.CachePolicy{
-		WaitPlan:             c.WaitPlanOn(),
-		ToolWaitMaxPings:     r.KeepAliveToolWaitMaxPings,
-		ToolWaitMinPrefix:    r.KeepAliveToolWaitMinPrefixTokens,
-		BackgroundExtraPings: r.KeepAliveBackgroundExtraPings,
-		HumanExtraPings:      r.KeepAliveHumanExtraPings,
-		// A memory guard, like the plan fields: a manual hold or a manager strategy can arm a hold on a parked account.
-		MaxBodyBytes: r.KeepAliveMaxBodyBytes,
-		// D's threshold rides the parked plan too. It is a threshold, not a switch: alone it turns nothing on. A
-		// manager strategy that switches 1-hour-on-wait on for this account must still find the account's own
-		// choice here, a negative value that keeps D off (a 0 would read as the 150,000 default).
-		OneHourRebuildTokens: r.KeepAliveOneHourRebuildTokens,
-	}
-	// Resolve the defaults only when something is actually switched on. A parked block
-	// (`keepalive: false` with a tuned interval) must not come out looking enabled, and a
-	// zero HeadTTLMinBytes must stay zero so a host that never configured this asks for
-	// nothing rather than asking on every request.
-	if !c.KeepAlive && !c.HeadTTL1h && !c.KeepAliveOneHourAlways {
-		return plan
-	}
-	return proxy.CachePolicy{
-		WaitPlan:             plan.WaitPlan,
-		OneHourOnWait:        c.KeepAliveOneHourOnWait,
-		OneHourRebuildTokens: r.KeepAliveOneHourRebuildTokens,
-		OneHourAlways:        c.KeepAliveOneHourAlways,
-		ToolWaitMaxPings:     plan.ToolWaitMaxPings,
-		ToolWaitMinPrefix:    plan.ToolWaitMinPrefix,
-		BackgroundExtraPings: plan.BackgroundExtraPings,
-		HumanExtraPings:      plan.HumanExtraPings,
-		KeepAlive:            c.KeepAlive,
-		Idle:                 time.Duration(r.KeepAliveIdleSeconds) * time.Second,
-		OpenAIIdle:           time.Duration(r.KeepAliveOpenAIIdleSeconds) * time.Second,
-		MaxPings:             r.KeepAliveMaxPings,
-		Idle1h:               time.Duration(r.KeepAliveIdleSeconds1h) * time.Second,
-		MaxPings1h:           r.KeepAliveMaxPings1h,
-		MaxUSDPerPing:        r.KeepAliveMaxUSDPerPing,
-		MaxBodyBytes:         r.KeepAliveMaxBodyBytes,
-		MinPrefixTokens:      r.KeepAliveMinPrefixTokens,
-		HeadTTL1h:            c.HeadTTL1h,
-		HeadTTLMinBytes:      headTTLMin(c.HeadTTL1h, r.HeadTTLMinBytes),
-	}
-}
-
-// headTTLMin returns the size gate only when the policy is on, so `HeadTTLMinBytes > 0` is
-// the single condition apply has to test.
-func headTTLMin(on bool, n int) int {
-	if !on {
-		return 0
-	}
-	return n
+	return keepalive.FromConfig(c)
 }
 
 // defaultUpstreams picks the first entry of each dialect as the default a newly

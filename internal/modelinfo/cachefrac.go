@@ -13,10 +13,12 @@ const (
 )
 
 // The provider's cache lifetimes. They run from the START of the previous request. Every cap on a
-// ping time reads these two.
+// ping time reads these two. They are the SAME two values as AnthropicCacheTTL5m and AnthropicCacheTTL1h
+// (cachelifetime.go), the one place they are written: these names only stay for the callers that read them
+// as a cap on a ping time (#1350).
 const (
-	AnthropicCacheLifetime5m = 5 * time.Minute
-	AnthropicCacheLifetime1h = time.Hour
+	AnthropicCacheLifetime5m = AnthropicCacheTTL5m
+	AnthropicCacheLifetime1h = AnthropicCacheTTL1h
 )
 
 // The Anthropic one-hour tier. This is the ONE place the one-hour ping time lives: 59 minutes

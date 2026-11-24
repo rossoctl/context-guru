@@ -40,6 +40,16 @@ curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/ins
 ```
 
 npm installs Pi from `https://registry.npmjs.org/`. Set `CG_PI_NPM_REGISTRY` to use another registry.
+When npm cannot read the registry and Pi is already installed, the installer keeps that Pi and goes on.
+
+The installer names the folders it uses: Pi's settings (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`) and
+context-guru's data. When `PI_CODING_AGENT_DIR` is set, for example in a terminal left from a test, it asks
+"Use these folders?" before any change. The default is no: then open a new terminal and run it again.
+
+Pi reads its settings only when it starts. So before the installer turns context-guru off (an uninstall, or a
+new connection on a routed Pi), it names the open Pi windows and asks "Go on anyway?". The default is no:
+close them first. A window that stays open anyway switches to your own endpoint on its next prompt, and says
+so; a window with an older Pi package (v0.7.7 and before) fails until you restart it.
 
 ## Install by hand
 

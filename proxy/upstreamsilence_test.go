@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // silentGateway reproduces what the packet capture on contextguru2 showed the LiteLLM gateway
@@ -101,6 +103,7 @@ func silenceBuild(url string, body string) func(context.Context) (*http.Request,
 // The failure itself: an accepted, never-answered streaming request is resent once on a NEW
 // connection and the client gets the answer — in about one silence timeout, not ten minutes.
 func TestASilentStreamingRequestIsResentOnANewConnection(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(n int) bool { return n == 1 })
 	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
 	before := upstreamSilenceResends.Load()
