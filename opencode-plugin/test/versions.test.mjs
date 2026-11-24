@@ -11,7 +11,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-versio
 process.env.CONTEXT_GURU_PORT_START = "9800"
 
 import plugin, { stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, waitUntilUnhealthy, timingOnly } from "./helpers.mjs"
 
 const PLATFORMS = { darwin: "darwin", linux: "linux" }
 const ARCHITECTURES = { arm64: "arm64", x64: "amd64" }
@@ -164,7 +164,7 @@ test("update installs the latest release over a too-old managed binary that has 
 })
 
 // A binary that does not know --version may start serving instead of answering. The update check must not wait for it.
-test("the update check stops a binary that never answers --version", async () => {
+test("the update check stops a binary that never answers --version", timingOnly, async () => {
   const directory = "/tmp/context-guru-versions-hung"
   const state = stateDirectory(directory)
   const restore = isolatePath()

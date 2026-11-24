@@ -17,6 +17,12 @@ import {
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
 
+// Timing tests assert a wall-clock bound. They fail on a busy machine with nothing wrong in the code.
+// They run only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
+const timingOnly = {
+  skip: process.env.CG_TIMING_TESTS !== "1" && "timing test: set CG_TIMING_TESTS=1 to run it",
+}
+
 const install = {
   port: 8800,
   base_urls: { anthropic: "http://127.0.0.1:8800/anthropic", openai: "http://127.0.0.1:8800/openai/v1" },
@@ -235,7 +241,7 @@ test("the health check is a GET to localhost /healthz, true only on 200", async 
   assert.equal(await proxyAnswers(port, 1000), false);
 });
 
-test("a proxy that accepts but never answers fails the check at the time limit", async () => {
+test("a proxy that accepts but never answers fails the check at the time limit", timingOnly, async () => {
   const server = createServer(() => undefined);
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const port = (server.address() as AddressInfo).port;
@@ -260,7 +266,7 @@ test("each check has a time limit, 5 seconds by default", async () => {
   assert.ok(signal, "the request carries a time limit");
 });
 
-test("a stopped check ends at once, before its time limit", async () => {
+test("a stopped check ends at once, before its time limit", timingOnly, async () => {
   const server = createServer(() => undefined);
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const port = (server.address() as AddressInfo).port;
@@ -352,7 +358,7 @@ test("a request waits for a running restart and goes as soon as it ends", async 
   assert.equal(went, true);
 });
 
-test("a request waits at most the limit, 10 seconds by default", async () => {
+test("a request waits at most the limit, 10 seconds by default", timingOnly, async () => {
   assert.equal(FIRST_REQUEST_WAIT_MS, 10_000);
   const gate = new RestartGate();
   gate.hold(); // never released

@@ -125,6 +125,7 @@ func scanPost(t *testing.T, srv *httptest.Server) {
 // as background work (the 20k floor, 5 pings) at once, and the 5 pings are SENT before the retention timer
 // ((5+1) x Idle) retires the entry. No late call, no pending hold.
 func TestEarlyScanPlansABackgroundTurnAtResponseTime(t *testing.T) {
+	testutil.RequireTiming(t)
 	var hits atomic.Int64
 	scanned := make(chan struct{}, 16)
 	up := scanUpstream(t, &hits, scanned)

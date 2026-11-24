@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/proxyapp/metricspush"
 )
 
@@ -27,6 +28,7 @@ import (
 //	requests 2xx 9 and 5xx 1 per second    -> 5xx ratio 0.1
 //	cache_read 30, input 10 tokens/s       -> cache read ratio 0.75
 func TestCentralRecordingRulesGiveTheRightNumber(t *testing.T) {
+	testutil.RequireTiming(t)
 	collector, token, prom := central(t)
 	if testing.Short() || os.Getenv("CENTRAL_SLOW") == "" {
 		t.Skip("slow (about 6 minutes): set CENTRAL_SLOW=1")

@@ -75,6 +75,11 @@ esac
 exit 0
 """
 
+# A timing test asserts a wall-clock bound. It fails on a busy machine with nothing wrong in the code.
+# It runs only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
+timing_only = unittest.skipUnless(os.environ.get("CG_TIMING_TESTS") == "1",
+                                  "timing test: set CG_TIMING_TESTS=1 to run it")
+
 
 class FakeProxy:
     """A local HTTP server in a thread: /healthz, /api/requests, /signal, and /stats and
@@ -1563,6 +1568,7 @@ class BinaryCheckTest(TempHome):
         self.assertEqual(reasons, [f"{folder / 'context-guru-proxy'} cannot list cache "
                                    "strategies (needs v0.7.1 or later)"])
 
+    @timing_only
     def test_an_old_binary_that_serves_for_strategies_is_skipped_within_the_timeout(self):
         folder = self.root / "oldbin"
         folder.mkdir()
@@ -1893,6 +1899,7 @@ class SecondReviewTest(TempHome):
         self.assertEqual(code, 1)
         self.assertIn("result=setup_incomplete", out)
 
+    @timing_only
     def test_ensure_fits_the_hook_timeout_when_launchctl_hangs(self):
         import time
         self.write_record(dead_port())

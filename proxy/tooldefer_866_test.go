@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -223,6 +224,7 @@ func TestToolDeferTenantAfterStartBuildsTheState(t *testing.T) {
 // GLM note on #872. The start waits one bound in all (startWait), for the load and every seed
 // together: two seeds that never end return at the bound, not at twice it, and never hang.
 func TestWaitAllIsOneBound(t *testing.T) {
+	testutil.RequireTiming(t)
 	never1, never2 := make(chan struct{}), make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

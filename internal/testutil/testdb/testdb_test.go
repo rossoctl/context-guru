@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func TestOpenUsesProductionSettings(t *testing.T) {
@@ -42,6 +44,7 @@ func TestReopenKeepsTheRows(t *testing.T) {
 
 // A file locked by another connection must fail with the SQLite error inside the bound.
 func TestOpenFailsWithTheRealErrorOnALockedFile(t *testing.T) {
+	testutil.RequireTiming(t)
 	path := filepath.Join(t.TempDir(), "a.db")
 	// A rollback-journal file with an exclusive lock held: the switch to WAL cannot get a lock.
 	locker, err := sql.Open("sqlite", "file:"+path)

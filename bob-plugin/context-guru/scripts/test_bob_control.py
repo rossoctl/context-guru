@@ -24,7 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_bob_plugin import (  # noqa: E402
     FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary,
-    block_network)
+    block_network, timing_only)
 
 
 def setUpModule():
@@ -359,6 +359,7 @@ class StrategyTableTest(unittest.TestCase):
         self.assertIn("for a proxy the plugin did not install", hint)
         self.assertIn("remove it so setup downloads the latest release", hint)
 
+    @timing_only
     def test_old_binary_that_serves_gets_the_update_error_within_the_timeout(self):
         # v0.7.0 given `strategies` starts serving and prints no JSON.
         binary = write_script(self.dir / "old", "echo 'listening on 127.0.0.1:0'\nexec sleep 30\n")

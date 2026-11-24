@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -59,6 +60,7 @@ func TestAccEndDoesNotWaitForTheAccountantWork(t *testing.T) {
 // small part of the accountant's work. The ratio keeps the test honest on a slow or loaded runner, where an
 // absolute limit would flake. A synchronous accountant pays the whole of it and fails.
 func TestRequestPathCostDoesNotGrowWithBodySize(t *testing.T) {
+	testutil.RequireTiming(t)
 	body := manyToolResultsRequest("claude-sonnet-5", 24) // about 670 KB
 	const runs = 15
 

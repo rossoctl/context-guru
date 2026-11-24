@@ -134,6 +134,7 @@ func TestASilentStreamingRequestIsResentOnANewConnection(t *testing.T) {
 // A gateway that is genuinely not answering still fails — after two silences, with an error that
 // says so, and never more than one resend.
 func TestAGatewayThatNeverAnswersFailsAfterOneResend(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(int) bool { return true })
 	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
 	before := upstreamSilenceFailures.Load()
@@ -153,6 +154,7 @@ func TestAGatewayThatNeverAnswersFailsAfterOneResend(t *testing.T) {
 // headers come promptly and whose tokens then take far longer than the timeout is never touched:
 // the deadline is on the first byte, not on the generation.
 func TestASlowStreamAfterTheFirstByteIsNeverResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
@@ -189,6 +191,7 @@ func TestASlowStreamAfterTheFirstByteIsNeverResent(t *testing.T) {
 // The client going away cancels the request and is NOT turned into a resend: a cancelled turn
 // must not cost a second generation.
 func TestAClientThatGivesUpIsNotResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(int) bool { return true })
 	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
@@ -205,6 +208,7 @@ func TestAClientThatGivesUpIsNotResent(t *testing.T) {
 // End to end through the handler: a streaming /v1/messages turn whose first upstream attempt is
 // silent reaches the client complete, from the resend.
 func TestTheHandlerRecoversASilentStreamingTurn(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(n int) bool { return n == 1 })
 	h := New(nil, nil, nil, Options{AnthropicUpstream: g.url(), StreamSilenceTimeout: 150 * time.Millisecond})
 	srv := httptest.NewServer(h.Mux())
@@ -230,6 +234,7 @@ func TestTheHandlerRecoversASilentStreamingTurn(t *testing.T) {
 // silence there is normal and must never trigger a resend — it would duplicate a long
 // generation.
 func TestANonStreamingRequestIsNeverResentForSilence(t *testing.T) {
+	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond) // "generating", well past the silence timeout below
 		w.Header().Set("Content-Type", "application/json")
@@ -587,6 +592,7 @@ func TestCountTokensRecoversADroppedReusedConnection(t *testing.T) {
 // start after its call has given up, so a count taken between calls can charge one call with
 // another's request.
 func TestAFirstByteRacingTheWatchdogIsNeverLostOrDuplicated(t *testing.T) {
+	testutil.RequireTiming(t)
 	var (
 		mu    sync.Mutex
 		sends = map[string]int{}
@@ -672,6 +678,7 @@ func (r ctxErrReader) Read([]byte) (int, error) { return 0, context.Cause(r.ctx)
 // with no error. Its body is already dead, so it must not reach the client: the attempt is silent,
 // and it is resent once.
 func TestAResponseThatLostTheRaceToTheWatchdogIsResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	tr := &lateByteTransport{}
 	c := &http.Client{Transport: tr}
 	before := upstreamSilenceResends.Load()
@@ -697,6 +704,7 @@ func TestAResponseThatLostTheRaceToTheWatchdogIsResent(t *testing.T) {
 // its response is already read, returns it with no error; the second shape is the one that must
 // never reach the client. On the unfixed code about 1 call in 20 took that shape.
 func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
+	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.WriteHeader(200)
@@ -754,6 +762,7 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 
 // The same late response, but the client has gone away by the time it arrives: it is not resent.
 func TestALateResponseForAClientThatLeftIsNotResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &lateByteTransport{late: cancel}
 	c := &http.Client{Transport: tr}

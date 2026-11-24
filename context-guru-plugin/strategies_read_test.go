@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // --- the plugin reads the table from the proxy -------------------------------------------------
@@ -124,6 +125,7 @@ func TestOnlyAnthropicStrategiesAreOffered(t *testing.T) {
 // not fail on `strategies`: it starts serving. The plugin must stop it at the limit, on a loopback
 // port that cannot collide, and say plainly to update the proxy. It must not fall back to a table.
 func TestAnOldProxyBinaryGetsTheUpdateMessageWithinTheTimeLimit(t *testing.T) {
+	testutil.RequireTiming(t)
 	bin, marker := oldProxyBin(t)
 	facts, code, took := settingsWithBin(t, bin, []string{"CONTEXT_GURU_STRATEGIES_TIMEOUT=1"}, "strategy", "list")
 	if code == 0 || facts["reason"] != "proxy_too_old" {

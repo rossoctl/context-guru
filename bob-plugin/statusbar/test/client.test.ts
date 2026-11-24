@@ -8,6 +8,12 @@ import * as path from 'node:path'
 import { getJson, MAX_BODY_BYTES, poll, readPort, stateDir } from '../src/client'
 import { render } from '../src/model'
 
+// Timing tests assert a wall-clock bound. They fail on a busy machine with nothing wrong in the code.
+// They run only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
+const timingOnly = {
+  skip: process.env.CG_TIMING_TESTS !== '1' && 'timing test: set CG_TIMING_TESTS=1 to run it',
+}
+
 type Reply = { status: number, body: unknown }
 type Routes = Record<string, Reply | (() => Reply)>
 
@@ -71,7 +77,7 @@ test('getJson refuses a host other than 127.0.0.1 and makes no call', async () =
   await assert.rejects(getJson('192.168.1.2', 8891, '/healthz', 500), /loopback/)
 })
 
-test('getJson times out on a proxy that never answers', async (t) => {
+test('getJson times out on a proxy that never answers', timingOnly, async (t) => {
   const server = net.createServer(() => { /* accept and say nothing */ })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => { server.close() })
@@ -178,7 +184,7 @@ test('a redirect is not followed', async (t) => {
   assert.equal(followed, false)
 })
 
-test('a server that drips bytes fails within the total deadline', async (t) => {
+test('a server that drips bytes fails within the total deadline', timingOnly, async (t) => {
   const proxy = await rawServer((_req, res) => {
     res.writeHead(200)
     const timer = setInterval(() => res.write(' '), 50)
@@ -193,7 +199,7 @@ test('a server that drips bytes fails within the total deadline', async (t) => {
 // A proxy restart can close the socket after the headers and part of the body. Node then emits
 // aborted and close on the reply, but no end and no error, so a promise that waits for one of
 // those never settles, and the status bar stops polling while it shows CG ✓.
-test('a reply cut off mid-body fails within the total deadline', { timeout: 3000 }, async (t) => {
+test('a reply cut off mid-body fails within the total deadline', { ...timingOnly, timeout: 3000 }, async (t) => {
   const proxy = net.createServer(socket => {
     socket.once('data', () => {
       socket.write('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{"a":')

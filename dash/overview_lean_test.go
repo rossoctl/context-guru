@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // explainPlan runs EXPLAIN QUERY PLAN over sql/args and returns each step's "detail" column.
@@ -398,6 +400,7 @@ func mustBigFixtureDB(t testing.TB, days int, sessionSize int, otherRequests int
 // #492/#498's shape (a window function or an unscoped scan), which cost MINUTES even under
 // nothing special — nothing of that scale is noise, raced or not.
 func TestOverviewLeanSessionStaysUnderBudgetAt20000Requests(t *testing.T) {
+	testutil.RequireTiming(t)
 	if testing.Short() {
 		t.Skip("short mode")
 	}

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The Sessions tab in tokens (#1023): each session's figure is the accountant's, split into the
@@ -68,6 +70,7 @@ func TestSessionTokens_SplitTheKeepAliveAndKeepThePingsApart(t *testing.T) {
 // through a session index, whatever the window. Measured here against the list's own aggregate,
 // which scans the window.
 func TestSessionTokens_StaysCheapOnALargeWindow(t *testing.T) {
+	testutil.RequireTiming(t)
 	db := openTestDB(t)
 	// Measured at 20,000 rows without -race: the list 103 ms, the token read 2.5 ms of it.
 	// The test runs at 8,000 so the suite stays quick under -race.

@@ -68,7 +68,7 @@ test("a strategy set keeps the saved preset and does not invent one", async () =
 })
 
 // ---- Round 1, finding 2 (reviewer 2): the lock must outlive the work it protects.
-test("a lock that is held and kept alive is not broken, even when it is old", async () => {
+test("a lock that is held and kept alive is not broken, even when it is old", timingOnly, async () => {
   const root = mkdtempSync(join(tmpdir(), "context-guru-lock-"))
   const lock = join(root, ".lock")
   const longer = Date.now() + 3000
