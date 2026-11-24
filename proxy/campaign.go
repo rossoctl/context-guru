@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/tenant"
@@ -24,7 +24,7 @@ import (
 //
 // A suggest cell names a kvcache.Strategy arm (see kvcache/registry.go) — the
 // simulator's vocabulary, built for backtesting, not for the live proxy. Most of that
-// vocabulary has no live counterpart at all: campaignArmFor is the one place this
+// vocabulary has no live counterpart at all: campaign.ArmFor is the one place this
 // deployment decides which arms it can actually run, and everything else is reported,
 // never silently approximated.
 //
@@ -35,472 +35,32 @@ import (
 // aws/claude-haiku-4-5 — every other model this service runs is a moving target: Sonnet
 // 5 was REFUSED on an earlier date and GRANTED on 2026-11-19, with several newer models (see
 // apply/headttl.go and #1243). Until a model is measured, activating a 1h arm blindly could pay the
-// tier's write premium for no benefit. headTTL1hHonoredModels is checked per tenant before a 1h arm is ever
+// tier's write premium for no benefit. campaign.HeadTTL1hHonored is checked per tenant before a 1h arm is ever
 // marked activatable.
 
-// campaignDefaultMinPrefixTokens mirrors config.DefaultKeepAliveMinPrefix. proxy does
-// not import config (see cachePolicy's own doc comment in cmd/context-guru-proxy for
-// why), so this is a local literal, the same way DefaultMaxUSDPerPing already mirrors
-// config.DefaultKeepAliveMaxUSDPerPing. Never left at the zero value: MinPrefixTokens 0
-// on a strategy means NO floor at all — pingable() pings every session that clears
-// turn >= 1 — which is 20000x looser than the account default, not equal to it.
-const campaignDefaultMinPrefixTokens = 80000
-
-// campaignLegacyMinPrefixTokens is the pre-#435 floor. The 80k evidence (analysis B-policy-r2)
-// is for K=2 ping-everyone (measured at 270 s, now run at 240 s); the K=1 (keepalive-5m-once), stop-reason-gated and 1h-tier
-// arms have no separate evidence for it, so they keep the old 20k floor.
-const campaignLegacyMinPrefixTokens = 20000
-
-// campaignKeepAlive5mIdle mirrors config.DefaultKeepAliveIdle for the keepalive-5m arm only.
-// The once and stop-reason-gated arms stay at 280: the K>=2 evidence (analysis B-policy-r2, then
-// the owner's 240 s choice so a ping and its 60 s timeout fit the cache, #716) does not cover K=1
-// (which prefers 280) or the gate.
-const campaignKeepAlive5mIdle = 240
-
-// The spacing of the arms that keep the simulator's schedule: 280 s on the 5-minute tier, 3360 s
-// (56 min) on the 1-hour tier. They read the simulator's constants, so the two cannot drift. The
-// live default is another value (config.DefaultKeepAliveIdle1h is 59 min); see #808.
-// A re-fit of kvcache.DefaultPingIdle* now moves the live campaign arms too.
-const (
-	campaignLegacyIdle5m = int(kvcache.DefaultPingIdle / time.Second)
-	campaignLegacyIdle1h = int(kvcache.DefaultPingIdle1h / time.Second)
-)
-
-// campaignDefaultMaxPings mirrors config.DefaultKeepAliveMaxPings.
-const campaignDefaultMaxPings = 2
-
-// campaignDefaultHeadTTLMinTokens mirrors config.DefaultHeadTTLMinTokens. A stored strategy keeps
-// the token-named field (database column and manager API); resolveHeadTTL reads it as
-// tokens x config.HeadTTLBytesPerToken bytes, so 50,000 here is the 200,000-byte gate. Every 1h-tier
-// arm needs a positive value here — see validStrategyBounds' own refusal of
-// HeadTTL1h=true paired with a zero token floor, which would silently create a
-// strategy that pings on the 1-hour schedule but never actually promotes the head to
-// the 1-hour tier.
-const campaignDefaultHeadTTLMinTokens = 50000
-
-// campaignDefaultPredictorThreshold is stop-reason-gated's own live threshold,
-// matching the value this codebase's own tests already use whenever they exercise this
-// predictor manually (proxy/keepaliveoverride_test.go, proxy/keepalivestrategy_test.go)
-// — see validPredictorRef's own refusal of a named predictor paired with a
-// non-positive threshold, which would make predictorFor's gate a no-op.
-const campaignDefaultPredictorThreshold = 0.5
-
-// headTTL1hHonoredModels are the models this deployment has actually measured granting
-// the 1h cache tier (apply/headttl.go). A
-// campaign will not mark a 1h-tier arm activatable for a tenant whose traffic in the
-// suggest window used any model outside this set. Extend it only after measuring a new
-// model the same way apply/headttl.go's own doc comment did — never by assumption.
-var headTTL1hHonoredModels = map[string]bool{"aws/claude-haiku-4-5": true}
-
-// campaignArm is how one suggest arm maps onto a live keepalive_strategies row,
-// decided once per ARM NAME, never per cell: every cell recommending the same arm gets
-// the same live parameters, which is what makes it safe to coalesce cells sharing an
-// arm across tenants and hours into one strategy.
-type campaignArm struct {
-	// activatable is false for an arm with no live enforcement path at all — a
-	// simulation-only arm. reason explains why, for CampaignCell.SkipReason.
-	activatable bool
-	reason      string
-	// baseline is true for an arm that means "change nothing" (no-cache/fixed-5m/
-	// fixed-1h) — a SUCCESSFUL outcome that creates no strategy, distinct from
-	// activatable=false, which is a limitation, not a recommendation to do nothing.
-	baseline bool
-	// needsModelHonoring is true for a 1h-tier arm: resolveCampaignCell additionally
-	// checks headTTL1hHonoredModels for this specific tenant before activating it.
-	needsModelHonoring bool
-
-	idleSeconds int
-	maxPings    int
-	// predictorID and predictorThreshold always travel together: a predictorID with a
-	// zero threshold would make predictorFor's gate a no-op (see validPredictorRef) —
-	// pingable() ends up pinging on the arm's idle/max-ping schedule unconditionally,
-	// identically to keepalive-5m, while still being labeled and billed as the
-	// predictor-gated arm.
-	predictorID        string
-	predictorThreshold float64
-	headTTL1h          bool
-	headTTLMinTokens   int
-	minPrefixTokens    int
+// campaignCellOf is a dashboard suggest cell as the campaign library reads it.
+func campaignCellOf(c dash.KVCacheSuggestion) campaign.Cell {
+	return campaign.Cell{User: c.User, HourUTC: c.HourUTC, Requests: c.Requests, BestStrategy: c.BestStrategy, SavingUSD: c.SavingUSD,
+		BaselineUSD: c.BaselineUSD, OptimalSavingUSD: c.OptimalSavingUSD, InsufficientData: c.InsufficientData, UnpricedRequests: c.UnpricedRequests}
 }
 
-// campaignArmFor is the single source of truth the create flow consults. idleSeconds/
-// maxPings for the 5-minute arms sit well inside validStrategyBounds' 5m band
-// (minOverrideIdle..maxOverrideIdle, minOverridePings..maxOverridePings); for the
-// 1h-tier arms they sit inside the 1h band (maxOverrideIdle1h, maxOverridePings1h) —
-// see proxy/keepalivestrategy.go for both bands and why they differ.
-func campaignArmFor(arm string) campaignArm {
-	switch arm {
-	case kvcache.StrategyNoCache, kvcache.StrategyFixed5m, kvcache.StrategyFixed1h:
-		return campaignArm{activatable: true, baseline: true}
-	case kvcache.StrategyKeepAlive5m:
-		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: campaignDefaultMaxPings,
-			minPrefixTokens: campaignDefaultMinPrefixTokens}
-	case kvcache.StrategyKeepAlive5mOnce:
-		return campaignArm{activatable: true, idleSeconds: campaignLegacyIdle5m, maxPings: 1,
-			minPrefixTokens: campaignLegacyMinPrefixTokens}
-	case kvcache.StrategyStopReasonGated:
-		return campaignArm{activatable: true, idleSeconds: campaignLegacyIdle5m, maxPings: campaignDefaultMaxPings,
-			predictorID: "stop-reason-gated", predictorThreshold: campaignDefaultPredictorThreshold,
-			minPrefixTokens: campaignLegacyMinPrefixTokens}
-	case kvcache.StrategyKeepAlive1h:
-		// campaignLegacyIdle1h is the simulator's own default cadence for this arm.
-		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
-			idleSeconds: campaignLegacyIdle1h, maxPings: campaignDefaultMaxPings,
-			headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
-			minPrefixTokens:  campaignLegacyMinPrefixTokens}
-	case kvcache.StrategyKeepAlive1hOnce:
-		return campaignArm{activatable: true, needsModelHonoring: true, headTTL1h: true,
-			idleSeconds: campaignLegacyIdle1h, maxPings: 1, headTTLMinTokens: campaignDefaultHeadTTLMinTokens,
-			minPrefixTokens: campaignLegacyMinPrefixTokens}
-	}
-	// keepalive-5m-xK: the 5-minute keep-alive with exactly K pings per idle span. The live strategy
-	// carries K as MaxPings, which the simulator replays as the arm's own PingCap. Idle and floor are
-	// keepalive-5m's for K >= 2 (the 80k evidence is K>=2) and keepalive-5m-once's for K = 1.
-	if k, ok := kvcache.KeepAlivePingsOf(arm); ok {
-		if k == 1 {
-			return campaignArm{activatable: true, idleSeconds: campaignLegacyIdle5m, maxPings: 1,
-				minPrefixTokens: campaignLegacyMinPrefixTokens}
-		}
-		return campaignArm{activatable: true, idleSeconds: campaignKeepAlive5mIdle, maxPings: k,
-			minPrefixTokens: campaignDefaultMinPrefixTokens}
-	}
-	return campaignArm{reason: fmt.Sprintf(
-		"%q has no live enforcement path yet — it is a simulation-only arm", arm)}
-}
-
-// CampaignCellOutcome is what creating a campaign would do with one uploaded suggest cell: activate
-// it (or keep it on a baseline arm), or record it with skipReason. honorsHeadTTL1h reports whether a
-// tenant's traffic honors the 1h cache tier. It is the SAME decision ctlCreateCampaign makes, so an
+// CampaignCellOutcome is what creating a campaign would do with one uploaded suggest cell (campaign.CellOutcome): activate it, or record it with
+// skipReason. honorsHeadTTL1h reports whether a tenant's traffic honors the 1h cache tier. It is the SAME decision ctlCreateCampaign makes, so an
 // offline tool that builds an upload file can report it without a second copy of the rules.
 func CampaignCellOutcome(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenantID string) bool) (activatable bool, skipReason string) {
-	c := resolveCampaignCell(cell, honorsHeadTTL1h)
-	return c.activatable, c.skipReason
+	return campaign.CellOutcome(campaignCellOf(cell), honorsHeadTTL1h)
 }
 
-// CampaignArmEnforceable reports whether a campaign can enforce arm on live traffic at all. A cell
-// can still be skipped for its own reasons (too few requests, unpriced rows, a 1h-tier arm on a
-// model that does not honor it) — CampaignCellOutcome answers that.
-func CampaignArmEnforceable(arm string) bool { return campaignArmFor(arm).activatable }
+// CampaignArmEnforceable reports whether a campaign can enforce arm on live traffic at all (campaign.ArmEnforceable).
+func CampaignArmEnforceable(arm string) bool { return campaign.ArmEnforceable(arm) }
 
-// HeadTTL1hHonored reports whether model is measured to honor the 1h cache tier on this deployment —
-// the set a campaign checks before it activates a 1h-tier arm.
-func HeadTTL1hHonored(model string) bool { return headTTL1hHonoredModels[model] }
-
-// resolvedCampaignCell is one suggest cell's outcome after resolving its arm and, for a
-// 1h-tier arm, checking whether this specific tenant's traffic honors it.
-type resolvedCampaignCell struct {
-	tenantID                  string
-	hourUTC                   int
-	requests                  int64
-	arm                       string
-	predictedUSD, baselineUSD float64
-	optimalSavingUSD          float64
-	insufficientData          bool
-	activatable               bool
-	skipReason                string
-	// strategyID is filled in by coalesceCampaignCells's caller once the group this
-	// cell belongs to has an actual keepalive_strategies row.
-	strategyID string
-	// config is only meaningful when activatable && !config.baseline.
-	config campaignArm
-}
-
-// resolveCampaignCell turns one suggest cell into its outcome. honorsHeadTTL1h reports
-// whether tenantID's own traffic honors the 1h tier — a function rather than a
-// precomputed map so the caller can memoize per tenant however it likes and tests can
-// fake it cheaply.
-//
-// HourUTC is bounds-checked FIRST, before the arm is even resolved: the live-fetch
-// source can never produce one outside [0,23] (it's always time.Time.UTC().Hour()), but
-// the upload source accepts a hand-edited suggest payload verbatim, and an out-of-range
-// hour reaching tileHours would build a Window string like "24:00" that
-// tenant.Window.Validate rejects — silently, if nothing catches it first, producing a
-// strategy that is created successfully but can never match anything.
-func resolveCampaignCell(cell dash.KVCacheSuggestion, honorsHeadTTL1h func(tenantID string) bool,
-) resolvedCampaignCell {
-	out := resolvedCampaignCell{
-		tenantID: cell.User, hourUTC: cell.HourUTC, requests: cell.Requests,
-		arm: cell.BestStrategy, predictedUSD: cell.SavingUSD, baselineUSD: cell.BaselineUSD,
-		optimalSavingUSD: cell.OptimalSavingUSD, insufficientData: cell.InsufficientData,
-	}
-	if cell.HourUTC < 0 || cell.HourUTC > 23 {
-		out.skipReason = fmt.Sprintf("hour_utc %d is out of range (must be 0-23)", cell.HourUTC)
-		return out
-	}
-	a := campaignArmFor(cell.BestStrategy)
-	if !a.activatable {
-		out.skipReason = a.reason
-		return out
-	}
-	if a.needsModelHonoring && !honorsHeadTTL1h(cell.User) {
-		out.skipReason = "this tenant's traffic does not run on a model that honors the " +
-			"1h cache tier on this deployment (see apply/headttl.go)"
-		return out
-	}
-	// InsufficientData means the suggest engine itself does not trust this cell's
-	// winning arm as a pattern (too few requests to backtest from) — activating a real,
-	// live strategy off it anyway would act on exactly what that flag warns against.
-	// Baseline arms are exempt: "change nothing" carries no risk regardless of sample
-	// size, unlike committing to a real ping/write-tier schedule.
-	if cell.InsufficientData && !a.baseline {
-		out.skipReason = "too few requests in this cell to trust its recommendation as a pattern"
-		return out
-	}
-	// The same objection, on the other axis: too few PRICED requests. BestStrategy is an argmax
-	// over whichever of the cell's requests had rates, so a cell with unpriced traffic hands us
-	// a winner chosen on a subset of the pattern we are about to enforce. This is not about the
-	// dollars — an unpriced request contributes $0 to the baseline and $0 to every arm, so
-	// SavingUSD is understated, not inflated — it is about the ranking, which really does move:
-	// pricing one missing model reordered ranks 5 through 8 and flipped stop-reason-gated from
-	// -0.35% to +0.75%, and stop-reason-gated buys 249 pings.
-	//
-	// Baseline arms are exempt for exactly the reason InsufficientData exempts them: "change
-	// nothing" needs no evidence. Everything else here is a live ping or write-tier schedule.
-	if cell.UnpricedRequests > 0 && !a.baseline {
-		out.skipReason = fmt.Sprintf("%d of this cell's %d requests could not be priced, so its "+
-			"winning arm was chosen on a subset of its own traffic",
-			cell.UnpricedRequests, cell.Requests)
-		return out
-	}
-	out.activatable = true
-	out.config = a
-	return out
-}
-
-// markCampaignOverlaps turns any cell whose (tenant, hour) an ACTIVE campaign already
-// enforces into a non-activatable one, naming the campaign that holds it.
-//
-// A per-cell skip, not a refusal of the whole request. The two alternatives are both
-// worse: rejecting the campaign outright makes one already-covered hour block a batch of
-// two hundred good cells, and a manager's only recovery is to hand-edit the payload to
-// remove it — while creating the strategy anyway leaves two live strategies competing for
-// one hour, where the resolution chain silently picks one and both campaigns claim it.
-// Skipping reuses the machinery every other unenforceable cell already flows through:
-// recorded with a reason, grouped by that reason in the create result, never hidden.
-//
-// Deliberately blind to the ARM: a second campaign recommending a DIFFERENT arm for an
-// hour is still a conflict, not a refinement. Only one of the two strategies can win the
-// resolution chain, so letting the different-arm case through would recreate exactly the
-// ambiguity this gate exists to remove. Re-issuing an hour under a new arm is a real
-// need, and the honest path for it is to archive the campaign that holds it first.
-func markCampaignOverlaps(resolved []*resolvedCampaignCell, owners []tenant.CampaignCellOwner) {
-	type key struct {
-		tenantID string
-		hour     int
-	}
-	held := make(map[key]tenant.CampaignCellOwner, len(owners))
-	for _, o := range owners {
-		held[key{o.TenantID, o.HourUTC}] = o
-	}
-	for _, c := range resolved {
-		if !c.activatable {
-			continue
-		}
-		// Baseline cells ("change nothing") create no strategy at all, so they cannot
-		// collide with one — excluding them keeps a campaign whose recommendation for an
-		// hour is "keep the current policy" from being reported as conflicting with the
-		// campaign that already decided the same thing.
-		if c.config.baseline {
-			continue
-		}
-		if o, ok := held[key{c.tenantID, c.hourUTC}]; ok {
-			c.activatable = false
-			c.skipReason = fmt.Sprintf(
-				"the active campaign %q already enforces this tenant's hour %02d:00 UTC — "+
-					"archive it first to re-issue this hour", o.CampaignName, c.hourUTC)
-		}
-	}
-}
-
-// duplicateCampaignCell reports the first cell whose (tenantID, hourUTC) pair also
-// appears earlier in resolved, or nil if every pair is unique — the same key shape
-// tenant.CreateCampaign's own guard checks, run here up front so a duplicate is
-// refused before any strategy is created for it, not just before the campaign record
-// that would have referenced it.
-func duplicateCampaignCell(resolved []*resolvedCampaignCell) *resolvedCampaignCell {
-	seen := map[[2]any]bool{}
-	for _, c := range resolved {
-		key := [2]any{c.tenantID, c.hourUTC}
-		if seen[key] {
-			return c
-		}
-		seen[key] = true
-	}
-	return nil
-}
-
-// campaignDefaultWeekdays is the work week every suggest cell's PredictedUSD is
-// actually backtested against, on either input source: the live path always sets
-// KVCacheSuggestions.Weekdays to this exact set (dash's own kvSuggestWeekdays), and the
-// upload path accepts a hand-edited copy of that same payload. It is the fallback
-// weekdaysFromNames uses when it cannot recover any day at all from the input, rather
-// than "no restriction" — see weekdaysFromNames' own doc comment for why "every day" is
-// the one outcome that must never happen silently here.
-var campaignDefaultWeekdays = []time.Weekday{
-	time.Sunday, time.Monday, time.Tuesday, time.Wednesday, time.Thursday,
-}
-
-// weekdaysFromNames converts a suggest payload's Weekdays (["Sunday", "Monday", ...])
-// into tenant.Window's []time.Weekday. An unrecognized name is silently dropped rather
-// than erroring — the caller has no better recovery than "run with fewer restricted
-// days", and the alternative (refusing the whole campaign for one bad string in a list
-// this deployment itself generated) is a worse failure mode.
-//
-// If NOTHING is recognized — Weekdays omitted entirely by a hand-edited upload, or
-// every name in it misspelled — this returns campaignDefaultWeekdays, never an empty
-// slice: tenant.Window.contains treats an empty Days as "every day matches", not "no
-// day restricted", so a silent drop-to-empty here would create a live strategy that
-// fires on Friday and Saturday too — traffic the frozen PredictedUSD figures were never
-// backtested against (both this suggester and its own callers only ever read
-// Sunday-Thursday history). "Fewer restricted days" must have a floor.
-func weekdaysFromNames(names []string) []time.Weekday {
-	byName := map[string]time.Weekday{
-		"Sunday": time.Sunday, "Monday": time.Monday, "Tuesday": time.Tuesday,
-		"Wednesday": time.Wednesday, "Thursday": time.Thursday, "Friday": time.Friday,
-		"Saturday": time.Saturday,
-	}
-	out := make([]time.Weekday, 0, len(names))
-	for _, n := range names {
-		if d, ok := byName[n]; ok {
-			out = append(out, d)
-		}
-	}
-	if len(out) == 0 {
-		return campaignDefaultWeekdays
-	}
-	return out
-}
-
-// tileHours turns a set of UTC hours into the fewest tenant.Window values that cover
-// exactly those hours and no others, merging consecutive hours into one window.
-//
-// Hour 23 never merges past midnight into hour 0: tenant.Window has no overnight span
-// (Window.Validate rejects end <= start), so a run ending at 23 closes its own window at
-// "24:00" — the end-of-day sentinel tenant.parseHHMM accepts for exactly this reason. It used
-// to close at "23:59", which as an exclusive end left 23:59:00-23:59:59 covered by nothing.
-func tileHours(hours []int, days []time.Weekday) []tenant.Window {
-	sorted := append([]int(nil), hours...)
-	sort.Ints(sorted)
-	var out []tenant.Window
-	for i := 0; i < len(sorted); {
-		start := sorted[i]
-		end := start
-		for i+1 < len(sorted) && sorted[i+1] == end+1 {
-			i++
-			end = sorted[i]
-		}
-		i++
-		// end+1 == 24 spells itself "24:00", the end-of-day sentinel tenant.parseHHMM accepts.
-		// It used to be written "23:59", which as an EXCLUSIVE end stopped at 23:58:59.999 and
-		// left 23:59:00-23:59:59 covered by nothing — the gap the comment above used to describe
-		// as unavoidable. It is not unavoidable any more.
-		endStr := fmt.Sprintf("%02d:00", end+1)
-		out = append(out, tenant.Window{
-			Days: days, Start: fmt.Sprintf("%02d:00", start), End: endStr,
-			TZ: "UTC", // cells are UTC hours on UTC weekdays; unset would resolve to Asia/Jerusalem
-		})
-	}
-	return out
-}
-
-// campaignGroup is one set of activatable, non-baseline cells that will share exactly
-// one keepalive_strategies row: the same arm, AND the same set of hours. Grouping any
-// looser than "same hour set" would be wrong, not just coarser — a strategy's Target
-// and Windows both apply to the WHOLE strategy, not per-tenant, so folding a tenant
-// recommended for hours {9} together with one recommended for {9,14} into one strategy
-// would activate hour 14 for the first tenant too, an hour it was never recommended
-// for.
-type campaignGroup struct {
-	arm       string
-	config    campaignArm
-	hourSet   []int
-	tenantIDs []string
-	cells     []*resolvedCampaignCell
-}
-
-// coalesceCampaignCells groups activatable, non-baseline cells by (arm, exact hour
-// set) — see campaignGroup's doc comment for why that is the loosest safe grouping.
-// Baseline cells (campaignArm.baseline) and non-activatable cells are excluded: neither
-// needs, nor can have, a strategy.
-func coalesceCampaignCells(cells []*resolvedCampaignCell) []*campaignGroup {
-	type tenantArm struct{ tenantID, arm string }
-	hoursByTenantArm := map[tenantArm][]int{}
-	for _, c := range cells {
-		if !c.activatable || c.config.baseline {
-			continue
-		}
-		key := tenantArm{c.tenantID, c.arm}
-		hoursByTenantArm[key] = append(hoursByTenantArm[key], c.hourUTC)
-	}
-	for k, hrs := range hoursByTenantArm {
-		sort.Ints(hrs)
-		hoursByTenantArm[k] = hrs
-	}
-
-	type groupKey struct{ arm, hourSetKey string }
-	keyFor := func(tenantID, arm string) groupKey {
-		return groupKey{arm, hourSetKey(hoursByTenantArm[tenantArm{tenantID, arm}])}
-	}
-	groups := map[groupKey]*campaignGroup{}
-	var order []groupKey
-	for ta, hours := range hoursByTenantArm {
-		gk := groupKey{ta.arm, hourSetKey(hours)}
-		g := groups[gk]
-		if g == nil {
-			g = &campaignGroup{arm: ta.arm, config: campaignArmFor(ta.arm), hourSet: hours}
-			groups[gk] = g
-			order = append(order, gk)
-		}
-		g.tenantIDs = append(g.tenantIDs, ta.tenantID)
-	}
-	for _, g := range groups {
-		sort.Strings(g.tenantIDs)
-	}
-	for _, c := range cells {
-		if !c.activatable || c.config.baseline {
-			continue
-		}
-		g := groups[keyFor(c.tenantID, c.arm)]
-		g.cells = append(g.cells, c)
-	}
-
-	out := make([]*campaignGroup, 0, len(order))
-	for _, gk := range order {
-		out = append(out, groups[gk])
-	}
-	return out
-}
-
-func hourSetKey(hours []int) string {
-	parts := make([]string, len(hours))
-	for i, h := range hours {
-		parts[i] = strconv.Itoa(h)
-	}
-	return strings.Join(parts, ",")
-}
-
-// strategyForGroup builds the tenant.Strategy one campaignGroup resolves to: the
-// coalesced Target and the tiled Windows, at the arm's own live parameters.
-func strategyForGroup(campaignName string, g *campaignGroup, days []time.Weekday) tenant.Strategy {
-	return tenant.Strategy{
-		Name:               fmt.Sprintf("%s: %s (%d tenants)", campaignName, g.arm, len(g.tenantIDs)),
-		Active:             true,
-		Windows:            tileHours(g.hourSet, days),
-		Target:             tenant.Target{Mode: tenant.TargetList, TenantIDs: g.tenantIDs},
-		IdleSeconds:        g.config.idleSeconds,
-		MaxPings:           g.config.maxPings,
-		MinPrefixTokens:    g.config.minPrefixTokens,
-		PredictorID:        g.config.predictorID,
-		PredictorThreshold: g.config.predictorThreshold,
-		HeadTTL1h:          g.config.headTTL1h,
-		HeadTTLMinTokens:   g.config.headTTLMinTokens,
-	}
-}
+// HeadTTL1hHonored reports whether model is measured to honor the 1h cache tier on this deployment (campaign.HeadTTL1hHonored).
+func HeadTTL1hHonored(model string) bool { return campaign.HeadTTL1hHonored(model) }
 
 // validateGroupStrategy runs the same checks ctlCreateKeepAliveStrategy already runs on
 // a manually-created strategy before persisting it — defense in depth here, since a
-// strategy strategyForGroup built from campaignArmFor's own vetted constants and
-// resolveCampaignCell's hour-range check should always already be valid, but "should
+// strategy campaign.StrategyForGroup built from campaign.ArmFor's own vetted constants and
+// campaign.ResolveCell's hour-range check should always already be valid, but "should
 // always" is not "provably always," and the alternative to checking is trusting a
 // window/target/bounds mismatch to surface itself only much later, silently, as a
 // strategy that pings and saves nothing forever.
@@ -657,10 +217,10 @@ type campaignCreateIn struct {
 //
 //  1. Skip any cell for tenant_id "" — an ambiguous pool (single-tenant traffic, or
 //     pre-tenancy rows), never a safe campaign target in a hosted deployment.
-//  2. Resolve every remaining cell's arm (campaignArmFor), gating a 1h-tier arm on
-//     whether THIS tenant's own traffic honors it (headTTL1hHonoredModels).
+//  2. Resolve every remaining cell's arm (campaign.ArmFor), gating a 1h-tier arm on
+//     whether THIS tenant's own traffic honors it (campaign.HeadTTL1hHonored).
 //  3. Coalesce the activatable, non-baseline cells into the fewest safe strategies
-//     (coalesceCampaignCells) and create each one.
+//     (campaign.Coalesce) and create each one.
 //  4. Persist the campaign and every cell's frozen outcome (tenant.CreateCampaign),
 //     including baseline and non-activatable cells — nothing is hidden, only skipped.
 //
@@ -705,12 +265,12 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 		return v
 	}
 
-	resolved := make([]*resolvedCampaignCell, 0, len(suggest.Cells))
+	resolved := make([]*campaign.Resolved, 0, len(suggest.Cells))
 	for _, cell := range suggest.Cells {
 		if cell.User == "" {
 			continue
 		}
-		c := resolveCampaignCell(cell, honorsHeadTTL1h)
+		c := campaign.ResolveCell(campaignCellOf(cell), honorsHeadTTL1h)
 		resolved = append(resolved, &c)
 	}
 	if len(resolved) == 0 {
@@ -724,9 +284,9 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 	// real, live keepalive_strategies row for every coalesced group; rejecting only
 	// there still means a duplicate-cell upload creates-then-rolls-back strategies
 	// instead of never creating them at all.
-	if dup := duplicateCampaignCell(resolved); dup != nil {
+	if dup := campaign.DuplicateCell(resolved); dup != nil {
 		ctlErr(w, http.StatusBadRequest, fmt.Sprintf(
-			"duplicate cell for tenant %q at hour %d", dup.tenantID, dup.hourUTC))
+			"duplicate cell for tenant %q at hour %d", dup.TenantID, dup.HourUTC))
 		return
 	}
 	// Cross-campaign overlap, checked in the same place and for the same reason the
@@ -742,23 +302,23 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 			"could not check this campaign against the hours already enforced")
 		return
 	}
-	markCampaignOverlaps(resolved, owners)
+	campaign.MarkOverlaps(resolved, owners)
 
-	days := weekdaysFromNames(suggest.Weekdays)
-	groups := coalesceCampaignCells(resolved)
+	days := campaign.WeekdaysFromNames(suggest.Weekdays)
+	groups := campaign.Coalesce(resolved)
 	created := make([]tenant.Strategy, 0, len(groups))
 	for _, g := range groups {
-		strategy := strategyForGroup(in.Name, g, days)
+		strategy := campaign.StrategyForGroup(in.Name, g, days)
 		if err := validateGroupStrategy(strategy); err != nil {
-			// Defense in depth: campaignArmFor's own constants and resolveCampaignCell's
+			// Defense in depth: campaign.ArmFor's own constants and campaign.ResolveCell's
 			// hour-range check should make this unreachable, but a coalesced strategy this
 			// deployment could not actually enforce must never be silently persisted as if
 			// it could — every cell that would have shared it becomes non-activatable with
 			// the reason, the same as any other unenforceable arm, instead of aborting the
 			// whole campaign over one bad group.
-			for _, c := range g.cells {
-				c.activatable = false
-				c.skipReason = "could not create a valid strategy: " + err.Error()
+			for _, c := range g.Cells {
+				c.Activatable = false
+				c.SkipReason = "could not create a valid strategy: " + err.Error()
 			}
 			continue
 		}
@@ -770,22 +330,16 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		created = append(created, s)
-		for _, c := range g.cells {
-			c.strategyID = s.ID
+		for _, c := range g.Cells {
+			c.StrategyID = s.ID
 		}
 	}
 
 	cells := make([]tenant.CampaignCell, 0, len(resolved))
 	for _, c := range resolved {
-		cells = append(cells, tenant.CampaignCell{
-			TenantID: c.tenantID, HourUTC: c.hourUTC, Requests: c.requests, Arm: c.arm,
-			PredictedUSD: c.predictedUSD, BaselineUSD: c.baselineUSD,
-			OptimalSavingUSD: c.optimalSavingUSD,
-			InsufficientData: c.insufficientData, Activatable: c.activatable,
-			SkipReason: c.skipReason, StrategyID: c.strategyID,
-		})
+		cells = append(cells, c.TenantCell())
 	}
-	campaign, err := h.registry().CreateCampaign(actor.ID, tenant.Campaign{
+	camp, err := h.registry().CreateCampaign(actor.ID, tenant.Campaign{
 		Name: in.Name, Source: in.Source, Baseline: suggest.Baseline,
 		MinRequests: suggest.MinRequests, Weekdays: suggest.Weekdays,
 	}, cells)
@@ -805,7 +359,7 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 	var auditFailed bool
 	for _, s := range created {
 		if err := h.registry().AuditWrite(actor.ID, actor.ID, s.ID, "",
-			"created via campaign: "+campaign.Name); err != nil {
+			"created via campaign: "+camp.Name); err != nil {
 			auditFailed = true
 		}
 	}
@@ -818,7 +372,7 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.keeper.loadStrategies()
-	view := viewCampaign(campaign)
+	view := viewCampaign(camp)
 	view.Cells = make([]campaignCellView, 0, len(cells))
 	for _, c := range cells {
 		view.Cells = append(view.Cells, viewCampaignCell(c))
@@ -834,7 +388,7 @@ func (h *Handler) ctlCreateCampaign(w http.ResponseWriter, r *http.Request) {
 //
 // Reloads the keeper's in-memory strategy list once, after every delete attempt, no
 // matter how many succeeded: a strategy this call just created was already matchable
-// to live traffic (strategyForGroup sets Active: true, and nothing gates matching on
+// to live traffic (campaign.StrategyForGroup sets Active: true, and nothing gates matching on
 // the campaign it came from), so a rolled-back strategy left in memory would keep
 // pinging and toggling KeepAlive/HeadTTL1h for its targeted tenants — invisible to
 // every control route, since neither the campaign nor its cells were ever persisted —
@@ -881,7 +435,7 @@ func (h *Handler) resolveCampaignSuggest(r *http.Request, in campaignCreateIn) (
 }
 
 // tenantHonorsHeadTTL1h reports whether every model tenantID used, in the same window a
-// live suggest call would have scanned, is in headTTL1hHonoredModels. Fails CLOSED: no
+// live suggest call would have scanned, is honors the 1h tier (campaign.HonorsHeadTTL1h). Fails CLOSED: no
 // models found (unknown traffic, or the dashboard unreachable) means "not confirmed",
 // never "assume yes" — the same direction every other check in this file errs in.
 func (h *Handler) tenantHonorsHeadTTL1h(r *http.Request, tenantID string, since, until int64) bool {
@@ -890,15 +444,10 @@ func (h *Handler) tenantHonorsHeadTTL1h(r *http.Request, tenantID string, since,
 	}
 	models, err := h.rec.DB().WithContext(r.Context()).KVCacheModels(
 		dash.Filter{Tenant: tenantID, Since: since, Until: until})
-	if err != nil || len(models) == 0 {
+	if err != nil {
 		return false
 	}
-	for _, m := range models {
-		if !headTTL1hHonoredModels[m] {
-			return false
-		}
-	}
-	return true
+	return campaign.HonorsHeadTTL1h(models)
 }
 
 // ctlGetCampaign returns one campaign with its full cell set.
