@@ -162,6 +162,7 @@ func Prepare(p Pre) *Prepared {
 			body = Inject(p.Wire, p.Provider, p.Pipe, p.InjectExpand, p.Store.Persists(), body)
 			if p.ToolDefer != nil {
 				body = p.ToolDefer(&tr, th, body)
+				// ToolDefer may append to tr.Ops. Nothing else changes tr after Apply, so this is the only refresh.
 				out.Trace = tr
 			}
 		}
@@ -178,6 +179,27 @@ func Prepare(p Pre) *Prepared {
 // stays warm. Under expand.InjectAuto the expand tool goes in only when the pipeline can mint a
 // marker (Pipeline.HasOffload). The adjudication tool goes in only for a pipeline with
 // extract_llm_sweep, on a wire whose prefixed ask has an adapter.
+//
+// Hosts call it only for a request they rewrite. Observe mode and a bypassed request are
+// forwarded byte for byte, so nothing is injected there. The agent's own compaction request is
+// not bypassed, so it gets the tool like every earlier turn of its thread. That keeps the tools
+// array, which the provider hashes ahead of messages, the same as on the previous turn.
+//
+// Known gaps this leaves on a compaction turn (the prompt tells the model to call no tool, so
+// both need a model that ignores it):
+//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
+//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call.
+//     The proxy does not inspect non-Anthropic SSE (see the isSSE case in serve). Claude Code
+//     uses the Anthropic dialect and is not hit.
+//   - Any dialect: if the model calls expand on every round, the client gets the raw tool call
+//     after maxExpandRounds, with no summary. That takes 4 calls in a row.
+//
+// compactionexpand_test.go pins both, so a change shows.
+//
+// Why `auto` asks Pipeline.HasOffload rather than a list of presets: a pipeline with no offload
+// declared a tool whose every use is guaranteed to fail, and `off` is the A/B control arm, which
+// must not carry an extra tool. The adjudication tool is gated on pipeline membership and the
+// provider, both byte-stable under one config, so the tools array never flaps from turn to turn.
 func Inject(wire string, provider bschemas.ModelProvider, pipe *components.Pipeline, injectExpand string, storePersists bool, body []byte) []byte {
 	im := injectExpand
 	if im == "" {
