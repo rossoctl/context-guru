@@ -1,4 +1,4 @@
-package proxy
+package accrec
 
 import (
 	"fmt"
@@ -43,18 +43,18 @@ func TestSharedWarm(t *testing.T) {
 		{"the same thread is not a sibling", time.Minute, sharedBody("a", "b"), bpAt(accountant.SectionMessages, 1), "main", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newSiblingStore()
+			s := NewSiblingStore()
 			sibAt := t0.Add(tc.sibAt)
 			if tc.sibAt < 0 {
 				sibAt = t0.Add(-ttl - time.Minute)
 			}
-			_ = s.sharedWarm("s1", tc.sibID, sibAt, ttl, tc.sibBody, tc.sibBPs)
+			_ = s.SharedWarm("s1", tc.sibID, sibAt, ttl, tc.sibBody, tc.sibBPs)
 			at := t0.Add(2 * time.Minute)
 			if tc.sibID == "main" {
 				// the thread's own earlier request is replaced, not compared
 				at = t0.Add(2 * time.Minute)
 			}
-			got := s.sharedWarm("s1", "main", at, ttl, sharedBody("a", "b", "c"), bpAt(accountant.SectionMessages, 2))
+			got := s.SharedWarm("s1", "main", at, ttl, sharedBody("a", "b", "c"), bpAt(accountant.SectionMessages, 2))
 			switch {
 			case tc.want == nil && got != nil:
 				t.Fatalf("SharedWarm %+v, want nil", *got)
@@ -67,20 +67,20 @@ func TestSharedWarm(t *testing.T) {
 
 // Another session's thread is never a sibling.
 func TestSharedWarmIsPerSession(t *testing.T) {
-	s := newSiblingStore()
+	s := NewSiblingStore()
 	t0 := time.Unix(1_700_000_000, 0)
-	_ = s.sharedWarm("other", "sub", t0, 5*time.Minute, sharedBody("a"), bpAt(accountant.SectionSystem, 0))
-	if got := s.sharedWarm("s1", "main", t0.Add(time.Minute), 5*time.Minute, sharedBody("a"), nil); got != nil {
+	_ = s.SharedWarm("other", "sub", t0, 5*time.Minute, sharedBody("a"), bpAt(accountant.SectionSystem, 0))
+	if got := s.SharedWarm("s1", "main", t0.Add(time.Minute), 5*time.Minute, sharedBody("a"), nil); got != nil {
 		t.Fatalf("SharedWarm %+v across sessions", *got)
 	}
 }
 
 // A session keeps at most siblingThreadsMax threads: the oldest goes first.
 func TestSharedWarmBoundsThreadsPerSession(t *testing.T) {
-	s := newSiblingStore()
+	s := NewSiblingStore()
 	t0 := time.Unix(1_700_000_000, 0)
 	for i := 0; i < siblingThreadsMax+10; i++ {
-		s.sharedWarm("s1", fmt.Sprintf("t%03d", i), t0.Add(time.Duration(i)*time.Second), time.Hour, sharedBody("a"), nil)
+		s.SharedWarm("s1", fmt.Sprintf("t%03d", i), t0.Add(time.Duration(i)*time.Second), time.Hour, sharedBody("a"), nil)
 	}
 	ss := s.session("s1")
 	if n := len(ss.threads); n != siblingThreadsMax {
@@ -96,13 +96,13 @@ func TestSharedWarmBoundsThreadsPerSession(t *testing.T) {
 
 // The store keeps at most siblingsMax sessions and drops the least recently used.
 func TestSharedWarmBoundsSessions(t *testing.T) {
-	s := newSiblingStore()
+	s := NewSiblingStore()
 	t0 := time.Unix(1_700_000_000, 0)
 	for i := 0; i < siblingsMax; i++ {
-		s.sharedWarm(fmt.Sprintf("s%d", i), "main", t0, time.Hour, sharedBody("a"), nil)
+		s.SharedWarm(fmt.Sprintf("s%d", i), "main", t0, time.Hour, sharedBody("a"), nil)
 	}
-	s.sharedWarm("s0", "main", t0, time.Hour, sharedBody("a"), nil) // s0 is now the most recent
-	s.sharedWarm("new", "main", t0, time.Hour, sharedBody("a"), nil)
+	s.SharedWarm("s0", "main", t0, time.Hour, sharedBody("a"), nil) // s0 is now the most recent
+	s.SharedWarm("new", "main", t0, time.Hour, sharedBody("a"), nil)
 	if len(s.m) != siblingsMax {
 		t.Fatalf("sessions = %d, want %d", len(s.m), siblingsMax)
 	}
