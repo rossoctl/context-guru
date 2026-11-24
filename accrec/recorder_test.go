@@ -3,11 +3,14 @@ package accrec
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 )
 
 func recMsg(role, text string) (string, int) {
@@ -192,5 +195,105 @@ func TestStateRoundTripAndRefusals(t *testing.T) {
 	}
 	if res := NewRecorder().RestoreState([]byte("{not json"), time.Minute); res.Restored || res.Err == nil {
 		t.Fatalf("a bad file must be refused: %+v", res)
+	}
+}
+
+func TestBilledForwardedKeepsTheBodyWhenNothingIsDeferred(t *testing.T) {
+	fw := recBody(mustRecMsg("user", "x"))
+	if b, nr := BilledForwarded(fw, nil); string(b) != string(fw) || nr != "" {
+		t.Fatalf("nil preDefer: %q %q", b, nr)
+	}
+	if b, nr := BilledForwarded(fw, fw); string(b) != string(fw) || nr != "" {
+		t.Fatalf("no deferred tool: %q %q", b, nr)
+	}
+}
+
+func TestRecordNamesTheThreadAndKeepsTheFacts(t *testing.T) {
+	r := NewRecorder()
+	m0 := mustRecMsg("user", "first")
+	body := recBody(m0)
+	req := r.Begin(recMeta(1, "s"), body)
+	var seen string
+	r.OnEnd = func(*accountant.Request, EndRecord) { seen = "ended" }
+	out := r.Record(req, RecordIn{Meta: recMeta(1, "s"), Client: body, Forwarded: body, ThreadID: "main",
+		ReadSets: func(_ bschemas.ModelProvider, _, _, _ string, pinged bool) bool { return true }})
+	if out.Thread != ThreadID("main") || out.NoResult != "" || seen != "ended" || !out.Facts.Provider.ReadSetsTTL {
+		t.Fatalf("%+v %q", out, seen)
+	}
+}
+
+func TestLowerTTLIsNilSafe(t *testing.T) {
+	r := NewRecorder()
+	f := accountant.EntryFacts{TTL: time.Hour}
+	if got := r.LowerTTL(nil, "s", "main", f, 100, 0); got.TTL != time.Hour {
+		t.Fatalf("a nil request changed the facts: %+v", got)
+	}
+}
+
+func TestLowerTTLLowersTheFactsToTheBilledTier(t *testing.T) {
+	r := NewRecorder()
+	req := recOneRequest(r, 1, ThreadOf("main", "", false))
+	asked := accountant.EntryFacts{TTL: time.Hour, Lifetime: accountant.LifetimeExact}
+	// The request asked for 1h and the gateway billed the write at 5m (no 1h tokens).
+	if got := r.LowerTTL(req, "s", "main", asked, 300, 0); got.TTL != BaseTTL {
+		t.Fatalf("TTL = %v, want %v", got.TTL, BaseTTL)
+	}
+	// A write billed at 1h keeps the asked tier.
+	if got := r.LowerTTL(req, "s", "other", asked, 300, 300); got.TTL != time.Hour {
+		t.Fatalf("TTL = %v, want 1h", got.TTL)
+	}
+}
+
+// A deferred tool: the client body holds the definition, the forwarded body marks it defer_loading.
+const (
+	deferDef    = `a long definition of a tool that is deferred, long enough that its stub is much smaller`
+	deferClient = `{"tools":[{"name":"big","description":"` + deferDef + `"}],"messages":[{"role":"user","content":"hi"}]}`
+	deferFwd    = `{"tools":[{"name":"big","description":"` + deferDef + `","defer_loading":true}],"messages":[{"role":"user","content":"hi"}]}`
+)
+
+func recordWith(t *testing.T, client, preDefer, fwd []byte) (RecordOut, EndRecord, accountant.Result) {
+	t.Helper()
+	r := NewRecorder()
+	var rec EndRecord
+	r.OnEnd = func(_ *accountant.Request, e EndRecord) { rec = e }
+	req := r.Begin(recMeta(1, "s"), client)
+	out := r.Record(req, RecordIn{Meta: recMeta(1, "s"), Client: client, PreDefer: preDefer, Forwarded: fwd, ThreadID: "main"})
+	return out, rec, r.Compute(req, Usage{FreshInput: 10, CacheRead: 100})
+}
+
+func TestRecordGivesTheLibraryTheStubbedBodyOfADeferral(t *testing.T) {
+	client, fwd := []byte(deferClient), []byte(deferFwd)
+	out, rec, res := recordWith(t, client, client, fwd)
+	billed, ok := BilledBody(fwd, map[string]bool{"big": true})
+	if !ok {
+		t.Fatal("test setup: the stub was not placed")
+	}
+	stubbed, _ := accwire.For(billed).Parse(billed, nil)
+	plain, _ := accwire.For(fwd).Parse(fwd, nil)
+	if out.NoResult != "" {
+		t.Errorf("NoResult = %q, want none", out.NoResult)
+	}
+	if !reflect.DeepEqual(rec.Forwarded, stubbed) || reflect.DeepEqual(rec.Forwarded, plain) {
+		t.Error("End must get the body the provider bills (the stub), not the bytes sent")
+	}
+	found := false
+	for _, o := range res.Ops {
+		found = found || o.Operator == "context-guru.tooldefer"
+	}
+	if !found {
+		t.Errorf("no tooldefer operation was appended: %+v", res.Ops)
+	}
+}
+
+func TestRecordNamesAnUnplacedDeferralAndKeepsTheForwardedBody(t *testing.T) {
+	// The stub is as large as the definition, so it cannot be placed.
+	client := []byte(`{"tools":[{"name":"b","defer_loading":true}],"messages":[{"role":"user","content":"hi"}]}`)
+	out, rec, _ := recordWith(t, client, []byte(`{}`), client)
+	plain, _ := accwire.For(client).Parse(client, nil)
+	if out.NoResult != DeferralUnplaced {
+		t.Errorf("NoResult = %q, want %q", out.NoResult, DeferralUnplaced)
+	}
+	if !reflect.DeepEqual(rec.Forwarded, plain) {
+		t.Error("End must get the forwarded body as it was")
 	}
 }
