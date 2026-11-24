@@ -1,11 +1,12 @@
 package all_test
 
 import (
+	"net/http"
 	"slices"
 	"testing"
 
 	"github.com/rossoctl/context-guru/agent"
-	_ "github.com/rossoctl/context-guru/agent/all"
+	"github.com/rossoctl/context-guru/agent/all"
 )
 
 // Bob's model route (bob.ModelPath), written out: an import of agent/bob for its constant would
@@ -25,5 +26,27 @@ func TestImportingAllListsBob(t *testing.T) {
 	}
 	if !slices.Contains(names, "bob") {
 		t.Fatalf("All() names = %q, want bob among them", names)
+	}
+}
+
+func TestIsClientCompaction(t *testing.T) {
+	plain := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	phrase := []byte(`{"input":"You are performing a CONTEXT CHECKPOINT COMPACTION. x"}`)
+	h := http.Header{}
+	h.Set(agent.HeaderRequestKind, "compaction")
+	for _, tc := range []struct {
+		name string
+		h    http.Header
+		body []byte
+		want bool
+	}{
+		{"plugin mark", h, plain, true},
+		{"nil headers, phrase", nil, phrase, true},
+		{"nil headers, plain", nil, plain, false},
+		{"headers, plain", http.Header{}, plain, false},
+	} {
+		if got := all.IsClientCompaction(tc.h, tc.body); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
