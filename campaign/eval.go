@@ -75,6 +75,7 @@ func (e *EvalResult) InPlan(i int) int   { return e.Final.PlanFor(e.Scope[i]) }
 
 // Eval tunes the tenant's plan(s) on the fleet's rows resolved before the tenant's 70% point and refits on all of them. segBy "" is one plan
 // for the tenant; otherwise one tuner scope per (tenant, segment), each shrunk toward the fleet.
+// facts (same order as rows) may be nil only when segBy is empty: a segmentation reads each row's facts, and a nil slice panics.
 func Eval(rows []predictive.AutoRow, facts []RowFacts, tenant string, until int64, segBy string) *EvalResult {
 	e := &EvalResult{Scope: make([]string, len(rows))}
 	seg := segFeatures[segBy]
@@ -127,7 +128,7 @@ func Eval(rows []predictive.AutoRow, facts []RowFacts, tenant string, until int6
 }
 
 // BuildSpec builds the campaign document for one tenant from the fleet's rows. It is the whole build; the host only does the I/O around it.
-// facts (same order as rows, may be nil) add the shipped default to the gate and allow segBy.
+// facts (same order as rows) add the shipped default to the gate and are needed for segBy: facts may be nil only when segBy is empty.
 func BuildSpec(rows []predictive.AutoRow, facts []RowFacts, tenant string, since, until int64, sessionEnd bool, segBy string) (spec map[string]any, rec string) {
 	e := Eval(rows, facts, tenant, until, segBy)
 	sess := map[string]bool{}

@@ -193,10 +193,9 @@ func Rows(reqs []*kvcache.Request, price func(model string) (pIn, pOut, pRead, p
 			Turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), Prefix: r.CachedContext,
 			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: r.Agent, Stop: r.StopReason, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
 		f.Span = math.Inf(1)
-		if ss := byThr[tk]; true {
-			if j := sort.Search(len(ss), func(i int) bool { return ss[i] > r.TS }); j < len(ss) {
-				f.Span = float64(ss[j]-end) / 1000
-			}
+		ss := byThr[tk]
+		if j := sort.Search(len(ss), func(i int) bool { return ss[i] > r.TS }); j < len(ss) {
+			f.Span = float64(ss[j]-end) / 1000
 		}
 		if r.HasNext {
 			f.Gap = float64(r.NextTS-end) / 1000

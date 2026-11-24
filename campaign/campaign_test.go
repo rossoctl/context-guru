@@ -345,11 +345,10 @@ func TestAutoPlansNeverPingLaterThanTheConfiguredInterval(t *testing.T) {
 		if conf == 0 {
 			want = config.DefaultKeepAliveIdle * time.Second
 		}
-		for _, idle := range []float64{AutoX, 280, 300} {
-			got := Apply(keepalive.Policy{KeepAlive: true, Idle: conf, MaxPings: 2}, 3, true) // the idle the decision was scored at changes nothing
-			if got.Idle != want || got.MaxPings != 3 {
-				t.Errorf("a %v s campaign plan under a %v interval: %v x%d, want %v x3", idle, conf, got.Idle, got.MaxPings, want)
-			}
+		// Apply takes no idle: the spacing the decision was scored at cannot change the result, by the type.
+		got := Apply(keepalive.Policy{KeepAlive: true, Idle: conf, MaxPings: 2}, 3, true)
+		if got.Idle != want || got.MaxPings != 3 {
+			t.Errorf("a campaign plan under a %v interval: %v x%d, want %v x3", conf, got.Idle, got.MaxPings, want)
 		}
 	}
 }
