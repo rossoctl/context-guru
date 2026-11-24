@@ -28,6 +28,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Cancel a PR run that a newer push to the same PR replaced. Push and schedule runs use the commit sha in the
+# group, so each one has its own group. Without that, GitHub drops a queued run of the same group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
