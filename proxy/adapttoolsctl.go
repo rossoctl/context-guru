@@ -1,11 +1,11 @@
 package proxy
 
 import (
-	"github.com/rossoctl/context-guru/config"
 	"net/http"
 	"regexp"
 	"strings"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/skills"
 )
 

@@ -38,12 +38,38 @@ var editDocs = map[string]string{
 
 func editGolden(t *testing.T, name, got string) {
 	t.Helper()
-	want, err := os.ReadFile(filepath.Join("testdata", "editgolden", name+".golden"))
+	path := filepath.Join("testdata", "editgolden", name+".golden")
+	if os.Getenv("UPDATE_EDIT_GOLDEN") != "" {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("%s: %v (run with UPDATE_EDIT_GOLDEN=1)", name, err)
 	}
 	if string(want) != got {
 		t.Errorf("%s changed.\nwant:\n%s\ngot:\n%s", name, want, got)
+	}
+}
+
+func TestAdaptAccessorsReturnCopies(t *testing.T) {
+	c := AdaptCandidates()
+	c[0] = "changed"
+	if AdaptCandidates()[0] == "changed" || !IsAdaptCandidate("format") {
+		t.Error("a change to the returned candidates reached the next call")
+	}
+	g := AdaptKnobGrid()
+	g["extract"]["min_tokens"][0] = -1
+	g["extract"]["new"] = []int{1}
+	delete(g, "dedup")
+	n := AdaptKnobGrid()
+	if n["extract"]["min_tokens"][0] != 200 || n["extract"]["new"] != nil || n["dedup"] == nil {
+		t.Errorf("a change to the returned grid reached the next call: %v", n)
+	}
+	if AdaptKnobAllowed("extract", "min_tokens", -1) || !AdaptKnobAllowed("extract", "min_tokens", 200) {
+		t.Error("the grid check read the changed copy")
 	}
 }
 

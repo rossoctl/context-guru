@@ -68,11 +68,11 @@ import (
 // deterministic compaction components, in the default pipeline's order. Everything else in an
 // account's pipeline (cachesplit, toolfilter, the LLM components) keeps its place in the
 // applied config and is not run by the replay.
-var AdaptCompactionCandidates = config.AdaptCandidates
+var AdaptCompactionCandidates = config.AdaptCandidates()
 
 // adaptKnobs are the settings the search varies, and the only settings the apply route accepts
 // from a client. Values are the grid tried.
-var adaptKnobs = config.AdaptKnobs
+var adaptKnobs = config.AdaptKnobGrid()
 
 // AdaptCompactionKnobAllowed reports whether comp.key=v is a setting the apply route may store.
 func AdaptCompactionKnobAllowed(comp, key string, v int) bool {

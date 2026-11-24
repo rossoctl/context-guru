@@ -247,21 +247,37 @@ func WithComponent(pipeline []string, name string, want bool) []string {
 
 // --- adapt compaction ---------------------------------------------------------
 
-// AdaptCandidates are the components the adapt-compaction search may add, drop, reorder or
+// adaptCandidates are the components the adapt-compaction search may add, drop, reorder or
 // tune: the shipped deterministic compaction components, in the default pipeline's order.
 // Everything else in an account's pipeline keeps its place.
-var AdaptCandidates = []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract"}
+var adaptCandidates = []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract"}
 
-// AdaptKnobs are the settings the search varies, and the only settings the apply route accepts
+// adaptKnobs are the settings the search varies, and the only settings the apply route accepts
 // from a client. Values are the grid tried.
-var AdaptKnobs = map[string]map[string][]int{
+var adaptKnobs = map[string]map[string][]int{
 	"extract": {"min_tokens": {200, 300, 400, 800}},
 	"dedup":   {"min_tokens": {50, 100, 200}},
 }
 
+// AdaptCandidates returns a copy of the components the search may change, in the default
+// pipeline's order. A caller that edits the copy does not change the next answer.
+func AdaptCandidates() []string { return append([]string(nil), adaptCandidates...) }
+
+// AdaptKnobGrid returns a copy of the settings the search varies and the values tried.
+func AdaptKnobGrid() map[string]map[string][]int {
+	out := make(map[string]map[string][]int, len(adaptKnobs))
+	for c, knobs := range adaptKnobs {
+		out[c] = make(map[string][]int, len(knobs))
+		for k, vals := range knobs {
+			out[c][k] = append([]int(nil), vals...)
+		}
+	}
+	return out
+}
+
 // IsAdaptCandidate reports whether name is one of AdaptCandidates.
 func IsAdaptCandidate(name string) bool {
-	for _, c := range AdaptCandidates {
+	for _, c := range adaptCandidates {
 		if c == name {
 			return true
 		}
@@ -271,7 +287,7 @@ func IsAdaptCandidate(name string) bool {
 
 // AdaptKnobAllowed reports whether comp.key=v is a setting the apply route may store.
 func AdaptKnobAllowed(comp, key string, v int) bool {
-	for _, x := range AdaptKnobs[comp][key] {
+	for _, x := range adaptKnobs[comp][key] {
 		if x == v {
 			return true
 		}
@@ -332,7 +348,7 @@ func EditAdaptCompaction(doc string, candidates []string, settings map[string]ma
 	base := f.Pipeline
 	f.Pipeline = AdaptMerge(f.Pipeline, candidates)
 	// The candidates are the only names this may take out; ApplyForm keeps anything else.
-	f.PipelineKnown, f.PipelineBase = AdaptCandidates, base
+	f.PipelineKnown, f.PipelineBase = AdaptCandidates(), base
 	// Nor does it state the cache block: a parsed form carries one, and ApplyForm would write
 	// `keepalive: false` into a document that never said it, pinning the account against a
 	// default that later changes.
