@@ -730,7 +730,9 @@ class Folders(Sandbox):
         self.assertEqual(code, 1)
         self.assertIn(f"PI_CODING_AGENT_DIR is set: Pi's settings are in {self.agent}", shown)
         self.assertIn("Use these folders? [y/N]", shown)
+        self.assertIn(f"XDG_STATE_HOME is set too: {self.root / 'state'}", shown)
         self.assertIn("open a new terminal", shown)
+        self.assertNotIn("unset", shown)  # unset does not fix a PATH that a test changed
         self.assertEqual(self.shell.ran("npm", "view"), [])  # nothing ran after the check
         self.assertEqual(self.shell.ran("pi", "install"), [])
 
@@ -759,6 +761,31 @@ class Folders(Sandbox):
         shown = self.everything_printed(terminal)
         self.assertIn("Start Pi with: pi (/usr/local/bin/pi)", shown)
         self.assertIn("open a new terminal", shown)
+
+    def test_the_default_folder_named_by_the_variable_asks_nothing(self):
+        self.shell.pi_version = "1.6.0"
+        default = self.root / ".pi/agent"
+        default.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(default)}):
+            code, terminal = self.run_install(["https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+        self.assertNotIn("Use these folders?", self.everything_printed(terminal))
+
+    def test_the_last_line_has_no_path_when_pi_is_not_on_path(self):
+        self.shell.pi_version = "1.6.0"
+        real_which = self.shell.which
+        with mock.patch.object(self.shell, "which", side_effect=lambda n: None if n == "pi" and self.shell.calls and
+                               any(c[0][:2] == ["python3", PLUGIN] and c[0][2] == "status" for c in self.shell.calls)
+                               else real_which(n)):
+            _, terminal = self.run_install(["y", "https://gw.example.com", "", "m", "y", "n"], [CANARY])
+        self.assertIn("Done. Start Pi with: pi.", self.everything_printed(terminal))
+        self.assertNotIn("pi (pi)", self.everything_printed(terminal))
+
+    def test_main_asks_about_the_folders(self):
+        with mock.patch.object(install_pi, "Installer") as made:
+            made.return_value.install.return_value = 0
+            install_pi.main(["install", "--source", str(self.source)])
+        self.assertTrue(made.call_args.kwargs["confirm_folders"])
 
     def test_uninstall_asks_the_same_question_so_a_test_folder_install_can_be_removed(self):
         self.shell.pi_version = "1.6.0"

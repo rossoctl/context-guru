@@ -192,14 +192,16 @@ class Installer:
         self.terminal.say(f"Pi's settings: {pi_plugin.agent_dir()}")
         self.terminal.say(f"context-guru's data: {pi_plugin.state_dir()}")
         moved = os.environ.get("PI_CODING_AGENT_DIR")
-        if not (self.confirm_folders and moved):
+        default = Path.home() / ".pi/agent"
+        if not (self.confirm_folders and moved) or Path(os.path.abspath(pi_plugin.agent_dir())) == default:
             return
         self.terminal.say(f"PI_CODING_AGENT_DIR is set: Pi's settings are in {pi_plugin.agent_dir()}, not in "
-                          f"{Path.home() / '.pi/agent'}." + (f" XDG_STATE_HOME is set too: {os.environ['XDG_STATE_HOME']}."
+                          f"{default}." + (f" XDG_STATE_HOME is set too: {os.environ['XDG_STATE_HOME']}."
                                                               if os.environ.get("XDG_STATE_HOME") else ""))
         if not self.yes("Use these folders?", default=False):
-            raise Stop("nothing was changed. If this terminal is left from a test, open a new terminal, or run "
-                       "`unset PI_CODING_AGENT_DIR XDG_STATE_HOME`, then run this again.")
+            # Only a new terminal: a test can also have put another pi first on PATH, which unset does not undo.
+            raise Stop("nothing was changed. If this terminal is left from a test, open a new terminal and run "
+                       "this again there.")
 
     def latest_pi(self):
         out = self.shell.run(["npm", "view", PI_NPM, "version", f"--registry={self.registry}"])
@@ -468,9 +470,9 @@ class Installer:
         if self.yes("Send one short test prompt through Pi now?", default=False):
             out = self.shell.run(["pi", "-p", "Reply with the single word: ok"], stdin="")
             self.terminal.say(f"Pi answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
-        where = self.shell.which("pi") or "pi"
-        self.terminal.say(f"Done. Start Pi with: pi ({where}). If your terminal does not find this one (for example "
-                          "after Pi was installed or updated), open a new terminal.")
+        where = self.shell.which("pi")
+        self.terminal.say(f"Done. Start Pi with: pi{f' ({where})' if where else ''}. If your terminal does not find "
+                          "this one (for example after Pi was installed or updated), open a new terminal.")
 
     # ----------------------------------------------------------------------------- uninstall
     def uninstall(self):
