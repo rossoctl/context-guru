@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // Three measured counter-examples to "a correlated subquery is the slow shape", collected
@@ -56,6 +58,7 @@ import (
 // qualifies a request is settled at write time, where the rates and the session history
 // are both in hand. Cheaper, and the reason it is cheaper is the reason it is correct.
 func TestOverviewStaysFastOnALargeWindow(t *testing.T) {
+	testutil.RequireTiming(t)
 	db := openTestDB(t)
 	const n = 10_000
 	batch := make([]*Event, 0, 1000)

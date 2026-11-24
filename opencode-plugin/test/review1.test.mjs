@@ -9,7 +9,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-review
 process.env.CONTEXT_GURU_PORT_START = "9300"
 
 import plugin, { stateDirectory, effectiveSettings, withLock } from "../index.js"
-import { stubProxyBinary, deadProxyBinary, pickyProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, deadProxyBinary, pickyProxyBinary, waitUntilUnhealthy, timingOnly } from "./helpers.mjs"
 
 const context = (directory, logs = []) => ({ directory, client: { app: { log: async ({ body }) => { logs.push(body.message) } } } })
 const anthropic = (baseURL = "https://api.anthropic.com") => ({ anthropic: { options: { baseURL } } })
@@ -156,7 +156,7 @@ test("the download runs outside the lock", async () => {
   }
 })
 
-test("startProxy fails fast when its own child exits, and leaves the base URL alone", async () => {
+test("startProxy fails fast when its own child exits, and leaves the base URL alone", timingOnly, async () => {
   const directory = "/tmp/context-guru-r1-child-exits"
   process.env.CONTEXT_GURU_BIN = deadProxyBinary()
   const logs = []
