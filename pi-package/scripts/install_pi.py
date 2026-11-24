@@ -186,6 +186,34 @@ class Installer:
             raise Stop("Pi needs Node.js 22.19 or later. Install it from https://nodejs.org, then run this again. "
                        "Nothing was changed.")
 
+    def open_pi_windows(self):
+        """Process ids of running Pi windows. macOS shows Pi as `pi`; on Linux node can keep its own name, so the
+        path of Pi's program is matched too."""
+        pids = set()
+        for cmd in (["pgrep", "-x", "pi"], ["pgrep", "-f", "pi-coding-agent/dist"]):
+            out = self.shell.run(cmd)
+            if out.returncode == 0:
+                pids.update(int(line) for line in out.stdout.split() if line.isdigit())
+        pids.discard(os.getpid())
+        return sorted(pids)
+
+    @staticmethod
+    def windows_text(pids):
+        return (f"{len(pids)} Pi window{'s are' if len(pids) != 1 else ' is'} open "
+                f"(process {', '.join(str(p) for p in pids)})")
+
+    def ask_before_turning_off(self):
+        """#1341: a Pi window that is open while context-guru goes off keeps its address in memory, and every
+        request of it fails until it restarts. A window with a newer package switches by itself on its next prompt;
+        an older one does not. Ask first."""
+        pids = self.open_pi_windows()
+        if not pids:
+            return
+        self.terminal.say(f"{self.windows_text(pids)}. Close them first: a window that is open now can keep "
+                          "context-guru's address, and its requests fail until you restart it.")
+        if not self.yes("Go on anyway?", default=False):
+            raise Stop("nothing was changed. Close the open Pi windows, then run this again.")
+
     def check_folders(self):
         """Name the folders this run uses. A terminal left from a test can move Pi's settings with
         PI_CODING_AGENT_DIR; then ask, and stop on no, before any change (#1319)."""
@@ -290,6 +318,7 @@ class Installer:
                 # setup starts without the old upstream in its record.
                 self.terminal.say("context-guru routes Pi now. It is turned off first, so that the new connection "
                                   "replaces your real endpoint.")
+                self.ask_before_turning_off()
                 off = self.plugin_run("uninstall")
                 if off.get("models_restore") not in ("restored", "no_record"):
                     raise Stop(f"context-guru could not put Pi's endpoint back ({off.get('models_restore')}). "
@@ -470,6 +499,11 @@ class Installer:
         if self.yes("Send one short test prompt through Pi now?", default=False):
             out = self.shell.run(["pi", "-p", "Reply with the single word: ok"], stdin="")
             self.terminal.say(f"Pi answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
+        pids = self.open_pi_windows()
+        if pids:
+            count = f"{len(pids)} Pi window{'s' if len(pids) != 1 else ''} that {'were' if len(pids) != 1 else 'was'}"
+            self.terminal.say(f"{count} open before uses context-guru only after you restart it "
+                              f"(process {', '.join(str(p) for p in pids)}).")
         where = self.shell.which("pi")
         self.terminal.say(f"Done. Start Pi with: pi{f' ({where})' if where else ''}. If your terminal does not find "
                           "this one (for example after Pi was installed or updated), open a new terminal.")
@@ -483,6 +517,7 @@ class Installer:
             plugin = self.plugin if Path(self.plugin).exists() else str(self.source / "scripts/pi_plugin.py")
             self.step("Turn context-guru off", "It puts Pi's models.json back to Pi's own endpoints, and stops and "
                                                "removes the background service.")
+            self.ask_before_turning_off()
             # context-guru off first: this puts the route back in models.json and stops the service.
             off = facts(self.shell.run(["python3", plugin, "uninstall"]).stdout)
             details = ", ".join(f"{name}: {off[fact]}" for name, fact in (("models.json", "models_restore"),

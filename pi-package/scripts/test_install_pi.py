@@ -50,6 +50,7 @@ class FakeShell:
         self.plan_preset, self.plan_strategy, self.restore = "off", "auto", "restored"
         self.keychain_has_item = True
         self.realistic, self.routing = False, None
+        self.open_pi = []  # process ids of open Pi windows
 
     def which(self, name):
         if name == "pi":
@@ -59,6 +60,8 @@ class FakeShell:
     def run(self, cmd, stdin=None):
         self.calls.append((list(cmd), stdin))
         ok = lambda out="": subprocess.CompletedProcess(cmd, 0, out, "")
+        if cmd[0] == "pgrep":
+            return subprocess.CompletedProcess(cmd, 0 if self.open_pi else 1, "".join(f"{p}\n" for p in self.open_pi), "")
         if cmd[:2] == ["node", "--version"]:
             return ok(self.node + "\n")
         if cmd[:2] == ["pi", "--version"]:
@@ -796,6 +799,57 @@ class Folders(Sandbox):
         terminal = FakeTerminal(["y", "y"])
         self.assertEqual(self.installer(terminal, confirm_folders=True).uninstall(), 0)
         self.assertIn(["python3", PLUGIN, "uninstall"], self.shell.ran("python3", PLUGIN))
+
+
+class OpenPiWindows(Sandbox):
+    """#1341: a Pi window open during a change keeps the old route in memory. The installer names open windows,
+    and asks before it turns context-guru off."""
+
+    def installed(self):
+        self.shell.pi_version = "1.6.0"
+        code, terminal = self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
+        self.assertEqual(code, 0, self.everything_printed(terminal))
+
+    def test_uninstall_with_open_pi_windows_asks_and_no_changes_nothing(self):
+        self.installed()
+        self.shell.open_pi = [4242, 4343]
+        terminal = FakeTerminal(["n"])
+        self.assertEqual(self.installer(terminal).uninstall(), 1)
+        shown = self.everything_printed(terminal)
+        self.assertIn("2 Pi windows are open (process 4242, 4343)", shown)
+        self.assertIn("Go on anyway? [y/N]", shown)
+        self.assertIn("Close the open Pi windows", shown)
+        self.assertEqual(self.shell.ran("python3", PLUGIN, "uninstall"), [])
+
+    def test_uninstall_goes_on_after_a_yes(self):
+        self.installed()
+        self.shell.open_pi = [4242]
+        terminal = FakeTerminal(["y", "y"])
+        self.assertEqual(self.installer(terminal).uninstall(), 0)
+        self.assertIn(["python3", PLUGIN, "uninstall"], self.shell.ran("python3", PLUGIN))
+        self.assertIn("1 Pi window is open (process 4242)", self.everything_printed(terminal))
+
+    def test_no_open_window_asks_nothing(self):
+        self.installed()
+        terminal = FakeTerminal(["y"])
+        self.assertEqual(self.installer(terminal).uninstall(), 0)
+        self.assertNotIn("Go on anyway?", self.everything_printed(terminal))
+
+    def test_a_routed_rerun_that_turns_context_guru_off_asks_first(self):
+        self.shell.realistic = True
+        self.installed()
+        self.shell.open_pi = [4242]
+        code, terminal = self.install(answers=["n", "n"])  # do not keep; then: do not go on
+        self.assertEqual(code, 1)
+        self.assertIn("Go on anyway? [y/N]", self.everything_printed(terminal))
+        self.assertEqual(self.shell.ran("python3", PLUGIN, "uninstall"), [])
+
+    def test_after_an_install_open_windows_are_told_to_restart(self):
+        self.shell.open_pi = [4242]
+        self.installed()
+        _, terminal = self.install(answers=["", "y", "n"])  # keep the connection; on; no prompt
+        self.assertIn("1 Pi window that was open before uses context-guru only after you restart it",
+                      self.everything_printed(terminal))
 
 
 class TheKeyStaysSecret(Sandbox):
