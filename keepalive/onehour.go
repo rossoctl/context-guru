@@ -495,3 +495,22 @@ func (k *Keeper) checkOneHourFirstDowngrade(key string, provider bschemas.ModelP
 		"a request with 1-hour markers wrote tokens and was billed at 5 minutes (a silent downgrade)",
 		"cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h)
 }
+
+// OneHourFirstFor is the apply hook of the 1-hour modes D and C (#1261), with the policy decision in
+// the library. resolve returns the policy in force for the request: the account's with its stored
+// strategy, so a manager's strategy that switches 1-hour-on-wait on counts, like for the pings. It
+// is called only for a main-thread request that declares tools, so a host skips the policy chain for
+// the rest. model is the model of the FINAL body apply hands over, the one Record keys the route
+// state by too.
+func (k *Keeper) OneHourFirstFor(resolve func() Policy, tenant, session, threadID string,
+	provider bschemas.ModelProvider, endpoint, route, model string, toolsDeclared bool) bool {
+	if threadID != "" || !toolsDeclared || session == "" {
+		return false // only the main thread is ever relabelled
+	}
+	pol := resolve()
+	if !pol.OneHourOnWait && !pol.OneHourAlways {
+		return false
+	}
+	return k.OneHourFirst(tenant, session, threadID, provider, endpoint, route, model, toolsDeclared,
+		OneHourMode{Always: pol.OneHourAlways, RebuildTokens: int64(pol.OneHourRebuildTokens)})
+}

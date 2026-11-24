@@ -663,4 +663,4 @@ Version one: items 1 to 3, and the savings dashboard (6.2). Tokens and money bot
 - The OTel SDK aggregates in memory and keeps no queue of points, so a failed push loses no count.
 - Counters restart at 0 when a process restarts. Use `rate()` and `increase()`, which handle this.
 - Do not use the Pushgateway.
-- Related existing code: `proxy/promexport.go` (pull exporter, to retire), `dash/metrics_export.go` (to retire), `deploy/grafana/` (to move or delete), `proxy/accountant_*.go` (the accountant wiring), `dash/accountant_price.go` (pricing).
+- Related existing code: `proxy/promexport.go` (pull exporter, to retire), `dash/metrics_export.go` (to retire), `deploy/grafana/` (to move or delete), `proxy/accountant_*.go`, `accwire/` and `accrec/` (the accountant wiring), `dash/accountant_price.go` (pricing).

@@ -1,4 +1,4 @@
-package proxy
+package accrec
 
 import (
 	"sync"
@@ -7,21 +7,21 @@ import (
 	"github.com/rossoctl/accountant"
 )
 
-// siblingsMax bounds siblingStore by session, and siblingThreadsMax by thread within a session. A
+// siblingsMax bounds SiblingStore by session, and siblingThreadsMax by thread within a session. A
 // session past the thread cap drops its oldest thread: a sibling that old is past any TTL anyway.
 const (
 	siblingsMax       = 4096
 	siblingThreadsMax = 64
 )
 
-// siblingStore remembers, per session, the last forwarded body each thread sent and when. It gives
+// SiblingStore remembers, per session, the last forwarded body each thread sent and when. It gives
 // EntryFacts.SharedWarm: the prefix of a request's forwarded body that another thread of the session
 // kept warm inside the TTL, which a keep-alive rescue must not credit (accountant R54). It holds the
 // library's Body (hashes and sizes only, R2) and the breakpoints, never content.
 //
 // The store lock is held only to find or create a session; each session has its own lock, so
 // requests of different sessions do not wait on each other's scans.
-type siblingStore struct {
+type SiblingStore struct {
 	mu   sync.Mutex
 	m    map[string]*siblingSession
 	tick uint64 // a use counter, for least-recently-used eviction of sessions
@@ -39,11 +39,11 @@ type siblingEntry struct {
 	bps []accountant.Breakpoint
 }
 
-func newSiblingStore() *siblingStore { return &siblingStore{m: map[string]*siblingSession{}} }
+func NewSiblingStore() *SiblingStore { return &SiblingStore{m: map[string]*siblingSession{}} }
 
 // session returns the session's entry, creating it; at the cap it drops the least recently used
 // session, which only loses that session's sibling facts.
-func (s *siblingStore) session(id string) *siblingSession {
+func (s *SiblingStore) session(id string) *siblingSession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tick++
@@ -65,11 +65,11 @@ func (s *siblingStore) session(id string) *siblingSession {
 	return ss
 }
 
-// sharedWarm returns the last position of fwd that a sibling of thread kept warm inside ttl before at,
+// SharedWarm returns the last position of fwd that a sibling of thread kept warm inside ttl before at,
 // then records this request as the thread's last. The host chooses the siblings: another thread of the
 // session, last seen inside the TTL and not after this request. The library decides where the shared
 // prefix ends (accountant.SharedWarmFrom, R54). Nil when no sibling did.
-func (s *siblingStore) sharedWarm(session, thread string, at time.Time, ttl time.Duration,
+func (s *SiblingStore) SharedWarm(session, thread string, at time.Time, ttl time.Duration,
 	fwd accountant.Body, bps []accountant.Breakpoint) *accountant.Position {
 	if s == nil || session == "" {
 		return nil
