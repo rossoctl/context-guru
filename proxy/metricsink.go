@@ -7,6 +7,7 @@ import (
 
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -38,6 +39,32 @@ func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float
 		return pr.Output, false
 	}
 	return 0, true
+}
+
+// operatorsOutsideRegistry are the operator names, without the "context-guru." prefix, that book
+// savings but are not in components.Names(). The accountant's sink pushes a name outside
+// WithComponents as component="other", so without these the central dashboard cannot tell them
+// from an unlisted rewrite.
+//
+//   - keeper: the keep-alive ping's spend. accountant.PingOps names it; the library exports no
+//     constant for it, so TestMetricComponentsHoldTheKeeper reads it from PingOps.
+//   - headttl: a host option, not a pipeline component (apply/headttl.go, accwire/envelope.go).
+//   - tailbreakpoint: the trailing cache mark (apply/ops.go).
+//   - tooldefer: tool deferral (dash.DeferComponent).
+//   - expand, adjudicate: the tool declarations they inject (accwire.envelopeOwner).
+//   - expand_restore: the copy fixed_restore inserts (#481).
+//
+// dash's envelopeComponents lists the envelope operators for its own figures; this list is the
+// subset of them that is not a registered component.
+var operatorsOutsideRegistry = []string{
+	"keeper", "headttl", "tailbreakpoint", "tooldefer", "expand", "adjudicate", "expand_restore",
+}
+
+// MetricComponents is the component allow-list for NewMetricsSink and NewInferenceMetrics: every
+// registered component and every operator outside the registry, so each operator this proxy
+// books keeps its own `component` label.
+func MetricComponents() []string {
+	return append(components.Names(), operatorsOutsideRegistry...)
 }
 
 // NewMetricsSink returns the accountant sink for the savings counters, priced from prices. A nil
