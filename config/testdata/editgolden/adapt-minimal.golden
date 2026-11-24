@@ -1,0 +1,8 @@
+components:
+  dedup:
+    min_tokens: 100
+pipeline:
+  - dedup
+  - format
+  - toon
+PIPELINE dedup,format,toon

@@ -254,7 +254,7 @@ func (p Policy) SpanPings(s SpanFacts) (pings int, idle time.Duration) {
 		q := p.ForOneHour()
 		return q.MaxPings, q.Idle
 	}
-	if p.Idle >= 300*time.Second {
+	if p.Idle >= OneHourIdleFloor {
 		return p.MaxPings, p.Idle
 	}
 	return p.WaitPings(w, s.Subagent), p.Idle

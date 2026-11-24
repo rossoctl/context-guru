@@ -515,7 +515,7 @@ trail.
 Running the proxy by hand needs no unit at all:
 
 ```bash
-CG_LOG_LEVEL=debug context-guru-proxy --preset codesmart      # text on stderr, nothing shipped
+CG_LOG_LEVEL=debug context-guru-proxy --preset conservative      # text on stderr, nothing shipped
 ```
 
 ### The four questions, as LogQL

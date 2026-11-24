@@ -1,5 +1,7 @@
 package schema
 
+import "github.com/tidwall/gjson"
+
 // The wire dialects a request body can be in. The provider alone does not say: OpenAI speaks two
 // (Chat Completions and Responses), and they differ in where the transcript lives (`messages` or
 // `input`), how a tool is declared and how a tool call is written.
@@ -23,3 +25,34 @@ func WireFor(provider, api string) string {
 
 // IsResponses reports whether wire is the Responses dialect.
 func IsResponses(wire string) bool { return wire == WireResponses }
+
+// ServerHeldHistory says whether an OpenAI Responses body leaves part of its prompt on the provider's side, so
+// the host cannot see the prefix the provider reads. It has two forms, and they differ on purpose until #1298 is
+// decided:
+//
+//   - wide (the accountant's rule): previous_response_id (the earlier turns of a response chain), conversation (a
+//     stored conversation's items, a string id or an object), and an input item of type item_reference (an item the
+//     provider expands from its own store). The accountant has no record for such a request (fallback
+//     server_held_history, #899).
+//   - narrow (apply's and expand's rule): previous_response_id only.
+//
+// Making apply and expand use the wide form is a behaviour change. It is held in #1298. Do not widen the narrow
+// callers here.
+func ServerHeldHistory(body []byte, wide bool) bool {
+	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+		return true
+	}
+	if !wide {
+		return false
+	}
+	switch c := gjson.GetBytes(body, "conversation"); {
+	case c.Type == gjson.String && c.String() != "", c.IsObject():
+		return true
+	}
+	held := false
+	gjson.GetBytes(body, "input").ForEach(func(_, it gjson.Result) bool {
+		held = it.Get("type").String() == "item_reference"
+		return !held
+	})
+	return held
+}

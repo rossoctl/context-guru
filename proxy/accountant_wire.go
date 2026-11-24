@@ -2,28 +2,12 @@ package proxy
 
 import (
 	"log/slog"
-	"strconv"
-	"strings"
-	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
-	"github.com/rossoctl/context-guru/accwire"
-	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/thread"
-	"github.com/rossoctl/context-guru/tooldefer"
-	"github.com/tidwall/gjson"
 )
-
-// accThreadID maps the primary thread to "main", the library's name for it.
-func accThreadID(id string) string {
-	if id == thread.Primary {
-		return "main"
-	}
-	return id
-}
 
 // accBegin notes the body the agent sent. It does no work: parsing and hashing a large body cost a request
 // milliseconds before it went upstream (issue #1059), so the record is opened by accEnd, off the request
@@ -99,27 +83,6 @@ func (c *capture) accRun(meta accountant.RequestMeta, client []byte, th thread.R
 	c.accEndNow(th, forwarded, ops)
 }
 
-// responsesServerHeldHistory says whether a Responses body leaves part of its prompt on the provider's side, so
-// the proxy cannot see the prefix the provider reads and bills. Three fields do that: previous_response_id
-// (the earlier turns of a response chain), conversation (a stored conversation's items, a string id or an
-// object), and an input item of type item_reference (an item the provider expands from its own store). The
-// accountant has no record for such a request (fallback server_held_history, #899).
-func responsesServerHeldHistory(body []byte) bool {
-	if gjson.GetBytes(body, "previous_response_id").String() != "" {
-		return true
-	}
-	switch c := gjson.GetBytes(body, "conversation"); {
-	case c.Type == gjson.String && c.String() != "", c.IsObject():
-		return true
-	}
-	held := false
-	gjson.GetBytes(body, "input").ForEach(func(_, it gjson.Result) bool {
-		held = it.Get("type").String() == "item_reference"
-		return !held
-	})
-	return held
-}
-
 // accEndNow records the thread, the forwarded body and the operations. A thread that continues
 // another by content names it as its parent, but starts with no state of its own: accountant carries
 // Thread.Parent and does not read it (design §4.1).
@@ -127,10 +90,10 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	if c.accReq == nil {
 		return
 	}
-	t := accountant.Thread{ID: accThreadID(th.ID)}
+	t := accountant.Thread{ID: accrec.ThreadID(th.ID)}
 	c.accThread = t.ID
 	if parent, ok := th.InheritsFrom(); ok {
-		t.Parent = accThreadID(parent)
+		t.Parent = accrec.ThreadID(parent)
 	}
 	// The envelope changes report no operation of their own: envelopeOps finds them from the two
 	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
@@ -147,7 +110,7 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	// no rescue. Nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not
 	// measured. The rescue is itself evidence (it credits only tokens the return READ), see Keeper.ReadSetsTTL.
 	if c.readSets != nil && c.readSets(bschemas.ModelProvider(c.provider), c.endpoint, c.route, c.accMeta.Model,
-		facts.PingTTL >= time.Hour) {
+		facts.PingTTL >= accrec.OneHourTTL) {
 		facts.Provider.ReadSetsTTL = true
 	}
 	c.accPingWindow, c.accFacts = facts.PingWindow, facts
@@ -156,7 +119,7 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 
 // accDeferralUnplaced names why a request books no figure when its deferral cannot be placed. The log line says
 // acc_fallback deferral_unplaced (noResultWhy). The stored fallback of the event is no_result.
-const accDeferralUnplaced = "deferral_unplaced"
+const accDeferralUnplaced = accrec.DeferralUnplaced
 
 // accBilled is the body the accountant records. A request deferral did not change returns the forwarded body. A
 // deferral whose stub cannot be placed (a stub that would not be smaller than its definition) also returns the
@@ -166,11 +129,11 @@ func (c *capture) accBilled(forwarded []byte) []byte {
 	if c.accPreDefer == nil {
 		return forwarded
 	}
-	own := ownDeferred(forwarded, c.accPreDefer)
+	own := accrec.OwnDeferred(forwarded, c.accPreDefer)
 	if len(own) == 0 {
 		return forwarded
 	}
-	b, ok := billedBody(forwarded, own)
+	b, ok := accrec.BilledBody(forwarded, own)
 	if !ok {
 		c.accNoResult = accDeferralUnplaced
 		return forwarded
@@ -178,88 +141,18 @@ func (c *capture) accBilled(forwarded []byte) []byte {
 	return b
 }
 
-// envelopeOpsFor is envelopeOps for the body the accountant records, with tool deferral's edits attributed to the
-// tooldefer operator so its row does not land on toolschema (#908). Deferral's edits are two: the definitions the
-// proxy deferred, each now a stub (R56), and the search tool it adds, an ordinary added declaration.
-//
-// Each keeps the ChangeID envelopeOps gave it, and only the operator changes. The ChangeID is what the library
-// replaces by, so a thread whose state was written before this change (per-tool cg:toolschema:decl-rewritten and
-// decl-added operations) has them replaced on its next request instead of kept beside a second copy, and a deferred
-// set that grows or shrinks mid-thread re-reports each surviving tool under its own stable ID. One merged operation
-// would carry a hash of the whole set, so any change of the set would orphan it.
+// envelopeOpsFor is accrec.EnvelopeOpsFor for this request's client body.
 func (c *capture) envelopeOpsFor(billed []byte) []accountant.Operation {
-	ops := accwire.For(c.accClient).EnvelopeOps(c.accClient, billed)
-	if c.accPreDefer == nil {
-		return ops
-	}
-	// Match by NAME: a rewritten declaration is reported at its CLIENT index, and a declaration removed before it
-	// makes the billed index smaller.
-	own := ownDeferred(billed, c.accPreDefer)
-	atBilled := map[string]int{}
-	for i, t := range gjson.GetBytes(billed, "tools").Array() {
-		atBilled[t.Get("name").String()] = i
-	}
-	client := gjson.GetBytes(c.accClient, "tools").Array()
-	out := make([]accountant.Operation, 0, len(ops))
-	for _, o := range ops {
-		switch {
-		case o.Operator == "context-guru.toolschema" && o.At.Section == accountant.SectionTools &&
-			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && o.At.Index < len(client) &&
-			own[client[o.At.Index].Get("name").String()] && isStub(billed, atBilled[client[o.At.Index].Get("name").String()]):
-			o.Operator = "context-guru.tooldefer"
-		case o.Operator == "context-guru.toolschema" && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
-			gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String() == tooldefer.SearchName:
-			o.Operator = "context-guru.tooldefer"
-		}
-		out = append(out, o)
-	}
-	return out
+	return accrec.EnvelopeOpsFor(c.accClient, billed, c.accPreDefer)
 }
 
-// isStub says whether the tool at i of the billed body is a deferred stub: a bare name and the defer_loading mark.
-func isStub(billed []byte, i int) bool {
-	t := gjson.GetBytes(billed, "tools."+strconv.Itoa(i))
-	return t.Get("defer_loading").Bool() && t.Get("name").Exists()
-}
-
-// entryFacts builds the facts the library needs about the entry this request wrote. A keep-alive
-// ping for the thread since its last request is read from pings (nil = none; the capture drops it
-// once the request is priced) and supplies
-// LastPing, PingWindow and the ping's usage. PingRead stays nil: the keeper replays the previous
-// request's forwarded body, so the library derives the extent the ping read from its usage
-// (accountant design §5.2).
-//
-// The Lifetime kind comes from apply.CacheLifetime, the same rule the cold gate uses: an exact expiry
-// for a provider with explicit breakpoints, a minimum for OpenAI's 30-minute entries, else unknown.
-// An unknown lifetime cannot prove an expiry, so the library would never rescue after a gap past
-// the TTL (design §5.2). The TTL is 1h only when EVERY breakpoint of the forwarded body asks for it,
-// as the keeper decides: a 1h head over a 5m tail leaves a tail that expires in five minutes. The
-// keeper also needs the billed tier, which is known only after the response. These facts are written
-// before it, so they hold the ASKED tier. accBilledTTL corrects it once the usage arrives, before the
-// library prices the request (context-guru#919).
+// entryFacts is accrec.EntryFacts with the proxy's ping store.
 func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte, pings *PingStore,
 	session string, t accountant.Thread) accountant.EntryFacts {
-	facts := accountant.EntryFacts{TTL: 5 * time.Minute, Lifetime: accountant.LifetimeUnknown}
-	// The kind comes from the cold gate's rule. The duration is taken again with the keeper's tier
-	// (every breakpoint asks 1h): apply.CacheLifetime lengthens it for a single 1h ask.
-	switch ttl, kind := apply.CacheLifetime(provider, model, forwarded); kind {
-	case apply.CacheLifetimeExact:
-		facts.TTL, facts.Lifetime = modelinfo.CacheLifetime(string(provider), model, apply.AllBreakpointsAskExtendedTTL(forwarded)),
-			accountant.LifetimeExact
-	case apply.CacheLifetimeMinimum:
-		facts.TTL, facts.Lifetime = ttl, accountant.LifetimeMinimum
-	}
-	if pf, ok := pings.peek(accPingKey(session, t.ID)); ok {
-		pf.Apply(&facts)
-	}
-	return facts
+	return accrec.EntryFacts(provider, model, forwarded, pings, session, t) // a nil store has no facts (Peek is nil-safe)
 }
 
-// accPingKey is the key the ping store keeps one thread's ping facts under: the session and the
-// thread id as the accountant sees it ("main" for the primary thread).
-func accPingKey(session, threadID string) string { return session + "\x00" + threadID }
-
-// accBilledTTL sets the entry TTL to the tier the response billed, when a gateway downgraded the tier
+// accBilledTTL applies accrec.BilledTTL, which holds the rule: it sets the entry TTL to the tier the response billed, when a gateway downgraded the tier
 // the request asked for (1h). It runs after the usage arrives and before Compute, which reads the facts'
 // TTL for the verdict and stores it as the entry's TTL. Without it the library treats a gap of 5 to 60
 // minutes as hot and can overstate a rescue by up to 55 minutes of idle time.
@@ -274,22 +167,9 @@ func (c *capture) accBilledTTL(u Usage) {
 	if c == nil || c.accReq == nil {
 		return
 	}
-	f := c.accFacts
-	if f.Lifetime != accountant.LifetimeExact || f.TTL <= 5*time.Minute {
-		return
-	}
-	key := accPingKey(c.accMeta.Session, c.accThread)
-	prev, known := c.savings.billed1h.get(key)
-	if !known {
-		prev = true // no earlier write: the asked tier stands on a read-only turn
-	}
-	oneHour := keepalive.BilledOneHour(u.CacheWrite, u.CacheWrite1h, prev)
-	if u.CacheWrite > 0 || oneHour {
-		c.savings.billed1h.set(key, oneHour) // a read-only turn leaves the remembered tier alone
-	}
-	if !oneHour {
-		c.accFacts.TTL = 5 * time.Minute
+	if accrec.BilledTTL(c.savings.billed1h, accrec.PingKey(c.accMeta.Session, c.accThread), c.accFacts, u.CacheWrite, u.CacheWrite1h) {
+		c.accFacts.TTL = accrec.BaseTTL
 		// The library lowers the facts' TTL and the TTL of every 1h breakpoint together, on a copy.
-		c.accReq.LowerTTL(5 * time.Minute)
+		c.accReq.LowerTTL(accrec.BaseTTL)
 	}
 }

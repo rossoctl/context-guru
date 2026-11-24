@@ -34,7 +34,7 @@ const (
 	// OneHourIdleFloor is the Idle at or above which a policy is an EXPLICIT 1-hour schedule (a
 	// strategy with HeadTTL1h): no 5-minute Idle can reach it, because MaxOverrideIdle refuses it.
 	// Such a policy does not take the per-wait plan.
-	OneHourIdleFloor = 300 * time.Second
+	OneHourIdleFloor = modelinfo.AnthropicCacheTTL5m
 	// The ping-count band. The upper end is bounded again, and more tightly, by MaxOverrideHold.
 	MinOverridePings = 1
 	MaxOverridePings = 11
@@ -171,4 +171,31 @@ func (o Override) ApplyOpenAI(pol Policy) Policy {
 	maxPings := int(MaxOverrideHold/pol.Idle) - 1
 	pol.MaxPings = min(o.Pol.MaxPings, maxPings)
 	return pol
+}
+
+// WorstCasePings is the most pings one armed override can send before it expires: time until expiry
+// over the idle interval, at least 1. It is a CEILING and not an estimate.
+//
+// The count is `time until expiry / X`, one ping per idle interval, and NOT `K pings per (K+1)X
+// span`. A span ends the instant a real request arrives, so the worst case is a session whose
+// requests land just after each ping, restarting the clock every time and sending one ping per X
+// for the whole hold. The span form under-states by (K+1)/K: 8 against a true 12 at the shipped
+// defaults, and 2x at K=1. Under-stating a ceiling on a spend authorization is the one direction
+// that cannot be defended. A zero idle gives 0 (nothing can be computed).
+func (o Override) WorstCasePings(now time.Time) int64 {
+	if o.Pol.Idle <= 0 {
+		return 0
+	}
+	pings := int64(o.Until.Sub(now).Seconds() / o.Pol.Idle.Seconds())
+	if pings < 1 {
+		pings = 1
+	}
+	return pings
+}
+
+// PingUSD is the worst-case cost of one ping on a prefix of prefixTokens tokens: a cache read of the
+// prefix plus the output of the ping. Per-ping cost is bimodal, so it is priced from the session's
+// own last billed prefix and its own model's rates, never a service-wide average.
+func PingUSD(prefixTokens int64, cacheReadUSDPerToken, outputUSD float64) float64 {
+	return float64(prefixTokens)*cacheReadUSDPerToken + outputUSD
 }

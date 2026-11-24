@@ -1,22 +1,22 @@
-package proxy
+package accrec
 
 import "sync"
 
-// tierStoreMax bounds tierStore. Past it the store starts over: a thread that lost its entry meets
+// tierStoreMax bounds TierStore. Past it the store starts over: a thread that lost its entry meets
 // the asked tier on its next read-only turn, which is the behavior before the entry existed.
 const tierStoreMax = 8192
 
-// tierStore remembers, per thread, whether its last write was billed at the one-hour tier. It is
+// TierStore remembers, per thread, whether its last write was billed at the one-hour tier. It is
 // keyed like the ping store (accPingKey) and holds one bool per thread: no content.
-type tierStore struct {
+type TierStore struct {
 	mu sync.Mutex
 	m  map[string]bool
 }
 
-func newTierStore() *tierStore { return &tierStore{m: map[string]bool{}} }
+func NewTierStore() *TierStore { return &TierStore{m: map[string]bool{}} }
 
 // get returns the remembered tier and whether the thread has one. Nil-safe.
-func (s *tierStore) get(key string) (oneHour, ok bool) {
+func (s *TierStore) Get(key string) (oneHour, ok bool) {
 	if s == nil {
 		return false, false
 	}
@@ -27,7 +27,7 @@ func (s *tierStore) get(key string) (oneHour, ok bool) {
 }
 
 // set remembers the tier. Nil-safe.
-func (s *tierStore) set(key string, oneHour bool) {
+func (s *TierStore) Set(key string, oneHour bool) {
 	if s == nil {
 		return
 	}

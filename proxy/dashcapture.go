@@ -4,7 +4,6 @@ import (
 	"context"
 	"maps"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -12,6 +11,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -173,6 +173,8 @@ type capture struct {
 	hosted bool
 	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
 	kaRefreshedAt time.Time
+	// kaRefreshedOneHour: the entry's last touch was a live free 1-hour ping (kaArrival).
+	kaRefreshedOneHour bool
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -434,7 +436,7 @@ func (c *capture) noteKeepAlive(ka kaArrival) {
 	defer c.timed("noteKeepAlive")()
 	if c != nil {
 		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
-		c.kaRefreshedAt = ka.refreshedAt
+		c.kaRefreshedAt, c.kaRefreshedOneHour = ka.refreshedAt, ka.refreshedOneHour
 	}
 }
 
@@ -802,7 +804,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
-	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
+	e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
 	// saving is the accountant library's rescue, not computed from these.
@@ -831,25 +833,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
-		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
-		// dollars. The response body of a 4xx or 5xx can still carry a usage object, but the provider
-		// billed none of the request, so the library must not price a saving on it. DropUnbilledSavings
-		// zeroed the tokens above; skipping the compute leaves the event with no Result, so PriceMode
-		// books no dollars either (acc_fallback no_result, reason rejected_status). PingSavings refuses
-		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
-		if c.rejected() {
-			c.accNoResult = "rejected_status"
-		} else if c.accNoResult == accDeferralUnplaced {
-			// accEnd found a deferral it could not describe to the library (billedBody). Computing on the bodies
-			// as they are would fail the sum check, so no figure is computed and the log line names the reason.
-		} else if c.rounds <= 1 {
+		// The rules for which request books no figure are accrec.ShouldCompute's: a rejected status, a deferral
+		// that could not be placed, and several upstream rounds. DropUnbilledSavings zeroed the tokens above;
+		// skipping the compute leaves the event with no Result, so PriceMode books no dollars either
+		// (acc_fallback no_result). PingSavings refuses a non-2xx ping the same way.
+		compute, why := accrec.ShouldCompute(c.status, c.rounds, c.accNoResult)
+		if !compute {
+			c.accNoResult = why
+		}
+		if compute {
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
 				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
 					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
 			} else {
-				c.accNoResult = "compute_panicked"
+				c.accNoResult = accrec.ComputePanicked
 			}
 			// Pings went out in the gap this request ended, yet no ping facts were found for its thread:
 			// the credit for them is lost. Count it, so a host that does not wire the ping side shows.
@@ -857,7 +856,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 				c.savings.noteRescueFactsMissing()
 			}
 			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
+			c.pings.drop(accrec.PingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}
 	}
 	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
@@ -928,27 +927,16 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
-// the last real request, cut short by a ping that refreshed the entry later than that request.
+// entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold
+// check (#1350). attributionTTLMs, below, does the same for apply.BilledLifetimeMs.
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
-	if refreshedAt.IsZero() || sinceMs <= 0 {
-		return sinceMs
-	}
-	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
-		return age
-	}
-	return sinceMs
+	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
 
-// cacheAttributionTTLMs is the lifetime of the entry this request tried to read. oneHour is the
-// tier the provider BILLED that entry at (the whole write at 1h on the thread's previous request),
-// not the tier a request asked for: a one-hour ask the provider billed at five minutes stays
-// five minutes. false (also "unknown") keeps the five-minute lifetime.
-func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
-	if _, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil); kind != apply.CacheLifetimeExact {
-		return 0
-	}
-	return modelinfo.CacheLifetime(provider, model, oneHour).Milliseconds()
+// attributionTTLMs passes the two facts to apply.BilledLifetimeMs, which decides the lifetime the miss verdict
+// judges against: the tier the last write was billed at, and whether the last touch was a live free 1-hour ping.
+func (c *capture) attributionTTLMs(provider, model string, prevOneHour bool) int64 {
+	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, prevOneHour, c != nil && c.kaRefreshedOneHour)
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
@@ -995,21 +983,11 @@ func (c *capture) accDrop() {
 // rejected is true when the provider answered with a status that is not 2xx. Status 0 means no upstream
 // answered (such as /compact), and is not a rejection.
 func (c *capture) rejected() bool {
-	return c.status != 0 && (c.status < 200 || c.status > 299)
+	return accrec.Rejected(c.status)
 }
 
 func (c *capture) noResultWhy(usageOK bool) string {
-	switch {
-	case c.accReq == nil:
-		return "no_record" // no session, or the pipeline did not run: accEnd never noted a request, or the job opened none
-	case !usageOK:
-		return "no_usage"
-	case c.accNoResult != "":
-		return c.accNoResult
-	case c.rounds > 1:
-		return "upstream_rounds=" + strconv.Itoa(c.rounds)
-	}
-	return ""
+	return accrec.NoResultWhy(c.accReq != nil, usageOK, c.accNoResult, c.rounds)
 }
 
 // fillStrategyMeta sets the strategy metadata that one request alone decides (#1198): the host's

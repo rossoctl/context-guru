@@ -1,0 +1,13 @@
+components:
+  dedup:
+    min_tokens: 100
+  toolfilter:
+    always_defer:
+      - mcp__ops
+    defer: auto
+pipeline:
+  - toolfilter
+  - dedup
+  - format
+  - toon
+PIPELINE toolfilter,dedup,format,toon

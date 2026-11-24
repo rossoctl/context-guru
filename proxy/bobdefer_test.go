@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"github.com/rossoctl/context-guru/inband/inbandtest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -263,10 +264,10 @@ func TestBobDeferNeverRemovesAKeepListTool(t *testing.T) {
 // A streamed reply that calls our search is answered in band on Bob's route: Bob gets the tool's
 // own call, never ours, and the follow-up declares the tool at the end of `tools`.
 func TestBobDeferStreamedSearchIsAnsweredInBand(t *testing.T) {
-	r1 := ccRole("r1") + ccCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
-		ccCallArgs("r1", 0, `{"names":["office_edit"]}`) + ccFinish("r1", "tool_calls") + ccUsage("r1") + ccDone
-	r2 := ccRole("r2") + ccCallStart("r2", 0, "c2", "office_edit") + ccCallArgs("r2", 0, `{"path":"/w/a.docx"}`) +
-		ccFinish("r2", "tool_calls") + ccUsage("r2") + ccDone
+	r1 := inbandtest.CCRole("r1") + inbandtest.CCCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
+		inbandtest.CCCallArgs("r1", 0, `{"names":["office_edit"]}`) + inbandtest.CCFinish("r1", "tool_calls") + inbandtest.CCUsage("r1") + inbandtest.CCDone
+	r2 := inbandtest.CCRole("r2") + inbandtest.CCCallStart("r2", 0, "c2", "office_edit") + inbandtest.CCCallArgs("r2", 0, `{"path":"/w/a.docx"}`) +
+		inbandtest.CCFinish("r2", "tool_calls") + inbandtest.CCUsage("r2") + inbandtest.CCDone
 	up := &csUpstream{script: []string{r1, r2}}
 	us := httptest.NewServer(up)
 	defer us.Close()

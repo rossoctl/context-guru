@@ -108,3 +108,10 @@ createServer((request, response) => {
   chmodSync(path, 0o755)
   return path
 }
+
+// Timing tests assert a wall-clock bound. They fail on a busy machine with nothing wrong in the code.
+// They run only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). Pass this to
+// test() as an option: test(name, timingOnly, fn) or test(name, { ...timingOnly, timeout: 60000 }, fn).
+export const timingOnly = {
+  skip: process.env.CG_TIMING_TESTS !== "1" && "timing test: set CG_TIMING_TESTS=1 to run it",
+}

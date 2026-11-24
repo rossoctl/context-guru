@@ -35,7 +35,8 @@ type Opts struct {
 	//	orig := body // the request as the agent sent it, saved before the pipeline runs
 	//	agentID, _ := thread.HeaderAgentID(req.Header.Get(thread.AgentHeader))
 	//	opts.ThreadOf = func(session string) thread.Result {
-	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, thread.IsAgentCompaction(orig))
+	//		// agentall is github.com/rossoctl/context-guru/agent/all. With no headers, pass nil.
+	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, agentall.IsClientCompaction(req.Header, orig))
 	//		return res
 	//	}
 	//
@@ -44,6 +45,9 @@ type Opts struct {
 	// before it called ThreadOf (no message list, or no message it can use). Then call the same
 	// function yourself with Trace.Session, so the finish side below still has a thread.
 	// Trace.Session is "" in that case, so the result is the primary thread.
+	//
+	// lifecycle.Prepare runs the request-side steps in their order, and lifecycle.Request.Opts builds the
+	// shared options. The finish-side steps below are the host's until lifecycle.Finish takes them.
 	//
 	// Host contract. Once ThreadOf is set, components key their state by
 	// thread.Key(session, threadID). Make the finish-side calls with the same thread

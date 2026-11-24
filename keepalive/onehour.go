@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // The 1-hour-on-wait ping (#1243).
@@ -71,10 +72,11 @@ type oneHourRouteState struct {
 
 // oneHourProbe is what a free probe leaves for the thread's return.
 type oneHourProbe struct {
-	route  string
-	model  string    // the model the probe's request named, to see a model switch on the return
-	at     time.Time // when the ping started
-	prefix int64     // the billed prefix of the request it copied
+	route    string
+	provider bschemas.ModelProvider // for the two lifetimes the return is judged against
+	model    string                 // the model the probe's request named, to see a model switch on the return
+	at       time.Time              // when the ping started
+	prefix   int64                  // the billed prefix of the request it copied
 }
 
 // oneHourBlocked reports whether the route is switched off. Record uses it: a route that is off gets the
@@ -180,17 +182,16 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		// The last touch of this thread was a FREE 1-hour ping: until its next real request, or an hour
 		// from the ping, the clock counts an hour from it (OneHourTouches). Kept apart from the entry,
 		// which the keeper forgets after about 8 minutes.
-		if len(k.oneHourTouches) >= MaxTurnKeys {
-			k.oneHourTouches = map[string]oneHourTouch{}
-		}
-		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk}
+		k.makeRoomForTouchLocked(start)
+		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk,
+			provider: j.provider, model: e.model, st: j.st, alias: touchAliasOf(j)}
 		if st != nil && st.proven {
 			e.ttl1h = true // a route proven to grant: from now until the next real request it is a 1-hour session
 		} else {
 			if len(k.oneHourProbes) >= MaxTurnKeys {
 				k.oneHourProbes = map[string]oneHourProbe{}
 			}
-			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, model: e.model, at: start, prefix: e.prefix}
+			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, provider: j.provider, model: e.model, at: start, prefix: e.prefix}
 		}
 		k.mu.Unlock()
 	case read < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
@@ -198,6 +199,25 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 			"expected_prefix", int64(prefix))
 	default:
 		k.oneHourRelease(rk, "the ping's usage was neither a free nor a costly switch")
+	}
+}
+
+// makeRoomForTouchLocked keeps the touch map bounded. It drops the touches that are no longer live first. If
+// every one is live, it starts over. A bound is a capacity event, not a fact about any entry: the stored mirrors are
+// NOT ended here, they expire by apply.EntryLifetime, so a live entry still reads warm in the cold check. Only
+// the keeper's own index (the dashboard, the press refusal) loses a touch then. A route switch-off is different:
+// there the tier was never granted, and oneHourSwitchOff ends the mirrors.
+func (k *Keeper) makeRoomForTouchLocked(now time.Time) {
+	if len(k.oneHourTouches) < MaxTurnKeys {
+		return
+	}
+	for id, t := range k.oneHourTouches {
+		if !t.live(now) {
+			delete(k.oneHourTouches, id)
+		}
+	}
+	if len(k.oneHourTouches) >= MaxTurnKeys {
+		k.oneHourTouches = map[string]oneHourTouch{}
 	}
 }
 
@@ -226,7 +246,17 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 	}
 	first := !st.off
 	st.off, st.costly, st.proven, st.probeUntil = true, false, false, time.Time{}
+	// The touches this route gave no longer count, here or in the stored mirror the cold check reads.
+	var ended []oneHourTouch
+	for _, t := range k.oneHourTouches {
+		if t.route == rk {
+			ended = append(ended, t)
+		}
+	}
 	k.mu.Unlock()
+	for _, t := range ended {
+		apply.EndTouchTier(t.st, t.alias, t.at.UnixMilli())
+	}
 	if first {
 		slog.Warn("context-guru: no more 1-hour keep-alive pings on this route; the threads fall back to the plain schedule: "+why,
 			append([]any{"provider", string(provider), "route", route, "endpoint", endpoint, "model", model}, kv...)...)
@@ -248,12 +278,16 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 		return
 	}
 	gap := startedAt.Sub(p.at)
+	// The two lifetimes the return is judged against: the base tier (the entry would be gone without the
+	// grant) and the 1-hour tier (past it nothing proves anything). From the one table, for the probe's own
+	// provider and model, so no number is written here.
+	base, hour := cacheLifetime(p.provider, p.model, false), cacheLifetime(p.provider, p.model, true)
 	prefix := float64(p.prefix)
 	write := float64(max(u.CacheWrite, u.CacheWrite1h))
 	switch {
 	// A return on another model, or after the client rewrote the prefix (a compaction, a fork), reads cold
 	// whatever the cache tier is: it proves nothing about the grant. The probe is not resolved.
-	case !usageOK || gap <= 5*time.Minute || gap > time.Hour || prefixRewritten || (model != "" && model != p.model):
+	case !usageOK || gap <= base || gap > hour || prefixRewritten || (model != "" && model != p.model):
 		k.oneHourRelease(p.route, "the return came inside 5 minutes, after an hour, on another model, or after the client rewrote the prefix")
 	case float64(u.CacheRead) >= oneHourFreeRead*prefix:
 		k.mu.Lock()
@@ -284,13 +318,35 @@ type oneHourTouch struct {
 	key   Key
 	at    time.Time // when the ping started
 	route string
+	// provider and model give the lifetime of the touch (apply.EntryLifetime), so no duration is stored.
+	provider bschemas.ModelProvider
+	model    string
+	// st and alias are where the SAME fact is mirrored for the cold check (cg:seen:<alias>, "<ms>:1h"). The
+	// keeper's map is the index by thread (the dashboard, the manual ping); the stored tier is its mirror.
+	// They are written at the same ping, ended at the same real request, and ended together when the route is
+	// switched off (oneHourSwitchOff), and both expire by the one function. One fact, two indexes.
+	st    store.Store
+	alias string
+}
+
+// live reports whether the touch still counts at now: under its lifetime old, from the one function.
+func (t oneHourTouch) live(now time.Time) bool {
+	return now.Before(t.at.Add(apply.EntryLifetime(apply.CacheFacts{Provider: t.provider, Model: t.model, LastOneHour: true})))
+}
+
+// touchAliasOf is the cold clock's key for a job: the one the host handed in, else the one its body derives.
+func touchAliasOf(j pingJob) string {
+	if j.touchAlias != "" {
+		return j.touchAlias
+	}
+	return apply.TouchAliasFor(j.tenant, j.raw, j.provider)
 }
 
 // oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: under an
 // hour old, on a route not switched off. The same test as OneHourTouches. The caller holds k.mu.
 func (k *Keeper) oneHourTouchLiveLocked(id string, now time.Time) bool {
 	t, ok := k.oneHourTouches[id]
-	if !ok || !now.Before(t.at.Add(time.Hour)) {
+	if !ok || !t.live(now) {
 		return false
 	}
 	st := k.oneHourRoutes[t.route]
@@ -328,7 +384,7 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 	defer k.mu.Unlock()
 	out := map[string]OneHourTouch{}
 	for _, t := range k.oneHourTouches {
-		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !now.Before(t.at.Add(time.Hour)) {
+		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !t.live(now) {
 			continue
 		}
 		st := k.oneHourRoutes[t.route]
@@ -494,4 +550,23 @@ func (k *Keeper) checkOneHourFirstDowngrade(key string, provider bschemas.ModelP
 	k.oneHourSwitchOff(oneHourRoute(provider, endpoint, route, model), provider, route, endpoint, model,
 		"a request with 1-hour markers wrote tokens and was billed at 5 minutes (a silent downgrade)",
 		"cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h)
+}
+
+// OneHourFirstFor is the apply hook of the 1-hour modes D and C (#1261), with the policy decision in
+// the library. resolve returns the policy in force for the request: the account's with its stored
+// strategy, so a manager's strategy that switches 1-hour-on-wait on counts, like for the pings. It
+// is called only for a main-thread request that declares tools, so a host skips the policy chain for
+// the rest. model is the model of the FINAL body apply hands over, the one Record keys the route
+// state by too.
+func (k *Keeper) OneHourFirstFor(resolve func() Policy, tenant, session, threadID string,
+	provider bschemas.ModelProvider, endpoint, route, model string, toolsDeclared bool) bool {
+	if threadID != "" || !toolsDeclared || session == "" {
+		return false // only the main thread is ever relabelled
+	}
+	pol := resolve()
+	if !pol.OneHourOnWait && !pol.OneHourAlways {
+		return false
+	}
+	return k.OneHourFirst(tenant, session, threadID, provider, endpoint, route, model, toolsDeclared,
+		OneHourMode{Always: pol.OneHourAlways, RebuildTokens: int64(pol.OneHourRebuildTokens)})
 }
