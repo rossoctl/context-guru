@@ -222,7 +222,7 @@ func ParseTable(b []byte) (*Table, error) {
 //   - A tail claimed by TWO OR MORE differently-priced providers is ambiguous — a
 //     bare request for it cannot be resolved without guessing which provider it
 //     meant, and guessing is exactly the mechanism that caused #324. "Differently
-//     priced" covers the window and compaction point the entry also serves, not only
+//     priced" covers the window, the compaction point and the `flat` tier setting the entry also serves, not only
 //     the rate: Window, WindowExact and CompactionPoint read the same entry, and a
 //     5x-too-high window reported as exact is as wrong as a wrong price. Such a tail is
 //     not indexed at all here, so it falls through to the family/public-map passes
@@ -247,8 +247,8 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 			continue // an explicit bare entry for this tail already wins on its own
 		}
 		if prev, ok := tails[tail]; ok && prev.match != e.match {
-			// Two providers at one rate and one window are not a guess.
-			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
+			// Two providers at one rate, one window and one tier setting are not a guess.
+			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint || prev.flat != e.flat {
 				ambiguous[tail] = true
 			}
 			continue
