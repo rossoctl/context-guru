@@ -96,12 +96,16 @@ export async function recoverStaleRoute(deps: {
 }): Promise<"not-routed" | "still-installed" | "no-better-model" | "switched"> {
   const { model } = deps;
   if (!model || !isRouted(deps.installedAtStart, model.baseUrl)) return "not-routed";
-  if (deps.installNow) return "still-installed";
+  // Installed and still on this URL: a down proxy is the start check's restart. A record on another port (a
+  // re-run moved it) does not count: the URL this window holds is dead.
+  if (isRouted(deps.installNow, model.baseUrl)) return "still-installed";
   await deps.refresh();
   const fresh = deps.find(model.provider, model.id);
   if (!fresh || isRouted(deps.installedAtStart, fresh.baseUrl) || !(await deps.setModel(fresh))) return "no-better-model";
   const where = fresh.baseUrl ? fresh.baseUrl.split("//").pop()!.split("/")[0] : "the provider's own API";
-  deps.notify(`context-guru was removed. This Pi window now sends its ${model.provider} requests to ${where} directly.`);
+  deps.notify(isRouted(deps.installNow, fresh.baseUrl)
+    ? `context-guru moved to ${where}. This Pi window now uses it.`
+    : `context-guru was removed. This Pi window now sends its ${model.provider} requests to ${where} directly.`);
   return "switched";
 }
 
@@ -529,13 +533,16 @@ export default function contextGuru(pi: ExtensionAPI) {
     if (SESSION_ID.test(session)) event.headers[SESSION_HEADER] = session;
   });
 
-  // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
-  // to that same model. An API key (or any other provider) passes through unchanged.
   // #1341: on each prompt, a session that still uses our route after an uninstall moves to its real endpoint.
   const recover = async (ctx: ExtensionContext) => {
     try {
+      // Read the record once per prompt, and keep a route it shows: a window can take the route after it
+      // started (/model), and must still know that URL after an uninstall.
+      const now = readInstall();
+      // Only a record that routes this window's URL: a record on a new port must not hide the old one.
+      if (now?.base_urls && isRouted(now, ctx.model?.baseUrl)) routedInstall = now;
       await recoverStaleRoute({
-        model: ctx.model, installedAtStart: routedInstall, installNow: readInstall(),
+        model: ctx.model, installedAtStart: routedInstall, installNow: now,
         refresh: () => ctx.modelRegistry.refresh(), find: (p, id) => ctx.modelRegistry.find(p, id),
         setModel: (m) => pi.setModel(m as never),
         notify: (text) => (ctx.hasUI ? ctx.ui.notify(text, "info") : console.error(text)),
@@ -553,6 +560,8 @@ export default function contextGuru(pi: ExtensionAPI) {
     return undefined;
   });
 
+  // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
+  // to that same model. An API key (or any other provider) passes through unchanged.
   pi.on("before_provider_request", async (event, ctx) => {
     if (routed(ctx)) await gate.wait(FIRST_REQUEST_WAIT_MS, ctx.signal);
     const model = ctx.model;

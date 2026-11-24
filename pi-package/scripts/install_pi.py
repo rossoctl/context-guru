@@ -190,7 +190,8 @@ class Installer:
         """Process ids of running Pi windows. macOS shows Pi as `pi`; on Linux node can keep its own name, so the
         path of Pi's program is matched too."""
         pids = set()
-        for cmd in (["pgrep", "-x", "pi"], ["pgrep", "-f", "pi-coding-agent/dist"]):
+        user = ["-u", str(os.getuid())]  # only this user's windows: an uninstall cannot affect another user's
+        for cmd in (["pgrep", *user, "-x", "pi"], ["pgrep", *user, "-f", "pi-coding-agent/dist"]):
             out = self.shell.run(cmd)
             if out.returncode == 0:
                 pids.update(int(line) for line in out.stdout.split() if line.isdigit())
@@ -202,17 +203,27 @@ class Installer:
         return (f"{len(pids)} Pi window{'s are' if len(pids) != 1 else ' is'} open "
                 f"(process {', '.join(str(p) for p in pids)})")
 
-    def ask_before_turning_off(self):
+    @staticmethod
+    def routed():
+        """True when context-guru routes Pi now: a proxy URL in models.json, or context-guru's own record."""
+        try:
+            providers = load_json(pi_plugin.models_path()).get("providers", {})
+        except Stop:
+            providers = {}
+        urls = [entry.get("baseUrl", "") for entry in providers.values() if isinstance(entry, dict)]
+        return any(str(url).startswith("http://127.0.0.1:") for url in urls) or bool(pi_plugin.read_record().get("port"))
+
+    def ask_before_turning_off(self, refusal="nothing was changed."):
         """#1341: a Pi window that is open while context-guru goes off keeps its address in memory, and every
         request of it fails until it restarts. A window with a newer package switches by itself on its next prompt;
         an older one does not. Ask first."""
-        pids = self.open_pi_windows()
+        pids = self.open_pi_windows() if self.routed() else []
         if not pids:
             return
         self.terminal.say(f"{self.windows_text(pids)}. Close them first: a window that is open now can keep "
                           "context-guru's address, and its requests fail until you restart it.")
         if not self.yes("Go on anyway?", default=False):
-            raise Stop("nothing was changed. Close the open Pi windows, then run this again.")
+            raise Stop(f"{refusal} Close the open Pi windows, then run this again.")
 
     def check_folders(self):
         """Name the folders this run uses. A terminal left from a test can move Pi's settings with
@@ -318,7 +329,8 @@ class Installer:
                 # setup starts without the old upstream in its record.
                 self.terminal.say("context-guru routes Pi now. It is turned off first, so that the new connection "
                                   "replaces your real endpoint.")
-                self.ask_before_turning_off()
+                # Pi and the package may already have changed in this run, so do not claim that nothing did.
+                self.ask_before_turning_off(refusal="context-guru was not turned off.")
                 off = self.plugin_run("uninstall")
                 if off.get("models_restore") not in ("restored", "no_record"):
                     raise Stop(f"context-guru could not put Pi's endpoint back ({off.get('models_restore')}). "
@@ -501,9 +513,10 @@ class Installer:
             self.terminal.say(f"Pi answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
         pids = self.open_pi_windows()
         if pids:
-            count = f"{len(pids)} Pi window{'s' if len(pids) != 1 else ''} that {'were' if len(pids) != 1 else 'was'}"
-            self.terminal.say(f"{count} open before uses context-guru only after you restart it "
-                              f"(process {', '.join(str(p) for p in pids)}).")
+            one = len(pids) == 1
+            self.terminal.say(f"{self.windows_text(pids)}. Restart {'it' if one else 'them'} if "
+                              f"{'it' if one else 'they'} started before context-guru was on: Pi reads its settings "
+                              "only when it starts.")
         where = self.shell.which("pi")
         self.terminal.say(f"Done. Start Pi with: pi{f' ({where})' if where else ''}. If your terminal does not find "
                           "this one (for example after Pi was installed or updated), open a new terminal.")

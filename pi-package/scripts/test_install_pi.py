@@ -805,6 +805,10 @@ class OpenPiWindows(Sandbox):
     """#1341: a Pi window open during a change keeps the old route in memory. The installer names open windows,
     and asks before it turns context-guru off."""
 
+    def setUp(self):
+        super().setUp()
+        self.shell.realistic = True  # setup routes models.json, as the real pi_plugin does
+
     def installed(self):
         self.shell.pi_version = "1.6.0"
         code, terminal = self.install(answers=["https://gw.example.com", "", "m", "y", "n"], secrets=[CANARY])
@@ -836,20 +840,38 @@ class OpenPiWindows(Sandbox):
         self.assertNotIn("Go on anyway?", self.everything_printed(terminal))
 
     def test_a_routed_rerun_that_turns_context_guru_off_asks_first(self):
-        self.shell.realistic = True
         self.installed()
         self.shell.open_pi = [4242]
         code, terminal = self.install(answers=["n", "n"])  # do not keep; then: do not go on
         self.assertEqual(code, 1)
         self.assertIn("Go on anyway? [y/N]", self.everything_printed(terminal))
+        # Pi and the package may have changed by now, so it does not claim "nothing was changed".
+        self.assertIn("context-guru was not turned off", self.everything_printed(terminal))
+        self.assertNotIn("nothing was changed", self.everything_printed(terminal))
         self.assertEqual(self.shell.ran("python3", PLUGIN, "uninstall"), [])
 
     def test_after_an_install_open_windows_are_told_to_restart(self):
         self.shell.open_pi = [4242]
         self.installed()
         _, terminal = self.install(answers=["", "y", "n"])  # keep the connection; on; no prompt
-        self.assertIn("1 Pi window that was open before uses context-guru only after you restart it",
+        self.assertIn("1 Pi window is open (process 4242). Restart it if it started before context-guru was on",
                       self.everything_printed(terminal))
+        self.shell.open_pi = [4242, 4343]
+        _, terminal = self.install(answers=["", "y", "n"])
+        self.assertIn("2 Pi windows are open (process 4242, 4343). Restart them if they started before",
+                      self.everything_printed(terminal))
+
+    def test_only_this_users_pi_windows_are_counted(self):
+        self.installed()
+        self.installer(FakeTerminal(["y"])).uninstall()
+        for cmd in self.shell.ran("pgrep"):
+            self.assertEqual(cmd[1:3], ["-u", str(os.getuid())], cmd)
+
+    def test_uninstall_with_no_route_asks_nothing_about_windows(self):
+        self.shell.open_pi = [4242]
+        terminal = FakeTerminal(["y"])  # no install: nothing routes Pi
+        self.assertEqual(self.installer(terminal).uninstall(), 0)
+        self.assertNotIn("Go on anyway?", self.everything_printed(terminal))
 
 
 class TheKeyStaysSecret(Sandbox):
