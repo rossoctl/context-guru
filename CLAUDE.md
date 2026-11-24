@@ -124,6 +124,9 @@ the person. The team knows who holds the role at any time.
   [Behavior changes need a human's permission](RELEASING.md#behavior-changes-need-a-humans-permission).
 - The row in [docs/data-dependence.md](docs/data-dependence.md) is updated.
 - It adds no binary and no LFS file.
+- Exception: a docs-only PR needs only the release owner's review, by hand, unless the owner asks
+  for the 2 reviews. See
+  [RELEASING.md](RELEASING.md#when-the-head-moves-after-an-approval), where the rule stands.
 
 For the details, see [Check that a PR is ready](RELEASING.md#check-that-a-pr-is-ready).
 
@@ -132,16 +135,16 @@ For the details, see [Check that a PR is ready](RELEASING.md#check-that-a-pr-is-
 1. Find the session named `integrator` with `ListAgents`.
 2. Send one message to it with `SendMessage`. Use this block:
 
-```text
-PR: <link>
-Head SHA: <sha>
-Approvals: round <n>, backend <name>, head <sha> (one line for each reviewer)
-CI: <result>
-Behavior change: <none, or the change and where the human's yes is recorded>
-Data dependence: <none, or the row and what changed>
-Binaries: <none>
-Squash notes: keep the Signed-off-by lines
-```
+   ```text
+   PR: <link>
+   Head SHA: <sha>
+   Approvals: round <n>, backend <name>, head <sha> (one line for each reviewer)
+   CI: <result>
+   Behavior change: <none, or the change and where the human's yes is recorded>
+   Data dependence: <none, or the row and what changed>
+   Binaries: <none>
+   Squash notes: keep the Signed-off-by lines
+   ```
 
 3. If no session named `integrator` is listed, do not merge the PR yourself. Tell the human:
    "PR #N is ready. Please ask the integrator holder on Slack to review and merge it." Add the
@@ -149,8 +152,8 @@ Squash notes: keep the Signed-off-by lines
 
 ### After the hand-off
 
-- After the merge, the PR-owning session runs `scripts/offload-review.sh <pr> --cleanup`. It
-  also removes its own worktrees and branches.
+- After the merge, the PR-owning session runs `scripts/offload-review.sh <pr> --cleanup`. The
+  session also removes its own worktrees and branches.
 - When the integrator asks for "all done", the PR-owning session answers with its PR list. See
   [What "all done" contains](RELEASING.md#4-freeze).
 
