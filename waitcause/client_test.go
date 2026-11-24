@@ -100,3 +100,30 @@ func TestCodexBackgroundTerminal(t *testing.T) {
 		}
 	}
 }
+
+// Claude Code must read exactly as before this change: for every input, the client form with a Claude
+// Code client gives the same answer as the form that has no client (the behavior on main).
+func TestClaudeCodeWaitCauseIsUnchanged(t *testing.T) {
+	cc := who("claude-cli/2.1.294 (external, cli)")
+	names := [][]string{nil, {"Bash"}, {"AskUserQuestion"}, {"ExitPlanMode"}, {"Read", "Task"}, {"SendMessage"}, {"StructuredOutput"}}
+	for _, stop := range []string{"end_turn", "tool_use", "max_tokens", ""} {
+		for _, n := range names {
+			for _, failed := range []bool{false, true} {
+				for _, usageOK := range []bool{false, true} {
+					for bg := 0; bg < 2; bg++ {
+						for tm := 0; tm < 2; tm++ {
+							wantW, wantT := ClassifyWaitingForTerminal([]string{"StructuredOutput"}, n, stop, failed, usageOK, bg, tm)
+							gotW, gotT := ClassifyWaitingForClient(cc, []string{"StructuredOutput"}, n, stop, failed, usageOK, bg, tm)
+							if gotW != wantW || gotT != wantT {
+								t.Errorf("stop=%q names=%v failed=%v usageOK=%v bg=%d tm=%d: got %q/%q, main gives %q/%q", stop, n, failed, usageOK, bg, tm, gotW, gotT, wantW, wantT)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if w, _ := ClassifyWaitingForClient(cc, nil, nil, "end_turn", false, true, 0, 0); w != WaitingHuman {
+		t.Errorf("a Claude Code end_turn with nothing open must read human, got %q", w)
+	}
+}
