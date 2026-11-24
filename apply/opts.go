@@ -46,6 +46,9 @@ type Opts struct {
 	// function yourself with Trace.Session, so the finish side below still has a thread.
 	// Trace.Session is "" in that case, so the result is the primary thread.
 	//
+	// lifecycle.Prepare runs the request-side steps in their order, and lifecycle.Request.Opts builds the
+	// shared options. The finish-side steps below are the host's until lifecycle.Finish takes them.
+	//
 	// Host contract. Once ThreadOf is set, components key their state by
 	// thread.Key(session, threadID). Make the finish-side calls with the same thread
 	// (threadID = Trace.Thread.ID, session = Trace.Session), or state is written under one key

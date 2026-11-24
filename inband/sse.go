@@ -1,4 +1,4 @@
-package proxy
+package inband
 
 import (
 	"bufio"
@@ -86,7 +86,7 @@ import (
 //   - Chat Completions streams are spliced only when the request declares our own tool search
 //     (#825, #879): there the dialect differs only in how a call is detected and renumbered
 //     (see chatProxyToolCallName and rewriteChat). Responses streams are spliced only when the
-//     request declares it too AND is stateless (#884, statelessResponses): the client then
+//     request declares it too AND is stateless (#884, StatelessResponses): the client then
 //     never chains on a response id, so round 1's id can stand for the whole stream. Other
 //     non-Anthropic streams are not spliced.
 //   - The forwarded bytes are retained until the round ends, because Continuation needs the
@@ -106,7 +106,7 @@ import (
 // the content the model asked for, so the error never reaches the model even when the block
 // could not be withheld.
 
-// sseSplicer joins the rounds of an expand continuation into ONE client event stream.
+// SSESplicer joins the rounds of an expand continuation into ONE client event stream.
 //
 // Round 1's events are forwarded as they arrive and forwarding stops at the expand call.
 // The continuation's blocks are then written into the same open response, renumbered to
@@ -114,17 +114,18 @@ import (
 // one message per turn. If the loop cannot answer after all, handBack writes the withheld
 // events through the same transform — which, for a round whose blocks were not renumbered,
 // is byte-for-byte the stream as it arrived: exactly the old pass-through.
-type sseSplicer struct {
-	w        http.ResponseWriter
-	flush    http.Flusher
-	headers  bool        // response headers and status are on the wire
-	msgStart bool        // the client has its message_start
-	ended    bool        // a message_stop has gone out: the client's turn is closed
-	blocks   int         // content blocks the client holds
-	base     int         // index offset applied to the round being forwarded
-	first    time.Time   // when the client got its first byte
-	thinking bool        // the client holds a thinking block from an earlier round
-	remap    map[int]int // this round's block index -> the client's index; -1 = withheld
+type SSESplicer struct {
+	w           http.ResponseWriter
+	copyHeaders func(dst, src http.Header)
+	flush       http.Flusher
+	headers     bool        // response headers and status are on the wire
+	msgStart    bool        // the client has its message_start
+	ended       bool        // a message_stop has gone out: the client's turn is closed
+	blocks      int         // content blocks the client holds
+	base        int         // index offset applied to the round being forwarded
+	first       time.Time   // when the client got its first byte
+	thinking    bool        // the client holds a thinking block from an earlier round
+	remap       map[int]int // this round's block index -> the client's index; -1 = withheld
 
 	// Chat Completions (#879). The same splice in another chunk format: a call's name arrives
 	// on the first chunk of choices[].delta.tool_calls[] for its index, blocks counts the
@@ -148,21 +149,23 @@ type sseSplicer struct {
 	usage     map[string]int64 // input, output and total tokens summed over the rounds
 }
 
-func newSSESplicer(w http.ResponseWriter) *sseSplicer {
+// copyHeaders is the host's header copy for the first round's response headers. The host owns
+// it because it decides which headers may reach its client. Nil means "copy no headers".
+func NewSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
 	f, _ := w.(http.Flusher)
-	return &sseSplicer{w: w, flush: f}
+	return &SSESplicer{w: w, flush: f, copyHeaders: copyHeaders}
 }
 
-// newChatSSESplicer is the splicer for a Chat Completions stream.
-func newChatSSESplicer(w http.ResponseWriter) *sseSplicer {
-	sp := newSSESplicer(w)
+// NewChatSSESplicer is the splicer for a Chat Completions stream.
+func NewChatSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
+	sp := NewSSESplicer(w, copyHeaders)
 	sp.chat = true
 	return sp
 }
 
-// newResponsesSSESplicer is the splicer for an OpenAI Responses stream.
-func newResponsesSSESplicer(w http.ResponseWriter) *sseSplicer {
-	sp := newSSESplicer(w)
+// NewResponsesSSESplicer is the splicer for an OpenAI Responses stream.
+func NewResponsesSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
+	sp := NewSSESplicer(w, copyHeaders)
 	sp.resp = true
 	sp.items = map[int]string{}
 	sp.usage = map[string]int64{}
@@ -172,7 +175,7 @@ func newResponsesSSESplicer(w http.ResponseWriter) *sseSplicer {
 // opened reports whether the client holds any of the model's answer: a content block on
 // Anthropic, text, reasoning or a tool call on Chat Completions. A round whose proxy call came
 // before any of it made the client wait for the whole continuation.
-func (sp *sseSplicer) opened() bool {
+func (sp *SSESplicer) Opened() bool {
 	if sp.chat {
 		return sp.said || sp.blocks > 0
 	}
@@ -182,7 +185,7 @@ func (sp *sseSplicer) opened() bool {
 // round starts an upstream round. Its blocks are numbered from the end of what the client
 // already holds, and only the first round's headers and status are sent — by the time a
 // continuation answers, the response is long open.
-func (sp *sseSplicer) round(resp *http.Response) {
+func (sp *SSESplicer) Round(resp *http.Response) {
 	sp.base = sp.blocks
 	sp.remap = nil
 	sp.rounds++
@@ -192,7 +195,9 @@ func (sp *sseSplicer) round(resp *http.Response) {
 	if sp.headers {
 		return
 	}
-	copyHeaders(sp.w.Header(), resp.Header)
+	if sp.copyHeaders != nil {
+		sp.copyHeaders(sp.w.Header(), resp.Header)
+	}
 	sp.w.WriteHeader(resp.StatusCode)
 	sp.headers = true
 }
@@ -245,7 +250,7 @@ const sseRetainMaxBytes = 16 << 20
 // tool_use streams straight to the client while the call site reads as though it were protected. The
 // two-argument signature this grew out of made that unrepresentable; this keeps that property while
 // still taking a set.
-func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...string) (whole, withheld []byte, called []string) {
+func (sp *SSESplicer) Pass(body io.Reader, proxyTool string, moreProxyTools ...string) (whole, withheld []byte, called []string) {
 	proxyTools := append([]string{proxyTool}, moreProxyTools...)
 	br := bufio.NewReader(body)
 	// One event buffer for the round, not one per event: a 2.25 MB round is ~19,000 events.
@@ -286,7 +291,7 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 					// now, and the rest of the stream follows it event by event. The flush
 					// includes THIS event, so it must not also be forwarded below.
 					if cut >= 0 {
-						sp.handBack(buf.Bytes()[cut:])
+						sp.HandBack(buf.Bytes()[cut:])
 						cut, sent = -1, true
 					}
 					over, buf = true, bytes.Buffer{}
@@ -314,7 +319,7 @@ func (sp *sseSplicer) pass(body io.Reader, proxyTool string, moreProxyTools ...s
 
 // handBack sends events the splice withheld — the fail-open path, and the one that hands a
 // client the model's own expand call when nothing else can be done with it.
-func (sp *sseSplicer) handBack(withheld []byte) {
+func (sp *SSESplicer) HandBack(withheld []byte) {
 	br := bufio.NewReader(bytes.NewReader(withheld))
 	var ev bytes.Buffer
 	for {
@@ -329,7 +334,7 @@ func (sp *sseSplicer) handBack(withheld []byte) {
 }
 
 // forward sends one complete event, transformed as the splice requires.
-func (sp *sseSplicer) forward(ev []byte) {
+func (sp *SSESplicer) forward(ev []byte) {
 	ev, ok := sp.rewrite(ev)
 	if !ok {
 		return
@@ -347,7 +352,7 @@ func (sp *sseSplicer) forward(ev []byte) {
 // rewrite drops a second message_start and shifts block indices past the blocks the client
 // already has. With no offset to apply it returns the event untouched — byte-for-byte,
 // which is what keeps a response that never calls expand an exact pass-through.
-func (sp *sseSplicer) rewrite(ev []byte) ([]byte, bool) {
+func (sp *SSESplicer) rewrite(ev []byte) ([]byte, bool) {
 	if sp.resp {
 		return sp.rewriteResponses(ev)
 	}
@@ -502,7 +507,7 @@ func proxyToolCallName(ev []byte, proxyTools []string) string {
 // round whose terminator the splice withheld is the only other place one exists. Without
 // this the client is left with a half-open message, which is worse than the leaked tool_use
 // it replaced: on main those rounds cannot arise at all.
-func (sp *sseSplicer) terminate(withheld []byte) {
+func (sp *SSESplicer) Terminate(withheld []byte) {
 	if sp.ended || !sp.msgStart {
 		return
 	}
@@ -584,7 +589,7 @@ func isChatDone(ev []byte) bool {
 // byte-for-byte; the splicer only notes the id, the tool-call indexes and whether text has gone
 // out. A later round's chunks take round 1's id and have their tool-call indexes moved past the
 // ones the client holds, so the client reads one answer. A chunk it cannot parse goes as it came.
-func (sp *sseSplicer) rewriteChat(ev []byte) []byte {
+func (sp *SSESplicer) rewriteChat(ev []byte) []byte {
 	sp.msgStart = true
 	if isChatDone(ev) {
 		sp.ended = true
@@ -643,7 +648,7 @@ func (sp *sseSplicer) rewriteChat(ev []byte) []byte {
 // terminateChat is terminate for Chat Completions: it forwards the withheld round's closing
 // chunks (the finish_reason chunk, the usage chunk and [DONE]) and never a chunk that carries
 // the withheld call or text. With no [DONE] anywhere, it ends the stream with an error chunk.
-func (sp *sseSplicer) terminateChat(withheld []byte) {
+func (sp *SSESplicer) terminateChat(withheld []byte) {
 	if withheld == nil && sp.rounds <= 1 && !sp.cutOff {
 		// One round, nothing withheld, and the upstream closed cleanly: a gateway that ends a
 		// complete answer without [DONE]. The client got the upstream's bytes, exactly.
@@ -701,7 +706,7 @@ func responsesProxyToolCallName(ev []byte, proxyTools []string) string {
 }
 
 // heldItems lists the output items the client holds, in order.
-func (sp *sseSplicer) heldItems() []string {
+func (sp *SSESplicer) heldItems() []string {
 	idx := make([]int, 0, len(sp.items))
 	for i := range sp.items {
 		idx = append(idx, i)
@@ -716,7 +721,7 @@ func (sp *sseSplicer) heldItems() []string {
 
 // addUsage adds a response.completed event's token counts to the running sum, so the merged
 // terminal event reports every round.
-func (sp *sseSplicer) addUsage(ev []byte) {
+func (sp *SSESplicer) addUsage(ev []byte) {
 	p := gjson.Parse(sseEventPayload(ev))
 	if p.Get("type").String() != "response.completed" {
 		return
@@ -741,7 +746,7 @@ func (sp *sseSplicer) addUsage(ev []byte) {
 // response.created / in_progress, takes round 1's id, has output_index moved past the items the
 // client holds and sequence_number continued, and its response.completed is replaced by one that
 // lists every item the client saw. An event it cannot parse goes as it came.
-func (sp *sseSplicer) rewriteResponses(ev []byte) ([]byte, bool) {
+func (sp *SSESplicer) rewriteResponses(ev []byte) ([]byte, bool) {
 	if isChatDone(ev) {
 		sp.ended = true // a gateway that ends the stream with [DONE]: no response.failed after it
 		return ev, true
@@ -830,7 +835,7 @@ func (sp *sseSplicer) rewriteResponses(ev []byte) ([]byte, bool) {
 // withheld argument): a turn
 // that ends without a terminator of its own gets a response.failed, as an Anthropic one gets an
 // error event. sp.ended is checked by terminate, so this runs only when none went out.
-func (sp *sseSplicer) terminateResponses() {
+func (sp *SSESplicer) terminateResponses() {
 	// A Responses stream always ends with a terminal event, so a missing one is a failed turn
 	// even when the upstream closed cleanly.
 	sp.forward([]byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":" +
@@ -838,3 +843,17 @@ func (sp *sseSplicer) terminateResponses() {
 		"\"error\":{\"code\":\"server_error\",\"message\":\"upstream ended the turn without a terminator\"}}}\n\n"))
 	sp.ended = true
 }
+
+// StatelessResponses reports whether a Responses request never relies on the server keeping
+// the response: store is false and there is no previous_response_id. Codex over HTTP sends
+// exactly this. A missing store field means the API default, which is true.
+func StatelessResponses(body []byte) bool {
+	st := gjson.GetBytes(body, "store")
+	return st.Exists() && st.Type == gjson.False && !gjson.GetBytes(body, "previous_response_id").Exists()
+}
+
+// FirstByte is when the client got its first byte (zero before any).
+func (sp *SSESplicer) FirstByte() time.Time { return sp.first }
+
+// Blocks is the number of content blocks the client holds.
+func (sp *SSESplicer) Blocks() int { return sp.blocks }

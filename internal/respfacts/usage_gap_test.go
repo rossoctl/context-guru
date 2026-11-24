@@ -1,4 +1,4 @@
-package proxy
+package respfacts
 
 import (
 	"bytes"
@@ -23,67 +23,67 @@ func TestEveryUsageOutcomeIsDistinguishable(t *testing.T) {
 		name string
 		ct   string
 		body string
-		want usageMiss
+		want Miss
 	}{
 		{"anthropic snake_case", "application/json",
-			`{"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":9}}`, usageMissNone},
+			`{"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":9}}`, MissNone},
 		{"openai snake_case", "application/json",
-			`{"usage":{"prompt_tokens":10,"completion_tokens":2}}`, usageMissNone},
+			`{"usage":{"prompt_tokens":10,"completion_tokens":2}}`, MissNone},
 		{"output-only delta", "application/json",
-			`{"usage":{"output_tokens":7}}`, usageMissNone},
+			`{"usage":{"output_tokens":7}}`, MissNone},
 
 		// The gap this issue was filed for. aws/claude-* through Bedrock Converse speaks
 		// camelCase, and a block that is RIGHT THERE read as "the provider reported nothing".
 		{"bedrock converse camelCase", "application/json",
-			`{"usage":{"inputTokens":10,"outputTokens":2},"text":"` + content + `"}`, usageMissUnparsed},
+			`{"usage":{"inputTokens":10,"outputTokens":2},"text":"` + content + `"}`, MissUnparsed},
 		{"nested under response", "application/json",
-			`{"response":{"usage":{"input_tokens":10}}}`, usageMissUnparsed},
+			`{"response":{"usage":{"input_tokens":10}}}`, MissUnparsed},
 
 		// Benign, and they must NOT reach the same signal as the two above.
 		{"no usage anywhere", "application/json",
-			`{"content":[{"type":"text","text":"` + content + `"}],"stop_reason":"end_turn"}`, usageMissAbsent},
+			`{"content":[{"type":"text","text":"` + content + `"}],"stop_reason":"end_turn"}`, MissAbsent},
 		{"recognised but all zero", "application/json",
-			`{"usage":{"input_tokens":0,"output_tokens":0}}`, usageMissZero},
-		{"empty response", "application/json", "", usageMissNoBody},
+			`{"usage":{"input_tokens":0,"output_tokens":0}}`, MissZero},
+		{"empty response", "application/json", "", MissNoBody},
 
 		// A THIRD failure the issue did not list, and the reason it needs its own value: over
 		// sniffMax each way, sniffer.bytes returns head+"\n"+tail, which is not a whole document.
 		// Reported as an unrecognised dialect it would send someone hunting for a field name that
 		// is not missing — the remedy is in the sniffer, not in any parser.
 		{"spliced sniffer window", "application/json",
-			`{"content":[{"text":"` + content + `"` + "\n" + `"usage":{"input_tokens":10}}`, usageMissUnreadable},
+			`{"content":[{"text":"` + content + `"` + "\n" + `"usage":{"input_tokens":10}}`, MissUnreadable},
 
 		{"sse anthropic", "text/event-stream",
-			"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10}}}\n", usageMissNone},
+			"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10}}}\n", MissNone},
 		{"sse in an unknown dialect", "text/event-stream",
-			"data: {\"usage\":{\"inputTokens\":10}}\n", usageMissUnparsed},
+			"data: {\"usage\":{\"inputTokens\":10}}\n", MissUnparsed},
 		{"sse with no usage event", "text/event-stream",
-			"data: {\"type\":\"ping\"}\n", usageMissAbsent},
+			"data: {\"type\":\"ping\"}\n", MissAbsent},
 
-		// The transport axis was SAMPLED here rather than covered: usageMissZero had no streamed
+		// The transport axis was SAMPLED here rather than covered: MissZero had no streamed
 		// row, so the one value that is benign-but-block-bearing was untested on the transport
 		// where it was misclassified as a dialect gap. Same for a null field, which is what
 		// OpenAI-dialect streaming sends on every chunk without stream_options.include_usage.
 		{"sse recognised but all zero", "text/event-stream",
-			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":0}}\n", usageMissZero},
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":0}}\n", MissZero},
 		{"sse with a null usage field", "text/event-stream",
-			"data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n", usageMissAbsent},
+			"data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n", MissAbsent},
 		{"sse with an empty usage object", "text/event-stream",
-			"data: {\"usage\":{}}\n", usageMissAbsent},
-		{"a null usage field", "application/json", `{"usage":null}`, usageMissAbsent},
-		{"an empty usage object", "application/json", `{"usage":{}}`, usageMissAbsent},
+			"data: {\"usage\":{}}\n", MissAbsent},
+		{"a null usage field", "application/json", `{"usage":null}`, MissAbsent},
+		{"an empty usage object", "application/json", `{"usage":{}}`, MissAbsent},
 		// A stream that says nothing readable in one event and the real tiers in another must take
 		// the GOOD outcome, not the worst — `worst` is only the answer when nothing parsed.
 		{"sse null chunk then real usage", "text/event-stream",
 			"data: {\"choices\":[{\"delta\":{}}],\"usage\":null}\n" +
-				"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n", usageMissNone},
+				"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n", MissNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, why, ok := responseUsageWhy(tc.ct, []byte(tc.body), false)
+			_, why, ok := readWhy(tc.ct, []byte(tc.body), false)
 			if why != tc.want {
 				t.Fatalf("classified %v, want %v — %q", why, tc.want, tc.body)
 			}
-			if ok != (tc.want == usageMissNone) {
+			if ok != (tc.want == MissNone) {
 				t.Fatalf("ok=%v disagrees with the reason %v", ok, why)
 			}
 		})
@@ -113,8 +113,8 @@ func TestOnlyAnAccountingOutageMovesTheUsageCounters(t *testing.T) {
 		{"a healthy response", "application/json", `{"usage":{"input_tokens":10}}`, 0, 0},
 
 		// THE TRANSPORT AXIS, which this table sampled rather than covered. Every row above is
-		// application/json, so the rule was asserted only where parseUsageWhy runs and never where
-		// parseSSEUsageWhy does — and the stream path is the half that broke it.
+		// application/json, so the rule was asserted only where ParseUsage runs and never where
+		// ParseSSEUsage does — and the stream path is the half that broke it.
 		//
 		// `usage: null` is not a hypothetical shape. gjson's Exists() is `Type != Null ||
 		// len(Raw) != 0`, and a JSON null has Raw == "null", so a null field looked present; and
@@ -135,7 +135,7 @@ func TestOnlyAnAccountingOutageMovesTheUsageCounters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			unpBefore, unrBefore := UsageGaps()
-			responseUsageWhy(tc.ct, []byte(tc.body), false)
+			readWhy(tc.ct, []byte(tc.body), false)
 			unp, unr := UsageGaps()
 			if got := unp - unpBefore; got != tc.wantUnp {
 				t.Errorf("usage_unparsed moved by %d, want %d: the counter whose whole meaning is "+
@@ -160,9 +160,9 @@ func TestTheShapeRecordNamesTheDialectAndCarriesNoContent(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
-	ResetUsageShapeRecordForTest()
+	ResetShapeRecordForTest()
 
-	responseUsageWhy("application/json", []byte(body), false)
+	readWhy("application/json", []byte(body), false)
 	got := buf.String()
 
 	// It names WHERE the block is and WHAT the provider calls the fields — the answer the dialect
@@ -192,7 +192,7 @@ func TestTheShapeRecordNamesTheDialectAndCarriesNoContent(t *testing.T) {
 	// One per process. A run with this gap has it on EVERY request — 4,015 of 4,015 in the
 	// iteration that motivated this — so a per-response record is a log line per request.
 	buf.Reset()
-	responseUsageWhy("application/json", []byte(body), false)
+	readWhy("application/json", []byte(body), false)
 	if strings.Contains(buf.String(), "cg.usage_unaccounted") {
 		t.Fatalf("a second unaccounted response logged a second shape record:\n%s", buf.String())
 	}
@@ -200,7 +200,7 @@ func TestTheShapeRecordNamesTheDialectAndCarriesNoContent(t *testing.T) {
 
 // THE RECORD MUST DESCRIBE THE EVENT THAT WAS UNREADABLE, not the last event of the stream.
 //
-// parseSSEUsageWhy scans every event; the record described only the final `data:` payload. On the
+// ParseSSEUsage scans every event; the record described only the final `data:` payload. On the
 // Anthropic-family transport the usage block arrives in `message_start` and the stream ENDS with
 // `message_stop`, so an unrecognised streamed dialect produced `why=unparsed_dialect` and a record
 // of the terminal event — no usage_at, no usage_keys, nothing about the dialect. Worse, it took the
@@ -213,14 +213,14 @@ func TestTheShapeRecordDescribesTheUnreadableEventNotTheLastOne(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
-	ResetUsageShapeRecordForTest()
+	ResetShapeRecordForTest()
 
 	// The Anthropic-family shape: usage in the FIRST event, a terminal event carrying none.
 	stream := "data: {\"type\":\"message_start\",\"message\":{\"usage\":" +
 		"{\"inputTokens\":10,\"cacheReadInputTokens\":9}}}\n" +
 		"data: {\"type\":\"message_stop\"}\n"
-	_, why, _ := responseUsageWhy("text/event-stream", []byte(stream), false)
-	if why != usageMissUnparsed {
+	_, why, _ := readWhy("text/event-stream", []byte(stream), false)
+	if why != MissUnparsed {
 		t.Fatalf("classified %v, want unparsed_dialect — the fixture is not exercising the gap", why)
 	}
 
@@ -235,7 +235,7 @@ func TestTheShapeRecordDescribesTheUnreadableEventNotTheLastOne(t *testing.T) {
 }
 
 // And the record must look where the CLASSIFIER looked. usageShapeAttrs used Exists() where
-// parseUsageWhy now uses usagePresent, so a response with a null top-level usage AND a real nested
+// ParseUsage now uses usagePresent, so a response with a null top-level usage AND a real nested
 // one recorded `usage_at=usage usage_keys=[]` — pointing at the null, naming no fields, while the
 // nested block held the answer. It also keyed as `usage|`, colliding with a genuinely empty block.
 func TestTheShapeRecordSkipsANullBlockForTheOneThatHasTheAnswer(t *testing.T) {
@@ -243,9 +243,9 @@ func TestTheShapeRecordSkipsANullBlockForTheOneThatHasTheAnswer(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
-	ResetUsageShapeRecordForTest()
+	ResetShapeRecordForTest()
 
-	responseUsageWhy("application/json",
+	readWhy("application/json",
 		[]byte(`{"usage":null,"response":{"usage":{"inputTokens":10,"outputTokens":2}}}`), false)
 	got := buf.String()
 	if !strings.Contains(got, "usage_at=response.usage") || !strings.Contains(got, "inputTokens") {
@@ -262,11 +262,11 @@ func TestTheShapeRecordSaysWhenTheBytesWereNotAWholeDocument(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
-	ResetUsageShapeRecordForTest()
+	ResetShapeRecordForTest()
 
 	// The splice has to hide the block, or it is simply read correctly — see the note in
 	// TestOnlyAnAccountingOutageMovesTheUsageCounters.
-	responseUsageWhy("application/json",
+	readWhy("application/json",
 		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`), false)
 	got := buf.String()
 	if !strings.Contains(got, "valid_json=false") {
@@ -287,8 +287,8 @@ func TestASplicedStreamReportsUnreadableNotAbsent(t *testing.T) {
 	stream := "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"...\"}}\n"
 
 	_, unreadBefore := UsageGaps()
-	_, why, ok := responseUsageWhy("text/event-stream", []byte(stream), true)
-	if why != usageMissUnreadable || ok {
+	_, why, ok := readWhy("text/event-stream", []byte(stream), true)
+	if why != MissUnreadable || ok {
 		t.Fatalf("a spliced window with no visible usage block classified %v (ok=%v), want "+
 			"unreadable — \"none in what we kept\" is not \"the provider sent none\"", why, ok)
 	}
@@ -298,7 +298,7 @@ func TestASplicedStreamReportsUnreadableNotAbsent(t *testing.T) {
 
 	// The same stream NOT spliced keeps the benign reading: a whole response that carried no
 	// usage block is the provider's own absence, not a window of ours.
-	if _, why, _ := responseUsageWhy("text/event-stream", []byte(stream), false); why != usageMissAbsent {
+	if _, why, _ := readWhy("text/event-stream", []byte(stream), false); why != MissAbsent {
 		t.Fatalf("an unspliced stream with no usage block classified %v, want absent", why)
 	}
 
@@ -306,19 +306,19 @@ func TestASplicedStreamReportsUnreadableNotAbsent(t *testing.T) {
 	// finding is about the field names, and the window must not mask it.
 	dialect := "data: {\"type\":\"message_start\",\"message\":{\"usage\":" +
 		"{\"inputTokens\":10,\"cacheReadInputTokens\":9}}}\n"
-	if _, why, _ := responseUsageWhy("text/event-stream", []byte(dialect), true); why != usageMissUnparsed {
+	if _, why, _ := readWhy("text/event-stream", []byte(dialect), true); why != MissUnparsed {
 		t.Fatalf("a spliced window over a rejected block classified %v, want unparsed_dialect — "+
 			"the window must not mask a real dialect finding", why)
 	}
 
 	// The record says the bytes were a window, so the unreadable verdict cannot be misread as a
 	// dialect gap.
-	ResetUsageShapeRecordForTest()
+	ResetShapeRecordForTest()
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
-	responseUsageWhy("text/event-stream", []byte(stream), true)
+	readWhy("text/event-stream", []byte(stream), true)
 	if got := buf.String(); !strings.Contains(got, "spliced=true") {
 		t.Errorf("the shape record does not say the bytes were a spliced window, so an unreadable "+
 			"verdict reads as a dialect problem:\n%s", got)
@@ -340,13 +340,13 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(prev)
-	ResetUsageShapeRecordForTest()
+	ResetShapeRecordForTest()
 
 	// First: a spliced window, which is alertable but says nothing about any dialect.
-	responseUsageWhy("application/json",
+	readWhy("application/json",
 		[]byte(`{"content":[{"text":"x"`+"\n"+`"usage":{"input_tokens":10}}`), false)
 	// Then: the response whose shape somebody actually needs.
-	responseUsageWhy("application/json",
+	readWhy("application/json",
 		[]byte(`{"id":"msg_1","usage":{"inputTokens":10,"cacheReadInputTokens":9}}`), false)
 
 	got := buf.String()
@@ -358,7 +358,7 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 	// And still bounded: the SAME shape again writes nothing, so a run with the gap on every
 	// request produces one line, not one per request.
 	buf.Reset()
-	responseUsageWhy("application/json",
+	readWhy("application/json",
 		[]byte(`{"id":"msg_2","usage":{"inputTokens":11,"cacheReadInputTokens":8}}`), false)
 	if strings.Contains(buf.String(), "cg.usage_unaccounted") {
 		t.Fatalf("a second response of an ALREADY RECORDED shape logged again; a run with this gap "+
@@ -368,7 +368,7 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 	// The bound is on distinct shapes, not on responses, and it holds.
 	buf.Reset()
 	for i := 0; i < usageShapeMax+4; i++ {
-		responseUsageWhy("application/json",
+		readWhy("application/json",
 			[]byte(`{"usage":{"tokensVariant`+strconv.Itoa(i)+`":1}}`), false)
 	}
 	if n := strings.Count(buf.String(), "cg.usage_unaccounted"); n > usageShapeMax {
@@ -384,47 +384,47 @@ func TestAnEarlierShapeDoesNotSpendTheRecordForALaterDialect(t *testing.T) {
 // having the reason.
 func TestTheMissReasonNeverContradictsUsageReported(t *testing.T) {
 	// Accounted by any round => parsed, whatever a later round found.
-	if got := noteUsageMiss(usageMissNone, usageMissAbsent, true); got != usageMissNone {
+	if got := NoteMiss(MissNone, MissAbsent, true); got != MissNone {
 		t.Errorf("an accounted request reported %v; usage_reported=true with a miss reason is a "+
 			"self-contradicting log line", got)
 	}
-	if got := noteUsageMiss(usageMissUnparsed, usageMissAbsent, true); got != usageMissNone {
+	if got := NoteMiss(MissUnparsed, MissAbsent, true); got != MissNone {
 		t.Errorf("a request accounted by a later round still reported %v", got)
 	}
 	// Unaccounted => keep the WORST reason seen, so a benign later round cannot mask a dialect gap
 	// an earlier one found.
-	if got := noteUsageMiss(usageMissUnparsed, usageMissAbsent, false); got != usageMissUnparsed {
+	if got := NoteMiss(MissUnparsed, MissAbsent, false); got != MissUnparsed {
 		t.Errorf("reported %v, want unparsed_dialect: a later benign round masked the round that "+
 			"found a dialect gap", got)
 	}
-	if got := noteUsageMiss(usageMissAbsent, usageMissUnparsed, false); got != usageMissUnparsed {
+	if got := NoteMiss(MissAbsent, MissUnparsed, false); got != MissUnparsed {
 		t.Errorf("reported %v, want unparsed_dialect", got)
 	}
 }
 
-// EVERY usageMiss VALUE MUST BE A DELIBERATE CHOICE, benign or counted.
+// EVERY Miss VALUE MUST BE A DELIBERATE CHOICE, benign or counted.
 //
-// alertable() and the counter increment used to be two independent lists — a predicate and a switch.
+// Alertable() and the counter increment used to be two independent lists — a predicate and a switch.
 // Widening only the predicate, exactly the edit someone adding a 6th value would make, passed the
 // entire suite: the shape record started firing on the new case while no counter moved. They are one
 // map now, so they cannot drift; this test covers the other half, which construction cannot — that
 // a new value is not silently benign because nobody added it anywhere.
 //
 // The failure it produces is a naming one on purpose: an unnamed value means someone added a
-// usageMiss and stopped, and the two questions to answer are "what does the log line call it" and
+// Miss and stopped, and the two questions to answer are "what does the log line call it" and
 // "is it alertable".
 func TestEveryUsageMissIsClassifiedAsBenignOrCounted(t *testing.T) {
 	// Benign by design — no counter, no shape record. Listed rather than derived, so adding a value
 	// here is a decision and not an omission.
-	benign := map[usageMiss]bool{
-		usageMissNone:   true,
-		usageMissNoBody: true,
-		usageMissAbsent: true,
-		usageMissZero:   true,
+	benign := map[Miss]bool{
+		MissNone:   true,
+		MissNoBody: true,
+		MissAbsent: true,
+		MissZero:   true,
 	}
-	for m := usageMissNone; m <= usageMissUnreadable; m++ {
+	for m := MissNone; m <= MissUnreadable; m++ {
 		if got := m.String(); got == "unknown" {
-			t.Errorf("usageMiss(%d) has no name, so the log line would read `usage_miss=unknown`: "+
+			t.Errorf("Miss(%d) has no name, so the log line would read `usage_miss=unknown`: "+
 				"a value was added without deciding what an operator should see", m)
 		}
 		_, counted := usageCounters[m]
@@ -436,16 +436,16 @@ func TestEveryUsageMissIsClassifiedAsBenignOrCounted(t *testing.T) {
 			t.Errorf("%v is neither listed benign nor counted, so it is silently benign by "+
 				"omission — decide: add it to `benign` here, or give it a counter in usageCounters", m)
 		}
-		if counted != m.alertable() {
-			t.Errorf("%v: alertable()=%v disagrees with usageCounters membership=%v — the two have "+
-				"drifted apart again", m, m.alertable(), counted)
+		if counted != m.Alertable() {
+			t.Errorf("%v: Alertable()=%v disagrees with usageCounters membership=%v — the two have "+
+				"drifted apart again", m, m.Alertable(), counted)
 		}
 	}
 	// And the map holds nothing outside the declared range, which would be an entry for a value that
 	// no longer exists.
 	for m := range usageCounters {
-		if m > usageMissUnreadable {
-			t.Errorf("usageCounters has an entry for usageMiss(%d), outside the declared values", m)
+		if m > MissUnreadable {
+			t.Errorf("usageCounters has an entry for Miss(%d), outside the declared values", m)
 		}
 	}
 }

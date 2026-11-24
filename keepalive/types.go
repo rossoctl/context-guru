@@ -208,7 +208,7 @@ type Policy struct {
 // manager strategy with HeadTTL1h, whose band allows up to 3590 s) and is left alone: no 5-minute
 // Idle can be that long, because config and the override band refuse it.
 func (p Policy) ForOneHour() Policy {
-	if p.Idle >= 300*time.Second {
+	if p.Idle >= OneHourIdleFloor {
 		p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
 		return p
 	}

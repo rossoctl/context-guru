@@ -34,7 +34,7 @@ const (
 	// OneHourIdleFloor is the Idle at or above which a policy is an EXPLICIT 1-hour schedule (a
 	// strategy with HeadTTL1h): no 5-minute Idle can reach it, because MaxOverrideIdle refuses it.
 	// Such a policy does not take the per-wait plan.
-	OneHourIdleFloor = 300 * time.Second
+	OneHourIdleFloor = modelinfo.AnthropicCacheTTL5m
 	// The ping-count band. The upper end is bounded again, and more tightly, by MaxOverrideHold.
 	MinOverridePings = 1
 	MaxOverridePings = 11

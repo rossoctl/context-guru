@@ -40,12 +40,15 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/inband"
 	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
+	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -933,22 +936,17 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
 	// request's row, not to whichever tenant is in flight when the call returns.
-	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, apply.Opts{
-		Provider:    provider,
-		Body:        body,
-		Session:     r.Header.Get("x-context-guru-session"),
-		Tenant:      tn.ID,
-		Bypass:      strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
-		Models:      models,
-		Window:      window,
-		WindowExact: windowExact,
-		// C, resolved beside the window because the fill fraction belongs over it rather than over
-		// the window — see internal/compactionpoint.
-		CompactionPoint:       cpoint.Tokens(window),
-		CompactionPointSource: string(cpoint.Source),
-		CacheMode:             cacheMode,
-		Tracker:               h.tracker,
-	})
+	// The shared option build (lifecycle.Request): the same window, C and tracker as the chat path.
+	// C is resolved beside the window because the fill fraction belongs over it rather than over
+	// the window — see internal/compactionpoint.
+	o := lifecycle.Request{
+		Provider: provider, Body: body, Session: r.Header.Get("x-context-guru-session"), Tenant: tn.ID,
+		Models: models, Window: window, WindowExact: windowExact,
+		CompactionPoint: cpoint.Tokens(window), CompactionPointSource: string(cpoint.Source),
+		CacheMode: cacheMode, Tracker: h.tracker,
+	}.Opts()
+	o.Bypass = strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
+	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, o)
 	cp.noteCG(float64(time.Since(start).Microseconds()) / 1000.0)
 	cp.noteTrace(res.Trace)
 	w.Header().Set("Content-Type", "application/json")
@@ -992,16 +990,7 @@ func headerKey(name, key string) func(http.Header) {
 // Nil pricer or an unnameable model returns the zero value, which the component must read as
 // "unknown" and fall back on, never as free.
 func (h *Handler) selfRates(ctx context.Context, model string) components.TokenRates {
-	if h.opts.Prices == nil || model == "" {
-		return components.TokenRates{}
-	}
-	p, ok := h.opts.Prices.Price(ctx, model)
-	if !ok || p.Zero() {
-		return components.TokenRates{}
-	}
-	return components.TokenRates{
-		Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite,
-	}
+	return lifecycle.SelfRates(ctx, h.opts.Prices, model)
 }
 
 // ratesFor hands the pipeline the operator's rate card as a lookup, so a component that
@@ -1013,10 +1002,7 @@ func (h *Handler) selfRates(ctx context.Context, model string) components.TokenR
 // falls back to CHEAP_MODEL_PRICE_* (haiku LIST rates), which is a different card from the one
 // the dashboard prices with — measured 32% apart on the same 93 calls.
 func (h *Handler) ratesFor(ctx context.Context) func(string) components.TokenRates {
-	if h.opts.Prices == nil {
-		return nil
-	}
-	return func(model string) components.TokenRates { return h.selfRates(ctx, model) }
+	return lifecycle.RatesFor(ctx, h.opts.Prices)
 }
 
 // incomingModel builds an LLM client that reuses the proxied request's own model
@@ -1371,12 +1357,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
 		agentCompaction := isClientCompaction(r, body)
-		if !bypassed && agentCompaction {
-			gate := "detected"
-			if int64(len(body)) > maxRequestBytes {
-				bypassed = true
-				gate = "oversize_bypass"
-			}
+		bypassed, gate := lifecycle.CompactionGate(bypassed, agentCompaction, len(body), maxRequestBytes)
+		if gate != "" {
 			if h.agg != nil {
 				rep := components.Report{Component: "agent_compaction", Skipped: true, Mode: tn.Mode}
 				rep.Gate(gate)
@@ -1406,292 +1388,160 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.
 		orig := body
-		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
-		var added time.Duration // hoisted with tr: the lifecycle log line reads both
-		var threadID string     // hoisted with it: serve hands it to the keeper
-
-		// threadOf is hoisted too: serve resolves the observe-mode thread with it.
-		var threadOf func(session string) thread.Result
-		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
-		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
-		// read by h.serve below, and stashed alongside the body actually forwarded: see the
-		// STALE-PREFIX GUARD comment on sentEntry in prefixask.go for why the two can diverge (PR
-		// #414's review of this follow-up, and PR #431's round 1) and why a caller checking coverage
-		// must compare against THIS, never against what a later component in the pipeline went on to
-		// rewrite.
-		var preBody []byte
-		// Where an expand answered in band on this turn is restored from the next turn on, when
-		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
-		// in the same coordinates the anchor is checked against on every later turn.
-		var anchor *expand.Anchor
+		// The thread of a session, read off `orig`, the request as the agent sent it. apply calls it
+		// once the session id is known, and serve resolves the observe-mode thread with it.
 		// Tool deferral's facts for this request (#485), nil when it did not change the request.
 		var di *deferInfo
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
-					body = orig
-					// The original goes upstream, so no operation of the savings record is on the
-					// wire: drop the record, and the event books no saving.
-					cp.accDrop()
+		// lifecycle.Prepare runs the steps before the forward in their one right order and fails
+		// open: a panic in any step (a hook included) gives back the original body. The comments
+		// of each step are in the lifecycle package and on the hooks below.
+		prep := lifecycle.Prepare(lifecycle.Pre{
+			Wire: wire, Provider: provider, Mode: tn.Mode, Bypassed: bypassed, Pipe: tn.Pipe,
+			Store: tn.Store, InjectExpand: h.opts.InjectExpand,
+			Orig: orig,
+			MakeThreadOf: func() func(string) thread.Result {
+				return func(sess string) thread.Result {
+					return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
 				}
-			}()
-			// A client that received our own expand tool_use answered it itself, with an
-			// error — no client implements the tool. Put the content the model asked for where
-			// that error is, BEFORE the pipeline reads the transcript, so the restored text is
-			// marked kept-verbatim and offload does not compact it straight back into the
-			// marker that caused the call. Same gate as expand.Inject below: we repair exactly
-			// when we are rewriting this request at all.
-			if tn.Mode != components.ModeObserve && !bypassed {
-				var repaired int
-				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
+			},
+			// A client that received our own expand tool_use answered it itself, with an error. The
+			// repair puts the content the model asked for where that error is, BEFORE the pipeline
+			// reads the transcript, so offload does not compact it straight back into the marker
+			// that caused the call. A call the AGENT made to context_guru_adjudicate gets the same
+			// repair (lifecycle.Prepare, adjudicate.AnswerStrayCalls).
+			RepairExpand: func(b []byte) ([]byte, int) {
+				return h.repairExpandErrors(wire, b, tn, cp, func(b []byte) string {
 					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
 					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSess, api, provider, bypassed, b)
 				})
-				if repaired > 0 {
-					// A rewrite of the client's own transcript must never be silent: this is
-					// the only line that says the response side failed to withhold the call
-					// and the request side caught it.
-					lg.Debug("cg.expand_repair", "restored", repaired)
+			},
+			// A rewrite of the client's own transcript must never be silent: these lines say the
+			// response side failed to withhold the call and the request side caught it.
+			OnRepair: func(n int) { lg.Debug("cg.expand_repair", "restored", n) },
+			OnStray:  func(n int) { lg.Debug("cg.adjudicate_stray", "answered", n) },
+			Apply: func(b []byte, threadOf func(string) thread.Result) ([]byte, time.Duration, apply.Trace) {
+				return h.applyMode(&reqInfo{
+					// cp.llmCtx: context-guru's OWN compaction-model spend under this context
+					// is charged to this request's row, and to no other tenant's.
+					ctx:         cp.llmCtx(r.Context()),
+					provider:    provider,
+					api:         api,
+					body:        b,
+					session:     explicitSess,
+					bypassed:    bypassed,
+					models:      models,
+					window:      window,
+					windowExact: windowExact,
+					// C, resolved once here so both the enforced and the observed path see the same
+					// figure — a second resolution is a second thing to keep in agreement.
+					compactionPoint:       cpoint.Tokens(window),
+					compactionPointSource: string(cpoint.Source),
+					rates:                 h.selfRates(r.Context(), gjson.GetBytes(b, "model").String()),
+					tn:                    tn,
+					threadOf:              threadOf,
+					endpoint:              up.base,
+					route:                 up.path,
+				})
+			},
+			Applied: func(tr apply.Trace, added time.Duration) {
+				cp.noteCG(float64(added.Microseconds()) / 1000.0)
+				cp.noteTrace(tr)
+			},
+			Observed: func(th thread.Result, tr apply.Trace, added time.Duration) {
+				// The thread is known before the savings tracker is told of the request: the first
+				// request after the agent's own compaction is found here (thread.Result.AfterCompaction,
+				// #947). It was read off `orig`, the request as the agent sent it.
+				cp.noteThread(th)
+				// The savings tracker is told of the request HERE, after the pipeline, and not before
+				// it: the session (tr.Session) is known only once the pipeline has run. accBegin only
+				// notes the client body; accEnd opens the record on another goroutine (issue #1059).
+				// An empty session means the pipeline did not run (bypassed, observe, no messages):
+				// there are no operations to price, so the request is skipped.
+				//
+				// Not for an OpenAI Responses request whose history the provider holds
+				// (previous_response_id, conversation, item_reference; see schema.ServerHeldHistory,
+				// wide form): the body is only this turn. The record would compare that delta with the
+				// last full body as a client edit, and price a prefix the proxy cannot see. The event
+				// is marked instead, so the dashboard says why it has no saving (#899).
+				if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
+					schema.ServerHeldHistory(orig, true) {
+					cp.accServerHeldHistory = true
+				} else if cp != nil && cp.savings != nil && tr.Session != "" {
+					cp.accBegin(accountant.RequestMeta{
+						RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
+						Session:   tr.Session,
+						Model:     gjson.GetBytes(orig, "model").String(),
+						At:        cp.start,
+						// The proxy has no subscription detection, so every request is billed as api.
+						Billing: accountant.Billing{Mode: accountant.BillingAPI},
+						// The first request after the agent's own compaction (R55). The wire does not yet
+						// tell a manual /compact from an auto compaction, so the verdict is unknown.
+						Compaction: compactionVerdict(th),
+					}, orig)
 				}
-				// The same problem for the adjudication tool, and the same remedy. The client
-				// cannot execute a tool the proxy injected, so a call the AGENT made to
-				// context_guru_adjudicate comes back as "not found" and the agent loses a turn
-				// to a dead end. Not defensive: a model was directly observed calling
-				// context_guru_expand at step 2 of a run. Measured at 0 strays across ~4,900
-				// requests with the "do not call this yourself" description, and 0 again across
-				// three further benchmark passes. This is now the BACKSTOP, for two distinct paths.
-				// The response loop answers a stray in band when the turn called proxy tools only.
-				// It DEFERS to this repair when the model co-called a client tool in the same turn
-				// (otherTools -> bail, see the response loop), because it cannot continue a turn
-				// whose other tool_use only the client can execute — on that path our tool_use does
-				// reach the client and this repair is the only thing that answers it, at a cost of
-				// one agent turn. It also catches a round the loop could not reconstruct at all.
-				// The counter (adjudicate_stray) is what says whether the description still works.
-				var strays int
-				if body, strays = adjudicate.AnswerStrayCalls(wire, body); strays > 0 {
-					lg.Debug("cg.adjudicate_stray", "answered", strays)
-				}
-			}
-			if tn.Mode != components.ModeObserve && !bypassed && tn.Pipe.FixedRestore() {
-				if at, fp, ok := expand.AnchorPoint(wire, body); ok {
-					anchor = &expand.Anchor{At: at, Fp: fp}
-				}
-			}
-			// Captured BEFORE the pipeline runs — see ClearStaleKeepAliveCandidate's own comment
-			// on why this request's "did I register fresh keep-alive material" test has to be a
-			// timestamp comparison rather than clearing by call order: tr.Session (the key a
-			// clear-by-session-id would need) is not resolved until the pipeline inside applyMode
-			// runs, so an unconditional clear placed after it deletes the very candidate this
-			// request's own run just wrote.
-			pipelineStartedAt := time.Now()
-			// The thread is resolved INSIDE apply, once the session id is known and before the
-			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
-			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
-			threadOf = func(sess string) thread.Result {
-				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
-			}
-			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
-			// EVERY component, cache_aware_summarizer and extract_llm_sweep included — this is "as
-			// the pipeline received them", not "as the client originally sent them"
-			// (repairExpandErrors, AnswerStrayCalls and the force-model rewrite above may already
-			// have touched body), which is what makes it the right thing for a later component's
-			// own hash to agree with.
-			preBody = body
-			body, added, tr = h.applyMode(&reqInfo{
-				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
-				// is charged to this request's row, and to no other tenant's.
-				ctx:         cp.llmCtx(r.Context()),
-				provider:    provider,
-				api:         api,
-				body:        body,
-				session:     explicitSess,
-				bypassed:    bypassed,
-				models:      models,
-				window:      window,
-				windowExact: windowExact,
-				// C, resolved once here so both the enforced and the observed path see the same
-				// figure — a second resolution is a second thing to keep in agreement.
-				compactionPoint:       cpoint.Tokens(window),
-				compactionPointSource: string(cpoint.Source),
-				rates:                 h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
-				tn:                    tn,
-				threadOf:              threadOf,
-				endpoint:              up.base,
-				route:                 up.path,
-			})
-			addedMs := float64(added.Microseconds()) / 1000.0
-			cp.noteCG(addedMs)
-			cp.noteTrace(tr)
-			// The thread is known before the savings tracker is told of the request: the first request
-			// after the agent's own compaction is found here (thread.Result.AfterCompaction, #947).
-			// Read off `orig`, the request as the agent sent it — the pipeline's own rewrite would
-			// break the prefix the fallback matches on.
-			th := tr.Thread
-			if !tr.ThreadResolved {
-				// apply returned before resolving the session's thread (no message list, an
-				// observe-mode or bypassed request): resolve it here, as before.
-				th = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
-			}
-			threadID = th.ID
-			cp.noteThread(th)
-			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
-			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
-			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
-			// sent. An empty session means the pipeline did not run (bypassed, observe, no
-			// messages): there are no operations to price, so the request is skipped.
+				// Issue #424's RECORD half: stash the PRISTINE body for finish() to scan AFTER this
+				// request has gone upstream — see noteWaitBody's own comment, and dashcapture.go's
+				// finish() for where the actual scan (waitcause.Tracker.Observe) runs. This line
+				// itself costs one slice-header copy, not a scan.
+				cp.noteWaitBody(orig)
+				// The wait-cause scan of the same body starts HERE and runs while the request is
+				// upstream. The keeper takes it at response end without waiting (#1225, #1227;
+				// earlyscan.go).
+				cp.startEarlyScan(h, r.Context(), provider, orig)
+				// The alias derivation needs the pipeline that transforms THIS body, and the wire
+				// dialect and bypass flag it transforms under — see noteAliasSource.
+				cp.noteAliasSource(tn.Pipe, api, bypassed)
+			},
+			// A real request has arrived on this thread: cancel any pending keep-alive (this request
+			// refreshes the entry itself, and a ping concurrent with it would be a second request
+			// against the tenant's budget for nothing), and pick up what the pings during the idle
+			// span it just ended actually did. Both facts are needed BEFORE the row is priced.
 			//
-			// Not for an OpenAI Responses request whose history the provider holds (previous_response_id,
-			// conversation, item_reference; see schema.ServerHeldHistory, wide form): the body is only this turn. The record would compare that delta with the last full
-			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
-			// the dashboard says why it has no saving (#899).
-			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
-				schema.ServerHeldHistory(orig, true) {
-				cp.accServerHeldHistory = true
-			} else if cp != nil && cp.savings != nil && tr.Session != "" {
-				cp.accBegin(accountant.RequestMeta{
-					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
-					Session:   tr.Session,
-					Model:     gjson.GetBytes(orig, "model").String(),
-					At:        cp.start,
-					// The proxy has no subscription detection, so every request is billed as api.
-					Billing: accountant.Billing{Mode: accountant.BillingAPI},
-					// The first request after the agent's own compaction (R55). The wire does not yet tell
-					// a manual /compact from an auto compaction, so the verdict is unknown.
-					Compaction: compactionVerdict(th),
-				}, orig)
-			}
-			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
-			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
-			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
-			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
-			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
-			cp.noteWaitBody(orig)
-			// The wait-cause scan of the same body starts HERE and runs while the request is upstream. The
-			// keeper takes it at response end without waiting (#1225, #1227; earlyscan.go).
-			cp.startEarlyScan(h, r.Context(), provider, orig)
-			// The alias derivation needs the pipeline that transforms THIS body, and the
-			// wire dialect and bypass flag it transforms under — see noteAliasSource.
-			cp.noteAliasSource(tn.Pipe, api, bypassed)
-			// A real request has arrived on this session: cancel any pending keep-alive
-			// (this request refreshes the entry itself, and a ping concurrent with it would
-			// be a second request against the tenant's budget for nothing), and pick up what
-			// the pings during the idle span it just ended actually did. Both facts are
-			// needed BEFORE the row is priced — the ping count and the tokens the last ping
-			// refreshed are inputs to a dollar figure, not just a label.
-			//
-			// Per THREAD of the session (#423): the main agent, each subagent and each fork
-			// have their own cache entry, and only this request's thread was refreshed.
-			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
-			if cp != nil {
-				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
-			}
-			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
-			// turn's conversation — but never the one this request's own pipeline run (above)
-			// may just have written: an unconditional clear here used to delete that candidate
-			// in the same call it was created, which is why keep-alive substitution could never
-			// actually fire. See ClearStaleKeepAliveCandidate's own comment.
-			// Per THREAD (#423): the registry is keyed by session + thread, so another thread's
-			// request can never clear this thread's candidate.
-			offload.ClearStaleKeepAliveCandidate(thread.Key(tr.Session, threadID), pipelineStartedAt)
-			h.setLastSession(tr.Session)
-			if h.agg != nil && !bypassed {
-				h.agg.RecordAddedLatency(addedMs)
-				h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)
-			}
-			// Advertise the expand tool so the model can recover any offloaded content
-			// (closes the reversibility loop h.serve drives). Sticky/idempotent + appended
-			// last to keep the provider prefix cache warm; gated by InjectExpand + store.
-			// Skipped in observe mode: nothing was offloaded, so there is nothing to
-			// recover, and injecting a tool declaration would MODIFY the request — which is
-			// precisely the one thing observe mode promises never to do.
-			// Skipped on a bypassed request too: bypass promises a byte-identical forward, so
-			// nothing is injected. Only the x-context-guru-bypass header bypasses. An agent
-			// compaction request is not bypassed, so it gets the tool like every earlier turn
-			// of its thread. That keeps the tools array, which sits ahead of messages in the
-			// provider's cache hash, the same as on the previous turn.
-			//
-			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
-			// tool, so both need a model that ignores it):
-			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
-			//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
-			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
-			//   - Any dialect: if the model calls expand on every round, the client gets the raw
-			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
-			// compactionexpand_test.go pins both, so a change shows.
-			if tn.Mode != components.ModeObserve && !bypassed {
-				im := h.opts.InjectExpand
-				if im == "" {
-					im = expand.InjectAuto
+			// Per THREAD of the session (#423): the main agent, each subagent and each fork have
+			// their own cache entry, and only this request's thread was refreshed.
+			Arrive: func(session, threadID string) {
+				cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, session, threadID))
+				if cp != nil {
+					cp.predArrival = h.predRT().arrive(tn.ID, session, threadID, time.Now())
 				}
-				// Under `auto`, advertise only when THIS request's pipeline can actually mint a
-				// marker. Without it, an offloader-free pipeline — `off`, `safe`, or any
-				// cachesplit-only configuration — declared a tool whose every use is guaranteed
-				// to fail: measured `[Read Bash]` in, `[Read Bash context_guru_expand]` out, and
-				// on a transcript containing marker-shaped text the model duly called it and got
-				// "[expand: original for id ... is no longer available]".
-				//
-				// Which presets those are is NOT a list worth writing down here — `mcp` looks
-				// offloader-free and is not, because `smartcrush` implements components.Offload.
-				// That is exactly why the gate asks the interface (Pipeline.HasOffload) instead
-				// of naming presets: a list in a comment is a second source of truth, and this
-				// one was wrong about `mcp` in its first draft.
-				//
-				// `off` mattered most: it is the A/B control arm, and a control that carries an
-				// extra tool declaration is not a control.
-				if im != expand.InjectAuto || tn.Pipe.HasOffload() {
-					body, _ = expand.Inject(wire, im, body, tn.Store.Persists())
+			},
+			Settled: func(tr apply.Trace, added time.Duration) {
+				h.setLastSession(tr.Session)
+				if h.agg != nil && !bypassed {
+					h.agg.RecordAddedLatency(float64(added.Microseconds()) / 1000.0)
+					h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)
 				}
-				// The adjudication tool, on every request of a pipeline that can ACTUALLY
-				// adjudicate, and on no other.
-				//
-				// The cache argument for injecting it unconditionally is real but narrower than it
-				// was first applied. `tools` hashes before system and messages, so a tool that
-				// appears on the turn a sweep fires and vanishes on the next invalidates the prefix
-				// from position zero — the flap expand's `always` mode exists to prevent. That
-				// forbids gating on anything that varies PER TURN. It does not forbid these two
-				// conditions: pipeline membership is fixed per config DOCUMENT and the provider is
-				// fixed by the route, so both are byte-stable for every request under a given config
-				// and the prefix never flaps. "Fixed at config load" is what this used to say and it
-				// is false: tenancy.go rebuilds a tenant's *Pipeline when the config document
-				// changes, mid-session, by its own design. The conclusion survives, because a config
-				// change that adds or drops extract_llm_sweep has already invalidated the prefix for
-				// much bigger reasons than this tool's 946 bytes — but the premise had to be stated
-				// as what the code actually guarantees.
-				//
-				// Injecting it unconditionally instead cost 946 bytes (measured on the wire) at the
-				// head of the cacheable prefix of EVERY preset, including `off` — which is the
-				// control arm of every published comparison in this repo — and including presets
-				// like codesmart that contain no extract_llm_sweep and so can never adjudicate.
-				// The provider half is not cosmetic either: the prefixed ask needs a
-				// matching wire adapter. Anthropic, Responses and Chat Completions have one
-				// (chatPrefixAsker, #1030); every other wire does not.
-				//
-				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
-				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || schema.IsResponses(wire) || wire == schema.WireOpenAI) && tn.Pipe.Has("extract_llm_sweep") {
-					body, _ = adjudicate.Inject(wire, body)
-				}
-				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
-				// the never-defer list, and the names list must see the tools as they go upstream.
-				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
-				preDefer := body
-				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
+			},
+			// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on the
+			// never-defer list, and the names list must see the tools as they go upstream. Only the
+			// ultrahigh preset turns it on (toolfilter `defer: auto`).
+			ToolDefer: func(tr *apply.Trace, th thread.Result, b []byte) []byte {
+				preDefer := b
+				b, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, th.ID, orig, b)
 				// Deferral adds its names list to the messages after the pipeline reported its
 				// operations. Report it as an operation of its own, after theirs (#908).
-				if di != nil && !bytes.Equal(preDefer, body) {
+				if di != nil && !bytes.Equal(preDefer, b) {
 					if cp != nil {
 						cp.accPreDefer = preDefer
 					}
-					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, body)...)
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, b)...)
 				}
-			}
-			// The savings record ends HERE, after both injections, with the body that goes
-			// upstream: the provider bills the injected tool declarations, so the library's
-			// bytes-to-tokens ratio must count them too. They are appended to `tools`, so no
-			// message moves and the operations' positions stay valid.
-			cp.accEnd(th, body, tr.Ops)
-		}()
+				return b
+			},
+			// The savings record ends HERE, after both injections, with the body that goes upstream:
+			// the provider bills the injected tool declarations, so the library's bytes-to-tokens
+			// ratio must count them too. They are appended to `tools`, so no message moves and the
+			// operations' positions stay valid.
+			Done: func(th thread.Result, b []byte, tr apply.Trace) { cp.accEnd(th, b, tr.Ops) },
+		})
+		if prep.Panic != nil {
+			lg.Error("context-guru: recovered from panic before forward; sending original", "panic", prep.Panic)
+			// The original goes upstream, so no operation of the savings record is on the wire: drop
+			// the record, and the event books no saving.
+			cp.accDrop()
+		}
+		body = prep.Body
+		preBody, anchor, tr, added, threadID, threadOf := prep.PreBody, prep.Anchor, prep.Trace, prep.Added, prep.ThreadID, prep.ThreadOf
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
@@ -1752,9 +1602,6 @@ func lifecycleLogger(lg *slog.Logger, tr apply.Trace, bypassed bool, added time.
 // API exposes the dashboard's HTTP surface so the host can attach an authenticator.
 // nil when the dashboard is off.
 func (h *Handler) API() *dash.API { return h.api }
-
-// maxExpandRounds caps the expand continuation loop (headroom's default).
-const maxExpandRounds = 3
 
 // maxRequestBytes caps an inbound request body so a single huge POST can't exhaust
 // proxy memory (the body is buffered and token-counted several times). Generous
@@ -1858,27 +1705,18 @@ func refuseTooLarge(w http.ResponseWriter, limit int64) {
 // every later turn. Nothing is charged to the process-wide bounce counter, which counts expand
 // CALLS, and ten repairs of one stale error are one call.
 func (h *Handler) repairExpandErrors(wire string, body []byte, tn *Tenancy, cp *capture, sessionOf func(body []byte) string) ([]byte, int) {
-	out, restored := expand.RepairToolResults(wire, body, func(hashID string) (string, bool) {
-		return expand.Resolve(tn.Store, hashID)
-	})
-	if len(restored) == 0 {
-		return out, 0
+	s := h.expandSinks(cp)
+	s.Bounce = nil // a repair is never a bounce: see inband.RepairExpandErrors
+	return inband.RepairExpandErrors(wire, body, tn.Store, sessionOf, s)
+}
+
+// expandSinks wires the library's expand accounting to the dashboard row and the process counter.
+func (h *Handler) expandSinks(cp *capture) inband.Sinks {
+	s := inband.Sinks{NoteExpand: cp.noteExpand, NoteSweepExpand: cp.noteSweepExpand}
+	if h.agg != nil {
+		s.Bounce = h.agg.RecordExpand
 	}
-	// Lazy: the derivation re-parses the transcript, and a repair is rare. Derived from the repaired
-	// body, because that is what the pipeline will see.
-	session := sessionOf(out)
-	for _, orig := range restored {
-		// Charge the row only the FIRST time this original comes back. Repairing the same
-		// stale error on ten later turns is one recovery, not ten.
-		if !offload.KeptVerbatim(tn.Store, session, orig) {
-			cp.noteExpand(schema.TextTokens(orig))
-			// A sweep marker restored by the repair is charged to the sweep too (#404 point 7). Same
-			// first-time rule as the line above: the repair runs again on every later turn.
-			cp.noteSweepExpand(schema.TextTokens(orig), offload.NoteSweepExpand(tn.Store, offload.SweepMarkerID(orig), schema.TextTokens(orig), ""))
-		}
-		offload.MarkKeptVerbatim(tn.Store, session, orig)
-	}
-	return out, len(restored)
+	return s
 }
 
 var errNoUpstream = errors.New("no upstream configured")
@@ -1890,7 +1728,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // Streaming (SSE) keeps streaming while it does. An Anthropic event stream is forwarded
 // event by event and forwarding stops at the content_block_start that calls the expand
 // tool; the continuation's blocks are then spliced into the same open response, renumbered
-// past the blocks already sent (sseSplicer, ssepeek.go). Nothing is buffered to decide
+// past the blocks already sent (sseSplicer, inband/sse.go). Nothing is buffered to decide
 // this, and the client's first byte is the upstream's first event. Both outcomes are
 // counted (agg.RecordSSE → /stats sse_streamed / sse_buffered), and a response is filed as
 // buffered only when the model opened with the call, so the client really did wait for the
@@ -1921,7 +1759,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// So for a tools-bearing client this is true from the FIRST turn, and the old "no offload
 	// yet → no tool → no buffering" fast path is gone with it. What replaced it is narrower
 	// and does the same job: sseSplicer withholds only the block that calls the expand tool
-	// and streams everything else as it arrives (see ssepeek.go). Of the other dialects, only a
+	// and streams everything else as it arrives (see inband/sse.go). Of the other dialects, only a
 	// Chat Completions stream that declares our own tool search is spliced (#879).
 	// Advertised covers BOTH proxy-injected tools. The response loop is what keeps a
 	// proxy-injected tool_use away from the client, and gating it on expand alone let an
@@ -1934,7 +1772,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	// A Responses stream with our search is spliced only for a stateless request (#884): the
 	// client sends the full input each turn, so it never chains on the id of this response and
 	// round 1's id can stand for the whole stream. A request that may chain keeps the buffering.
-	respSplice := searchOn && schema.IsResponses(wire) && statelessResponses(body)
+	respSplice := searchOn && schema.IsResponses(wire) && inband.StatelessResponses(body)
 	// SSE accounting is PER CLIENT REQUEST, not per upstream round: one client request
 	// that drives several expand rounds waited for all of them, so timing a single
 	// round would report a healthy TTFB for a client that waited three round-trips.
@@ -1955,8 +1793,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	var deferSearches searchTally
 	// WHY, when the answer is no. `usage_reported=false` meant five different things — two
 	// benign, three a measurement outage — and nothing distinguished them, so a run that had
-	// stopped accounting tokens on every request read as healthy (#200). See usageMiss.
-	usageWhy := usageMissNoBody
+	// stopped accounting tokens on every request read as healthy (#200). See respfacts.Miss.
+	usageWhy := respfacts.MissNoBody
 	// status/rounds/expanded exist for the lifecycle log line: the upstream status is
 	// the one fact about a request an operator asks for first, and until now it reached
 	// the dashboard row and nothing else.
@@ -1968,7 +1806,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 	var lastUpStart time.Time
 	// sp is nil until an Anthropic event stream needs splicing, and then lives for the rest
 	// of the client request: every later round is written into the response it opened.
-	var sp *sseSplicer
+	var sp *inband.SSESplicer
 	// The events the current round withheld, hoisted out of the loop: once a stream is open,
 	// EVERY way this request can end has to end it with a complete turn, and these are the
 	// bytes that do it. prevWithheld keeps the round before's, because a continuation round
@@ -2189,28 +2027,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		// Tool deferral changed this request and the provider refused it: the client must never see
 		// that 400 (Claude Code would turn its own search off for the session). Send the request
 		// without deferral, once, before answering. Round 0 only: a later round is the proxy's own.
-		if round == 0 && err == nil && resp != nil && di != nil &&
-			(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
-			resp.Body.Close()
-			refused := resp.StatusCode
-			body = di.Orig
-			resp, err = h.doUpstream(r, up, body)
-			stubbed := false
-			// The missing-reference repair reads Anthropic shapes: not on our search's OpenAI wires.
-			if err == nil && !di.Search {
-				if fixed, ok := repairOnMissingRef(resp, body); ok {
-					// The original failed the same way: it names a tool `tools` lacks. Send it once
-					// more with a stub for that tool, so the client never sees our 400 (#871). The
-					// refusal was then not deferral's, so deferral stays on (originalOK false).
-					body, stubbed = fixed, true
-					resp, err = h.doUpstream(r, up, body)
-				}
+		if round == 0 && di != nil {
+			var retried bool
+			resp, err, body, retried = inband.RetryRefused(resp, err, body, inband.Refused{
+				Orig: di.Orig, Search: di.Search,
+				Do:   func(b []byte) (*http.Response, error) { return h.doUpstream(r, up, b) },
+				Book: func(status int, errBody []byte, ok bool) { h.deferRetry(di, status, errBody, ok) },
+			})
+			if retried {
+				// The original declares no search tool of ours: nothing to hold or answer from here on.
+				di, searchOn, respSplice = nil, false, false
 			}
-			ok := !stubbed && err == nil && resp != nil && resp.StatusCode < 400
-			h.deferRetry(di, refused, errBody, ok)
-			// The original declares no search tool of ours: nothing to hold or answer from here on.
-			di, searchOn, respSplice = nil, false, false
 		}
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			// The bytes the provider's prompt cache is now populated from. Stashed HERE rather than
@@ -2247,8 +2074,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				if withheld != nil {
 					countLeak(called)
 				}
-				sp.handBack(withheld)
-				sp.terminate(withheld)
+				sp.HandBack(withheld)
+				sp.Terminate(withheld)
 				return
 			}
 			// The client gets a fixed string, NOT err.Error(). http.Client returns a
@@ -2292,11 +2119,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tee != nil {
 				recBody, recIsSSE = teeBody(tee, isSSE, &recIncomplete)
 			}
-			// noteUsageMiss, not a bare assignment: usageOK is sticky-true across expand rounds
+			// respfacts.NoteMiss, not a bare assignment: usageOK is sticky-true across expand rounds
 			// while this was last-write-wins, so a request whose round 1 parsed usage and whose
 			// round 2 continuation carried none logged `usage_reported=true usage_miss=absent`.
 			// A pair that can contradict itself undoes the reason for having the reason.
-			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok)
+			usageWhy = respfacts.NoteMiss(usageWhy, why, usageOK || ok)
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -2312,32 +2139,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		switch {
 		case isSSE && (provider == bschemas.Anthropic || (searchOn && wire == schema.WireOpenAI) || respSplice):
 			// Forward the events as they arrive and stop at the expand call, rather than
-			// buffering the response to find out whether it holds one. See ssepeek.go.
+			// buffering the response to find out whether it holds one. See inband/sse.go.
 			// Chat Completions with our own tool search (#879) takes the same splice: its text
 			// streams at once, and only a call to a proxy tool is held.
 			sse = true
 			if sp == nil {
 				if respSplice {
-					sp = newResponsesSSESplicer(w)
+					sp = inband.NewResponsesSSESplicer(w, copyHeaders)
 				} else if provider == bschemas.Anthropic {
-					sp = newSSESplicer(w)
+					sp = inband.NewSSESplicer(w, copyHeaders)
 				} else {
-					sp = newChatSSESplicer(w)
+					sp = inband.NewChatSSESplicer(w, copyHeaders)
 				}
 			}
-			sp.round(resp)
+			sp.Round(resp)
 			// The PREVIOUS round's withheld events, because pass is about to overwrite
 			// withheld and round 1's message_stop may be the only terminator this client
 			// will ever get (see the terminator check below).
 			prevWithheld = withheld
 			if searchOn {
-				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName)
+				respBody, withheld, called = sp.Pass(resp.Body, expand.ToolName, adjudicate.ToolName, tooldefer.ClientSearchName)
 			} else {
-				respBody, withheld, called = sp.pass(resp.Body, expand.ToolName, adjudicate.ToolName)
+				respBody, withheld, called = sp.Pass(resp.Body, expand.ToolName, adjudicate.ToolName)
 			}
 			resp.Body.Close()
 			switch {
-			case len(called) > 0 && !sp.opened():
+			case len(called) > 0 && !sp.Opened():
 				// The model OPENED with the call, so the client holds a message_start and
 				// nothing else and waits for the whole continuation. That is a buffered
 				// response, and its first byte has to stay unset: filing the message_start's
@@ -2345,10 +2172,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 				// mislabelling sse_ttfb_ms_avg_buffered exists to expose.
 				sseBuffered, sseFirstByte = true, time.Time{}
 			case !sseBuffered:
-				sseFirstByte = sp.first
+				sseFirstByte = sp.FirstByte()
 			}
 			lg.Debug("cg.sse_splice", "round", round, "proxy_calls", strings.Join(called, ","),
-				"blocks_sent", sp.blocks, "bytes", len(respBody))
+				"blocks_sent", sp.Blocks(), "bytes", len(respBody))
 			if h.recorder != nil {
 				// sp.pass returns the round's raw event stream (the continuation loop below
 				// aggregates it too), so the writer must aggregate it: recIsSSE is true. A nil
@@ -2391,7 +2218,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if tee != nil {
 				recBody, recIsSSE = teeBody(tee, isSSE, &recIncomplete)
 			}
-			usageWhy = noteUsageMiss(usageWhy, why, usageOK || ok) // see the other stream path
+			usageWhy = respfacts.NoteMiss(usageWhy, why, usageOK || ok) // see the other stream path
 			if ok {
 				usage, usageOK = u, true
 			} else {
@@ -2424,11 +2251,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			u.Backend = agentU.Backend
 		}
 		if ok {
-			usage, usageOK, usageWhy = u, true, noteUsageMiss(usageWhy, why, true)
+			usage, usageOK, usageWhy = u, true, respfacts.NoteMiss(usageWhy, why, true)
 		} else {
 			usage.StopReason = u.StopReason // same reasoning as the stream path above
 			usage.Backend = u.Backend       // a reply with no usage still has a backend label
-			usageWhy = noteUsageMiss(usageWhy, why, usageOK)
+			usageWhy = respfacts.NoteMiss(usageWhy, why, usageOK)
 		}
 		if di != nil {
 			deferSearches.Add(isSSE, respBody)
@@ -2439,7 +2266,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// that second case the client has our tool_use, which is the leak these counters
 			// exist for.
 			countLeak(called)
-			sp.terminate(prevWithheld)
+			sp.Terminate(prevWithheld)
 			return
 		}
 		// bail is what the client gets when the loop cannot answer after all. On a spliced
@@ -2462,12 +2289,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			if withheld != nil {
 				countLeak(called)
 			}
-			sp.handBack(withheld)
+			sp.HandBack(withheld)
 			// Idempotent via sp.ended: if those events closed the turn this is a no-op, and
 			// if the round was truncated it is the only thing that closes it.
-			sp.terminate(withheld)
+			sp.Terminate(withheld)
 		}
-		if round >= maxExpandRounds {
+		if round >= inband.MaxExpandRounds {
 			// The cap is reached, so this call cannot be answered — the client gets it, and
 			// bail is what counts that. Withholding first and handing back is the same bytes
 			// as streaming the round whole, and it is the only way the leak is visible.
@@ -2492,162 +2319,50 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			msg = agg
 		}
 
-		// Calls to our own tool search (#825). Together with a client tool call, the turn goes to the
-		// client whole (the loop cannot run the client's tool): the tools are added back now, and the
-		// next request answers our call (tooldefer.ApplySearch). Alone, they are answered below.
-		var searches []tooldefer.SearchCall
-		var searchSet map[string]bool
-		var searchNow []string
+		turn := inband.Turn{
+			Wire: wire, Body: body, Msg: msg, Store: tn.Store, Session: session, ThreadID: threadID,
+			Anchor: anchor, InBandBreakpoint: tn.Pipe.InBandBreakpoint(),
+			Sinks: h.expandSinks(cp),
+		}
 		if searchOn && di != nil {
-			var client bool
-			searches, client = tooldefer.SearchCalls(wire, msg, expand.ToolName, adjudicate.ToolName)
-			if len(searches) > 0 {
-				var names []string
-				for _, c := range searches {
-					names = append(names, c.Names...)
-				}
-				searchSet, searchNow = h.searchLoad(tn, di, names)
-				deferSearches.N += len(searches)
-				deferSearches.Loaded = append(deferSearches.Loaded, searchNow...)
-				lg.Debug("cg.tooldefer_search_call", "round", round, "calls", len(searches), "added_back", len(searchNow),
-					"with_client_tool", client)
-				if client || searchSet == nil {
-					if client {
-						h.deferGate().MixedSearches.Add(int64(len(searches)))
-						// Kept by call id, so the next request answers them even if it chains on
-						// previous_response_id and does not carry the calls.
-						h.noteSearchCalls(tn, di, searches)
-					}
-					bail()
-					return
-				}
+			turn.Search = &inband.Search{
+				Orig: di.Orig,
+				Load: func(names []string) (map[string]bool, []string) { return h.searchLoad(tn, di, names) },
+				Mixed: func(calls []tooldefer.SearchCall) {
+					h.deferGate().MixedSearches.Add(int64(len(calls)))
+					// Kept by call id, so the next request answers them even if it chains on
+					// previous_response_id and does not carry the calls.
+					h.noteSearchCalls(tn, di, calls)
+				},
 			}
 		}
-
-		calls, otherTools := expand.ResponseCalls(wire, msg, adjudicate.ToolName, tooldefer.ClientSearchName)
-		// Calls the AGENT made to the adjudication tool. Answered HERE, in band, whenever this turn
-		// called PROXY tools only: by the time the request-path repair runs, the client has already
-		// received a tool_use for a tool it does not implement, already answered "not found", and
-		// already lost the turn.
-		//
-		// NOT on every path, and the exception is worth more than the claim it replaces. When the model
-		// calls this tool AND a client tool in the same assistant turn, otherTools is true, the bail()
-		// below hands the round to the client whole, and our tool_use reaches it raw — exactly as it did
-		// before this change. That is a deliberate deferral, not an oversight: answering in band means
-		// continuing the turn upstream, and this loop cannot continue a turn whose other tool_use only
-		// the CLIENT can execute. It would have to invent a result for the client's tool or drop the
-		// client's call, and both are worse than one lost turn. adjudicate.AnswerStrayCalls repairs it
-		// on the NEXT request instead: the substitute answer lands, is_error clears, the client's own
-		// tool_result is untouched, and the stray is counted — so fail-open holds and the price is one
-		// agent turn, not a broken session. Pinned by TestAdjudicateStrayCoCalledWithClientToolLeaks.
-		//
-		// So AnswerStrayCalls backstops TWO different things: this co-call path, which the loop DOES
-		// see and declines, and a round the loop genuinely cannot reconstruct (SSE aggregation failed,
-		// or maxExpandRounds is spent). An earlier version of this comment said the backstop was only
-		// for "a path this loop does not see", which was false for the first of those.
-		strays := adjudicate.ResponseCallIDs(wire, msg)
-		if (len(calls) == 0 && len(strays) == 0 && len(searches) == 0) || otherTools {
-			bail() // normal answer (or a CLIENT tool) — hand it over unchanged
+		ans := inband.Answer(turn)
+		if ans.Searches > 0 {
+			deferSearches.N += ans.Searches
+			deferSearches.Loaded = append(deferSearches.Loaded, ans.SearchLoaded...)
+			lg.Debug("cg.tooldefer_search_call", "round", round, "calls", ans.Searches, "added_back", len(ans.SearchLoaded),
+				"with_client_tool", ans.SearchClient)
+		}
+		expanded += ans.Resolved
+		if ans.Reached {
+			// The reversibility loop is the hardest thing here to diagnose after the fact:
+			// a model calls expand, an id has aged out of the store, and the symptom is a
+			// confused agent rather than an error. So log what it asked for against what came
+			// back — `unresolved > 0` is the tell.
+			lg.Debug("cg.expand", "round", round, "calls", ans.Calls,
+				"resolved", ans.Resolved, "unresolved", ans.Calls-ans.Resolved)
+		}
+		if ans.Bail {
+			bail()
 			return
 		}
-		// Build a tool_result for EVERY expand call — the provider requires one per
-		// tool_call_id or the continuation is malformed. Expired/unknown ids get an
-		// explicit placeholder rather than being omitted.
-		resolved := map[string]string{}
-		// Every stray adjudication call gets the same definite, uninteresting answer, so the model can
-		// finish its turn instead of waiting on a tool nobody will run.
-		for _, id := range strays {
-			resolved[id] = adjudicate.StrayAnswer
+		// Counted only once the continuation exists, NOT when the answer was composed (see inband.Answer).
+		if ans.Strays > 0 {
+			adjudicate.NoteAnsweredInBand(ans.Strays)
+			lg.Debug("cg.adjudicate_stray", "answered_in_band", ans.Strays, "round", round)
 		}
-		for _, c := range searches {
-			resolved[c.ID] = tooldefer.SearchAnswer(c.Names, searchSet)
-		}
-		got := 0
-		for _, c := range calls {
-			if orig, ok := expand.Resolve(tn.Store, c.HashID); ok {
-				resolved[c.CallID] = orig
-				got++
-				// The agent needed this content back — don't re-compact it on later turns
-				// (that would loop it straight back into another expand). Keep it verbatim.
-				offload.MarkKeptVerbatim(tn.Store, session, orig)
-				// And, under fixed restore, where to give it back from now on. The mark above stays:
-				// it is the fail-open behaviour for any turn on which the anchor cannot be honoured.
-				if anchor != nil {
-					expand.RecordAnchor(tn.Store, session, expand.Anchor{ID: c.HashID, At: anchor.At, Fp: anchor.Fp})
-				}
-				back := schema.TextTokens(orig)
-				if h.agg != nil {
-					h.agg.RecordExpand(back) // bounce: offload had to come back
-				}
-				cp.noteExpand(back) // and on the dashboard row, or SavedAdjusted over-reports
-				// And, when the marker is one the sweep made, charged to the sweep (#404 point 7): the
-				// false-drop signal, and what comes off the sweep's credit.
-				cp.noteSweepExpand(back, offload.NoteSweepExpand(tn.Store, c.HashID, back, thread.Key(session, threadID)))
-			} else {
-				// Classified as well as counted: the response loop and the request-path repair
-				// both reach here, and an id this proxy could have minted with nothing behind it
-				// is our own broken reversibility promise rather than the model inventing one.
-				// See expand/unresolved.go.
-				expand.NoteUnresolved(c.HashID)
-				resolved[c.CallID] = expand.Unavailable(c.HashID)
-			}
-		}
-		expanded += got
-		// The reversibility loop is the hardest thing here to diagnose after the fact:
-		// a model calls expand, an id has aged out of the store, and the symptom is a
-		// confused agent rather than an error. So log what it asked for against what came
-		// back — `unresolved > 0` is the tell.
-		lg.Debug("cg.expand", "round", round, "calls", len(calls),
-			"resolved", got, "unresolved", len(calls)-got)
-		next, ok := expand.Continuation(wire, body, msg, resolved)
-		if ok && len(searchNow) > 0 && di != nil {
-			// The loaded tools go at the end of `tools`, as on every later request of the thread
-			// (tooldefer.RewriteSearch), taken from the request before our rewrite.
-			next, ok = tooldefer.AppendTools(wire, next, di.Orig, searchNow)
-		}
-		if !ok {
-			bail() // malformed shapes — fail open, hand the response over unchanged
-			return
-		}
-		if tn.Pipe.InBandBreakpoint() {
-			// The follow-up ends with content the client never sent. The client's last message
-			// breakpoint moves onto it, so the provider caches it (#784). Off by default: the
-			// client's next request does not carry this content, so nothing reads the entry.
-			// No-op off Anthropic.
-			next = apply.MarkInBandFollowUp(wire, next)
-		}
-		// Counted only once the continuation exists, NOT when the answer was composed. Incrementing
-		// before this point double-counted: a Continuation failure bails, the tool_use reaches the
-		// client after all, and the request-path repair then counts the very same stray a second time
-		// on the next turn. The counter is meant to be one-per-stray-call however it was answered.
-		if len(strays) > 0 {
-			adjudicate.NoteAnsweredInBand(len(strays))
-			lg.Debug("cg.adjudicate_stray", "answered_in_band", len(strays), "round", round)
-		}
-		// got == 0 CONTINUES, and that is the change that let the expand tool be advertised
-		// on every request in a session (expand.InjectAuto). `resolved` already carries a
-		// placeholder for every unresolved id, so the continuation is well formed whether
-		// anything came back or not, and the model gets to finish its turn by reading "that
-		// id is no longer available" — which is a turn that completes.
-		//
-		// Replaying the raw response here instead handed the CLIENT a bare tool_use for a
-		// tool the client does not implement. On an agent's own compaction request that
-		// reads as a summary that came back empty, and three of those disable auto-compact
-		// for the session — so the advertise condition was narrowed to marker-bearing turns
-		// to avoid ever reaching this line. It bought that safety with the whole prompt-cache
-		// prefix, on every turn where the marker set changed. The cost of paying it here
-		// instead is one bounded upstream round (maxExpandRounds still caps the loop), and
-		// only when a model asks for an id that has aged out of the store.
-		body = next // loop: re-invoke with the originals in hand
+		body = ans.Next // loop: re-invoke with the originals in hand
 	}
-}
-
-// statelessResponses reports whether a Responses request never relies on the server keeping
-// the response: store is false and there is no previous_response_id. Codex over HTTP sends
-// exactly this. A missing store field means the API default, which is true.
-func statelessResponses(body []byte) bool {
-	st := gjson.GetBytes(body, "store")
-	return st.Exists() && st.Type == gjson.False && !gjson.GetBytes(body, "previous_response_id").Exists()
 }
 
 // writeRaw replays a fully-buffered upstream response (SSE or JSON) to the client
@@ -2665,16 +2380,7 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 // table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
 // and /compact) go through it, as they do for the window.
 func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
-	model := gjson.GetBytes(body, "model").String()
-	stated := 0
-	if cp, ok := h.opts.Windows.(interface {
-		CompactionPoint(context.Context, string) (int, bool)
-	}); ok {
-		if n, found := cp.CompactionPoint(ctx, model); found {
-			stated = n
-		}
-	}
-	return compactionpoint.Resolve(model, stated, window)
+	return lifecycle.ResolveCompactionPoint(ctx, h.opts.Windows, gjson.GetBytes(body, "model").String(), window)
 }
 
 // resolveWindow resolves this request's model context window and whether that figure is
@@ -2690,25 +2396,7 @@ func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, windo
 // must not act on an unknown either, and no caller needs to tell those apart. See
 // modelinfo.ExactResolver for why ok=true from the resolver is not the same as right.
 func (h *Handler) resolveWindow(ctx context.Context, body []byte) (window int, exact bool) {
-	if h.opts.Windows == nil {
-		return 0, false
-	}
-	model := gjson.GetBytes(body, "model").String()
-	// The capability is optional: an Options.Windows supplied by a caller that predates it,
-	// or a test double, still resolves windows and simply never claims exactness.
-	if er, hasCap := h.opts.Windows.(interface {
-		WindowExact(context.Context, string) (int, bool, bool)
-	}); hasCap {
-		w, ex, ok := er.WindowExact(ctx, model)
-		if !ok {
-			return 0, false
-		}
-		return w, ex
-	}
-	if w, ok := h.opts.Windows.Window(ctx, model); ok {
-		return w, false
-	}
-	return 0, false
+	return lifecycle.ResolveWindow(ctx, h.opts.Windows, gjson.GetBytes(body, "model").String())
 }
 
 func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.Response, error) {
@@ -2796,7 +2484,7 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 // therefore record nothing: the recorder must not see a route that has no turn.
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
-func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
 	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
 }
 
@@ -2814,7 +2502,7 @@ func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Res
 // streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
 // the shared parser's usage reading (readAgentUsage). think, when not nil, is the thinking collector
 // (thinkCollector), and it reads every byte the client gets.
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why usageMiss, ok bool) {
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2882,7 +2570,7 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 }
 
 // stream is the no-recording path: every existing caller keeps its exact behaviour.
-func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (time.Time, Usage, usageMiss, bool) {
+func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) (time.Time, Usage, respfacts.Miss, bool) {
 	return h.streamRec(w, resp, nil)
 }
 
@@ -3068,7 +2756,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// for want of a stash slot is counted by the COMPONENT, whatever store instance refused it.
 	// Process-wide like the counters below: the parser is package-level, so whatever tenant's
 	// response carried the unreadable usage, this is the process's total.
-	snap.UsageUnparsed, snap.UsageUnreadable = UsageGaps()
+	snap.UsageUnparsed, snap.UsageUnreadable = respfacts.UsageGaps()
 	snap.StashRefused = offload.StashRefusals()
 	snap.WaitScanUsed, snap.WaitScanNotReady, snap.WaitScanUnknown = int64(h.scan.used.Load()), int64(h.scan.notReady.Load()), int64(h.scan.unknown.Load())
 	snap.WaitScanWriterEarly, snap.WaitScanWriterOwn = int64(h.scan.writerEarly.Load()), int64(h.scan.writerOwn.Load())

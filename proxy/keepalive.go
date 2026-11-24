@@ -205,6 +205,9 @@ type kaArrival struct {
 	// refreshedAt is when the provider's entry was last known refreshed: the previous real
 	// request's start, or the start of the last ping that READ or WROTE the cache. Zero when no entry.
 	refreshedAt time.Time
+	// refreshedOneHour: the last touch was a free 1-hour ping that still counts, so the entry is at the
+	// 1-hour tier whatever tier its last write was billed at (#1350). A fact the proxy passes on.
+	refreshedOneHour bool
 }
 
 // arriveAt is arrive plus the instant the provider's entry was last refreshed. The cache-miss
@@ -214,8 +217,10 @@ func (k *keeper) arriveAt(tenant, session, threadID string) kaArrival {
 	if k == nil || session == "" {
 		return kaArrival{}
 	}
-	pings, refreshed, tag, refreshedAt := k.Keeper.ArriveAt(keepalive.Key{Tenant: tenant, Session: session, Thread: threadID})
-	return kaArrival{pings: pings, refreshed: refreshed, strategyID: tag, refreshedAt: refreshedAt}
+	key := keepalive.Key{Tenant: tenant, Session: session, Thread: threadID}
+	pings, refreshed, tag, refreshedAt := k.Keeper.ArriveAt(key)
+	return kaArrival{pings: pings, refreshed: refreshed, strategyID: tag, refreshedAt: refreshedAt,
+		refreshedOneHour: k.Keeper.OneHourTouchLive(key)}
 }
 
 func (k *keeper) retireSession(tenant, session string) {

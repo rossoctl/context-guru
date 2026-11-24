@@ -1,4 +1,4 @@
-package proxy
+package inband
 
 import (
 	"bufio"
@@ -39,16 +39,16 @@ func pkAdjudicate() string {
 // expand bucket. Order is first appearance, repeats collapse, and a round carrying both tools
 // reports both — the either/or a boolean `found` could not express.
 func TestPassReportsWhichProxyToolItWithheld(t *testing.T) {
-	newSplicer := func() (*sseSplicer, *httptest.ResponseRecorder) {
+	newSplicer := func() (*SSESplicer, *httptest.ResponseRecorder) {
 		rec := httptest.NewRecorder()
-		sp := newSSESplicer(rec)
-		sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+		sp := NewSSESplicer(rec, testCopyHeaders)
+		sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
 		return sp, rec
 	}
 
 	t.Run("an adjudicate-only round names only the adjudication tool", func(t *testing.T) {
 		sp, _ := newSplicer()
-		_, _, called := sp.pass(strings.NewReader(pkStart+pkText+pkBStop+pkAdjudicate()+pkStop),
+		_, _, called := sp.Pass(strings.NewReader(pkStart+pkText+pkBStop+pkAdjudicate()+pkStop),
 			expand.ToolName, adjudicate.ToolName)
 		if len(called) != 1 || called[0] != adjudicate.ToolName {
 			t.Fatalf("called=%v, want [%s] — an adjudicate leak cannot be told from an expand one",
@@ -59,7 +59,7 @@ func TestPassReportsWhichProxyToolItWithheld(t *testing.T) {
 	t.Run("a round carrying both reports both, in order of appearance", func(t *testing.T) {
 		sp, _ := newSplicer()
 		stream := pkStart + pkText + pkBStop + pkExpand() + pkAdjudicate() + pkStop
-		_, _, called := sp.pass(strings.NewReader(stream), expand.ToolName, adjudicate.ToolName)
+		_, _, called := sp.Pass(strings.NewReader(stream), expand.ToolName, adjudicate.ToolName)
 		if len(called) != 2 || called[0] != expand.ToolName || called[1] != adjudicate.ToolName {
 			t.Fatalf("called=%v, want [%s %s] — a both-at-once leak needs both counters",
 				called, expand.ToolName, adjudicate.ToolName)
@@ -68,7 +68,7 @@ func TestPassReportsWhichProxyToolItWithheld(t *testing.T) {
 
 	t.Run("a repeated call to the same tool is reported once", func(t *testing.T) {
 		sp, _ := newSplicer()
-		_, _, called := sp.pass(strings.NewReader(pkStart+pkExpand()+pkExpand()+pkStop),
+		_, _, called := sp.Pass(strings.NewReader(pkStart+pkExpand()+pkExpand()+pkStop),
 			expand.ToolName, adjudicate.ToolName)
 		if len(called) != 1 || called[0] != expand.ToolName {
 			t.Fatalf("called=%v, want [%s] — the caller counts leaks per tool, not per block",
@@ -78,7 +78,7 @@ func TestPassReportsWhichProxyToolItWithheld(t *testing.T) {
 
 	t.Run("a client tool among them names nothing", func(t *testing.T) {
 		sp, rec := newSplicer()
-		_, _, called := sp.pass(strings.NewReader(pkStart+pkOtherT+pkStop),
+		_, _, called := sp.Pass(strings.NewReader(pkStart+pkOtherT+pkStop),
 			expand.ToolName, adjudicate.ToolName)
 		if len(called) != 0 {
 			t.Fatalf("called=%v, want none — a client tool is not ours to count", called)
@@ -165,9 +165,9 @@ func TestPassSplitsTheStreamWithoutLosingAByte(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			sp := newSSESplicer(rec)
-			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-			whole, withheld, called := sp.pass(strings.NewReader(tc.stream), expand.ToolName)
+			sp := NewSSESplicer(rec, testCopyHeaders)
+			sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
+			whole, withheld, called := sp.Pass(strings.NewReader(tc.stream), expand.ToolName)
 			found := len(called) > 0
 			if found != tc.wantFound {
 				t.Fatalf("found=%v, want %v", found, tc.wantFound)
@@ -198,12 +198,12 @@ func TestPassSplitsTheStreamWithoutLosingAByte(t *testing.T) {
 // never calls expand an exact pass-through.
 func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sp := newSSESplicer(rec)
+	sp := NewSSESplicer(rec, testCopyHeaders)
 	resp := &http.Response{StatusCode: 200, Header: http.Header{}}
 
-	sp.round(resp)
+	sp.Round(resp)
 	round1 := pkStart + pkText + pkDelta + pkBStop + pkExpand() + pkStop
-	_, withheld, called := sp.pass(strings.NewReader(round1), expand.ToolName)
+	_, withheld, called := sp.Pass(strings.NewReader(round1), expand.ToolName)
 	if len(called) == 0 || sp.blocks != 1 {
 		t.Fatalf("round 1 should have forwarded exactly one block, called=%v blocks=%d", called, sp.blocks)
 	}
@@ -212,9 +212,9 @@ func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
 		t.Fatalf("round 1 prefix must be verbatim: %q", prefix)
 	}
 
-	sp.round(resp)
+	sp.Round(resp)
 	round2 := pkStart + pkText + pkDelta + pkBStop + pkStop
-	if _, _, called := sp.pass(strings.NewReader(round2), expand.ToolName); len(called) > 0 {
+	if _, _, called := sp.Pass(strings.NewReader(round2), expand.ToolName); len(called) > 0 {
 		t.Fatal("round 2 has no expand call")
 	}
 	out := rec.Body.String()
@@ -240,7 +240,7 @@ func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
 	if sp.blocks != 2 {
 		t.Fatalf("the client holds 2 blocks, splicer says %d", sp.blocks)
 	}
-	if _, withheldAgain, _ := sp.pass(strings.NewReader(""), expand.ToolName); withheldAgain != nil {
+	if _, withheldAgain, _ := sp.Pass(strings.NewReader(""), expand.ToolName); withheldAgain != nil {
 		t.Fatal("an empty round withholds nothing")
 	}
 	_ = withheld
@@ -251,11 +251,11 @@ func TestSpliceRenumbersTheContinuationAndKeepsOneMessage(t *testing.T) {
 // pass-through, which is the behaviour every "replays verbatim" test depends on.
 func TestHandBackReplaysTheWithheldEventsVerbatim(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sp := newSSESplicer(rec)
-	sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
+	sp := NewSSESplicer(rec, testCopyHeaders)
+	sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
 	stream := pkStart + pkText + pkDelta + pkBStop + pkExpand() + pkOtherT + pkStop
-	_, withheld, _ := sp.pass(strings.NewReader(stream), expand.ToolName)
-	sp.handBack(withheld)
+	_, withheld, _ := sp.Pass(strings.NewReader(stream), expand.ToolName)
+	sp.HandBack(withheld)
 	if got := rec.Body.String(); got != stream {
 		t.Fatalf("prefix + handBack must reconstitute the stream:\n want %q\n got  %q", stream, got)
 	}
@@ -332,9 +332,9 @@ func TestARoundPastTheRetainBoundIsForwardedWholeAndNothingIsWithheld(t *testing
 				t.Fatalf("fixture is %d B, must exceed the %d B bound", len(stream), sseRetainMaxBytes)
 			}
 			rec := httptest.NewRecorder()
-			sp := newSSESplicer(rec)
-			sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-			whole, withheld, called := sp.pass(strings.NewReader(stream), expand.ToolName)
+			sp := NewSSESplicer(rec, testCopyHeaders)
+			sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
+			whole, withheld, called := sp.Pass(strings.NewReader(stream), expand.ToolName)
 			if whole != nil {
 				t.Fatalf("past the bound the round must not be retained, got %d B", len(whole))
 			}
@@ -361,9 +361,9 @@ func TestARoundUnderTheRetainBoundIsStillIntercepted(t *testing.T) {
 		t.Fatalf("fixture %d B must stay under the %d B bound", len(stream), sseRetainMaxBytes)
 	}
 	rec := httptest.NewRecorder()
-	sp := newSSESplicer(rec)
-	sp.round(&http.Response{StatusCode: 200, Header: http.Header{}})
-	whole, withheld, called := sp.pass(strings.NewReader(stream), expand.ToolName)
+	sp := NewSSESplicer(rec, testCopyHeaders)
+	sp.Round(&http.Response{StatusCode: 200, Header: http.Header{}})
+	whole, withheld, called := sp.Pass(strings.NewReader(stream), expand.ToolName)
 	if len(called) == 0 || withheld == nil || string(whole) != stream {
 		t.Fatalf("a full-length 4.5 MB round must still be retained and withheld: called=%v withheld=%d whole=%d",
 			called, len(withheld), len(whole))
@@ -379,19 +379,19 @@ func TestARoundUnderTheRetainBoundIsStillIntercepted(t *testing.T) {
 // the gap.
 func TestSpliceWithholdsAContinuationsThinkingWhenTheClientAlreadyHoldsSome(t *testing.T) {
 	rec := httptest.NewRecorder()
-	sp := newSSESplicer(rec)
+	sp := NewSSESplicer(rec, testCopyHeaders)
 	resp := &http.Response{StatusCode: 200, Header: http.Header{}}
 
-	sp.round(resp)
-	sp.pass(strings.NewReader(pkStart+pkThink+pkBStop+pkExpand()+pkStop), expand.ToolName)
+	sp.Round(resp)
+	sp.Pass(strings.NewReader(pkStart+pkThink+pkBStop+pkExpand()+pkStop), expand.ToolName)
 	prefix := rec.Body.String()
 
 	text := strings.ReplaceAll(pkText, `"index":0`, `"index":1`)
 	tool := pkOtherT // index 1 in the fixture; the continuation numbers it 2
 	tool = strings.ReplaceAll(tool, `"index":1`, `"index":2`)
 	stop1 := strings.ReplaceAll(pkBStop, `"index":0`, `"index":1`)
-	sp.round(resp)
-	sp.pass(strings.NewReader(pkStart+pkThink+pkBStop+text+stop1+tool+pkStop), expand.ToolName)
+	sp.Round(resp)
+	sp.Pass(strings.NewReader(pkStart+pkThink+pkBStop+text+stop1+tool+pkStop), expand.ToolName)
 
 	spliced := strings.TrimPrefix(rec.Body.String(), prefix)
 	if strings.Contains(spliced, `"thinking"`) {
@@ -404,5 +404,22 @@ func TestSpliceWithholdsAContinuationsThinkingWhenTheClientAlreadyHoldsSome(t *t
 	}
 	if sp.blocks != 3 {
 		t.Fatalf("client holds thinking + text + tool = 3 blocks, splicer says %d", sp.blocks)
+	}
+}
+
+// testCopyHeaders stands in for the host's header copy.
+func testCopyHeaders(dst, src http.Header) {
+	for k, vs := range src {
+		dst[k] = append([]string(nil), vs...)
+	}
+}
+
+// A nil header copy means "copy no headers". It must not panic (fail open for a library API).
+func TestSplicerWithNilCopyHeadersCopiesNothing(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sp := NewSSESplicer(rec, nil)
+	sp.Round(&http.Response{StatusCode: 200, Header: http.Header{"X-Up": {"1"}}})
+	if rec.Code != 200 || rec.Header().Get("X-Up") != "" {
+		t.Fatalf("code %d, headers %v", rec.Code, rec.Header())
 	}
 }

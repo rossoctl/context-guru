@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The registration mode is switched on in TWO places — the control plane enforces it
@@ -124,6 +126,8 @@ func TestRegistrationBucketIsPerIPv6Prefix(t *testing.T) {
 			t.Errorf("regBucket(%q) = %q, want it unchanged", v4, got)
 		}
 	}
+
+	testutil.RequireTiming(t) // the rest races the per-minute rate limit under load
 
 	// End to end: rotating the host part of one /64 does not buy fresh budget.
 	//
