@@ -34,22 +34,12 @@ const (
 func CacheLifetime(provider bschemas.ModelProvider, model string, body []byte) (time.Duration, CacheLifetimeKind) {
 	if explicitBreakpointProvider(provider) {
 		// The tier is the one the body REQUESTED; the shared rule maps it to a lifetime.
-		return LifetimeAtTier(provider, model, bodyAsksExtendedTTL(body)), CacheLifetimeExact
+		return EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: bodyAsksExtendedTTL(body)}), CacheLifetimeExact
 	}
 	if modelinfo.OpenAI30MinuteCache(string(provider), model) {
 		return OpenAIMinimumCacheTTL, CacheLifetimeMinimum
 	}
 	return 0, CacheLifetimeUnknown
-}
-
-// LifetimeAtTier is how long the provider keeps an entry after a touch that left it at the given tier, for
-// the model. It is the ONE place a host asks that question, and it adds nothing to modelinfo.CacheLifetime
-// but the provider type: no code outside modelinfo writes "5 minutes", "1 hour" or "30 minutes" for a cache
-// lifetime (#1350). oneHour is the tier the touch LEFT the entry at, which is what the host knows: the tier
-// a request asked for, the tier a ping's markers asked for, or the tier the provider billed. A provider with
-// a fixed lifetime ignores it.
-func LifetimeAtTier(provider bschemas.ModelProvider, model string, oneHour bool) time.Duration {
-	return modelinfo.CacheLifetime(string(provider), model, oneHour)
 }
 
 // EntryAgeMs is how old the provider's cache entry was when a request arrived: the gap since the last real
@@ -71,7 +61,7 @@ func BilledLifetimeMs(provider bschemas.ModelProvider, model string, oneHour boo
 	if _, kind := CacheLifetime(provider, model, nil); kind != CacheLifetimeExact {
 		return 0
 	}
-	return LifetimeAtTier(provider, model, oneHour).Milliseconds()
+	return EntryLifetime(CacheFacts{Provider: provider, Model: model, BilledOneHour: oneHour}).Milliseconds()
 }
 
 // restartGrace is the restart grace for a thread whose first request after the restart carries

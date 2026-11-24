@@ -172,6 +172,8 @@ type capture struct {
 	hosted bool
 	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
 	kaRefreshedAt time.Time
+	// kaRefreshedOneHour: the entry's last touch was a live free 1-hour ping (kaArrival).
+	kaRefreshedOneHour bool
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -557,7 +559,7 @@ func (c *capture) noteKeepAlive(ka kaArrival) {
 	defer c.timed("noteKeepAlive")()
 	if c != nil {
 		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
-		c.kaRefreshedAt = ka.refreshedAt
+		c.kaRefreshedAt, c.kaRefreshedOneHour = ka.refreshedAt, ka.refreshedOneHour
 	}
 }
 
@@ -925,7 +927,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
-	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
+	e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
 	// saving is the accountant library's rescue, not computed from these.
@@ -1052,6 +1054,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 // proxy passes facts, and the lifetime rule lives with the cold check (#1350).
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
 	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
+}
+
+// attributionTTLMs is the lifetime the miss verdict judges against: the entry is at 1 hour when its last
+// write was billed there, or when its last touch was a free 1-hour ping (#1350).
+func (c *capture) attributionTTLMs(provider, model string, prevOneHour bool) int64 {
+	return cacheAttributionTTLMs(provider, model, prevOneHour || (c != nil && c.kaRefreshedOneHour))
 }
 
 func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {

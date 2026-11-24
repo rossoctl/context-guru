@@ -154,3 +154,42 @@ func TestAReturnAfterAFiveMinutePingStaysCold(t *testing.T) {
 		t.Error("a return 6 minutes after a 5-minute ping read warm")
 	}
 }
+
+// One fact, two indexes: when the route that gave the 1-hour tier is switched off, the keeper's touch ends
+// AND the stored mirror the cold check reads ends with it. Without that the cold check would keep an hour for a
+// tier the keeper no longer believes.
+func TestSwitchingTheRouteOffEndsTheStoredTierToo(t *testing.T) {
+	r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+	proveRoute(r.k)
+	t0 := r.clock.now()
+	r.request(t0)
+	r.record(t0, "end_turn", onWaitPolicy())
+	r.clock.advance(240 * time.Second)
+	r.k.Sweep(r.clock.now())
+	waitPings(t, r.k, 1)
+	if _, ok := touchOf(r.k, sess1); !ok {
+		t.Fatal("fixture: no free 1-hour touch")
+	}
+	r.k.oneHourSwitchOff(oneHourKeyOf(), bschemas.Anthropic, "/v1/messages", "", "aws/claude-sonnet-5", "test")
+	if _, ok := touchOf(r.k, sess1); ok {
+		t.Error("the keeper still holds a touch of a route that is off")
+	}
+	if cold, _ := r.request(t0.Add(13 * time.Minute)); !cold {
+		t.Error("the cold check kept an hour for a tier the keeper dropped")
+	}
+}
+
+// A sub-agent's real request is its own thread: it ends its own touch only, never the main thread's.
+func TestASubAgentRequestKeepsTheMainThreadsOneHourTouch(t *testing.T) {
+	k, _ := probeThenWait(t)
+	if _, ok := touchOf(k, sess1); !ok {
+		t.Fatal("fixture: no touch on the main thread")
+	}
+	sub := Key{Tenant: sess1.Tenant, Session: sess1.Session, Thread: "a:sub1"}
+	k.Record(Record{Key: sub, StartedAt: k.now().Add(6 * time.Minute), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+		Route: "/v1/messages", Status: http.StatusOK, UsageOK: true, Policy: onWaitPolicy(),
+		Usage: Usage{CacheRead: 40000, CacheWrite: 100, StopReason: "end_turn"}, Header: kaHeader(), Hold: fakeOf(k).hold(sub)})
+	if _, ok := touchOf(k, sess1); !ok {
+		t.Error("a sub-agent request ended the main thread's 1-hour touch")
+	}
+}

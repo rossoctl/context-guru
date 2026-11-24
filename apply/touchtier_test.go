@@ -95,8 +95,8 @@ func TestTheLifetimeComesFromTheOneTable(t *testing.T) {
 		{bschemas.OpenAI, "gpt-5.6", false, 30 * time.Minute},
 		{bschemas.OpenAI, "gpt-5.6", true, 30 * time.Minute},
 	} {
-		if got := LifetimeAtTier(tc.provider, tc.model, tc.oneHour); got != tc.want {
-			t.Errorf("LifetimeAtTier(%s, %s, %v) = %v, want %v", tc.provider, tc.model, tc.oneHour, got, tc.want)
+		if got := EntryLifetime(CacheFacts{Provider: tc.provider, Model: tc.model, LastOneHour: tc.oneHour}); got != tc.want {
+			t.Errorf("EntryLifetime(%s, %s, %v) = %v, want %v", tc.provider, tc.model, tc.oneHour, got, tc.want)
 		}
 	}
 	// And the cold check on that model: a 1-hour touch does not make it declare anything.
@@ -131,5 +131,83 @@ func TestTheTierRecordIsMonotoneAndReadable(t *testing.T) {
 	}
 	if b, _ = st.Get(store.SeenPrefix + "a"); string(b) != "4000" {
 		t.Errorf("a real request left %q, want a plain 4000", b)
+	}
+}
+
+// A sub-agent's real request on the same session has its own prefix, so its own clock. It must not end the
+// main thread's 1-hour tier, and the main thread's return must still read warm.
+func TestASubAgentRequestDoesNotEndTheMainThreadsOneHourTier(t *testing.T) {
+	var cold []bool
+	pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+	mainBody := touchTierBody
+	subBody := []byte(`{"model":"claude-haiku-5","system":"you are a sub-agent that searches files","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"find the config","cache_control":{"type":"ephemeral"}}]}]}`)
+	base := time.Unix(1_700_000_000, 0)
+	run := func(body []byte, at time.Duration) {
+		BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: body, Tracker: tr,
+			Tenant: "t", Session: "cc-abc", Now: base.Add(at)})
+	}
+	run(mainBody, 0)
+	RecordCacheTouchTier(st, "t", mainBody, bschemas.Anthropic, base.Add(4*time.Minute).UnixMilli(), true)
+	run(subBody, 6*time.Minute) // a sub-agent turn on the same session
+	run(subBody, 9*time.Minute) // and another
+	cold = nil
+	run(mainBody, 13*time.Minute)
+	if len(cold) != 1 || cold[0] {
+		t.Fatalf("the main thread's return read cold after sub-agent turns on its session: %v", cold)
+	}
+}
+
+// A reader that does not know the tier suffix (an older binary on the same store after a downgrade) parses
+// the value as an integer, fails, and reads 0: "no previous touch", which is never cold. It then writes a plain
+// value. The new reader never fails on the old format.
+func TestTheTierSuffixFailsOpenForAnOlderReader(t *testing.T) {
+	if _, err := strconv.ParseInt("1700000000000:1h", 10, 64); err == nil {
+		t.Fatal("fixture: the suffixed value must not parse as a plain integer")
+	}
+	if ms, oneHour := parseSeen([]byte("1700000000000")); ms != 1700000000000 || oneHour {
+		t.Errorf("a plain value read as %d %v", ms, oneHour)
+	}
+	if ms, oneHour := parseSeen([]byte("garbage:1h")); ms != 0 || oneHour {
+		t.Errorf("an unreadable value read as %d %v, want 0 (unknown, never cold)", ms, oneHour)
+	}
+	if cacheIsCold(0, 1700000000000, 5*time.Minute) {
+		t.Error("an unknown last touch read cold")
+	}
+}
+
+func TestEndTouchTierKeepsTheTimeAndLeavesALaterTouchAlone(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	RecordCacheTouchAliasTier(st, "a", 2000, true)
+	EndTouchTier(st, "a", 1000) // another touch: nothing
+	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000:1h" {
+		t.Fatalf("a different touch's end changed the record: %q", b)
+	}
+	EndTouchTier(st, "a", 2000)
+	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000" {
+		t.Fatalf("record = %q, want a plain 2000", b)
+	}
+}
+
+func TestEntryLifetimeIsTheOneDecision(t *testing.T) {
+	a, m := bschemas.Anthropic, "claude-sonnet-5"
+	for _, tc := range []struct {
+		name string
+		f    CacheFacts
+		want time.Duration
+	}{
+		{"base", CacheFacts{Provider: a, Model: m}, 5 * time.Minute},
+		{"last touch at 1h", CacheFacts{Provider: a, Model: m, LastOneHour: true}, time.Hour},
+		{"billed at 1h", CacheFacts{Provider: a, Model: m, BilledOneHour: true}, time.Hour},
+		{"a guard's floor is never undercut", CacheFacts{Provider: a, Model: m, Floor: time.Hour}, time.Hour},
+		{"OpenAI GPT-5.6 keeps its minimum", CacheFacts{Provider: bschemas.OpenAI, Model: "gpt-5.6", LastOneHour: true}, 30 * time.Minute},
+	} {
+		if got := EntryLifetime(tc.f); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if IsCold(CacheFacts{Provider: a, Model: m, LastOneHour: true}, 1000, 1000+int64(30*time.Minute/time.Millisecond)) {
+		t.Error("30 minutes after a 1-hour touch read cold")
 	}
 }

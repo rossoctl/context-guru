@@ -16,7 +16,6 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dispatch"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/store"
@@ -1898,7 +1897,7 @@ func (e *kaEntry) cacheTTL() time.Duration { return cacheLifetime(e.provider, e.
 // 30 minutes on OpenAI (the GPT-5.6+ minimum; the one-hour tier is never set there), else 1 hour
 // on the one-hour tier, else 5 minutes.
 func cacheLifetime(provider bschemas.ModelProvider, model string, ttl1h bool) time.Duration {
-	return modelinfo.CacheLifetime(string(provider), model, ttl1h)
+	return apply.EntryLifetime(apply.CacheFacts{Provider: provider, Model: model, BilledOneHour: ttl1h})
 }
 
 // giveBackFailedPing undoes Sweep's stamp for a ping that failed in transport, so the next sweep

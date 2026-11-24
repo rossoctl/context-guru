@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/store"
 )
 
 // The 1-hour-on-wait ping (#1243).
@@ -184,7 +185,8 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		if len(k.oneHourTouches) >= MaxTurnKeys {
 			k.oneHourTouches = map[string]oneHourTouch{}
 		}
-		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk, ttl: cacheLifetime(j.provider, e.model, true)}
+		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk,
+			provider: j.provider, model: e.model, st: j.st, alias: touchAliasOf(j)}
 		if st != nil && st.proven {
 			e.ttl1h = true // a route proven to grant: from now until the next real request it is a 1-hour session
 		} else {
@@ -227,7 +229,17 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 	}
 	first := !st.off
 	st.off, st.costly, st.proven, st.probeUntil = true, false, false, time.Time{}
+	// The touches this route gave no longer count, here or in the stored mirror the cold check reads.
+	var ended []oneHourTouch
+	for _, t := range k.oneHourTouches {
+		if t.route == rk {
+			ended = append(ended, t)
+		}
+	}
 	k.mu.Unlock()
+	for _, t := range ended {
+		apply.EndTouchTier(t.st, t.alias, t.at.UnixMilli())
+	}
 	if first {
 		slog.Warn("context-guru: no more 1-hour keep-alive pings on this route; the threads fall back to the plain schedule: "+why,
 			append([]any{"provider", string(provider), "route", route, "endpoint", endpoint, "model", model}, kv...)...)
@@ -289,14 +301,35 @@ type oneHourTouch struct {
 	key   Key
 	at    time.Time // when the ping started
 	route string
-	ttl   time.Duration // the 1-hour lifetime for the thread's provider and model, from cacheLifetime
+	// provider and model give the lifetime of the touch (apply.EntryLifetime), so no duration is stored.
+	provider bschemas.ModelProvider
+	model    string
+	// st and alias are where the SAME fact is mirrored for the cold check (cg:seen:<alias>, "<ms>:1h"). The
+	// keeper's map is the index by thread (the dashboard, the manual ping); the stored tier is its mirror.
+	// They are written at the same ping, ended at the same real request, and ended together when the route is
+	// switched off (oneHourSwitchOff), and both expire by the one function. One fact, two indexes.
+	st    store.Store
+	alias string
+}
+
+// live reports whether the touch still counts at now: under its lifetime old, from the one function.
+func (t oneHourTouch) live(now time.Time) bool {
+	return now.Before(t.at.Add(apply.EntryLifetime(apply.CacheFacts{Provider: t.provider, Model: t.model, LastOneHour: true})))
+}
+
+// touchAliasOf is the cold clock's key for a job: the one the host handed in, else the one its body derives.
+func touchAliasOf(j pingJob) string {
+	if j.touchAlias != "" {
+		return j.touchAlias
+	}
+	return apply.TouchAliasFor(j.tenant, j.raw, j.provider)
 }
 
 // oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: under an
 // hour old, on a route not switched off. The same test as OneHourTouches. The caller holds k.mu.
 func (k *Keeper) oneHourTouchLiveLocked(id string, now time.Time) bool {
 	t, ok := k.oneHourTouches[id]
-	if !ok || !now.Before(t.at.Add(t.ttl)) {
+	if !ok || !t.live(now) {
 		return false
 	}
 	st := k.oneHourRoutes[t.route]
@@ -334,7 +367,7 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 	defer k.mu.Unlock()
 	out := map[string]OneHourTouch{}
 	for _, t := range k.oneHourTouches {
-		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !now.Before(t.at.Add(t.ttl)) {
+		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !t.live(now) {
 			continue
 		}
 		st := k.oneHourRoutes[t.route]

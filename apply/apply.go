@@ -697,12 +697,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 					ttl = a
 				}
 				// A free 1-hour ping was the last touch: the provider holds the entry for the 1-hour
-				// lifetime from it, whatever tier this thread's own request asks (#1350). The lifetime
-				// comes from the one table, with the tier, so no number lives here.
-				if touchOneHour {
-					ttl = max(ttl, LifetimeAtTier(provider, gjson.GetBytes(body, "model").String(), true))
-				}
-				coldCache = cacheIsCold(prevAt, nowMs, ttl)
+				// lifetime from it, whatever tier this thread's own request asks (#1350). The guards above
+				// are the floor; the lifetime and the verdict come from the one function.
+				facts := CacheFacts{Provider: provider, Model: gjson.GetBytes(body, "model").String(),
+					LastOneHour: touchOneHour, Floor: ttl}
+				ttl = EntryLifetime(facts)
+				coldCache = IsCold(facts, prevAt, nowMs)
 			}
 			// A minimum only proves warmth before its boundary; past it the
 			// entry may still exist. Never lift TailOnlyCold on that guess.
@@ -1381,17 +1381,42 @@ func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
 	RecordCacheTouchAliasTier(st, alias, nowMs, false)
 }
 
-// RecordCacheTouchTier is RecordCacheTouch that also says the tier the touch left the entry at.
-func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
-	if st == nil || nowMs <= 0 || len(body) == 0 {
-		return
+// TouchAliasFor is the alias (the cold clock's key) a request body derives, "" when it derives none. It is
+// the same derivation RecordCacheTouch uses, so a caller that must find the clock again later (the keeper
+// ending a 1-hour tier) cannot drift from it.
+func TouchAliasFor(tenant string, body []byte, provider bschemas.ModelProvider) string {
+	if len(body) == 0 {
+		return ""
 	}
 	norm := normalizeSessionMessages(provider, body)
 	if len(norm) == 0 {
-		return
+		return ""
 	}
 	sys, firstUser := schema.SessionHead(norm)
-	RecordCacheTouchAliasTier(st, session.Scoped(tenant, "", sys, firstUser), nowMs, oneHour)
+	return session.Scoped(tenant, "", sys, firstUser)
+}
+
+// RecordCacheTouchTier is RecordCacheTouch that also says the tier the touch left the entry at.
+func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
+	if st == nil || nowMs <= 0 {
+		return
+	}
+	RecordCacheTouchAliasTier(st, TouchAliasFor(tenant, body, provider), nowMs, oneHour)
+}
+
+// EndTouchTier ends the 1-hour tier of the touch made at atMs, keeping its time: the plain clock value stays.
+// The keeper calls it when the route that gave the tier is switched off, so the stored fact and the keeper's
+// own never disagree. A later touch (another time or tier) is left alone.
+func EndTouchTier(st store.Store, alias string, atMs int64) {
+	if st == nil || alias == "" {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		if ms, oneHour := parseSeen(b); oneHour && ms == atMs {
+			st.Put(k, []byte(strconv.FormatInt(atMs, 10)))
+		}
+	}
 }
 
 // RecordCacheTouchAliasTier is RecordCacheTouchAlias with the tier of the touch.
