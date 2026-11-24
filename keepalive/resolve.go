@@ -122,3 +122,14 @@ func EffectiveWaitPlan(account Policy, strategies []tenant.Strategy, tenantID st
 	}
 	return pol
 }
+
+// CanKeepAlive is the record-time gate on a resolved policy: the policy is on, and a thread with no
+// tool call yet is not pinged (#858) when the per-wait plan is on, so it keeps no copy either.
+// toolSeen is read only when the plan is on. The host checks the kill switch, the audit sink, the
+// provider and the session first.
+func CanKeepAlive(pol Policy, toolSeen func() bool) bool {
+	if !pol.On() {
+		return false
+	}
+	return !(pol.WaitPlan && !toolSeen())
+}
