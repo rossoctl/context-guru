@@ -97,3 +97,26 @@ func TestMessageOpsInsert(t *testing.T) {
 		t.Fatalf("Responses insertion: %+v", ops)
 	}
 }
+
+// The Responses fallback (instructions as system, input as messages) runs only on the Responses wire. A
+// body whose messages is not an array reads as empty on Messages, and as its input on Responses. The gate
+// is responsesSections being called from kind.scan for responses only: remove it and Messages reads input.
+func TestOnlyTheResponsesWireReadsInput(t *testing.T) {
+	body := []byte(`{"messages":null,"instructions":"sys","input":[{"role":"user","content":"a","cache_control":{"type":"ephemeral"}}]}`)
+	if n := len(Messages.Body(body).Pos); n != 0 {
+		t.Fatalf("Messages read input: %d positions", n)
+	}
+	if bps := Messages.Breakpoints(body); len(bps) != 0 {
+		t.Fatalf("Messages found breakpoints in input: %+v", bps)
+	}
+	if n := len(Responses.Body(body).Pos); n != 2 {
+		t.Fatalf("Responses positions = %d, want 2 (instructions, one input item)", n)
+	}
+	if bps := Responses.Breakpoints(body); len(bps) != 1 || bps[0].Pos.Section != accountant.SectionMessages {
+		t.Fatalf("Responses breakpoints = %+v, want one on the input item", bps)
+	}
+	both := []byte(`{"messages":[{"role":"user","content":"m"}],"input":[{"role":"user","content":"i"},{"role":"user","content":"j"}]}`)
+	if n := len(Responses.Body(both).Pos); n != 1 {
+		t.Fatalf("a body with a messages array reads as messages on every wire: %d positions", n)
+	}
+}
