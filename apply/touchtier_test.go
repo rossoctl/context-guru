@@ -534,3 +534,69 @@ func TestAConfirmInTheSameMillisecondEndsOnlyItsOwnCarry(t *testing.T) {
 		t.Fatalf("the second request's own confirm left %q, want 3000", got)
 	}
 }
+
+// previousParseSeenState is a copy of the reader v0.7.8 ships (#1357), pinned so the test does not follow the
+// code under test. It knows 3 shapes: "<ms>", "<ms>:1h" and "<ms>^<pingMs>".
+func previousParseSeenState(b []byte) (at, carriedAt int64, oneHour bool) {
+	str := string(b)
+	if i := strings.Index(str, "^"); i >= 0 {
+		c, err := strconv.ParseInt(str[i+1:], 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		carriedAt, str = c, str[:i]
+	}
+	trimmed := strings.TrimSuffix(str, ":1h")
+	oneHour = len(trimmed) != len(str)
+	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return ms, carriedAt, oneHour
+}
+
+// A downgrade to v0.7.8 must fail open on every shape this version writes. The old reader cannot parse a route tag or
+// a request number, reads "no previous touch" (0), and a 0 is never cold. The shapes it DOES know must read the
+// same in both readers, so an upgrade changes nothing for a value written before it.
+func TestAnOlderReaderReadsEveryNewShapeAsNotCold(t *testing.T) {
+	const tag = "abcd1234"
+	now := int64(1_700_000_000_000)
+	for _, v := range []string{
+		"1699999000000:1h:" + tag, // a ping stamped with its route
+		"1699999000000^1699998000000#7:" + tag,
+		"1699999000000^1699998000000#7",
+		"1699999000000^1699998000000:" + tag,
+	} {
+		at, carried, oneHour := previousParseSeenState([]byte(v))
+		if at != 0 || carried != 0 || oneHour {
+			t.Errorf("the v0.7.8 reader parsed %q as %d, %d, %v: it must read 0", v, at, carried, oneHour)
+		}
+		// The verdict of the old cold check for a 0 touch, at any time and any lifetime.
+		for _, ttl := range []time.Duration{5 * time.Minute, time.Hour} {
+			if cacheIsCold(at, now+int64(48*time.Hour/time.Millisecond), ttl) {
+				t.Errorf("the v0.7.8 reader would read %q cold", v)
+			}
+		}
+		if got := parseSeenState([]byte(v)); got.at != 1699999000000 {
+			t.Errorf("this version cannot read its own value %q: %+v", v, got)
+		}
+	}
+	// And the values this version really writes, not only fixed strings.
+	st := store.NewMemory(store.Options{})
+	RecordCacheTouchAliasRoute(st, "a", now-1000, true, RouteTag("r"))
+	for step := 0; step < 2; step++ {
+		b, _ := st.Get(store.SeenPrefix + "a")
+		if at, carried, oneHour := previousParseSeenState(b); at != 0 || carried != 0 || oneHour {
+			t.Errorf("step %d: the v0.7.8 reader parsed the written value %q as %d, %d, %v", step, b, at, carried, oneHour)
+		}
+		aliasSeenState(st, "a", now+int64(step)) // a real request over the ping: the carry
+	}
+	// The shapes v0.7.8 writes read the same here.
+	for _, v := range []string{"1699999000000", "1699999000000:1h", "1699999000000^1699998000000"} {
+		at, carried, oneHour := previousParseSeenState([]byte(v))
+		got := parseSeenState([]byte(v))
+		if got.at != at || got.carriedAt != carried || got.oneHour != oneHour || got.tag != "" || got.seq != 0 {
+			t.Errorf("%q: this version reads %+v, v0.7.8 reads %d, %d, %v", v, got, at, carried, oneHour)
+		}
+	}
+}
