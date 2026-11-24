@@ -26,8 +26,8 @@ func TestAtNoTiersReturnsItself(t *testing.T) {
 // Haiku 5.5: $0.10 in, $0.50 out, $0.125 5m write, $0.01 read per MTok. Above 100,000 tokens all x5.
 func TestAtHaiku55(t *testing.T) {
 	base := Price{Input: 0.10e-6, Output: 0.50e-6, CacheRead: 0.01e-6, CacheWrite: 0.125e-6}.Resolved("claude-haiku-5-5").WithTiers("claude-haiku-5-5")
-	if len(base.Tiers) != 1 {
-		t.Fatalf("Tiers = %+v, want one built-in tier", base.Tiers)
+	if !base.HasTiers() {
+		t.Fatalf("Tiers = %+v, want a built-in tier", base.Tiers)
 	}
 	for _, tc := range []struct {
 		n    int64
@@ -38,7 +38,7 @@ func TestAtHaiku55(t *testing.T) {
 		if !near(got.Input, want.Input) || !near(got.Output, want.Output) || !near(got.CacheRead, want.CacheRead) || !near(got.CacheWrite, want.CacheWrite) {
 			t.Errorf("At(%d) = %+v, want %+v", tc.n, got, want)
 		}
-		if got.Tiers != nil {
+		if got.HasTiers() {
 			t.Errorf("At(%d) kept tiers", tc.n)
 		}
 	}
@@ -66,7 +66,7 @@ func TestAtGPT56(t *testing.T) {
 // A price that is not Resolved keeps its cache-rate fallbacks: they follow the scaled Input.
 func TestAtKeepsCacheFallbacksConsistent(t *testing.T) {
 	p := Price{Input: 1e-6, ReadFrac: 0.1, WriteFrac: 1.25,
-		Tiers: []PriceTier{{AbovePromptTokens: 100, InputMult: 2, ReadMult: 2, WriteMult: 2}}}
+		Tiers: [MaxTiers]PriceTier{{AbovePromptTokens: 100, InputMult: 2, ReadMult: 2, WriteMult: 2}}}
 	hi := p.At(101)
 	if !near(hi.Input, 2e-6) {
 		t.Fatalf("Input = %g", hi.Input)
@@ -80,7 +80,7 @@ func TestAtKeepsCacheFallbacksConsistent(t *testing.T) {
 }
 
 func TestAtStatedTierRateWinsOverMultiple(t *testing.T) {
-	p := Price{Input: 1e-6, Output: 4e-6, Tiers: []PriceTier{{AbovePromptTokens: 10, Input: 3e-6, InputMult: 9, OutputMult: 2}}}
+	p := Price{Input: 1e-6, Output: 4e-6, Tiers: [MaxTiers]PriceTier{{AbovePromptTokens: 10, Input: 3e-6, InputMult: 9, OutputMult: 2}}}
 	got := p.At(11)
 	if got.Input != 3e-6 || !near(got.Output, 8e-6) {
 		t.Errorf("At = %+v, want Input 3e-6 and Output 8e-6", got)
@@ -88,7 +88,7 @@ func TestAtStatedTierRateWinsOverMultiple(t *testing.T) {
 }
 
 func TestAtPicksHighestLineBelowPrompt(t *testing.T) {
-	p := Price{Input: 1, Tiers: []PriceTier{{AbovePromptTokens: 500, InputMult: 4}, {AbovePromptTokens: 100, InputMult: 2}}}
+	p := Price{Input: 1, Tiers: [MaxTiers]PriceTier{{AbovePromptTokens: 500, InputMult: 4}, {AbovePromptTokens: 100, InputMult: 2}}}
 	for n, want := range map[int64]float64{100: 1, 101: 2, 500: 2, 501: 4} {
 		if got := p.At(n).Input; got != want {
 			t.Errorf("At(%d).Input = %g, want %g", n, got, want)
@@ -104,16 +104,45 @@ func TestBuiltinTiersByModel(t *testing.T) {
 		"claude-haiku-5-5": true, "aws/claude-haiku-5-5": true, "us.anthropic.claude-haiku-5-5-v1:0": true,
 		"claude-haiku-4-5": false, "claude-sonnet-5": false, "claude-opus-5": false, "": false,
 	} {
-		if got := len(BuiltinTiers(model)) > 0; got != want {
-			t.Errorf("BuiltinTiers(%q) has tier = %v, want %v", model, got, want)
+		if _, got := BuiltinTier(model); got != want {
+			t.Errorf("BuiltinTier(%q) has tier = %v, want %v", model, got, want)
 		}
 	}
 }
 
 func TestWithTiersKeepsAStatedTier(t *testing.T) {
-	stated := []PriceTier{{AbovePromptTokens: 200_000, Input: 9}}
+	stated := [MaxTiers]PriceTier{{AbovePromptTokens: 200_000, Input: 9}}
 	got := Price{Input: 1, Tiers: stated}.WithTiers("gpt-5.5")
-	if !reflect.DeepEqual(got.Tiers, stated) {
+	if got.Tiers != stated {
 		t.Errorf("Tiers = %+v, want the stated tier", got.Tiers)
+	}
+}
+
+// Price must stay comparable: the packages that alias it compare and key maps by it.
+var _ = Price{} == Price{}
+
+func TestSharedGPTVersionParser(t *testing.T) {
+	for model, want := range map[string][2]bool{ // {5.4+, 5.6+}
+		"gpt-5.4": {true, false}, "gpt-5.5": {true, false}, "gpt-5.6": {true, true}, "gpt-5.10": {true, true},
+		"gpt-6": {true, true}, "gpt-5": {false, false}, "gpt-5.": {false, false}, "gpt-4o": {false, false},
+		"azure/gpt-5.6-luna": {true, true}, "gpt-5.3/gpt-5.4": {true, false}, "nogpt": {false, false},
+	} {
+		if got := [2]bool{GPT54OrLater(model), GPT56OrLater(model)}; got != want {
+			t.Errorf("%q: {54,56} = %v, want %v", model, got, want)
+		}
+	}
+}
+
+func TestTablePriceGetsBuiltinTier(t *testing.T) {
+	tb, err := ParseTable([]byte("models:\n  - match: gpt-5.5\n    in: 5\n    out: 30\n  - match: claude-sonnet-5\n    in: 3\n    out: 15\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Price(nil, "gpt-5.5")
+	if !ok || !p.HasTiers() || !near(p.At(272_001).Output, 45e-6) {
+		t.Errorf("gpt-5.5 from the operator file: %+v, want the built-in tier (output 45/MTok above 272k)", p)
+	}
+	if p, _ := tb.Price(nil, "claude-sonnet-5"); p.HasTiers() {
+		t.Errorf("claude-sonnet-5 must stay flat, got %+v", p.Tiers)
 	}
 }

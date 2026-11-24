@@ -229,7 +229,7 @@ func (l *LiteLLM) fetch(ctx context.Context) (map[string]int, map[string]modelin
 		if v.CacheCreateCost < 0 {
 			p.CacheWrite = v.CacheCreateCost
 		}
-		p.Tiers = feedTiers(rv, p)
+		p.Tiers = feedTiers(rv, p, k)
 		p = p.WithTiers(k) // a tier the feed states wins; else the built-in table
 		pm[full] = p
 		if _, ok := pm[tail]; !ok {
@@ -359,17 +359,21 @@ func undecorate(id string) string {
 var tierKey = regexp.MustCompile(`^(input_cost_per_token|output_cost_per_token|cache_read_input_token_cost|cache_creation_input_token_cost)_above_(\d+)k_tokens$`)
 
 // feedTiers reads the entry's long-prompt rates into tiers, one per line (N thousand tokens). A
-// rate the feed leaves out for a tier scales the base rate by the tier's input ratio, as the
-// providers do. The 1-hour write rate is not stated here: it is derived from the input rate.
-func feedTiers(rv json.RawMessage, base modelinfo.Price) []modelinfo.PriceTier {
+// rate the feed leaves out for a tier uses the model's built-in multiple when the package has one
+// (OpenAI output is 1.5x, not the input ratio), else the tier's input ratio. The 1-hour write rate
+// is not stated here: it is derived from the input rate. A line with a negative rate is invalid
+// and dropped, as is any line past modelinfo.MaxTiers.
+func feedTiers(rv json.RawMessage, base modelinfo.Price, model string) [modelinfo.MaxTiers]modelinfo.PriceTier {
+	var out [modelinfo.MaxTiers]modelinfo.PriceTier
 	if !bytes.Contains(rv, []byte("_above_")) {
-		return nil
+		return out
 	}
 	var all map[string]any
 	if json.Unmarshal(rv, &all) != nil {
-		return nil
+		return out
 	}
 	byLine := map[int64]*modelinfo.PriceTier{}
+	bad := map[int64]bool{}
 	for key, val := range all {
 		m := tierKey.FindStringSubmatch(key)
 		f, isNum := val.(float64)
@@ -380,10 +384,15 @@ func feedTiers(rv json.RawMessage, base modelinfo.Price) []modelinfo.PriceTier {
 		if err != nil || n <= 0 {
 			continue
 		}
-		t := byLine[n*1000]
+		line := n * 1000
+		if f < 0 {
+			bad[line] = true
+			continue
+		}
+		t := byLine[line]
 		if t == nil {
-			t = &modelinfo.PriceTier{AbovePromptTokens: n * 1000}
-			byLine[n*1000] = t
+			t = &modelinfo.PriceTier{AbovePromptTokens: line}
+			byLine[line] = t
 		}
 		switch m[1] {
 		case "input_cost_per_token":
@@ -396,23 +405,32 @@ func feedTiers(rv json.RawMessage, base modelinfo.Price) []modelinfo.PriceTier {
 			t.CacheWrite = f
 		}
 	}
+	builtin, hasBuiltin := modelinfo.BuiltinTier(model)
 	var tiers []modelinfo.PriceTier
-	for _, t := range byLine {
+	for line, t := range byLine {
+		if bad[line] {
+			continue
+		}
+		ratio := 0.0
 		if t.Input > 0 && base.Input > 0 {
-			ratio := t.Input / base.Input
-			for _, r := range []struct {
-				stated *float64
-				mult   *float64
-			}{
-				{&t.Output, &t.OutputMult}, {&t.CacheRead, &t.ReadMult}, {&t.CacheWrite, &t.WriteMult},
-			} {
-				if *r.stated == 0 {
-					*r.mult = ratio
-				}
+			ratio = t.Input / base.Input
+		}
+		fill := func(stated float64, mult *float64, builtinMult float64) {
+			switch {
+			case stated != 0:
+			case hasBuiltin:
+				*mult = builtinMult
+			default:
+				*mult = ratio
 			}
 		}
+		fill(t.Input, &t.InputMult, builtin.InputMult)
+		fill(t.Output, &t.OutputMult, builtin.OutputMult)
+		fill(t.CacheRead, &t.ReadMult, builtin.ReadMult)
+		fill(t.CacheWrite, &t.WriteMult, builtin.WriteMult)
 		tiers = append(tiers, *t)
 	}
 	sort.Slice(tiers, func(i, j int) bool { return tiers[i].AbovePromptTokens < tiers[j].AbovePromptTokens })
-	return tiers
+	copy(out[:], tiers)
+	return out
 }

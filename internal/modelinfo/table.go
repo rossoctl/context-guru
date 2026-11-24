@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -244,7 +243,7 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 		}
 		if prev, ok := tails[tail]; ok && prev.match != e.match {
 			// Two providers at one rate and one window are not a guess.
-			if !reflect.DeepEqual(prev.price, e.price) || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
+			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
 				ambiguous[tail] = true
 			}
 			continue
@@ -338,7 +337,7 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	// The fill uses the QUERIED model, not the match pattern: a family entry such as
 	// `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5` on
 	// `aws/claude-sonnet-5-5`, serves models with different read tiers.
-	return e.price.Resolved(model), true
+	return e.price.Resolved(model).WithTiers(model), true
 }
 
 // Window returns an operator-supplied context window, for models the public map

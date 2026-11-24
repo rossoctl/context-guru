@@ -1,9 +1,6 @@
 package modelinfo
 
-import (
-	"reflect"
-	"testing"
-)
+import "testing"
 
 // #1248: a cache-read rate that no source states, for a model that is not Claude, is priced from
 // Anthropic's multiple. That is a fallback rate, and Resolved must say so. The write tiers follow a
@@ -28,7 +25,7 @@ func TestResolvedMarksAFallbackReadRate(t *testing.T) {
 			t.Errorf("%s: CacheReadFallback = %v, want %v", tc.name, got.CacheReadFallback, tc.want)
 		}
 		// A second Resolved sees the filled rate as stated. It must keep the mark.
-		if again := got.Resolved(tc.model); !reflect.DeepEqual(again, got) {
+		if again := got.Resolved(tc.model); again != got {
 			t.Errorf("%s: Resolved twice = %+v, want %+v", tc.name, again, got)
 		}
 	}

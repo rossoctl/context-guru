@@ -93,9 +93,9 @@ type Price struct {
 	CacheReadFallback bool `json:"-"`
 
 	// Tiers hold the rates a request bills above a prompt size (see PriceTier and At). Empty means
-	// one flat rate. Not part of the wire form, so a price's JSON does not change. A Price with
-	// tiers cannot be compared with ==.
-	Tiers []PriceTier `json:"-"`
+	// one flat rate. A zero entry is unused. A fixed array, so Price stays comparable with ==.
+	// Not part of the wire form, so a price's JSON does not change.
+	Tiers [MaxTiers]PriceTier `json:"-"`
 }
 
 // CacheReadFor is the cache-READ rate per token for a model. This is the ONE place the rule lives.

@@ -17,6 +17,10 @@ type PriceTier struct {
 	InputMult, OutputMult, ReadMult, WriteMult float64
 }
 
+// MaxTiers is how many tiers a Price holds. The array keeps Price comparable with ==, which the
+// packages that alias Price rely on. The live feed has at most 2 lines per model.
+const MaxTiers = 3
+
 // PromptTokens is the prompt size that picks a price tier: fresh input plus cache reads plus cache
 // writes. It is the ONE place that says what counts as prompt size. Output tokens do not count.
 func PromptTokens(fresh, cacheRead, cacheWrite int64) int64 {
@@ -28,18 +32,15 @@ func PromptTokens(fresh, cacheRead, cacheWrite int64) int64 {
 // tiers, the highest line below the prompt size wins. A price with no tiers returns itself.
 // The result carries no tiers.
 func (p Price) At(promptTokens int64) Price {
-	if len(p.Tiers) == 0 {
-		return p
-	}
 	var t *PriceTier
 	for i := range p.Tiers {
 		c := &p.Tiers[i]
-		if promptTokens > c.AbovePromptTokens && (t == nil || c.AbovePromptTokens > t.AbovePromptTokens) {
+		if c.AbovePromptTokens > 0 && promptTokens > c.AbovePromptTokens && (t == nil || c.AbovePromptTokens > t.AbovePromptTokens) {
 			t = c
 		}
 	}
 	q := p
-	q.Tiers = nil
+	q.Tiers = [MaxTiers]PriceTier{}
 	if t == nil {
 		return q
 	}
@@ -71,47 +72,41 @@ var (
 	haiku55LongPromptTier = PriceTier{AbovePromptTokens: 100_000, InputMult: 5, OutputMult: 5, ReadMult: 5, WriteMult: 5}
 )
 
-// BuiltinTiers returns the tiers this package knows for a model id, or nil. Other Claude models
-// are flat across their window and have none.
-func BuiltinTiers(model string) []PriceTier {
+// BuiltinTier returns the tier this package knows for a model id. Other Claude models are flat
+// across their window and have none.
+func BuiltinTier(model string) (PriceTier, bool) {
 	full, _ := Normalize(model)
 	if maj, min, ok := tierVersion(full, FamilyHaiku); ok && maj == 5 && min == 5 {
-		return []PriceTier{haiku55LongPromptTier}
+		return haiku55LongPromptTier, true
 	}
 	if GPT54OrLater(full) && !strings.Contains(full, "mini") && !strings.Contains(full, "nano") {
-		return []PriceTier{openAILongPromptTier}
+		return openAILongPromptTier, true
 	}
-	return nil
+	return PriceTier{}, false
 }
 
-// WithTiers sets the built-in tiers for the model, unless the price already has tiers: a tier a
-// source states wins over the built-in table. A source that bills a flat rate, such as an operator
-// price file, must not call it.
+// HasTiers reports whether the price has at least one tier.
+func (p Price) HasTiers() bool {
+	for _, t := range p.Tiers {
+		if t.AbovePromptTokens > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// WithTiers sets the built-in tier for the model, unless the price already has tiers: a tier a
+// source states wins over the built-in table. Both the public feed and the operator price file
+// call it, so one model gets one answer whatever the config.
 func (p Price) WithTiers(model string) Price {
-	if len(p.Tiers) == 0 {
-		p.Tiers = BuiltinTiers(model)
+	if !p.HasTiers() {
+		if t, ok := BuiltinTier(model); ok {
+			p.Tiers[0] = t
+		}
 	}
 	return p
 }
 
 // GPT54OrLater reports whether an OpenAI GPT model is version 5.4 or later. Routed ids such as
-// azure/gpt-5.5 count. The final "gpt-" token is the model the request selects.
-func GPT54OrLater(model string) bool {
-	model = strings.ToLower(model)
-	i := strings.LastIndex(model, "gpt-")
-	if i < 0 {
-		return false
-	}
-	major, rest, ok := leadingInt(model[i+4:])
-	if !ok {
-		return false
-	}
-	if major != 5 {
-		return major > 5
-	}
-	if rest == "" || rest[0] != '.' {
-		return false
-	}
-	minor, _, ok := leadingInt(rest[1:])
-	return ok && minor >= 4
-}
+// azure/gpt-5.5 count.
+func GPT54OrLater(model string) bool { return gptAtLeast(model, 4) }
