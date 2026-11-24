@@ -417,7 +417,8 @@ export default function contextGuru(pi: ExtensionAPI) {
       if (warned) return;
       warned = true;
       const text = `context-guru: two copies of the Pi package are loaded, ${owner} and ${PACKAGE_DIR}. ` +
-        `Only the first one runs. Remove the other one from "packages" in ~/.pi/agent/settings.json.`;
+        `Only the first one runs. Remove the other one from "packages" in ` +
+        `${process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "settings.json") : "~/.pi/agent/settings.json"}.`;
       if (ctx.hasUI) ctx.ui.notify(text, "warning");
       else console.warn(text);
     });

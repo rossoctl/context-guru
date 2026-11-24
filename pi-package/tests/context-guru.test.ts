@@ -553,3 +553,20 @@ test("a configure that worked names the preset and the strategy", () => {
 test("a configure with no facts shows stderr", () => {
   assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
 });
+
+test("the two-copies warning names the settings.json that Pi uses", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  const before = process.env.PI_CODING_AGENT_DIR;
+  g[LOADED] = "/clone-a/pi-package";
+  process.env.PI_CODING_AGENT_DIR = "/tmp/test-agent";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    second.emit("session_start");
+    assert.ok(second.notices[0].includes('"packages" in /tmp/test-agent/settings.json'), second.notices[0]);
+  } finally {
+    delete g[LOADED];
+    if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = before;
+  }
+});

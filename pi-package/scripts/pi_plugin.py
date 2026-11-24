@@ -146,8 +146,9 @@ def healthy(port, timeout=1):
         return False
 
 
-def wait_healthy(port, tries=50):
-    """True once /healthz answers, checking every 0.1 s, about 5 s in all."""
+def wait_healthy(port, tries=200):
+    """True once /healthz answers, checking every 0.1 s, about 20 s in all. A proxy that answers at once adds
+    no wait; the first start of a freshly downloaded binary can take more than 5 s (#1288)."""
     for _ in range(tries):
         if healthy(port):
             return True
@@ -972,8 +973,13 @@ def setup(args):
             return 2
         # Proxy first, routing second: a route written while nothing answers makes every request fail.
         if not start_service(executable, port, upstreams):
+            extra = {}
+            if not record.get("port"):
+                # A first setup: remove the service it just started, so nothing is left running with no
+                # record (#1288). A re-run keeps the service of the earlier install.
+                extra["service"] = stop_service()
             facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
-                  routing_written="false")
+                  routing_written="false", **extra)
             return 1
         record.update(port=port, binary=executable, service=service_kind(), preset=preset,
                       cache_strategy=strategy, upstreams=upstreams,

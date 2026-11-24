@@ -271,6 +271,40 @@ class Controller(Sandbox):
         self.assertEqual((code, facts["reason"], facts["routing_written"]), (1, "health_check_failed", "false"))
         self.assertFalse(self.models.exists())
 
+    def test_the_health_wait_lasts_about_20_seconds_for_a_cold_first_start(self):
+        # #1288: a freshly downloaded proxy can take more than 5 s to answer.
+        answers = iter([False] * 149 + [True])
+        with mock.patch.object(pi_plugin, "healthy", side_effect=lambda port: next(answers)), \
+                mock.patch.object(pi_plugin.time, "sleep"):
+            self.assertTrue(pi_plugin.wait_healthy(8800))  # it answers at 15 s
+        calls = []
+        with mock.patch.object(pi_plugin, "healthy", side_effect=lambda port: calls.append(port) or False), \
+                mock.patch.object(pi_plugin.time, "sleep"):
+            self.assertFalse(pi_plugin.wait_healthy(8800))
+        self.assertEqual(len(calls), 200)  # every 0.1 s, about 20 s in all
+
+    def test_a_failed_first_setup_removes_the_service_it_started(self):
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "start_service", return_value=False), \
+                mock.patch.object(pi_plugin, "stop_service", return_value="stopped") as stop:
+            code, facts = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["reason"]), (1, "health_check_failed"))
+        stop.assert_called_once()  # nothing is left running with no record (#1288)
+        self.assertEqual(facts["service"], "stopped")
+
+    def test_a_failed_re_setup_keeps_the_service_of_the_earlier_install(self):
+        pi_plugin.write_record({"port": 8800, "binary": "/bin/true"})
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", return_value=False), \
+                mock.patch.object(pi_plugin, "stop_service", return_value="stopped") as stop:
+            code, facts = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["reason"]), (1, "health_check_failed"))
+        stop.assert_not_called()
+
     def test_setup_routes_after_the_proxy_answers(self):
         with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
                 mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
