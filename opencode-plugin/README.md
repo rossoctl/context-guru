@@ -129,12 +129,29 @@ export both `server` and `tui`. Add it to `~/.config/opencode/tui.json`:
 - A stop or reset signals a process only when it runs the binary path the plugin recorded.
 - Your own gateway (for example `localhost:4000`) stays the upstream. The plugin does not replace it.
 
+## Lifecycle signals
+
+The plugin tells the proxy when a routed session ends or is compacted, so the keep-alive stops pings for a dead cache entry.
+
+| OpenCode event | Version | Signal to `/signal` |
+|---|---|---|
+| `session.compacted` | v1 | `SessionStart`, `compact` |
+| `session.compaction.ended` | v2 | `SessionStart`, `compact` |
+| `session.deleted` | v1, v2 | `SessionEnd`, `other` |
+| `permission.asked` | v1, v2 | `Notification`, `permission_prompt` |
+| `question.asked` | v1 | `Notification`, `elicitation_dialog` |
+
+- The body holds only the session id (the one in `x-context-guru-session`), an event name and a kind.
+- The plugin signals only for a session that already sent a request through the proxy.
+- A signal has a 1 s timeout. A lost signal changes nothing.
+- Set `CONTEXT_GURU_CLIENT_SIGNALS=off` to turn signals off.
+
 ## Not ported yet
 
 These Claude Code plugin features do not exist here:
 
 - `doctor`, `insights`, `save-more`, `remove-mcp-and-skills`, `cache-campaign`
-- `statusline` and the session signal hooks
+- `statusline` and the Claude Code session hooks (OpenCode sends its own lifecycle signals, see above)
 - the `x-context-guru-ping` header for manual pings
 - the keep-alive plan from `cache-campaign`
 
