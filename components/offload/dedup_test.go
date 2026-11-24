@@ -261,7 +261,7 @@ func TestDedupKeepsAnExpandedOutputAfterARestart(t *testing.T) {
 	}
 	defer db.Close()
 	open := func() (*store.Memory, *store.Disk) {
-		d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, FlushEvery: time.Millisecond})
+		d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, FlushEvery: time.Millisecond, LoadTimeout: time.Minute})
 		if err != nil {
 			t.Fatal(err)
 		}

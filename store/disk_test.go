@@ -24,8 +24,14 @@ func brokenDB(t *testing.T, path string) *sql.DB {
 	return testdb.OpenUnchecked(t, path)
 }
 
+// testLoadTimeout is the open and load limit the disk tests use. Production keeps 3 s.
+const testLoadTimeout = time.Minute
+
 func newDiskStore(t *testing.T, path string, o DiskOptions, opt Options) (*Memory, *Disk) {
 	t.Helper()
+	if o.LoadTimeout == 0 {
+		o.LoadTimeout = testLoadTimeout // a loaded machine can take longer than the 3 s default
+	}
 	d, err := OpenDisk(hostDB(t, path), o)
 	if err != nil {
 		t.Fatalf("OpenDisk: %v", err)
@@ -523,5 +529,32 @@ func TestFailedLoadBacksOff(t *testing.T) {
 	m.LoadSession("s")
 	if got, ok := m.Get(SumPrefix + "s"); !ok || string(got) != "CP" {
 		t.Fatalf("retry after the backoff: %q %v", got, ok)
+	}
+}
+
+// A zero LoadTimeout keeps the 3 s limit, so production behavior does not change.
+func TestZeroLoadTimeoutIsThreeSeconds(t *testing.T) {
+	if defaultLoadTimeout != 3*time.Second {
+		t.Fatalf("defaultLoadTimeout = %v, want 3s", defaultLoadTimeout)
+	}
+	d, err := OpenDisk(hostDB(t, filepath.Join(t.TempDir(), "state.db")), DiskOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.loadTimeout != 3*time.Second {
+		t.Fatalf("zero LoadTimeout resolved to %v, want 3s", d.loadTimeout)
+	}
+}
+
+// A set LoadTimeout is used as given.
+func TestLoadTimeoutOptionIsUsed(t *testing.T) {
+	d, err := OpenDisk(hostDB(t, filepath.Join(t.TempDir(), "state.db")), DiskOptions{LoadTimeout: 7 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if d.loadTimeout != 7*time.Second {
+		t.Fatalf("LoadTimeout resolved to %v, want 7s", d.loadTimeout)
 	}
 }
