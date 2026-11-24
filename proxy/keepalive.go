@@ -338,7 +338,6 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 	if k == nil || tn == nil {
 		return nil
 	}
-	cl := agent.Identify(r.Header)
 	// keepalive.Keeper.Record departs the thread's open request (the one arrive opened) on every
 	// return path of its own. A panic in this function BEFORE it hands off would skip that and
 	// leave the thread paused until restart, so depart here unless the hand-off happened. Not an
@@ -351,6 +350,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 			k.depart(tn.ID, session, threadID)
 		}
 	}()
+	cl := agent.Identify(r.Header)
 	// NO AUDIT SINK, NO RETENTION. An audit control that --dashboard silently removes is not a
 	// control, and this is the one that makes the whole credential arrangement reviewable. Given
 	// the choice between an unconditional second sink and refusing to hold anything we cannot
