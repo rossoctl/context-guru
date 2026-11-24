@@ -26,6 +26,7 @@ reference — port its *logic*, re-implement its transport in Go.
   host resolves the destination and credential and sends it. Credentials and their masking are
   each host's own business. See `docs/superpowers/specs/2026-10-13-dispatch-design.md`.
   The checklist is in [What goes in the proxy](#what-goes-in-the-proxy).
+  The rule for code that names one client is in [Client-specific code](#client-specific-code).
 - **Fail open, always.** Any component error/panic reverts that component only; the
   original request is always forwarded as a valid fallback. Every lossy Offload must be
   reversible (a `<<cg:HASH>>` marker + the stashed original in the Store).
@@ -96,6 +97,40 @@ logic goes in a library package.
    reviewer checks this.
 
 `offload-review` checks each PR for a new leak, and `refactor-scan` checks each release.
+
+## Client-specific code
+
+Clients (Claude Code, Codex, OpenCode, Pi, Bob) differ in headers, session ids and prompts. Use
+this test: **if a rule names one client, it lives in `agent.Identify` (#1312), and nowhere else.**
+
+**Client rules. Keep them in `agent.Identify` and the agent packages:**
+
+- A header, User-Agent value, tool name, marker or prompt phrase that only one client sends.
+- A client's session id, subagent id, compaction phrase or label.
+- The choice of which client sent a request.
+
+**Not client rules. Keep them where they are:**
+
+- A rule that holds for every client, such as "an `end_turn` with nothing open".
+- A signal that a host sets for all clients, such as `x-context-guru-session`.
+- The fallback when no client is found. It is the generic rule.
+
+**Rules for a client rule:**
+
+1. Find the client by its headers and User-Agent, not by the route path. A path may break a tie.
+   One exception: an agent that owns a route, such as Bob's gateway.
+2. Library code takes the `agent.Client` value. It never reads User-Agent or a vendor header again.
+3. Every client rule states its fallback: no headers, another client, or a host without the
+   signal (Cortex, the bifrost adapter). The fallback is never worse than the generic result.
+4. A new client signal cites the client's source and version. Never guess a header or a phrase.
+5. Code in `proxy/` or `internal/` follows [What goes in the proxy](#what-goes-in-the-proxy). In
+   addition, it must not depend on the proxy's route paths.
+6. A PR that adds a client rule lists each supported client as covered or fallback, and updates
+   [docs/client-coverage.md](docs/client-coverage.md).
+
+Details are in #1321. `offload-review` checks each PR for a client rule outside `agent.Identify`.
+`refactor-scan` checks each release. `agent/all/coverage_test.go` fails when a registered agent has
+no row in the coverage table.
 
 ## Conventions
 

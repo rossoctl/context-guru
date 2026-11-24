@@ -74,6 +74,20 @@ logic there is a copy that a second host (Cortex, bifrost) does not have. Use th
   - A fixed call order: the steps before and after `apply` for each request (inject, repair, defer,
     then record billed input, resolve the summary, touch the keeper) exist only in `proxy/proxy.go`.
 
+## Third pattern: client rule outside agent.Identify
+
+A rule that names one client belongs in `agent.Identify` (#1312). Use the test in `CLAUDE.md`,
+*Client-specific code*: does the code name one client?
+
+- **When:** before each release, with the host-leak mode. Scan the diff since the last tag:
+  `git diff <last-tag>..origin/main -- '*.go'`. A full run reads every Go file.
+- **Signs:** `Header.Get("x-<vendor>-`, `claude-code`, `codex`, `opencode`, `bobshell` or a
+  client's prompt phrase outside `agent/`; library code that reads User-Agent; a rule that finds a
+  client by route path; a client rule with no stated fallback.
+- **Report** each one like a duplicate: the rule, its `file:line`, and the agent package it
+  belongs in. Say whether the code also leaks a host boundary. Report it once, as a client rule.
+- A client rule that is already in #1321 or its child issues is not reported again.
+
 ## Phase 1: find and report
 
 1. Make a read-only worktree from `origin/main`. Do not touch the main checkout.
