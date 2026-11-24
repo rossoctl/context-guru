@@ -40,7 +40,7 @@ func deferSettings(doc string) (c deferConf, ok bool, reason string) {
 			"as fields; a manager must repair it on the account page"
 	}
 	blk := f.Components[toolFilterComponent]
-	return deferConf{on: docDefers(doc), keep: nameList(blk["keep"]), always: nameList(blk["always_defer"])}, true, ""
+	return deferConf{on: tooldefer.DocOn(doc), keep: nameList(blk["keep"]), always: nameList(blk["always_defer"])}, true, ""
 }
 
 // nameList is one of toolfilter's name lists as a form value, sorted.

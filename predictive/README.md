@@ -47,7 +47,7 @@ Two layers, deliberately separate:
 |---|---|
 | inference, the rule, the live feature tracker, spec v2 types | `predictive/` (Go, no dependencies; the default 300-tree LightGBM model about 0.5-2 ms per decision (1.7 ms measured on a host at load 77), the MLP ~30 us; both run after the response is complete) |
 | training, replay, held-out comparison, JSON export | `scripts/campaign/` (Python: numpy, pandas, lightgbm, scikit-learn; torch only for the MLP; build time only) |
-| runtime (shadow and active) | `proxy/predictive.go`, hooked into `keeper.arrive` / `keeper.record` |
+| runtime (shadow and active) | the decision math in `campaign/` (`Choose`, `Apply`, `ScoreDecision`); the host's state and hooks in `proxy/predictive.go`, hooked into `keeper.arrive` / `keeper.record` |
 | build and lifecycle endpoints | `proxy/campaignbuild.go` |
 
 ## Parity with the Python reference
@@ -168,7 +168,7 @@ Dollars are closed-form units calibrated to an offline replay engine (`scripts/c
 ## The auto builder (`"builder":"auto"`)
 
 A plan chooser, not a predictor, and no Python: `predictive/autotune.go` picks the tenant's plan from the menu "ping k times, 240 s apart", k = 0..6, and
-`proxy/campaignauto.go` wraps it in a campaign (spec kind `rules`, one segment, the chosen plan).
+`campaign/eval.go` (`BuildSpec`) wraps it in a campaign (spec kind `rules`, one segment, the chosen plan); `proxy/campaignauto.go` reads the history and writes the file.
 
 * Data: the fleet's rows (for the prior) come from one read capped at the dashboard's newest-rows limit; the tenant's own rows are read on
   their own, so a busy fleet never pushes them out. The spec's `evidence.data` and `caveats` say when either read was truncated.

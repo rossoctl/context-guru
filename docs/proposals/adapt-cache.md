@@ -50,7 +50,7 @@ SessionEnd is scored as always delivered at once, also an upper bound.
 - held-out (the table): plans are tuned on the fleet's rows resolved before the account's 70% point and scored on the account's last 30%;
   fixed options are scored on the same rows. Paired differences with 95% intervals by bootstrap over sessions (B = 1000).
 - in-sample (`in_sample` of every option): the whole window, plans fitted on the same rows; optimistic for adapted plans.
-- the builder gate, per adapted option (`held_out.builder_gate`): `shipGate`, the function the builder itself uses, on the same rows and units:
+- the builder gate, per adapted option (`held_out.builder_gate`): `campaign.ShipGate`, the function the builder itself uses, on the same rows and units:
   net > 0 and a paired interval above zero against the default, blanket K3 and the fleet plan.
 - `recommendation` (with `ci95` and `per_week_usd`) is set only for an adapted option that passes the gate; otherwise `summary` says plainly that nothing beats the default, or
   what the leading option fails against, and to keep the default. `disagreement` is one line when money and the gate disagree on the leader.

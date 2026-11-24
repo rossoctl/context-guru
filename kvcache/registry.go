@@ -337,7 +337,7 @@ func (StopReasonGated) Decide(o Observation) Action {
 }
 
 // PingCap implements PingCapper: the gate pings at most DefaultMaxPings times per span, the budget its
-// live strategy runs (proxy's campaignDefaultMaxPings). Without it a replay with a raised
+// live strategy runs (campaign.ArmFor's config.DefaultKeepAliveMaxPings). Without it a replay with a raised
 // Config.MaxPings — a sweep that also scores many-ping arms — would score the gate at a budget it
 // never runs with.
 func (StopReasonGated) PingCap() int { return DefaultMaxPings }

@@ -137,3 +137,11 @@ func TestPiMarkBeatsTheSDKUserAgent(t *testing.T) {
 		t.Fatalf("an unknown mark must be ignored, got %+v", c)
 	}
 }
+
+func TestModelAgentOfKeepsThePiProviderToken(t *testing.T) {
+	for _, tc := range [][3]string{{"pi", "openai", "openai"}, {"pi", "anthropic", "anthropic"}, {"pi", "bedrock", "bedrock"}, {"claude-cli", "anthropic", "claude-cli"}, {"openai", "openai", "openai"}} {
+		if got := ModelAgentOf(tc[0], tc[1]); got != tc[2] {
+			t.Errorf("ModelAgentOf(%q, %q) = %q, want %q", tc[0], tc[1], got, tc[2])
+		}
+	}
+}

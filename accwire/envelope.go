@@ -1,4 +1,4 @@
-package proxy
+package accwire
 
 import (
 	"hash/fnv"
@@ -56,14 +56,14 @@ func envelopeOwner(name string, added, removed bool) string {
 
 // envelopeOps lists the operations that explain the tools and system sections' difference between
 // the client body and the forwarded body. It returns nil when either body has no conversation
-// (accBodies gives an empty Body for it). On the Responses wire the system section is instructions.
-func envelopeOps(client, forwarded []byte) []accountant.Operation {
-	if !accScan(client).messages.IsArray() || !accScan(forwarded).messages.IsArray() {
+// (Body gives an empty Body for it). On the Responses wire the system section is instructions.
+func (k kind) envelopeOps(client, forwarded []byte) []accountant.Operation {
+	if !k.scan(client).messages.IsArray() || !k.scan(forwarded).messages.IsArray() {
 		return nil
 	}
 	ops := toolsOps(gjson.GetBytes(client, "tools").Array(), gjson.GetBytes(forwarded, "tools").Array())
-	ops = append(ops, systemOps(systemBlocks(client), systemBlocks(forwarded))...)
-	return append(ops, rootTTLOps(client, forwarded)...)
+	ops = append(ops, systemOps(k.systemBlocks(client), k.systemBlocks(forwarded))...)
+	return append(ops, k.rootTTLOps(client, forwarded)...)
 }
 
 // rootTTLOps reports the relabel of the TOP-LEVEL cache_control to 1h (automatic caching, #1279). The
@@ -71,13 +71,13 @@ func envelopeOps(client, forwarded []byte) []accountant.Operation {
 // else reports it, and the library would book neither the 1h premium nor the rescue. The change moves
 // no section bytes, so the operation is anchored on the first element of the first section that has
 // one (system, tools, messages) with the same size before and after, which keeps the sum check whole.
-func rootTTLOps(client, forwarded []byte) []accountant.Operation {
+func (k kind) rootTTLOps(client, forwarded []byte) []accountant.Operation {
 	if !headTTLRelabelled(string(client), string(forwarded)) {
 		return nil
 	}
 	var at accountant.Position
 	var raw string
-	switch sys := systemBlocks(client); {
+	switch sys := k.systemBlocks(client); {
 	case len(sys) > 0:
 		at, raw = accountant.Position{Section: accountant.SectionSystem}, sys[0]
 	case gjson.GetBytes(client, "tools.0").Exists():
@@ -141,7 +141,7 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 	}
 	if len(removed) > 0 {
 		op := envelopeOp("toolfilter", accountant.Position{Section: accountant.SectionTools, Index: removed[0].From},
-			removedBytes, 0, "decl-removed:"+accHex(removedHash.Sum64()))
+			removedBytes, 0, "decl-removed:"+hex(removedHash.Sum64()))
 		if len(removed) > 1 {
 			op.Spans = removed
 		}
@@ -173,9 +173,9 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 	return ops
 }
 
-// systemBlocks is the system section as accBodies hashes it: a string system prompt is one block.
-func systemBlocks(raw []byte) []string {
-	s := accScan(raw).system // system, or a Responses body's instructions
+// systemBlocks is the system section as Body hashes it: a string system prompt is one block.
+func (k kind) systemBlocks(raw []byte) []string {
+	s := k.scan(raw).system // system, or a Responses body's instructions
 	switch {
 	case s.IsArray():
 		var out []string
@@ -309,10 +309,10 @@ func envelopeOpID(component string, at accountant.Position, before, after int, c
 func hashOf(s string) string {
 	h := fnv.New64a()
 	h.Write([]byte(s))
-	return accHex(h.Sum64())
+	return hex(h.Sum64())
 }
 
-func accHex(v uint64) string { return strconv.FormatUint(v, 16) }
+func hex(v uint64) string { return strconv.FormatUint(v, 16) }
 
 // messageOps explains a change to the messages array that an edit AFTER the pipeline made, and that
 // no component reported: tool deferral puts its names list at messages[1], either appended to a system
@@ -321,9 +321,9 @@ func accHex(v uint64) string { return strconv.FormatUint(v, 16) }
 // in place of that message. When the two arrays are the same length, it returns one rewrite op per changed
 // message. Any other change (a different length by more than one, or a non-insertion) returns nil, and the sum check says so. The operator is
 // the edit's own, so its row and its ChangeID do not collide with a pipeline component's.
-func messageOps(operator string, before, after []byte) []accountant.Operation {
-	// accScan's messages: a Responses body's input items, so the positions are accBodies' positions.
-	b, a := accScan(before).messages.Array(), accScan(after).messages.Array()
+func (k kind) messageOps(operator string, before, after []byte) []accountant.Operation {
+	// scan's messages: a Responses body's input items, so the positions are Body's positions.
+	b, a := k.scan(before).messages.Array(), k.scan(after).messages.Array()
 	switch {
 	case len(a) == len(b)+1:
 		i := 0

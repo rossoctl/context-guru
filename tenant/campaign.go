@@ -70,7 +70,7 @@ type CampaignCell struct {
 	OptimalSavingUSD float64
 	InsufficientData bool
 	// Activatable is false for a simulation-only arm, or a 1h-tier arm on a tenant
-	// whose model does not honor it — see proxy/campaign.go's arm-mapping table. A
+	// whose model does not honor it — see campaign.ArmFor. A
 	// non-activatable cell is still recorded, with SkipReason saying why, never hidden.
 	Activatable bool
 	SkipReason  string

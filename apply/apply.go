@@ -35,6 +35,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
@@ -2394,7 +2395,7 @@ func rawTotal(msgs []gjson.Result) int {
 func wireGroups(slots []slot) []int {
 	groups := make([]int, len(slots))
 	for i, s := range slots {
-		bi, _, ok := splitSlotPath(s.path)
+		bi, ok := accwire.Messages.WireIndex(s.path)
 		if !ok {
 			return nil
 		}
