@@ -142,6 +142,7 @@ A review without this block does not count toward the 2.
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
+- the last `local-tests` comment (from `scripts/dev/local-tests.sh`) names this head and says `result=pass`. A green heavy CI run on this head also counts. The heavy suites do not run on a PR;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
 - the head has a passing `CodeQL` check run from GitHub's code-scanning app, which the code-scanning rule reads. **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
 - every commit has a `Signed-off-by:` line.
@@ -211,6 +212,18 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 This section is about a stacked PR. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
 ### Defects found on the way
+
+### Heavy CI on main
+
+Owner decision (David Amid, 2026-11-24): "we dont need a queue, we can risk main not be 100% if an owner of the PR did run it on the laptop." A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
+
+The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh --wait` (it runs `gh workflow run ci.yaml --ref main`). Run it:
+- about every 5 merges;
+- after a big refactor or a merge that someone resolved by hand;
+- before a merge of a PR that waits on a fix of `main`;
+- always before a cut.
+
+A release is cut only on a commit with a green heavy run **and** a passing Part A (step 5). A failure on `main` is fixed forward: a new PR with the fix. Nobody reverts to make it green.
 
 A defect in `main` that the PR under review did not cause gets its own issue, its own branch from `main` and its own PR. It never rides on another PR's branch. The release owner decides whether it goes into the release.
 
