@@ -177,6 +177,17 @@ func TestTheTierSuffixFailsOpenForAnOlderReader(t *testing.T) {
 	if cacheIsCold(0, 1700000000000, 5*time.Minute) {
 		t.Error("an unknown last touch read cold")
 	}
+	// The carried shape ("<ms>^<pingMs>") fails open for an older reader the same way. The older reader is
+	// `prev, _ = strconv.ParseInt(value)`: an error leaves 0, which is "no previous touch".
+	for _, v := range []string{"1700000000000:1h", "1700000000000^1699999990000"} {
+		legacy, err := strconv.ParseInt(v, 10, 64)
+		if err == nil || legacy != 0 {
+			t.Errorf("an older reader read %q as %d (err %v), want 0 with an error", v, legacy, err)
+		}
+		if cacheIsCold(legacy, 1700000000000+int64(time.Hour/time.Millisecond), 5*time.Minute) {
+			t.Errorf("an older reader would read %q cold", v)
+		}
+	}
 }
 
 func TestEndTouchTierKeepsTheTimeAndLeavesALaterTouchAlone(t *testing.T) {
