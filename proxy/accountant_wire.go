@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"log/slog"
-	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
@@ -111,7 +110,7 @@ func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant
 	// no rescue. Nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not
 	// measured. The rescue is itself evidence (it credits only tokens the return READ), see Keeper.ReadSetsTTL.
 	if c.readSets != nil && c.readSets(bschemas.ModelProvider(c.provider), c.endpoint, c.route, c.accMeta.Model,
-		facts.PingTTL >= time.Hour) {
+		facts.PingTTL >= accrec.OneHourTTL) {
 		facts.Provider.ReadSetsTTL = true
 	}
 	c.accPingWindow, c.accFacts = facts.PingWindow, facts
@@ -169,8 +168,8 @@ func (c *capture) accBilledTTL(u Usage) {
 		return
 	}
 	if accrec.BilledTTL(c.savings.billed1h, accrec.PingKey(c.accMeta.Session, c.accThread), c.accFacts, u.CacheWrite, u.CacheWrite1h) {
-		c.accFacts.TTL = 5 * time.Minute
+		c.accFacts.TTL = accrec.BaseTTL
 		// The library lowers the facts' TTL and the TTL of every 1h breakpoint together, on a copy.
-		c.accReq.LowerTTL(5 * time.Minute)
+		c.accReq.LowerTTL(accrec.BaseTTL)
 	}
 }

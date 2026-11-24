@@ -34,12 +34,34 @@ const (
 func CacheLifetime(provider bschemas.ModelProvider, model string, body []byte) (time.Duration, CacheLifetimeKind) {
 	if explicitBreakpointProvider(provider) {
 		// The tier is the one the body REQUESTED; the shared rule maps it to a lifetime.
-		return modelinfo.CacheLifetime(string(provider), model, bodyAsksExtendedTTL(body)), CacheLifetimeExact
+		return EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: bodyAsksExtendedTTL(body)}), CacheLifetimeExact
 	}
 	if modelinfo.OpenAI30MinuteCache(string(provider), model) {
 		return OpenAIMinimumCacheTTL, CacheLifetimeMinimum
 	}
 	return 0, CacheLifetimeUnknown
+}
+
+// EntryAgeMs is how old the provider's cache entry was when a request arrived: the gap since the last real
+// request, cut short by a ping that refreshed the entry later than that request.
+func EntryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
+	if refreshedAt.IsZero() || sinceMs <= 0 {
+		return sinceMs
+	}
+	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
+		return age
+	}
+	return sinceMs
+}
+
+// BilledLifetimeMs is the lifetime of the entry a request tried to read, in ms; 0 when the lifetime is not
+// exact. oneHour is the tier the provider BILLED that entry at, not the tier a request asked for: a one-hour
+// ask billed at five minutes stays five minutes. false (also "unknown") keeps the base lifetime.
+func BilledLifetimeMs(provider bschemas.ModelProvider, model string, oneHour bool) int64 {
+	if _, kind := CacheLifetime(provider, model, nil); kind != CacheLifetimeExact {
+		return 0
+	}
+	return EntryLifetime(CacheFacts{Provider: provider, Model: model, BilledOneHour: oneHour}).Milliseconds()
 }
 
 // restartGrace is the restart grace for a thread whose first request after the restart carries
