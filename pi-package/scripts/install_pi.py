@@ -146,9 +146,9 @@ def facts(text):
 
 class Installer:
     def __init__(self, terminal, shell, http, source, plugin=PLUGIN_SCRIPT, platform=None, sleep=time.sleep,
-                 downloaded=False):
+                 downloaded=False, confirm_folders=False):
         self.terminal, self.shell, self.http, self.source = terminal, shell, http, Path(source)
-        self.downloaded, self.steps = downloaded, ()
+        self.downloaded, self.steps, self.confirm_folders = downloaded, (), confirm_folders
         self.plugin, self.platform, self.sleep = plugin, platform or platform_module.system(), sleep
         self.registry = os.environ.get("CG_PI_NPM_REGISTRY") or PUBLIC_REGISTRY
         self.record = {}
@@ -160,6 +160,7 @@ class Installer:
             self.record = load_json(installer_record_path())
             self.step("Check this computer", "Pi needs Node.js 22.19 or later. Nothing changes in this step.")
             self.check_node()
+            self.check_folders()
             self.step("Pi", "Pi is the AI coding agent that context-guru works in. This step installs or updates Pi, "
                             "after your yes.")
             self.ensure_pi()
@@ -184,6 +185,23 @@ class Installer:
         if version is None or version[:2] < MIN_NODE:
             raise Stop("Pi needs Node.js 22.19 or later. Install it from https://nodejs.org, then run this again. "
                        "Nothing was changed.")
+
+    def check_folders(self):
+        """Name the folders this run uses. A terminal left from a test can move Pi's settings with
+        PI_CODING_AGENT_DIR; then ask, and stop on no, before any change (#1319)."""
+        self.terminal.say(f"Pi's settings: {pi_plugin.agent_dir()}")
+        self.terminal.say(f"context-guru's data: {pi_plugin.state_dir()}")
+        moved = os.environ.get("PI_CODING_AGENT_DIR")
+        default = Path.home() / ".pi/agent"
+        if not (self.confirm_folders and moved) or Path(os.path.abspath(pi_plugin.agent_dir())) == default:
+            return
+        self.terminal.say(f"PI_CODING_AGENT_DIR is set: Pi's settings are in {pi_plugin.agent_dir()}, not in "
+                          f"{default}." + (f" XDG_STATE_HOME is set too: {os.environ['XDG_STATE_HOME']}."
+                                                              if os.environ.get("XDG_STATE_HOME") else ""))
+        if not self.yes("Use these folders?", default=False):
+            # Only a new terminal: a test can also have put another pi first on PATH, which unset does not undo.
+            raise Stop("nothing was changed. If this terminal is left from a test, open a new terminal and run "
+                       "this again there.")
 
     def latest_pi(self):
         out = self.shell.run(["npm", "view", PI_NPM, "version", f"--registry={self.registry}"])
@@ -452,12 +470,15 @@ class Installer:
         if self.yes("Send one short test prompt through Pi now?", default=False):
             out = self.shell.run(["pi", "-p", "Reply with the single word: ok"], stdin="")
             self.terminal.say(f"Pi answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
-        self.terminal.say("Done. Start Pi with: pi")
+        where = self.shell.which("pi")
+        self.terminal.say(f"Done. Start Pi with: pi{f' ({where})' if where else ''}. If your terminal does not find "
+                          "this one (for example after Pi was installed or updated), open a new terminal.")
 
     # ----------------------------------------------------------------------------- uninstall
     def uninstall(self):
         try:
             self.begin(UNINSTALL_STEPS)
+            self.check_folders()
             record = load_json(installer_record_path())
             plugin = self.plugin if Path(self.plugin).exists() else str(self.source / "scripts/pi_plugin.py")
             self.step("Turn context-guru off", "It puts Pi's models.json back to Pi's own endpoints, and stops and "
@@ -584,7 +605,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     # setup runs from the installed copy, not from the download: it copies its reset command from there.
     installer = Installer(Terminal(), Shell(), http_post, args.source, plugin=str(package_dir() / "scripts/pi_plugin.py"),
-                          downloaded=args.downloaded)
+                          downloaded=args.downloaded, confirm_folders=True)
     return installer.install() if args.action == "install" else installer.uninstall()
 
 
