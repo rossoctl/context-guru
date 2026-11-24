@@ -1,20 +1,15 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/agent/bob"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
 
@@ -41,96 +36,16 @@ import (
 
 // ClaudeCompactOffEnv turns the start-up read off ("off", "0" or "false"). C then comes from the
 // table.
-const ClaudeCompactOffEnv = "CONTEXT_GURU_CLIENT_COMPACT_CONFIG"
+const ClaudeCompactOffEnv = compactionpoint.OffEnv
 
 // ReadClaudeCompact reads the settings from env and the user's settings files. getenv and home are
 // injected for tests. It never fails: an unreadable or odd file is skipped (fail open).
 func ReadClaudeCompact(getenv func(string) string, home string) compactionpoint.ClaudeCode {
-	switch strings.ToLower(strings.TrimSpace(getenv(ClaudeCompactOffEnv))) {
-	case "off", "0", "false":
-		return compactionpoint.ClaudeCode{}
-	}
-	c := compactionpoint.ClaudeCode{
-		EnvWindow:      short(getenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW")),
-		EnvPct:         short(getenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")),
-		EnvDisableAuto: short(getenv("DISABLE_AUTO_COMPACT")),
-		EnvDisable:     short(getenv("DISABLE_COMPACT")),
-	}
-	dir := strings.TrimSpace(getenv("CLAUDE_CONFIG_DIR"))
-	if dir == "" && home == "" {
-		return c // env only: with no home, a relative path would name a project file
-	}
-	if dir != "" && !filepath.IsAbs(dir) {
-		return c // a relative CLAUDE_CONFIG_DIR depends on the working directory: not read
-	}
-	globalCfg := filepath.Join(home, ".claude.json")
-	settings := filepath.Join(home, ".claude", "settings.json")
-	if dir != "" {
-		globalCfg = filepath.Join(dir, ".claude.json")
-		settings = filepath.Join(dir, "settings.json")
-	}
-	// ~/.claude.json first, then settings.json: the settings file wins (the client's own order puts
-	// userSettings above the legacy global config).
-	if b := readSmall(globalCfg); b != nil {
-		if v := gjson.GetBytes(b, "autoCompactEnabled"); v.Type == gjson.True || v.Type == gjson.False {
-			c.SettingsEnabled = fmt.Sprint(v.Bool())
-		}
-	}
-	if b := readSmall(settings); b != nil {
-		if v := gjson.GetBytes(b, "autoCompactWindow"); v.Type == gjson.Number || v.Type == gjson.String {
-			c.SettingsWindow = short(v.String())
-		}
-		if v := gjson.GetBytes(b, "autoCompactEnabled"); v.Type == gjson.True || v.Type == gjson.False {
-			c.SettingsEnabled = fmt.Sprint(v.Bool())
-		}
-		if ms := gjson.GetBytes(b, "modelSettings"); ms.IsObject() {
-			n := 0
-			ms.ForEach(func(name, val gjson.Result) bool {
-				if n >= 16 {
-					return false
-				}
-				w := val.Get("autoCompactWindow")
-				if len(name.String()) <= 64 && (w.Type == gjson.Number || w.Type == gjson.String) {
-					if c.ModelWindows == nil {
-						c.ModelWindows = map[string]string{}
-					}
-					c.ModelWindows[name.String()] = short(w.String())
-					n++
-				}
-				return true
-			})
-		}
-	}
-	return c
+	return compactionpoint.ReadClaude(getenv, home, hostFS)
 }
 
-// readSmall reads a settings file of at most 4 MiB, or nil. A missing file is the normal case.
-func readSmall(path string) []byte {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	if st, err := f.Stat(); err != nil || st.Size() > 4<<20 {
-		return nil
-	}
-	var b []byte
-	dec := json.NewDecoder(f)
-	var raw json.RawMessage
-	if dec.Decode(&raw) != nil {
-		return nil
-	}
-	b = raw
-	return b
-}
-
-func short(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > 32 {
-		return ""
-	}
-	return s
-}
+// hostFS is the real file system, rooted at "/". The library reads settings files through it.
+var hostFS = os.DirFS("/")
 
 // compactionPointFor is C for this request: the user's own setting, read at start-up, when it
 // changes C for the request's model; else the operator's compaction_point in the price table, else the
@@ -138,7 +53,7 @@ func short(s string) string {
 // never has a user setting. Fail open: any odd value gives the table.
 //
 // WHICH REQUESTS. Each client's setting applies only to a request whose User-Agent is that client's
-// own (clientOf below; the client sets it itself). A request of another client on the same local
+// own (compactionpoint.ClientOf; the client sets it itself). A request of another client on the same local
 // proxy gets the table. Bob also gets its own verified default when the user set nothing (#963).
 // Codex has no default (see compactionpoint.Codex). The limit: the header is the client's own
 // claim, and the Claude Agent SDK sends the same User-Agent, so an SDK program run with the same
@@ -152,19 +67,9 @@ func short(s string) string {
 func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
 	if h.opts.Tenants == nil && r != nil {
-		switch clientOf(r.UserAgent()) {
-		case "claude":
-			if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
-				return p
-			}
-		case "bob":
-			if p, ok := h.opts.BobCompact.Resolve(window, h.bobWindow(model)); ok {
-				return p
-			}
-		case "codex":
-			if p, ok := h.opts.CodexCompact.Resolve(window); ok {
-				return p
-			}
+		set := compactionpoint.Settings{Claude: h.opts.ClaudeCompact, Bob: h.opts.BobCompact, Codex: h.opts.CodexCompact}
+		if p, ok := set.Pick(r.UserAgent(), model, window, h.bobWindow); ok {
+			return p
 		}
 	}
 	ctx := context.Background()
@@ -172,27 +77,6 @@ func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) c
 		ctx = r.Context()
 	}
 	return h.resolveCompactionPoint(ctx, body, window)
-}
-
-// clientOf names the client for the compaction point only. It is narrower than dash.AgentFor, which
-// matches the substring "bob" or "codex" anywhere and serves the dashboard's filter. A wrong match
-// here would give a stranger's request another client's C, so Bob and Codex are matched by the
-// start of the User-Agent they send: Bob Shell sends `bobshell/<version>` (bob.js, the request
-// headers of its API client); Codex sends its originator first, `codex_cli_rs/...` by default (and
-// `codex_exec`, `codex-tui` and the like). Claude Code keeps the dash.AgentFor rule from #955.
-func clientOf(userAgent string) string {
-	l := strings.ToLower(strings.TrimSpace(userAgent))
-	switch {
-	case strings.HasPrefix(l, "bobshell/"):
-		return "bob"
-	case strings.HasPrefix(l, "codex"):
-		return "codex"
-	}
-	switch dash.AgentFor(userAgent) {
-	case "claude-code", "claude-cli":
-		return "claude"
-	}
-	return ""
 }
 
 // bobWindow is Bob's own max_input_tokens for the model, as seen in the model/info response that
@@ -204,7 +88,7 @@ func (h *Handler) bobWindow(model string) int {
 	return h.bobWin[model]
 }
 
-const bobWindowMax = bob.MaxModelWindows
+const bobWindowMax = compactionpoint.MaxBobWindows
 
 // noteBobModelInfo records bob.ModelWindows(body). A body that is not that shape records nothing.
 func (h *Handler) noteBobModelInfo(body []byte) { h.noteBobWindows(bob.ModelWindows(body)) }
@@ -212,18 +96,8 @@ func (h *Handler) noteBobModelInfo(body []byte) { h.noteBobWindows(bob.ModelWind
 // noteBobWindows records the agent's window catalog (agent.ControlReply.Windows). An empty catalog,
 // or one over bobWindowMax entries, records nothing. A window <= 0 is dropped.
 func (h *Handler) noteBobWindows(windows map[string]int) {
-	// The agent caps the map too; this host check keeps the cap if the agent changes.
-	if len(windows) == 0 || len(windows) > bobWindowMax {
-		return
-	}
-	// A copy: the agent keeps no handle on the host's store.
-	got := make(map[string]int, len(windows))
-	for m, w := range windows {
-		if w > 0 {
-			got[m] = w
-		}
-	}
-	if len(got) == 0 {
+	got := compactionpoint.CleanBobWindows(windows)
+	if got == nil {
 		return
 	}
 	h.bobWinMu.Lock()
@@ -237,27 +111,7 @@ func (h *Handler) noteBobWindows(windows map[string]int) {
 // Bob's own default (0.5) applies when nothing is set. Same switch as the others: off gives the zero
 // value. It never fails.
 func ReadBobCompact(getenv func(string) string, home string) compactionpoint.Bob {
-	switch strings.ToLower(strings.TrimSpace(getenv(ClaudeCompactOffEnv))) {
-	case "off", "0", "false":
-		return compactionpoint.Bob{}
-	}
-	b := compactionpoint.Bob{Read: true}
-	var paths []string
-	if home != "" {
-		paths = append(paths, filepath.Join(home, ".bob", "settings.json"))
-	}
-	paths = append(paths, bobSystemSettingsPath(getenv))
-	for _, p := range paths { // later wins: system over user
-		if !filepath.IsAbs(p) {
-			continue
-		}
-		if raw := readSmall(p); raw != nil {
-			if v := gjson.GetBytes(raw, "model.compressionThreshold"); v.Type == gjson.Number || v.Type == gjson.String {
-				b.Threshold = short(v.String())
-			}
-		}
-	}
-	return b
+	return compactionpoint.ReadBob(getenv, home, bobSystemSettingsPath(getenv), hostFS)
 }
 
 // bobSystemSettingsPath is the client's own rule (getSystemSettingsPath in bob.js).
@@ -277,52 +131,5 @@ func bobSystemSettingsPath(getenv func(string) string) string {
 // only `key = value` lines before the first [table] header, and skips anything it does not
 // understand (fail open). Same switch as the others.
 func ReadCodexCompact(getenv func(string) string, home string) compactionpoint.Codex {
-	switch strings.ToLower(strings.TrimSpace(getenv(ClaudeCompactOffEnv))) {
-	case "off", "0", "false":
-		return compactionpoint.Codex{}
-	}
-	dir := strings.TrimSpace(getenv("CODEX_HOME"))
-	if dir == "" {
-		if home == "" {
-			return compactionpoint.Codex{}
-		}
-		dir = filepath.Join(home, ".codex")
-	}
-	if !filepath.IsAbs(dir) {
-		return compactionpoint.Codex{}
-	}
-	f, err := os.Open(filepath.Join(dir, "config.toml"))
-	if err != nil {
-		return compactionpoint.Codex{}
-	}
-	defer f.Close()
-	if st, err := f.Stat(); err != nil || st.Size() > 4<<20 {
-		return compactionpoint.Codex{}
-	}
-	var c compactionpoint.Codex
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if strings.HasPrefix(line, "[") {
-			break // the first table header ends the top level
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		if i := strings.Index(v, "#"); i >= 0 { // a trailing comment (no setting here holds a #)
-			v = v[:i]
-		}
-		v = short(strings.Trim(strings.TrimSpace(v), `"'`))
-		switch strings.TrimSpace(k) {
-		case "model_auto_compact_token_limit":
-			c.Limit = v
-		case "model_auto_compact_token_limit_scope":
-			c.Scope = v
-		case "model_post_turn_compact_threshold_percent":
-			c.PostTurn = v
-		}
-	}
-	return c
+	return compactionpoint.ReadCodex(getenv, home, hostFS)
 }
