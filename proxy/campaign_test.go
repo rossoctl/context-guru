@@ -423,7 +423,7 @@ func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 	_, downgradedTenant := f.signUpJar(t, "sonnet@ibm.com")
 
 	// aws/claude-haiku-4-5 is the one model this deployment has measured actually
-	// honoring the 1h cache tier (see headTTL1hHonoredModels); aws/claude-sonnet-5 is
+	// honoring the 1h cache tier (see campaign.HeadTTL1hHonored); aws/claude-sonnet-5 is
 	// silently downgraded to 5m.
 	f.record(t, honoredTenant, "s1", &dash.Event{Model: "aws/claude-haiku-4-5"})
 	f.record(t, downgradedTenant, "s1", &dash.Event{Model: "aws/claude-sonnet-5"})

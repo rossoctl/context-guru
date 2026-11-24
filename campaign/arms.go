@@ -292,7 +292,7 @@ func DefaultWeekdays() []time.Weekday { return slices.Clone(defaultWeekdays) }
 // this deployment itself generated) is a worse failure mode.
 //
 // If NOTHING is recognized — Weekdays omitted entirely by a hand-edited upload, or
-// every name in it misspelled — this returns DefaultWeekdays, never an empty
+// every name in it misspelled — this returns a copy of DefaultWeekdays(), never an empty
 // slice: tenant.Window.contains treats an empty Days as "every day matches", not "no
 // day restricted", so a silent drop-to-empty here would create a live strategy that
 // fires on Friday and Saturday too — traffic the frozen PredictedUSD figures were never
