@@ -74,27 +74,16 @@ func TestTheProxyHandsTheRequestsOwnClockToTheKeepersConfirm(t *testing.T) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 
-			// The keeper records after the response: wait for the value to settle.
-			carried := func() (string, bool) {
-				b, _ := st.Get(key)
-				return string(b), strings.Contains(string(b), "^"+strconv.FormatInt(ping, 10))
-			}
-			deadline := time.Now().Add(3 * time.Second)
-			var v string
-			var has bool
-			for {
-				v, has = carried()
-				if (has == tc.wantCarry && (tc.wantCarry || !strings.Contains(v, "^"))) || time.Now().After(deadline) {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if !strings.Contains(v, "^") && tc.wantCarry {
+			// The keeper records inside the handler: closing the server waits for it, so no polling is needed.
+			srv.Close()
+			v, _ := st.Get(key)
+			has := strings.Contains(string(v), "^"+strconv.FormatInt(ping, 10))
+			if !strings.Contains(string(v), "^") && tc.wantCarry {
 				t.Fatalf("fixture: apply wrote no carry over the ping: %q", v)
 			}
 			if has != tc.wantCarry {
 				t.Errorf("after a %d response the record is %q: the ping's hour standing = %v, want %v",
-					tc.status, v, has, tc.wantCarry)
+					tc.status, string(v), has, tc.wantCarry)
 			}
 		})
 	}
