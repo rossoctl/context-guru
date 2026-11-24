@@ -4,7 +4,6 @@ import (
 	"context"
 	"maps"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -12,6 +11,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -954,25 +954,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
-		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
-		// dollars. The response body of a 4xx or 5xx can still carry a usage object, but the provider
-		// billed none of the request, so the library must not price a saving on it. DropUnbilledSavings
-		// zeroed the tokens above; skipping the compute leaves the event with no Result, so PriceMode
-		// books no dollars either (acc_fallback no_result, reason rejected_status). PingSavings refuses
-		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
-		if c.rejected() {
-			c.accNoResult = "rejected_status"
-		} else if c.accNoResult == accDeferralUnplaced {
-			// accEnd found a deferral it could not describe to the library (billedBody). Computing on the bodies
-			// as they are would fail the sum check, so no figure is computed and the log line names the reason.
-		} else if c.rounds <= 1 {
+		// The rules for which request books no figure are accrec.ShouldCompute's: a rejected status, a deferral
+		// that could not be placed, and several upstream rounds. DropUnbilledSavings zeroed the tokens above;
+		// skipping the compute leaves the event with no Result, so PriceMode books no dollars either
+		// (acc_fallback no_result). PingSavings refuses a non-2xx ping the same way.
+		compute, why := accrec.ShouldCompute(c.status, c.rounds, c.accNoResult)
+		if !compute {
+			c.accNoResult = why
+		}
+		if compute {
 			c.accBilledTTL(usage)
 			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
 				e.SetAccountant(res)
 				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
 					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
 			} else {
-				c.accNoResult = "compute_panicked"
+				c.accNoResult = accrec.ComputePanicked
 			}
 			// Pings went out in the gap this request ended, yet no ping facts were found for its thread:
 			// the credit for them is lost. Count it, so a host that does not wire the ping side shows.
@@ -980,7 +977,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 				c.savings.noteRescueFactsMissing()
 			}
 			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
+			c.pings.drop(accrec.PingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
 		}
 	}
 	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
@@ -1118,21 +1115,11 @@ func (c *capture) accDrop() {
 // rejected is true when the provider answered with a status that is not 2xx. Status 0 means no upstream
 // answered (such as /compact), and is not a rejection.
 func (c *capture) rejected() bool {
-	return c.status != 0 && (c.status < 200 || c.status > 299)
+	return accrec.Rejected(c.status)
 }
 
 func (c *capture) noResultWhy(usageOK bool) string {
-	switch {
-	case c.accReq == nil:
-		return "no_record" // no session, or the pipeline did not run: accEnd never noted a request, or the job opened none
-	case !usageOK:
-		return "no_usage"
-	case c.accNoResult != "":
-		return c.accNoResult
-	case c.rounds > 1:
-		return "upstream_rounds=" + strconv.Itoa(c.rounds)
-	}
-	return ""
+	return accrec.NoResultWhy(c.accReq != nil, usageOK, c.accNoResult, c.rounds)
 }
 
 // fillStrategyMeta sets the strategy metadata that one request alone decides (#1198): the host's
