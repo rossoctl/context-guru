@@ -446,6 +446,7 @@ func TestMailSinkFileIsOwnerOnly(t *testing.T) {
 // spend an unbounded number of codes from one host.
 func TestVerifyAttemptsAreRateLimited(t *testing.T) {
 	f := ctlFixture(t)
+	f.fixLimiterClocks(midMinute())
 	f.signUp(t, "a@ibm.com", "laptop")
 	limited := false
 	for i := 0; i < codeAttemptsPerMinute+4; i++ {

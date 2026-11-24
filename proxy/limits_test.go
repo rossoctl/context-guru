@@ -39,6 +39,12 @@ func (f *hostedFixture) fixLimiterClocks(t time.Time) *fakeClock {
 	return c
 }
 
+// pinned fixes a limiter's clock mid-minute and returns it, for tests that build their own.
+func pinned(l *Limiter) *Limiter {
+	l.now = (&fakeClock{t: midMinute()}).now
+	return l
+}
+
 // The window is a fixed calendar minute. A burst that crosses a minute boundary gets a
 // fresh budget, and a burst inside one minute does not.
 func TestLimiterWindowResetsAtTheMinuteBoundary(t *testing.T) {
@@ -81,7 +87,7 @@ func TestAllowActionWindowResetsAtTheHourBoundary(t *testing.T) {
 	if err == nil {
 		t.Fatal("second action in the same hour was not refused")
 	}
-	if want := "retry in 1771s"; !strings.Contains(err.Error(), want) { // 29m29s left, rounded up
+	if want := "retry in 1771s"; !strings.Contains(err.Error(), want) { // 29m30s left, rounded up
 		t.Errorf("error %q lacks %q", err.Error(), want)
 	}
 	c.advance(30 * time.Minute) // 11:00:30
@@ -180,17 +186,6 @@ func TestCheapModelSemaphoreBlocksAndReleases(t *testing.T) {
 	if !ok {
 		t.Error("the slot was not released")
 	}
-}
-
-func contains(hay, needle string) bool {
-	return len(hay) >= len(needle) && (func() bool {
-		for i := 0; i+len(needle) <= len(hay); i++ {
-			if hay[i:i+len(needle)] == needle {
-				return true
-			}
-		}
-		return false
-	})()
 }
 
 // A ping must never crowd out a real request, and the two ways that promise was broken are
