@@ -249,3 +249,33 @@ func TestNoProductionPackageImportsTestutil(t *testing.T) {
 		t.Fatalf("scanned only %d non-test files; the walk is broken", seen)
 	}
 }
+
+func TestTimingEnabledFollowsTheVariable(t *testing.T) {
+	for val, want := range map[string]bool{"": false, "0": false, "true": false, "1": true} {
+		t.Setenv("CG_TIMING_TESTS", val)
+		if got := TimingEnabled(); got != want {
+			t.Errorf("CG_TIMING_TESTS=%q: TimingEnabled() = %v, want %v", val, got, want)
+		}
+	}
+}
+
+func TestRequireTimingSkipsUnlessSwitchedOn(t *testing.T) {
+	t.Setenv("CG_TIMING_TESTS", "")
+	ran := true
+	t.Run("off", func(t *testing.T) {
+		RequireTiming(t)
+		ran = false // not reached when the test skips
+	})
+	if !ran {
+		t.Error("RequireTiming did not skip with the switch off")
+	}
+	t.Setenv("CG_TIMING_TESTS", "1")
+	ran = false
+	t.Run("on", func(t *testing.T) {
+		RequireTiming(t)
+		ran = true
+	})
+	if !ran {
+		t.Error("RequireTiming skipped with the switch on")
+	}
+}
