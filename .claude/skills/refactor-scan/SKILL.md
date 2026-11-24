@@ -48,6 +48,22 @@ Past examples. Read these PRs to see the shape of a good fix:
 - A comment like "same as X, but ...", "mirrors X", "kept in step with X", or "this package cannot
   import X". A test that exists only to keep two copies equal.
 
+## Second pattern: logic in a host package
+
+The host packages are `proxy/`, `proxyapp/`, `cmd/context-guru-proxy` and `dash/`. Business
+logic there is a copy that a second host (Cortex, bifrost) does not have. Use the test in
+`CLAUDE.md`, *What goes in the proxy*: would Cortex have to copy this code to behave the same?
+
+- **When:** before each release. The integrator runs this mode on the host-package diff since the
+  last tag: `git diff <last-tag>..origin/main -- proxy proxyapp cmd/context-guru-proxy dash`.
+  A full run reads all host files. The first full run is #1309.
+- **Signs:** a new non-handler function in a host package that decides, scores, prices or parses
+  wire format; a constant with a library twin; a comment such as "mirrors X"; a host function that
+  calls three or more library functions in a fixed order (that order is a host contract).
+- **Report** each leak like a duplicate: the logic, its `file:line`, the library package it
+  belongs in, and whether the library already has a copy that differs.
+- A leak that is already in #1309 or its child issues is not reported again.
+
 ## Phase 1: find and report
 
 1. Make a read-only worktree from `origin/main`. Do not touch the main checkout.
