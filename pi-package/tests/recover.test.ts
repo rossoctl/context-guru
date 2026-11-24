@@ -23,10 +23,11 @@ function writeRecord() {
 function world(startUrl: string, over: { setModel?: (m: unknown) => Promise<boolean> } = {}) {
   const handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>> = {};
   const commands: Record<string, { handler: (args: string, ctx: unknown) => Promise<unknown> }> = {};
-  const seen = { set: [] as string[], notices: [] as string[], onDisk: GATEWAY };
+  const seen = { set: [] as string[], models: [] as Array<{ provider: string; id: string }>, notices: [] as string[],
+    onDisk: GATEWAY };
   const ctx = {
     hasUI: true,
-    model: { provider: "anthropic", id: "m", baseUrl: startUrl } as { provider: string; id: string; baseUrl: string },
+    model: { provider: "anthropic", id: "aws/claude-opus-5-5", baseUrl: startUrl } as { provider: string; id: string; baseUrl: string },
     ui: { notify: (text: string) => seen.notices.push(text), confirm: async () => true },
     modelRegistry: {
       getAll: () => [],
@@ -44,8 +45,9 @@ function world(startUrl: string, over: { setModel?: (m: unknown) => Promise<bool
       stdout: args[1] === "uninstall" ? "models_restore=restored\nservice=stopped\nresult=removed\n" : "",
       stderr: "", code: 0, killed: false, truncated: false,
     }),
-    setModel: over.setModel ?? (async (m: { baseUrl: string }) => {
+    setModel: over.setModel ?? (async (m: { provider: string; id: string; baseUrl: string }) => {
       seen.set.push(m.baseUrl);
+      seen.models.push({ provider: m.provider, id: m.id });
       ctx.model = { ...ctx.model, baseUrl: m.baseUrl };
       return true;
     }),
@@ -66,6 +68,9 @@ test("a window routed at load switches to models.json's endpoint after the recor
   rmSync(record);
   assert.deepEqual(await w.emit("input", { text: "hi" }), [{ action: "continue" }]);
   assert.deepEqual(w.seen.set, [GATEWAY]);
+  // Exactly the same model: the same provider and id. Only the address is read again from models.json.
+  assert.deepEqual(w.seen.models, [{ provider: "anthropic", id: "aws/claude-opus-5-5" }]);
+  assert.equal(w.ctx.model.id, "aws/claude-opus-5-5");
   assert.equal(w.seen.notices.length, 1);
   assert.match(w.seen.notices[0], /context-guru was removed/);
 });
