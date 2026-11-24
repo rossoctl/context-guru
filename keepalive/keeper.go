@@ -38,8 +38,9 @@ type kaEntry struct {
 	key             Key
 	tenant, session string
 	// client is Record.Client as it stood when this entry was created — the tenant-scoped id a
-	// client's hooks name this session by, when the host keys it differently (Codex's
-	// session-id header). "" when there is none. MarkEnded / EndedAfter and
+	// client's hooks name this session by, when the host keys it differently (a client
+	// that sends an id but is keyed by another; Codex no longer, since its session-id is the key).
+	// "" when there is none. MarkEnded / EndedAfter and
 	// RetireSessionStartedBefore match a session on either Key.Session or this.
 	client string
 	// cred is Record.Cred as it stood when this entry was created — the opaque credential id
@@ -437,7 +438,8 @@ type Record struct {
 	// (proxy/credmask.go credKey).
 	Cred string
 	// Client is the id the client itself names the session by, when the host keys it
-	// differently (Codex's session-id header). "" when there is none. MarkEnded and
+	// differently (a client that sends an id but is keyed by another; Codex no longer, since its
+	// session-id is the key). "" when there is none. MarkEnded and
 	// RetireSessionStartedBefore match on either Key.Session or Client.
 	Client  string
 	UsageOK bool
