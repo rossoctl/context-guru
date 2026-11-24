@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // Per-session keep-alive overrides: a human pointing at one session and saying "keep this
@@ -40,181 +40,68 @@ import (
 // request, which is why an override left on a dead session costs exactly zero. It disappears at
 // `until`, at a restart, or on disarm.
 
-// Override bounds. Every one of them is a refusal with a reason rather than a silent clamp: a
-// clamp on a spend authorization tells the person they got what they asked for when they did not.
+// The override rules (bounds, validation, how an armed override changes a policy) live in package
+// keepalive (keepalive/override.go), so every host resolves the same policy. This file keeps the
+// host half: the map of armed overrides, its lock, the arm limits and the credential release. The
+// names below keep the old unexported spelling for this package and its tests.
 const (
-	// maxOverrideUntil caps how far ahead an override may reach. Session lifetime p99 is
-	// 12.9 h, so past this the authorization is being spent on a session that statistically no
-	// longer exists.
-	maxOverrideUntil = 12 * time.Hour
-	// defaultOverrideUntil is what the dialog offers.
-	defaultOverrideUntil = time.Hour
-	// The idle interval's band. Below 60 s a ping lands inside the previous one's own refresh
-	// for no reason; above maxOverrideIdle the first ping arrives after the 5-minute lifetime (modelinfo.AnthropicCacheLifetime5m) has already
-	// lapsed and pays a 1.25x WRITE — the exact charge the mechanism exists to avoid.
-	minOverrideIdle = 60 * time.Second
-	maxOverrideIdle = modelinfo.AnthropicCacheLifetime5m - 10*time.Second
-	// The ping-count band. The upper end is bounded again, and more tightly, by the credential
-	// hold below.
-	minOverridePings = 1
-	maxOverridePings = 11
-	// maxOverrideHold is the operator's ceiling on the CREDENTIAL HOLD an override may buy.
-	// The hard deadline is (K+1)x X (see kaEntry.timer), and the Settings copy promises "up to
-	// about 12 minutes" at the shipped defaults — an override changes that number, so the arm
-	// dialog states the computed hold.
-	//
-	// It is CURRENTLY UNREACHABLE, and saying so is more useful than implying an independent
-	// rule: the two caps above bound (K+1)x X at 12 x 290 s = 58 minutes, so the real ceiling on
-	// the hold is 58 minutes and it is a consequence of them. This stays as the bound that keeps
-	// holding if either of those is ever widened — a credential-retention limit is the wrong place
-	// to rely on an emergent property of two unrelated caps — but no test can exercise it without
-	// changing one of them, and TestOverrideRespectsTheCredentialHoldCeiling asserts the 58
-	// minutes that is actually enforced.
-	maxOverrideHold = time.Hour
-	// Bounds on the map itself. Same order as maxKeepAliveSessions, and both are needed for
-	// the same reason that bound has two: many accounts with a few, or one account with many.
-	maxOverridesPerTenant = 64
-	maxOverridesTotal     = 512
-	// maxSessionIDBytes refuses an implausible session id before it is used as a map key.
-	maxSessionIDBytes = 200
-	// overrideArmsPerHour is the arm rate per account. Arming is a spend authorization, so it
-	// is rate-limited like one.
-	overrideArmsPerHour = 30
+	maxOverrideUntil      = keepalive.MaxOverrideUntil
+	defaultOverrideUntil  = keepalive.DefaultOverrideUntil
+	minOverrideIdle       = keepalive.MinOverrideIdle
+	maxOverrideIdle       = keepalive.MaxOverrideIdle
+	minOverridePings      = keepalive.MinOverridePings
+	maxOverridePings      = keepalive.MaxOverridePings
+	maxOverrideHold       = keepalive.MaxOverrideHold
+	maxOverridesPerTenant = keepalive.MaxOverridesPerTenant
+	maxOverridesTotal     = keepalive.MaxOverridesTotal
+	maxSessionIDBytes     = keepalive.MaxSessionIDBytes
+	overrideArmsPerHour   = keepalive.OverrideArmsPerHour
 )
 
-// sessionOverride is one armed session's policy and its expiry.
+// sessionOverride is keepalive.Override under this package's old field names. The fields are
+// copies, and the rules read them through lib().
 type sessionOverride struct {
-	// pol carries Idle, MaxPings and MinPrefixTokens ONLY. MaxUSDPerPing is deliberately not
-	// here: the per-ping cost guard is the one control that exists because ping cost is bimodal
-	// (p50 $0.0004, p99 $0.2275, max $0.3780), and an override may not widen it. KeepAlive is
-	// forced on — enabling the mechanism for one session while the account default is off is
-	// the point of the feature, and the arming request is itself the consent act.
 	pol   CachePolicy
 	until time.Time
 	armed time.Time
-	// by is the tenant id of the principal that armed it, for the audit row. Always the
-	// authenticated principal, never a value out of a request body.
-	by string
+	by    string
 }
 
-// hold is the credential-hold ceiling this override buys: (K+1) x Idle, the same arithmetic
-// kaEntry.timer uses. Named because it is a number a person is shown before they authorize it.
-func (o sessionOverride) hold() time.Duration {
-	return time.Duration(o.pol.MaxPings+1) * o.pol.Idle
+func fromLib(o keepalive.Override) sessionOverride {
+	return sessionOverride{pol: o.Pol, until: o.Until, armed: o.Armed, by: o.By}
 }
 
-// validOverride checks a proposed override against every bound, naming the one it fails.
-//
-// Returns the resolved override, so the caller cannot apply a different one from the one that
-// was checked. `now` is passed in rather than read, for the same reason the keeper's clock is.
+func (o sessionOverride) lib() keepalive.Override {
+	return keepalive.Override{Pol: o.pol, Until: o.until, Armed: o.armed, By: o.by}
+}
+
+// hold is the credential-hold ceiling this override buys (keepalive.Override.Hold).
+func (o sessionOverride) hold() time.Duration { return o.lib().Hold() }
+
+// validOverride is keepalive.ValidOverride.
 func validOverride(session string, idle time.Duration, pings, minPrefix int,
 	until, now time.Time, by string) (sessionOverride, error) {
-	if session == "" {
-		return sessionOverride{}, fmt.Errorf("name the session to arm")
-	}
-	if len(session) > maxSessionIDBytes {
-		return sessionOverride{}, fmt.Errorf("that is not a session id")
-	}
-	if strings.ContainsRune(session, 0) {
-		return sessionOverride{}, fmt.Errorf("that is not a session id")
-	}
-	// A session id whose `tenant:base` prefix names SOMEBODY ELSE is refused rather than armed.
-	//
-	// Overrides are keyed under the authenticated principal, which is the isolation this feature
-	// wants — so a foreign session id becomes a key under the caller's own tenant that no request
-	// will ever match. Arming it did nothing and returned 200, and the response then reported
-	// `last_prefix_tokens: 0` and `priced: false` because the worst-case lookup is scoped to the
-	// arming principal too. A manager's service-wide session list is full of these rows, so this
-	// is reachable by clicking, not only by hand.
-	if t, _, ok := strings.Cut(session, ":"); ok && t != by {
-		return sessionOverride{}, fmt.Errorf(
-			"that session belongs to another account. An override is keyed to the principal that " +
-				"arms it, so this one would match no request and keep nothing warm")
-	}
-	if until.IsZero() {
-		return sessionOverride{}, fmt.Errorf("an override must state when it expires")
-	}
-	if !until.After(now) {
-		return sessionOverride{}, fmt.Errorf("that expiry has already passed")
-	}
-	if until.Sub(now) > maxOverrideUntil {
-		return sessionOverride{}, fmt.Errorf(
-			"an override may last at most %d hours; sessions do not live longer than that",
-			int(maxOverrideUntil/time.Hour))
-	}
-	if idle < minOverrideIdle || idle > maxOverrideIdle {
-		return sessionOverride{}, fmt.Errorf(
-			"the idle interval must be between %d and %d seconds; past %d the first ping "+
-				"arrives after the provider's 5-minute lifetime has already lapsed and pays "+
-				"a cache WRITE instead of a read",
-			int(minOverrideIdle.Seconds()), int(maxOverrideIdle.Seconds()),
-			int(maxOverrideIdle.Seconds()))
-	}
-	if pings < minOverridePings || pings > maxOverridePings {
-		return sessionOverride{}, fmt.Errorf("the ping count must be between %d and %d",
-			minOverridePings, maxOverridePings)
-	}
-	if minPrefix < 0 {
-		return sessionOverride{}, fmt.Errorf("the prefix floor cannot be negative")
-	}
-	o := sessionOverride{
-		pol:   CachePolicy{KeepAlive: true, Idle: idle, MaxPings: pings, MinPrefixTokens: minPrefix},
-		until: until, armed: now, by: by,
-	}
-	if h := o.hold(); h > maxOverrideHold {
-		return sessionOverride{}, fmt.Errorf(
-			"%d pings %ds apart would hold your credential for up to %d minutes; the ceiling "+
-				"is %d minutes, so lower one of them",
-			pings, int(idle.Seconds()), int(h.Minutes()), int(maxOverrideHold.Minutes()))
-	}
-	return o, nil
+	o, err := keepalive.ValidOverride(session, idle, pings, minPrefix, until, now, by)
+	return fromLib(o), err
 }
 
 // overrideFor resolves one session's effective policy: the account's own, unless an unexpired
-// override is armed for it.
-//
-// The ONE hook this feature has in the request path, called from record. Everything downstream
-// — pol.On(), pingable(), the hard deadline, the per-ping cost guard, the kill switch, the
-// no-audit-sink refusal — reads the returned policy and is otherwise untouched.
+// override is armed for it (keepalive.Override.Apply).
 func (k *keeper) overrideFor(tenantID, session string, pol CachePolicy) CachePolicy {
 	o, ok := k.activeOverride(tenantID, session)
 	if !ok {
 		return pol
 	}
-	pol.KeepAlive = true
-	pol.Idle, pol.MaxPings = o.pol.Idle, o.pol.MaxPings
-	pol.MinPrefixTokens = o.pol.MinPrefixTokens
-	// The person armed this exact count and was shown the hold it buys: the per-wait plan (#858)
-	// does not change it.
-	pol.WaitPlan = false
-	// The override's ping count bounds a 1-hour thread too, but only downward: its 60-290 s band
-	// cannot express an hour, so the 1-hour timing stays the account's, and the hold the person was
-	// shown is then (K+1) x 59 min at most. 0 means the proxy default, which is resolved here so
-	// that the minimum is taken against a real number.
-	k1h := pol.MaxPings1h
-	if k1h <= 0 {
-		k1h = modelinfo.AnthropicDefaultKeepAliveMaxPings1h
-	}
-	pol.MaxPings1h = min(k1h, o.pol.MaxPings)
-	return pol
+	return o.lib().Apply(pol)
 }
 
-// OpenAI overrides enable a session and set its floor, but never import the
-// Anthropic-only 60-290s cadence. Bound the actual credential hold to one hour
-// even when an account configured a longer OpenAI interval or many pings.
+// overrideForOpenAI is overrideFor for an OpenAI request (keepalive.Override.ApplyOpenAI).
 func (k *keeper) overrideForOpenAI(tenantID, session string, pol CachePolicy) CachePolicy {
 	o, ok := k.activeOverride(tenantID, session)
 	if !ok {
 		return pol
 	}
-	pol.KeepAlive = true
-	pol.MinPrefixTokens = o.pol.MinPrefixTokens
-	if pol.Idle <= 0 || pol.Idle > modelinfo.OpenAIDefaultKeepAliveIdle {
-		pol.Idle = modelinfo.OpenAIDefaultKeepAliveIdle
-	}
-	maxPings := int(maxOverrideHold/pol.Idle) - 1
-	pol.MaxPings = min(o.pol.MaxPings, maxPings)
-	return pol
+	return o.lib().ApplyOpenAI(pol)
 }
 
 func (k *keeper) activeOverride(tenantID, session string) (sessionOverride, bool) {
@@ -224,7 +111,7 @@ func (k *keeper) activeOverride(tenantID, session string) (sessionOverride, bool
 	k.mu.Lock()
 	o, ok := k.overrides[kaKey(tenantID, session)]
 	k.mu.Unlock()
-	if !ok || !k.now().Before(o.until) {
+	if !ok || !o.lib().Active(k.now()) {
 		return sessionOverride{}, false
 	}
 	return o, true

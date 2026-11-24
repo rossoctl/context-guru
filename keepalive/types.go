@@ -81,6 +81,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/thread"
@@ -320,15 +321,11 @@ func Disabled() bool {
 	return v == "off" || v == "0" || v == "false"
 }
 
-// headTTLBytesPerToken is the factor the old head-TTL gate used (len(body)/4). It equals
-// config.HeadTTLBytesPerToken; keepalive does not import config.
-const headTTLBytesPerToken = 4
-
 // HeadTTLGateBytes is the head-TTL size gate in bytes of the request body: HeadTTLMinBytes, or the
 // deprecated HeadTTLMinTokens x 4 when only that is set. 0 means the upgrade is off.
 func (p Policy) HeadTTLGateBytes() int {
 	if p.HeadTTLMinBytes > 0 {
 		return p.HeadTTLMinBytes
 	}
-	return p.HeadTTLMinTokens * headTTLBytesPerToken
+	return p.HeadTTLMinTokens * config.HeadTTLBytesPerToken
 }

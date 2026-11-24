@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/schema"
@@ -96,18 +97,15 @@ func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 }
 
 // responsesWire is wireGroups for the Responses wire: for each slot, the index of its input item, which is
-// the accountant's message position (proxy accParse). A string input is one position, index 0. The
+// the accountant's message position (accwire.Responses). A string input is one position, index 0. The
 // instructions slot is the system section, not an input item, and gets -1: no message operation may be
 // placed there.
 func responsesWire(slots []responseSlot) []int {
 	wire := make([]int, len(slots))
 	for i, s := range slots {
-		switch idx, ok := responseInputIndex(s.path); {
-		case ok:
+		if idx, ok := accwire.Responses.WireIndex(s.path); ok {
 			wire[i] = idx
-		case s.path == "input":
-			wire[i] = 0
-		default:
+		} else {
 			wire[i] = -1
 		}
 	}
