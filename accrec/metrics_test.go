@@ -43,8 +43,10 @@ func TestMetricComponentsHoldTheRegistry(t *testing.T) {
 var (
 	// An operator name written as a literal instead of through accwire.Operator or an accwire.Op* constant.
 	literalOperator = regexp.MustCompile(`"context-guru\.[a-z_]+"|Operator:\s*"[^"]+"`)
-	// A bare name given to a helper that prefixes it.
-	literalHelperArg = regexp.MustCompile(`(?:envelopeOpID?|MessageOps|accwire\.Operator|[^.]\bOperator)\("([a-z_]+)"`)
+	// A bare name given to a helper that prefixes it: envelopeOp, envelopeOpID, MessageOps, Operator.
+	// It does not see a name returned by a function, such as envelopeOwner's "toolfilter" and
+	// "toolschema" (both registered); a new name there must be an accwire.Op* constant.
+	literalHelperArg = regexp.MustCompile(`(?:envelopeOp(?:ID)?|MessageOps|accwire\.Operator|[^.]\bOperator)\("([a-z_]+)"`)
 	// An accwire.Op* constant.
 	opConst = regexp.MustCompile(`(?m)^\s*(Op[A-Z]\w*)\s*=\s*"([^"]+)"`)
 )
