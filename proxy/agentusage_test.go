@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/agent"
-	"github.com/rossoctl/context-guru/internal/respfacts"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/thinkcount"
 )
 

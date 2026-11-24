@@ -622,7 +622,7 @@ func hasSystemMarker(text string) bool {
 // the "waiting_on" state issue #424 asks be tracked per thread, and (issue #424 fix 6) tracked
 // in a way that survives the agent compacting its own history. It still runs a full rescan of
 // the WHOLE current body every call (issue #424 allows this when it is fast enough — see
-// internal/waitcause_test.go's benchmark and the PR body for the measured cost on a ~600 KB
+// waitcause_test.go's benchmark and the PR body for the measured cost on a ~600 KB
 // body), which is what makes this self-correcting from anything an earlier request missed (a
 // restart, a dropped event); the difference from an earlier version of this package is that the
 // scan no longer DISCARDS an item just because ITS OWN start marker is no longer present —

@@ -14,18 +14,18 @@ import (
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/reqfacts"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/reqfacts"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
+	"github.com/rossoctl/context-guru/waitcause"
 	"github.com/tidwall/gjson"
 )
 
@@ -350,7 +350,7 @@ func (c *capture) noteThread(res thread.Result) {
 // noteWaitBody stashes the PRISTINE request body for issue #424's RECORD half, so finish()
 // can scan it (waitcause.Tracker.Observe) after the request has already gone upstream. This
 // is a slice-header copy — the request path pays nothing beyond this one field write, however
-// large the body: see internal/waitcause's own benchmark for what the scan itself costs, and
+// large the body: see waitcause's own benchmark for what the scan itself costs, and
 // why that cost belongs on finish()'s side of the line, not here. Call site: proxy.go, right
 // after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
 // the same body threadFor already matches on.

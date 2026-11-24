@@ -3,8 +3,8 @@ package compactionpoint_test
 import (
 	"testing"
 
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
 
 // ClientOf repeats dash.AgentFor's Claude rule (dash imports this package). Pin them together.

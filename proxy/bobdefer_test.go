@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"bytes"
-	"github.com/rossoctl/context-guru/inband/inbandtest"
+	"github.com/rossoctl/context-guru/internal/inbandtest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/metrics"
