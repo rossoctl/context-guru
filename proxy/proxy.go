@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rossoctl/context-guru/lifecycle"
 	"io"
 	"log/slog"
 	"math"
@@ -933,22 +934,17 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
 	// request's row, not to whichever tenant is in flight when the call returns.
-	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, apply.Opts{
-		Provider:    provider,
-		Body:        body,
-		Session:     r.Header.Get("x-context-guru-session"),
-		Tenant:      tn.ID,
-		Bypass:      strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true"),
-		Models:      models,
-		Window:      window,
-		WindowExact: windowExact,
-		// C, resolved beside the window because the fill fraction belongs over it rather than over
-		// the window — see internal/compactionpoint.
-		CompactionPoint:       cpoint.Tokens(window),
-		CompactionPointSource: string(cpoint.Source),
-		CacheMode:             cacheMode,
-		Tracker:               h.tracker,
-	})
+	// The shared option build (lifecycle.Request): the same window, C and tracker as the chat path.
+	// C is resolved beside the window because the fill fraction belongs over it rather than over
+	// the window — see internal/compactionpoint.
+	o := lifecycle.Request{
+		Provider: provider, Body: body, Session: r.Header.Get("x-context-guru-session"), Tenant: tn.ID,
+		Models: models, Window: window, WindowExact: windowExact,
+		CompactionPoint: cpoint.Tokens(window), CompactionPointSource: string(cpoint.Source),
+		CacheMode: cacheMode, Tracker: h.tracker,
+	}.Opts()
+	o.Bypass = strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
+	res := apply.BodyOpts(cp.llmCtx(r.Context()), pipe, tn.Store, o)
 	cp.noteCG(float64(time.Since(start).Microseconds()) / 1000.0)
 	cp.noteTrace(res.Trace)
 	w.Header().Set("Content-Type", "application/json")
@@ -992,16 +988,7 @@ func headerKey(name, key string) func(http.Header) {
 // Nil pricer or an unnameable model returns the zero value, which the component must read as
 // "unknown" and fall back on, never as free.
 func (h *Handler) selfRates(ctx context.Context, model string) components.TokenRates {
-	if h.opts.Prices == nil || model == "" {
-		return components.TokenRates{}
-	}
-	p, ok := h.opts.Prices.Price(ctx, model)
-	if !ok || p.Zero() {
-		return components.TokenRates{}
-	}
-	return components.TokenRates{
-		Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite,
-	}
+	return lifecycle.SelfRates(ctx, h.opts.Prices, model)
 }
 
 // ratesFor hands the pipeline the operator's rate card as a lookup, so a component that
@@ -1013,10 +1000,7 @@ func (h *Handler) selfRates(ctx context.Context, model string) components.TokenR
 // falls back to CHEAP_MODEL_PRICE_* (haiku LIST rates), which is a different card from the one
 // the dashboard prices with — measured 32% apart on the same 93 calls.
 func (h *Handler) ratesFor(ctx context.Context) func(string) components.TokenRates {
-	if h.opts.Prices == nil {
-		return nil
-	}
-	return func(model string) components.TokenRates { return h.selfRates(ctx, model) }
+	return lifecycle.RatesFor(ctx, h.opts.Prices)
 }
 
 // incomingModel builds an LLM client that reuses the proxied request's own model
@@ -1406,292 +1390,157 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// panic anywhere here must forward the PRISTINE inbound body, never 500 the client.
 		// apply.BodyFull has its own recover; this backstops expand.Inject and anything else.
 		orig := body
-		var tr apply.Trace      // hoisted: the lifecycle log line below reads it
-		var added time.Duration // hoisted with tr: the lifecycle log line reads both
-		var threadID string     // hoisted with it: serve hands it to the keeper
-
-		// threadOf is hoisted too: serve resolves the observe-mode thread with it.
-		var threadOf func(session string) thread.Result
-		// preBody is what the pipeline's own components are about to receive as req.Input, BEFORE
-		// any of them — cache_aware_summarizer and extract_llm_sweep included — runs. Captured here,
-		// read by h.serve below, and stashed alongside the body actually forwarded: see the
-		// STALE-PREFIX GUARD comment on sentEntry in prefixask.go for why the two can diverge (PR
-		// #414's review of this follow-up, and PR #431's round 1) and why a caller checking coverage
-		// must compare against THIS, never against what a later component in the pipeline went on to
-		// rewrite.
-		var preBody []byte
-		// Where an expand answered in band on this turn is restored from the next turn on, when
-		// the config asks for fixed restore (#407). Read off the transcript apply is about to see,
-		// in the same coordinates the anchor is checked against on every later turn.
-		var anchor *expand.Anchor
+		// The thread of a session, read off `orig`, the request as the agent sent it. apply calls it
+		// once the session id is known, and serve resolves the observe-mode thread with it.
+		threadOf := func(sess string) thread.Result {
+			return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
+		}
 		// Tool deferral's facts for this request (#485), nil when it did not change the request.
 		var di *deferInfo
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					lg.Error("context-guru: recovered from panic before forward; sending original", "panic", rec)
-					body = orig
-					// The original goes upstream, so no operation of the savings record is on the
-					// wire: drop the record, and the event books no saving.
-					cp.accDrop()
-				}
-			}()
-			// A client that received our own expand tool_use answered it itself, with an
-			// error — no client implements the tool. Put the content the model asked for where
-			// that error is, BEFORE the pipeline reads the transcript, so the restored text is
-			// marked kept-verbatim and offload does not compact it straight back into the
-			// marker that caused the call. Same gate as expand.Inject below: we repair exactly
-			// when we are rewriting this request at all.
-			if tn.Mode != components.ModeObserve && !bypassed {
-				var repaired int
-				body, repaired = h.repairExpandErrors(wire, body, tn, cp, func(b []byte) string {
+		// lifecycle.Prepare runs the steps before the forward in their one right order and fails
+		// open: a panic in any step (a hook included) gives back the original body. The comments
+		// of each step are in the lifecycle package and on the hooks below.
+		prep := lifecycle.Prepare(lifecycle.Pre{
+			Wire: wire, Provider: provider, Mode: tn.Mode, Bypassed: bypassed, Pipe: tn.Pipe,
+			Store: tn.Store, InjectExpand: h.opts.InjectExpand,
+			Orig: orig, ThreadOf: threadOf,
+			// A client that received our own expand tool_use answered it itself, with an error. The
+			// repair puts the content the model asked for where that error is, BEFORE the pipeline
+			// reads the transcript, so offload does not compact it straight back into the marker
+			// that caused the call. A call the AGENT made to context_guru_adjudicate gets the same
+			// repair (lifecycle.Prepare, adjudicate.AnswerStrayCalls).
+			RepairExpand: func(b []byte) ([]byte, int) {
+				return h.repairExpandErrors(wire, b, tn, cp, func(b []byte) string {
 					// The id the pipeline will derive, not the raw body's: see EnforcedSessionIDFor.
 					return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, explicitSess, api, provider, bypassed, b)
 				})
-				if repaired > 0 {
-					// A rewrite of the client's own transcript must never be silent: this is
-					// the only line that says the response side failed to withhold the call
-					// and the request side caught it.
-					lg.Debug("cg.expand_repair", "restored", repaired)
+			},
+			// A rewrite of the client's own transcript must never be silent: these lines say the
+			// response side failed to withhold the call and the request side caught it.
+			OnRepair: func(n int) { lg.Debug("cg.expand_repair", "restored", n) },
+			OnStray:  func(n int) { lg.Debug("cg.adjudicate_stray", "answered", n) },
+			Apply: func(b []byte) ([]byte, time.Duration, apply.Trace) {
+				return h.applyMode(&reqInfo{
+					// cp.llmCtx: context-guru's OWN compaction-model spend under this context
+					// is charged to this request's row, and to no other tenant's.
+					ctx:         cp.llmCtx(r.Context()),
+					provider:    provider,
+					api:         api,
+					body:        b,
+					session:     explicitSess,
+					bypassed:    bypassed,
+					models:      models,
+					window:      window,
+					windowExact: windowExact,
+					// C, resolved once here so both the enforced and the observed path see the same
+					// figure — a second resolution is a second thing to keep in agreement.
+					compactionPoint:       cpoint.Tokens(window),
+					compactionPointSource: string(cpoint.Source),
+					rates:                 h.selfRates(r.Context(), gjson.GetBytes(b, "model").String()),
+					tn:                    tn,
+					threadOf:              threadOf,
+					endpoint:              up.base,
+					route:                 up.path,
+				})
+			},
+			Observed: func(th thread.Result, tr apply.Trace, added time.Duration) {
+				addedMs := float64(added.Microseconds()) / 1000.0
+				cp.noteCG(addedMs)
+				cp.noteTrace(tr)
+				// The thread is known before the savings tracker is told of the request: the first
+				// request after the agent's own compaction is found here (thread.Result.AfterCompaction,
+				// #947). It was read off `orig`, the request as the agent sent it.
+				cp.noteThread(th)
+				// The savings tracker is told of the request HERE, after the pipeline, and not before
+				// it: the session (tr.Session) is known only once the pipeline has run. accBegin only
+				// notes the client body; accEnd opens the record on another goroutine (issue #1059).
+				// An empty session means the pipeline did not run (bypassed, observe, no messages):
+				// there are no operations to price, so the request is skipped.
+				//
+				// Not for an OpenAI Responses request whose history the provider holds
+				// (previous_response_id, conversation, item_reference; see schema.ServerHeldHistory,
+				// wide form): the body is only this turn. The record would compare that delta with the
+				// last full body as a client edit, and price a prefix the proxy cannot see. The event
+				// is marked instead, so the dashboard says why it has no saving (#899).
+				if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
+					schema.ServerHeldHistory(orig, true) {
+					cp.accServerHeldHistory = true
+				} else if cp != nil && cp.savings != nil && tr.Session != "" {
+					cp.accBegin(accountant.RequestMeta{
+						RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
+						Session:   tr.Session,
+						Model:     gjson.GetBytes(orig, "model").String(),
+						At:        cp.start,
+						// The proxy has no subscription detection, so every request is billed as api.
+						Billing: accountant.Billing{Mode: accountant.BillingAPI},
+						// The first request after the agent's own compaction (R55). The wire does not yet
+						// tell a manual /compact from an auto compaction, so the verdict is unknown.
+						Compaction: compactionVerdict(th),
+					}, orig)
 				}
-				// The same problem for the adjudication tool, and the same remedy. The client
-				// cannot execute a tool the proxy injected, so a call the AGENT made to
-				// context_guru_adjudicate comes back as "not found" and the agent loses a turn
-				// to a dead end. Not defensive: a model was directly observed calling
-				// context_guru_expand at step 2 of a run. Measured at 0 strays across ~4,900
-				// requests with the "do not call this yourself" description, and 0 again across
-				// three further benchmark passes. This is now the BACKSTOP, for two distinct paths.
-				// The response loop answers a stray in band when the turn called proxy tools only.
-				// It DEFERS to this repair when the model co-called a client tool in the same turn
-				// (otherTools -> bail, see the response loop), because it cannot continue a turn
-				// whose other tool_use only the client can execute — on that path our tool_use does
-				// reach the client and this repair is the only thing that answers it, at a cost of
-				// one agent turn. It also catches a round the loop could not reconstruct at all.
-				// The counter (adjudicate_stray) is what says whether the description still works.
-				var strays int
-				if body, strays = adjudicate.AnswerStrayCalls(wire, body); strays > 0 {
-					lg.Debug("cg.adjudicate_stray", "answered", strays)
-				}
-			}
-			if tn.Mode != components.ModeObserve && !bypassed && tn.Pipe.FixedRestore() {
-				if at, fp, ok := expand.AnchorPoint(wire, body); ok {
-					anchor = &expand.Anchor{At: at, Fp: fp}
-				}
-			}
-			// Captured BEFORE the pipeline runs — see ClearStaleKeepAliveCandidate's own comment
-			// on why this request's "did I register fresh keep-alive material" test has to be a
-			// timestamp comparison rather than clearing by call order: tr.Session (the key a
-			// clear-by-session-id would need) is not resolved until the pipeline inside applyMode
-			// runs, so an unconditional clear placed after it deletes the very candidate this
-			// request's own run just wrote.
-			pipelineStartedAt := time.Now()
-			// The thread is resolved INSIDE apply, once the session id is known and before the
-			// pipeline runs, so components see it on Ctx.Thread (cache_aware_summarizer keys its
-			// keep-alive candidate by it). Read off `orig`, the request as the agent sent it.
-			threadOf = func(sess string) thread.Result {
-				return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
-			}
-			// Snapshot the exact bytes the pipeline is about to normalize into req.Input for
-			// EVERY component, cache_aware_summarizer and extract_llm_sweep included — this is "as
-			// the pipeline received them", not "as the client originally sent them"
-			// (repairExpandErrors, AnswerStrayCalls and the force-model rewrite above may already
-			// have touched body), which is what makes it the right thing for a later component's
-			// own hash to agree with.
-			preBody = body
-			body, added, tr = h.applyMode(&reqInfo{
-				// cp.llmCtx: context-guru's OWN compaction-model spend under this context
-				// is charged to this request's row, and to no other tenant's.
-				ctx:         cp.llmCtx(r.Context()),
-				provider:    provider,
-				api:         api,
-				body:        body,
-				session:     explicitSess,
-				bypassed:    bypassed,
-				models:      models,
-				window:      window,
-				windowExact: windowExact,
-				// C, resolved once here so both the enforced and the observed path see the same
-				// figure — a second resolution is a second thing to keep in agreement.
-				compactionPoint:       cpoint.Tokens(window),
-				compactionPointSource: string(cpoint.Source),
-				rates:                 h.selfRates(r.Context(), gjson.GetBytes(body, "model").String()),
-				tn:                    tn,
-				threadOf:              threadOf,
-				endpoint:              up.base,
-				route:                 up.path,
-			})
-			addedMs := float64(added.Microseconds()) / 1000.0
-			cp.noteCG(addedMs)
-			cp.noteTrace(tr)
-			// The thread is known before the savings tracker is told of the request: the first request
-			// after the agent's own compaction is found here (thread.Result.AfterCompaction, #947).
-			// Read off `orig`, the request as the agent sent it — the pipeline's own rewrite would
-			// break the prefix the fallback matches on.
-			th := tr.Thread
-			if !tr.ThreadResolved {
-				// apply returned before resolving the session's thread (no message list, an
-				// observe-mode or bypassed request): resolve it here, as before.
-				th = h.threadFor(r, tn.ID, tr.Session, orig, agentCompaction, lg)
-			}
-			threadID = th.ID
-			cp.noteThread(th)
-			// The savings tracker is told of the request HERE, after applyMode, and not before it: the
-			// session (tr.Session) is known only once the pipeline has run. accBegin only notes the
-			// client body; accEnd opens the record on another goroutine (issue #1059). `orig` is what the agent
-			// sent. An empty session means the pipeline did not run (bypassed, observe, no
-			// messages): there are no operations to price, so the request is skipped.
+				// Issue #424's RECORD half: stash the PRISTINE body for finish() to scan AFTER this
+				// request has gone upstream — see noteWaitBody's own comment, and dashcapture.go's
+				// finish() for where the actual scan (waitcause.Tracker.Observe) runs. This line
+				// itself costs one slice-header copy, not a scan.
+				cp.noteWaitBody(orig)
+				// The wait-cause scan of the same body starts HERE and runs while the request is
+				// upstream. The keeper takes it at response end without waiting (#1225, #1227;
+				// earlyscan.go).
+				cp.startEarlyScan(h, r.Context(), provider, orig)
+				// The alias derivation needs the pipeline that transforms THIS body, and the wire
+				// dialect and bypass flag it transforms under — see noteAliasSource.
+				cp.noteAliasSource(tn.Pipe, api, bypassed)
+			},
+			// A real request has arrived on this thread: cancel any pending keep-alive (this request
+			// refreshes the entry itself, and a ping concurrent with it would be a second request
+			// against the tenant's budget for nothing), and pick up what the pings during the idle
+			// span it just ended actually did. Both facts are needed BEFORE the row is priced.
 			//
-			// Not for an OpenAI Responses request whose history the provider holds (previous_response_id,
-			// conversation, item_reference; see schema.ServerHeldHistory, wide form): the body is only this turn. The record would compare that delta with the last full
-			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
-			// the dashboard says why it has no saving (#899).
-			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
-				schema.ServerHeldHistory(orig, true) {
-				cp.accServerHeldHistory = true
-			} else if cp != nil && cp.savings != nil && tr.Session != "" {
-				cp.accBegin(accountant.RequestMeta{
-					RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
-					Session:   tr.Session,
-					Model:     gjson.GetBytes(orig, "model").String(),
-					At:        cp.start,
-					// The proxy has no subscription detection, so every request is billed as api.
-					Billing: accountant.Billing{Mode: accountant.BillingAPI},
-					// The first request after the agent's own compaction (R55). The wire does not yet tell
-					// a manual /compact from an auto compaction, so the verdict is unknown.
-					Compaction: compactionVerdict(th),
-				}, orig)
-			}
-			// Issue #424's RECORD half: stash the PRISTINE body (as the agent sent it, same
-			// reason threadFor reads `orig` rather than the pipeline's rewrite) for finish()
-			// to scan AFTER this request has gone upstream — see noteWaitBody's own comment,
-			// and dashcapture.go's finish() for where the actual scan (waitcause.Tracker.
-			// Observe) now runs. This line itself costs one slice-header copy, not a scan.
-			cp.noteWaitBody(orig)
-			// The wait-cause scan of the same body starts HERE and runs while the request is upstream. The
-			// keeper takes it at response end without waiting (#1225, #1227; earlyscan.go).
-			cp.startEarlyScan(h, r.Context(), provider, orig)
-			// The alias derivation needs the pipeline that transforms THIS body, and the
-			// wire dialect and bypass flag it transforms under — see noteAliasSource.
-			cp.noteAliasSource(tn.Pipe, api, bypassed)
-			// A real request has arrived on this session: cancel any pending keep-alive
-			// (this request refreshes the entry itself, and a ping concurrent with it would
-			// be a second request against the tenant's budget for nothing), and pick up what
-			// the pings during the idle span it just ended actually did. Both facts are
-			// needed BEFORE the row is priced — the ping count and the tokens the last ping
-			// refreshed are inputs to a dollar figure, not just a label.
-			//
-			// Per THREAD of the session (#423): the main agent, each subagent and each fork
-			// have their own cache entry, and only this request's thread was refreshed.
-			cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, tr.Session, threadID))
-			if cp != nil {
-				cp.predArrival = h.predRT().arrive(tn.ID, tr.Session, threadID, time.Now())
-			}
-			// Drop any cache_aware_summarizer keep-alive substitute registered off an EARLIER
-			// turn's conversation — but never the one this request's own pipeline run (above)
-			// may just have written: an unconditional clear here used to delete that candidate
-			// in the same call it was created, which is why keep-alive substitution could never
-			// actually fire. See ClearStaleKeepAliveCandidate's own comment.
-			// Per THREAD (#423): the registry is keyed by session + thread, so another thread's
-			// request can never clear this thread's candidate.
-			offload.ClearStaleKeepAliveCandidate(thread.Key(tr.Session, threadID), pipelineStartedAt)
-			h.setLastSession(tr.Session)
-			if h.agg != nil && !bypassed {
-				h.agg.RecordAddedLatency(addedMs)
-				h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)
-			}
-			// Advertise the expand tool so the model can recover any offloaded content
-			// (closes the reversibility loop h.serve drives). Sticky/idempotent + appended
-			// last to keep the provider prefix cache warm; gated by InjectExpand + store.
-			// Skipped in observe mode: nothing was offloaded, so there is nothing to
-			// recover, and injecting a tool declaration would MODIFY the request — which is
-			// precisely the one thing observe mode promises never to do.
-			// Skipped on a bypassed request too: bypass promises a byte-identical forward, so
-			// nothing is injected. Only the x-context-guru-bypass header bypasses. An agent
-			// compaction request is not bypassed, so it gets the tool like every earlier turn
-			// of its thread. That keeps the tools array, which sits ahead of messages in the
-			// provider's cache hash, the same as on the previous turn.
-			//
-			// Known gaps this leaves on a compaction turn (the prompt tells the model to call no
-			// tool, so both need a model that ignores it):
-			//   - OpenAI dialect with stream:true: if the model calls context_guru_expand (or
-			//     context_guru_adjudicate, declared on Chat since #1030), the client gets the raw tool call. The proxy does not inspect non-Anthropic SSE (see
-			//     the isSSE case in serve). Claude Code uses the Anthropic dialect and is not hit.
-			//   - Any dialect: if the model calls expand on every round, the client gets the raw
-			//     tool call after maxExpandRounds, with no summary. That takes 4 calls in a row.
-			// compactionexpand_test.go pins both, so a change shows.
-			if tn.Mode != components.ModeObserve && !bypassed {
-				im := h.opts.InjectExpand
-				if im == "" {
-					im = expand.InjectAuto
+			// Per THREAD of the session (#423): the main agent, each subagent and each fork have
+			// their own cache entry, and only this request's thread was refreshed.
+			Arrive: func(session, threadID string) {
+				cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, session, threadID))
+				if cp != nil {
+					cp.predArrival = h.predRT().arrive(tn.ID, session, threadID, time.Now())
 				}
-				// Under `auto`, advertise only when THIS request's pipeline can actually mint a
-				// marker. Without it, an offloader-free pipeline — `off`, `safe`, or any
-				// cachesplit-only configuration — declared a tool whose every use is guaranteed
-				// to fail: measured `[Read Bash]` in, `[Read Bash context_guru_expand]` out, and
-				// on a transcript containing marker-shaped text the model duly called it and got
-				// "[expand: original for id ... is no longer available]".
-				//
-				// Which presets those are is NOT a list worth writing down here — `mcp` looks
-				// offloader-free and is not, because `smartcrush` implements components.Offload.
-				// That is exactly why the gate asks the interface (Pipeline.HasOffload) instead
-				// of naming presets: a list in a comment is a second source of truth, and this
-				// one was wrong about `mcp` in its first draft.
-				//
-				// `off` mattered most: it is the A/B control arm, and a control that carries an
-				// extra tool declaration is not a control.
-				if im != expand.InjectAuto || tn.Pipe.HasOffload() {
-					body, _ = expand.Inject(wire, im, body, tn.Store.Persists())
+			},
+			Settled: func(tr apply.Trace, added time.Duration) {
+				h.setLastSession(tr.Session)
+				if h.agg != nil && !bypassed {
+					h.agg.RecordAddedLatency(float64(added.Microseconds()) / 1000.0)
+					h.agg.RecordEligibility(tr.AttemptedTokens, tr.FrozenTokens)
 				}
-				// The adjudication tool, on every request of a pipeline that can ACTUALLY
-				// adjudicate, and on no other.
-				//
-				// The cache argument for injecting it unconditionally is real but narrower than it
-				// was first applied. `tools` hashes before system and messages, so a tool that
-				// appears on the turn a sweep fires and vanishes on the next invalidates the prefix
-				// from position zero — the flap expand's `always` mode exists to prevent. That
-				// forbids gating on anything that varies PER TURN. It does not forbid these two
-				// conditions: pipeline membership is fixed per config DOCUMENT and the provider is
-				// fixed by the route, so both are byte-stable for every request under a given config
-				// and the prefix never flaps. "Fixed at config load" is what this used to say and it
-				// is false: tenancy.go rebuilds a tenant's *Pipeline when the config document
-				// changes, mid-session, by its own design. The conclusion survives, because a config
-				// change that adds or drops extract_llm_sweep has already invalidated the prefix for
-				// much bigger reasons than this tool's 946 bytes — but the premise had to be stated
-				// as what the code actually guarantees.
-				//
-				// Injecting it unconditionally instead cost 946 bytes (measured on the wire) at the
-				// head of the cacheable prefix of EVERY preset, including `off` — which is the
-				// control arm of every published comparison in this repo — and including presets
-				// like codesmart that contain no extract_llm_sweep and so can never adjudicate.
-				// The provider half is not cosmetic either: the prefixed ask needs a
-				// matching wire adapter. Anthropic, Responses and Chat Completions have one
-				// (chatPrefixAsker, #1030); every other wire does not.
-				//
-				// Kept rather than dropped because a three-way A/B showed the DECLARATION is what
-				// makes removing tool_choice:none safe; see cheapmodel.CompletePrefixed.
-				if (provider == bschemas.Anthropic || schema.IsResponses(wire) || wire == schema.WireOpenAI) && tn.Pipe.Has("extract_llm_sweep") {
-					body, _ = adjudicate.Inject(wire, body)
-				}
-				// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on
-				// the never-defer list, and the names list must see the tools as they go upstream.
-				// Only the ultrahigh preset turns it on (toolfilter `defer: auto`).
-				preDefer := body
-				body, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, threadID, orig, body)
+			},
+			// Tool deferral (#485), LAST, on the final tools array: the proxy's own tools are on the
+			// never-defer list, and the names list must see the tools as they go upstream. Only the
+			// ultrahigh preset turns it on (toolfilter `defer: auto`).
+			ToolDefer: func(tr *apply.Trace, th thread.Result, b []byte) []byte {
+				preDefer := b
+				b, di = h.applyToolDefer(r, tn, provider, wire, up, tr.Session, th.ID, orig, b)
 				// Deferral adds its names list to the messages after the pipeline reported its
 				// operations. Report it as an operation of its own, after theirs (#908).
-				if di != nil && !bytes.Equal(preDefer, body) {
+				if di != nil && !bytes.Equal(preDefer, b) {
 					if cp != nil {
 						cp.accPreDefer = preDefer
 					}
-					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, body)...)
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, b)...)
 				}
-			}
-			// The savings record ends HERE, after both injections, with the body that goes
-			// upstream: the provider bills the injected tool declarations, so the library's
-			// bytes-to-tokens ratio must count them too. They are appended to `tools`, so no
-			// message moves and the operations' positions stay valid.
-			cp.accEnd(th, body, tr.Ops)
-		}()
+				return b
+			},
+			// The savings record ends HERE, after both injections, with the body that goes upstream:
+			// the provider bills the injected tool declarations, so the library's bytes-to-tokens
+			// ratio must count them too. They are appended to `tools`, so no message moves and the
+			// operations' positions stay valid.
+			Done: func(th thread.Result, b []byte, tr apply.Trace) { cp.accEnd(th, b, tr.Ops) },
+		})
+		if prep.Panic != nil {
+			lg.Error("context-guru: recovered from panic before forward; sending original", "panic", prep.Panic)
+			// The original goes upstream, so no operation of the savings record is on the wire: drop
+			// the record, and the event books no saving.
+			cp.accDrop()
+		}
+		body = prep.Body
+		preBody, anchor, tr, added, threadID := prep.PreBody, prep.Anchor, prep.Trace, prep.Added, prep.ThreadID
 		// Load the request's one INFO line with everything the pipeline decided. serve
 		// emits it in a defer once the response is finished, so a request produces exactly
 		// one lifecycle line whichever way it ends — and the attrs are built here, once,
@@ -2665,16 +2514,7 @@ func writeRaw(w http.ResponseWriter, resp *http.Response, body []byte) {
 // table when one is stated, else the bootstrap table of internal/compactionpoint. Both paths (/v1/messages
 // and /compact) go through it, as they do for the window.
 func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, window int) compactionpoint.Point {
-	model := gjson.GetBytes(body, "model").String()
-	stated := 0
-	if cp, ok := h.opts.Windows.(interface {
-		CompactionPoint(context.Context, string) (int, bool)
-	}); ok {
-		if n, found := cp.CompactionPoint(ctx, model); found {
-			stated = n
-		}
-	}
-	return compactionpoint.Resolve(model, stated, window)
+	return lifecycle.ResolveCompactionPoint(ctx, h.opts.Windows, gjson.GetBytes(body, "model").String(), window)
 }
 
 // resolveWindow resolves this request's model context window and whether that figure is
@@ -2690,25 +2530,7 @@ func (h *Handler) resolveCompactionPoint(ctx context.Context, body []byte, windo
 // must not act on an unknown either, and no caller needs to tell those apart. See
 // modelinfo.ExactResolver for why ok=true from the resolver is not the same as right.
 func (h *Handler) resolveWindow(ctx context.Context, body []byte) (window int, exact bool) {
-	if h.opts.Windows == nil {
-		return 0, false
-	}
-	model := gjson.GetBytes(body, "model").String()
-	// The capability is optional: an Options.Windows supplied by a caller that predates it,
-	// or a test double, still resolves windows and simply never claims exactness.
-	if er, hasCap := h.opts.Windows.(interface {
-		WindowExact(context.Context, string) (int, bool, bool)
-	}); hasCap {
-		w, ex, ok := er.WindowExact(ctx, model)
-		if !ok {
-			return 0, false
-		}
-		return w, ex
-	}
-	if w, ok := h.opts.Windows.Window(ctx, model); ok {
-		return w, false
-	}
-	return 0, false
+	return lifecycle.ResolveWindow(ctx, h.opts.Windows, gjson.GetBytes(body, "model").String())
 }
 
 func (h *Handler) doUpstream(r *http.Request, up upstream, body []byte) (*http.Response, error) {
