@@ -36,7 +36,6 @@ func TestSessionEndRetiresTheHeldEntry(t *testing.T) {
 	}
 	clock.advance(290 * time.Second)
 	k.Sweep(clock.now())
-	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 0 {
 		t.Errorf("%d pings after SessionEnd", fs.n())
 	}
@@ -87,7 +86,6 @@ func TestCompactRetiresWithoutEndingAndPresenceIsRecordedOnly(t *testing.T) {
 	}
 	clock.advance(290 * time.Second)
 	k.Sweep(clock.now())
-	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 1 {
 		t.Errorf("%d pings, want 1 (the post-compaction entry only)", fs.n())
 	}
@@ -222,7 +220,6 @@ func TestSessionEndMatchesTheSessionIDHeaderOfANonCodexCaller(t *testing.T) {
 	}
 	clock.advance(290 * time.Second)
 	k.Sweep(clock.now())
-	time.Sleep(50 * time.Millisecond)
 	if fs.n() != 0 {
 		t.Errorf("%d pings after SessionEnd", fs.n())
 	}
