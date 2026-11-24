@@ -8,7 +8,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // bigAgentBody is an Anthropic transcript of about 300K tokens (~1.2 MB): 300 tool turns.

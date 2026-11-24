@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 )
 
 const (

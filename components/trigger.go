@@ -265,7 +265,7 @@ func frac(f float64, window int) int {
 // haiku behind the current client C is 0.996 of the window, so the two denominators are nearly the
 // same there and this branch's own acceptance run was not affected; that is luck, not design.
 //
-// See Ctx.FillDenominator for the fallback, and internal/compactionpoint for the definition.
+// See Ctx.FillDenominator for the fallback, and compactionpoint for the definition.
 func (t Trigger) Fires(req *schemas.BifrostChatRequest, c *Ctx) bool {
 	if t.MinMessages > 0 && len(req.Input) < t.MinMessages {
 		return false

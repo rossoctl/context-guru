@@ -2,15 +2,15 @@ package inband
 
 import (
 	"errors"
-	"github.com/rossoctl/context-guru/inband/inbandtest"
+	"github.com/rossoctl/context-guru/internal/inbandtest"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )

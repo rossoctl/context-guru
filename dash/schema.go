@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS requests (
   -- Nullable with NO default, unlike every other column above: a row written before this
   -- feature existed has nothing to read here, and NULL says so, rather than '' or 0 (which
   -- waitcause's own enums deliberately keep distinct from "never computed" by producing
-  -- "unknown"/0 themselves on a row this DID run on but found nothing — see internal/waitcause).
+  -- "unknown"/0 themselves on a row this DID run on but found nothing — see waitcause).
   waiting_for        TEXT,
   wait_tool          TEXT,
   wake_cause         TEXT,

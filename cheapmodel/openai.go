@@ -11,8 +11,8 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch"
-	"github.com/rossoctl/context-guru/internal/providerusage"
 	"github.com/rossoctl/context-guru/internal/tokens"
+	"github.com/rossoctl/context-guru/providerusage"
 	"github.com/rossoctl/context-guru/schema"
 )
 

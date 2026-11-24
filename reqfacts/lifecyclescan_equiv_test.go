@@ -8,8 +8,8 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // scanLifecycleOld is ScanLifecycle as it was before the normalization was shared: it

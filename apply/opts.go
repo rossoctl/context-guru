@@ -86,7 +86,7 @@ type Opts struct {
 	WindowExact bool
 	// CompactionPoint is C in provider-billed tokens: where the conversation's own compaction
 	// mechanism acts. 0 = unknown, and components fall back to Window. See
-	// internal/compactionpoint for the definition and why it is not the window.
+	// compactionpoint for the definition and why it is not the window.
 	CompactionPoint int
 	// CompactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "operator" | "window_fallback".
 	CompactionPointSource string
