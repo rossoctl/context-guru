@@ -81,8 +81,10 @@ func clientSignalsSwitchOn() bool {
 
 // clientSessionAlias is the tenant-scoped id a client's hooks name this session by, when the proxy
 // keys the session by something else. Codex sends its session id in a session-id header (equal to
-// the hook payload's session_id and to prompt_cache_key, verified on codex-cli 0.162.1) but no id
-// the session resolver reads, so its requests key by content hash. "" when there is no usable alias.
+// the hook payload's session_id and to prompt_cache_key, verified on codex-cli 0.162.1). Since #1311
+// agent/codex reads that header as the session key, so for Codex traffic the alias equals the key and
+// this returns "". It still serves a caller that sends the header but is not known as Codex, whose
+// requests key by something else. "" when there is no usable alias.
 func clientSessionAlias(tenantID, sessionKey string, r *http.Request) string {
 	if r == nil {
 		return ""

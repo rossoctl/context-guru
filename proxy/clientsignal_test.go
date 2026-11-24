@@ -188,7 +188,7 @@ func TestSignalsDefaultFollowsTheKeepAlive(t *testing.T) {
 	}
 }
 
-// Codex keys by content hash but its hooks name the session-id header's id: a SessionEnd for that id
+// A caller that sends session-id but keys by something else: its hooks name the session-id header's id: a SessionEnd for that id
 // retires the entry and stops an in-flight request from re-arming it.
 func TestCodexSessionEndMatchesTheSessionIDHeader(t *testing.T) {
 	k, fs, clock := testKeeper(t, Limits{})
