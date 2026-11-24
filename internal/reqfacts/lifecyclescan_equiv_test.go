@@ -12,7 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/schema"
 )
 
-// scanLifecycleOld is scanLifecycle as it was before the normalization was shared: it
+// scanLifecycleOld is ScanLifecycle as it was before the normalization was shared: it
 // normalized the body itself. Kept here as the reference the new path must equal.
 func scanLifecycleOld(provider bschemas.ModelProvider, body []byte) (q Lifecycle) {
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {

@@ -2385,7 +2385,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// Wiring only path A would leave a non-Anthropic --record user with turns that
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
-			// is the honest outcome; see fillResponse.
+			// is the honest outcome; see record.TurnFromCall.
 			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, nil) // no Anthropic stream here: nothing to collect
 			if !sseBuffered {
 				sseFirstByte = first

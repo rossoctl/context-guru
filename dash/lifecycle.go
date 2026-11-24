@@ -1,8 +1,9 @@
 package dash
 
 import (
-	"github.com/rossoctl/context-guru/internal/reqfacts"
 	"sync"
+
+	"github.com/rossoctl/context-guru/internal/reqfacts"
 )
 
 // Lifecycle signals (issue #424, #427): the few per-request facts that no other column holds,

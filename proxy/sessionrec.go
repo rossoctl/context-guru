@@ -5,11 +5,11 @@ package proxy
 // sessionRecorder records one OTLP span per proxied turn, for --record and --record-otlp.
 //
 // WHY THIS LIVES IN package proxy AND NOT internal/record. internal/record is a pure
-// translation library: no I/O, no proxy imports, unit-testable on byte slices alone, and
-// its Turn doc says outright that "the proxy fills it, the recorder writes it". Putting
-// the writer there would invert that dependency (record importing proxy for Usage, recTee
-// and expand.AggregateSSE) or force a parallel copy of all of it. So the split stays:
-// record translates, this file fills and writes.
+// translation library: no I/O, no proxy imports, unit-testable on byte slices alone. The
+// rules that turn a call into a Turn are there (record.TurnFromCall, record.TraceID). The
+// writer stays here because it needs proxy's Usage and recTee, and it does file and network
+// I/O. Putting it in record would make record import proxy. So the split stays: record
+// translates, this file fills a ProxiedCall and writes.
 //
 // THE ONE RULE THIS FILE OBEYS. CLAUDE.md: "Any component error/panic reverts that
 // component only; the original request is always forwarded as a valid fallback." Recording
@@ -34,8 +34,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/record"
 )
 

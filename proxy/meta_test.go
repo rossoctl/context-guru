@@ -10,20 +10,6 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 )
 
-// The two dialects spell the same knobs differently, and the dashboard aggregates them in
-// ONE column each — so the normalization is the thing under test, not the JSON reading.
-//
-// The Anthropic body is shaped after a real captured Claude request (model, max_tokens,
-// temperature, top_p, top_k, stop_sequences, metadata, stream, a `system` ARRAY of blocks
-// carrying cache_control, tools, messages), plus the two reasoning controls current models
-// use: `thinking.type` and `output_config.effort`.
-// The pre-4.6 thinking form, and Anthropic's other accepted effort shape.
-// OpenAI puts effort at the top level as `reasoning_effort`, has no top-level `system`
-// (it is a role=system message), caps output with `max_completion_tokens`, and sends
-// tool_choice as a bare string.
-// An unset sampling parameter must stay unset, and OpenAI's object tool_choice names one
-// function — recorded as the MODE, never the name.
-// metaZero is the zero value, named so the comparison above reads as intent.
 // The stop reason is the provider's own vocabulary, read from whichever shape and
 // transport the response arrived in. The streamed case is the one with a trap in it: an
 // earlier chunk carries `finish_reason: null`, and only the LAST event that names one is
@@ -157,8 +143,3 @@ func TestDashboardCapturesRequestMetadataEndToEnd(t *testing.T) {
 		t.Errorf("stop_reason = %q, want end_turn from the upstream response", e.StopReason)
 	}
 }
-
-// The claim this measures: reading the metadata is one structural pass over the top-level
-// object, so it does not scale with the transcript. The body here carries a ~90 KB tool
-// result, which is what a real agent turn looks like; a per-field gjson.GetBytes loop would
-// re-scan past that array once per field.

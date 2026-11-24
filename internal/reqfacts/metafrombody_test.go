@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+// The two dialects spell the same knobs differently, and the dashboard aggregates them in
+// ONE column each — so the normalization is the thing under test, not the JSON reading.
+//
+// The Anthropic body is shaped after a real captured Claude request (model, max_tokens,
+// temperature, top_p, top_k, stop_sequences, metadata, stream, a `system` ARRAY of blocks
+// carrying cache_control, tools, messages), plus the two reasoning controls current models
+// use: `thinking.type` and `output_config.effort`.
 func TestMetaFromBodyAnthropic(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-opus-5",
@@ -48,6 +55,7 @@ func TestMetaFromBodyAnthropic(t *testing.T) {
 	}
 }
 
+// The pre-4.6 thinking form, and Anthropic's other accepted effort shape.
 func TestMetaFromBodyAnthropicLegacyThinking(t *testing.T) {
 	m := MetaFromBody([]byte(`{
 		"thinking":{"type":"enabled","budget_tokens":8000},
@@ -65,6 +73,9 @@ func TestMetaFromBodyAnthropicLegacyThinking(t *testing.T) {
 	}
 }
 
+// OpenAI puts effort at the top level as `reasoning_effort`, has no top-level `system`
+// (it is a role=system message), caps output with `max_completion_tokens`, and sends
+// tool_choice as a bare string.
 func TestMetaFromBodyOpenAI(t *testing.T) {
 	m := MetaFromBody([]byte(`{
 		"model":"gpt-x",
@@ -94,6 +105,8 @@ func TestMetaFromBodyOpenAI(t *testing.T) {
 	}
 }
 
+// An unset sampling parameter must stay unset, and OpenAI's object tool_choice names one
+// function — recorded as the MODE, never the name.
 func TestMetaFromBodyAbsentAndObjectToolChoice(t *testing.T) {
 	m := MetaFromBody([]byte(`{"model":"m","tool_choice":{"type":"function","function":{"name":"run"}},"messages":[]}`))
 	if m.Temperature != nil || m.TopP != nil {
@@ -110,6 +123,10 @@ func TestMetaFromBodyAbsentAndObjectToolChoice(t *testing.T) {
 
 var metaZero = MetaFromBody([]byte(`{}`))
 
+// The claim this measures: reading the metadata is one structural pass over the top-level
+// object, so it does not scale with the transcript. The body here carries a ~90 KB tool
+// result, which is what a real agent turn looks like; a per-field gjson.GetBytes loop would
+// re-scan past that array once per field.
 func BenchmarkMetaFromBody(b *testing.B) {
 	body, err := json.Marshal(map[string]any{
 		"model": "aws/claude-sonnet-5", "max_tokens": 512, "temperature": 1,

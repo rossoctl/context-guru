@@ -2,12 +2,12 @@ package dash
 
 import (
 	"context"
-	"github.com/rossoctl/context-guru/internal/reqfacts"
 	"strings"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/reqfacts"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
