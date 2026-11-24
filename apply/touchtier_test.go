@@ -284,3 +284,64 @@ func TestARealRequestCarriesTheOneHourPingUntilConfirmed(t *testing.T) {
 		t.Errorf("an unreadable carry read as %+v", v)
 	}
 }
+
+func TestEndTouchTierEndsACarriedPingToo(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	RecordCacheTouchAliasTier(st, "a", 2000, true)
+	aliasSeenState(st, "a", 3000) // a real request: "3000^2000"
+	EndTouchTier(st, "a", 1999)   // another ping: nothing
+	if got := get(); got != "3000^2000" {
+		t.Fatalf("a different ping's end changed the record: %q", got)
+	}
+	EndTouchTier(st, "a", 2000)
+	if got := get(); got != "3000" {
+		t.Fatalf("record = %q, want a plain 3000", got)
+	}
+}
+
+// An accepted request ends the 1-hour tier that no apply write replaced (a bypassed request writes no clock),
+// as the keeper's own touch ends at the same line.
+func TestConfirmRealTouchEndsAnUnreplacedOneHourTier(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	RecordCacheTouchAliasTier(st, "a", 2000, true)
+	ConfirmRealTouch(st, "a")
+	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000" {
+		t.Fatalf("record = %q, want a plain 2000", b)
+	}
+}
+
+// The carry follows the same rules as the verdict: it ends at the hour plus the cold margin, and it does not
+// outlive a request that moved the entry without writing the alias clock (a bypassed one).
+func TestTheCarriedPingHasTheColdMarginAndTheLatestClockGuard(t *testing.T) {
+	m := time.Minute
+	run := func(returnAt time.Duration, bypassAt time.Duration) bool {
+		var cold []bool
+		pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+		st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+		base := time.Unix(1_700_000_000, 0)
+		do := func(at time.Duration, bypass bool) {
+			BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+				Tenant: "t", Now: base.Add(at), Bypass: bypass})
+		}
+		do(0, false)
+		ConfirmRealTouch(st, TouchAliasFor("t", touchTierBody, bschemas.Anthropic))
+		RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(4*m).UnixMilli(), true)
+		do(6*m, false) // fails: never confirmed, so the ping's hour is carried
+		if bypassAt > 0 {
+			do(bypassAt, true)
+		}
+		cold = nil
+		do(returnAt, false)
+		return cold[len(cold)-1]
+	}
+	if run(4*m+60*m+30*time.Second, 0) {
+		t.Error("30 seconds past the hour, inside the margin, read cold")
+	}
+	if !run(4*m+60*m+70*time.Second, 0) {
+		t.Error("past the hour and the margin read warm")
+	}
+	if !run(16*m, 8*m) {
+		t.Error("a bypassed request moved the entry to 5 minutes at 8 minutes; the carry still said warm at 16")
+	}
+}

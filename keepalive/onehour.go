@@ -182,14 +182,7 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 		// The last touch of this thread was a FREE 1-hour ping: until its next real request, or an hour
 		// from the ping, the clock counts an hour from it (OneHourTouches). Kept apart from the entry,
 		// which the keeper forgets after about 8 minutes.
-		var dropped []oneHourTouch
-		if len(k.oneHourTouches) >= MaxTurnKeys {
-			// The wholesale reset drops the keeper's touches; their stored mirrors end with them.
-			for _, t := range k.oneHourTouches {
-				dropped = append(dropped, t)
-			}
-			k.oneHourTouches = map[string]oneHourTouch{}
-		}
+		k.makeRoomForTouchLocked(start)
 		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk,
 			provider: j.provider, model: e.model, st: j.st, alias: touchAliasOf(j)}
 		if st != nil && st.proven {
@@ -201,14 +194,30 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 			k.oneHourProbes[j.key.id()] = oneHourProbe{route: rk, provider: j.provider, model: e.model, at: start, prefix: e.prefix}
 		}
 		k.mu.Unlock()
-		for _, t := range dropped {
-			apply.EndTouchTier(t.st, t.alias, t.at.UnixMilli())
-		}
 	case read < oneHourCostlyRead*prefix && write >= oneHourCostlyWrit*prefix:
 		k.oneHourMarkCostly(rk, j, "cache_read", u.CacheRead, "cache_write", u.CacheWrite, "cache_write_1h", u.CacheWrite1h,
 			"expected_prefix", int64(prefix))
 	default:
 		k.oneHourRelease(rk, "the ping's usage was neither a free nor a costly switch")
+	}
+}
+
+// makeRoomForTouchLocked keeps the touch map bounded. It drops the touches that are no longer live first. If
+// every one is live, it starts over. A bound is a capacity event, not a fact about any entry: the stored mirrors are
+// NOT ended here, they expire by apply.EntryLifetime, so a live entry still reads warm in the cold check. Only
+// the keeper's own index (the dashboard, the press refusal) loses a touch then. A route switch-off is different:
+// there the tier was never granted, and oneHourSwitchOff ends the mirrors.
+func (k *Keeper) makeRoomForTouchLocked(now time.Time) {
+	if len(k.oneHourTouches) < MaxTurnKeys {
+		return
+	}
+	for id, t := range k.oneHourTouches {
+		if !t.live(now) {
+			delete(k.oneHourTouches, id)
+		}
+	}
+	if len(k.oneHourTouches) >= MaxTurnKeys {
+		k.oneHourTouches = map[string]oneHourTouch{}
 	}
 }
 

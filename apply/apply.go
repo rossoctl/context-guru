@@ -674,6 +674,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			seen := aliasSeenState(st, alias, nowMs)
 			aliasAt := seen.at
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
+			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
+			// request that wrote no alias clock (a bypassed one) has moved the entry since.
+			carriedAt := int64(0)
+			if seen.carriedAt > 0 && seen.at >= prevAt {
+				carriedAt = seen.carriedAt
+			}
 			if aliasAt > prevAt {
 				prevAt = aliasAt
 			}
@@ -705,7 +711,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 					LastOneHour: touchOneHour, Floor: ttl}
 				// A free 1-hour ping stands under a real request the host has not confirmed (it failed, or
 				// nobody told us): the failed request touched nothing, so the ping's hour still runs.
-				if seen.carriedAt > 0 && time.Duration(nowMs-seen.carriedAt)*time.Millisecond < EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true}) {
+				// The same margin as the verdict (coldMargin): the carry ends where a plain tier would.
+				if carriedAt > 0 && time.Duration(nowMs-carriedAt)*time.Millisecond < EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true})+coldMargin {
 					facts.LastOneHour = true
 				}
 				ttl = EntryLifetime(facts)
@@ -1332,7 +1339,7 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 // seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
 const seenCarrySep = "^"
 
-// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that a real request was
+// ConfirmRealTouch ends the carried 1-hour ping (or an unreplaced 1-hour tier) under the alias's clock: the host learned that a real request was
 // accepted, so the entry's tier is now that request's own. The time stays. Nothing changes when nothing is
 // carried. The keeper calls it where it ends its own touch.
 func ConfirmRealTouch(st store.Store, alias string) {
@@ -1341,7 +1348,9 @@ func ConfirmRealTouch(st store.Store, alias string) {
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		if v := parseSeenState(b); v.carriedAt > 0 {
+		// Both shapes end, as the keeper's own touch does at an accepted request: a carry, and a 1-hour tier
+		// that no apply write replaced (a bypassed request writes no clock).
+		if v := parseSeenState(b); v.carriedAt > 0 || v.oneHour {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
