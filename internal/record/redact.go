@@ -383,13 +383,7 @@ func (t *Turn) Redact(bodyCap int) {
 // came from the proxy and describes WHY the body was never whole in the first place, which
 // is more specific than a downstream cap hit, so the first reason wins.
 func (t *Turn) markIncomplete(reason string) {
-	if t.Incomplete == IncompleteNone {
-		t.Incomplete = reason
-		return
-	}
-	if !strings.Contains(t.Incomplete, reason) {
-		t.Incomplete += "," + reason
-	}
+	t.Incomplete = JoinIncomplete(t.Incomplete, reason)
 }
 
 // MarkIncomplete is markIncomplete for the proxy, which fills a Turn from another package.

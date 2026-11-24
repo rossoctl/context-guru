@@ -1,4 +1,4 @@
-package proxy
+package reqfacts
 
 import (
 	"fmt"
@@ -48,6 +48,6 @@ func BenchmarkWriterBodyScansNormalizeOnce(b *testing.B) {
 			return msgs
 		}
 		waitcause.New().ObserveWith("t", "s", "th", body, norm)
-		scanLifecycle(norm, body)
+		ScanLifecycle(norm, body)
 	}
 }
