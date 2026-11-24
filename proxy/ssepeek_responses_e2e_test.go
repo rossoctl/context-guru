@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"fmt"
+	"github.com/rossoctl/context-guru/inband/inbandtest"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"io"
 	"net/http"
@@ -24,11 +25,11 @@ func TestResponsesSearchStreamsEndToEnd(t *testing.T) {
 		return []byte(`{"model":"gpt-5.5","stream":true,"instructions":"agent","tools":[` + respDecl("Bash") + `,` + respDecl("Read") + `,` +
 			respDecl("Workflow") + `,` + respDecl("Monitor") + `],` + extra + `"input":[{"role":"user","content":"go"}]}`)
 	}
-	r1 := rsCreated("resp_A") + rsText(0, "m1", "Let me look.") +
-		rsEv("response.output_item.added", `"sequence_number":4,"output_index":1,"item":{"id":"fc_c1","type":"function_call","status":"in_progress","call_id":"c1","name":"`+tooldefer.ClientSearchName+`","arguments":""}`) +
-		rsEv("response.output_item.done", `"sequence_number":5,"output_index":1,"item":{"id":"fc_c1","type":"function_call","status":"completed","call_id":"c1","name":"`+tooldefer.ClientSearchName+`","arguments":"{\"names\":[\"Workflow\"]}"}`) +
-		rsCompleted("resp_A", rsMsgItem("m1", "Let me look."), `{"id":"fc_c1","type":"function_call","status":"completed","call_id":"c1","name":"`+tooldefer.ClientSearchName+`","arguments":"{\"names\":[\"Workflow\"]}"}`)
-	r2 := rsCreated("resp_B") + rsText(0, "m2", "Done.") + rsCompleted("resp_B", rsMsgItem("m2", "Done."))
+	r1 := inbandtest.RSCreated("resp_A") + inbandtest.RSText(0, "m1", "Let me look.") +
+		inbandtest.RSEv("response.output_item.added", `"sequence_number":4,"output_index":1,"item":{"id":"fc_c1","type":"function_call","status":"in_progress","call_id":"c1","name":"`+tooldefer.ClientSearchName+`","arguments":""}`) +
+		inbandtest.RSEv("response.output_item.done", `"sequence_number":5,"output_index":1,"item":{"id":"fc_c1","type":"function_call","status":"completed","call_id":"c1","name":"`+tooldefer.ClientSearchName+`","arguments":"{\"names\":[\"Workflow\"]}"}`) +
+		inbandtest.RSCompleted("resp_A", inbandtest.RSMsgItem("m1", "Let me look."), `{"id":"fc_c1","type":"function_call","status":"completed","call_id":"c1","name":"`+tooldefer.ClientSearchName+`","arguments":"{\"names\":[\"Workflow\"]}"}`)
+	r2 := inbandtest.RSCreated("resp_B") + inbandtest.RSText(0, "m2", "Done.") + inbandtest.RSCompleted("resp_B", inbandtest.RSMsgItem("m2", "Done."))
 	for _, tc := range []struct {
 		name, extra string
 		spliced     bool
@@ -61,7 +62,7 @@ func TestResponsesSearchStreamsEndToEnd(t *testing.T) {
 			if len(up.all()) != 2 || strings.Contains(out, tooldefer.ClientSearchName) {
 				t.Fatalf("rounds=%d out=%s", len(up.all()), out)
 			}
-			if tc.spliced && !strings.HasPrefix(out, rsCreated("resp_A")+rsText(0, "m1", "Let me look.")) {
+			if tc.spliced && !strings.HasPrefix(out, inbandtest.RSCreated("resp_A")+inbandtest.RSText(0, "m1", "Let me look.")) {
 				t.Fatalf("the text must reach the client verbatim: %q", out)
 			}
 			if !tc.spliced && !strings.Contains(out, "resp_B") {
@@ -70,7 +71,7 @@ func TestResponsesSearchStreamsEndToEnd(t *testing.T) {
 			if tc.spliced && strings.Contains(out, "resp_B") {
 				t.Fatalf("a stateless client sees round 1's id only: %q", out)
 			}
-			ds2 := rsDatas(out)
+			ds2 := inbandtest.RSDatas(out)
 			last := ds2[len(ds2)-1]
 			if last.Get("type").String() != "response.completed" {
 				t.Fatalf("last event: %s", last.Raw)
@@ -92,7 +93,7 @@ func TestResponsesSearchRetriesOriginalOn400(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.5","stream":true,"store":false,"instructions":"agent","tools":[` + respDecl("Bash") + `,` + respDecl("Read") + `,` +
 		respDecl("Workflow") + `,` + respDecl("Monitor") + `],"input":[{"role":"user","content":"go"}]}`)
 	// No terminal event: a stream still wrapped in the splicer would get a response.failed added.
-	answer := rsCreated("resp_A") + rsText(0, "m1", "Hello")
+	answer := inbandtest.RSCreated("resp_A") + inbandtest.RSText(0, "m1", "Hello")
 	up := &csUpstream{script: []string{answer}, reject400: true}
 	us := httptest.NewServer(up)
 	defer us.Close()

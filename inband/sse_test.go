@@ -413,3 +413,13 @@ func testCopyHeaders(dst, src http.Header) {
 		dst[k] = append([]string(nil), vs...)
 	}
 }
+
+// A nil header copy means "copy no headers". It must not panic (fail open for a library API).
+func TestSplicerWithNilCopyHeadersCopiesNothing(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sp := NewSSESplicer(rec, nil)
+	sp.Round(&http.Response{StatusCode: 200, Header: http.Header{"X-Up": {"1"}}})
+	if rec.Code != 200 || rec.Header().Get("X-Up") != "" {
+		t.Fatalf("code %d, headers %v", rec.Code, rec.Header())
+	}
+}

@@ -150,7 +150,7 @@ type SSESplicer struct {
 }
 
 // copyHeaders is the host's header copy for the first round's response headers. The host owns
-// it because it decides which headers may reach its client.
+// it because it decides which headers may reach its client. Nil means "copy no headers".
 func NewSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
 	f, _ := w.(http.Flusher)
 	return &SSESplicer{w: w, flush: f, copyHeaders: copyHeaders}
@@ -195,7 +195,9 @@ func (sp *SSESplicer) Round(resp *http.Response) {
 	if sp.headers {
 		return
 	}
-	sp.copyHeaders(sp.w.Header(), resp.Header)
+	if sp.copyHeaders != nil {
+		sp.copyHeaders(sp.w.Header(), resp.Header)
+	}
 	sp.w.WriteHeader(resp.StatusCode)
 	sp.headers = true
 }
