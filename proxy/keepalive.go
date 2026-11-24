@@ -366,6 +366,10 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 	// campaign either; a zero policy then lets the core retire the thread and depart, as main's
 	// record did (retire, then return). The switch is the host's: the core has none.
 	client := clientSessionAlias(tn.ID, session, r)
+	// The User-Agent family (Client.SDK), for the prediction model. recordTouch has the request, not the
+	// Client chat already made: record has 100 callers (tests included), so passing it down would
+	// churn every signature. This is the one place keep-alive identifies the client; #1338 moves it.
+	sdk := identify(r).SDK
 	tracked := session != "" && len(body) > 0 && !startedAt.IsZero() && status >= 200 && status < 300
 	ended := tracked && clientSignalEnabled() && (k.endedAfter(tn.ID, session, startedAt) ||
 		(client != "" && k.endedAfter(tn.ID, client, startedAt)))
@@ -387,7 +391,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 				arr = u.Live.Arrival
 			}
 			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
-				string(provider), startedAt, body, identify(r).SDK, u)
+				string(provider), startedAt, body, sdk, u)
 		}
 		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
 		// cause of the response that ended this turn.
@@ -465,7 +469,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: identify(r).SDK, Preset: tn.Preset,
+		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: sdk, Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}
