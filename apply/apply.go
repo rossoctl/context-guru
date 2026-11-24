@@ -33,6 +33,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -918,7 +919,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
 		}
-		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0
+		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 		if ok {
 			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
@@ -927,7 +928,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 
 	// The envelope rewrites (tail split, tool-schema strip) already rewrote `body`, so
 	// the result must be forwarded even if no component changes a message.
-	changed := systemSplit || toolSchema || filteredDecls > 0
+	changed := systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 	// Each changed message's new bytes, keyed by its index in the body's messages array,
 	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
 	// sjson.SetBytes into the whole body per changed message, which copies the entire
@@ -2346,7 +2347,7 @@ func rawTotal(msgs []gjson.Result) int {
 func wireGroups(slots []slot) []int {
 	groups := make([]int, len(slots))
 	for i, s := range slots {
-		bi, _, ok := splitSlotPath(s.path)
+		bi, ok := accwire.Messages.WireIndex(s.path)
 		if !ok {
 			return nil
 		}

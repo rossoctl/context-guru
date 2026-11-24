@@ -16,15 +16,19 @@ infrastructure the components sit on.
 | `components/dsl/` | declarative text-filter engine (wrapped by `cmdfilter`) |
 | `components/all/` | blank-imports every component so `init()` registrations run |
 | `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
+| `accwire/` | the accountant's reader for each wire (Anthropic Messages and Chat Completions, Responses): hashed body positions, cache-mark breakpoints, envelope operations, slot path to wire position. Chosen once per body by `accwire.For` |
+| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, and the rules for which request books no figure |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
-| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`) |
+| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`); also `IsClientCompaction(h, body)`, the one call that tells a host a request is the client's own compaction |
 | `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`), and its control plane (`Gateway`, `ControlPlane`): the profile's region strip and the model-info window parse |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
+| `predictive/` | the learned keep-alive campaign: the feature tracker, the model and rule inference, the campaign spec types, and the plan tuner (`AutoTune`). No host code |
+| `campaign/` | the keep-alive campaign math every host shares: the closed-form replay and its calibrated constants, the fidelity model, the ship gate, the auto builder (`BuildSpec`), the live decision (`Choose`, `Apply`), the adapt report's choice (`Picker`), and the mapping of a suggest arm to a live strategy. A host reads history and files, and calls it |
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
 | `models/` | model context windows and token prices: `Resolver`, `Chain`, `ExactWindow`. A facade over `internal/modelinfo`; the LiteLLM gateway client is in `models/litellm`. A host that needs only these imports them, not `proxyapp`, so it does not link the proxy (#1251) |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |

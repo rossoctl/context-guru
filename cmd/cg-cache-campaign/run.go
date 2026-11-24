@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/proxy"
@@ -463,15 +464,7 @@ func cheapest(arms map[string]float64) (string, float64) {
 // summarise counts the upload's cells exactly as the dashboard's campaign create will treat them:
 // proxy.CampaignCellOutcome is that route's own decision. modelsByTenant feeds its 1h-tier check.
 func summarise(sug *dash.KVCacheSuggestions, modelsByTenant map[string][]string) CampaignSummary {
-	honors := func(tenantID string) bool {
-		ms := modelsByTenant[tenantID]
-		for _, m := range ms {
-			if !proxy.HeadTTL1hHonored(m) {
-				return false
-			}
-		}
-		return len(ms) > 0
-	}
+	honors := func(tenantID string) bool { return campaign.HonorsHeadTTL1h(modelsByTenant[tenantID]) }
 	cs := CampaignSummary{ByArm: map[string]int{}, NotEnforced: map[string]int{}}
 	for _, c := range sug.Cells {
 		if c.User == "" {

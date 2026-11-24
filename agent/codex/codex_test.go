@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -55,4 +56,45 @@ func TestIdentifyRefusesOtherCallers(t *testing.T) {
 			t.Errorf("%s: Identify = %+v, %v; want zero, false", name, got, ok)
 		}
 	}
+}
+
+func TestIsCompaction(t *testing.T) {
+	meta := func(kind string) string { return `{"request_kind":"` + kind + `","turn_id":"t"}` }
+	body := func(kind string) []byte {
+		b, _ := json.Marshal(map[string]any{"input": []any{}, "client_metadata": map[string]string{"x-codex-turn-metadata": meta(kind)}})
+		return b
+	}
+	hdr := func(v string) http.Header { h := codexHeader(); h.Set("x-codex-turn-metadata", v); return h }
+	for _, tc := range []struct {
+		name string
+		h    http.Header
+		body []byte
+		want bool
+	}{
+		{"header", hdr(meta("compaction")), []byte(`{}`), true},
+		{"header, turn", hdr(meta("turn")), []byte(`{}`), false},
+		{"header, not json", hdr("nope"), []byte(`{}`), false},
+		{"body client_metadata", codexHeader(), body("compaction"), true},
+		{"body client_metadata, turn", codexHeader(), body("turn"), false},
+		{"nothing", codexHeader(), []byte(`{"input":[]}`), false},
+		{"nil header", nil, body("compaction"), false},
+		{"not Codex, header", func() http.Header { h := hdr(meta("compaction")); h.Set("User-Agent", "curl/8"); return h }(), []byte(`{}`), false},
+		{"originator Codex only", func() http.Header {
+			h := http.Header{}
+			h.Set("Originator", "codex_vscode")
+			h.Set("x-codex-turn-metadata", meta("compaction"))
+			return h
+		}(), []byte(`{}`), true},
+	} {
+		if got := IsCompaction(tc.h, tc.body); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A Codex caller: its User-Agent starts with its originator.
+func codexHeader() http.Header {
+	h := http.Header{}
+	h.Set("User-Agent", "codex_cli_rs/0.172.0 (Mac OS)")
+	return h
 }

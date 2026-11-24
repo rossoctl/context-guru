@@ -17,6 +17,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -178,6 +179,7 @@ func TestRegistrationInviteCode(t *testing.T) {
 
 // Open mode is still not an open faucet: one address cannot mint accounts in a loop.
 func TestRegistrationRateLimitedPerIP(t *testing.T) {
+	testutil.RequireTiming(t)
 	t.Setenv(envRegisterMode, "open")
 	f := newHostedFixture(t, "up", "openai")
 	limited := false
