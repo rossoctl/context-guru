@@ -962,7 +962,7 @@ const OWN_FETCH = Symbol("context-guru fail-open fetch")
 
 // Sends to the proxy while it is usable, else to the upstream the proxy would use: the upstream plus
 // the path after /<dialect> (proxy/proxy.go). The direct request carries the caller's own method,
-// headers, body and signal; only the plugin's session header is removed.
+// headers, body and signal; only the plugin's session and request-kind headers are removed.
 function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
   const wrapped = async (input, init) => {
     // The AI SDK passes a string URL. A Request object, or a URL that is not this proxy's route, goes to
@@ -973,6 +973,7 @@ function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
     const direct = () => {
       const headers = new Headers(init?.headers)
       headers.delete("x-context-guru-session")
+      headers.delete("x-context-guru-request-kind")
       return inner(`${upstream.replace(/\/+$/, "")}${url.pathname.slice(prefix.length - 1)}${url.search}`, { ...init, headers })
     }
     if (existsSync(join(state, "disabled")) || proxyHealth.get(state)?.down) return direct()
@@ -1386,6 +1387,9 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
         output.headers["x-context-guru-session"] = input.sessionID
         signaler.noteSession(input.sessionID)
       }
+      // OpenCode 1 runs its summary request as the built-in "compaction" agent
+      // (packages/opencode/src/session/compaction.ts, v1.19.6). The proxy reads this mark, not the prompt.
+      if (input.agent === "compaction") output.headers["x-context-guru-request-kind"] = "compaction"
     },
   }
 }
@@ -1425,6 +1429,9 @@ async function setupV2(ctx) {
         event.request.headers.set("x-context-guru-session", event.sessionID)
         signaler.noteSession(event.sessionID)
       }
+      // The v2 hook names the request: SessionRequestKind is "primary" | "compaction" | "title" | "generate"
+      // (packages/plugin/src/promise/session.ts, v2.4.1).
+      if (event.kind === "compaction") event.request.headers.set("x-context-guru-request-kind", "compaction")
     }, { providerID: id }))
   }
 

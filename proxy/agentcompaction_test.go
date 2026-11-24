@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -487,5 +488,50 @@ func TestExpandToolAdvertisedOnEveryTurnIncludingACompaction(t *testing.T) {
 				t.Fatalf("expand tool advertised=%v, want %v: %s", advertised, tc.want, up.last().body)
 			}
 		})
+	}
+}
+
+// TestAgentCompactionMarkedByTheClientIsCounted: a request a client plugin marks (OpenCode, Pi) or
+// that Codex marks with its own turn metadata is a compaction whatever its text says (#1314). The
+// plugin header is not sent upstream.
+func TestAgentCompactionMarkedByTheClientIsCounted(t *testing.T) {
+	var sawKind atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if r.Header.Get("x-context-guru-request-kind") != "" {
+			sawKind.Store(true)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	h, _ := buildHandler(t, "pipeline: [dedup]\n", upstream.URL)
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+
+	for _, hdr := range []map[string]string{
+		{"x-context-guru-request-kind": "compaction"},
+		{"x-codex-turn-metadata": `{"request_kind":"compaction"}`},
+		{"x-codex-turn-metadata": `{"request_kind":"turn"}`},
+		{},
+	} {
+		body := openAIBody(map[string]any{"role": "user", "content": "an ordinary turn"})
+		req, _ := http.NewRequest("POST", srv.URL+"/openai/v1/chat/completions", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if n := agentCompactionCount(t, srv.URL); n != 2 {
+		t.Fatalf("components.agent_compaction.gates.detected = %d; want 2 (the plugin mark and the Codex mark)", n)
+	}
+	if sawKind.Load() {
+		t.Fatal("the upstream received the x-context-guru-request-kind header")
 	}
 }

@@ -30,6 +30,7 @@ const SCRIPT = join(PACKAGE_DIR, "scripts", "pi_plugin.py");
  *  worktree) both load; without this, Pi renames both commands and /context-guru disappears (#1154). */
 export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
 const SESSION_HEADER = "x-context-guru-session";
+const KIND_HEADER = "x-context-guru-request-kind";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
 /** One line per preset, the Claude Code plugin's preset-picker text without its markdown. A test fails
@@ -427,6 +428,8 @@ export default function contextGuru(pi: ExtensionAPI) {
   let install = readInstall();
 
   const routed = (ctx: ExtensionContext) => isRouted(install, ctx.model?.baseUrl);
+  /** Pi sessions whose own summary request is running (session_before_compact until session_compact(_failed)). */
+  const compacting = new Set<string>();
 
   const signal = (ctx: ExtensionContext, event: string, kind: string) => {
     const port = install?.port;
@@ -493,6 +496,17 @@ export default function contextGuru(pi: ExtensionAPI) {
     if (!routed(ctx)) return;
     const session = ctx.sessionManager.getSessionId();
     if (SESSION_ID.test(session)) event.headers[SESSION_HEADER] = session;
+    // Pi's own summary request runs between session_before_compact and session_compact(_failed), on the
+    // same stream function as a turn (agent-session.js: compact(..., this.agent.streamFunction, ...),
+    // @earendil-works/pi-coding-agent 1.6.0). The proxy reads this mark, not the prompt.
+    if (compacting.has(session)) event.headers[KIND_HEADER] = "compaction";
+  });
+
+  pi.on("session_before_compact", (_event, ctx) => {
+    compacting.add(ctx.sessionManager.getSessionId());
+  });
+  pi.on("session_compact_failed", (_event, ctx) => {
+    compacting.delete(ctx.sessionManager.getSessionId());
   });
 
   // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
@@ -512,7 +526,10 @@ export default function contextGuru(pi: ExtensionAPI) {
     return undefined;
   });
 
-  pi.on("session_compact", (_event, ctx) => signal(ctx, "SessionStart", "compact"));
+  pi.on("session_compact", (_event, ctx) => {
+    compacting.delete(ctx.sessionManager.getSessionId());
+    signal(ctx, "SessionStart", "compact");
+  });
 
   pi.on("session_shutdown", (event, ctx) => {
     // A reload, /new, /resume or /fork loads every copy again, so the first copy to load claims it again.
