@@ -874,7 +874,7 @@ for every component's config block.
 
 | Flag / env | Default | Purpose |
 |---|---|---|
-| `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. The six current presets are `off`, `conservative`, `medium`, `high`, `xhigh` and `ultrahigh`. `house` is the default and runs the same pipeline as `conservative`. Other presets are [obsolete](presets.md#obsolete-presets) but still load. |
+| `--preset` / `PRESET` | `conservative` | Pipeline preset when no `--config`. The six current presets are `off`, `conservative`, `medium`, `high`, `xhigh` and `ultrahigh`. `conservative` is the default. The obsolete name `house` runs the same pipeline. Other presets are [obsolete](presets.md#obsolete-presets) but still load. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
 | `--listen` / `LISTEN_ADDR` | `:4000` | Listen address. The flag exists so the port is visible in `ps` and to a supervisor; before it, the address reached the process only through the environment. |
 | `--version` | — | Print version and commit, then exit. |

@@ -99,17 +99,17 @@ const (
 )
 
 // DefaultConfigYAML is the pipeline every new tenant starts on: the config named
-// `house`, which is codesmart's structural offloaders in an operator-chosen order with
+// `conservative` (formerly `house`), which is codesmart's structural offloaders in an operator-chosen order with
 // the LLM extractor removed and no blind collapse. Deterministic all the way through,
 // which on a SHARED box is the property that matters — it makes no cheap-model
 // calls, so it adds no upstream spend, contends on no shared LLM budget, and costs
 // near-zero added latency on someone else's agent. A tenant can opt into
 // extract_llm on their settings page and see the tradeoff there.
 //
-// Kept as a literal document even though `house` is now a registered preset name, for
+// Kept as a literal document even though `conservative` is now a registered preset name, for
 // two reasons that have nothing to do with taste: supersededDefaults compares stored
 // configs against it BYTE for byte, and this package must not import the pipeline. The
-// two cannot drift — defaultconfig_test.go asserts this literal and `preset: house`
+// two cannot drift — defaultconfig_test.go asserts this literal and `preset: conservative`
 // resolve to the same pipeline and the same component blocks.
 // failed_run is deliberately absent. Measured on this service and on Terminal-Bench it
 // acted ZERO times while spending real wall clock scanning every request for superseded
@@ -147,7 +147,8 @@ mode: sync
 // a record, not a mechanism: nothing rewrites a stored config on the strength of it. A
 // sweep, if one is ever wanted, gets to be a separate and reversible decision.
 var supersededDefaults = []string{
-	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs: searchfold
+	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs (now an alias of
+	// `conservative`, via init): searchfold
 	// and toolfilter added, dedup moved ahead of toon.
 	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
 components:
