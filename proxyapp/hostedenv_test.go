@@ -41,6 +41,7 @@ func runMain(t *testing.T, env ...string) (out string, code int, exited bool) {
 	c := startChild(t, "127.0.0.1:0", env)
 	switch c.waitListening(t, "") {
 	case childListening:
+		// code is not an exit code here: the child still runs. Callers must read it only when exited.
 		return c.buf.String(), 0, false
 	case childTimedOut:
 		t.Fatalf("the proxy neither listened nor exited within %v:\n%s", childBound, c.buf.String())

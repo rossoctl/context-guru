@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/proxy"
@@ -137,6 +138,10 @@ func TestNoHooksKeepsTheBinaryDefaults(t *testing.T) {
 	}
 }
 
+// probeClient bounds each probe, so a child that logs "listening" and then hangs fails with a clear
+// message and not at the binary's -timeout.
+var probeClient = &http.Client{Timeout: 60 * time.Second}
+
 type probe struct {
 	status int
 	body   string
@@ -182,7 +187,7 @@ func bootAndGetOnce(t *testing.T, env []string, paths []string) (string, map[str
 	}
 
 	get := func(path string) probe {
-		r, err := http.Get("http://" + addr + path)
+		r, err := probeClient.Get("http://" + addr + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v\n%s", path, err, c.buf.String())
 		}

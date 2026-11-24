@@ -41,9 +41,9 @@ type syncBuffer struct {
 }
 
 type bufWatch struct {
-	substr string
-	ch     chan struct{}
-	fired  bool
+	match func(out string) bool
+	ch    chan struct{}
+	fired bool
 }
 
 func (s *syncBuffer) Write(p []byte) (int, error) {
@@ -57,18 +57,19 @@ func (s *syncBuffer) Write(p []byte) (int, error) {
 // fire closes the channel of each watch whose string is now in the output. The caller holds mu.
 func (s *syncBuffer) fire() {
 	for _, w := range s.watches {
-		if !w.fired && strings.Contains(s.b.String(), w.substr) {
+		if !w.fired && w.match(s.b.String()) {
 			w.fired = true
 			close(w.ch)
 		}
 	}
 }
 
-// watch returns a channel that closes once the output contains substr.
-func (s *syncBuffer) watch(substr string) <-chan struct{} {
+// watch returns a channel that closes once match is true for the whole output. match runs again
+// after every write, so a line that arrives in several writes is still seen.
+func (s *syncBuffer) watch(match func(out string) bool) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	w := &bufWatch{substr: substr, ch: make(chan struct{})}
+	w := &bufWatch{match: match, ch: make(chan struct{})}
 	s.watches = append(s.watches, w)
 	s.fire()
 	return w.ch
@@ -111,24 +112,22 @@ const (
 	childTimedOut                    // neither happened within childBound
 )
 
-// waitListening waits for the first of: the child's "context-guru-proxy listening" line that also
-// contains attr (any line when attr is empty), the child's exit, or childBound.
+// hasListeningLine reports whether out has a "context-guru-proxy listening" line that also
+// contains attr (any such line when attr is empty).
+func hasListeningLine(out, attr string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "context-guru-proxy listening") && strings.Contains(line, attr) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitListening waits for the first of: the child's listening line that also contains attr, the
+// child's exit, or childBound.
 func (c *child) waitListening(t *testing.T, attr string) childEvent {
 	t.Helper()
-	ready := make(chan struct{})
-	go func() {
-		// The line has two parts. Wait for the second, then check the first is on the same line.
-		select {
-		case <-c.buf.watch("context-guru-proxy listening"):
-			for _, line := range strings.Split(c.buf.String(), "\n") {
-				if strings.Contains(line, "context-guru-proxy listening") && strings.Contains(line, attr) {
-					close(ready)
-					return
-				}
-			}
-		case <-c.exited:
-		}
-	}()
+	ready := c.buf.watch(func(out string) bool { return hasListeningLine(out, attr) })
 	timer := time.NewTimer(childBound)
 	defer timer.Stop()
 	select {
@@ -136,10 +135,8 @@ func (c *child) waitListening(t *testing.T, attr string) childEvent {
 		return childListening
 	case <-c.exited:
 		// A line written just before the exit still counts as listening.
-		for _, line := range strings.Split(c.buf.String(), "\n") {
-			if strings.Contains(line, "context-guru-proxy listening") && strings.Contains(line, attr) {
-				return childListening
-			}
+		if hasListeningLine(c.buf.String(), attr) {
+			return childListening
 		}
 		return childExited
 	case <-timer.C:
