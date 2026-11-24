@@ -1530,7 +1530,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// messages): there are no operations to price, so the request is skipped.
 			//
 			// Not for an OpenAI Responses request whose history the provider holds (previous_response_id,
-			// conversation, item_reference; see responsesServerHeldHistory): the body is only this turn. The record would compare that delta with the last full
+			// conversation, item_reference; see schema.ServerHeldHistory, wide form): the body is only this turn. The record would compare that delta with the last full
 			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
 			// the dashboard says why it has no saving (#899).
 			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
