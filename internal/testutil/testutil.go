@@ -10,6 +10,7 @@ package testutil
 
 import (
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -109,4 +110,26 @@ func describe(state func() string) (out string) {
 		}
 	}()
 	return state()
+}
+
+// timingEnv is the switch for the timing tests. The value "1" turns them on.
+const timingEnv = "CG_TIMING_TESTS"
+
+// TimingEnabled reports whether the timing tests are on: CG_TIMING_TESTS=1.
+func TimingEnabled() bool { return os.Getenv(timingEnv) == "1" }
+
+// RequireTiming skips the test unless CG_TIMING_TESTS=1.
+//
+// Use it in a test whose result depends on the wall clock or on machine load: it asserts an
+// elapsed time or a latency budget, or it races a rate limit or a timeout. Such a test fails on a
+// busy machine with nothing wrong in the code. The integrator's checks (heavy CI, Part A) set the
+// variable. scripts/dev/local-tests.sh sets it only for a PR that adds or changes a timing test.
+// Do not use it for a test that only uses a fake clock, or a long timeout as a safety net.
+//
+// A test that checks more than time can guard only its time check with TimingEnabled.
+func RequireTiming(t testing.TB) {
+	t.Helper()
+	if !TimingEnabled() {
+		t.Skip("timing test: set " + timingEnv + "=1 to run it (the integrator's checks do)")
+	}
 }

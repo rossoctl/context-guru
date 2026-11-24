@@ -535,7 +535,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// delta as agent compaction and report a cached prefix we cannot see. Keep
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
-	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	serverHeldHistory := schema.ServerHeldHistory(o.Body, false)
 	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
 	// lifetime below are one fact — this request's cache lifetime.
 	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)

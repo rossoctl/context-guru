@@ -11,6 +11,7 @@ import (
 
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // typicalObservation is a request with a handful of operations, a spend, and a cache effect: the
@@ -81,6 +82,7 @@ func percentiles(n int, f func()) (p50, p99, max time.Duration) {
 // TestMetricsCallLatency reports the added time per request at p50 and p99. It logs, and it fails
 // only above a generous ceiling that would mean something is blocking.
 func TestMetricsCallLatency(t *testing.T) {
+	testutil.RequireTiming(t)
 	sink, _ := NewMetricsSink(sdk.NewMeterProvider(sdk.WithReader(sdk.NewManualReader())).Meter("b"), pricedLike())
 	im, _ := NewInferenceMetrics(sdk.NewMeterProvider(sdk.WithReader(sdk.NewManualReader())).Meter("b"), pricedLike())
 	o, e := typicalObservation(), typicalEvent()

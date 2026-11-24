@@ -1315,7 +1315,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			h.refuseRoute(w, r, tn, err)
 			return
 		}
-		// Not unconditional: only the agent's OWN compaction request (thread.IsAgentCompaction,
+		// Not unconditional: only the agent's OWN compaction request (agent/all.IsClientCompaction,
 		// checked inside readGatedBody) may read past maxRequestBytes here — everything
 		// else still gets refused at the default ceiling exactly as before.
 		body, ok := readGatedBody(w, r, false)
@@ -1371,7 +1371,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// compactions pass through. The counter is a report with Skipped set because the
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
-		agentCompaction := thread.IsAgentCompaction(body)
+		agentCompaction := isClientCompaction(r, body)
 		if !bypassed && agentCompaction {
 			gate := "detected"
 			if int64(len(body)) > maxRequestBytes {
@@ -1543,11 +1543,11 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// messages): there are no operations to price, so the request is skipped.
 			//
 			// Not for an OpenAI Responses request whose history the provider holds (previous_response_id,
-			// conversation, item_reference; see responsesServerHeldHistory): the body is only this turn. The record would compare that delta with the last full
+			// conversation, item_reference; see schema.ServerHeldHistory, wide form): the body is only this turn. The record would compare that delta with the last full
 			// body as a client edit, and price a prefix the proxy cannot see. The event is marked instead, so
 			// the dashboard says why it has no saving (#899).
 			if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
-				responsesServerHeldHistory(orig) {
+				schema.ServerHeldHistory(orig, true) {
 				cp.accServerHeldHistory = true
 			} else if cp != nil && cp.savings != nil && tr.Session != "" {
 				cp.accBegin(accountant.RequestMeta{
@@ -1766,7 +1766,7 @@ var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
-// request (thread.IsAgentCompaction — see agentcompaction.go; it goes through the pipeline like any
+// request (agent/all.IsClientCompaction — see agentcompaction.go; it goes through the pipeline like any
 // other request) and the standalone /compact endpoint, whose whole job is to
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
@@ -1804,7 +1804,7 @@ func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride
 		refuseTooLarge(w, maxCompactionRequestBytes)
 		return nil, false
 	}
-	if !unconditionalOverride && !thread.IsAgentCompaction(body) {
+	if !unconditionalOverride && !isClientCompaction(r, body) {
 		refuseTooLarge(w, maxRequestBytes)
 		return nil, false
 	}

@@ -3,6 +3,10 @@
 // branch on which agent it is. A new agent is one package that embeds Base, overrides only what
 // differs, and registers its route paths.
 //
+// Host contract: a host must strip every x-context-guru-* header before it forwards a request
+// upstream, or HeaderRequestKind (see requestkind.go) leaks to the provider. The proxy does it
+// already. A plugin host such as Cortex must do the same.
+//
 // This is a library package. A host (the proxy, the bifrost adapter) imports it; it never
 // imports a host. imports_test.go enforces that.
 package agent

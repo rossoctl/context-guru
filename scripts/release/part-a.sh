@@ -10,6 +10,12 @@
 # The whole run takes about 70 to 90 minutes on a laptop. The race steps have these limits: proxy 20m,
 # dash 25m, plugin 30m, rest 20m, record 40m. Run it detached, and wait for the DONE line.
 #
+# CG_TIMING_TESTS: the timing tests (testutil.RequireTiming) run when it is 1. The default here is 1,
+# because the integrator runs this script. scripts/dev/local-tests.sh sets it to 0 or 1 itself. The
+# summary records the value in a "timing-tests" line.
+#
+# The step node-timing needs node 22 (the opencode-plugin workflow uses it too).
+#
 # GO: the go binary (default: go on PATH, else /usr/local/go/bin/go).
 set -uo pipefail
 out=${1:-$PWD/.part-a}
@@ -25,6 +31,8 @@ trap 'echo "DONE rc=$rc" >> "$sum"' EXIT
 trap 'rc=143; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null; exit 143' HUP INT TERM
 GO=${GO:-$(command -v go || echo /usr/local/go/bin/go)}
 echo "commit $(git rev-parse --verify -q HEAD 2>/dev/null || echo unknown)" >> "$sum"
+export CG_TIMING_TESTS=${CG_TIMING_TESTS-1}
+echo "timing-tests $CG_TIMING_TESTS" >> "$sum"
 
 # run <log> <cmd...>: run the command in the background, wait for it, and return its exit code.
 run() {
@@ -64,5 +72,12 @@ step race-plugin   env CGO_ENABLED=1 "$GO" test -race -timeout 30m ./context-gur
 # The Bob plugin is on hold (#1221): skip its install suite. Remove the skip when the owner resumes it.
 step race-rest     env CGO_ENABLED=1 "$GO" test -race -timeout 20m -skip TestBobReleasePythonSuite $rest
 step race-record   env CGO_ENABLED=1 "$GO" test -race -timeout 40m -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
+# The OpenCode plugin's node tests. Only the timing tests need this step: the opencode-plugin workflow
+# runs the rest on every PR. With CG_TIMING_TESTS=0 the step is skipped, and the summary says so.
+if [ "$CG_TIMING_TESTS" = 1 ]; then
+  step node-timing env CG_TIMING_TESTS=1 node --test opencode-plugin/test/*.test.mjs
+else
+  echo "skip    node-timing (CG_TIMING_TESTS=$CG_TIMING_TESTS: the timing tests are off)" >> "$sum"
+fi
 echo "$skipnote" >> "$sum"
 exit "$rc"

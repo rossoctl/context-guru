@@ -153,11 +153,11 @@ func (h *Handler) ctlKeepAliveArm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.armedView(t, in.Session, o))
 }
 
-// The shipped policy's defaults, for a body that omits them. Named here rather than reaching
-// into config so this file states what it applies.
+// The shipped policy's defaults, for a body that omits them. They are config's own constants
+// (240 s and 2 pings), so the arm dialog and the account policy cannot drift apart.
 const (
-	recIdleSecondsDefault = 240
-	recMaxPingsDefault    = 2
+	recIdleSecondsDefault = config.DefaultKeepAliveIdle
+	recMaxPingsDefault    = config.DefaultKeepAliveMaxPings
 )
 
 // armedView is the POST answer: the resolved policy plus the two numbers being authorized.
@@ -190,7 +190,7 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 	out["last_prefix_tokens"], out["model"], out["worst_case_pings"] = prefix, model, spans
 	if p := h.opts.Prices; p != nil && model != "" && prefix > 0 {
 		if price, ok := p.Price(context.Background(), model); ok && !price.Zero() {
-			each := float64(prefix)*price.CacheRead + price.Output
+			each := keepalive.PingUSD(prefix, price.CacheRead, price.Output)
 			out["ping_usd_each"] = each
 			out["worst_case_usd"] = each * float64(spans)
 			out["priced"] = true
@@ -215,12 +215,9 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 // Deliberately a CEILING and not an estimate: a session that goes quiet sends none of them, and
 // the honest thing to show somebody authorizing a spend is the most it can be.
 func (h *Handler) worstCase(tenantID, session string, o sessionOverride) (prefix int64, model string, pings int64) {
-	if o.pol.Idle <= 0 {
+	pings = o.lib().WorstCasePings(time.Now())
+	if pings == 0 {
 		return 0, "", 0
-	}
-	pings = int64(time.Until(o.until).Seconds() / o.pol.Idle.Seconds())
-	if pings < 1 {
-		pings = 1
 	}
 	if h.rec == nil {
 		return 0, "", pings

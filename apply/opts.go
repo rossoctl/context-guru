@@ -35,7 +35,8 @@ type Opts struct {
 	//	orig := body // the request as the agent sent it, saved before the pipeline runs
 	//	agentID, _ := thread.HeaderAgentID(req.Header.Get(thread.AgentHeader))
 	//	opts.ThreadOf = func(session string) thread.Result {
-	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, thread.IsAgentCompaction(orig))
+	//		// agentall is github.com/rossoctl/context-guru/agent/all. With no headers, pass nil.
+	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, agentall.IsClientCompaction(req.Header, orig))
 	//		return res
 	//	}
 	//
