@@ -36,7 +36,7 @@ optional [`skeleton`](../components/skeleton.md) component's `cg_skeleton` build
 2. Run it. It listens on `:4000`; set `LISTEN_ADDR` to change that.
 
     ```sh
-    ./bin/context-guru-proxy       # default preset: house
+    ./bin/context-guru-proxy       # default preset: conservative
     ```
 
 3. Point your agent at it:

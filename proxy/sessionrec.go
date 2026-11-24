@@ -5,11 +5,11 @@ package proxy
 // sessionRecorder records one OTLP span per proxied turn, for --record and --record-otlp.
 //
 // WHY THIS LIVES IN package proxy AND NOT internal/record. internal/record is a pure
-// translation library: no I/O, no proxy imports, unit-testable on byte slices alone, and
-// its Turn doc says outright that "the proxy fills it, the recorder writes it". Putting
-// the writer there would invert that dependency (record importing proxy for Usage, recTee
-// and expand.AggregateSSE) or force a parallel copy of all of it. So the split stays:
-// record translates, this file fills and writes.
+// translation library: no I/O, no proxy imports, unit-testable on byte slices alone. The
+// rules that turn a call into a Turn are there (record.TurnFromCall, record.TraceID). The
+// writer stays here because it needs proxy's Usage and recTee, and it does file and network
+// I/O. Putting it in record would make record import proxy. So the split stays: record
+// translates, this file fills a ProxiedCall and writes.
 //
 // THE ONE RULE THIS FILE OBEYS. CLAUDE.md: "Any component error/panic reverts that
 // component only; the original request is always forwarded as a valid fallback." Recording
@@ -34,8 +34,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/record"
 )
 
@@ -252,101 +250,21 @@ func (r *sessionRecorder) handle(e *recEvent) {
 	r.written.Add(1)
 }
 
-// buildTurn fills record.Turn from one event. Everything expensive is here, on the writer.
+// buildTurn fills record.Turn from one event. Everything expensive is here, on the writer. The
+// rules are in record.TurnFromCall. This keeps only the host's span id.
 func (r *sessionRecorder) buildTurn(e *recEvent, parent string) (record.Turn, error) {
 	spanID, err := randomSpanID()
 	if err != nil {
 		return record.Turn{}, err
 	}
-	turn := record.Turn{
-		SessionID: e.traceID,
-		SpanID:    spanID,
-		ParentID:  parent,
-		System:    string(e.provider),
-		Start:     e.start,
-		End:       e.end,
-		// Usage comes from the PROXY's own parse, never record.UsageFromResponse: an
-		// aggregated SSE body carries no usage key at all (expand/sse.go never emits one),
-		// so reading it back would report zeros for every streamed turn -- i.e. for every
-		// turn of a real Claude Code session.
-		// int64 -> int: proxy.Usage counts in int64, record.Turn in int. Safe on every
-		// platform this builds for (64-bit int), and a token count that overflowed int32
-		// would be a 2-billion-token request.
-		FreshInput: int(e.usage.FreshInput),
-		CacheRead:  int(e.usage.CacheRead),
-		CacheWrite: int(e.usage.CacheWrite),
-		Output:     int(e.usage.Output),
-		StopReason: e.usage.StopReason,
-		UpstreamMS: e.upstreamMS,
-		// FirstByteMS only when it was actually observed. serve deliberately leaves
-		// sseFirstByte zero on a buffered response, and msSince falls back to NOW for a
-		// zero time -- correct for the dashboard's SSE accounting, and in a trace it would
-		// report the entire request duration as the time to first byte.
-		FirstByteMS:  e.firstByteMS,
-		Rounds:       e.rounds,
-		Incomplete:   e.incomplete,
-		ResponseSize: e.respSize,
-		Err:          e.errMsg,
-	}
-	if meta, err := record.RequestMeta(e.reqBody); err == nil {
-		turn.Model, turn.MaxTokens = meta.Model, meta.MaxTokens
-		turn.Effort, turn.OutputTy = meta.Effort, meta.OutputType
-		turn.OutputSchema = meta.OutputSchema
-	}
-	if in, err := record.InputMessages(e.reqBody); err == nil {
-		if body, err := record.MarshalMessages(in); err == nil {
-			turn.RequestBody = body
-		}
-	}
-	if defs, err := record.ToolDefinitions(e.reqBody); err == nil {
-		turn.ToolDefs = defs
-	}
-	r.fillResponse(&turn, e)
-	// Zero tokens and unknown tokens are DIFFERENT FACTS, and ToSpan cannot tell them apart:
-	// it writes the cache split unconditionally, because "this turn did no cache reads" is real
-	// data worth recording. So an unparsed usage block has to be marked here, or the corpus
-	// silently reports a measured zero for a turn nobody measured.
-	if !e.usageOK {
-		turn.MarkIncomplete(record.IncompleteNoUsage)
-	}
-	return turn, nil
-}
-
-// fillResponse translates the response body, aggregating SSE first when needed.
-//
-// An SSE body cannot be translated directly: record.OutputMessages unmarshals a single
-// Anthropic message object, and the tee holds an event stream. AggregateSSE rebuilds that
-// object -- for Anthropic only, by design -- so a non-Anthropic stream has no translatable
-// body and the turn says so rather than presenting an empty answer as a real one.
-func (r *sessionRecorder) fillResponse(turn *record.Turn, e *recEvent) {
-	if len(e.respBody) == 0 {
-		turn.MarkIncomplete(record.IncompleteNoBody)
-		return
-	}
-	body := e.respBody
-	if e.respIsSSE {
-		// Anthropic only: record.OutputMessages reads an Anthropic message object.
-		if e.provider != bschemas.Anthropic {
-			turn.MarkIncomplete(record.IncompleteNoBody)
-			return
-		}
-		agg, ok := expand.AggregateSSE(string(e.provider), body)
-		if !ok {
-			turn.MarkIncomplete(record.IncompleteNoBody)
-			return
-		}
-		body = agg
-	}
-	out, err := record.OutputMessages(body)
-	if err != nil {
-		turn.MarkIncomplete(record.IncompleteNoBody)
-		return
-	}
-	if s, err := record.MarshalMessages(out); err == nil && s != "" {
-		turn.ResponseBody = s
-		return
-	}
-	turn.MarkIncomplete(record.IncompleteNoBody)
+	return record.TurnFromCall(record.ProxiedCall{
+		TraceID: e.traceID, SpanID: spanID, ParentID: parent, Provider: string(e.provider),
+		ReqBody: e.reqBody, RespBody: e.respBody, RespIsSSE: e.respIsSSE, RespSize: e.respSize,
+		Start: e.start, End: e.end, UpstreamMS: e.upstreamMS, FirstByteMS: e.firstByteMS, Rounds: e.rounds,
+		FreshInput: e.usage.FreshInput, CacheRead: e.usage.CacheRead, CacheWrite: e.usage.CacheWrite,
+		Output: e.usage.Output, StopReason: e.usage.StopReason, UsageOK: e.usageOK,
+		Incomplete: e.incomplete, Err: e.errMsg,
+	}), nil
 }
 
 // appendWire appends one call to the session's wire file, as one line.

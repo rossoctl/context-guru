@@ -17,9 +17,10 @@ infrastructure the components sit on.
 | `components/all/` | blank-imports every component so `init()` registrations run |
 | `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
 | `accwire/` | the accountant's reader for each wire (Anthropic Messages and Chat Completions, Responses): hashed body positions, cache-mark breakpoints, envelope operations, slot path to wire position. Chosen once per body by `accwire.For` |
-| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, and the rules for which request books no figure |
+| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, the rules for which request books no figure, the `Recorder` (`Begin`/`End`/`Price`: the per-thread state and the finish-time pricing), the `PingStore`, and the state-file format (`SnapshotState`/`RestoreState`) |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
+| `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
@@ -32,6 +33,7 @@ infrastructure the components sit on.
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
 | `models/` | model context windows and token prices: `Resolver`, `Chain`, `ExactWindow`. A facade over `internal/modelinfo`; the LiteLLM gateway client is in `models/litellm`. A host that needs only these imports them, not `proxyapp`, so it does not link the proxy (#1251) |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
+| `lifecycle/` | the order of the steps around one request, for every host: `Prepare` (expand repair, stray adjudication answers, anchor, pipeline, thread, keep-alive arrival, tool injection, tool deferral), `Finish` (keep-alive touch, deferral ledger, deferred summary, warm question, billed input), `CompactionGate`, `Request.Opts` (the option build shared by the request path, observe and `/compact`), `SelfRates`, `RatesFor`, `ResolveWindow`, `ResolveCompactionPoint`. The host gives function values for what needs its own state |
 | `thread/` | tells apart the threads of one session (main agent, subagents, forks): `Tracker.Resolve` (agent header, then prefix continuity, then the session), `Key`, `AgentThread`, `ValidHeaderID`, `IsAgentCompaction`. A host sets `apply.Opts.ThreadOf` from it; see that field for the host contract |
 | `thinkcount/` | the token count of each thinking block, for the accountant: reads a response's signatures and `thinking_tokens` (JSON, or a stream as it goes by) and keeps a bounded table by signature hash, which the host passes to `accountant.NewBodyCounted` |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
@@ -499,7 +501,7 @@ constructor verbatim. A `preset` expands to a default pipeline; explicit fields 
 Unknown keys are rejected.
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }

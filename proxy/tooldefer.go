@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -404,28 +402,6 @@ func (h *Handler) startProbe(r *http.Request, tn *Tenancy, provider bschemas.Mod
 // deferRetry books a 400 or 422 to a request we changed (tooldefer.Flow.Retry).
 func (h *Handler) deferRetry(di *deferInfo, status int, errBody []byte, originalOK bool) {
 	h.deferFlow(nil).Retry(di, status, errBody, originalOK)
-}
-
-// repairOnMissingRef reads a refused response. When it is a 400 that names a tool_reference to a
-// tool body does not declare, it closes resp and returns body with a deferred stub for that tool.
-// Otherwise resp is left readable, with the same bytes, and ok is false. The decision is
-// tooldefer.RepairFromError's; this keeps the HTTP response.
-func repairOnMissingRef(resp *http.Response, body []byte) (fixed []byte, ok bool) {
-	if resp == nil || resp.StatusCode != http.StatusBadRequest {
-		return nil, false
-	}
-	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
-	if fixed, ok = tooldefer.RepairFromError(errBody, body); !ok {
-		// Put back what was read: LimitReader stops at 16 KiB, so the bytes read and the unread
-		// rest of resp.Body are the original stream, in order.
-		resp.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(errBody), resp.Body), resp.Body}
-		return nil, false
-	}
-	resp.Body.Close()
-	return fixed, true
 }
 
 // deferLedger books one finished request in the net-saving ledger (tooldefer.Flow.Book), and the

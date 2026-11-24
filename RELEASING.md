@@ -250,7 +250,7 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
 **Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. The owner's laptop is one such machine. A test machine is not required. It runs:
 - `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`, with and without `-tags cg_record`;
 - the check that the default build links no OpenTelemetry, gRPC or protobuf;
-- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 25m, plugin 30m, rest 20m, record 40m;
+- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 40m, plugin 30m, rest 20m, record 40m;
 - the `-tags cg_record` race tests, as CI runs them.
 
 Notes:

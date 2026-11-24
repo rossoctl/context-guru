@@ -1,4 +1,4 @@
-package proxy
+package reqfacts
 
 import (
 	"testing"
@@ -6,11 +6,10 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/dash"
 )
 
-func scanLifecycleBody(provider bschemas.ModelProvider, body []byte) dash.LifecycleReq {
-	return scanLifecycle(func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) }, body)
+func scanLifecycleBody(provider bschemas.ModelProvider, body []byte) Lifecycle {
+	return ScanLifecycle(func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) }, body)
 }
 
 func TestScanLifecycle(t *testing.T) {
