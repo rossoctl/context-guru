@@ -14,7 +14,6 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/agent/bob"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/compactionpoint"
 )
 
@@ -152,7 +151,7 @@ func short(s string) string {
 func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
 	if h.opts.Tenants == nil && r != nil {
-		switch clientOf(r.UserAgent()) {
+		switch identify(r).Name {
 		case "claude":
 			if p, ok := h.opts.ClaudeCompact.Resolve(model, window); ok {
 				return p
@@ -172,27 +171,6 @@ func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) c
 		ctx = r.Context()
 	}
 	return h.resolveCompactionPoint(ctx, body, window)
-}
-
-// clientOf names the client for the compaction point only. It is narrower than dash.AgentFor, which
-// matches the substring "bob" or "codex" anywhere and serves the dashboard's filter. A wrong match
-// here would give a stranger's request another client's C, so Bob and Codex are matched by the
-// start of the User-Agent they send: Bob Shell sends `bobshell/<version>` (bob.js, the request
-// headers of its API client); Codex sends its originator first, `codex_cli_rs/...` by default (and
-// `codex_exec`, `codex-tui` and the like). Claude Code keeps the dash.AgentFor rule from #955.
-func clientOf(userAgent string) string {
-	l := strings.ToLower(strings.TrimSpace(userAgent))
-	switch {
-	case strings.HasPrefix(l, "bobshell/"):
-		return "bob"
-	case strings.HasPrefix(l, "codex"):
-		return "codex"
-	}
-	switch dash.AgentFor(userAgent) {
-	case "claude-code", "claude-cli":
-		return "claude"
-	}
-	return ""
 }
 
 // bobWindow is Bob's own max_input_tokens for the model, as seen in the model/info response that

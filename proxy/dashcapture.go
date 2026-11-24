@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"github.com/rossoctl/context-guru/agent"
 	"maps"
 	"net/http"
 	"strconv"
@@ -72,7 +73,7 @@ type capture struct {
 	route     string
 	provider  string
 	model     string
-	agent     string
+	agent     agent.Client
 	project   string
 	start     time.Time
 	cgMs      float64
@@ -241,7 +242,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 	return &capture{
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
-		agent: r.UserAgent(), start: time.Now(),
+		agent: identify(r), start: time.Now(),
 		llm:      &cheapmodel.Sink{},
 		unique:   map[string]int{},
 		waits:    h.waits,
@@ -686,7 +687,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		Preset:   c.preset,
 		Status:   c.status,
 	}
-	e.Agent = dash.AgentFor(c.agent)
+	e.Agent = c.agent.Label
 	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
@@ -1093,7 +1094,7 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 		return nil
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
-		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent.SDK, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }
 
 // noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.
@@ -1148,39 +1149,10 @@ func (c *capture) fillStrategyMeta(e *dash.Event) {
 		v := off / 60
 		e.TZOffsetMin = &v
 	}
-	e.ClientEntrypoint = clientEntrypoint(c.agent)
+	e.ClientEntrypoint = c.agent.Entrypoint
 	if p := c.kaPlan; p != nil {
 		e.KAPlannedPings, e.KAMinPrefixTokens, e.KAIdleS = &p.MaxPings, &p.MinPrefixTokens, &p.IdleSeconds
 	}
-}
-
-// clientEntrypoint classifies how the client was started from its User-Agent: cli (interactive),
-// headless (`-p`, which Claude Code reports as sdk-cli), sdk, or other. "" for an empty agent.
-// Claude Code sends "claude-cli/<ver> (external, <entrypoint>)"; Codex sends "codex_cli_rs/<ver> ...".
-func clientEntrypoint(ua string) string {
-	l := strings.ToLower(strings.TrimSpace(ua))
-	if l == "" {
-		return ""
-	}
-	if i := strings.LastIndex(l, "("); i >= 0 && strings.HasPrefix(l, "claude-") {
-		inner := strings.TrimSuffix(strings.TrimSpace(l[i+1:]), ")")
-		if j := strings.LastIndex(inner, ","); j >= 0 {
-			inner = inner[j+1:]
-		}
-		switch inner = strings.TrimSpace(inner); {
-		case inner == "cli":
-			return "cli"
-		case inner == "sdk-cli":
-			return "headless"
-		case strings.HasPrefix(inner, "sdk"):
-			return "sdk"
-		}
-		return "other"
-	}
-	if strings.HasPrefix(l, "codex") {
-		return "cli"
-	}
-	return "other"
 }
 
 // startEarlyScan starts the early wait-cause scan of body (earlyscan.go). It needs the tracker (the dashboard

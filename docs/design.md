@@ -22,6 +22,7 @@ infrastructure the components sit on.
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
 | `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`) |
+| `agent.Identify` (`agent/identify.go`) and `agent/claudecode`, `agent/opencode`, `agent/pi` | the one library entry point that names the client behind a request, from the headers only (never the path). Per-client header rules are plain functions in those packages and in `agent/codex`; `Identify` calls them. See [Identify the client](#identify-the-client) |
 | `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`), and its control plane (`Gateway`, `ControlPlane`): the profile's region strip and the model-info window parse |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
@@ -288,6 +289,18 @@ sends may shorten that.**
 History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it before each release.
 `keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every
 substitute kind.
+
+## Identify the client
+
+`agent.Identify(h http.Header) agent.Client` names the client behind a request. It reads the User-Agent and each client's own marks. It does not read the route path: Claude Code, Codex, OpenCode and Pi share routes, and a host can mount routes elsewhere. The path registry stays for an agent that owns a route (Bob's gateway).
+
+- **Fields.** `Label` is the dashboard family. `Name` is the narrow identity that rules key on (`claude`, `bob`, `codex`, `opencode`, `pi`, or empty). `SDK` is the User-Agent family: for Pi it is the provider SDK's token, for the others it equals `Label`. `Entrypoint`, `SessionID`, `AgentID`, `AgentIDHeader`, `ParentID` come from headers.
+- **Nil or empty header.** The result is the generic client: `Label` and `SDK` are "unknown", all else is empty. A host that passes no headers gets today's behavior.
+- **Which field to read.** Take `Label` when the harness matters (the dashboard). Take `SDK` when the logic depends on the provider (the prediction model's agent feature).
+- **Proxy.** It calls `agent.Identify(r.Header)` once per request (`identify` in `proxy/clientid.go`) and uses the `Client`. It holds no client rules.
+- **Bifrost adapter.** The transport must pass the request headers to `Identify`. A host that cannot pass them gets the generic client.
+- **Cortex.** Call `agent.Identify(pctx.Headers)`. When `Client.SessionID` is empty, use the host's own session id (`pctx.SessionID`) as the gap filler.
+- **Library code** (`thread`, the compaction point, `waitcause`) takes the `Client` as a parameter, not a raw User-Agent.
 
 ## Session keying
 

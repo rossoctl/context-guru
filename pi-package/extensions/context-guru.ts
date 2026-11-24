@@ -30,6 +30,8 @@ const SCRIPT = join(PACKAGE_DIR, "scripts", "pi_plugin.py");
  *  worktree) both load; without this, Pi renames both commands and /context-guru disappears (#1154). */
 export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
 const SESSION_HEADER = "x-context-guru-session";
+/** Names Pi to the proxy. Pi calls the model through a provider SDK, so the User-Agent is the SDK's. */
+const CLIENT_HEADER = "x-context-guru-client";
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"];
 /** One line per preset, the Claude Code plugin's preset-picker text without its markdown. A test fails
@@ -491,6 +493,7 @@ export default function contextGuru(pi: ExtensionAPI) {
 
   pi.on("before_provider_headers", (event, ctx) => {
     if (!routed(ctx)) return;
+    event.headers[CLIENT_HEADER] = "pi";
     const session = ctx.sessionManager.getSessionId();
     if (SESSION_ID.test(session)) event.headers[SESSION_HEADER] = session;
   });

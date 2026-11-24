@@ -24,7 +24,7 @@ func TestAgentDoesNotImportAHost(t *testing.T) {
 		t.Fatalf("go list failed: %v\n%s", err, out)
 	}
 	deps := strings.Fields(string(out))
-	for _, want := range []string{module + "/agent", module + "/agent/bob", module + "/agent/codex"} {
+	for _, want := range []string{module + "/agent", module + "/agent/bob", module + "/agent/codex", module + "/agent/claudecode", module + "/agent/opencode", module + "/agent/pi"} {
 		if !contains(deps, want) {
 			t.Fatalf("go list did not list %s; the guard would prove nothing:\n%s", want, out)
 		}

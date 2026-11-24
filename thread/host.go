@@ -3,14 +3,13 @@ package thread
 import (
 	"fmt"
 	"strings"
+
+	"github.com/rossoctl/context-guru/agent/claudecode"
 )
 
-// AgentHeader is the request header Claude Code names a subagent's thread with. Seen on the wire
-// with Claude Code 2.1.294 through a custom ANTHROPIC_BASE_URL: present on every subagent request,
-// absent on the main thread. The sibling headers its code also names
-// (x-claude-code-parent-agent-id, -agent-type, -request-class) were NOT sent in that capture, so
-// nothing here depends on them.
-const AgentHeader = "x-claude-code-agent-id"
+// AgentHeader is the request header Claude Code names a subagent's thread with. The rule lives
+// in agent/claudecode (its SubagentID method); the name stays here for existing callers.
+const AgentHeader = claudecode.AgentHeader
 
 // HeaderAgentID turns a raw AgentHeader value into the agentID that Resolve and ResolveSession
 // take. It trims the value. It gives "" when the header is absent, and also when ValidHeaderID
