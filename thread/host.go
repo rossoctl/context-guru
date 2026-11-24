@@ -8,7 +8,7 @@ import (
 )
 
 // AgentHeader is the request header Claude Code names a subagent's thread with. The rule lives
-// in agent/claudecode (its SubagentID method); the name stays here for existing callers.
+// in agent/claudecode (its AgentID function); the name stays here for existing callers.
 const AgentHeader = claudecode.AgentHeader
 
 // HeaderAgentID is the one parser of an agent id's form. agent.Identify calls it with the Claude Code

@@ -324,7 +324,7 @@ Pi calls the model through a provider SDK, so the User-Agent says `anthropic` or
 - The proxy reads it in `agent.Identify`. It gives two values:
   - `Label` is the harness: `pi`. The dashboard shows it.
   - `SDK` is the old User-Agent family: `anthropic` or `openai`.
-- **A rule that depends on the provider reads `SDK` or the provider field. It never reads `Label`.**
+- **A rule that depends on the provider reads the raw User-Agent, `SDK` or the provider field. It never reads `Label`.**
 - A new reader of the label must pick one of the two. Then add a row to the
   [readers table](../docs/design.md#readers-of-the-client-label).
 

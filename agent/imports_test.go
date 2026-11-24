@@ -8,7 +8,7 @@ import (
 
 const module = "github.com/rossoctl/context-guru"
 
-// agent and every agent package under it (agent/bob, agent/codex) are library packages: a host (the proxy,
+// agent and every agent package under it (agent/bob, agent/claudecode, agent/codex, agent/opencode, agent/pi) are library packages: a host (the proxy,
 // the bifrost adapter) imports them, never the reverse. This test enforces that rule. It reads
 // the full dependency list of ./..., so an indirect import, or a new agent package, is covered.
 func TestAgentDoesNotImportAHost(t *testing.T) {

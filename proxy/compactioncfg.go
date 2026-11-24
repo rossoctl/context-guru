@@ -138,7 +138,7 @@ func short(s string) string {
 // never has a user setting. Fail open: any odd value gives the table.
 //
 // WHICH REQUESTS. Each client's setting applies only to a request whose User-Agent is that client's
-// own (clientOf below; the client sets it itself). A request of another client on the same local
+// own (agent.Identify, Client.Name; the client sets it itself). A request of another client on the same local
 // proxy gets the table. Bob also gets its own verified default when the user set nothing (#963).
 // Codex has no default (see compactionpoint.Codex). The limit: the header is the client's own
 // claim, and the Claude Agent SDK sends the same User-Agent, so an SDK program run with the same

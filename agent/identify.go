@@ -96,18 +96,22 @@ func Identify(h http.Header) Client {
 			if c.AgentID == "" && f.AgentID != "" {
 				c.AgentID, c.AgentIDHeader = f.AgentID, "thread-id"
 			}
-			break
-		}
-		switch c.Label {
-		case "claude-code", "claude-cli":
-			c.Name = ClientClaude
-		case "opencode":
-			c.Name = ClientOpenCode
+		} else {
+			if c.Label == "claude-code" || c.Label == "claude-cli" {
+				c.Name = ClientClaude
+			}
 		}
 	}
-	if f, ok := opencode.Identify(h); ok && c.Name != codex.Name && c.Name != ClientPi {
-		c.Label, c.Name = "opencode", ClientOpenCode
-		c.SessionID, c.ParentID = f.SessionID, f.ParentSessionID
+	// OpenCode: its User-Agent starts with "opencode/", or it sends its own headers. A client that
+	// already has a Name keeps it. The label is not changed here: it stays the User-Agent's first
+	// token ("opencode" for "opencode/<version>"), as before.
+	if c.Name == "" {
+		if f, ok := opencode.Identify(h); ok {
+			c.Name = ClientOpenCode
+			c.SessionID, c.ParentID = f.SessionID, f.ParentSessionID
+		} else if ua0 := strings.FieldsFunc(l, func(r rune) bool { return r == '/' || r == ' ' }); len(ua0) > 0 && ua0[0] == "opencode" {
+			c.Name = ClientOpenCode
+		}
 	}
 	return c
 }
@@ -117,7 +121,7 @@ func Identify(h http.Header) Client {
 // useless if everything is "other".
 func label(ua string) string {
 	l := strings.ToLower(ua)
-	for _, known := range []string{"claude-code", "claude-cli", "codex", "cursor", "cline", "aider", "gemini-cli", "bob", "opencode"} {
+	for _, known := range []string{"claude-code", "claude-cli", "codex", "cursor", "cline", "aider", "gemini-cli", "bob"} {
 		if strings.Contains(l, known) {
 			return known
 		}

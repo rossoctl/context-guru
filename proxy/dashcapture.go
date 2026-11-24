@@ -67,13 +67,15 @@ func (c *capture) timed(call string) func() {
 
 // capture is the per-request scratchpad the chat handler fills as it goes.
 type capture struct {
-	rec       *dash.Recorder
-	pricer    modelinfo.Pricer
-	preset    string
-	route     string
-	provider  string
-	model     string
-	agent     agent.Client
+	rec      *dash.Recorder
+	pricer   modelinfo.Pricer
+	preset   string
+	route    string
+	provider string
+	model    string
+	agent    agent.Client
+	// ua is the raw User-Agent. The live prediction model reads it as its agent feature, as it always did.
+	ua        string
 	project   string
 	start     time.Time
 	cgMs      float64
@@ -242,7 +244,7 @@ func (h *Handler) newCapture(r *http.Request, cl agent.Client, provider, route s
 	return &capture{
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
-		agent: cl, start: time.Now(),
+		agent: cl, ua: r.UserAgent(), start: time.Now(),
 		llm:      &cheapmodel.Sink{},
 		unique:   map[string]int{},
 		waits:    h.waits,
@@ -1094,7 +1096,7 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 		return nil
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
-		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent.SDK, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.ua, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }
 
 // noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.

@@ -26,12 +26,14 @@ func TestNoHeadersIsTheGenericClient(t *testing.T) {
 	}
 }
 
-// These are the dashboard labels dash.AgentFor gave before this refactor.
+// These are the dashboard labels dash.AgentFor gave before this refactor. "opencode" is not in the known
+// list: "opencode/<version>" gets its label from the first token, as before, and a User-Agent that holds
+// "opencode" later keeps its first token.
 func TestLabelsAreUnchanged(t *testing.T) {
 	for ua, want := range map[string]string{
 		"claude-cli/2.1.0 (external, cli)": "claude-cli", "Claude-Code/1": "claude-code", "codex_cli_rs/0.5": "codex",
 		"Cursor/1": "cursor", "cline/3": "cline", "aider/1": "aider", "gemini-cli/1": "gemini-cli",
-		"bobshell/1.0": "bob", "opencode/1.2.3": "opencode", "ai-sdk/x opencode/2": "opencode",
+		"bobshell/1.0": "bob", "opencode/1.2.3": "opencode", "ai-sdk/x opencode/2": "ai-sdk",
 		"Anthropic/JS 0.60": "anthropic", "": "unknown", "singletoken": "singletoken",
 		"averyveryveryveryverylongsingletokenwithoutseparators": "averyveryveryveryverylongsinglet",
 	} {
@@ -102,6 +104,20 @@ func TestCodexIds(t *testing.T) {
 	// A client that is not Codex gets no Codex ids.
 	if c := Identify(hdr("User-Agent", "curl/8", "session-id", "x")); c.SessionID != "" || c.Name != "" {
 		t.Fatalf("non-codex: got %+v", c)
+	}
+}
+
+func TestOpenCodeNameKeepsEveryOtherName(t *testing.T) {
+	if got := IdentifyUserAgent("ai-sdk/x opencode/2").Name; got != "" {
+		t.Errorf("a User-Agent with opencode mid-string: Name = %q, want empty", got)
+	}
+	c := Identify(hdr("User-Agent", "claude-cli/2.1.0 (external, cli)", "x-opencode-session-id", "ses_b"))
+	if c.Name != ClientClaude || c.SessionID != "" {
+		t.Errorf("a named client keeps its Name and gets no OpenCode id: %+v", c)
+	}
+	c = Identify(hdr("User-Agent", "ai-sdk/x", "x-opencode-session-id", "ses_b"))
+	if c.Name != ClientOpenCode || c.Label != "ai-sdk" || c.SessionID != "ses_b" {
+		t.Errorf("an unnamed client with OpenCode headers: %+v", c)
 	}
 }
 

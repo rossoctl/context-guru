@@ -307,14 +307,14 @@ substitute kind.
 | Reader | Reads | Why |
 |---|---|---|
 | Dashboard request rows (`Event.Agent`, filters) | `Label` (`pi`) | the user wants the harness |
-| Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | `SDK` | `Record.Agent` is also the model feature below: one value |
-| Prediction model, live (`Record.Agent`, `LiveFacts.Agent`, `predictiveDecide`) | `SDK` | its agent feature one-hots `openai` and `asyncopenai`: a provider stand-in |
-| Prediction model, stored rows (`proxy/campaignauto.go`) | `modelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives the old token back |
+| Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | raw User-Agent, turned into its family by `dash.AgentFor` | unchanged. A Pi ping row keeps the SDK token. |
+| Prediction model, live (`Record.Agent`, `LiveFacts.Agent`, `predictiveDecide`) | raw User-Agent | unchanged: this PR does not change model input |
+| Prediction model, stored rows (`proxy/campaignauto.go`) | `modelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives a token back (`openai`, `anthropic`, or the provider string) |
 | Compaction point (`proxy/compactioncfg.go`) | `Name` | Pi and OpenCode have no setting |
 | Entry point on the row | `Entrypoint` | Pi gets `other` |
 | `dash/kvcache.go` (offline rows) | `Label` | the provider is its own column in the same row |
 
-Rule: logic that depends on the provider reads `SDK` or the provider field, never `Label`. A new reader picks one and adds a row here.
+Rule: logic that depends on the provider reads the raw User-Agent, `SDK` or the provider field, never `Label`. A new reader picks one and adds a row here.
 
 ## Session keying
 
