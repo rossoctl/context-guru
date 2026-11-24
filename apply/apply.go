@@ -1339,7 +1339,7 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 // seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
 const seenCarrySep = "^"
 
-// ConfirmRealTouch ends the carried 1-hour ping (or an unreplaced 1-hour tier) under the alias's clock: the host learned that a real request was
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that a real request was
 // accepted, so the entry's tier is now that request's own. The time stays. Nothing changes when nothing is
 // carried. The keeper calls it where it ends its own touch.
 func ConfirmRealTouch(st store.Store, alias string) {
@@ -1348,9 +1348,10 @@ func ConfirmRealTouch(st store.Store, alias string) {
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		// Both shapes end, as the keeper's own touch does at an accepted request: a carry, and a 1-hour tier
-		// that no apply write replaced (a bypassed request writes no clock).
-		if v := parseSeenState(b); v.carriedAt > 0 || v.oneHour {
+		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
+		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
+		// clock, so its `:1h` stays) errs warm only: no cut.
+		if v := parseSeenState(b); v.carriedAt > 0 {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}

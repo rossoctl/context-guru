@@ -300,14 +300,30 @@ func TestEndTouchTierEndsACarriedPingToo(t *testing.T) {
 	}
 }
 
-// An accepted request ends the 1-hour tier that no apply write replaced (a bypassed request writes no clock),
-// as the keeper's own touch ends at the same line.
-func TestConfirmRealTouchEndsAnUnreplacedOneHourTier(t *testing.T) {
-	st := store.NewMemory(store.Options{})
-	RecordCacheTouchAliasTier(st, "a", 2000, true)
-	ConfirmRealTouch(st, "a")
-	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000" {
-		t.Fatalf("record = %q, want a plain 2000", b)
+// A 1-hour tier that a LATER ping wrote (another thread's, on the same alias) is not the confirmed request's to
+// end. The ping writes ":1h" after the request started; the confirm leaves it, and a return at +13 minutes is warm.
+func TestConfirmRealTouchLeavesALaterPingsTier(t *testing.T) {
+	var cold []bool
+	pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+	base := time.Unix(1_700_000_000, 0)
+	alias := TouchAliasFor("t", touchTierBody, bschemas.Anthropic)
+	do := func(at time.Duration) {
+		BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+			Tenant: "t", Now: base.Add(at)})
+	}
+	do(0)
+	ConfirmRealTouch(st, alias)
+	do(5 * time.Minute)                                                                                         // a real request starts
+	RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(6*time.Minute).UnixMilli(), true) // a later ping
+	ConfirmRealTouch(st, alias)                                                                                 // the request is accepted
+	if b, _ := st.Get(store.SeenPrefix + alias); string(b) != strconv.FormatInt(base.Add(6*time.Minute).UnixMilli(), 10)+":1h" {
+		t.Fatalf("the confirm changed a later ping's tier: %q", b)
+	}
+	cold = nil
+	do(13 * time.Minute)
+	if len(cold) != 1 || cold[0] {
+		t.Fatalf("a return 7 minutes after the later ping read cold: %v", cold)
 	}
 }
 
