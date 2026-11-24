@@ -14,7 +14,8 @@ import (
 // This file holds the choice of the compaction point for one request, and the readers of each
 // client's own settings. It moved out of proxy/compactioncfg.go (#1300), so that every host gets
 // the same C for the same client. A host passes only what it alone can know: the env (getenv),
-// the home directory, the file system, and Bob's system-settings path.
+// the home directory, an opener for files (Open), and its runtime.GOOS (goos). The library finds
+// Bob's system-settings path itself.
 
 // OffEnv turns the start-up read off ("off", "0" or "false"). C then comes from the table.
 const OffEnv = "CONTEXT_GURU_CLIENT_COMPACT_CONFIG"
