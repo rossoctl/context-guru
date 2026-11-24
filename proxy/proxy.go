@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/rossoctl/context-guru/lifecycle"
 	"io"
 	"log/slog"
 	"math"
@@ -47,6 +46,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
 	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
@@ -1355,12 +1355,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
 		agentCompaction := isClientCompaction(r, body)
-		if !bypassed && agentCompaction {
-			gate := "detected"
-			if int64(len(body)) > maxRequestBytes {
-				bypassed = true
-				gate = "oversize_bypass"
-			}
+		bypassed, gate := lifecycle.CompactionGate(bypassed, agentCompaction, len(body), maxRequestBytes)
+		if gate != "" {
 			if h.agg != nil {
 				rep := components.Report{Component: "agent_compaction", Skipped: true, Mode: tn.Mode}
 				rep.Gate(gate)
