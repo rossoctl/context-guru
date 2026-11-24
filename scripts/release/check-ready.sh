@@ -81,8 +81,8 @@ done <<<"$runs"
 # Local tests: the heavy suites run on the PR owner's laptop (scripts/dev/local-tests.sh), which posts
 # a marker comment. The last marker decides. It must name the current head and say pass. A green heavy
 # CI run on this head (workflow_dispatch on the PR branch) is accepted instead.
-lt=$(api "the comments" api --paginate "repos/$repo/issues/$pr/comments" --jq '.[].body' \
-  | grep -oE '<!-- local-tests sha=[0-9a-f]+ result=[a-z]+ -->' | tail -1 || true)
+cbodies=$(api "the comments" api --paginate "repos/$repo/issues/$pr/comments" --jq '.[].body')
+lt=$(printf '%s\n' "$cbodies" | grep -oE '<!-- local-tests sha=[0-9a-f]+ result=[a-z]+ -->' | tail -1 || true)
 if [ -z "$lt" ]; then
   heavy=$(printf '%s\n' "$runs" | awk -F'\t' '$3=="build-test" && $1=="completed" && $2=="success"{print "ok"; exit}')
   if [ "$heavy" = ok ]; then echo "local tests: none, but the heavy CI job passed on the head"
