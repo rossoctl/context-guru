@@ -102,7 +102,7 @@ logic goes in a library package.
 
 Clients with agent rules (Claude Code, Codex, OpenCode, Pi, Bob) differ in headers, session ids and
 prompts. Other names that the dashboard shows as labels (cursor, cline, aider, gemini-cli) have no
-rules. Use this test: **if a rule names one client, it lives in `agent.Identify` (#1312), and nowhere else.**
+rules. Use this test: **if a rule names one client, it lives in `agent.Identify`, and nowhere else.**
 
 **Client rules. Keep them in `agent.Identify` and the agent packages:**
 
@@ -129,7 +129,7 @@ rules. Use this test: **if a rule names one client, it lives in `agent.Identify`
 6. A PR that adds a client rule lists each supported client as covered or fallback, and updates
    [docs/client-coverage.md](docs/client-coverage.md).
 
-Details are in #1321. `offload-review` checks each PR for a client rule outside `agent.Identify`.
+The code is in `agent/identify.go` and the table is in `docs/client-coverage.md`. `offload-review` checks each PR for a client rule outside `agent.Identify`.
 `refactor-scan` checks each release. `agent/all/coverage_test.go` fails when a registered agent has
 no row in the coverage table.
 

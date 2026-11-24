@@ -11,19 +11,20 @@ import (
 )
 
 // docs/client-coverage.md says, for each client, whether each client-specific feature is covered
-// or falls back (#1321). A registered agent without a row fails. A row for a client that is
+// or falls back. A registered agent without a row fails. A row for a client that is
 // neither registered nor listed in pendingRows fails. The table for clients is the first one under
 // the "## By client" heading.
 const coverageDoc = "../../docs/client-coverage.md"
 
-// pendingRows are clients that have a row but no registered agent yet. Each maps to the issue that
-// registers it. agent/codex exists but is a helper, not a registered agent. Remove an entry when its
-// agent registers. Then an unregistered row fails.
+// pendingRows are clients that have a row but no registered agent yet. Each maps to the reason.
+// Remove an entry when its agent registers. Then an unregistered row fails.
+const reasonPlain = "no registered agent yet; rules are plain functions in agent/<pkg>"
+
 var pendingRows = map[string]string{
-	"claude code": "#1312",
-	"codex":       "#1331",
-	"opencode":    "#1331",
-	"pi":          "#1331",
+	"claude code": reasonPlain,
+	"codex":       reasonPlain,
+	"opencode":    reasonPlain,
+	"pi":          reasonPlain,
 }
 
 // clientHeading starts the table the test reads. A page without it fails loudly.
@@ -104,7 +105,7 @@ func TestClientCoverageHasARowForEveryAgent(t *testing.T) {
 	}
 	for name := range rows {
 		if !registered[name] && pendingRows[name] == "" {
-			t.Errorf("%s: row %q is not a registered agent (add it to pendingRows with its issue)", coverageDoc, name)
+			t.Errorf("%s: row %q is not a registered agent (add it to pendingRows with its reason)", coverageDoc, name)
 		}
 	}
 	for name := range pendingRows {
