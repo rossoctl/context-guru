@@ -1,13 +1,11 @@
 package proxy
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -69,280 +67,73 @@ func (k *keeper) clockNow() time.Time {
 	return k.Keeper.Now()
 }
 
-// bestStrategyFor resolves the highest-priority ACTIVE strategy matching tenantID at
-// `now`, if any — the one matching walk both applyStrategy (the ping-scheduling half,
-// resolved at record time) and resolveHeadTTL (the write-tier half, resolved on the
-// request path) need. They resolve at the same instant, so they agree on which strategy won, with one
-// exception since #858: for a wait that is not for a person, applyStrategyWindows ignores the windows
-// (bestStrategy), while resolveHeadTTL still respects them. The split is wanted: the head-TTL write tier
-// is a cost decision taken at write time, before the response, and a tool wait does not change it.
+// The strategy rules (which strategy wins, how it changes a policy, the bounds) live in package
+// keepalive (keepalive/strategy.go), so every host resolves the same policy. The methods below
+// read this keeper's strategy list under its lock and call them. The names keep the old
+// unexported spelling for this package and its tests.
+
+// strategyList returns the current strategy snapshot. The list is swapped wholesale, never mutated.
+func (k *keeper) strategyList() []tenant.Strategy {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.strategies
+}
+
+// bestStrategyFor is the highest-priority ACTIVE strategy matching tenantID at now (windows
+// respected), the walk both the ping half and the write-tier half (resolveHeadTTL) need.
 func (k *keeper) bestStrategyFor(tenantID string, now time.Time) *tenant.Strategy {
 	return k.bestStrategy(tenantID, now, false)
 }
 
-// bestStrategy is bestStrategyFor with the time windows optionally ignored (#858): the
-// highest-priority ACTIVE strategy that targets tenantID, as if its window matched. The same
-// priority rule (betterStrategy) picks among them.
+// bestStrategy is bestStrategyFor with the time windows optionally ignored (#858).
 func (k *keeper) bestStrategy(tenantID string, now time.Time, ignoreWindows bool) *tenant.Strategy {
-	k.mu.Lock()
-	strategies := k.strategies
-	k.mu.Unlock()
-	var best *tenant.Strategy
-	for i := range strategies {
-		s := &strategies[i]
-		if ignoreWindows {
-			if !s.Active || !s.Target.Covers(tenantID) {
-				continue
-			}
-		} else if !s.Matches(now, tenantID) {
-			continue
-		}
-		if best == nil || betterStrategy(s, best) {
-			best = s
-		}
-	}
-	return best
+	return keepalive.BestStrategy(k.strategyList(), tenantID, now, ignoreWindows)
 }
 
-// strategyTZFor is the timezone an account's keep-alive windows are written in: the first window of the highest-priority active strategy that
-// targets it (at any time of day), else tenant.DefaultStrategyTZ. Reports that show time of day use it, so a cell matches a window the user sets.
+// strategyTZFor is the timezone an account's keep-alive windows are written in.
 func (k *keeper) strategyTZFor(tenantID string) string {
 	if k == nil {
 		return tenant.DefaultStrategyTZ
 	}
-	k.mu.Lock()
-	strategies := k.strategies
-	k.mu.Unlock()
-	var best *tenant.Strategy
-	for i := range strategies {
-		s := &strategies[i]
-		if s.Active && s.Target.Covers(tenantID) && len(s.Windows) > 0 && (best == nil || betterStrategy(s, best)) {
-			best = s
-		}
-	}
-	if best == nil {
-		return tenant.DefaultStrategyTZ
-	}
-	return best.Windows[0].Zone()
+	return keepalive.StrategyTZ(k.strategyList(), tenantID)
 }
 
-// applyStrategy resolves the highest-priority ACTIVE strategy matching tenantID at
-// `now`, if any, and returns the policy with its fields replaced plus the matched
-// strategy's id ("" when none matched).
-//
-// Called from record, between account config and the session override — see the design
-// doc's resolution chain. Evaluated once, at record time, and then fixed on the entry
-// for its whole lifetime, exactly as overrideFor's own resolution already is: a strategy
-// whose window closes mid-hold does not retroactively un-arm a ping already scheduled.
+// applyStrategy resolves the strategy matching tenantID at now and writes it onto the policy.
 func (k *keeper) applyStrategy(tenantID string, pol CachePolicy, now time.Time) (CachePolicy, string) {
 	return k.applyStrategyWindows(tenantID, pol, now, false)
 }
 
-// applyStrategyWindows is applyStrategy with the time windows optionally ignored (#858). Windows
-// describe when a person answers, so they gate only a wait for a person. For any other wait the
-// caller passes ignoreWindows, and the strategy that targets the tenant applies at any hour; with no
-// such strategy the account config applies, as before. The wait cause is known here because the
-// strategy is resolved at record time, from the response that ended the turn.
+// applyStrategyWindows is applyStrategy with the time windows optionally ignored (#858).
 func (k *keeper) applyStrategyWindows(tenantID string, pol CachePolicy, now time.Time, ignoreWindows bool) (CachePolicy, string) {
-	best := k.bestStrategy(tenantID, now, ignoreWindows)
-	if best == nil {
-		return pol, ""
-	}
-	pol.KeepAlive = true
-	pol.Idle = time.Duration(best.IdleSeconds) * time.Second
-	pol.MaxPings = best.MaxPings
-	pol.MinPrefixTokens = best.MinPrefixTokens
-	pol.MaxUSDPerPing = best.MaxUSDPerPing
-	pol.PredictorID = best.PredictorID
-	pol.PredictorThreshold = best.PredictorThreshold
-	// A strategy can only turn the 1-hour-on-wait ping ON, never off (#1243), like KeepAlive and HeadTTL1h.
-	// The ping needs the wait plan, which the account policy carries (WaitPlan) and this does not touch.
-	pol.OneHourOnWait = pol.OneHourOnWait || best.OneHourOnWait
-	// The same for 1-hour-always (#1261): a manager may turn it on knowingly; it never turns an account's own off.
-	pol.OneHourAlways = pol.OneHourAlways || best.OneHourAlways
-	return pol, best.ID
+	return keepalive.ApplyStrategy(pol, k.bestStrategy(tenantID, now, ignoreWindows))
 }
 
-// resolveHeadTTL resolves the same matching strategy applyStrategy would, but for the
-// WRITE-TIER half of the policy — the half read on the request path (applyMode), not
-// inside keeper.record where the ping half resolves. Returns the account's own
-// fallback (accountHeadTTL1h, accountHeadTTLMinBytes) unchanged when no strategy
-// matches, or when k itself is nil (keepalive not built into this deployment at all):
-// a tenant with no matching strategy sees exactly the behaviour it had before
-// strategies could touch this field.
-//
-// A strategy can only turn HeadTTL1h ON, never off, mirroring applyStrategy's own
-// pol.KeepAlive = true — there is no "deny" strategy mode for either mechanism.
+// resolveHeadTTL is the write-tier half of the strategy (keepalive.ResolveHeadTTL). A nil keeper
+// (no keep-alive built into this deployment) returns the account's own fallback.
 func (k *keeper) resolveHeadTTL(tenantID string, now time.Time, accountHeadTTL1h bool,
 	accountHeadTTLMinBytes int) (bool, int) {
 	if k == nil {
 		return accountHeadTTL1h, accountHeadTTLMinBytes
 	}
-	best := k.bestStrategyFor(tenantID, now)
-	if best == nil || !best.HeadTTL1h {
-		return accountHeadTTL1h, accountHeadTTLMinBytes
-	}
-	// A stored strategy keeps the old token-named field: the database column and the manager API
-	// carry it. It is read as bytes at 4 per token, the rule the old gate used.
-	return true, best.HeadTTLMinTokens * headTTLBytesPerToken
+	return keepalive.ResolveHeadTTL(k.strategyList(), tenantID, now, accountHeadTTL1h, accountHeadTTLMinBytes)
 }
 
-// headTTLBytesPerToken converts the deprecated head_ttl_min_tokens to the byte gate. It is the
-// factor the old gate used (len(body)/4), so an old value gates at exactly the same size.
-const headTTLBytesPerToken = config.HeadTTLBytesPerToken
-
-// betterStrategy reports whether candidate beats current under the design doc's fixed
-// precedence: a list-target strategy beats an all-target one (more specific wins);
-// among equally specific matches, the most recently updated wins. Not configurable —
-// "no priority field to expose in the UI, one less knob a manager can get wrong."
-func betterStrategy(candidate, current *tenant.Strategy) bool {
-	cSpecific := candidate.Target.Mode == tenant.TargetList
-	curSpecific := current.Target.Mode == tenant.TargetList
-	if cSpecific != curSpecific {
-		return cSpecific
-	}
-	return candidate.UpdatedAt.After(current.UpdatedAt)
-}
-
-// The 1h-tier idle/ping band, parallel to minOverrideIdle/maxOverrideIdle/
-// minOverridePings/maxOverridePings but scaled to the hour-long lifetime a
-// HeadTTL1h-true strategy actually holds.
-//
-// maxOverrideIdle1h keeps the SAME 10-second margin maxOverrideIdle leaves against the
-// 5-minute lifetime (AnthropicCacheLifetime5m - 10 s), applied to the 1-hour one (AnthropicCacheLifetime1h - 10 s) — past it
-// the first ping arrives after the lifetime has already lapsed, exactly the failure
-// maxOverrideIdle exists to refuse. kvcache.DefaultPingIdle1h ("the same margin
-// against the one-hour lifetime" scaled up) sits comfortably inside this band as the
-// value the campaign arm-mapping (a later change) actually uses; the wider band here
-// only bounds what a manager could otherwise type into the form.
-//
-// maxOverridePings1h is capped far tighter than maxOverridePings (11): a strategy's
-// caller-pays credential is held in memory for up to (MaxPings+1) x Idle for as long as
-// this deployment's request path might need it to sign a ping (see kaEntry's own
-// security notes in keepalive.go) — at the 5-minute tier that ceiling is documented as
-// currently unreachable at 58 minutes (12 x 290s); at the 1-hour tier the SAME ping
-// count would hold a credential for up to half a day, which is not a bound this
-// mechanism's existing security reasoning was written to justify. 3 keeps the worst
-// case at (3+1) x 3590s ≈ 4 hours, and the 1-hour tier needs far fewer refreshes to
-// hold the same span in the first place (KeepAlive.Describe(): "one twelfth as many
-// refreshes as the 5-minute arm").
 const (
-	maxOverrideIdle1h  = modelinfo.AnthropicCacheLifetime1h - 10*time.Second
-	maxOverridePings1h = 3
+	maxOverrideIdle1h  = keepalive.MaxOverrideIdle1h
+	maxOverridePings1h = keepalive.MaxOverridePings1h
 )
 
-// validStrategyBounds checks the numeric fields against the SAME bounds validOverride
-// already enforces for Idle/MaxPings/MinPrefixTokens — a strategy is a
-// broader-blast-radius version of the same spend authorization, so it gets at least as
-// tight a check, not a looser one. When headTTL1h is set the idle/ping band widens to
-// maxOverrideIdle1h/maxOverridePings1h instead, since a 1-hour hold cannot be expressed
-// inside the 5-minute-tier band at all.
-//
-// MaxUSDPerPing is the one field an override does not expose at all; a strategy may set
-// it because this is an audited manager action rather than an ephemeral grant (see the
-// design doc's "Model"). Checked on its own terms: non-negative, with 0 left to mean
-// "use the package default" exactly like account config does (CachePolicy.Ceiling()).
-//
-// headTTLMinTokens is the stored, token-named field; the proxy reads it as tokens x 4 bytes of
-// request body (see resolveHeadTTL). It only needs to be non-negative while headTTL1h is false, the
-// same convention CachePolicy.HeadTTLMinBytes follows — but once headTTL1h IS set, zero is
-// refused outright rather than silently accepted: apply.Opts's own gate
-// (`o.HeadTTL1h && o.HeadTTLMinBytes > 0`) treats 0 as "never upgrade", so a strategy
-// with HeadTTL1h=true and HeadTTLMinTokens<=0 would be created successfully, ping on the
-// 1-hour schedule, and never once actually promote the head to the 1-hour tier — paying
-// the ping cost for a benefit that can never happen. There is no legitimate reason to
-// want that combination; account config's own Resolved() never lets this pairing exist
-// either (0 there means "use DefaultHeadTTLMinBytes", not "disable the upgrade").
-func validStrategyBounds(idle time.Duration, pings, minPrefix int, maxUSDPerPing float64,
-	headTTL1h bool, headTTLMinTokens int) error {
-	maxIdle, maxPings := maxOverrideIdle, maxOverridePings
-	lifetime := int(modelinfo.AnthropicCacheLifetime5m / time.Second)
-	if headTTL1h {
-		maxIdle, maxPings = maxOverrideIdle1h, maxOverridePings1h
-		lifetime = int(modelinfo.AnthropicCacheLifetime1h / time.Second)
-	}
-	if idle < minOverrideIdle || idle > maxIdle {
-		return fmt.Errorf(
-			"the idle interval must be between %d and %d seconds; past %d the first ping "+
-				"arrives after the provider's %d-second lifetime has already lapsed and pays "+
-				"a cache WRITE instead of a read",
-			int(minOverrideIdle.Seconds()), int(maxIdle.Seconds()), int(maxIdle.Seconds()), lifetime)
-	}
-	if pings < minOverridePings || pings > maxPings {
-		return fmt.Errorf("the ping count must be between %d and %d", minOverridePings, maxPings)
-	}
-	if minPrefix < 0 {
-		return fmt.Errorf("the prefix floor cannot be negative")
-	}
-	if maxUSDPerPing < 0 {
-		return fmt.Errorf("the per-ping cost ceiling cannot be negative")
-	}
-	if headTTLMinTokens < 0 {
-		return fmt.Errorf("the head-TTL token floor cannot be negative")
-	}
-	if headTTLMinTokens > config.MaxHeadTTLMinBytes/config.HeadTTLBytesPerToken {
-		return fmt.Errorf("the head-TTL token floor is too large (at most %d)",
-			config.MaxHeadTTLMinBytes/config.HeadTTLBytesPerToken)
-	}
-	if headTTL1h && headTTLMinTokens <= 0 {
-		return fmt.Errorf("a strategy asking for the 1h head-TTL tier needs a positive token " +
-			"floor; 0 means the upgrade never fires, which pays the 1h ping schedule for no benefit")
-	}
-	return nil
-}
+var (
+	validStrategyBounds = keepalive.ValidStrategyBounds
+	validWindows        = keepalive.ValidWindows
+	// knownPredictorIDs is this package's own copy of keepalive's registered names, so a test that
+	// registers a name does not change the library's map.
+	knownPredictorIDs = keepalive.KnownPredictorIDs()
+)
 
-// knownPredictorIDs is the set of predictor names a strategy is allowed to reference —
-// kept in lockstep with keepalive's predictorFor switch by TestKnownPredictorIDsMatchPredictorFor,
-// so accepting a strategy at creation time can never promise a gate that pingable() does
-// not actually know how to evaluate.
-//
-// "stop-reason-gated" is the first and, so far, only entry: write the five-minute tier on
-// every request, ping while idle only when the request just served's own stop_reason
-// clusters as kvcache.ClusterActuallyDone. Measured (docs/results/kv-ttl-predictor-arms.md)
-// as +1.54% vs fixed-5m pooled (CI95 [0.60%, 2.79%]), not statistically distinguishable
-// from a trained logistic regression on the same window — which is why it is a rule
-// rather than a model: predictorFor never runs anything heavier than kvcache.ClusterOf in
-// the hot path.
-var knownPredictorIDs = map[string]bool{"stop-reason-gated": true}
-
-// validPredictorRef checks predictorID against knownPredictorIDs (empty is always
-// valid — "no predictor gate") and the threshold's own shape.
-//
-// A named predictor paired with a threshold <= 0 is refused outright: predictorFor's
-// probability functions only ever return values in [0,1], so pingable()'s
-// `p(stopReason) >= threshold` is satisfied by EVERY possible prediction once threshold
-// hits 0 — the gate becomes a no-op that still pings on the arm's own idle/max-ping
-// schedule, exactly the "paying for a mechanism that can never actually gate anything"
-// mistake validStrategyBounds already refuses for HeadTTL1h/HeadTTLMinTokens.
+// validPredictorRef is keepalive.ValidPredictorRefIn over this package's copy.
 func validPredictorRef(predictorID string, threshold float64) error {
-	s := tenant.Strategy{PredictorID: predictorID, PredictorThreshold: threshold}
-	if err := s.ValidatePredictor(); err != nil {
-		return err
-	}
-	if predictorID != "" && !knownPredictorIDs[predictorID] {
-		return fmt.Errorf("%q is not a registered predictor; no predictor-gated strategies "+
-			"can be created yet", predictorID)
-	}
-	if predictorID != "" && threshold <= 0 {
-		return fmt.Errorf("a strategy naming a predictor needs a positive threshold; 0 makes " +
-			"the gate a no-op, since every possible prediction satisfies \">= 0\"")
-	}
-	return nil
-}
-
-// validWindows checks that a strategy has at least one window (one with no schedule can
-// never fire, which is never what a manager who created it meant) and that each one is
-// individually valid.
-func validWindows(windows []tenant.Window) error {
-	if len(windows) == 0 {
-		return fmt.Errorf("a strategy needs at least one window; one with no schedule can never fire")
-	}
-	for _, w := range windows {
-		if err := w.Validate(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return keepalive.ValidPredictorRefIn(knownPredictorIDs, predictorID, threshold)
 }
 
 // keepAliveStrategyCtlRoutes is this feature's control-plane table, appended to

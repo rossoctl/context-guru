@@ -49,7 +49,7 @@ func TestDisabledReadsTheKillSwitch(t *testing.T) {
 	}
 }
 
-// The wait-plan defaults mirror config's; keepalive may not import config.
+// The wait-plan defaults mirror config's; a test pins them to config (keepalive imports config; config does not import keepalive).
 func TestWaitPlanDefaultsMatchConfig(t *testing.T) {
 	if DefaultToolWaitMaxPings != config.DefaultKeepAliveToolWaitMaxPings ||
 		DefaultBackgroundExtraPings != config.DefaultKeepAliveBackgroundExtraPings ||

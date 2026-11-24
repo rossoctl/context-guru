@@ -8,7 +8,7 @@ import (
 
 const module = "github.com/rossoctl/context-guru"
 
-// agent and every agent package under it (agent/bob) are library packages: a host (the proxy,
+// agent and every agent package under it (agent/bob, agent/codex) are library packages: a host (the proxy,
 // the bifrost adapter) imports them, never the reverse. This test enforces that rule. It reads
 // the full dependency list of ./..., so an indirect import, or a new agent package, is covered.
 func TestAgentDoesNotImportAHost(t *testing.T) {
@@ -24,7 +24,7 @@ func TestAgentDoesNotImportAHost(t *testing.T) {
 		t.Fatalf("go list failed: %v\n%s", err, out)
 	}
 	deps := strings.Fields(string(out))
-	for _, want := range []string{module + "/agent", module + "/agent/bob"} {
+	for _, want := range []string{module + "/agent", module + "/agent/bob", module + "/agent/codex"} {
 		if !contains(deps, want) {
 			t.Fatalf("go list did not list %s; the guard would prove nothing:\n%s", want, out)
 		}
