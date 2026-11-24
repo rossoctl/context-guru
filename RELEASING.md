@@ -147,6 +147,8 @@ Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the cu
 
 It does not check for a behavior change. Read the diff for that yourself.
 
+A PR owner sends a ready PR to the integrator as [CLAUDE.md](CLAUDE.md#working-on-a-task) says.
+
 ### When the head moves after an approval
 
 An approval counts only for the head it names. If the head moves (a rebase, a fix, a conflict resolution):
