@@ -34,12 +34,11 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 
 Six presets are current: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. The other 15 are obsolete. They still load, and the [preset reference](reference/presets.md) lists every pipeline, verbatim.
 
-**The lossless trio leads every older preset** (`mcp` takes only `format` + `textclean` — it
-serves JSON list endpoints with no search output to fold). The current presets (`conservative` up, and `house`) do not follow this rule: `dedup`, `toon` and `cmdfilter` run first, and `toolfilter` comes last. See the [preset reference](reference/presets.md). `format`, `textclean` and `searchfold` all
+**The lossless trio leads the older presets that run it** (`safe`, `balanced`, `aggressive`, `coding`, `agent`, `general`, `codesmart`, `codesafe`). `mcp` takes only `format` + `textclean`, because it serves JSON list endpoints with no search output to fold. `cache`, `summarize`, `summarizer1509` and `agentdiet` run little or none of it. The `house` family does not follow this rule: `house`, `housellm`, and the current presets `conservative` and up run `dedup`, `toon` and `cmdfilter` first, and `toolfilter` comes last. See the [preset reference](reference/presets.md). `format`, `textclean` and `searchfold` all
 verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every
 downstream token count honest. Two of the three used to be missing: `textclean` shipped in `general`
 alone while 49.6% of corpus messages carry ANSI, and `searchfold` shipped in NO preset at all.
-`toon` was retired from the older presets — it acted 0 times on 5,752 production requests.
+`toon` is absent from the older presets — it acted 0 times on 5,752 production requests.
 
 **Cold turns sweep at depth.** `mask`, `failed_run` and `collapse` default to `cold_cache: true`:
 on a turn whose prompt cache has provably expired there is no cached prefix to protect, and
