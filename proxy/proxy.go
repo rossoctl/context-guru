@@ -32,6 +32,7 @@ import (
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
+	"github.com/rossoctl/context-guru/agent/codex"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
@@ -796,9 +797,20 @@ func (h *Handler) explicitSessionOf(r *http.Request, upPath string, body []byte)
 	sess := r.Header.Get("x-context-guru-session")
 	id := agentSessionID(r, h.agentFor(upPath))
 	if id == "" {
+		id = codexSessionID(r.Header)
+	}
+	if id == "" {
 		return sess
 	}
 	return apply.ExplicitSession(sess, body, id)
+}
+
+// codexSessionID is Codex's own session id (agent/codex), by the caller's headers and not by the
+// route, so a host with other paths gets the same answer. "" for any other caller. The proxy only
+// passes its headers here (#1311).
+func codexSessionID(h http.Header) string {
+	f, _ := codex.Identify(h)
+	return f.SessionID
 }
 
 // agentSessionID is a.SessionID, fail open: a panic in the agent gives "", no agent id, so the
