@@ -44,9 +44,9 @@ import (
 func envelopeOwner(name string, added, removed bool) string {
 	switch {
 	case added && name == expand.ToolName:
-		return "expand"
+		return OpExpand
 	case added && name == adjudicate.ToolName:
-		return "adjudicate"
+		return OpAdjudicate
 	case removed:
 		return "toolfilter"
 	default:
@@ -87,7 +87,7 @@ func (k kind) rootTTLOps(client, forwarded []byte) []accountant.Operation {
 	default:
 		return nil
 	}
-	return []accountant.Operation{envelopeOpID("headttl", at, len(raw), len(raw), "headttl:root:"+hashOf(raw))}
+	return []accountant.Operation{envelopeOpID(OpHeadTTL, at, len(raw), len(raw), "headttl:root:"+hashOf(raw))}
 }
 
 // toolsOps matches declarations by name. An unnamed declaration (an Anthropic server tool carries a
@@ -163,7 +163,7 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 					ops = append(ops, envelopeOp(envelopeOwner(k, false, false), at, len(cl[j].Raw), len(mid),
 						"decl-rewritten:"+hashOf(k)))
 				}
-				ops = append(ops, envelopeOpID("headttl", at, len(mid), len(fw[i].Raw), "headttl:"+hashOf(k)))
+				ops = append(ops, envelopeOpID(OpHeadTTL, at, len(mid), len(fw[i].Raw), "headttl:"+hashOf(k)))
 				continue
 			}
 			ops = append(ops, envelopeOp(envelopeOwner(k, false, false), at, len(cl[j].Raw), len(fw[i].Raw),
@@ -215,7 +215,7 @@ func systemOps(cl, fw []string) []accountant.Operation {
 			// only through a headttl: ChangeID.
 			before := cl[i]
 			if relabelled := withHeadTTL(cl[i], fw[j]); relabelled != cl[i] {
-				ops = append(ops, envelopeOpID("headttl", pos, len(cl[i]), len(relabelled), "headttl:"+hashOf(textOf(cl[i]))))
+				ops = append(ops, envelopeOpID(OpHeadTTL, pos, len(cl[i]), len(relabelled), "headttl:"+hashOf(textOf(cl[i]))))
 				before = relabelled
 			}
 			ops = append(ops, envelopeOpID("cachesplit", pos, len(before), len(fw[j])+len(fw[j+1]),
@@ -228,7 +228,7 @@ func systemOps(cl, fw []string) []accountant.Operation {
 		case headTTLRelabelled(cl[i], fw[j]):
 			// The library finds the head by the prefix "headttl:" (design §4.4), not "cg:". Its state is per
 			// thread, so the thread part of the spelled-out form is not needed to keep two heads apart.
-			ops = append(ops, envelopeOpID("headttl", pos, len(cl[i]), len(fw[j]), "headttl:"+hashOf(textOf(cl[i]))))
+			ops = append(ops, envelopeOpID(OpHeadTTL, pos, len(cl[i]), len(fw[j]), "headttl:"+hashOf(textOf(cl[i]))))
 		default:
 			// An in-place edit that is no relabel: the declaration filter taking a skill out of the listing.
 			// Only the Responses wire keeps that listing in the system section (instructions, skills.LocateResponses);
@@ -298,7 +298,7 @@ func envelopeOp(component string, at accountant.Position, before, after int, key
 func envelopeOpID(component string, at accountant.Position, before, after int, changeID string) accountant.Operation {
 	return accountant.Operation{
 		Kind:       accountant.KindRewrite,
-		Operator:   "context-guru." + component,
+		Operator:   Operator(component),
 		At:         at,
 		SizeBefore: accountant.Size{Bytes: before},
 		SizeAfter:  accountant.Size{Bytes: after},

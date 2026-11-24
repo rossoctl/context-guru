@@ -7,6 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 )
 
@@ -65,7 +66,7 @@ func opsFromRun(rr components.RunReport, wire []int, applied bool, keep func(idx
 			}
 			ops = append(ops, accountant.Operation{
 				Kind:       accountant.KindRewrite,
-				Operator:   "context-guru." + r.Component,
+				Operator:   accwire.Operator(r.Component),
 				DryRun:     !applied || r.Mode == components.ModeObserve,
 				At:         accountant.Position{Section: accountant.SectionMessages, Index: wire[c.Idx]},
 				SizeBefore: accountant.Size{Bytes: c.BytesBefore},
@@ -117,7 +118,7 @@ func spliceOp(r components.Report, c components.Change, wire []int, applied bool
 	}
 	op := accountant.Operation{
 		Kind:          accountant.KindRewrite,
-		Operator:      "context-guru." + r.Component,
+		Operator:      accwire.Operator(r.Component),
 		DryRun:        !applied || r.Mode == components.ModeObserve,
 		At:            accountant.Position{Section: accountant.SectionMessages, Index: at},
 		SizeBefore:    accountant.Size{Bytes: c.BytesBefore},
@@ -296,7 +297,7 @@ func tailOp(before, after []byte) (accountant.Operation, bool) {
 	h.Write([]byte(b[last].Raw))
 	return accountant.Operation{
 		Kind:       accountant.KindRewrite,
-		Operator:   "context-guru.tailbreakpoint",
+		Operator:   accwire.Operator(accwire.OpTailBreakpoint),
 		At:         accountant.Position{Section: accountant.SectionMessages, Index: last},
 		SizeBefore: accountant.Size{Bytes: len(b[last].Raw)},
 		SizeAfter:  accountant.Size{Bytes: len(a[last].Raw)},

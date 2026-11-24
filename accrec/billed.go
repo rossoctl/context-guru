@@ -128,13 +128,13 @@ func EnvelopeOpsFor(client, billed, preDefer []byte) []accountant.Operation {
 	out := make([]accountant.Operation, 0, len(ops))
 	for _, o := range ops {
 		switch {
-		case o.Operator == "context-guru.toolschema" && o.At.Section == accountant.SectionTools &&
+		case o.Operator == accwire.Operator("toolschema") && o.At.Section == accountant.SectionTools &&
 			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && o.At.Index < len(clientTools) &&
 			own[clientTools[o.At.Index].Get("name").String()] && IsStub(billed, atBilled[clientTools[o.At.Index].Get("name").String()]):
-			o.Operator = "context-guru.tooldefer"
-		case o.Operator == "context-guru.toolschema" && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
+			o.Operator = accwire.Operator(accwire.OpToolDefer)
+		case o.Operator == accwire.Operator("toolschema") && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
 			gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String() == tooldefer.SearchName:
-			o.Operator = "context-guru.tooldefer"
+			o.Operator = accwire.Operator(accwire.OpToolDefer)
 		}
 		out = append(out, o)
 	}

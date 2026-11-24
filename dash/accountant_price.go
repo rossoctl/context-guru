@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -75,7 +76,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		if o.DryRun || o.Call != nil {
 			continue
 		}
-		c := strings.TrimPrefix(o.Operator, "context-guru.")
+		c := strings.TrimPrefix(o.Operator, accwire.OperatorPrefix)
 		// An unpriced op still owns the break it caused: a setting with no position is unpriced
 		// (penalty_unknown) and its break is priced from the read the usage shows.
 		if o.ChangeID != "" {
@@ -145,7 +146,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			// effect was unpriced and every request with the default tail breakpoint booked no saving.
 			c, ok := owner[ce.ChangeID]
 			if !ok || ce.ChangeID == "" {
-				c = "tailbreakpoint"
+				c = accwire.OpTailBreakpoint
 			}
 			f.ByComponent[c] += value
 			f.DeltaUSD += value
@@ -235,17 +236,17 @@ const EndedChangeComponent = "ended_change"
 
 // DeferComponent is the library's component name for tool deferral: the operator context-guru.tooldefer, which the
 // proxy reports from the bodies (accountant R56). Its figure is the deferral's saving.
-const DeferComponent = "tooldefer"
+const DeferComponent = accwire.OpToolDefer
 
 // envelopeComponents are the operators that change the request envelope (tools, system, cache
 // marks) and may have no pipeline row: the proxy reports them from a body diff
-// (proxy/accountant_envelope.go). expand, adjudicate and expand_restore (the copy fixed_restore
+// (accwire/envelope.go). expand, adjudicate and expand_restore (the copy fixed_restore
 // inserts, #481) are never pipeline components; headttl is a host option; toolschema, toolfilter and cachesplit are components whose row can be absent when
 // the rewrite ran from an equivalent gate (cacheinject runs the split too).
 var envelopeComponents = map[string]bool{
-	"expand": true, "adjudicate": true, "headttl": true, "expand_restore": true,
+	accwire.OpExpand: true, accwire.OpAdjudicate: true, accwire.OpHeadTTL: true, accwire.OpExpandRestore: true,
 	"toolschema": true, "toolfilter": true, "cachesplit": true,
-	"tailbreakpoint": true, "tooldefer": true,
+	accwire.OpTailBreakpoint: true, accwire.OpToolDefer: true,
 }
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
@@ -488,7 +489,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
 	low := delta
 	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil || o.Operator == "context-guru."+DeferComponent {
+		if o.DryRun || o.Call != nil || o.Operator == accwire.Operator(DeferComponent) {
 			continue // the deferral's figure is out of the held ceiling, so its tokens are out of the floor
 		}
 		s := o.Saved
@@ -510,15 +511,15 @@ func inAdded(rows []CompRow, name string) bool {
 }
 
 // toolSectionOperators are the operators whose operations act on the tools section, not on messages:
-// the declaration filter and the schema rewrite (proxy/accountant_envelope.go reports them from a body
+// the declaration filter and the schema rewrite (accwire/envelope.go reports them from a body
 // diff), the two declarations the proxy injects, and tool deferral, whose deferred definitions are a
 // shrink of tools positions (accountant R56, #908). Their tokens are not in TokensBefore, which counts
 // message text only. Deferral's names list is a growth in messages and saves nothing, so it adds
 // no saved tokens to the bound.
 var toolSectionOperators = map[string]bool{
-	"context-guru.toolfilter": true, "context-guru.toolschema": true,
-	"context-guru.expand": true, "context-guru.adjudicate": true,
-	"context-guru.tooldefer": true,
+	accwire.Operator("toolfilter"): true, accwire.Operator("toolschema"): true,
+	accwire.Operator(accwire.OpExpand): true, accwire.Operator(accwire.OpAdjudicate): true,
+	accwire.Operator(accwire.OpToolDefer): true,
 }
 
 // countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
