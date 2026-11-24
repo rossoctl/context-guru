@@ -48,6 +48,9 @@ func TestSnifferSmallResponseReturnsItOnce(t *testing.T) {
 	}
 }
 
+// TestSnifferSeparatorPreventsGluedSSELines guards a subtle failure: joining a
+// truncated head to a tail without a newline could fuse two SSE `data:` lines into
+// one unparseable line, silently losing usage for every large stream.
 func TestSnifferSeparatorPreventsGluedSSELines(t *testing.T) {
 	s := newSniffer(true)
 	head := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1,\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":2}}}\n\n"

@@ -31,7 +31,7 @@ const (
 		`"cached_tokens":20315,"text_tokens":4},"total_tokens":20430}`
 )
 
-// bobBase is what the shared parser makes of a block, as parseUsageWhy builds it.
+// bobBase is what the shared parser makes of a block, as respfacts.ParseUsage builds it.
 func bobBase(t *testing.T, raw string) Usage {
 	t.Helper()
 	tiers, why := respfacts.ParseUsage([]byte(`{"usage":` + raw + `}`))

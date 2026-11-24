@@ -4,6 +4,7 @@ import (
 	"testing"
 )
 
+// The wait tool's `timeout` and `run_in_background` are read, and nothing else of the input.
 func TestToolParamsOf(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -26,6 +27,7 @@ func TestToolParamsOf(t *testing.T) {
 	}
 }
 
+// A buffered response, of each dialect, gives the parameters of its last call.
 func TestResponseLastToolParamsBuffered(t *testing.T) {
 	anth := []byte(`{"content":[
 		{"type":"tool_use","id":"a","name":"Bash","input":{"command":"x","timeout":1000}},
@@ -44,6 +46,7 @@ func TestResponseLastToolParamsBuffered(t *testing.T) {
 	}
 }
 
+// A streamed Anthropic call carries its input in pieces. They are joined for the LAST tool_use block.
 func TestResponseLastToolParamsStreamed(t *testing.T) {
 	ev := func(s string) string { return "data: " + s + "\n\n" }
 	stream := ev(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"Read","input":{}}}`) +
@@ -70,6 +73,7 @@ func TestResponseLastToolParamsStreamed(t *testing.T) {
 	}
 }
 
+// The result type holds one number and one flag per parameter, so no input text can ride in it.
 func TestToolParamsKeepNothingElse(t *testing.T) {
 	got := ToolParamsOf(`{"command":"curl -H 'Authorization: sk-secret'","timeout":1000}`)
 	if got != (ToolParams{TimeoutMs: 1000, HasTimeout: true}) {

@@ -14,10 +14,6 @@ import (
 	"github.com/rossoctl/context-guru/keepalive"
 )
 
-// The wait tool's `timeout` and `run_in_background` are read, and nothing else of the input.
-// A buffered response, of each dialect, gives the parameters of its last call.
-// A streamed Anthropic call carries its input in pieces. They are joined for the LAST tool_use block.
-// The result type holds one number and one flag per parameter, so no input text can ride in it.
 // A whole response reaches Usage with the parameters, unless the window was spliced.
 func TestResponseUsageCarriesToolParams(t *testing.T) {
 	body := []byte(`{"id":"m","usage":{"input_tokens":5,"output_tokens":3},"content":[

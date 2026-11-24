@@ -123,9 +123,6 @@ func TestParseSSEUsageNoneReported(t *testing.T) {
 	}
 }
 
-// TestSnifferSeparatorPreventsGluedSSELines guards a subtle failure: joining a
-// truncated head to a tail without a newline could fuse two SSE `data:` lines into
-// one unparseable line, silently losing usage for every large stream.
 func TestResponseUsagePicksTheParserByContentType(t *testing.T) {
 	json := []byte(`{"usage":{"input_tokens":3,"output_tokens":4}}`)
 	if u, ok := readOK("application/json", json); !ok || u.FreshInput != 3 {

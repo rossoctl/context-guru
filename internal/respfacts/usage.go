@@ -167,8 +167,7 @@ func ParseUsage(body []byte) (providerusage.Tiers, Miss) {
 // twice. An event with no input count (a real Anthropic message_delta) leaves the earlier tiers alone.
 // Output keeps the maximum, because the last event carries the final count and a repeat must not double it.
 //
-// Beyond that,  An event stream that carried a
-// usage block no event of it could be read is the streamed form of the dialect gap, and it must
+// An event stream that carried a usage block that no event of it could read is the streamed form of the dialect gap, and it must
 // not be reported as "the provider streamed no usage" — the remedies differ.
 // The third return is the PAYLOAD OF THE EVENT THAT SET THE REASON, for the shape record.
 //
