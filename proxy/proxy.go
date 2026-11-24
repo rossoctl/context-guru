@@ -45,6 +45,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/record"
+	"github.com/rossoctl/context-guru/internal/reqfacts"
 	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/metrics"
@@ -1394,7 +1395,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
 		// read from the PRISTINE body in one pass before the pipeline touches it.
-		cp.noteMeta(metaFromBody(body))
+		cp.noteMeta(reqfacts.MetaFromBody(body))
 		// Which PROJECT this request belongs to — the directory the agent was started in, stated
 		// in the prompt. Off the pristine body too: a pipeline that compacts the environment
 		// block would otherwise make the project vanish on the requests it acted on.
@@ -2144,7 +2145,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 					// A multi-round continuation OVERWRITES respBody each round, so what
 					// survived is the last round, not the whole answer. Rounds records the
 					// count; this records that the body is therefore partial.
-					inc = joinIncomplete(inc, record.IncompleteTruncated)
+					inc = record.JoinIncomplete(inc, record.IncompleteTruncated)
 				}
 				errMsg := ""
 				if status >= 400 || status == 0 {

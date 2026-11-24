@@ -1,4 +1,4 @@
-package proxy
+package reqfacts
 
 import (
 	"reflect"
@@ -8,14 +8,13 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/schema"
 )
 
 // scanLifecycleOld is scanLifecycle as it was before the normalization was shared: it
 // normalized the body itself. Kept here as the reference the new path must equal.
-func scanLifecycleOld(provider bschemas.ModelProvider, body []byte) (q dash.LifecycleReq) {
+func scanLifecycleOld(provider bschemas.ModelProvider, body []byte) (q Lifecycle) {
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {
 		return q
 	}
@@ -66,7 +65,7 @@ func TestSharedNormalizationIsByteIdentical(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(tc.body)
 			norm := func() []bschemas.ChatMessage { return apply.NormalizeMessages(tc.provider, body) }
-			if got, want := scanLifecycle(norm, body), scanLifecycleOld(tc.provider, body); got != want {
+			if got, want := ScanLifecycle(norm, body), scanLifecycleOld(tc.provider, body); got != want {
 				t.Errorf("lifecycle: shared %+v, old %+v", got, want)
 			}
 			calls := 0
