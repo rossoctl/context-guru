@@ -82,7 +82,7 @@ type tableFileModel struct {
 	Window int `yaml:"window"`
 	// CompactionPoint optionally states, in BILLED input tokens, where the client compacts this model's
 	// conversation (Claude Code on a GLM compacts near 167k of a 200k window). It is NOT derived from
-	// window and does not change it. Used by internal/compactionpoint, for models its bootstrap table
+	// window and does not change it. Used by compactionpoint, for models its bootstrap table
 	// does not know. 0 = unset.
 	CompactionPoint int `yaml:"compaction_point"`
 	// Note is documentation for whoever edits the file — in particular, which
@@ -350,7 +350,7 @@ func (t *Table) WindowExact(ctx context.Context, model string) (int, bool, bool)
 }
 
 // CompactionPoint returns the operator's compaction point for a model, in billed input tokens.
-// ok=false when the entry states none, so the bootstrap table of internal/compactionpoint answers.
+// ok=false when the entry states none, so the bootstrap table of compactionpoint answers.
 func (t *Table) CompactionPoint(_ context.Context, model string) (int, bool) {
 	e, ok := t.lookup(model)
 	if !ok || e.compactionPoint <= 0 {

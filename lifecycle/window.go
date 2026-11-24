@@ -3,7 +3,7 @@ package lifecycle
 import (
 	"context"
 
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -23,7 +23,7 @@ func ResolveWindow(ctx context.Context, r modelinfo.Resolver, model string) (win
 }
 
 // ResolveCompactionPoint is C for a model: the compaction point the operator states for it, else the
-// built-in table of internal/compactionpoint. window is ResolveWindow's figure.
+// built-in table of compactionpoint. window is ResolveWindow's figure.
 func ResolveCompactionPoint(ctx context.Context, r modelinfo.Resolver, model string, window int) compactionpoint.Point {
 	stated := 0
 	if n, found := modelinfo.OperatorCompactionPoint(r, ctx, model); found {

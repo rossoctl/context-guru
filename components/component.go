@@ -682,7 +682,7 @@ type Ctx struct {
 	//
 	// Measured in the same units as PrevBilledInput and CtxWindow: provider-billed input. Never the
 	// client's own token count, which for one real request read ~168,000 where the provider billed
-	// 199,184 — the same event in a different ruler. See internal/compactionpoint.
+	// 199,184 — the same event in a different ruler. See compactionpoint.
 	CompactionPoint int
 	// CompactionPointSource says where CompactionPoint came from: observed on real traffic, assumed
 	// from reported behaviour, set by the user's own client setting ("configured"), the client's own verified default ("client_default"), stated by the operator per model ("operator"), or fallen back to the window. Carried so a decision made on a guess

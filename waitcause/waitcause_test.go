@@ -491,7 +491,7 @@ func TestObserveWakeCauseAskHumanExceptionBehindTrailingSystemNoise(t *testing.T
 
 // --- a sibling block beside a tool_result in the SAME wire message (issue #457/PR #460:
 // apply.normalize used to drop these; it now splits them into a synthetic role=user message,
-// in wire order, which is what internal/waitcause now reads via apply.NormalizeMessages) ---
+// in wire order, which is what waitcause now reads via apply.NormalizeMessages) ---
 
 func TestObserveWakeCauseHumanBesideAToolResultSibling(t *testing.T) {
 	tr := New()

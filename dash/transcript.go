@@ -9,7 +9,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/providerusage"
 )
 
 // Reading Claude Code's own session transcripts (~/.claude/projects/<encoded-cwd>/<session>.jsonl).

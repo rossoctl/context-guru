@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/respfacts"
 )
 
 // A whole response reaches Usage with the parameters, unless the window was spliced.

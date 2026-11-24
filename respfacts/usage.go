@@ -9,7 +9,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/providerusage"
 )
 
 // Miss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -59,13 +59,13 @@ func (m Miss) String() string {
 // provider that legitimately said nothing. The two benign cases must never share a counter with
 // these, or the number an operator watches to confirm accounting is healthy is incremented by it
 // being broken.
-func (m Miss) Alertable() bool {
+func (m Miss) alertable() bool {
 	_, ok := usageCounters[m]
 	return ok
 }
 
 // usageCounters is the SINGLE SOURCE OF TRUTH for which reasons are alertable and which counter each
-// one moves. Alertable() derives from it and Read increments through it, so the two
+// one moves. alertable() derives from it and Read increments through it, so the two
 // cannot drift.
 //
 // They were two independent lists — a predicate and a switch — and that is the same "two labels, one

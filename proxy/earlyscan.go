@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The early wait-cause scan (#1225, #1227).

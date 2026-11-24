@@ -104,7 +104,7 @@ type reqInfo struct {
 	// mechanism acts, which is the denominator a fill fraction belongs over rather than the window.
 	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "window_fallback", carried so a
 	// decision made on a guess is distinguishable from one made on a measurement.
-	// See internal/compactionpoint.
+	// See compactionpoint.
 	compactionPoint       int
 	compactionPointSource string
 	// rates are the request model's per-token rates, so a component that calls that same

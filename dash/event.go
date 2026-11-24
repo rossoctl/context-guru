@@ -7,8 +7,8 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/reqfacts"
 	"github.com/rossoctl/context-guru/internal/tokens"
+	"github.com/rossoctl/context-guru/reqfacts"
 )
 
 // Token-accounting honesty levels. A request is only `complete` when the provider
@@ -179,7 +179,7 @@ type Event struct {
 	AliasFn func() string `json:"-"`
 	// Issue #424's RECORD half: why this thread is about to wait, and why it woke up — read
 	// from the request body and the response's own tool calls/stop reason, by string match
-	// and structural tool_use reads, no LLM. See internal/waitcause, which defines every
+	// and structural tool_use reads, no LLM. See waitcause, which defines every
 	// value and never guesses: a signal this proxy's client (Claude Code) does not send, or
 	// another agent/provider entirely, reads "unknown" rather than a label chosen for it.
 	// This package NEVER reads these columns to choose a keep-alive ping budget or change
@@ -633,7 +633,7 @@ type Event struct {
 }
 
 // Meta is the request's own metadata and the stop reason. The type lives in
-// internal/reqfacts, which reads it off a request body. dash stores it.
+// reqfacts, which reads it off a request body. dash stores it.
 type Meta = reqfacts.Meta
 
 // StopTimeoutEstimated is the stop_reason of a keep-alive ping row that ran to the keeper's ping

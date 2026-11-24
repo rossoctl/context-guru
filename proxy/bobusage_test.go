@@ -10,9 +10,9 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/providerusage"
-	"github.com/rossoctl/context-guru/internal/respfacts"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/providerusage"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
