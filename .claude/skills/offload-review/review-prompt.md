@@ -38,6 +38,12 @@ cannot read something, say so in the review and use `Verdict: blocking`.
   file under `docs/data-dependence/` and rebuild `docs/data-dependence.md` with
   `go run ./cmd/gen-datadep`. A hand edit to the generated page, or a page that differs from the
   row files, is a finding. Read the row for a change of Kind or of a level, as `CLAUDE.md` says.
+- **Host boundary.** `proxy/`, `proxyapp/`, `cmd/context-guru-proxy` and `dash/` are host
+  packages. New business logic in a host package is a blocking finding. Business logic is code
+  that Cortex would have to copy to behave the same: a decision, a threshold or default, cost or
+  savings math, or reading a provider wire format for meaning. See `CLAUDE.md`, *What goes in
+  the proxy*. It is not a finding when the PR says why the code cannot live in a library package.
+  A copy of a library constant or rule in a host package is always a finding.
 - Report real defects: wrong behavior, data loss, a broken fail-open path, a missing test for
   new behavior, a security problem.
 - Leave out style nitpicks. If a small point is worth noting, put it under "Non-blocking".
