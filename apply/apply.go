@@ -919,7 +919,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
 		}
-		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0
+		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 		if ok {
 			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
