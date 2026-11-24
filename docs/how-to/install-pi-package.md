@@ -40,6 +40,7 @@ curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/ins
 ```
 
 npm installs Pi from `https://registry.npmjs.org/`. Set `CG_PI_NPM_REGISTRY` to use another registry.
+When npm cannot read the registry and Pi is already installed, the installer keeps that Pi and goes on.
 
 ## Install by hand
 

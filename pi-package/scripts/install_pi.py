@@ -196,7 +196,15 @@ class Installer:
         installed = None
         if self.shell.which("pi"):
             installed = self.shell.run(["pi", "--version"]).stdout.strip()
-        latest = self.latest_pi()
+        try:
+            latest = self.latest_pi()
+        except Stop as stop:
+            if not installed:
+                raise
+            # Nothing needs npm here: a registry that fails (E401, a blocked network) must not block an installed Pi.
+            self.terminal.say(f"The installer cannot check for a newer Pi: {str(stop).removesuffix(' Nothing was changed.')}")
+            self.terminal.say(f"Pi {installed} stays.")
+            return
         if installed and version_tuple(installed) and version_tuple(installed) >= version_tuple(latest):
             self.terminal.say(f"Pi {installed} is installed.")
             return

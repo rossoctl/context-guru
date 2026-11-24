@@ -45,6 +45,7 @@ class FakeShell:
         self.test, self.calls = test, []
         self.node, self.pi_version, self.latest = "v24.2.0", "1.5.2", "1.6.0"
         self.npm_install_error = None
+        self.npm_view_error = None
         self.setup_results = ["routed"]
         self.plan = "planned"
         self.plan_preset, self.plan_strategy, self.restore = "off", "auto", "restored"
@@ -64,6 +65,8 @@ class FakeShell:
         if cmd[:2] == ["pi", "--version"]:
             return ok(self.pi_version + "\n")
         if cmd[:2] == ["npm", "view"]:
+            if self.npm_view_error:
+                return subprocess.CompletedProcess(cmd, 1, "", self.npm_view_error)
             return ok(self.latest + "\n")
         if cmd[:2] == ["npm", "uninstall"]:
             self.pi_version = None
@@ -259,6 +262,25 @@ class PiItself(Sandbox):
         with mock.patch.dict(os.environ, {"CG_PI_NPM_REGISTRY": "https://npm.example.com/"}):
             self.install(answers=["y"])
         self.assertIn("--registry=https://npm.example.com/", self.shell.ran("npm", "view")[0])
+
+    def test_a_registry_that_fails_keeps_an_installed_pi_and_goes_on(self):
+        self.shell.npm_view_error = "npm error code E401\nnpm error Unable to authenticate"
+        code, terminal = self.install()
+        printed = self.everything_printed(terminal)
+        self.assertIn("cannot check for a newer Pi", printed)
+        self.assertIn("E401", printed)
+        self.assertIn("CG_PI_NPM_REGISTRY", printed)
+        self.assertIn("Pi 1.5.2 stays.", printed)
+        self.assertEqual(self.shell.ran("npm", "install"), [])
+        self.assertEqual(len(self.shell.ran("pi", "install")), 1)  # the install went on to the package step
+
+    def test_a_registry_that_fails_with_no_pi_stops_and_changes_nothing(self):
+        self.shell.pi_version, self.shell.npm_view_error = None, "npm error code E401"
+        code, terminal = self.install()
+        self.assertEqual(code, 1)
+        self.assertIn("CG_PI_NPM_REGISTRY", self.everything_printed(terminal))
+        self.assertIn("Nothing was changed.", self.everything_printed(terminal))
+        self.assertEqual(self.shell.ran("pi", "install"), [])
 
     def test_an_npm_error_stops_with_its_message_and_never_uses_sudo(self):
         self.shell.npm_install_error = "npm error code EACCES\nnpm error path /usr/local/lib/node_modules"
