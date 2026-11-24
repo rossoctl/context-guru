@@ -37,11 +37,11 @@ func deferSettings(doc string) (c deferConf, ok bool, reason string) {
 	if !ok {
 		return deferConf{}, false, reason
 	}
-	return deferConf{on: docDefers(doc), keep: keep, always: always}, true, ""
+	return deferConf{on: tooldefer.DocOn(doc), keep: keep, always: always}, true, ""
 }
 
 // editDefer is doc with toolfilter's `defer`, `keep` and `always_defer` rewritten by edit
-// (config.EditToolfilterDefer). Whether the document defers now is docDefers' answer.
+// (config.EditToolfilterDefer). Whether the document defers now is tooldefer.DocOn's answer.
 func editDefer(current string, edit func(deferConf) deferConf) (string, error) {
 	c, _, _ := deferSettings(current)
 	doc, err := config.EditToolfilterDefer(current, c.on, func(d config.ToolfilterDefer) config.ToolfilterDefer {
