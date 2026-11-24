@@ -32,27 +32,7 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | [`cache_aware_summarizer`](components/advanced-offload.md#cache_aware_summarizer) | Offload (LLM) | the middle of the transcript → one summary, but the summarizer CALL reuses the conversation's own prefix instead of rebuilding a prompt. [Two ways to use `trigger.cache_state`](components/advanced-offload.md#two-ways-to-use-cache_state) | via expand | long trajectories on a prefix-caching backend; needs a `MessagesModel` or (Anthropic traffic) a prior request to reuse, and **declines without either** | `keep_last_turns` (10), `instruction_role` (auto), `model_id`, `min_tokens` (500), `resummarize_tokens` (6000), `refresh_cost` (extra), `profiles_path`, `model.source`, `trigger` |
 | [`agentdiet`](components/advanced-offload.md#agentdiet) | Offload (LLM) | useless/redundant/**expired** content in the step that just aged past the delay | via expand | a step above `min_step_tokens`, `delay_steps` turns back | `delay_steps` (2), `context_steps` (1), `min_step_tokens` (500), `min_saved_tokens` (400), `max_keep_ratio` (0.8), `model.source` |
 
-Presets (`config/config.go`), verbatim: **`house`** (the proxy default), **`codesmart`** (the SWE-bench arm)
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]` ·
-**`codesafe`**
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit]`
-(deterministic-only) · `off` `[]` · `safe` `[format, textclean, searchfold, cachesplit]` · `balanced`
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap, cachesplit]` · `aggressive`
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, linecap, cachesplit]` ·
-`coding` `[format, textclean, searchfold, dedup, cmdfilter, extract, linecap, cachesplit]` ·
-`mcp` `[format, textclean, smartcrush, cachesplit]` ·
-**`agent`** `[format, textclean, searchfold, dedup, failed_run, mask, extract, extract_llm, cachesplit]` —
-for long agentic sessions; `mask` is the biggest lever there (~27–30% content-token savings, no reward
-loss — see [RESULTS.md](RESULTS.md)) ·
-**`general`**
-`[format, textclean, searchfold, dedup, failed_run, cmdfilter, mask, extract, extract_llm, collapse, linecap, cachesplit]`
-— the recommended all-round pipeline: the reward-neutral levers of `agent` plus the situational
-shrinkers (`cmdfilter`/`linecap`/`collapse`) that cost nothing when they don't fire. `balanced` is
-**not** recommended for agentic traffic — it omits `mask`, so it barely helps (6% vs 31% in the
-Terminal-Bench replay) ·
-`summarize` `[summarize]` (run alone — it restructures the whole transcript) ·
-`agentdiet` `[format, agentdiet, cachesplit]` (a published-method **baseline** for A/B, run without
-our own offloaders so its effect is attributable — see [agentdiet](components/advanced-offload.md)).
+Six presets are current: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. The other 15 are obsolete. They still load, and the [preset reference](reference/presets.md) lists every pipeline, verbatim.
 
 **The lossless trio leads every working preset** (`mcp` takes only `format` + `textclean` — it
 serves JSON list endpoints with no search output to fold). `format`, `textclean` and `searchfold` all

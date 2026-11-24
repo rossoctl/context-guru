@@ -28,7 +28,7 @@ have achieved. Read the `potential_*` numbers, then switch the same config to `s
     or on the proxy binary, which wins over the file:
 
     ```sh
-    context-guru-proxy --preset codesmart --mode observe
+    context-guru-proxy --preset conservative --mode observe
     ```
 
 2. Run your agent against the proxy as usual.
