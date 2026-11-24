@@ -316,6 +316,13 @@ func TestFinishObserveWritesTheShadowStore(t *testing.T) {
 	if billedOf(live, store.BilledPrefix+"sid") != "" {
 		t.Error("the live store must stay clean in observe mode")
 	}
+	// Without an ObserveThread the shadow thread record falls back to Fin.ThreadID.
+	shadow3 := newStore()
+	Finish(Fin{Store: live, Shadow: shadow3, Mode: components.ModeObserve, ThreadID: "fallback", UsageOK: true, Billed: 9,
+		ObserveSession: func() string { return "sid" }})
+	if billedOf(shadow3, store.BilledThreadPrefix+thread.Key("sid", "fallback")) != "9" {
+		t.Error("with no ObserveThread the shadow thread record must use Fin.ThreadID")
+	}
 	// An enforcing request never writes the shadow store.
 	shadow2 := newStore()
 	Finish(Fin{Store: live, Shadow: shadow2, Mode: components.ModeSync, Session: "s", ThreadID: "m", UsageOK: true, Billed: 1,
