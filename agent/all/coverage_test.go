@@ -16,7 +16,8 @@ import (
 const coverageDoc = "../../docs/client-coverage.md"
 
 // pendingRows are clients that have a row but no registered agent yet.
-// TODO(#1312): remove an entry when its agent package registers. Then an unregistered row fails.
+// agent/codex exists but is a helper, not a registered agent. TODO(#1312, #1331): remove an entry
+// when its agent registers. Then an unregistered row fails.
 var pendingRows = map[string]bool{
 	"claude code": true,
 	"codex":       true,
