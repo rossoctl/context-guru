@@ -44,7 +44,8 @@ class FakeShell:
 
     def __init__(self):
         self.calls = []
-        self.opencode = "1.19.5"
+        self.opencode, self.latest = "1.19.6", "1.19.6"
+        self.npm_view_error = None
         self.has_npm = True
         self.npm_install_error = None
         self.proxy = "up"
@@ -66,6 +67,10 @@ class FakeShell:
 
         if cmd[:2] == ["opencode", "--version"]:
             return ok((self.opencode_version_text or self.opencode) + "\n")
+        if cmd[:2] == ["npm", "view"]:
+            if self.npm_view_error:
+                return subprocess.CompletedProcess(cmd, 1, "", self.npm_view_error)
+            return ok(self.latest + "\n")
         if cmd[:2] == ["npm", "install"]:
             if self.npm_install_error:
                 return subprocess.CompletedProcess(cmd, 1, "", self.npm_install_error)
@@ -210,14 +215,18 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(json.loads(backup.read_text()), {"plugin": ["opencode-foo"]})
 
     # ------------------------------------------------------------------------------ OpenCode
-    def test_installs_the_tested_opencode_when_missing_after_a_yes(self):
+    def npm_installs(self):
+        return [call for call in self.npm_calls() if call[1] == "install"]
+
+    def test_installs_the_latest_opencode_when_missing_after_a_yes(self):
         self.shell.opencode = None
 
         code = self.installer("y", "y", "n").install()
 
         self.assertEqual(code, 0)
-        self.assertEqual(self.npm_calls(), [["npm", "install", "-g", "--registry=https://registry.npmjs.org/",
-                                             "opencode-ai@1.19.5"]])
+        self.assertEqual(self.npm_calls(), [
+            ["npm", "view", "opencode-ai", "version", "--registry=https://registry.npmjs.org/"],
+            ["npm", "install", "-g", "--registry=https://registry.npmjs.org/", "opencode-ai@1.19.6"]])
         self.assertTrue(json.loads((install_opencode.state_root() / "installer.json").read_text())
                         ["opencode_installed"])
 
@@ -227,7 +236,7 @@ class InstallerTest(unittest.TestCase):
         code = self.installer("n").install()
 
         self.assertEqual(code, 1)
-        self.assertEqual(self.npm_calls(), [])
+        self.assertEqual(self.npm_installs(), [])
         self.assertFalse(self.config.exists())
 
     def test_missing_opencode_and_no_npm_names_the_install_page(self):
@@ -237,6 +246,25 @@ class InstallerTest(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("https://opencode.ai/docs", self.terminal.text())
+
+    def test_an_installed_opencode_without_npm_stays(self):
+        self.shell.opencode, self.shell.has_npm = "1.19.5", False
+
+        code = self.installer("y", "n").install()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.npm_calls(), [])
+        self.assertIn("OpenCode 1.19.5 is installed", self.terminal.text())
+
+    def test_npm_that_cannot_read_the_latest_version_names_the_registry_setting(self):
+        self.shell.npm_view_error = "E401 Unable to authenticate"
+
+        code = self.installer().install()
+
+        self.assertEqual(code, 1)
+        self.assertIn("E401 Unable to authenticate", self.terminal.text())
+        self.assertIn("CG_OC_NPM_REGISTRY", self.terminal.text())
+        self.assertFalse(self.config.exists())
 
     def test_an_npm_failure_shows_npms_message_and_never_uses_sudo(self):
         self.shell.opencode, self.shell.npm_install_error = None, "EACCES: permission denied"
@@ -248,31 +276,67 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn("sudo", [arg for call in self.shell.calls for arg in call])
         self.assertFalse(self.config.exists())
 
-    def test_too_old_opencode_is_updated_after_a_yes(self):
-        self.shell.opencode = "1.17.0"
+    def test_an_older_opencode_is_updated_to_the_latest_after_a_yes(self):
+        self.shell.opencode = "1.19.5"
 
         self.installer("y", "y", "n").install()
 
-        self.assertEqual(self.npm_calls()[0][-1], "opencode-ai@1.19.5")
+        self.assertEqual(self.npm_installs()[0][-1], "opencode-ai@1.19.6")
         record = json.loads((install_opencode.state_root() / "installer.json").read_text())
         self.assertNotIn("opencode_installed", record)  # it was there before: uninstall must not offer to remove it
 
-    def test_too_old_opencode_kept_stops_the_install(self):
+    def test_no_to_the_update_keeps_a_supported_opencode(self):
+        self.shell.opencode = "1.19.5"
+
+        code = self.installer("n", "y", "n").install()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.npm_installs(), [])
+        self.assertIn("OpenCode 1.19.5 stays", self.terminal.text())
+
+    def test_no_to_the_update_of_a_too_old_opencode_stops_the_install(self):
         self.shell.opencode = "1.17.0"
 
         code = self.installer("n").install()
 
         self.assertEqual(code, 1)
         self.assertIn("1.18.29", self.terminal.text())
+        self.assertFalse(self.config.exists())
 
-    def test_a_newer_untested_opencode_stays_with_a_note(self):
-        self.shell.opencode = "1.19.6"
-
+    def test_the_latest_opencode_stays_and_names_the_tested_version(self):
         code = self.installer("y", "n").install()
 
         self.assertEqual(code, 0)
-        self.assertEqual(self.npm_calls(), [])
+        self.assertEqual(self.npm_installs(), [])
+        self.assertIn("OpenCode 1.19.6 is installed", self.terminal.text())
         self.assertIn("tested on OpenCode 1.19.5", self.terminal.text())
+
+    def test_a_newer_pre_release_is_never_downgraded(self):
+        self.shell.opencode = "1.20.0-beta.1"
+
+        code = self.installer("y", "n").install()  # no OpenCode question
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.npm_installs(), [])
+        self.assertIn("OpenCode 1.20.0 is installed", self.terminal.text())
+
+    def test_an_opencode_whose_version_cannot_be_read_stays_after_a_yes(self):
+        self.shell.opencode_version_text = "opencode dev build"
+
+        code = self.installer("y", "y", "n").install()  # go on with it, consent, no test prompt
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.npm_installs(), [])
+        self.assertIn("cannot read the version", self.terminal.text())
+        self.assertNotIn("opencode_installed", json.loads(install_opencode.record_path().read_text()))
+
+    def test_an_opencode_whose_version_cannot_be_read_and_a_no_stops(self):
+        self.shell.opencode_version_text = "opencode dev build"
+
+        code = self.installer("n").install()
+
+        self.assertEqual(code, 1)
+        self.assertFalse(self.config.exists())
 
     # -------------------------------------------------------------------------- test prompt
     def test_test_prompt_reports_the_proxy_up(self):
@@ -319,15 +383,6 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("still runs OpenCode 1.17.0", self.terminal.text())
         self.assertIn("/usr/local/bin/opencode", self.terminal.text())
         self.assertFalse(self.config.exists())
-
-    def test_an_opencode_whose_version_cannot_be_read_is_not_taken_as_missing(self):
-        self.shell.opencode_version_text = "opencode dev build"
-
-        code = self.installer("y").install()  # the update question
-
-        self.assertEqual(code, 1)  # the new version cannot be read either, so it stops
-        record = install_opencode.record_path()
-        self.assertFalse(record.exists() and "opencode_installed" in json.loads(record.read_text()))
 
     def test_carried_options_with_a_preset_change_the_consent_text(self):
         clone = Path(self.home.name) / "src/opencode-plugin"
@@ -396,7 +451,7 @@ class InstallerTest(unittest.TestCase):
 
         self.installer("y").uninstall()  # one question only: the local data
 
-        self.assertEqual(self.npm_calls(), [])
+        self.assertEqual([call for call in self.npm_calls() if call[1] == "uninstall"], [])
 
     def test_uninstall_with_a_jsonc_file_still_stops_proxies_and_removes_the_copy(self):
         self.installer("y", "n").install()

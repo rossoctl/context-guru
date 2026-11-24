@@ -21,8 +21,9 @@ curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/ins
 
 It asks before each change:
 
-1. **OpenCode:** it installs OpenCode 1.19.5 (the tested version) with npm if OpenCode is missing, or updates
-   it if it is older than 1.18.29. A newer OpenCode stays. It never uses `sudo`.
+1. **OpenCode:** it installs the latest OpenCode with npm if OpenCode is missing, or updates it if it is
+   older than the latest release, as the Pi installer does for Pi. It never uses `sudo`. The plugin is tested
+   on 1.19.5 only; the installer says so for another version.
 2. **Your consent:** it says what turns on, and asks once.
 3. **The plugin:** it installs the release's plugin, checked by SHA-256, at
    `~/.local/share/context-guru-opencode/plugin/`. It adds it to the global `opencode.json` and `tui.json`,
@@ -38,8 +39,7 @@ To remove it, run the command below. It stops the proxies, removes every entry o
 curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash -s uninstall
 ```
 
-npm installs OpenCode from `https://registry.npmjs.org/`. Set `CG_OC_NPM_REGISTRY` to use another registry,
-and `CG_OC_OPENCODE_VERSION` to install another OpenCode version.
+npm installs OpenCode from `https://registry.npmjs.org/`. Set `CG_OC_NPM_REGISTRY` to use another registry.
 
 ## Install by hand
 

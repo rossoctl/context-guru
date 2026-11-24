@@ -25,7 +25,8 @@ two copies of the plugin load.
 
 In scope:
 - macOS and Linux. A bash bootstrap and a Python installer, as for Pi.
-- OpenCode: install it when it is missing, or update it when it is older than the plugin supports. Each change
+- OpenCode: install the latest when it is missing, or update it when it is older than the latest, as the Pi
+  installer does for Pi. Each change
   needs a yes.
 - The plugin from the release, checked by SHA-256, at one stable path.
 - The global `opencode.json` (`index.js`) and `tui.json` (`tui.js`) entries.
@@ -47,15 +48,19 @@ Out of scope:
 ## OpenCode versions
 
 - The plugin needs OpenCode **1.18.29** or later (the v1 `server()` export). It is tested on **1.19.5** only.
-- npm's latest is 1.19.6 today. The installer installs the **tested** version, 1.19.5, not the latest.
-  `CG_OC_OPENCODE_VERSION` overrides it.
-- Missing: ask "Install OpenCode 1.19.5?". Older than 1.18.29: ask "Update OpenCode <old> to 1.19.5?"; no stops
-  (the plugin cannot load). 1.18.29 or later: keep it. When it is not 1.19.5, say that it is not tested.
+- The installer installs the **latest** OpenCode, the same concept as the Pi installer (owner's decision,
+  2026-11-24). `<latest>` comes from `npm view opencode-ai version --registry <registry>`. When the installed
+  OpenCode is not 1.19.5, the installer says that the plugin is tested on 1.19.5 only.
+- Missing: ask "Install OpenCode <latest>?"; no stops. Older than `<latest>`: ask "Update OpenCode <old> to
+  <latest>?". No keeps it when it is 1.18.29 or later, and stops when it is older (the plugin cannot load).
+- A pre-release counts as its release: `1.20.0-beta.1` is 1.20.0, so it is never downgraded.
+- A version the installer cannot read (a dev build): it never offers npm, which could downgrade it. It asks "Go
+  on with this OpenCode?".
+- No npm: an OpenCode of 1.18.29 or later stays. Else stop, and name OpenCode's own install page.
 - After npm, run `opencode --version` again. When `opencode` is not on `PATH`, or an older one comes first
   (Homebrew, `~/.opencode/bin`), stop before the consent step and name it.
 - Install with `npm install -g opencode-ai@<version> --registry <registry>`. `<registry>` is
   `https://registry.npmjs.org/` by default; `CG_OC_NPM_REGISTRY` overrides it. Never `sudo`.
-- No npm: stop, and name OpenCode's own install page.
 
 ## Files
 
@@ -139,4 +144,5 @@ Out of scope:
 
 ## Open points
 
-- The tested version (1.19.5) is a pin in the installer. A test of a new OpenCode version must update it.
+- The latest OpenCode can be untested with the plugin. The installer says so. A test of a new OpenCode version
+  updates `TESTED_OPENCODE`.

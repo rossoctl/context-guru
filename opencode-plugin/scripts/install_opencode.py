@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,7 +20,7 @@ import sys
 import tempfile
 
 OPENCODE_NPM = "opencode-ai"
-TESTED_OPENCODE = "1.19.5"
+TESTED_OPENCODE = "1.19.5"  # only named in a note: the installer installs the latest, as the Pi installer does
 MIN_OPENCODE = (1, 18, 29)  # the first release that calls the plugin's v1 server() export
 PUBLIC_REGISTRY = "https://registry.npmjs.org/"
 INSTALL_PAGE = "https://opencode.ai/docs"
@@ -61,11 +62,12 @@ def backup_dir():
 
 
 def version_tuple(text):
-    """(major, minor, patch) from `1.19.5` or `opencode 1.19.5`; None when there is no version."""
+    """(major, minor, patch) from `1.19.5`, `opencode v1.19.5` or `1.20.0-beta.1` (a suffix is ignored, so a
+    pre-release counts as its release); None when there is no version."""
     for word in text.split():
-        parts = word.lstrip("v").split(".")
-        if len(parts) == 3 and all(part.isdigit() for part in parts):
-            return tuple(int(part) for part in parts)
+        found = re.match(r"v?(\d+)\.(\d+)\.(\d+)(?![.\d])", word)
+        if found:
+            return tuple(int(part) for part in found.groups())
     return None
 
 
@@ -167,7 +169,6 @@ class Installer:
     def __init__(self, terminal, shell, source, downloaded=False):
         self.terminal, self.shell, self.source, self.downloaded = terminal, shell, Path(source), downloaded
         self.registry = os.environ.get("CG_OC_NPM_REGISTRY") or PUBLIC_REGISTRY
-        self.target = os.environ.get("CG_OC_OPENCODE_VERSION") or TESTED_OPENCODE
         self.steps, self.record = (), {}
 
     # ------------------------------------------------------------------------------- install
@@ -201,6 +202,10 @@ class Installer:
             raise Stop(f"OpenCode reads {jsonc}, and the installer does not change JSONC files.\n{manual_steps()}")
         return {name: load_json(config_dir() / name) for name, _, _ in CONFIGS}
 
+    @staticmethod
+    def tested_note(shown):
+        return "" if shown == TESTED_OPENCODE else f"The plugin is tested on OpenCode {TESTED_OPENCODE} only."
+
     def opencode_version(self):
         """(path of `opencode` on PATH, its version text); (None, None) when it is not on PATH."""
         path = self.shell.which("opencode")
@@ -209,28 +214,49 @@ class Installer:
         version = version_tuple(self.shell.run(["opencode", "--version"]).stdout)
         return path, ".".join(map(str, version)) if version else "of an unknown version"
 
+    def latest_opencode(self):
+        out = self.shell.run(["npm", "view", OPENCODE_NPM, "version", f"--registry={self.registry}"])
+        if out.returncode != 0 or not version_tuple(out.stdout):
+            raise Stop(f"npm cannot read the latest OpenCode version from {self.registry}:\n{out.stderr.strip()}\n"
+                       "To use another registry, set CG_OC_NPM_REGISTRY. Nothing was changed.")
+        return out.stdout.strip()
+
     def ensure_opencode(self):
         path, shown = self.opencode_version()
-        if path and version_tuple(shown) and version_tuple(shown) >= MIN_OPENCODE:
-            note = "" if shown == TESTED_OPENCODE else f" The plugin is tested on OpenCode {TESTED_OPENCODE} only."
-            self.terminal.say(f"OpenCode {shown} is installed.{note}")
+        version = version_tuple(shown) if path else None
+        if path and not version:
+            # A dev build: never offer npm for it, which could replace a newer OpenCode with an older one.
+            self.terminal.say(f"The installer cannot read the version of {path}. The plugin needs OpenCode 1.18.29 "
+                              "or later.")
+            if not self.yes("Go on with this OpenCode?", default=True):
+                raise Stop("Nothing was changed.")
             return
-        installed = path is not None
         if not self.shell.which("npm"):
-            raise Stop(f"OpenCode {'is too old' if installed else 'is not installed'}, and npm is not here to "
-                       f"install it. Install OpenCode {self.target} from {INSTALL_PAGE}, then run this again.")
-        if installed:
-            question = f"The plugin needs OpenCode 1.18.29 or later. Update OpenCode {shown} to {self.target}?"
-        else:
-            question = f"Install OpenCode {self.target} (the version the plugin is tested on)?"
-        if not self.yes(question, default=True):
-            raise Stop("context-guru needs OpenCode 1.18.29 or later. Nothing was changed.")
+            if version and version >= MIN_OPENCODE:
+                self.terminal.say(f"OpenCode {shown} is installed. {self.tested_note(shown)}")
+                return
+            raise Stop(f"OpenCode {'is too old' if path else 'is not installed'}, and npm is not here to install "
+                       f"it. Install the latest OpenCode from {INSTALL_PAGE}, then run this again.")
+        latest = self.latest_opencode()
+        target = ".".join(map(str, version_tuple(latest)))
+        if version and version >= version_tuple(latest):
+            self.terminal.say(f"OpenCode {shown} is installed. {self.tested_note(shown)}")
+            return
+        if path:
+            if not self.yes(f"Update OpenCode {shown} to {target}?", default=True):
+                if version >= MIN_OPENCODE:
+                    self.terminal.say(f"OpenCode {shown} stays.")
+                    return
+                raise Stop("context-guru needs OpenCode 1.18.29 or later. Nothing was changed.")
+        elif not self.yes(f"Install OpenCode {target}?", default=True):
+            raise Stop("context-guru needs OpenCode. Nothing was changed.")
+        self.target = target
         out = self.shell.run(["npm", "install", "-g", f"--registry={self.registry}", f"{OPENCODE_NPM}@{self.target}"])
         if out.returncode != 0:
             raise Stop(f"npm could not install OpenCode:\n{out.stderr.strip()}\n"
                        "If npm cannot write its global folder, fix npm's prefix or install OpenCode yourself. "
                        "To use another registry, set CG_OC_NPM_REGISTRY. This installer never uses sudo.")
-        if not installed:
+        if not path:
             self.record["opencode_installed"] = True
             self.save_record()
         # npm's global bin can be missing from PATH, or come after an older OpenCode (Homebrew, ~/.opencode/bin).
@@ -241,7 +267,7 @@ class Installer:
         if not version_tuple(now_shown) or version_tuple(now_shown) < MIN_OPENCODE:
             raise Stop(f"npm installed OpenCode {self.target}, but `opencode` still runs OpenCode {now_shown} "
                        f"({now}). Remove that one, or put npm's global bin folder first on PATH, then run this again.")
-        self.terminal.say(f"✓ OpenCode {now_shown} {'updated' if installed else 'installed'}.")
+        self.terminal.say(f"✓ OpenCode {now_shown} {'updated' if path else 'installed'}.")
 
     @staticmethod
     def carried_options(document):
