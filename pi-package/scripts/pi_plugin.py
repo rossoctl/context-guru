@@ -153,18 +153,19 @@ WARM_START_SECONDS = 5
 COLD_START_SECONDS = 20
 
 
-def wait_healthy(port, seconds=None):
+def wait_healthy(port, seconds=None, clock=None, sleep=None):
     """True once /healthz answers, checking every 0.1 s until a deadline. Each check gets at most the time
     that is left, so a proxy that accepts but does not answer cannot stretch the wait. A proxy that answers at
-    once adds no wait."""
-    deadline = time.monotonic() + (WARM_START_SECONDS if seconds is None else seconds)
+    once adds no wait. `clock` and `sleep` are for tests."""
+    clock, sleep = clock or time.monotonic, sleep or time.sleep
+    deadline = clock() + (WARM_START_SECONDS if seconds is None else seconds)
     while True:
-        remaining = deadline - time.monotonic()
+        remaining = deadline - clock()
         if remaining <= 0:
             return False
         if healthy(port, timeout=min(1, remaining)):
             return True
-        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        sleep(min(0.1, max(0, deadline - clock())))
 
 
 def first_free_port():

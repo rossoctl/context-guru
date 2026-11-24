@@ -495,11 +495,18 @@ class Restart(Sandbox):
         sleep = mock.patch.object(pi_plugin.time, "sleep")
         sleep.start()
         self.addCleanup(sleep.stop)
-        # wait_healthy stops at a real-clock deadline; with sleep mocked it would spin for the full 5 s.
-        # The lock tests here need the real clock, so only the wait is made short.
-        short = mock.patch.object(pi_plugin, "WARM_START_SECONDS", 0.05)
-        short.start()
-        self.addCleanup(short.stop)
+        # The lock tests here need the real clock, so only wait_healthy gets a fake one: each sleep moves it.
+        real_wait = pi_plugin.wait_healthy
+
+        def fake_clock_wait(port, seconds=None):
+            now = [0.0]
+
+            def sleep(s):
+                now[0] += s
+            return real_wait(port, seconds, clock=lambda: now[0], sleep=sleep)
+        wait = mock.patch.object(pi_plugin, "wait_healthy", side_effect=fake_clock_wait)
+        wait.start()
+        self.addCleanup(wait.stop)
 
     def restart(self, kind, healthy):
         with mock.patch.object(pi_plugin, "service_kind", return_value=kind), \
@@ -971,6 +978,7 @@ class ConfigByName(Sandbox):
 
         def start(executable, port, upstreams=None, cold_start=False):
             seen["config"] = pi_plugin.proxy_config().read_text()
+            seen["cold_start"] = cold_start
             return True
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"), \
                 mock.patch.object(pi_plugin, "binary_version_text", return_value="0.7.0"), \
@@ -979,6 +987,7 @@ class ConfigByName(Sandbox):
                 mock.patch.object(pi_plugin, "start_service", side_effect=start):
             code, facts = self.run_main("update", "--install")
         self.assertEqual((code, facts["result"], facts["config"], facts["restart"]), (0, "updated", "rendered", "completed"))
+        self.assertTrue(seen["cold_start"])  # a new binary is a cold start: it gets 20 s (#1288)
         self.assertEqual(asked, [new])
         self.assertIn("preset: medium\n", seen["config"])
         self.assertIn("  strategy: auto\n", seen["config"])
