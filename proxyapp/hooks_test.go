@@ -1,20 +1,14 @@
 package proxyapp
 
 import (
-	"bytes"
-	"context"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/proxy"
@@ -173,71 +167,32 @@ func bootAndGetOnce(t *testing.T, env []string, paths []string) (string, map[str
 	addr := ln.Addr().String()
 	_ = ln.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0]) //nolint:gosec // the test binary itself
-	cmd.Env = append(append(os.Environ(), "CG_TEST_RUN_MAIN=1", "LISTEN_ADDR="+addr), env...)
-	var buf syncBuffer
-	cmd.Stdout, cmd.Stderr = &buf, &buf
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	c := startChild(t, addr, env)
+	// The child owns the port only once it logs its own "listening addr=<addr>" line. A probe that
+	// answers earlier could come from another process that took the freed port.
+	switch c.waitListening(t, "addr="+addr) {
+	case childExited:
+		out := c.buf.String()
+		if strings.Contains(out, "address already in use") {
+			return out, nil, true
+		}
+		t.Fatalf("the proxy exited before it listened on %s:\n%s", addr, out)
+	case childTimedOut:
+		t.Fatalf("the proxy never listened on %s within %v:\n%s", addr, childBound, c.buf.String())
 	}
-	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited) }()
-	defer func() { _ = cmd.Process.Kill(); <-exited }()
 
-	get := func(path string) (probe, error) {
+	get := func(path string) probe {
 		r, err := http.Get("http://" + addr + path)
 		if err != nil {
-			return probe{}, err
+			t.Fatalf("GET %s: %v\n%s", path, err, c.buf.String())
 		}
 		b, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
-		return probe{status: r.StatusCode, body: string(b), header: r.Header}, nil
+		return probe{status: r.StatusCode, body: string(b), header: r.Header}
 	}
 	got := map[string]probe{}
-	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		select {
-		case <-exited:
-			out := buf.String()
-			if strings.Contains(out, "address already in use") {
-				return out, nil, true
-			}
-			t.Fatalf("the proxy exited before it answered on %s:\n%s", addr, out)
-		default:
-		}
-		if p, err := get(paths[0]); err == nil {
-			got[paths[0]] = p
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the proxy never answered on %s:\n%s", addr, buf.String())
-		}
+	for _, path := range paths {
+		got[path] = get(path)
 	}
-	for _, path := range paths[1:] {
-		p, err := get(path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		got[path] = p
-	}
-	return buf.String(), got, false
-}
-
-// syncBuffer is a bytes.Buffer the subprocess's two pipes can write at once.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
+	return c.buf.String(), got, false
 }
