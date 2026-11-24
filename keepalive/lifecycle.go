@@ -153,7 +153,7 @@ func NormalizeSignal(event, kind string) (string, bool) {
 	return kind, signalEvents[event] && signalKinds[kind]
 }
 
-// SignalResult is what ApplyClientSignal did.
+// SignalResult reports what ApplyClientSignal changed for one client event.
 type SignalResult struct {
 	// Applied is true when the event is one the keeper acts on (SessionEnd, or SessionStart with
 	// kind "compact"). It stays true when nothing was live to retire.
