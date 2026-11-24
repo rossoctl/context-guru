@@ -56,13 +56,23 @@ logic there is a copy that a second host (Cortex, bifrost) does not have. Use th
 
 - **When:** before each release. The integrator runs this mode on the host-package diff since the
   last tag: `git diff <last-tag>..origin/main -- proxy proxyapp cmd/context-guru-proxy dash`.
-  A full run reads all host files. The first full run is #1309.
 - **Signs:** a new non-handler function in a host package that decides, scores, prices or parses
   wire format; a constant with a library twin; a comment such as "mirrors X"; a host function that
   calls three or more library functions in a fixed order (that order is a host contract).
 - **Report** each leak like a duplicate: the logic, its `file:line`, the library package it
   belongs in, and whether the library already has a copy that differs.
-- A leak that is already in #1309 or its child issues is not reported again.
+- **Past examples.** Read these to see the shape of a leak:
+  - Keep-alive policy choice: the order of account, strategy, campaign and session override lived
+    only in `proxy/keepalive.go` (`recordTouch`, `resolvePolicyWindows`). `keepalive` got only the
+    final `Policy`.
+  - Calibrated constants: the campaign scoring constants (`cfTC=296.5`, `cfScale=0.948`) and the
+    fidelity miss rates per model family sat in `proxy/predictive.go` and `proxy/adaptreplay.go`.
+  - A copy that differs: `rowFloor` in `proxy/adaptcache.go` gave some waits the 80k floor, where
+    the keeper gives them 20k.
+  - Wire format read for meaning: the accountant's body scan, cache marks and envelope diff lived
+    in `proxy/accountant_*.go`, so the savings figure needed proxy-only code.
+  - A fixed call order: the steps before and after `apply` for each request (inject, repair, defer,
+    then record billed input, resolve the summary, touch the keeper) exist only in `proxy/proxy.go`.
 
 ## Phase 1: find and report
 

@@ -95,8 +95,7 @@ logic goes in a library package.
 6. A PR that adds logic to a host package states why it cannot live in a library package. The
    reviewer checks this.
 
-Known leaks from before this rule are listed in #1309. Do not add to them. When you touch one,
-move it. `offload-review` checks each PR for a new leak, and `refactor-scan` checks each release.
+`offload-review` checks each PR for a new leak, and `refactor-scan` checks each release.
 
 ## Conventions
 
