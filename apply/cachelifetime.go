@@ -57,11 +57,14 @@ func EntryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
 // BilledLifetimeMs is the lifetime of the entry a request tried to read, in ms; 0 when the lifetime is not
 // exact. oneHour is the tier the provider BILLED that entry at, not the tier a request asked for: a one-hour
 // ask billed at five minutes stays five minutes. false (also "unknown") keeps the base lifetime.
-func BilledLifetimeMs(provider bschemas.ModelProvider, model string, oneHour bool) int64 {
+// refreshedOneHour says the last touch was a live free 1-hour ping.
+func BilledLifetimeMs(provider bschemas.ModelProvider, model string, billedOneHour, refreshedOneHour bool) int64 {
 	if _, kind := CacheLifetime(provider, model, nil); kind != CacheLifetimeExact {
 		return 0
 	}
-	return EntryLifetime(CacheFacts{Provider: provider, Model: model, BilledOneHour: oneHour}).Milliseconds()
+	// The entry is at 1 hour when its last write was billed there, or when its last touch was a live free
+	// 1-hour ping (#1350). The host passes the two facts; the rule is here.
+	return EntryLifetime(CacheFacts{Provider: provider, Model: model, BilledOneHour: billedOneHour, LastOneHour: refreshedOneHour}).Milliseconds()
 }
 
 // restartGrace is the restart grace for a thread whose first request after the restart carries
