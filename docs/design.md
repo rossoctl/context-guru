@@ -17,6 +17,7 @@ infrastructure the components sit on.
 | `components/all/` | blank-imports every component so `init()` registrations run |
 | `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
 | `accwire/` | the accountant's reader for each wire (Anthropic Messages and Chat Completions, Responses): hashed body positions, cache-mark breakpoints, envelope operations, slot path to wire position. Chosen once per body by `accwire.For` |
+| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, and the rules for which request books no figure |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |

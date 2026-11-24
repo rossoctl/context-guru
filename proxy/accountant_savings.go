@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/accwire"
 
 	"github.com/rossoctl/context-guru/thinkcount"
@@ -16,7 +17,7 @@ import (
 // of the proxy: a thread's state lives there between requests.
 type savingsTracker struct {
 	trackers *accountant.Trackers
-	siblings *siblingStore // each thread's last forwarded body, for EntryFacts.SharedWarm
+	siblings *accrec.SiblingStore // each thread's last forwarded body, for EntryFacts.SharedWarm
 	// clients holds the hash of each open request's client body, by request, from begin to end.
 	clients sync.Map // *accountant.Request -> clientHash
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
@@ -24,7 +25,7 @@ type savingsTracker struct {
 	// written is the last state file's bytes, for save to skip an unchanged write.
 	written lastSaved
 	// billed1h is the tier each thread's last write was billed at, for accBilledTTL (issue #1078).
-	billed1h *tierStore
+	billed1h *accrec.TierStore
 	// rescueFactsMissing counts priced requests that followed keep-alive pings but found no ping facts.
 	rescueFactsMissing atomic.Int64
 	// thinking holds the token count of each thinking block a response made, by its signature's key, so a block
@@ -79,7 +80,7 @@ func (s *savingsTracker) drop(req *accountant.Request) {
 }
 
 func newSavingsTracker() *savingsTracker {
-	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: newSiblingStore(), billed1h: newTierStore(),
+	return &savingsTracker{trackers: accountant.NewTrackers(), siblings: accrec.NewSiblingStore(), billed1h: accrec.NewTierStore(),
 		thinking: thinkcount.NewTable(0)}
 }
 
@@ -114,7 +115,7 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 	} else {
 		fwd, bps = accwire.For(forwarded).Parse(forwarded, s.thinking.Lookup)
 	}
-	facts.SharedWarm = s.siblings.sharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
+	facts.SharedWarm = s.siblings.SharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)
 	rec := endRecord{Client: client, Forwarded: fwd, Breakpoints: bps}
 	if s.onEnd != nil {
