@@ -302,6 +302,20 @@ substitute kind.
 - **Cortex.** Call `agent.Identify(pctx.Headers)`. When `Client.SessionID` is empty, use the host's own session id (`pctx.SessionID`) as the gap filler.
 - **Library code** (`thread`, the compaction point, `waitcause`) takes the `Client` as a parameter, not a raw User-Agent.
 
+### Readers of the client label
+
+| Reader | Reads | Why |
+|---|---|---|
+| Dashboard request rows (`Event.Agent`, filters) | `Label` (`pi`) | the user wants the harness |
+| Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | `SDK` | `Record.Agent` is also the model feature below: one value |
+| Prediction model, live (`Record.Agent`, `LiveFacts.Agent`, `predictiveDecide`) | `SDK` | its agent feature one-hots `openai` and `asyncopenai`: a provider stand-in |
+| Prediction model, stored rows (`proxy/campaignauto.go`) | `modelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives the old token back |
+| Compaction point (`proxy/compactioncfg.go`) | `Name` | Pi and OpenCode have no setting |
+| Entry point on the row | `Entrypoint` | Pi gets `other` |
+| `dash/kvcache.go` (offline rows) | `Label` | the provider is its own column in the same row |
+
+Rule: logic that depends on the provider reads `SDK` or the provider field, never `Label`. A new reader picks one and adds a row here.
+
 ## Session keying
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
