@@ -42,8 +42,8 @@ type Picker struct {
 // NewPicker is a Picker with no option yet.
 func NewPicker() *Picker { return &Picker{bestNet: math.Inf(-1)} }
 
-// Add scores one option. "never" is a baseline, never the best. Among the adapted options, the one that leads in gateway dollars while the builder's
-// gate disagrees (either way) is named in Disagreement.
+// Add scores one option. "never" is a baseline, never the best.
+// An adapted option that leads in gateway dollars while the builder's gate disagrees, or the reverse, is named in Disagree.
 func (p *Picker) Add(o Option) {
 	if o.Adapted {
 		if realBeats := o.CI[0] > 0; realBeats != o.GatePass && (p.disID == "" || o.Net > p.disNet) {
@@ -71,9 +71,9 @@ type Pick struct {
 	BestID     string
 	BestCI     [2]float64
 	BestDiff   float64
-	GateID     string // the adapted option with the best net that passes the builder's gate; "" when none does
-	GateDiff   float64
-	GateCI     [2]float64
+	GateID     string     // the adapted option with the best net that passes the builder's gate; "" when none does
+	GateDiff   float64    // zero when GateID is ""
+	GateCI     [2]float64 // zero when GateID is ""
 	Disagree   []string
 	summary    string
 	failID     string
