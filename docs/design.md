@@ -319,7 +319,7 @@ time, so it cannot disagree with the store. Each event writes the store record o
 | --- | --- |
 | a free 1-hour ping | `<ms>:1h` |
 | a real request (before the forward) | `<ms>` or, over a standing ping, `<ms>^<pingMs>` (the carry) |
-| an accepted real request | the carry ends: `<ms>` (`apply.ConfirmRealTouch`) |
+| an accepted real request | the carry that request wrote ends: `<ms>` (`apply.ConfirmRealTouch`, by the request's own clock time) |
 | a failed real request | nothing: the carry stays, the ping's hour runs on |
 | a 5-minute touch, a manual press | `<ms>` |
 | a route switch-off | the ping's tier ends, the time stays (`apply.EndTouchTier`) |

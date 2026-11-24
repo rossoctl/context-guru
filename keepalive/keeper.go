@@ -425,11 +425,14 @@ type Record struct {
 	// the host has none, and the touch derives its key from Body, which is right only when the
 	// host sent the transcript unchanged. Tool deferral changes the head, so the proxy sets it.
 	TouchAlias string
-	Provider   bschemas.ModelProvider
-	Endpoint   string // upstream host, passed to Dispatcher.Price
-	Route      string // upstream path
-	Status     int
-	Usage      Usage
+	// TouchAtMs is the time that request wrote under TouchAlias (apply.Trace.TouchAtMs). Record ends only the carry
+	// written at that time (apply.ConfirmRealTouch). 0: the request wrote no clock, and nothing ends.
+	TouchAtMs int64
+	Provider  bschemas.ModelProvider
+	Endpoint  string // upstream host, passed to Dispatcher.Price
+	Route     string // upstream path
+	Status    int
+	Usage     Usage
 	// Cred is an opaque credential id the host computes for the request's provider key; ""
 	// means a server-held key (never subject to the dead-credential mark, only ever the route
 	// breaker). The package scopes it by Key.Tenant itself, so the host passes the bare id with
@@ -884,7 +887,7 @@ func (k *Keeper) Record(r Record) {
 		if alias == "" {
 			alias = apply.TouchAliasFor(r.Key.Tenant, body, r.Provider)
 		}
-		apply.ConfirmRealTouch(r.Store, alias)
+		apply.ConfirmRealTouch(r.Store, alias, r.TouchAtMs)
 	}
 	k.checkOneHourFirstDowngrade(key, r.Provider, r.Endpoint, r.Route, model, body, u, usageOK)
 	if usageOK {

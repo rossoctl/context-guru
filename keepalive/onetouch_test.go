@@ -219,3 +219,29 @@ func TestACostlyRouteShowsNoFreeHourButTheColdCheckKeepsIt(t *testing.T) {
 		t.Error("the cold check lost the hour a rewrite really gave")
 	}
 }
+
+// The 3-way race of #1357 round 4 (#1365), through the real keeper. Request A writes its clock. A ping writes
+// `:1h`. Request C turns it into a carry. A is accepted first and its confirm must leave C's carry. C then fails.
+// All readers must say the ping's hour stands.
+func TestAnEarlierRequestsConfirmLeavesALaterRequestsCarryInTheKeeper(t *testing.T) {
+	r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+	proveRoute(r.k)
+	t0 := r.clock.now()
+	r.request(t0)
+	r.record(t0, "end_turn", onWaitPolicy()) // the thread waits: its ping is due at +4 minutes
+	// A: another thread with the same content head writes its clock BEFORE the ping.
+	r.request(t0.Add(time.Minute))
+	aAlias, aAt := r.alias, r.atMs
+	r.clock.advance(240 * time.Second)
+	r.k.Sweep(r.clock.now())
+	waitPings(t, r.k, 1)               // the free ping writes :1h after A's clock
+	r.request(t0.Add(6 * time.Minute)) // C converts the ping into a carry
+	// A's response arrives first and is accepted: it confirms its OWN clock (aAt).
+	subKey := Key{Tenant: sess1.Tenant, Session: sess1.Session, Thread: "a:2"}
+	r.k.Record(Record{Key: subKey, StartedAt: t0.Add(time.Minute), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+		Route: "/v1/messages", Status: 200, UsageOK: true, Policy: onWaitPolicy(),
+		Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
+		Hold: fakeOf(r.k).hold(subKey), Store: r.st, TouchAlias: aAlias, TouchAtMs: aAt})
+	// C fails: no Record. The ping's hour stands.
+	r.agree(t0.Add(13*time.Minute), true, "after an earlier request's confirm and a failed later request")
+}

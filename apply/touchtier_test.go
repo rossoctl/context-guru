@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,10 +40,10 @@ func runTouches(t *testing.T, provider bschemas.ModelProvider, model string, ste
 	}
 	base := time.Unix(1_700_000_000, 0)
 	run := func(at time.Duration) {
-		BodyOpts(context.Background(), pipe, st, Opts{Provider: provider, Body: body, Tracker: tr,
+		res := BodyOpts(context.Background(), pipe, st, Opts{Provider: provider, Body: body, Tracker: tr,
 			Tenant: "t", Now: base.Add(at)})
-		// The host's Record confirms an accepted request: it ends the carried 1-hour ping.
-		ConfirmRealTouch(st, TouchAliasFor("t", body, provider))
+		// The host's Record confirms an accepted request: it ends the carried 1-hour ping its request wrote.
+		ConfirmRealTouch(st, TouchAliasFor("t", body, provider), res.TouchAtMs)
 	}
 	run(0)
 	cold = nil
@@ -266,11 +267,15 @@ func TestARealRequestCarriesTheOneHourPingUntilConfirmed(t *testing.T) {
 	if got := get(); got != "4000^2000" {
 		t.Fatalf("a second unconfirmed request: %q, want 4000^2000", got)
 	}
-	ConfirmRealTouch(st, "a")
+	ConfirmRealTouch(st, "a", 3000) // the FIRST request's confirm: the carry is the second request's, so it stands
+	if got := get(); got != "4000^2000" {
+		t.Fatalf("an earlier request's confirm changed the record: %q", got)
+	}
+	ConfirmRealTouch(st, "a", 4000)
 	if got := get(); got != "4000" {
 		t.Fatalf("after the confirm: %q, want a plain 4000", got)
 	}
-	ConfirmRealTouch(st, "a") // nothing carried: nothing changes
+	ConfirmRealTouch(st, "a", 4000) // nothing carried: nothing changes
 	if got := get(); got != "4000" {
 		t.Fatalf("a second confirm changed the record: %q", got)
 	}
@@ -375,15 +380,14 @@ func TestConfirmRealTouchLeavesALaterPingsTier(t *testing.T) {
 	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
 	base := time.Unix(1_700_000_000, 0)
 	alias := TouchAliasFor("t", touchTierBody, bschemas.Anthropic)
-	do := func(at time.Duration) {
-		BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
-			Tenant: "t", Now: base.Add(at)})
+	do := func(at time.Duration) int64 {
+		return BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+			Tenant: "t", Now: base.Add(at)}).TouchAtMs
 	}
-	do(0)
-	ConfirmRealTouch(st, alias)
-	do(5 * time.Minute)                                                                                         // a real request starts
+	ConfirmRealTouch(st, alias, do(0))
+	at := do(5 * time.Minute)                                                                                   // a real request starts
 	RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(6*time.Minute).UnixMilli(), true) // a later ping
-	ConfirmRealTouch(st, alias)                                                                                 // the request is accepted
+	ConfirmRealTouch(st, alias, at)                                                                             // the request is accepted
 	if b, _ := st.Get(store.SeenPrefix + alias); string(b) != strconv.FormatInt(base.Add(6*time.Minute).UnixMilli(), 10)+":1h" {
 		t.Fatalf("the confirm changed a later ping's tier: %q", b)
 	}
@@ -403,12 +407,11 @@ func TestTheCarriedPingHasTheColdMarginAndTheLatestClockGuard(t *testing.T) {
 		pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
 		st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
 		base := time.Unix(1_700_000_000, 0)
-		do := func(at time.Duration, bypass bool) {
-			BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
-				Tenant: "t", Now: base.Add(at), Bypass: bypass})
+		do := func(at time.Duration, bypass bool) int64 {
+			return BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+				Tenant: "t", Now: base.Add(at), Bypass: bypass}).TouchAtMs
 		}
-		do(0, false)
-		ConfirmRealTouch(st, TouchAliasFor("t", touchTierBody, bschemas.Anthropic))
+		ConfirmRealTouch(st, TouchAliasFor("t", touchTierBody, bschemas.Anthropic), do(0, false))
 		RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(4*m).UnixMilli(), true)
 		do(6*m, false) // fails: never confirmed, so the ping's hour is carried
 		if bypassAt > 0 {
@@ -426,5 +429,33 @@ func TestTheCarriedPingHasTheColdMarginAndTheLatestClockGuard(t *testing.T) {
 	}
 	if !run(16*m, 8*m) {
 		t.Error("a bypassed request moved the entry to 5 minutes at 8 minutes; the carry still said warm at 16")
+	}
+}
+
+// The 3-way race of #1357 round 4 (#1365). Request A writes its clock. A ping on the same alias writes `:1h`.
+// Request C turns it into a carry. A's response comes first, and its confirm must NOT strip C's carry. C then
+// fails, and the ping's hour must stand: a return 13 minutes after the ping is warm.
+func TestAnEarlierRequestsConfirmLeavesALaterRequestsCarry(t *testing.T) {
+	var cold []bool
+	pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+	base := time.Unix(1_700_000_000, 0)
+	alias := TouchAliasFor("t", touchTierBody, bschemas.Anthropic)
+	do := func(at time.Duration) int64 {
+		return BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+			Tenant: "t", Now: base.Add(at)}).TouchAtMs
+	}
+	a := do(0)                                                                                                  // 1. A writes its clock
+	RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(4*time.Minute).UnixMilli(), true) // 2. the ping
+	do(5 * time.Minute)                                                                                         // 3. C converts it to a carry
+	ConfirmRealTouch(st, alias, a)                                                                              // 4. A is accepted first
+	if b, _ := st.Get(store.SeenPrefix + alias); !strings.Contains(string(b), seenCarrySep) {
+		t.Fatalf("A's confirm stripped C's carry: %q", b)
+	}
+	// 5. C fails: no confirm. 6. The return comes 13 minutes after the start.
+	cold = nil
+	do(13 * time.Minute)
+	if len(cold) != 1 || cold[0] {
+		t.Fatalf("a return 9 minutes after the ping read COLD after C failed: %v", cold)
 	}
 }

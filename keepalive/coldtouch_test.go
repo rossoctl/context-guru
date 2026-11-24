@@ -44,6 +44,7 @@ type coldRig struct {
 	cold  []bool
 	ttl   []int64
 	alias string
+	atMs  int64 // the clock the last real request wrote (apply.Trace.TouchAtMs)
 }
 
 func newColdRig(t *testing.T, usage Usage) *coldRig {
@@ -61,7 +62,7 @@ func (r *coldRig) request(at time.Time) (cold bool, ttl time.Duration) {
 	res := apply.BodyOpts(context.Background(), r.pipe, r.st, apply.Opts{
 		Provider: bschemas.Anthropic, Body: []byte(kaBody), Tracker: r.tr, Now: at, Tenant: "t",
 	})
-	r.alias = res.TouchAlias
+	r.alias, r.atMs = res.TouchAlias, res.TouchAtMs
 	if len(r.cold) == 0 {
 		r.t.Fatal("the pipeline did not run")
 	}
@@ -79,7 +80,7 @@ func (r *coldRig) record(at time.Time, stop string, pol Policy) {
 		}
 		r.k.Record(Record{Key: sess1, StartedAt: when, Body: []byte(kaBody), Provider: bschemas.Anthropic,
 			Route: "/v1/messages", Status: http.StatusOK, Usage: u, UsageOK: true, Policy: pol,
-			ToolUseNames: names, Header: kaHeader(), Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias})
+			ToolUseNames: names, Header: kaHeader(), Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias, TouchAtMs: r.atMs})
 	}
 }
 
@@ -217,7 +218,7 @@ func (r *coldRig) recordStatus(at time.Time, status int) {
 	r.k.Record(Record{Key: sess1, StartedAt: at, Body: []byte(kaBody), Provider: bschemas.Anthropic,
 		Route: "/v1/messages", Status: status, UsageOK: status == 200, Policy: onWaitPolicy(),
 		Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
-		Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias})
+		Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias, TouchAtMs: r.atMs})
 }
 
 // A real request that FAILS touched nothing at the provider, so the ping's hour still runs. Apply wrote the plain

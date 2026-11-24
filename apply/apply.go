@@ -229,6 +229,10 @@ type Trace struct {
 	// body that goes upstream gives another key when the host edits the head (tool deferral).
 	// "" when apply derived none.
 	TouchAlias string
+	// TouchAtMs is the time this request wrote under TouchAlias (the cold clock, before the forward). The host
+	// hands it back to ConfirmRealTouch, so a confirm ends only the carry its OWN request wrote. 0 when this
+	// request wrote no clock (a bypassed one).
+	TouchAtMs int64
 	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
 	Thread         thread.Result
 	ThreadResolved bool
@@ -672,6 +676,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				loadSessionState(st, alias)
 			}
 			seen := aliasSeenState(st, alias, nowMs)
+			tr.TouchAtMs = nowMs // aliasSeenState wrote this request's own clock at nowMs (when st persists)
 			aliasAt := seen.at
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
@@ -1339,11 +1344,15 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 // seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
 const seenCarrySep = "^"
 
-// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that a real request was
-// accepted, so the entry's tier is now that request's own. The time stays. Nothing changes when nothing is
-// carried. The keeper calls it where it ends its own touch.
-func ConfirmRealTouch(st store.Store, alias string) {
-	if st == nil || alias == "" {
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that the real request
+// that wrote the clock at atMs was accepted, so the entry's tier is now that request's own. The time stays.
+//
+// It ends only the carry that request wrote (the value's own time is atMs). Another request on the same alias may
+// have written its clock since, over a ping that came after this request's clock: that carry is not this
+// request's to end, and if that request then fails, the ping's hour must stand (#1365). atMs 0 (this request wrote
+// no clock) ends nothing. The keeper calls it where it ends its own index entry.
+func ConfirmRealTouch(st store.Store, alias string, atMs int64) {
+	if st == nil || alias == "" || atMs <= 0 {
 		return
 	}
 	k := store.SeenPrefix + alias
@@ -1351,7 +1360,7 @@ func ConfirmRealTouch(st store.Store, alias string) {
 		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
 		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
 		// clock, so its `:1h` stays) errs warm only: no cut.
-		if v := parseSeenState(b); v.carriedAt > 0 {
+		if v := parseSeenState(b); v.carriedAt > 0 && v.at == atMs {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
