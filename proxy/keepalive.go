@@ -10,7 +10,6 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/tenant"
@@ -538,51 +537,25 @@ func (k *keeper) resolvePolicy(tn *Tenancy, session string, provider bschemas.Mo
 }
 
 // resolvePolicyWindows is resolvePolicy with the strategy's time windows optionally ignored (#858).
+// The order (account, manager strategy, ignore-windows retry, campaign, session override) is
+// keepalive.Resolve. This host supplies the strategy snapshot, the campaign decision and the armed
+// override, which are its own state.
 func (k *keeper) resolvePolicyWindows(tn *Tenancy, session string, provider bschemas.ModelProvider,
 	pol CachePolicy, pdec predDecision, pdecOK bool, ignoreWindows bool) (CachePolicy, string) {
-	// The manager-controlled strategy layer, resolved once here and generalizing the one
-	// hook the session override already had — see keepalivestrategy.go's applyStrategy.
-	// A matching ACTIVE strategy forces KeepAlive on and replaces Idle/MaxPings/
-	// MinPrefixTokens/MaxUSDPerPing; it sits ABOVE account config and BELOW a session
-	// override, which still wins on top and still cannot widen MaxUSDPerPing.
-	applied := ""
-	if provider != bschemas.OpenAI {
-		account := pol
-		pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), false)
-		// A strategy that matches only because its window was ignored (#858) never displaces an active
-		// campaign: with a campaign and a closed window, the campaign wins, as before #858.
-		if applied == "" && ignoreWindows && !(pdecOK && pdec.active) {
-			pol, applied = k.applyStrategyWindows(tn.ID, account, k.now(), true)
-		}
-		// An ACTIVE campaign decides the ping count unless a manager strategy matched (the more
-		// explicit instruction). The campaign owns the count, so the per-wait plan is off for it (#858).
-		if pdecOK && applied == "" && pdec.active {
-			pol, applied = pdec.apply(pol), campaignStrategyID(pdec.campaign.meta.ID)
-			pol.WaitPlan = false
+	in := keepalive.ResolveInput{TenantID: tn.ID, OpenAI: provider == bschemas.OpenAI, Now: k.now(),
+		IgnoreWindows: ignoreWindows}
+	if !in.OpenAI {
+		in.Strategies = k.strategyList()
+		if pdecOK && pdec.active {
+			in.Campaign = keepalive.CampaignDecision{Active: true, Apply: pdec.apply,
+				Tag: campaignStrategyID(pdec.campaign.meta.ID)}
 		}
 	}
-	// A per-session manual override, if one is armed and unexpired. Everything below reads
-	// `pol` and neither knows nor cares where it came from. An override may switch the
-	// mechanism ON for a session whose account default (or no matching strategy) leaves it
-	// off — that is the point of it, and the arming request is the consent act — but it may
-	// not widen the per-ping cost guard, and it cannot reach around the kill switch or the
-	// no-audit-sink refusal above.
-	// The manager strategy and session override APIs bound Idle to Anthropic's
-	// five-minute lifetime (60–290s). Applying that cadence to a 30-minute
-	// OpenAI cache would buy 6–28 unnecessary pings per useful one. Strategies
-	// remain Anthropic-only; a manual session override uses an OpenAI-specific
-	// cadence and a one-hour credential-hold ceiling instead.
-	if provider != bschemas.OpenAI {
-		pol = k.overrideFor(tn.ID, session, pol)
+	if o, ok := k.activeOverride(tn.ID, session); ok {
+		lo := o.lib()
+		in.Override = &lo
 	}
-	if provider == bschemas.OpenAI {
-		pol.Idle = pol.OpenAIIdle
-		if pol.Idle <= 0 {
-			pol.Idle = modelinfo.OpenAIDefaultKeepAliveIdle
-		}
-		pol = k.overrideForOpenAI(tn.ID, session, pol)
-	}
-	return pol, applied
+	return keepalive.Resolve(pol, in)
 }
 
 // PendingPings reports how many tracked sessions still have a ping scheduled ahead of them.
@@ -701,8 +674,6 @@ func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 			return off
 		}
 		c := tn.Cache
-		pol := keepalive.Policy{WaitPlan: c.WaitPlan, ToolWaitMaxPings: c.ToolWaitMaxPings, ToolWaitMinPrefix: c.ToolWaitMinPrefix, MinPrefixTokens: c.MinPrefixTokens,
-			BackgroundExtraPings: c.BackgroundExtraPings, HumanExtraPings: c.HumanExtraPings, KeepAlive: c.KeepAlive}
 		// With an active campaign the request path does not retry a closed window (resolvePolicyWindows),
 		// so a strategy counts only while its window is open and a closed one falls through to the
 		// campaign. Without one, the window-ignoring lookup stands.
@@ -712,17 +683,11 @@ func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 			campaignOn = pc.meta.Mode == campaignModeActive
 			pc.mu.Unlock()
 		}
+		var strategies []tenant.Strategy
+		now := time.Now()
 		if h.keeper != nil {
-			if best := h.keeper.bestStrategy(tn.ID, h.keeper.now(), !campaignOn); best != nil {
-				if time.Duration(best.IdleSeconds)*time.Second >= 300*time.Second {
-					return off
-				}
-				return pol // a covering strategy decides; the campaign is skipped
-			}
+			strategies, now = h.keeper.strategyList(), h.keeper.now()
 		}
-		if campaignOn {
-			return off
-		}
-		return pol
+		return keepalive.EffectiveWaitPlan(c, strategies, tn.ID, now, campaignOn)
 	}
 }

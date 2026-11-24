@@ -68,6 +68,8 @@ step 6, after the key check.
    - `<latest>` comes from `npm view ... version --registry <registry>`. `<registry>` is
      `https://registry.npmjs.org/` by default: company npm settings can point to a registry without Pi (seen:
      E401). `CG_PI_NPM_REGISTRY` overrides it.
+   - When `npm view` fails and Pi is installed, keep that Pi, show npm's message, and go on. Nothing in that
+     case needs npm.
    - When npm fails on permissions (a global prefix the user cannot write), stop and show npm's message. Never
      run `sudo`.
 3. **Package.** The bootstrap already checked the SHA-256. Copy the package to
@@ -143,7 +145,8 @@ step 6, after the key check.
 | Failure | What the user sees | State after |
 |---|---|---|
 | No Node, or too old | "Install Node.js 22.19 or later from nodejs.org, then run this again." | Nothing changed |
-| npm cannot reach the registry | npm's message, and `CG_PI_NPM_REGISTRY` | Nothing changed |
+| npm cannot reach the registry, no Pi | npm's message, and `CG_PI_NPM_REGISTRY` | Nothing changed |
+| npm cannot reach the registry, Pi installed | npm's message; "Pi <version> stays" | The install goes on |
 | npm needs root | npm's message, and "fix the npm prefix or install Pi yourself" | Nothing changed |
 | Key rejected 3 times | "the key is not accepted at <host>" | Pi installed (if asked), package installed, no connection change |
 | Secret store refuses | its error, without the key | No connection change |

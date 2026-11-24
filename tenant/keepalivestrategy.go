@@ -233,7 +233,7 @@ func (w Window) contains(now time.Time) (bool, error) {
 	// obviously meant to cover. That made
 	// TestKeepAliveStrategyControlRoutesResolveLiveWithNoRestart fail for ONE MINUTE IN 1440: CI
 	// hit 20:59:11Z, which is 23:59 in DefaultStrategyTZ, so mins was 1439 and end was 1439.
-	// campaign.go's tileHours already documented the same hole as "a known, documented gap in
+	// campaign.TileHours (campaign/arms.go) already documented the same hole as "a known, documented gap in
 	// tenant.Window itself".
 	//
 	// Writing 1440 for "24:00" closes it without touching exclusivity: every existing window

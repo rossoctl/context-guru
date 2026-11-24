@@ -1,0 +1,21 @@
+cache:
+  head_ttl_1h: false
+  keepalive: true
+components:
+  extract:
+    min_tokens: 400
+  toolfilter:
+    always_defer:
+      - mcp__pw
+    defer: auto
+    keep:
+      - Read
+      - WebFetch
+    remove:
+      - mcp__ops
+pipeline:
+  - format
+  - dedup
+  - cachesplit
+  - extract
+  - toolfilter

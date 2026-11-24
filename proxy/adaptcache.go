@@ -9,7 +9,6 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,16 +16,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/waitcause"
-	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
 // `/context-guru:adapt cache`: replay keep-alive strategies on the caller's own history and enforce the chosen one as an auto campaign.
 // Design: docs/proposals/adapt-cache.md; the wire shape is the plugin's /context-guru:adapt contract (kind, version, options, recommendation, basis_id).
-// The replay is the closed form the auto builder and the live shadow scorer use (rowFacts.outcome). Every dollar is at the gateway's rates, scale 1;
+// The replay is the closed form the auto builder and the live shadow scorer use (campaign.RowFacts.Outcome). Every dollar is at the gateway's rates, scale 1;
 // engine_usd is the same calibrated to the pinned replay engine, the unit of the builder's gate.
 //
 //	GET  /api/adapt/cache?since=&until= (or days=N; session_end=0)  the report
@@ -86,96 +84,19 @@ func adaptActor(who adaptWho) string {
 	return "local"
 }
 
-// adaptTally is one strategy's replay over a set of rows.
-type adaptTally struct {
-	Net, Engine, Rescue, Ping float64
-	Pings, Rescues            float64 // expected counts
-}
-
-// adaptPlan is a strategy's decision on row i: k pings, x seconds apart, cancelled by SessionEnd or not.
-type adaptPlan func(i int) (k int, x float64, se bool)
-
-// adaptScore replays plan on the rows idx: the totals, and each row's net in gateway dollars (per) and in the builder's units (eng).
-func adaptScore(facts []rowFacts, idx []int, plan adaptPlan, fp *fidParams) (t adaptTally, per, eng []float64) {
-	per, eng = make([]float64, len(idx)), make([]float64, len(idx))
-	for j, i := range idx {
-		f := &facts[i]
-		k, x, se := plan(i)
-		rescue, ping, pings, rescues := f.expected(k, x, se, fp)
-		t.Pings += pings
-		t.Ping += ping
-		t.Rescues += rescues
-		t.Rescue += rescue
-		fired, rescued := f.outcome(k, x, se)
-		ge := -cfPingScale * float64(fired) * f.ping
-		if rescued {
-			ge += cfScale * f.stake
-		}
-		t.Net += rescue - ping
-		t.Engine += ge
-		per[j], eng[j] = rescue-ping, ge
-	}
-	return t, per, eng
-}
-
-// currentPlan replays the caller's own policy as configured now: its live campaign's plan where one is active (rules campaigns only), else the
-// account's keep-alive with its floor, ceiling, first-request skip and predictor gate. SessionEnd counts only if this deployment honours the signal.
-// A manager strategy (time windows) and per-session overrides are not replayed; a model campaign is reported as not replayable.
-func (h *Handler) currentPlan(tn *Tenancy, facts []rowFacts) (adaptPlan, string, bool) {
-	pol := tn.Cache
-	se := clientSignalEnabled()
-	x := pol.Idle.Seconds()
-	if x <= 0 {
-		x = autoX
-	}
+// currentPlan replays the caller's own policy as configured now (campaign.CurrentPlan): the host reads the account's policy, whether this
+// deployment honours SessionEnd, and its live campaign.
+func (h *Handler) currentPlan(tn *Tenancy, facts []campaign.RowFacts) (campaign.Plan, string, bool) {
+	var camp *campaign.Active
 	if pc := h.predRT().forTenant(tn.ID); pc != nil {
 		pc.mu.Lock()
-		spec, active := pc.spec, pc.meta.Mode == campaignModeActive
-		id := pc.meta.ID
+		spec, active, id := pc.spec, pc.meta.Mode == campaignModeActive, pc.meta.ID
 		pc.mu.Unlock()
-		if active && pol.KeepAlive {
-			if spec.Policy.Model != nil {
-				return nil, "active campaign " + id + " runs a model; it cannot be replayed offline", false
-			}
-			return func(i int) (int, float64, bool) {
-				f := &facts[i]
-				ff := predictive.Facts{Family: familyOf(f.model), StopReason: f.stop, Model: f.model, Agent: f.agent, PrefixTok: float64(f.prefix), PingCost: f.ping,
-					HourUTC: float64(f.hour), DowUTC: float64(f.dow)}
-				k, _ := spec.PlanOf(spec.RuleFor(&ff))
-				return k, x, se
-			}, "active campaign " + id, true
+		if active {
+			camp = &campaign.Active{ID: id, Spec: spec}
 		}
 	}
-	if !pol.On() {
-		return func(int) (int, float64, bool) { return 0, 0, false }, "keep-alive off", true
-	}
-	gate, _ := keepalive.PredictorFor(pol.PredictorID)
-	return func(i int) (int, float64, bool) {
-		f := &facts[i]
-		if f.turn < 1 || f.prefix < int64(rowFloor(pol, f)) || f.ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.stop) < pol.PredictorThreshold)) {
-			return 0, x, se
-		}
-		return pol.MaxPings, x, se
-	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens for a main thread that waits for a person (%d otherwise), <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), pol.Ceiling()), true
-}
-
-// rowFloor is the prefix floor the keeper would apply to a replayed row (Policy.WaitMinPrefix). A row
-// has the stop reason, not the wait cause or the tool names: a tool stop is read as a tool wait, any
-// other stop as a wait for a person (80k). A row that waited for background work or a teammate gets 80k
-// here, where the keeper gives it 20k, so the replay under-counts those rows. A row carries no stored
-// cause here, so every tool stop reads as a tool wait (20k). Dash's storedWait differs: it keeps a tool
-// stop with a stored human cause as human. So a main-thread tool stop that asks a person reads as a tool
-// wait here, and the replay can admit a few rows the keeper would refuse.
-// An OpenAI row gets the general floor only: the keeper plans no wait for OpenAI.
-func rowFloor(pol CachePolicy, f *rowFacts) int {
-	if f.openai {
-		return pol.MinPrefixTokens
-	}
-	cause := waitcause.WaitingHuman
-	if slices.Contains(keepalive.ToolStopReasons, f.stop) {
-		cause = waitcause.WaitingOwnTool
-	}
-	return pol.WaitMinPrefix(cause, f.subagent)
+	return campaign.CurrentPlan(tn.Cache, clientSignalEnabled(), camp, facts)
 }
 
 func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {
@@ -227,15 +148,15 @@ func (h *Handler) adaptCacheReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-// adaptLabels names each adapt arm. The ping spacing in the text comes from autoX, the spacing the
+// adaptLabels names each adapt arm. The ping spacing in the text comes from campaign.AutoX, the spacing the
 // arms actually run at, so the text cannot drift from the default again (#719 review).
 var adaptLabels = map[string][2]string{
 	"never": {"No pings", "never keep the cache warm"},
 	"default": {"Default keep-alive", fmt.Sprintf("2 pings %d s apart on prefixes >= 80K tokens, <= $0.50 a ping, "+
-		"none after a thread's first request, stopped by SessionEnd", autoX)},
-	"K1":   {"1 ping, every response", fmt.Sprintf("one ping %d s after every response", autoX)},
-	"K2":   {"2 pings, every response", fmt.Sprintf("two pings %d s apart after every response", autoX)},
-	"K3":   {"3 pings, every response", fmt.Sprintf("three pings %d s apart after every response", autoX)},
+		"none after a thread's first request, stopped by SessionEnd", campaign.AutoX)},
+	"K1":   {"1 ping, every response", fmt.Sprintf("one ping %d s after every response", campaign.AutoX)},
+	"K2":   {"2 pings, every response", fmt.Sprintf("two pings %d s apart after every response", campaign.AutoX)},
+	"K3":   {"3 pings, every response", fmt.Sprintf("three pings %d s apart after every response", campaign.AutoX)},
 	"auto": {"Adapted: one plan for you", "the ping count learned from your history, shrunk toward everyone's"},
 }
 
@@ -295,7 +216,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 	}
 	set := data.rowsWith(reqs, tenant, price, se, until)
 	rows, facts := set.rows, set.facts
-	fp := fitFidelity(reqs, tenant)
+	fp := campaign.FitFidelity(reqs, tenant)
 	led, err := db.KeepAliveLedger(dash.Filter{Tenant: tenant, Since: since, Until: until})
 	if err != nil {
 		return nil, http.StatusInternalServerError, "could not read the keep-alive ledger"
@@ -306,22 +227,24 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 			all = append(all, i)
 		}
 	}
-	evals := map[string]*autoEvalResult{"": autoEval(rows, facts, tenant, until, "")}
+	evals := map[string]*campaign.EvalResult{"": campaign.Eval(rows, facts, tenant, until, "")}
 	for _, s := range adaptSegments {
-		evals[s] = autoEval(rows, facts, tenant, until, s)
+		evals[s] = campaign.Eval(rows, facts, tenant, until, s)
 	}
-	test := evals[""].test // the held-out rows depend only on the tenant's own rows: the same for every segmentation
+	test := evals[""].Test // the held-out rows depend only on the tenant's own rows: the same for every segmentation
 	ss := make([]string, len(test))
 	for j, i := range test {
 		ss[j] = rows[i].Session
 	}
-	fixed := func(k int, s bool) adaptPlan { return func(int) (int, float64, bool) { return k, autoX, s } }
-	defPlan := func(i int) (int, float64, bool) { return facts[i].defaultK(), autoX, true }
-	_, defHeld, defEng := adaptScore(facts, test, defPlan, &fp)
+	fixed := func(k int, s bool) campaign.Plan {
+		return func(int) (int, float64, bool) { return k, campaign.AutoX, s }
+	}
+	defPlan := func(i int) (int, float64, bool) { return facts[i].DefaultK(), campaign.AutoX, true }
+	_, defHeld, defEng := campaign.ScoreRows(facts, test, defPlan, &fp)
 
 	type strat struct {
 		id, label, detail string
-		in, held          adaptPlan // held nil = same as in
+		in, held          campaign.Plan // held nil = same as in
 		adapted           bool
 		unavailable       string
 		fleet             func() int // an adapted option's fleet plan (tuned before the cut)
@@ -353,14 +276,14 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 				st.detail += "; shown in " + tz + " (the rule runs on UTC " + map[string]string{"dow": "days", "hour": "hours"}[s] + ", so across a daylight-saving change the shown span moves by an hour)"
 			}
 		}
-		if e.insufficient != "" {
-			st.unavailable = "too little history: " + e.insufficient
+		if e.Insufficient != "" {
+			st.unavailable = "too little history: " + e.Insufficient
 		} else {
-			st.in = func(i int) (int, float64, bool) { return e.inPlan(i), autoX, se }
-			st.held = func(i int) (int, float64, bool) { return e.heldPlan(i), autoX, se }
-			st.fleet = func() int { return e.fit.FleetPlan }
+			st.in = func(i int) (int, float64, bool) { return e.InPlan(i), campaign.AutoX, se }
+			st.held = func(i int) (int, float64, bool) { return e.HeldPlan(i), campaign.AutoX, se }
+			st.fleet = func() int { return e.Fit.FleetPlan }
 			if s != "" {
-				st.plan = segPlanDisplay(s, facts, tenant, rows, func(key string) int { return e.final.PlanFor(tenant + "\x1f" + key) }, loc, ref)
+				st.plan = segPlanDisplay(s, facts, tenant, rows, func(key string) int { return e.Final.PlanFor(tenant + "\x1f" + key) }, loc, ref)
 			}
 		}
 		strats = append(strats, st)
@@ -378,7 +301,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 	gateNet, gateDiff, failNet := 0.0, 0.0, 0.0
 	var gateCI [2]float64
 	curPings, curPingUSD := 0.0, 0.0
-	inTally := map[string]adaptTally{}
+	inTally := map[string]campaign.Tally{}
 	// the one line the report owes when gateway dollars and the builder's calibrated gate disagree: for the adapted option that leads in gateway dollars
 	var disagree []string
 	disID, disNet := "", 0.0
@@ -397,7 +320,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 			options = append(options, row)
 			continue
 		}
-		in, per, _ := adaptScore(facts, all, s.in, &fp)
+		in, per, _ := campaign.ScoreRows(facts, all, s.in, &fp)
 		if s.id == "current" {
 			curPings, curPingUSD = in.Pings, in.Ping
 		}
@@ -409,7 +332,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		if held == nil {
 			held = s.in
 		}
-		ht, hp, he := adaptScore(facts, test, held, &fp)
+		ht, hp, he := campaign.ScoreRows(facts, test, held, &fp)
 		// The table's numbers are held-out, the same rows for every option, so the best row and its numbers are one basis.
 		hh, hhu := helpedHurt(rows, test, hp)
 		row["saved_usd"], row["spend_usd"], row["net_usd"], row["engine_usd"] = r2(ht.Rescue), r2(ht.Ping), r2(ht.Net), r2(ht.Engine)
@@ -418,35 +341,35 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		for j := range hp {
 			d[j] = hp[j] - defHeld[j]
 		}
-		ci := sessionCI(d, ss, 1)
-		ho := map[string]any{"ci95": sessionCI(hp, ss, 0), "vs_default_usd": r2(sumOf(d)), "vs_default_ci95": ci}
+		ci := campaign.SessionCI(d, ss, 1)
+		ho := map[string]any{"ci95": campaign.SessionCI(hp, ss, 0), "vs_default_usd": r2(campaign.SumOf(d)), "vs_default_ci95": ci}
 		row["held_out"] = ho
 		options = append(options, row)
 		heldPer[s.id] = hp
 		if s.adapted {
 			// The campaign builder's own gate, on the same rows in the same units: positive, and a paired session interval above zero against the
 			// shipped default, blanket K3 and the fleet plan. An option that fails it would run in shadow if applied.
-			_, _, k3 := adaptScore(facts, test, fixed(3, se), &fp)
-			_, _, fl := adaptScore(facts, test, fixed(s.fleet(), se), &fp)
-			pass, why := shipGate(he, gateLegs(k3, fl, defEng, s.fleet()), ss)
+			_, _, k3 := campaign.ScoreRows(facts, test, fixed(3, se), &fp)
+			_, _, fl := campaign.ScoreRows(facts, test, fixed(s.fleet(), se), &fp)
+			pass, why := campaign.ShipGate(he, campaign.GateLegs(k3, fl, defEng, s.fleet()), ss)
 			ho["builder_gate"] = map[string]any{"pass": pass, "failed": why, "unit": "engine_usd"}
 			if realBeats := ci[0] > 0; realBeats != pass && (disID == "" || ht.Net > disNet) {
 				disID, disNet, disagree = s.id, ht.Net, nil
 				if realBeats {
-					disagree = append(disagree, fmt.Sprintf("%s leads the default in gateway dollars (%+.2f [%.2f, %.2f]) but fails the builder's calibrated gate; the gate decides, so it would run in shadow unless applied anyway.", s.id, sumOf(d), ci[0], ci[1]))
+					disagree = append(disagree, fmt.Sprintf("%s leads the default in gateway dollars (%+.2f [%.2f, %.2f]) but fails the builder's calibrated gate; the gate decides, so it would run in shadow unless applied anyway.", s.id, campaign.SumOf(d), ci[0], ci[1]))
 				} else {
-					disagree = append(disagree, fmt.Sprintf("%s passes the builder's calibrated gate, but in gateway dollars its lead over the default (%+.2f [%.2f, %.2f]) is not clear of zero.", s.id, sumOf(d), ci[0], ci[1]))
+					disagree = append(disagree, fmt.Sprintf("%s passes the builder's calibrated gate, but in gateway dollars its lead over the default (%+.2f [%.2f, %.2f]) is not clear of zero.", s.id, campaign.SumOf(d), ci[0], ci[1]))
 				}
 			}
 			if pass && (gateID == "" || ht.Net > gateNet) {
-				gateID, gateNet, gateDiff, gateCI = s.id, ht.Net, sumOf(d), ci
+				gateID, gateNet, gateDiff, gateCI = s.id, ht.Net, campaign.SumOf(d), ci
 			}
 			if !pass && (failID == "" || ht.Net > failNet) {
 				failID, failNet, failWhy = s.id, ht.Net, strings.Join(why, "; ")
 			}
 		}
 		if s.id != "never" && ht.Net > bestNet {
-			bestID, bestNet, bestCI, bestDiff = s.id, ht.Net, ci, sumOf(d)
+			bestID, bestNet, bestCI, bestDiff = s.id, ht.Net, ci, campaign.SumOf(d)
 		}
 	}
 	beats := bestID != "default" && bestCI[0] > 0
@@ -482,7 +405,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		for j := range d {
 			d[j] = x[j] - y[j]
 		}
-		return map[string]any{"usd": r2(sumOf(d)), "ci95": sessionCI(d, ss, 1)}
+		return map[string]any{"usd": r2(campaign.SumOf(d)), "ci95": campaign.SessionCI(d, ss, 1)}
 	}
 	relative := map[string]any{"best": bestID, "best_vs_default": pair(bestID, "default"), "current_vs_default": pair("current", "default"),
 		"best_vs_current": pair(bestID, "current"), "basis": "held-out, paired by session, gateway dollars of the same replay for every option"}
@@ -491,7 +414,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		summary += fmt.Sprintf(" Your current setting is $%.2f [%.2f, %.2f] against the default on the same decisions.", c["usd"], ci[0], ci[1])
 	}
 	// Per held-out week, for the plugin's "a week" line: the held-out slice spans from the cut to the window end.
-	weeks := float64(until-evals[""].cut) / (7 * 86400e3)
+	weeks := float64(until-evals[""].Cut) / (7 * 86400e3)
 	perWeek := func(usd float64) any {
 		if weeks <= 0 {
 			return nil
@@ -579,14 +502,14 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		"disagreement": strings.Join(disagree, ""), // one line, or "" when gateway dollars and the gate agree
 		"calibration": map[string]any{
 			"observed_ping_usd_mean": meanOr(led.PingUSD, float64(led.Pings)), "replay_ping_usd_mean": meanOr(curPingUSD, curPings),
-			"benefit_scale": cfScale, "ping_scale": cfPingScale,
+			"benefit_scale": campaign.BenefitScale, "ping_scale": campaign.PingScale,
 			"gaps_classified": len(all), "gaps_unknown": drop["unresolved_at_window_end"], "gaps_classified_share": math.Round(float64(len(all))/math.Max(1, float64(len(all)+drop["unresolved_at_window_end"]))*1000) / 1000,
 			"decision_points_share_of_requests": math.Round(float64(len(all))/float64(nReq)*1000) / 1000,
 			"note":                              "money is the closed-form replay in expectation over ping rewrites (a rewrite stops the span), the miss of a rescued request, a cliff with a spread, the head a missed request reads anyway and hits after long gaps from other sessions (h, fitted on your own history). It does not follow thread lineage inside a conversation, so it is labelled an upper bound. engine_usd is the builder's calibrated closed form, the unit of its gate. Observed and replayed mean ping cost cover different pings (the observed ones were sent under whatever policy ran then). Responses whose outcome is unknown at the window end are not scored, so they are never counted as savings.",
-			"h_beyond_cliff":                    r2(fp.h), "h_fit_requests": fp.n, "threads_recorded": threads,
+			"h_beyond_cliff":                    r2(fp.H), "h_fit_requests": fp.N, "threads_recorded": threads,
 			"default_net_over_engine": ratioOr(inTally["default"]), "k3_net_over_engine": ratioOr(inTally["K3"]),
 		},
-		"assumptions": map[string]any{"session_end": se, "cliff_s": cfTC, "ping_spacing_s": autoX, "benefit_scale": cfScale, "ping_scale": cfPingScale,
+		"assumptions": map[string]any{"session_end": se, "cliff_s": campaign.Cliff, "ping_spacing_s": campaign.AutoX, "benefit_scale": campaign.BenefitScale, "ping_scale": campaign.PingScale,
 			"note": "net = rewrites avoided (prefix x (cache write - cache read)) minus pings (prefix x cache read + input + output), vs never pinging; billed = the never-ping bill (billed - pings sent + their observed saving) minus net; engine_usd = the builder's calibrated closed form, the unit of its gate; a session's last response is a no-return; time segments are UTC"},
 	}
 	b, _ := json.Marshal(rep)
@@ -616,7 +539,7 @@ func helpedHurt(rows []predictive.AutoRow, idx []int, per []float64) (helped, hu
 	return helped, hurt
 }
 
-func ratioOr(t adaptTally) any {
+func ratioOr(t campaign.Tally) any {
 	if t.Engine <= 0 {
 		return nil
 	}
@@ -671,7 +594,7 @@ func (h *Handler) adaptCacheApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	segBy := strings.TrimPrefix(in.Option, "by_")
-	if _, ok := segFeatures[segBy]; in.Option != "default" && in.Option != "revert" && in.Option != "auto" && (!ok || segBy == in.Option) {
+	if ok := campaign.SegmentOf(segBy) != nil; in.Option != "default" && in.Option != "revert" && in.Option != "auto" && (!ok || segBy == in.Option) {
 		ctlErr(w, http.StatusBadRequest, fmt.Sprintf("%q is shown for comparison only: apply default, auto or a by_* option", in.Option))
 		return
 	}
@@ -847,14 +770,8 @@ func (h *Handler) adaptAfterBuild(actor string, force bool, blocked func() bool)
 func (h *Handler) forcePolicy(id string) bool {
 	dir := filepath.Join(h.campaignDir(), id)
 	var spec map[string]any
-	if readJSONFile(filepath.Join(dir, "spec.json"), &spec) != nil || spec["own_policy"] == nil {
+	if readJSONFile(filepath.Join(dir, "spec.json"), &spec) != nil || !campaign.ForcePolicy(spec) {
 		return false
-	}
-	spec["policy"], spec["forced"] = spec["own_policy"], true
-	if ev, ok := spec["evidence"].(map[string]any); ok {
-		if sh, ok := ev["shipped"].(map[string]any); ok {
-			sh["plan"], sh["note"] = spec["own_plan"], "applied anyway: the tenant's own plan, although the held-out gate did not pass"
-		}
 	}
 	return writeSpecValidated(dir, spec) == nil
 }
@@ -884,10 +801,10 @@ func (h *Handler) managedCampaign(pc *predCampaign, who adaptWho) bool {
 }
 
 // adaptHeatmap is an option's held-out net minus the default's, summed by the day of week (Monday first) and hour of the request start in loc.
-func adaptHeatmap(facts []rowFacts, idx []int, per, def []float64, loc *time.Location) [7][24]float64 {
+func adaptHeatmap(facts []campaign.RowFacts, idx []int, per, def []float64, loc *time.Location) [7][24]float64 {
 	var m [7][24]float64
 	for j, i := range idx {
-		t := time.UnixMilli(facts[i].startMs).In(loc)
+		t := time.UnixMilli(facts[i].StartMs).In(loc)
 		m[(int(t.Weekday())+6)%7][t.Hour()] += per[j] - def[j]
 	}
 	for d := range m {
@@ -923,14 +840,14 @@ func segLabel(segBy, key string, loc *time.Location, ref time.Time) string {
 }
 
 // segPlanDisplay is "segment: plan" for every segment value the account's rows have, in the account's timezone, in UTC order.
-func segPlanDisplay(segBy string, facts []rowFacts, tenant string, rows []predictive.AutoRow, planOf func(key string) int, loc *time.Location, ref time.Time) string {
+func segPlanDisplay(segBy string, facts []campaign.RowFacts, tenant string, rows []predictive.AutoRow, planOf func(key string) int, loc *time.Location, ref time.Time) string {
 	seen := map[string]bool{}
 	var keys []string
 	for i, r := range rows {
 		if r.Scope != tenant {
 			continue
 		}
-		k, _ := segFeatures[segBy](&facts[i])
+		k, _ := campaign.SegmentOf(segBy)(&facts[i])
 		if !seen[k] {
 			seen[k] = true
 			keys = append(keys, k)
@@ -939,7 +856,7 @@ func segPlanDisplay(segBy string, facts []rowFacts, tenant string, rows []predic
 	sort.Strings(keys)
 	parts := make([]string, len(keys))
 	for i, k := range keys {
-		parts[i] = segLabel(segBy, k, loc, ref) + ": " + planName(planOf(k))
+		parts[i] = segLabel(segBy, k, loc, ref) + ": " + campaign.PlanName(planOf(k))
 	}
 	return strings.Join(parts, "; ")
 }

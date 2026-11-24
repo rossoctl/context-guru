@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 
 	"github.com/rossoctl/context-guru/thinkcount"
 )
@@ -85,7 +86,7 @@ func newSavingsTracker() *savingsTracker {
 // begin opens the request record with the client body, before any component ran. The Trackers bound
 // their own memory (accountant design §6.1, Memory), so there is nothing to sweep here.
 func (s *savingsTracker) begin(meta accountant.RequestMeta, client []byte) *accountant.Request {
-	body, bps := accParseCounted(client, s.thinking.Lookup)
+	body, bps := accwire.For(client).Parse(client, s.thinking.Lookup)
 	req := s.trackers.BeginRequest(meta, body, bps)
 	s.clients.Store(req, clientHash{meta: meta, raw: client, body: body, bps: bps})
 	return req
@@ -108,10 +109,10 @@ func (s *savingsTracker) end(req *accountant.Request, th accountant.Thread, forw
 		if bytes.Equal(v.(clientHash).raw, forwarded) {
 			fwd, bps = client, v.(clientHash).bps
 		} else {
-			fwd, bps = accParseCounted(forwarded, s.thinking.Lookup)
+			fwd, bps = accwire.For(forwarded).Parse(forwarded, s.thinking.Lookup)
 		}
 	} else {
-		fwd, bps = accParseCounted(forwarded, s.thinking.Lookup)
+		fwd, bps = accwire.For(forwarded).Parse(forwarded, s.thinking.Lookup)
 	}
 	facts.SharedWarm = s.siblings.sharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)

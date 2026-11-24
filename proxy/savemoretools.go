@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -34,67 +33,23 @@ type deferConf struct {
 
 // deferSettings reads toolfilter's deferral settings out of a configuration document.
 func deferSettings(doc string) (c deferConf, ok bool, reason string) {
-	f, err := config.ParseForm(doc)
-	if err != nil || f.ParseError != "" {
-		return deferConf{}, false, "your stored configuration does not load, so it cannot be edited " +
-			"as fields; a manager must repair it on the account page"
+	keep, always, ok, reason := config.ToolfilterLists(doc)
+	if !ok {
+		return deferConf{}, false, reason
 	}
-	blk := f.Components[toolFilterComponent]
-	return deferConf{on: docDefers(doc), keep: nameList(blk["keep"]), always: nameList(blk["always_defer"])}, true, ""
+	return deferConf{on: tooldefer.DocOn(doc), keep: keep, always: always}, true, ""
 }
 
-// nameList is one of toolfilter's name lists as a form value, sorted.
-func nameList(v any) []string {
-	var out []string
-	switch list := v.(type) {
-	case []string:
-		out = append(out, list...)
-	case []any:
-		for _, v := range list {
-			if s, isStr := v.(string); isStr && s != "" {
-				out = append(out, s)
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// editDefer is doc with toolfilter's `defer`, `keep` and `always_defer` rewritten by edit. Like
-// editRemoved, it adds toolfilter to the pipeline when it is absent and leaves every other key alone.
+// editDefer is doc with toolfilter's `defer`, `keep` and `always_defer` rewritten by edit
+// (config.EditToolfilterDefer). Whether the document defers now is tooldefer.DocOn's answer.
 func editDefer(current string, edit func(deferConf) deferConf) (string, error) {
-	f, perr := config.ParseForm(current)
-	if perr != nil || f.ParseError != "" {
-		return "", statusError{http.StatusConflict, "your stored configuration does not load, so it cannot " +
-			"be edited as fields; a manager must repair it on the account page"}
-	}
 	c, _, _ := deferSettings(current)
-	c = edit(c)
-	if f.Components == nil {
-		f.Components = map[string]map[string]any{}
-	}
-	blk := f.Components[toolFilterComponent]
-	if blk == nil {
-		blk = map[string]any{}
-		f.Components[toolFilterComponent] = blk
-	}
-	blk["defer"] = "off"
-	if c.on {
-		blk["defer"] = "auto"
-	}
-	blk["keep"] = c.keep
-	if len(c.always) > 0 {
-		blk["always_defer"] = c.always
-	} else {
-		delete(blk, "always_defer") // an empty list is the default: leave no key behind
-	}
-	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, true)
-	f.PipelineKnown = []string{toolFilterComponent}
-	doc, err := config.ApplyForm(current, f)
-	if err != nil {
-		return "", statusError{http.StatusBadRequest, err.Error()}
-	}
-	return doc, nil
+	doc, err := config.EditToolfilterDefer(current, c.on, func(d config.ToolfilterDefer) config.ToolfilterDefer {
+		// The lists read here are the ones deferSettings read: one parse rule, in config.
+		out := edit(deferConf{on: d.On, keep: d.Keep, always: d.Always})
+		return config.ToolfilterDefer{On: out.on, Keep: out.keep, Always: out.always}
+	})
+	return doc, editStatus(err)
 }
 
 // saveMoreToolsReport serves GET /api/save-more/tools.
