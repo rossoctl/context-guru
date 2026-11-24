@@ -32,6 +32,9 @@ type Fin struct {
 	Touch func()
 	// Ledger books the request in the tool-deferral ledger.
 	Ledger func()
+	// Counters runs after the warm sweep's question and before the billed-input writes. The host
+	// books its SSE and usage counters here.
+	Counters func()
 }
 
 // Finish runs the steps after the response, in their order:
@@ -39,7 +42,8 @@ type Fin struct {
 //  1. Touch (keep-alive), then Ledger (tool deferral);
 //  2. release a cache-aware summary the turn deferred because its cache was cold;
 //  3. run the warm sweep's question, if the trigger registered one;
-//  4. only when usage is OK: keep the billed input for the next turn, under the session and the
+//  4. Counters (the host's SSE and usage counters);
+//  5. only when usage is OK: keep the billed input for the next turn, under the session and the
 //     thread, and, in observe mode, under the shadow store too.
 //
 // A response without usage leaves the previous turn's figure in place: a zero would read as
@@ -55,6 +59,9 @@ func Finish(f Fin) {
 	// resolves the deferral too: see offload.ResolveDeferredCacheAwareSummary.
 	offload.ResolveDeferredCacheAwareSummary(f.Session, f.ThreadID)
 	offload.ResolveWarmQuestion(f.Session, f.ThreadID, f.Forwarded, f.CacheRead)
+	if f.Counters != nil {
+		f.Counters()
+	}
 	if !f.UsageOK {
 		return
 	}

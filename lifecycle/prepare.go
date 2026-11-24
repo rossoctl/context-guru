@@ -29,10 +29,11 @@ type Pre struct {
 	InjectExpand string
 	// Orig is the request as the agent sent it. Prepare forwards it when a step panics.
 	Orig []byte
-	// ThreadOf resolves the thread of a session (thread.Tracker.ResolveSession bound to the
-	// request). It is passed to apply, and Prepare calls it again when apply returned before it
-	// resolved the thread.
-	ThreadOf func(session string) thread.Result
+	// MakeThreadOf builds the thread resolver of the request (thread.Tracker.ResolveSession bound to
+	// it). Prepare calls it after the repair and anchor steps and just before the pipeline, and passes
+	// the result to Apply. Prepare calls the resolver again when apply returned before it resolved
+	// the thread. The result is in Prepared.ThreadOf.
+	MakeThreadOf func() func(session string) thread.Result
 
 	// RepairExpand puts back the content a client's own error answer to our expand tool replaced.
 	// It runs first, only when the host rewrites the request. It returns the body and the number of
@@ -40,9 +41,12 @@ type Pre struct {
 	RepairExpand func(body []byte) ([]byte, int)
 	// Apply runs the pipeline: the host's observe-versus-enforce choice. It gets the body and the
 	// thread resolver, and gives back the body, the time to charge to the request and the trace.
-	Apply func(body []byte) ([]byte, time.Duration, apply.Trace)
+	Apply func(body []byte, threadOf func(session string) thread.Result) ([]byte, time.Duration, apply.Trace)
+	// Applied runs right after the pipeline, before the thread is resolved. The host notes the
+	// latency and the trace here.
+	Applied func(tr apply.Trace, added time.Duration)
 	// Observed runs once the thread is known, and before the keep-alive arrival. The host notes the
-	// trace, the thread and the savings record here.
+	// thread and the savings record here.
 	Observed func(th thread.Result, tr apply.Trace, added time.Duration)
 	// Arrive tells the keep-alive and the predictor that a real request arrived on this thread.
 	Arrive func(session, threadID string)
@@ -71,6 +75,8 @@ type Prepared struct {
 	Added  time.Duration
 	// ThreadID is the thread of the request. "" when the thread was not resolved yet.
 	ThreadID string
+	// ThreadOf is the resolver MakeThreadOf built. nil when a step before it panicked.
+	ThreadOf func(session string) thread.Result
 	// Panic is the recovered value, nil when no step panicked.
 	Panic any
 }
@@ -118,17 +124,25 @@ func Prepare(p Pre) *Prepared {
 		// Taken BEFORE the pipeline: the clear below must spare a candidate this request's own run
 		// wrote. See offload.ClearStaleKeepAliveCandidate.
 		startedAt := time.Now()
+		var threadOf func(session string) thread.Result
+		if p.MakeThreadOf != nil {
+			threadOf = p.MakeThreadOf()
+		}
+		out.ThreadOf = threadOf
 		out.PreBody = body
 		out.Body = body
 		var tr apply.Trace
 		var added time.Duration
-		body, added, tr = p.Apply(body)
+		body, added, tr = p.Apply(body, threadOf)
 		out.Body, out.Added, out.Trace = body, added, tr
+		if p.Applied != nil {
+			p.Applied(tr, added)
+		}
 		th := tr.Thread
 		if !tr.ThreadResolved {
 			// apply returned before it resolved the thread (no message list, observe mode, bypass).
-			if p.ThreadOf != nil {
-				th = p.ThreadOf(tr.Session)
+			if threadOf != nil {
+				th = threadOf(tr.Session)
 			} else {
 				th = thread.Result{ID: thread.Primary, Source: thread.SourceSession}
 			}

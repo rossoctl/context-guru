@@ -132,13 +132,17 @@ func preFor(mode components.Mode, bypassed bool, log *[]string) Pre {
 	return Pre{
 		Wire: schema.WireFor(string(bschemas.Anthropic), ""), Provider: bschemas.Anthropic, Mode: mode, Bypassed: bypassed,
 		Pipe: components.NewPipeline(nil, nil), Store: persists(true), InjectExpand: expand.InjectAlways, Orig: orig,
-		ThreadOf:     func(s string) thread.Result { *log = append(*log, "threadOf:"+s); return thread.Result{ID: "t1"} },
+		MakeThreadOf: func() func(string) thread.Result {
+			*log = append(*log, "makeThreadOf")
+			return func(s string) thread.Result { *log = append(*log, "threadOf:"+s); return thread.Result{ID: "t1"} }
+		},
 		RepairExpand: func(b []byte) ([]byte, int) { *log = append(*log, "repair"); return b, 1 },
 		OnRepair:     func(int) { *log = append(*log, "onrepair") },
-		Apply: func(b []byte) ([]byte, time.Duration, apply.Trace) {
+		Apply: func(b []byte, _ func(string) thread.Result) ([]byte, time.Duration, apply.Trace) {
 			*log = append(*log, "apply")
 			return b, time.Millisecond, apply.Trace{Session: "s"}
 		},
+		Applied:  func(apply.Trace, time.Duration) { *log = append(*log, "applied") },
 		Observed: func(th thread.Result, tr apply.Trace, _ time.Duration) { *log = append(*log, "observed:"+th.ID) },
 		Arrive:   func(s, th string) { *log = append(*log, "arrive:"+s+"/"+th) },
 		Settled:  func(apply.Trace, time.Duration) { *log = append(*log, "settled") },
@@ -169,7 +173,7 @@ func TestPrepareOrder(t *testing.T) {
 	var log []string
 	out := Prepare(preFor(components.ModeSync, false, &log))
 	// The thread comes from apply when it resolved it; here the fake apply did not, so Prepare resolves it.
-	want := "repair onrepair apply threadOf:s observed:t1 arrive:s/t1 settled defer done"
+	want := "repair onrepair makeThreadOf apply applied threadOf:s observed:t1 arrive:s/t1 settled defer done"
 	if got := join(log); got != want {
 		t.Fatalf("order\n got %s\nwant %s", got, want)
 	}
@@ -191,7 +195,7 @@ func TestPrepareDoesNotRewriteInObserveOrBypass(t *testing.T) {
 	}{{components.ModeObserve, false}, {components.ModeSync, true}} {
 		var log []string
 		out := Prepare(preFor(c.mode, c.bypassed, &log))
-		want := "apply threadOf:s observed:t1 arrive:s/t1 settled done"
+		want := "makeThreadOf apply applied threadOf:s observed:t1 arrive:s/t1 settled done"
 		if got := join(log); got != want {
 			t.Errorf("%v bypass=%v: order\n got %s\nwant %s", c.mode, c.bypassed, got, want)
 		}
@@ -204,7 +208,7 @@ func TestPrepareDoesNotRewriteInObserveOrBypass(t *testing.T) {
 func TestPrepareUsesTheThreadApplyResolved(t *testing.T) {
 	var log []string
 	p := preFor(components.ModeSync, false, &log)
-	p.Apply = func(b []byte) ([]byte, time.Duration, apply.Trace) {
+	p.Apply = func(b []byte, _ func(string) thread.Result) ([]byte, time.Duration, apply.Trace) {
 		return b, 0, apply.Trace{Session: "s", Thread: thread.Result{ID: "fromapply"}, ThreadResolved: true}
 	}
 	out := Prepare(p)
@@ -222,7 +226,10 @@ func TestPrepareFailsOpenOnAPanic(t *testing.T) {
 		case "repair":
 			p.RepairExpand = func([]byte) ([]byte, int) { boom(); return nil, 0 }
 		case "apply":
-			p.Apply = func([]byte) ([]byte, time.Duration, apply.Trace) { boom(); return nil, 0, apply.Trace{} }
+			p.Apply = func([]byte, func(string) thread.Result) ([]byte, time.Duration, apply.Trace) {
+				boom()
+				return nil, 0, apply.Trace{}
+			}
 		case "observed":
 			p.Observed = func(thread.Result, apply.Trace, time.Duration) { boom() }
 		case "arrive":
@@ -315,5 +322,52 @@ func TestFinishObserveWritesTheShadowStore(t *testing.T) {
 		ObserveSession: func() string { return "sid" }})
 	if billedOf(shadow2, store.BilledPrefix+"sid") != "" {
 		t.Error("shadow written outside observe mode")
+	}
+}
+
+// The order of side effects is the contract. These three pins each fail when two steps swap.
+
+func TestPrepareOrderPinsThreadFallbackAfterTheApplyNotes(t *testing.T) {
+	var log []string
+	Prepare(preFor(components.ModeSync, false, &log))
+	if i, j := index(log, "applied"), index(log, "threadOf:s"); i < 0 || j < 0 || i > j {
+		t.Errorf("the thread fallback must run after the latency and trace notes: %s", join(log))
+	}
+}
+
+func TestPrepareOrderPinsMakeThreadOfAfterRepairBeforeApply(t *testing.T) {
+	var log []string
+	Prepare(preFor(components.ModeSync, false, &log))
+	r, m, a := index(log, "repair"), index(log, "makeThreadOf"), index(log, "apply")
+	if r < 0 || !(r < m && m < a) {
+		t.Errorf("makeThreadOf must run after repair and before apply: %s", join(log))
+	}
+}
+
+func index(l []string, s string) int {
+	for i, v := range l {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestFinishOrderPinsCountersBeforeBilledInput(t *testing.T) {
+	st := newStore()
+	var log []string
+	Finish(Fin{
+		Store: st, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 10,
+		Touch:  func() { log = append(log, "touch") },
+		Ledger: func() { log = append(log, "ledger") },
+		Counters: func() {
+			if billedOf(st, store.BilledPrefix+"s") != "" {
+				log = append(log, "counters-after-billed")
+			}
+			log = append(log, "counters")
+		},
+	})
+	if got := join(log); got != "touch ledger counters" {
+		t.Errorf("the counters run after the ledger and before the billed-input writes: %s", got)
 	}
 }
