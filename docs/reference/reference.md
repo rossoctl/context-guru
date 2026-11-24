@@ -480,7 +480,7 @@ configuration is on screen:
 ```json
 {
   "scope": "server",
-  "config": { "preset": "codesmart", "pipeline": ["format", "…"], "…": "…" },
+  "config": { "preset": "conservative", "pipeline": ["format", "…"], "…": "…" },
   "description": "The configuration this proxy resolved at startup. …"
 }
 ```

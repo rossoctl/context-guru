@@ -7,7 +7,7 @@ Turn the dashboard on, run your agent, and read the numbers with their denominat
 1. Start the proxy with the dashboard:
 
     ```sh
-    context-guru-proxy --preset medium --dashboard
+    context-guru-proxy --preset conservative --dashboard
     ```
 
 2. Point your agent at `http://localhost:4000/anthropic` (or `/openai`) and give it a few

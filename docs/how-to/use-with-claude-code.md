@@ -115,7 +115,7 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
 does both:
 
 ```sh
-scripts/with-guru.sh codesmart -- claude
+scripts/with-guru.sh conservative -- claude
 ```
 
 </details>
