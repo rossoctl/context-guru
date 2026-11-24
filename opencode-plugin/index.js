@@ -1281,17 +1281,22 @@ async function recoverProxy(state, record, client, fallback = false) {
 //   2.4.1 packages/client/src/promise/generated/types.ts):
 //     session.compacted (v1) / session.compaction.ended (v2) -> SessionStart, compact
 //     session.deleted                                         -> SessionEnd, other
-//     permission.asked                                        -> Notification, permission_prompt
+//     permission.asked, permission.v2.asked (v1 SDK type)     -> Notification, permission_prompt
 //     question.asked (v1 only; v2 has no such event)          -> Notification, elicitation_dialog
 const SIGNAL_EVENTS = {
   "session.compacted": ["SessionStart", "compact"],
   "session.compaction.ended": ["SessionStart", "compact"],
   "session.deleted": ["SessionEnd", "other"],
   "permission.asked": ["Notification", "permission_prompt"],
+  "permission.v2.asked": ["Notification", "permission_prompt"],
   "question.asked": ["Notification", "elicitation_dialog"],
 }
+// v2 subscribe takes this list as a filter and ignores names the v2 host does not have (the v1 names).
 export const SIGNAL_EVENT_TYPES = Object.keys(SIGNAL_EVENTS)
 const SIGNAL_TIMEOUT_MS = 1000
+// Bound on the sessions a plugin remembers. The oldest id goes first. A dropped id only means no signal
+// for that session, which is what happens without signals.
+const MAX_SIGNAL_SESSIONS = 256
 
 function signalsOff(env = process.env) {
   return ["off", "0", "false"].includes(String(env.CONTEXT_GURU_CLIENT_SIGNALS ?? "").trim().toLowerCase())
@@ -1304,7 +1309,12 @@ export function createSignaler(fetcher = globalThis.fetch) {
   const sessions = new Set()
   return {
     setPort(value) { port = value },
-    noteSession(sessionID) { if (typeof sessionID === "string" && sessionID) sessions.add(sessionID) },
+    noteSession(sessionID) {
+      if (typeof sessionID !== "string" || !sessionID) return
+      sessions.delete(sessionID) // a session seen again counts as newest
+      sessions.add(sessionID)
+      if (sessions.size > MAX_SIGNAL_SESSIONS) sessions.delete(sessions.values().next().value)
+    },
     handle(type, sessionID) {
       const mapped = SIGNAL_EVENTS[type]
       if (!mapped || !port || typeof sessionID !== "string" || !sessions.has(sessionID) || signalsOff()) return

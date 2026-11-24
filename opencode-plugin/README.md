@@ -138,7 +138,7 @@ The plugin tells the proxy when a routed session ends or is compacted, so the ke
 | `session.compacted` | v1 | `SessionStart`, `compact` |
 | `session.compaction.ended` | v2 | `SessionStart`, `compact` |
 | `session.deleted` | v1, v2 | `SessionEnd`, `other` |
-| `permission.asked` | v1, v2 | `Notification`, `permission_prompt` |
+| `permission.asked`, `permission.v2.asked` | v1, v2 | `Notification`, `permission_prompt` |
 | `question.asked` | v1 | `Notification`, `elicitation_dialog` |
 
 - The body holds only the session id (the one in `x-context-guru-session`), an event name and a kind.

@@ -20,9 +20,9 @@ test("signaler maps each OpenCode event to the proxy's event and kind", () => {
   const signaler = createSignaler(fetcher)
   signaler.setPort(8787)
   signaler.noteSession("ses_1")
-  for (const type of ["session.compacted", "session.compaction.ended", "permission.asked", "question.asked", "session.deleted"]) signaler.handle(type, "ses_1")
+  for (const type of ["session.compacted", "session.compaction.ended", "permission.asked", "permission.v2.asked", "question.asked", "session.deleted"]) signaler.handle(type, "ses_1")
   assert.deepEqual(calls.map((call) => [call.body.event, call.body.kind]), [
-    ["SessionStart", "compact"], ["SessionStart", "compact"], ["Notification", "permission_prompt"], ["Notification", "elicitation_dialog"], ["SessionEnd", "other"],
+    ["SessionStart", "compact"], ["SessionStart", "compact"], ["Notification", "permission_prompt"], ["Notification", "permission_prompt"], ["Notification", "elicitation_dialog"], ["SessionEnd", "other"],
   ])
   for (const call of calls) {
     assert.equal(call.url, "http://127.0.0.1:8787/signal")
@@ -51,6 +51,21 @@ test("signaler stays silent for an unrouted session, an unknown event, no port, 
     delete process.env.CONTEXT_GURU_CLIENT_SIGNALS
   }
   assert.equal(calls.length, 0)
+})
+
+test("the signaler remembers a bounded number of sessions, oldest out", () => {
+  const { calls, fetcher } = recorder()
+  const signaler = createSignaler(fetcher)
+  signaler.setPort(8787)
+  for (let i = 0; i < 300; i++) signaler.noteSession(`ses_${i}`)
+  signaler.handle("session.compacted", "ses_0") // dropped: no signal
+  signaler.handle("session.compacted", "ses_299")
+  assert.deepEqual(calls.map((call) => call.body.session), ["ses_299"])
+  signaler.noteSession("ses_44") // oldest kept id is ses_44; seeing it again makes it newest
+  for (let i = 300; i < 340; i++) signaler.noteSession(`ses_${i}`)
+  signaler.handle("session.compacted", "ses_44") // kept: signals
+  signaler.handle("session.compacted", "ses_45") // evicted: no signal
+  assert.deepEqual(calls.map((call) => call.body.session), ["ses_299", "ses_44"])
 })
 
 test("a session that ended signals once; a lost signal throws nothing", () => {
