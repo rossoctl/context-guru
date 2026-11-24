@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
+  stripsChatGPTFields, strategyChoices, type StartCheck, settingsPath, recoverStaleRoute, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
   uninstallText, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
@@ -552,4 +552,80 @@ test("a configure that worked names the preset and the strategy", () => {
 
 test("a configure with no facts shows stderr", () => {
   assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
+});
+
+test("the two-copies warning names the settings.json that Pi uses", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  const before = process.env.PI_CODING_AGENT_DIR;
+  g[LOADED] = "/clone-a/pi-package";
+  process.env.PI_CODING_AGENT_DIR = "/tmp/test-agent";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    second.emit("session_start");
+    assert.ok(second.notices[0].includes('"packages" in /tmp/test-agent/settings.json'), second.notices[0]);
+  } finally {
+    delete g[LOADED];
+    if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = before;
+  }
+});
+
+test("settingsPath names Pi's own settings.json, or the one in PI_CODING_AGENT_DIR", () => {
+  assert.equal(settingsPath({}), "~/.pi/agent/settings.json");
+  assert.equal(settingsPath({ PI_CODING_AGENT_DIR: "/tmp/agent" }), "/tmp/agent/settings.json");
+});
+
+/** A model registry and a session for recoverStaleRoute: models.json can name the proxy or the real endpoint. */
+function staleWorld(onDisk: string) {
+  const seen = { refreshed: 0, set: [] as string[], notices: [] as string[] };
+  const routedAtStart = { port: 8800, base_urls: { anthropic: "http://127.0.0.1:8800/anthropic" } };
+  return {
+    seen, routedAtStart,
+    deps: (installNow: unknown) => ({
+      model: { provider: "anthropic", id: "m", baseUrl: "http://127.0.0.1:8800/anthropic" },
+      installedAtStart: routedAtStart,
+      installNow: installNow as never,
+      refresh: async () => { seen.refreshed++; },
+      find: (provider: string, id: string) => ({ provider, id, baseUrl: onDisk }),
+      setModel: async (m: { baseUrl?: string }) => { seen.set.push(m.baseUrl ?? ""); return true; },
+      notify: (text: string) => seen.notices.push(text),
+    }),
+  };
+}
+
+test("after an uninstall, a session that still uses the proxy URL switches to the endpoint in models.json", async () => {
+  const w = staleWorld("https://gw.example.com");
+  assert.equal(await recoverStaleRoute(w.deps(undefined)), "switched");
+  assert.deepEqual(w.seen.set, ["https://gw.example.com"]);
+  assert.equal(w.seen.notices.length, 1);
+  assert.match(w.seen.notices[0], /context-guru was removed/);
+  assert.match(w.seen.notices[0], /gw\.example\.com/);
+});
+
+test("while context-guru is still installed, nothing is switched (a down proxy is the restart's job)", async () => {
+  const w = staleWorld("https://gw.example.com");
+  assert.equal(await recoverStaleRoute(w.deps(w.routedAtStart)), "still-installed");
+  assert.equal(w.seen.refreshed, 0);
+  assert.deepEqual(w.seen.set, []);
+});
+
+test("a session that does not use the proxy URL is left alone", async () => {
+  const w = staleWorld("https://gw.example.com");
+  const deps = { ...w.deps(undefined), model: { provider: "anthropic", id: "m", baseUrl: "https://gw.example.com" } };
+  assert.equal(await recoverStaleRoute(deps), "not-routed");
+  assert.equal(w.seen.refreshed, 0);
+});
+
+test("when models.json still names the proxy, there is nothing better to switch to", async () => {
+  const w = staleWorld("http://127.0.0.1:8800/anthropic");
+  assert.equal(await recoverStaleRoute(w.deps(undefined)), "no-better-model");
+  assert.deepEqual(w.seen.set, []);
+});
+
+test("a model with no baseUrl in models.json goes to the provider's own API", async () => {
+  const w = staleWorld("");
+  const deps = { ...w.deps(undefined), find: (provider: string, id: string) => ({ provider, id }) };
+  assert.equal(await recoverStaleRoute(deps), "switched");
+  assert.match(w.seen.notices[0], /the provider's own API/);
 });

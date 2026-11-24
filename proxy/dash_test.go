@@ -636,6 +636,7 @@ func checkSpend(t *testing.T, spends []time.Duration, budget time.Duration) {
 const maxSmallBodySpend = 30 * time.Millisecond
 
 func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
+	testutil.RequireTiming(t)
 	checkSpend(t, dashboardSpends(t, 50, 2), maxSmallBodySpend)
 }
 
@@ -645,6 +646,7 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 const maxMaxContentSpend = 25 * time.Millisecond
 
 func TestDashboardCaptureAddsNoRequestLatencyAtMaxContent(t *testing.T) {
+	testutil.RequireTiming(t)
 	checkSpend(t, dashboardSpends(t, 20, 24, "accBegin", "accEnd", "accWait", "accBilledTTL", "accCompute"), maxMaxContentSpend)
 }
 

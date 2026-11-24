@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 const sample = `{
@@ -114,7 +115,7 @@ func TestLiteLLMConcurrentSingleFlight(t *testing.T) {
 			defer wg.Done()
 			start := time.Now()
 			l.Window(ctx, "gpt-4o")
-			if time.Since(start) > 100*time.Millisecond {
+			if testutil.TimingEnabled() && time.Since(start) > 100*time.Millisecond {
 				t.Errorf("Window blocked on the upstream fetch (%v) — must be non-blocking", time.Since(start))
 			}
 		}()

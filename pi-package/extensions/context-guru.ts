@@ -26,6 +26,11 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 const STATE_DIR = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-pi");
 const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(PACKAGE_DIR, "scripts", "pi_plugin.py");
+/** The settings.json that Pi uses: $PI_CODING_AGENT_DIR/settings.json when that is set (#1289). */
+export function settingsPath(env: Record<string, string | undefined> = process.env): string {
+  return env.PI_CODING_AGENT_DIR ? join(env.PI_CODING_AGENT_DIR, "settings.json") : "~/.pi/agent/settings.json";
+}
+
 /** The package folder of the copy that runs in this Pi process. Two installed copies (two clones, or a
  *  worktree) both load; without this, Pi renames both commands and /context-guru disappears (#1154). */
 export const LOADED = Symbol.for("rossoctl.context-guru.pi.loaded");
@@ -77,6 +82,37 @@ export function isRouted(install: Install | undefined, baseUrl: string | undefin
   if (!install?.base_urls || !baseUrl) return false;
   const want = baseUrl.replace(/\/+$/, "");
   return Object.values(install.base_urls).some((url) => url.replace(/\/+$/, "") === want);
+}
+
+type RouteModel = { provider: string; id: string; baseUrl?: string };
+
+/** After an uninstall, a Pi window opened while context-guru routed it still holds the proxy URL in memory:
+ *  Pi reads models.json at start and on /model only. Every request then fails on a stopped proxy (#1341).
+ *  When the session's model is our route and context-guru's install record is gone, read models.json again
+ *  and switch the session to the same model at its real endpoint. Fail open: a removed context-guru must
+ *  never break Pi. While the record exists, a down proxy is the start check's restart, not this. */
+export async function recoverStaleRoute(deps: {
+  model: RouteModel | undefined;
+  installedAtStart: Install | undefined;
+  installNow: Install | undefined;
+  refresh: () => Promise<unknown>;
+  find: (provider: string, id: string) => RouteModel | undefined;
+  setModel: (model: RouteModel) => Promise<boolean>;
+  notify: (text: string) => void;
+}): Promise<"not-routed" | "still-installed" | "no-better-model" | "switched"> {
+  const { model } = deps;
+  if (!model || !isRouted(deps.installedAtStart, model.baseUrl)) return "not-routed";
+  // Installed and still on this URL: a down proxy is the start check's restart. A record on another port (a
+  // re-run moved it) does not count: the URL this window holds is dead.
+  if (isRouted(deps.installNow, model.baseUrl)) return "still-installed";
+  await deps.refresh();
+  const fresh = deps.find(model.provider, model.id);
+  if (!fresh || isRouted(deps.installedAtStart, fresh.baseUrl) || !(await deps.setModel(fresh))) return "no-better-model";
+  const where = fresh.baseUrl ? fresh.baseUrl.split("//").pop()!.split("/")[0] : "the provider's own API";
+  deps.notify(isRouted(deps.installNow, fresh.baseUrl)
+    ? `context-guru moved to ${where}. This Pi window now uses it.`
+    : `context-guru was removed. This Pi window now sends its ${model.provider} requests to ${where} directly.`);
+  return "switched";
 }
 
 /** True when a session start must check the proxy: context-guru is installed and at least one of these
@@ -431,7 +467,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       if (warned) return;
       warned = true;
       const text = `context-guru: two copies of the Pi package are loaded, ${owner} and ${PACKAGE_DIR}. ` +
-        `Only the first one runs. Remove the other one from "packages" in ~/.pi/agent/settings.json.`;
+        `Only the first one runs. Remove the other one from "packages" in ${settingsPath()}.`;
       if (ctx.hasUI) ctx.ui.notify(text, "warning");
       else console.warn(text);
     });
@@ -439,6 +475,13 @@ export default function contextGuru(pi: ExtensionAPI) {
   }
   shared[LOADED] = PACKAGE_DIR;
   let install = readInstall();
+  // The last install record that routed Pi. An uninstall (in this window too) clears `install`, but this one
+  // stays, so recoverStaleRoute still knows the proxy URL the session holds.
+  let routedInstall = install?.base_urls ? install : undefined;
+  const loadInstall = () => {
+    install = readInstall();
+    if (install?.base_urls) routedInstall = install;
+  };
 
   const routed = (ctx: ExtensionContext) => isRouted(install, ctx.model?.baseUrl);
   /** Pi sessions whose own summary request is running (session_before_compact until session_compact(_failed)). */
@@ -469,7 +512,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   let strategyNames: string[] = [];
 
   pi.on("session_start", (_event, ctx) => {
-    install = readInstall();
+    loadInstall();
     const port = install?.port;
     let urls: Array<string | undefined> = [ctx.model?.baseUrl];
     try {
@@ -522,6 +565,33 @@ export default function contextGuru(pi: ExtensionAPI) {
     compacting.delete(ctx.sessionManager.getSessionId());
   });
 
+  // #1341: on each prompt, a session that still uses our route after an uninstall moves to its real endpoint.
+  const recover = async (ctx: ExtensionContext) => {
+    try {
+      // Read the record once per prompt, and keep a route it shows: a window can take the route after it
+      // started (/model), and must still know that URL after an uninstall.
+      const now = readInstall();
+      // Only a record that routes this window's URL: a record on a new port must not hide the old one.
+      if (now?.base_urls && isRouted(now, ctx.model?.baseUrl)) routedInstall = now;
+      await recoverStaleRoute({
+        model: ctx.model, installedAtStart: routedInstall, installNow: now,
+        refresh: () => ctx.modelRegistry.refresh(), find: (p, id) => ctx.modelRegistry.find(p, id),
+        setModel: (m) => pi.setModel(m as never),
+        notify: (text) => (ctx.hasUI ? ctx.ui.notify(text, "info") : console.error(text)),
+      });
+    } catch {
+      // A failed recovery leaves the session as it was; /model or a restart still fixes it.
+    }
+  };
+  pi.on("input", async (_event, ctx) => {
+    await recover(ctx);
+    return { action: "continue" as const };
+  });
+  pi.on("before_agent_start", async (_event, ctx) => {
+    await recover(ctx);
+    return undefined;
+  });
+
   // Only a routed built-in `openai` Responses model with a stored ChatGPT login, and only for a request
   // to that same model. An API key (or any other provider) passes through unchanged.
   pi.on("before_provider_request", async (event, ctx) => {
@@ -563,7 +633,7 @@ export default function contextGuru(pi: ExtensionAPI) {
   };
 
   const reloadModels = async (ctx: ExtensionCommandContext) => {
-    install = readInstall();
+    loadInstall();
     try {
       await ctx.modelRegistry.refresh();
     } catch {
@@ -655,7 +725,7 @@ export default function contextGuru(pi: ExtensionAPI) {
       "The new setting applies after a restart. A restart costs one cache rewrite in every open Pi session."))) return;
     // As for restart: configure can wait for a session-start restart that holds the lock.
     const out = await run(["configure", flag, value], RESTART_TIMEOUT_MS);
-    install = readInstall();
+    loadInstall();
     const m = configureMessage(out.facts, out.code, out.stderr);
     say(ctx, m.text, m.level);
   };
