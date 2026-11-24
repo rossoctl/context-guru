@@ -147,7 +147,8 @@ mode: sync
 // a record, not a mechanism: nothing rewrites a stored config on the strength of it. A
 // sweep, if one is ever wanted, gets to be a separate and reversible decision.
 var supersededDefaults = []string{
-	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs: searchfold
+	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs (now an alias of
+	// `conservative`, via init): searchfold
 	// and toolfilter added, dedup moved ahead of toon.
 	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
 components:
