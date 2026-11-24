@@ -1285,7 +1285,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			h.refuseRoute(w, r, tn, err)
 			return
 		}
-		// Not unconditional: only the agent's OWN compaction request (agent/all.IsClientCompaction,
+		// Not unconditional: only the agent's OWN compaction request (agent.IsClientCompaction with the request's Client,
 		// checked inside readGatedBody) may read past maxRequestBytes here — everything
 		// else still gets refused at the default ceiling exactly as before.
 		body, ok := readGatedBody(w, r, cl, false)
@@ -1736,7 +1736,7 @@ var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
-// request (agent/all.IsClientCompaction — see agentcompaction.go; it goes through the pipeline like any
+// request (agent.IsClientCompaction with the request's Client — see agentcompaction.go; it goes through the pipeline like any
 // other request) and the standalone /compact endpoint, whose whole job is to
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
