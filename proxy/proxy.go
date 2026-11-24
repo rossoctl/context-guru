@@ -1862,86 +1862,56 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 		tee = newRecTee(h.recorder.teeCap)
 	}
 	defer func() {
-		// Hand the finished request to the keep-alive. Last, so `body` is the bytes that
-		// actually went upstream on the final round (an expand round rewrites it) and the
-		// prefix a ping would replay is the one the provider just hashed. Costs nothing when
-		// no tenant has opted in.
 		ttfb := 0.0
 		if sse && !sseBuffered {
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
 		usage.Live = cp.liveFacts(ttfb)
 		usage.PrefixRewritten = cp.prefixRewritten()
-		cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
-		h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
-		// Release any cache_aware_summarizer side call this turn deferred because its own cache
-		// was COLD: this request has now either rewritten that prefix or failed trying to, and
-		// either way the deferral must resolve rather than wait indefinitely for a signal that
-		// may never come (see offload.ResolveDeferredCacheAwareSummary's own comment on why a
-		// failed forward still resolves it). Harmless, and nearly free, on the overwhelming
-		// majority of sessions that never deferred anything.
-		offload.ResolveDeferredCacheAwareSummary(session, threadID)
-		// The warm sweep's question (#491), if the trigger registered one: it runs now, after this
-		// request was forwarded and answered, on its own goroutine. A failed forward drops it.
-		offload.ResolveWarmQuestion(session, threadID, status/100 == 2, int(usage.CacheRead))
-		if sse {
-			// The same two facts to both sinks. The aggregator keeps the process-lifetime
-			// average; the dashboard row keeps the per-request pair, so "which model, which
-			// account, which hour buffers" becomes answerable instead of being one gauge
-			// that resets on restart.
-			if h.agg != nil {
-				h.agg.RecordSSE(msSince(reqStart, sseFirstByte), sseBuffered)
-			}
-			cp.observeSSE(msSince(reqStart, sseFirstByte), sseBuffered)
-		}
-		if h.agg != nil && usageOK {
-			h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
-		}
-		// The provider's own input count, kept for this session's NEXT turn so a
-		// fraction-of-the-window trigger has something in the window's units to compare
-		// against. `session` here is tr.Session — the id apply itself derived — which is what
-		// RecordBilledInput requires; the three parts are summed because the split between
-		// fresh, read and written is an artefact of where the cache breakpoints fell, while the
-		// question being asked is how big the prompt was.
-		//
-		// Guarded on usageOK: a response that reported no usage (a stream that failed, a
-		// non-provider path) must leave the previous turn's figure in place rather than
-		// overwrite it with a zero that would read as "unknown" and shut the gate.
-		if usageOK {
-			billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
-			apply.RecordBilledInput(tn.Store, session, billed)
-			apply.RecordBilledInputThread(tn.Store, session, threadID, billed)
-			// OBSERVE MODE NEEDS ITS OWN RECORD, or the projection it exists to produce is a
-			// permanent zero.
-			//
-			// In observe mode the enforced path never runs a pipeline — that is what makes the
-			// byte-identity guarantee structural — so there is no Trace, `session` above is "",
-			// and the write no-ops. The off-path run also reads a DIFFERENT store, tn.Shadow,
-			// which nothing would ever write cg:bin: into. So Ctx.PrevBilledInput stayed 0,
-			// FracResolvable read false, and summarize's shipped 0.9 default reported
-			// window_not_exact on every turn: an operator deciding whether to enable this would
-			// see it save nothing, forever. That is the same defect resolveWindow fixes for
-			// /compact, arriving through the other door.
-			//
-			// The session id is derived HERE rather than on the request path, so observe keeps
-			// paying only the enqueue for its measurement — the property modes.go documents.
-			if tn.Mode == components.ModeObserve && tn.Shadow != nil {
-				// The id the shadow pipeline derives (post-transform), not the raw body's: see
-				// EnforcedSessionIDFor. bypass is false there, as in the observe job.
-				if sid := apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, up.path, body),
-					wire, provider, false, body); sid != "" {
-					apply.RecordBilledInput(tn.Shadow, sid, billed)
-					// tr.Session is "" here, so threadID is always the primary thread. Resolve the
-					// real one from the same inputs the off-path run's ThreadOf uses (agent header,
-					// then prefix continuity), so the key written is the key that run reads.
-					obsThread := threadID
-					if threadOf != nil {
-						obsThread = threadOf(sid).ID
+		billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
+		// lifecycle.Finish runs the steps after the response in their order: the keep-alive touch, the
+		// deferral ledger, the release of a deferred cache-aware summary, the warm sweep's question,
+		// and, only when usage is OK, the provider's own input count kept for this session's NEXT turn
+		// (the three tiers are summed because their split is an artefact of where the cache
+		// breakpoints fell; the question is how big the prompt was). `session` is tr.Session, the id
+		// apply itself derived, which RecordBilledInput requires.
+		lifecycle.Finish(lifecycle.Fin{
+			Store: tn.Store, Shadow: tn.Shadow, Mode: tn.Mode, Session: session, ThreadID: threadID,
+			UsageOK: usageOK, Billed: billed, Forwarded: status/100 == 2, CacheRead: int(usage.CacheRead),
+			// Hand the finished request to the keep-alive. At request end, so `body` is the bytes that actually
+			// went upstream on the final round (an expand round rewrites it) and the prefix a ping
+			// would replay is the one the provider just hashed. Costs nothing when no tenant has opted in.
+			Touch: func() {
+				cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
+			},
+			Ledger: func() {
+				h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
+			},
+			// The session id is derived HERE rather than on the request path, so observe keeps paying
+			// only the enqueue for its measurement. The id is the one the shadow pipeline derives
+			// (post-transform), not the raw body's: see EnforcedSessionIDFor. bypass is false there,
+			// as in the observe job. tr.Session is "" in observe mode, so the thread is resolved from
+			// the same inputs the off-path run's ThreadOf uses (agent header, then prefix continuity).
+			ObserveSession: func() string {
+				return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, up.path, body), wire, provider, false, body)
+			},
+			ObserveThread: threadOf,
+			Counters: func() {
+				if sse {
+					// The same two facts to both sinks. The aggregator keeps the process-lifetime
+					// average; the dashboard row keeps the per-request pair, so "which model, which
+					// account, which hour buffers" becomes answerable instead of being one gauge
+					// that resets on restart.
+					if h.agg != nil {
+						h.agg.RecordSSE(msSince(reqStart, sseFirstByte), sseBuffered)
 					}
-					apply.RecordBilledInputThread(tn.Shadow, sid, obsThread, billed)
+					cp.observeSSE(msSince(reqStart, sseFirstByte), sseBuffered)
 				}
-			}
-		}
+				if h.agg != nil && usageOK {
+					h.agg.RecordUsage(usage.FreshInput, usage.CacheRead, usage.CacheWrite, usage.Output)
+				}
+			},
+		})
 		cp.noteRounds(rounds)
 		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		cp.stopEarlyScan() // the request is over: the scan's work in progress ends (a finished result stays)

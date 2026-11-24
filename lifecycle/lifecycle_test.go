@@ -12,6 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -259,6 +260,78 @@ func TestInjectGates(t *testing.T) {
 	}
 }
 
+func newStore() store.Store { return store.NewMemory(store.Options{}) }
+
+func billedOf(st store.Store, key string) string {
+	b, _ := st.Get(key)
+	return string(b)
+}
+
+func TestFinishOrderAndBilledInput(t *testing.T) {
+	st := newStore()
+	var log []string
+	Finish(Fin{
+		Store: st, Mode: components.ModeSync, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 1234,
+		Touch:  func() { log = append(log, "touch") },
+		Ledger: func() { log = append(log, "ledger") },
+	})
+	if got := join(log); got != "touch ledger" {
+		t.Errorf("order: %s", got)
+	}
+	if billedOf(st, store.BilledPrefix+"s") != "1234" {
+		t.Error("the session's billed input was not kept")
+	}
+	if billedOf(st, store.BilledThreadPrefix+thread.Key("s", "t1")) != "1234" {
+		t.Error("the thread's billed input was not kept under thread.Key(session, thread)")
+	}
+}
+
+func TestFinishKeepsThePreviousFigureWithoutUsage(t *testing.T) {
+	st := newStore()
+	apply.RecordBilledInput(st, "s", 99)
+	ran := false
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: false, Billed: 777, Touch: func() { ran = true }})
+	if billedOf(st, store.BilledPrefix+"s") != "99" {
+		t.Error("a response without usage must leave the previous figure")
+	}
+	if !ran {
+		t.Error("Touch runs whether or not usage is OK")
+	}
+}
+
+func TestFinishObserveWritesTheShadowStore(t *testing.T) {
+	live, shadow := newStore(), newStore()
+	Finish(Fin{
+		Store: live, Shadow: shadow, Mode: components.ModeObserve, Session: "", ThreadID: thread.Primary,
+		UsageOK: true, Billed: 500,
+		ObserveSession: func() string { return "sid" },
+		ObserveThread:  func(string) thread.Result { return thread.Result{ID: "obs"} },
+	})
+	if billedOf(shadow, store.BilledPrefix+"sid") != "500" {
+		t.Error("shadow session record missing")
+	}
+	if billedOf(shadow, store.BilledThreadPrefix+thread.Key("sid", "obs")) != "500" {
+		t.Error("shadow thread record must use the resolved observe thread")
+	}
+	if billedOf(live, store.BilledPrefix+"sid") != "" {
+		t.Error("the live store must stay clean in observe mode")
+	}
+	// Without an ObserveThread the shadow thread record falls back to Fin.ThreadID.
+	shadow3 := newStore()
+	Finish(Fin{Store: live, Shadow: shadow3, Mode: components.ModeObserve, ThreadID: "fallback", UsageOK: true, Billed: 9,
+		ObserveSession: func() string { return "sid" }})
+	if billedOf(shadow3, store.BilledThreadPrefix+thread.Key("sid", "fallback")) != "9" {
+		t.Error("with no ObserveThread the shadow thread record must use Fin.ThreadID")
+	}
+	// An enforcing request never writes the shadow store.
+	shadow2 := newStore()
+	Finish(Fin{Store: live, Shadow: shadow2, Mode: components.ModeSync, Session: "s", ThreadID: "m", UsageOK: true, Billed: 1,
+		ObserveSession: func() string { return "sid" }})
+	if billedOf(shadow2, store.BilledPrefix+"sid") != "" {
+		t.Error("shadow written outside observe mode")
+	}
+}
+
 // The order of side effects is the contract. These three pins each fail when two steps swap.
 
 func TestPrepareOrderPinsThreadFallbackAfterTheApplyNotes(t *testing.T) {
@@ -285,4 +358,23 @@ func index(l []string, s string) int {
 		}
 	}
 	return -1
+}
+
+func TestFinishOrderPinsCountersBeforeBilledInput(t *testing.T) {
+	st := newStore()
+	var log []string
+	Finish(Fin{
+		Store: st, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 10,
+		Touch:  func() { log = append(log, "touch") },
+		Ledger: func() { log = append(log, "ledger") },
+		Counters: func() {
+			if billedOf(st, store.BilledPrefix+"s") != "" {
+				log = append(log, "counters-after-billed")
+			}
+			log = append(log, "counters")
+		},
+	})
+	if got := join(log); got != "touch ledger counters" {
+		t.Errorf("the counters run after the ledger and before the billed-input writes: %s", got)
+	}
 }
