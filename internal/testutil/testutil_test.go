@@ -73,7 +73,6 @@ type deadlineTB struct {
 func (d *deadlineTB) Deadline() (time.Time, bool) { return d.dl, true }
 
 func TestWaitForGivesUpBeforeTheTestDeadlineWithItsOwnMessage(t *testing.T) {
-	RequireTiming(t)
 	// The test deadline is 5.2 s away; the margin is 5 s; so the bound is about 0.2 s, not 30 s.
 	d := &deadlineTB{dl: time.Now().Add(deadlineMargin + 200*time.Millisecond)}
 	start := time.Now()
@@ -85,7 +84,7 @@ func TestWaitForGivesUpBeforeTheTestDeadlineWithItsOwnMessage(t *testing.T) {
 		}()
 		WaitFor(d, "never", func() bool { return false })
 	}()
-	if el := time.Since(start); el > 3*time.Second {
+	if el := time.Since(start); TimingEnabled() && el > 3*time.Second {
 		t.Fatalf("WaitFor waited %v; it must stop before the test deadline", el)
 	}
 	if !strings.Contains(d.msg, "waiting for never") {

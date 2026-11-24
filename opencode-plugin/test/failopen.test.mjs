@@ -10,7 +10,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-failop
 process.env.CONTEXT_GURU_PORT_START = "9200"
 
 import plugin, { routeProviders, stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy, timingOnly } from "./helpers.mjs"
+import { stubProxyBinary, waitUntilUnhealthy, timingOnly, timingEnabled } from "./helpers.mjs"
 
 // Ports only this file uses. 9263 stays closed: nothing listens there.
 const UPSTREAM_PORT = 9260
@@ -410,7 +410,7 @@ test("with fallback: false, a restart whose binary is missing returns at once", 
   try {
     const waited = await timed(project.ask)
 
-    assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
+    if (timingEnabled) assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
   } finally {
     await project.cleanup()
   }

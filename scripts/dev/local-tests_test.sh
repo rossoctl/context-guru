@@ -61,9 +61,17 @@ r=$(mktemp -d); trap 'rm -rf "$d" "$r"' EXIT
   printf 'package p\nfunc TestB(t *T) { x() }\n' > b_test.go; git commit -qam plain-test; git tag plain
   printf 'package p\nfunc TestA(t *T) { testutil.RequireTiming(t); y() }\n func TestC(t *T) {}\n' > a_test.go; git commit -qam timing-file; git tag timingfile
   printf 'package p\nfunc TestB(t *T) { x() }\nfunc TestD(t *T) { testutil.RequireTiming(t) }\n' > b_test.go; git commit -qam new-timing; git tag newtiming
+  # A Python and a TypeScript suite with the timing switch, and a Python file without it.
+  printf 'TIMING = os.environ.get("CG_TIMING_TESTS") == "1"\ndef test_a(): pass\n' > c.py
+  printf 'const timing = process.env.CG_TIMING_TESTS === "1"\ntest("a", () => {})\n' > d.test.ts
+  printf 'def f(): pass\n' > e.py
+  git add . && git commit -qm suites; git tag suites
+  printf 'TIMING = os.environ.get("CG_TIMING_TESTS") == "1"\ndef test_a(): pass\ndef test_b(): pass\n' > c.py; git commit -qam py-change; git tag pychange
+  printf 'const timing = process.env.CG_TIMING_TESTS === "1"\ntest("a", () => {})\ntest("b", () => {})\n' > d.test.ts; git commit -qam ts-change; git tag tschange
+  printf 'def f(): return 1\n' > e.py; git commit -qam py-plain; git tag pyplain
 ) >/dev/null 2>&1
 needs() { (cd "$r" && "$root/scripts/dev/timing-tests-needed.sh" "$1" "$2"); }
-for c in "base docs skip" "docs plain skip" "plain timingfile run" "timingfile newtiming run"; do
+for c in "base docs skip" "docs plain skip" "plain timingfile run" "timingfile newtiming run" "newtiming suites run" "suites pychange run" "pychange tschange run" "tschange pyplain skip"; do
   set -- $c
   got=$(needs "$1" "$2")
   if [ "$got" = "$3" ]; then echo "ok   timing-needed $1..$2 = $3"; else echo "FAIL timing-needed $1..$2 = $got, want $3"; fails=1; fi

@@ -134,7 +134,6 @@ func TestASilentStreamingRequestIsResentOnANewConnection(t *testing.T) {
 // A gateway that is genuinely not answering still fails — after two silences, with an error that
 // says so, and never more than one resend.
 func TestAGatewayThatNeverAnswersFailsAfterOneResend(t *testing.T) {
-	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(int) bool { return true })
 	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
 	before := upstreamSilenceFailures.Load()
@@ -234,7 +233,6 @@ func TestTheHandlerRecoversASilentStreamingTurn(t *testing.T) {
 // silence there is normal and must never trigger a resend — it would duplicate a long
 // generation.
 func TestANonStreamingRequestIsNeverResentForSilence(t *testing.T) {
-	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond) // "generating", well past the silence timeout below
 		w.Header().Set("Content-Type", "application/json")
@@ -762,7 +760,6 @@ func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
 
 // The same late response, but the client has gone away by the time it arrives: it is not resent.
 func TestALateResponseForAClientThatLeftIsNotResent(t *testing.T) {
-	testutil.RequireTiming(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &lateByteTransport{late: cancel}
 	c := &http.Client{Transport: tr}

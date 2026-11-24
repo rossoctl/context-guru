@@ -28,11 +28,12 @@ import (
 //	requests 2xx 9 and 5xx 1 per second    -> 5xx ratio 0.1
 //	cache_read 30, input 10 tokens/s       -> cache read ratio 0.75
 func TestCentralRecordingRulesGiveTheRightNumber(t *testing.T) {
-	testutil.RequireTiming(t)
 	collector, token, prom := central(t)
 	if testing.Short() || os.Getenv("CENTRAL_SLOW") == "" {
 		t.Skip("slow (about 6 minutes): set CENTRAL_SLOW=1")
 	}
+	// The rules read rates per real minute, so the run needs both CENTRAL_SLOW and CG_TIMING_TESTS.
+	testutil.RequireTiming(t)
 	machine := fmt.Sprintf("rule%028d", time.Now().UnixNano()%1e12)
 	p, stop, err := metricspush.Start(context.Background(), metricspush.Config{URL: collector, Token: token,
 		Interval: 5 * time.Second, Proxy: "context-guru", Machine: machine, Version: "e2e", Preset: "rules"})
