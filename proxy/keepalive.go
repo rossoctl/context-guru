@@ -388,63 +388,23 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
 				string(provider), startedAt, body, r.UserAgent(), u)
 		}
-		// Time windows gate only a wait for a person (#858), so the strategy is resolved with the wait
-		// cause of the response that ended this turn.
-		// The body reading joins only where the per-wait plan changes the count (the 5-minute tier, not
-		// OpenAI, Idle under 300 s: Record's own guard), for the windows as for the plan (#1227). Elsewhere
-		// the tracker-only cause decides, as before.
-		account := pol
+		// The wait-cause windows, today's reading against the wide one, are keepalive.ResolveWithWindows.
+		// This host supplies the tracker, the request's usage and its own strategy, campaign and override.
 		wkey := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
-		sub := keepalive.IsSubagentThread(threadID)
-		causeOf := func(o *keepalive.TaskCounts) string {
-			return k.Keeper.WaitingFor(wkey, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, o)
-		}
-		planEligible := func(p keepalive.Policy) bool { return p.WaitPlan && p.On() && p.Idle < 300*time.Second }
-		ignoreWindows, ignoreToday := false, false
-		if pol.WaitPlan && tracked {
-			ignoreToday = !keepalive.WindowsApply(causeOf(nil), sub)
-			ignoreWindows = ignoreToday
-			if open != nil && provider != bschemas.OpenAI &&
-				!k.Keeper.OneHourTier(wkey, body, keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
-					CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h, StopReason: u.StopReason}, usageOK, provider) {
-				ignoreWindows = !keepalive.WindowsApply(causeOf(open), sub)
-			}
-		}
-		pol, applied = k.resolvePolicyWindows(tn, session, provider, pol, pdec, pdecOK, ignoreWindows)
-		if ignoreWindows != ignoreToday {
-			// Ignoring the windows must never refuse a hold today's decision makes, nor plan fewer pings.
-			// Today's policy is the one the windows give; the wide one is the policy with them ignored.
-			todayPol, todayApplied := k.resolvePolicyWindows(tn, session, provider, account, pdec, pdecOK, ignoreToday)
-			prefix := u.CacheRead + u.CacheWrite
-			// The wait cause a policy is judged by is the one Record will use for it: the merged cause where
-			// the policy takes the per-wait plan, the tracker-only cause where it does not (a strategy on the
-			// 1-hour band keeps its own count and the general floor). Whether a policy HOLDS the wait does not
-			// depend on its plan eligibility.
-			causeFor := func(p keepalive.Policy) string {
-				if planEligible(p) {
-					return causeOf(open)
-				}
-				return causeOf(nil)
-			}
-			holds := func(p keepalive.Policy) bool {
-				return p.On() && prefix >= int64(p.WaitMinPrefix(causeFor(p), sub))
-			}
-			pingsOf := func(p keepalive.Policy) int {
-				if planEligible(p) {
-					return p.WaitPings(causeFor(p), sub)
-				}
-				return p.MaxPings
-			}
-			switch {
-			case !planEligible(pol):
-				// The policy that ignoring the windows chose does not take the plan (a 1-hour Idle, or
-				// off): the reading does not apply, and today's windows decision stands.
-				pol, applied, open = todayPol, todayApplied, nil
-			case holds(todayPol) && (!holds(pol) || pingsOf(todayPol) > pingsOf(pol)):
-				// Today's policy holds this wait and the strategy's would refuse it or plan fewer pings.
-				pol, applied = todayPol, todayApplied
-			}
-		}
+		pol, applied, open = keepalive.ResolveWithWindows(keepalive.WindowsInput{
+			Account: pol, Tracked: tracked, OpenAI: provider == bschemas.OpenAI,
+			Subagent: keepalive.IsSubagentThread(threadID), Open: open, Prefix: u.CacheRead + u.CacheWrite,
+			CauseOf: func(o *keepalive.TaskCounts) string {
+				return k.Keeper.WaitingFor(wkey, u.ToolUseNames, u.ToolUseIncomplete, u.StopReason, usageOK, o)
+			},
+			OneHourTier: func() bool {
+				return k.Keeper.OneHourTier(wkey, body, keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
+					CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h, StopReason: u.StopReason}, usageOK, provider)
+			},
+			Resolve: func(p keepalive.Policy, ignore bool) (keepalive.Policy, string) {
+				return k.resolvePolicyWindows(tn, session, provider, p, pdec, pdecOK, ignore)
+			},
+		})
 		// The Ping button's opt-in (manualping.go): this REQUEST asked to be held for it. Set only here,
 		// on the path that already passed the no-audit-sink rule, the client-ended check and the kill
 		// switch, so the header can never widen what those refuse. It does not turn the schedule on.
@@ -486,16 +446,10 @@ func (h *Handler) oneHourFirstFor(r *reqInfo) func(session, threadID, model stri
 		return nil
 	}
 	return func(session, threadID, model string, toolsDeclared bool) bool {
-		if threadID != "" || !toolsDeclared || session == "" {
-			return false // only the main thread is ever relabelled: skip the policy resolution for the rest
-		}
-		pol, _ := h.keeper.resolvePolicy(r.tn, session, r.provider, r.tn.Cache, predDecision{}, false)
-		if !pol.OneHourOnWait && !pol.OneHourAlways {
-			return false
-		}
-		// model is the model of the FINAL body apply hands over, the one Record keys the route state by too.
-		return h.keeper.Keeper.OneHourFirst(r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared,
-			keepalive.OneHourMode{Always: pol.OneHourAlways, RebuildTokens: int64(pol.OneHourRebuildTokens)})
+		return h.keeper.Keeper.OneHourFirstFor(func() keepalive.Policy {
+			pol, _ := h.keeper.resolvePolicy(r.tn, session, r.provider, r.tn.Cache, predDecision{}, false)
+			return pol
+		}, r.tn.ID, session, threadID, r.provider, r.endpoint, r.route, model, toolsDeclared)
 	}
 }
 
@@ -519,14 +473,9 @@ func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschema
 	// pessimistic answer is the safe one. A tool wait outside a window then registers no conversation copy
 	// and still gets its plain ping; it loses only the sweep substitute. A copy is content kept in memory.
 	pol, _ := k.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
-	if !pol.On() {
-		return false
-	}
-	// A thread with no tool call yet is not pinged (#858), so it keeps no copy either.
-	if pol.WaitPlan && !k.Keeper.ToolSeen(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}) {
-		return false
-	}
-	return true
+	return keepalive.CanKeepAlive(pol, func() bool {
+		return k.Keeper.ToolSeen(keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID})
+	})
 }
 
 // resolvePolicy layers the manager strategy and the session override over the account's own

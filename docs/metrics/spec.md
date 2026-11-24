@@ -345,7 +345,34 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 | Metric | Type | Unit | Labels | Meaning |
 |---|---|---|---|---|
 | `llm_cache_misses_total` | counter | 1 | `model`, `cause` | Misses by cause from `cache_miss_cause`: `ttl_expiry`, `prefix_change`, `model_changed`, `compaction_after_rewrite`, `bypass_flip`, `cold_start`, `other`. |
-| `llm_cache_miss_cost_usd_total` | counter | none | `model`, `cause` | Extra cost of those misses. |
+| `llm_cache_miss_cost_usd_total` | counter | none | `model`, `cause` | Extra cost of those misses: the write premium (see below). Not the price of the request. |
+
+**What counts as a miss.** A request is a miss when the proxy's cache verdict for it is not a hit. Keep-alive pings are never misses. Each proxy uses its own verdict. context-guru uses `cache_miss_reason`, so a partial read that re-wrote most of the prompt is a miss (#496). A proxy that has no such verdict counts a request with no cache-read tokens.
+
+**One cause for each miss, in this order.** The first rule that applies gives the `cause`:
+
+1. `cold_start`: the first request of the thread, or the first on its model.
+2. `ttl_expiry`: the time since the previous request is longer than the cache TTL.
+3. `model_changed`: the thread switched model.
+4. `compaction_after_rewrite`: a bypass request after the proxy rewrote earlier turns.
+5. `bypass_flip`: bypass turned on or off with no earlier rewrite.
+6. `prefix_change`: the tools, the system prompt, or the effort or thinking settings changed.
+7. `other`: anything else, for example parallel requests (`concurrent`) or a miss with no measured difference.
+
+Rules 3 to 6 apply only when the request wrote cache tokens. A changed prefix that wrote nothing re-created no prefix, so it is `other`. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it. It does not guess.
+
+**The miss cost is the write premium.** It is what the written prefix cost above a read of the same tokens, which is what a hit would have charged:
+
+```
+miss_cost_usd = (cache_write - cache_write_1h) x (cache_write_5m_rate - cache_read_rate)
+              +  cache_write_1h                x (cache_write_1h_rate - cache_read_rate)
+```
+
+- `cache_write` is all written tokens. `cache_write_1h` is the part of them billed at the 1-hour tier, never more than `cache_write`.
+- Each term is never below zero.
+- Output and fresh input are not in it, because a hit pays them too.
+- **Rates.** A rate the price states is used as it is. A tier rate the price leaves blank is the model's standard multiple of its input rate, as `internal/modelinfo` resolves it (`Price.Resolved`, #1248). No gateway states `cache_write_1h_rate`, so it is always derived (`Price.CacheWrite1hFor`): when the operator sets `Write1hFrac`, it is that multiple of the input rate and never below `cache_write_5m_rate`; else it is 2.0x the input rate (`AnthropicCacheWrite1hFrac`).
+- A model with no price counts the miss in `llm_cache_misses_total` and books no money here.
 
 ### 5.5 Proxy health
 

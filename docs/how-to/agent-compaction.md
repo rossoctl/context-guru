@@ -17,9 +17,11 @@ request keeps the same tool list and the same rewritten history as the turns bef
 keeps the provider cache warm. Measured on production traffic, a request that bypassed the
 pipeline missed the cache 31% of the time. A request that did not bypass missed 1.6% of the time.
 The trade-off: the summary model sees the rewritten history (shortened tool outputs and
-`<<cg:HASH>>` markers), not the full original. Detection is a match on the opening of the
-agent's own summarization prompt in the last message of the request, and it covers Claude Code
-and Bob Shell (`proxy/agentcompaction.go`). Detection only feeds thread identification, the
+`<<cg:HASH>>` markers), not the full original. Detection uses, in this order, a mark the
+client sets (`x-context-guru-request-kind: compaction` from the OpenCode and Pi plugins, and
+Codex's `x-codex-turn-metadata` header or `client_metadata`), then a match on the opening of the
+agent's own summarization prompt in the last turn of `messages` or of the Responses `input`. It
+covers Claude Code, Bob Shell, Codex, OpenCode and Pi (`thread/compaction.go`). Detection only feeds thread identification, the
 larger size limit below, the dashboard row, and the `agent_compaction` counter in `/stats`. To
 skip the pipeline for one request, send `x-context-guru-bypass: true`. A compaction body over
 32 MiB is bypassed without the header, because the pipeline costs about 0.35 s per MiB.
