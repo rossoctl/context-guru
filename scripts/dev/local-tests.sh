@@ -53,9 +53,24 @@ sum=$out/summary.txt
 [ -s "$sum" ] || { echo "ERROR: no summary at $sum" >&2; exit 2; }
 grep -q '^DONE rc=' "$sum" || { echo "ERROR: $sum has no DONE line: the run did not finish" >&2; exit 2; }
 
+# The suites must have run on this head. A summary from another commit says nothing about it.
+sumsha=$(sed -n '1s/^commit //p' "$sum")
+if [ "$sumsha" != "$head" ]; then
+  echo "ERROR: $sum is for commit ${sumsha:-unknown}, not the head ${head:0:12}. Nothing posted." >&2
+  exit 2
+fi
+done_rc=$(sed -n 's/^DONE rc=//p' "$sum" | tail -1)
+
 known=$(grep -vE '^\s*(#|$)' "$here/../release/known-laptop-failures.txt")
 result=pass
 rows=
+# part-a.sh gives rc=1 when any step failed, so rc=1 does not decide: the steps do (a step that
+# fails only on known laptop failures stays a pass). Any other rc is a run that stopped (143) or
+# broke: fail. Every step that part-a.sh runs must also have a line, or the run stopped short.
+case $done_rc in 0|1) ;; *) result=fail; rows+="| (run) | **FAIL**: stopped, DONE rc=$done_rc |"$'\n' ;; esac
+for st in $(grep -oE '^step [a-z0-9-]+' "$here/../release/part-a.sh" | awk '{print $2}'); do
+  grep -qE "^(ok|flaky|FAILED) +$st( |\$)" "$sum" || { result=fail; rows+="| $st | **FAIL**: no result line |"$'\n'; }
+done
 notes=
 while read -r state name _; do
   case $state in
