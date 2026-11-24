@@ -1,0 +1,10 @@
+cache:
+  head_ttl_1h: false
+  keepalive: false
+components:
+  toolfilter:
+    remove:
+      - a
+      - b
+pipeline:
+  - toolfilter

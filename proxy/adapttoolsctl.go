@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/rossoctl/context-guru/config"
 	"net/http"
 	"regexp"
 	"strings"
@@ -83,32 +84,8 @@ func (h *Handler) adaptToolsApply(w http.ResponseWriter, r *http.Request) {
 		"effective": "now", "note": note, "undo": map[string]string{"option": "revert"}})
 }
 
-// applyNote says what the list now does, read back from the configuration that was written,
-// so it never claims a change that did not happen: a restore cannot take out a name the
-// configuration still lists (an operator's config file, say), and the note names those.
+// applyNote says what the list now does, read back from the configuration that was written
+// (config.RemovalNote).
 func applyNote(names []string, doc string, restore bool) string {
-	after, _, _ := removedFrom(doc)
-	still := map[string]bool{}
-	for _, n := range after {
-		still[n] = true
-	}
-	var done, kept []string
-	for _, n := range names {
-		if still[n] == restore {
-			kept = append(kept, n)
-		} else {
-			done = append(done, n)
-		}
-	}
-	if !restore {
-		return "filtering " + strings.Join(done, ", ")
-	}
-	note := "stopped filtering " + strings.Join(done, ", ")
-	if len(done) == 0 {
-		note = "stopped filtering nothing"
-	}
-	if len(kept) > 0 {
-		note += "; still filtered because your configuration lists them: " + strings.Join(kept, ", ")
-	}
-	return note
+	return config.RemovalNote(names, doc, restore)
 }

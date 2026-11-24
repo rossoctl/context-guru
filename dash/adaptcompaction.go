@@ -68,23 +68,15 @@ import (
 // deterministic compaction components, in the default pipeline's order. Everything else in an
 // account's pipeline (cachesplit, toolfilter, the LLM components) keeps its place in the
 // applied config and is not run by the replay.
-var AdaptCompactionCandidates = []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract"}
+var AdaptCompactionCandidates = config.AdaptCandidates
 
 // adaptKnobs are the settings the search varies, and the only settings the apply route accepts
 // from a client. Values are the grid tried.
-var adaptKnobs = map[string]map[string][]int{
-	"extract": {"min_tokens": {200, 300, 400, 800}},
-	"dedup":   {"min_tokens": {50, 100, 200}},
-}
+var adaptKnobs = config.AdaptKnobs
 
 // AdaptCompactionKnobAllowed reports whether comp.key=v is a setting the apply route may store.
 func AdaptCompactionKnobAllowed(comp, key string, v int) bool {
-	for _, x := range adaptKnobs[comp][key] {
-		if x == v {
-			return true
-		}
-	}
-	return false
+	return config.AdaptKnobAllowed(comp, key, v)
 }
 
 // isAdaptReplayable says the replay can run name: it acts on messages and calls no model. The
@@ -123,14 +115,7 @@ func adaptCandidatesOf(comps []string) []string {
 	return out
 }
 
-func isAdaptCandidate(name string) bool {
-	for _, c := range AdaptCompactionCandidates {
-		if c == name {
-			return true
-		}
-	}
-	return false
-}
+func isAdaptCandidate(name string) bool { return config.IsAdaptCandidate(name) }
 
 const (
 	// adaptSearchRequests caps the covered requests the SEARCH replays (most recent sessions
@@ -643,29 +628,7 @@ func asIntAny(v any) (int, bool) {
 // component of cur kept right after the candidate it followed in cur (walking back past
 // candidates the new order drops), so cachesplit stays after the offloaders and an LLM
 // component stays where its owner put it relative to what remains.
-func AdaptCompactionMerge(cur, cands []string) []string {
-	keep := map[string]bool{}
-	for _, c := range cands {
-		keep[c] = true
-	}
-	after := map[string][]string{} // surviving candidate ("" = head) -> fixed comps after it
-	anchor := ""
-	for _, c := range cur {
-		if isAdaptCandidate(c) {
-			if keep[c] {
-				anchor = c
-			}
-			continue
-		}
-		after[anchor] = append(after[anchor], c)
-	}
-	out := append([]string(nil), after[""]...)
-	for _, c := range cands {
-		out = append(out, c)
-		out = append(out, after[c]...)
-	}
-	return out
-}
+func AdaptCompactionMerge(cur, cands []string) []string { return config.AdaptMerge(cur, cands) }
 
 // --- loading -------------------------------------------------------------------
 
