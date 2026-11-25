@@ -20,9 +20,14 @@ func TestProjectedPingUsesTheTierOfThePrefix(t *testing.T) {
 	k, fd, _ := testKeeper(t)
 	fd.setPrices(proxyPricer{fixedPrice{tieredGPT56()}})
 	out := float64(pingOutputBudget("/v1/messages"))
-	at := k.projectedPingUSD("gpt-5.6", 272_000, "/v1/messages", "")
-	if want := 272_000*0.5e-6 + out*30e-6; !near(at, want) {
+	at := k.projectedPingUSD("gpt-5.6", 271_999, "/v1/messages", "")
+	if want := 271_999*0.5e-6 + out*30e-6; !near(at, want) {
 		t.Fatalf("at the line %v want base %v", at, want)
+	}
+	// A prefix of exactly 272,000 sends a ping of 272,001 tokens: the tier rate.
+	edge := k.projectedPingUSD("gpt-5.6", 272_000, "/v1/messages", "")
+	if want := 272_000*1e-6 + out*45e-6; !near(edge, want) {
+		t.Fatalf("prefix 272,000 %v want tier %v", edge, want)
 	}
 	above := k.projectedPingUSD("gpt-5.6", 300_000, "/v1/messages", "")
 	if want := 300_000*1e-6 + out*45e-6; !near(above, want) { // 2x read, 1.5x output

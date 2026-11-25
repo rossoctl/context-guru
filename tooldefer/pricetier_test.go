@@ -45,3 +45,14 @@ func TestPriceBothAboveAndBelowTheLine(t *testing.T) {
 		t.Fatalf("unknown: %+v", m)
 	}
 }
+
+// The size without the deferral is rounded UP. Haiku bills 1.3686 per counted token, so one deferred
+// token is 1.3686 billed: from 99,999 that must reach 100,001 (the dear tier), not stop at 100,000.
+func TestPriceRoundsTheWithoutSizeUp(t *testing.T) {
+	haiku := modelinfo.Price{Input: 1e-6, CacheRead: 0.1e-6, CacheWrite: 1.25e-6, Output: 5e-6}.WithTiers("claude-haiku-5-5")
+	r := Request{Model: "claude-haiku-5-5", DeferredTokens: 1, Tier: TierRead, PromptTokens: 99_999}
+	m, _ := Price(r, haiku)
+	if want := 1.3686 * 0.5e-6; !near(m.Gross, want) {
+		t.Fatalf("gross %v want %v", m.Gross, want)
+	}
+}

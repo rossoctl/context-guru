@@ -1266,7 +1266,7 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 	if model == "" || prefix <= 0 {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -1291,7 +1291,7 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	if model == "" || prefix <= 0 {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -2077,6 +2077,10 @@ func (k *Keeper) recordTimedOut(j pingJob, ms float64) {
 		})
 	}
 }
+
+// pingPrompt is the prompt size of a ping on a cached prefix: the prefix plus the fresh input the
+// ping carries (kvcache.DefaultPingInputTokens). A prefix exactly on a tier line sends a ping above it.
+func pingPrompt(prefix int64) int64 { return prefix + kvcache.DefaultPingInputTokens }
 
 // billedPrompt is the prompt size that picks the price tier of a request that has run: what the
 // answer's usage billed (modelinfo.PromptTokens). When the usage has no input, it is the prefix

@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"math"
 	"testing"
 
+	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -57,5 +59,18 @@ func TestAutoPriceUsesTheRowsPromptSize(t *testing.T) {
 	in, out, read, write, _ = price("gpt-5.6", modelinfo.PromptTokens(1000, 271_001, 0))
 	if in != 10e-6 || out != 45e-6 || read != 1e-6 || write != 10e-6 {
 		t.Fatalf("above the line: %v %v %v %v", in, out, read, write)
+	}
+}
+
+// The avoidable write premium is priced at the tier of the request's prompt size.
+func TestMissCostUsesTheTierOfThePrompt(t *testing.T) {
+	im := &InferenceMetrics{prices: tieredPricer{gpt56Price()}}
+	above := im.missCostUSD(&dash.Event{Model: "gpt-5.6", CacheWrite: 300_000})
+	if want := 300_000 * (10e-6 - 1e-6); math.Abs(above-want) > 1e-9 {
+		t.Fatalf("above the line %v want %v", above, want)
+	}
+	below := im.missCostUSD(&dash.Event{Model: "gpt-5.6", CacheWrite: 272_000})
+	if want := 272_000 * (5e-6 - 0.5e-6); math.Abs(below-want) > 1e-9 {
+		t.Fatalf("at the line %v want %v", below, want)
 	}
 }

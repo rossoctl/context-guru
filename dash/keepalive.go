@@ -1276,7 +1276,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				// identical (#706), but the reply is one token and output is billed as generated.
 				// max_tokens 0 is accepted by this gateway and bills none, but the figure has to
 				// match what is sent, not the cheapest shape available.
-				p = p.At(r.Prefix) // the ping reads this prefix: the rates of that prompt size
+				p = p.At(r.Prefix + kvcache.DefaultPingInputTokens) // the ping reads this prefix: the rates of that prompt size
 				r.PingUSDEach = float64(r.Prefix)*p.CacheRead + p.Output
 				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
 				if r.PingUSDEach > 0 {
@@ -1837,7 +1837,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.AddressableUSD += e.usd
 	}
 	if out.Priced {
-		p = p.At(prefix) // a ping reads this prefix: the rates of that prompt size
+		p = p.At(prefix + kvcache.DefaultPingInputTokens) // a ping reads this prefix: the rates of that prompt size
 		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
 		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
 	}

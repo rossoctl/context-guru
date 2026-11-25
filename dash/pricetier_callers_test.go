@@ -116,8 +116,25 @@ func TestNextRequestUSDUsesTheTierOfThePrefix(t *testing.T) {
 	if !accNear(warm, 300_000*1e-6) || !accNear(cold, 300_000*10e-6) {
 		t.Fatalf("above the line: warm %v cold %v", warm, cold)
 	}
-	warm, cold = NextRequestUSD(gpt56(), 272_000, 300)
-	if !accNear(warm, 272_000*0.5e-6) || !accNear(cold, 272_000*5e-6) {
-		t.Fatalf("at the line: warm %v cold %v", warm, cold)
+	warm, cold = NextRequestUSD(gpt56(), 271_999, 300)
+	if !accNear(warm, 271_999*0.5e-6) || !accNear(cold, 271_999*5e-6) {
+		t.Fatalf("below the line: warm %v cold %v", warm, cold)
+	}
+	// A prefix of exactly 272,000 plus the next request's input is above the line.
+	warm, _ = NextRequestUSD(gpt56(), 272_000, 300)
+	if !accNear(warm, 272_000*1e-6) {
+		t.Fatalf("prefix 272,000: warm %v", warm)
+	}
+}
+
+// The floor re-prices the saved tokens at the read rate of the size WITHOUT context-guru. The trim
+// takes the request from 300,000 (2x) to 250,000: saved input bills 10e-6, as a read 1e-6.
+func TestHeldFloorUsesTheSavedSidePrice(t *testing.T) {
+	e := &Event{FreshInput: 250_000}
+	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask",
+		Saved: accountant.TierTokens{Input: 50_000}}}})
+	delta := 50_000 * 10e-6
+	if got, want := e.heldFloorUSD(gpt56(), delta), 50_000*1e-6; !accNear(got, want) {
+		t.Fatalf("floor %v want %v", got, want)
 	}
 }

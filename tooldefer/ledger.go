@@ -1,6 +1,7 @@
 package tooldefer
 
 import (
+	"math"
 	"sync"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -141,7 +142,9 @@ func Price(r Request, p modelinfo.Price) (Money, bool) {
 	// dearer tier. The cost is what the request sent billed, at its own tier.
 	pb := p
 	if r.PromptTokens > 0 {
-		pb = p.At(r.PromptTokens + int64(billed(r.DeferredTokens)) - int64(billed(r.ListTokens)))
+		// Round the size without up: truncating could lose one token at a tier line and put the
+		// client's request in the cheaper tier. This errs toward the larger (dearer) side by under 1 token.
+		pb = p.At(r.PromptTokens + int64(math.Ceil(billed(r.DeferredTokens)-billed(r.ListTokens))))
 		p = p.At(r.PromptTokens)
 	} else {
 		p, pb = p.At(0), p.At(0)

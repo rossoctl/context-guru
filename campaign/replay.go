@@ -189,10 +189,15 @@ func Rows(reqs []*kvcache.Request, price func(model string, promptTokens int64) 
 		if !ok || pWrite <= pRead {
 			continue
 		}
+		// A replayed ping reads CachedContext plus its own input: priced at that size, not at the row's.
+		pingIn, pingOut, pingRead, _, pingOK := price(r.Model, r.CachedContext+kvcache.DefaultPingInputTokens)
+		if !pingOK {
+			pingIn, pingOut, pingRead = pIn, pOut, pRead
+		}
 		key, tk := sk{r.User, r.ConversationID}, sk{r.User, r.ConversationID + "\x00" + r.ThreadID}
 		st := time.UnixMilli(r.TS).UTC()
 		f := RowFacts{U: r.UpstreamMs / 1000, Returned: r.HasNext, ToEnd: float64(max(0, lastEnd[key]-end)) / 1000,
-			Stake: Stake(r.CachedContext, pRead, pWrite), Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pIn, POut: pOut, PRead: pRead}).PingCost(),
+			Stake: Stake(r.CachedContext, pRead, pWrite), Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pingIn, POut: pingOut, PRead: pingRead}).PingCost(),
 			Turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), Prefix: r.CachedContext,
 			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: agent.ModelAgentOf(r.Agent, r.Provider), Stop: r.StopReason, Cause: r.WaitingFor, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
 		f.Span = math.Inf(1)

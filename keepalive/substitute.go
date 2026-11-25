@@ -363,7 +363,7 @@ func (k *Keeper) projectedSweepBatchesUSD(model, endpoint string, prefix int64, 
 	if model == "" || prefix <= 0 || n < 1 {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
 	if !ok || price.Zero() {
 		return 0
 	}

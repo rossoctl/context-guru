@@ -156,7 +156,7 @@ func okPing(DispatchRequest) (Usage, int, error) {
 }
 
 // proxyPricer adapts a model-only modelinfo.Pricer, the shape the proxy's price table has, to
-// pricer by ignoring the endpoint and the prompt size.
+// pricer by ignoring the endpoint.
 type proxyPricer struct{ p modelinfo.Pricer }
 
 // Price is the proxy's adapter: the model's price at the prompt size the keeper names.
