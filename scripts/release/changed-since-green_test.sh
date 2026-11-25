@@ -7,20 +7,24 @@ script=$here/changed-since-green.sh
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 fails=0
 
-# The stub gh. "run list --event E" prints $d/list.E.json through the --jq filter. "run view ID"
-# prints $d/run.ID.json through the filter. STUB_FAIL=1 makes every call fail.
+# The stub gh. "run list --event E" returns the newest --limit rows of $d/list.E.json (like gh), then
+# applies the --jq filter. It fails when the script passes --status: the script must not filter by
+# the run's own conclusion. "run view ID" prints $d/run.ID.json through the filter.
+# STUB_FAIL=1 makes every call fail.
 cat > "$d/gh" <<'STUB'
 #!/usr/bin/env bash
 [ "${STUB_FAIL:-}" = 1 ] && { echo "stub gh: API error" >&2; exit 1; }
 d=$(dirname "$0")
-args=("$@"); ev=; jqf=.
+args=("$@"); ev=; jqf=.; limit=30
 for ((i = 0; i < ${#args[@]}; i++)); do
+  [ "${args[i]}" = --status ] && { echo "stub gh: --status is not allowed (it hides a green build-test)" >&2; exit 1; }
+  [ "${args[i]}" = --limit ] && limit=${args[i+1]}
   [ "${args[i]}" = --event ] && ev=${args[i+1]}
   [ "${args[i]}" = --jq ] && jqf=${args[i+1]}
 done
 if [ "$1 $2" = "run list" ]; then
   f=$d/list.$ev.json; [ -f "$f" ] || f=$d/empty.json
-  jq -r "$jqf" "$f"
+  jq -c --argjson n "$limit" 'sort_by(.createdAt) | reverse | .[:$n]' "$f" | jq -r "$jqf"
 elif [ "$1 $2" = "run view" ]; then
   jq -r "$jqf" "$d/run.$3.json"
 fi
