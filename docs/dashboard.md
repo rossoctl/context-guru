@@ -251,13 +251,30 @@ Limits:
 - A thread that continues another by content (a rewind, a fork) is priced as a first request. The
   proxy passes the parent thread to the library, but the library does not read it, so the new thread
   does not start from a copy of the parent's cache state (accountant design §4.1).
-- Every request is priced at the model's base rates. A model whose provider charges more above a prompt size
-  (LiteLLM's `*_above_100k_tokens` and `*_above_200k_tokens` fields) is under-priced on those requests: its
-  cost and its saving both use the base rate, so their ratio looks right and the dollars are low. Among Claude
-  models, `claude-haiku-5-5` carries a 100k tier (input at 5x) on every listing, and Sonnet 4 and 4.5 carry a
-  200k tier (2x) on their Bedrock, Vertex and Azure listings but not on the Anthropic API ids; Sonnet 5, Opus and
-  Fable carry none. Models of other families carry tiers too.
-  `MODEL_PRICES` sets one flat rate for a model, so it does not fix a tiered price.
+- A request is priced at the rates of its own prompt size. The prompt size is fresh input plus cache
+  reads plus cache writes (output does not count). Some models bill every token at higher rates above a
+  line: OpenAI GPT-5.4 and later (not mini or nano) above 272,000 tokens (2x input, cache read and cache
+  write, 1.5x output), and `claude-haiku-5-5` above 100,000 (5x every rate). The LiteLLM feed's
+  `*_above_<N>k_tokens` fields win over these built-in tiers. `cost_usd`, the keep-alive per-ping dollar
+  limit (`max_usd_per_ping`) and the cache-state and keep-alive figures use the tier of the request they
+  describe. A saving is the bill of the request without context-guru minus the bill of the request as
+  sent, each priced at its own prompt size. The two can sit on different sides of a line, and then the
+  tokens that stay in both requests change rate too. Example, gpt-5.6, line at 272,000: a trim takes
+  290,000 tokens to 250,000. The saving is 290,000 x 2x minus 250,000 x 1x on input, plus the output
+  re-rate (output bills 1.5x above the line, and all output stays). Removed tokens price at the size
+  without context-guru, added tokens at the size with it. The re-rate is split over the components in
+  proportion to each one's net saved tokens (saved minus caused, only where above 0), so the rows add up
+  to the request total. A component that only causes cost (no net saved tokens) gets no share. With no
+  such component the re-rate books to the `ended_change` row, whose name is then approximate: that dollar
+  figure is the re-rate, not a break (it has no tokens). The re-rate is booked in the first-removal column
+  (`saved_first_usd`), also the re-rate of cache-read tokens that stay. So that column can no longer be
+  derived from the token columns. A re-rate can be negative, and a component that has a net saving can
+  then show a saving below 0. A request that crosses no line has no
+  re-rate, and a price with no tiers gives the figures of before.
+  Totals that sum tokens by model, with no request size (for example the per-model tier cost split, the
+  replay figures of legacy rows, the metrics module's savings counters and the summary and sweep model
+  estimates) still use the base rates. Set `flat: true` on a price-file entry to turn the tiers off for it.
+  Other Claude models are flat across their window, so the tiers change nothing for them.
 - The cache lifetime comes from the provider rule the cold gate uses (`apply.CacheLifetime`): an
   exact expiry for Anthropic, a minimum for OpenAI's 30-minute entries. Where it is unknown, the
   library does not credit a keep-alive rescue after a gap past the TTL.

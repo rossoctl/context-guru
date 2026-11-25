@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dispatch"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -1271,7 +1272,7 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 	if model == "" || prefix <= 0 {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -1296,7 +1297,7 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	if model == "" || prefix <= 0 {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -2083,6 +2084,20 @@ func (k *Keeper) recordTimedOut(j pingJob, ms float64) {
 	}
 }
 
+// pingPrompt is the prompt size of a ping on a cached prefix: the prefix plus the fresh input the
+// ping carries (kvcache.DefaultPingInputTokens). A prefix exactly on a tier line sends a ping above it.
+func pingPrompt(prefix int64) int64 { return prefix + kvcache.DefaultPingInputTokens }
+
+// billedPrompt is the prompt size that picks the price tier of a request that has run: what the
+// answer's usage billed (modelinfo.PromptTokens). When the usage has no input, it is the prefix
+// the request was planned with.
+func billedPrompt(u Usage, prefix int64) int64 {
+	if n := modelinfo.PromptTokens(int64(u.FreshInput), int64(u.CacheRead), int64(u.CacheWrite)); n > 0 {
+		return n
+	}
+	return prefix
+}
+
 // pingCost prices one ping's usage. The same gate dash.Event.Price used to apply before pricing
 // anything: no cost without a usable rate, and no cost claimed for a ping whose usage reported
 // nothing at all. priced is false when the model has no rate.
@@ -2090,7 +2105,7 @@ func (k *Keeper) pingCost(endpoint, model string, prefix int64, u Usage) (cost f
 	if model == "" {
 		return 0, false
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, billedPrompt(u, prefix))
 	if !ok || price.Zero() {
 		return 0, false
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
@@ -157,7 +158,7 @@ func NewFacts(model, stop, agent string, prefix int64, pingCost float64, hourUTC
 // Rows turns the dashboard dataset into tuner rows plus each row's facts (same order). A row whose outcome is not known by untilMs (its response ended
 // less than the last ping plus the cache lifetime before it) is dropped, and so is one with no price or incomplete accounting. Gains are in the
 // builder's units (calibrated to the pinned replay engine).
-func Rows(reqs []*kvcache.Request, price func(model string) (pIn, pOut, pRead, pWrite float64, ok bool), sessionEnd bool, untilMs int64) ([]predictive.AutoRow, []RowFacts) {
+func Rows(reqs []*kvcache.Request, price func(model string, promptTokens int64) (pIn, pOut, pRead, pWrite float64, ok bool), sessionEnd bool, untilMs int64) ([]predictive.AutoRow, []RowFacts) {
 	type sk struct{ user, conv string }
 	lastEnd := map[sk]int64{}
 	byThr := map[sk][]int64{} // request starts per thread of a session: the keeper's turns and entries are per thread
@@ -184,14 +185,19 @@ func Rows(reqs []*kvcache.Request, price func(model string) (pIn, pOut, pRead, p
 		if r.KeepAlive || r.Rejected || !r.CostKnown || r.CachedContext <= 0 || float64(end)+2700e3 > float64(untilMs) {
 			continue
 		}
-		pIn, pOut, pRead, pWrite, ok := price(r.Model)
+		pIn, pOut, pRead, pWrite, ok := price(r.Model, modelinfo.PromptTokens(r.InputTokens, r.CacheRead, r.CacheWrite))
 		if !ok || pWrite <= pRead {
 			continue
+		}
+		// A replayed ping reads CachedContext plus its own input: priced at that size, not at the row's.
+		pingIn, pingOut, pingRead, _, pingOK := price(r.Model, r.CachedContext+kvcache.DefaultPingInputTokens)
+		if !pingOK {
+			pingIn, pingOut, pingRead = pIn, pOut, pRead
 		}
 		key, tk := sk{r.User, r.ConversationID}, sk{r.User, r.ConversationID + "\x00" + r.ThreadID}
 		st := time.UnixMilli(r.TS).UTC()
 		f := RowFacts{U: r.UpstreamMs / 1000, Returned: r.HasNext, ToEnd: float64(max(0, lastEnd[key]-end)) / 1000,
-			Stake: Stake(r.CachedContext, pRead, pWrite), Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pIn, POut: pOut, PRead: pRead}).PingCost(),
+			Stake: Stake(r.CachedContext, pRead, pWrite), Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pingIn, POut: pingOut, PRead: pingRead}).PingCost(),
 			Turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), Prefix: r.CachedContext,
 			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: agent.ModelAgentOf(r.Agent, r.Provider), Stop: r.StopReason, Cause: r.WaitingFor, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
 		f.Span = math.Inf(1)

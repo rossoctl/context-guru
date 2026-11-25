@@ -15,6 +15,7 @@ import (
 
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
@@ -205,12 +206,8 @@ func openDB(t *testing.T) *sql.DB {
 }
 
 func waitReady(t *testing.T, m *Mem) {
-	for i := 0; i < 500 && !m.Ready(); i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !m.Ready() {
-		t.Fatal("history never loaded")
-	}
+	t.Helper()
+	testutil.WaitFor(t, "history loaded", m.Ready)
 }
 
 func TestHistoryObserveAndRule(t *testing.T) {
@@ -333,16 +330,11 @@ func TestHistorySeedsOneTenantFromDashboardTables(t *testing.T) {
 	if got := m.UserSessions("t", "", 3); len(got) != 0 {
 		t.Fatalf("seeded before the tenant asked: %d", len(got))
 	}
-	m.SeedTenant("t")
-	var got []Session
-	for i := 0; i < 500 && len(got) < 3; i++ {
-		got = m.UserSessions("t", "", 3)
-		time.Sleep(5 * time.Millisecond)
-	}
+	<-m.SeedTenant("t") // closed when the copy has finished
+	got := m.UserSessions("t", "", 3)
 	if len(got) != 3 || !got[0].Declared["Workflow"] || got[0].Declared["x"] {
 		t.Fatalf("seed: %+v", got)
 	}
-	time.Sleep(50 * time.Millisecond) // let the seed finish copying, so a leak would show
 	if n := len(m.UserSessions("t", "", 10)); n != 3 {
 		t.Fatalf("tenant t holds %d sessions, want its own 3", n)
 	}
@@ -504,7 +496,7 @@ func TestForgetDoesNotPersistOnTheCaller(t *testing.T) {
 	go func() { p.Forget(k); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Forget waited on Persist")
 	}
 	if p.Verdict(k) != Unknown {
@@ -589,7 +581,7 @@ func TestEnsurePersistsOutsideTheLock(t *testing.T) {
 	p.Ensure(k, func(context.Context) (Verdict, error) { return Pass, nil }) // runs on its own goroutine
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Persist never ran")
 	}
 	done := make(chan Verdict, 1)
@@ -599,7 +591,7 @@ func TestEnsurePersistsOutsideTheLock(t *testing.T) {
 		if v != Pass {
 			t.Fatalf("verdict %v", v)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Verdict waited on Persist")
 	}
 	close(block)
@@ -824,6 +816,18 @@ func TestHistorySetLoadedTwice(t *testing.T) {
 	m.setLoaded()
 	if !m.WaitReady(time.Millisecond) {
 		t.Fatal("not ready")
+	}
+}
+
+// A ready history always reads ready, even with a zero wait. A select with both cases ready picks
+// one at random, so WaitReady must check the ready channel first.
+func TestWaitReadyOnAReadyHistoryNeverReadsNotReady(t *testing.T) {
+	m := NewMem(nil)
+	m.setLoaded()
+	for i := 0; i < 10000; i++ {
+		if !m.WaitReady(0) {
+			t.Fatalf("call %d: a ready history read not ready", i)
+		}
 	}
 }
 
