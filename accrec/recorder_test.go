@@ -297,3 +297,47 @@ func TestRecordNamesAnUnplacedDeferralAndKeepsTheForwardedBody(t *testing.T) {
 		t.Error("End must get the forwarded body as it was")
 	}
 }
+
+// #1351: a fold that the host applies again never causes a miss. When a new sweep cut lands on the folded
+// message, the rewrite is charged to the sweep and nothing to searchfold.
+func TestARewriteFromANewSweepCutIsNotChargedToARepeatedFold(t *testing.T) {
+	for _, reportAgain := range []bool{false, true} {
+		t.Run(fmt.Sprint("fold reported again=", reportAgain), func(t *testing.T) {
+			r := NewRecorder()
+			th := ThreadOf("main", "", false)
+			user := func(text string) (string, int) { return recMsg("user", text) }
+			big, nBig := user(strings.Repeat("tool result ", 400))
+			folded, nFolded := user(strings.Repeat("fold ", 100))
+			cut, nCut := user("[cut]")
+			first := mustRecMsg("user", "first")
+			last := `{"role":"assistant","content":"answer","cache_control":{"type":"ephemeral"}}`
+			pad := mustRecMsg("user", strings.Repeat("pad ", 300))
+			at := accountant.Position{Section: accountant.SectionMessages, Index: 1}
+			fold := accountant.Operation{Kind: accountant.KindRewrite, Operator: "context-guru.searchfold", ChangeID: "cg:searchfold:f1", At: at,
+				SizeBefore: accountant.Size{Bytes: nBig}, SizeAfter: accountant.Size{Bytes: nFolded}}
+			sweep := accountant.Operation{Kind: accountant.KindRewrite, Operator: "context-guru.extract_llm_sweep", ChangeID: "cg:extract_llm_sweep:c1", At: at,
+				SizeBefore: accountant.Size{Bytes: nFolded}, SizeAfter: accountant.Size{Bytes: nCut}}
+			run := func(n int, fwd string, ops []accountant.Operation, u Usage) accountant.Result {
+				req := r.Begin(recMeta(n, "s"), recBody(first, big, pad, last))
+				r.End(req, th, recBody(first, fwd, pad, last), ops, recFacts)
+				return r.Compute(req, u)
+			}
+			run(1, big, nil, Usage{CacheWrite: 3000})
+			run(2, folded, []accountant.Operation{fold}, Usage{CacheRead: 100, CacheWrite: 2000})
+			ops3 := []accountant.Operation{sweep}
+			if reportAgain { // the proxy reports every operation on every turn
+				ops3 = []accountant.Operation{fold, sweep}
+			}
+			res := run(3, cut, ops3, Usage{CacheWrite: 2000})
+			charged := map[string]int{}
+			for _, e := range res.CacheEffects {
+				if e.Kind == accountant.EffectBreak {
+					charged[e.ChangeID]++
+				}
+			}
+			if charged["cg:extract_llm_sweep:c1"] != 1 || charged["cg:searchfold:f1"] != 0 {
+				t.Fatalf("break charged to %v, want the sweep only", charged)
+			}
+		})
+	}
+}
