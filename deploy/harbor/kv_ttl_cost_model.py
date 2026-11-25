@@ -377,6 +377,7 @@ def cache_write_frac_for(model: str, file_frac: float = DEFAULT_WRITE_5M_MULTIPL
     the operator's cache_write_frac in place of 1.25 for a family that charges a premium)."""
     return file_frac if charges_cache_write_premium(model) else 1.0
 DEFAULT_WRITE_1H_MULTIPLE = 2.0
+# Mirrors kvcache.DefaultPingInputTokens (Go): the one constant for a ping's own fresh input.
 DEFAULT_PING_INPUT_TOKENS = 7
 DEFAULT_PING_OUTPUT_TOKENS = 1
 
