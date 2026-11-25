@@ -3996,17 +3996,57 @@ def _names(rows) -> str:
 _STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*[^ \t#]")
 
 
+# A `strategy` key at the top level of a flow mapping (the text kept by `_flow_top_level`).
+_FLOW_STRATEGY_KEY = re.compile(r"(?:^|[,{\s])[\"']?strategy[\"']?[ \t]*:[ \t]*[^ \t,}]")
+
+
+def _flow_top_level(lines: list, start: int, first: str) -> str:
+    """The text of a flow mapping that begins with `first` (which starts with `{`) on lines[start],
+    up to its matching `}` and across lines, with everything inside a nested `{...}` dropped. Quotes are
+    not parsed: a `strategy:` inside a quoted string can count, which only sends the file to the table
+    check (the safe direction)."""
+    kept, depth, i, text = [], 0, start, first
+    while True:
+        for ch in text.split("#")[0]:
+            if ch == "{":
+                depth += 1
+                if depth == 1:
+                    kept.append(ch)
+            elif ch == "}":
+                depth -= 1
+                if depth <= 0:
+                    return "".join(kept)
+            elif depth == 1:
+                kept.append(ch)
+        kept.append("\n")
+        i += 1
+        if i >= len(lines):
+            return "".join(kept)
+        text = lines[i]
+
+
 def _file_sets_strategy_key(text: str) -> bool:
     """Does the file set `strategy:` as a direct child of `cache:`? Other nested keys (such as
-    `components.extract_llm.strategy`) are not a cache strategy name."""
+    `components.extract_llm.strategy`) are not a cache strategy name. Block style and flow style (on
+    the `cache:` line, on the next line, or across several lines) both count."""
+    lines = text.split("\n")[1:]
     in_cache, indent = False, 0
-    for line in text.split("\n")[1:]:
+    for n, line in enumerate(lines):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         width = len(line) - len(line.lstrip(" \t"))
         if width == 0:
-            in_cache, indent = line.split("#")[0].strip() == "cache:", 0
+            code = line.split("#")[0].strip()
+            in_cache, indent = code.startswith("cache:"), 0
+            if in_cache:
+                value = code[len("cache:"):].strip()
+                if value.startswith("{"):
+                    return bool(_FLOW_STRATEGY_KEY.search(_flow_top_level(lines, n, value)))
+                if value:
+                    in_cache = False
         elif in_cache:
+            if not indent and line.strip().startswith("{"):
+                return bool(_FLOW_STRATEGY_KEY.search(_flow_top_level(lines, n, line.strip())))
             indent = indent or width
             if width == indent and _STRATEGY_KEY.match(line):
                 return True
@@ -4043,8 +4083,9 @@ def cmd_strategy(args) -> int:
         # start-proxy.sh asks this BEFORE it restarts or starts a proxy for a strategy name: does the
         # proxy binary it is about to run know `--name`? The plugin holds no table (the proxy owns it),
         # so a name from a newer release reaches an older binary, which exits on it and leaves the
-        # session with no proxy (#1383). `known` is the only answer that keeps the config; anything
-        # else (`unknown`, `unchecked`) makes the caller start without it. Never an error exit.
+        # session with no proxy (#1383). `known` is the only answer that keeps the config. For
+        # `unknown` the caller starts without it, with preset off. For `unchecked` a cold caller does
+        # the same, and a warm caller keeps the running proxy as it is. Never an error exit.
         name = args.name.strip()
         try:
             text = open(path, encoding="utf-8").read()
@@ -4066,7 +4107,11 @@ def cmd_strategy(args) -> int:
             emit(result="unchecked", strategy=name, reason="proxy_too_old")
             return 0
         explicit = getattr(args, "bin", "") or ""
-        if explicit and not (shutil.which(explicit) or os.access(explicit, os.X_OK)):
+        # A bare name is looked up on PATH. A name that holds a `/` is a path: check that file itself.
+        # (start-proxy.sh also accepts `[ -x "$BIN" ]` for a bare name, which is relative to its working
+        # directory. The check does not: it runs the binary from another directory.)
+        runnable = shutil.which(explicit) if "/" not in explicit else os.access(explicit, os.X_OK)
+        if explicit and not runnable:
             # The caller named the binary it will launch. Another one must not answer for it.
             emit(result="unchecked", strategy=name, reason="table_unavailable",
                  detail=f"{explicit} cannot be run")
