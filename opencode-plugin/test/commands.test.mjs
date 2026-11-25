@@ -292,21 +292,21 @@ test("first startup downloads the release binary and extracts under the state di
   const state = stateDirectory(directory)
 
   // A release fixture: the working stub proxy as a tarball, plus its checksums line.
-  const stub = stubProxyBinary(undefined, { version: "0.7.8" })
+  const stub = stubProxyBinary(undefined, { version: "0.7.9" })
   const fixture = mkdtempSync(join(tmpdir(), "context-guru-release-"))
   const archive = join(fixture, "archive.tar.gz")
   spawnSync("tar", ["-czf", archive, "-C", dirname(stub), "context-guru-proxy"])
   const archiveBytes = readFileSync(archive)
   const checksum = createHash("sha256").update(archiveBytes).digest("hex")
-  // The plugin downloads its pinned release, v0.7.8, and never asks which release is latest.
-  const archiveName = `context-guru_0.7.8_${PLATFORMS[process.platform]}_${ARCHITECTURES[process.arch]}.tar.gz`
+  // The plugin downloads its pinned release, v0.7.9, and never asks which release is latest.
+  const archiveName = `context-guru_0.7.9_${PLATFORMS[process.platform]}_${ARCHITECTURES[process.arch]}.tar.gz`
 
   const requested = []
   const server = createServer((request, response) => {
     requested.push(request.url)
-    if (request.url === "/releases/download/v0.7.8/checksums.txt") {
+    if (request.url === "/releases/download/v0.7.9/checksums.txt") {
       response.end(`${checksum}  ${archiveName}\n`)
-    } else if (request.url === `/releases/download/v0.7.8/${archiveName}`) {
+    } else if (request.url === `/releases/download/v0.7.9/${archiveName}`) {
       response.end(archiveBytes)
     } else {
       response.statusCode = 404
@@ -333,7 +333,7 @@ test("first startup downloads the release binary and extracts under the state di
 
     assert.ok(existsSync(join(state, "bin", "context-guru-proxy")))
     record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
-    assert.equal(record.version, "v0.7.8")
+    assert.equal(record.version, "v0.7.9")
     assert.equal(record.managed, true)
     assert.ok(!requested.includes("/releases/latest"), "the plugin must not ask for the latest release")
     assert.equal(config.provider.anthropic.options.baseURL, `http://127.0.0.1:${record.port}/anthropic/v1`)
