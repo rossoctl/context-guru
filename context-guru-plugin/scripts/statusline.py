@@ -476,7 +476,7 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     cached, cached_age = None, None
     try:
         st = os.stat(cache_path)
-        cached_age = time.time() - st.st_mtime
+        cached_age = cgcache.now() - st.st_mtime
         with open(cache_path, encoding="utf-8") as fh:
             cached = json.load(fh)
         if cached_age < STATS_CACHE_TTL_SECONDS:
@@ -532,7 +532,7 @@ def _stale_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     cached, age = None, None
     try:
         path = _stats_cache_path(port, session_id)
-        age = time.time() - os.stat(path).st_mtime
+        age = cgcache.now() - os.stat(path).st_mtime
         with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
     except (OSError, ValueError):
@@ -881,7 +881,7 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float,
     path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
     cached, age = None, 0.0
     try:
-        age = max(0.0, time.time() - os.stat(path).st_mtime)
+        age = max(0.0, cgcache.now() - os.stat(path).st_mtime)
         with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
         if age < ttl:
@@ -939,7 +939,7 @@ def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, 
     path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
     cached, age = None, 0.0
     try:
-        age = max(0.0, time.time() - os.stat(path).st_mtime)
+        age = max(0.0, cgcache.now() - os.stat(path).st_mtime)
         with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
     except (OSError, ValueError):
@@ -1229,7 +1229,7 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
     cli = None
     exp = _num(pc, "expires_at")
     if exp is not None:
-        cli = exp - time.time()
+        cli = exp - cgcache.now()
     elif pc.get("warm") is False:
         cli = 0.0
     srv, tokens, usd, ping, unproven = None, _num(pc, "recache_tokens_if_cold"), None, False, False

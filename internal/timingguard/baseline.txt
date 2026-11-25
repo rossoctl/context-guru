@@ -9,9 +9,9 @@ components/offload/extract_sweep_ping_test.go sleep=1
 components/offload/extract_sweep_warm_test.go sleep=5 poll=3 after=1
 components/offload/summarize_thread_test.go sleep=1
 context-guru-plugin/beep_test.go sleep=1 poll=1
-context-guru-plugin/leak_test.go sleep=3
-context-guru-plugin/plugin_test.go sleep=5 poll=5
-context-guru-plugin/signal_test.go sleep=3 poll=1 after=8
+context-guru-plugin/leak_test.go sleep=1
+context-guru-plugin/plugin_test.go sleep=3 poll=3
+context-guru-plugin/signal_test.go after=5
 context-guru-plugin/statusline_golden_test.go sleep=1 poll=1 after=4
 dash/bypasscount_test.go sleep=4
 dash/cachecost_test.go sleep=3 poll=3
