@@ -65,6 +65,11 @@ type Limiter struct {
 	// attacker-supplied, and therefore something that must never become a metric label.
 	perTenant bool
 
+	// now is the clock for every window. nil means time.Now. A test sets it before the
+	// limiter is used, so a burst cannot cross a minute boundary by chance. It is a field,
+	// not a package variable, so parallel tests each keep their own clock.
+	now func() time.Time
+
 	mu       sync.Mutex
 	tenants  *lru[*tenantLimiter]
 	cheapSem chan struct{}
@@ -97,6 +102,14 @@ func newLimiter(l Limits, perTenant bool) *Limiter {
 	return lm
 }
 
+// clock returns the current time from the limiter's clock.
+func (l *Limiter) clock() time.Time {
+	if l.now != nil {
+		return l.now()
+	}
+	return time.Now()
+}
+
 // refused counts a refusal. The key is dropped unless it is a tenant id — see perTenant.
 func (l *Limiter) refused(reason refusalReason, key string) {
 	if !l.perTenant {
@@ -110,7 +123,7 @@ func (l *Limiter) forTenant(id string) *tenantLimiter {
 	defer l.mu.Unlock()
 	t, ok := l.tenants.get(id)
 	if !ok {
-		t = &tenantLimiter{windowStart: time.Now().Truncate(time.Minute)}
+		t = &tenantLimiter{windowStart: l.clock().Truncate(time.Minute)}
 		if l.lim.Concurrent > 0 {
 			t.inFlight = make(chan struct{}, l.lim.Concurrent)
 		}
@@ -130,7 +143,7 @@ func (l *Limiter) Acquire(tenantID string) (release func(), err error) {
 
 	if l.lim.RequestsPerMinute > 0 {
 		t.mu.Lock()
-		now := time.Now()
+		now := l.clock()
 		if w := now.Truncate(time.Minute); w.After(t.windowStart) {
 			t.windowStart, t.count = w, 0
 		}
@@ -143,7 +156,7 @@ func (l *Limiter) Acquire(tenantID string) (release func(), err error) {
 			l.refused(refuseRateLimit, tenantID)
 			return func() {}, statusError{http.StatusTooManyRequests, fmt.Sprintf(
 				"rate limit: %d requests/minute for this account; retry in %ds",
-				l.lim.RequestsPerMinute, int(time.Until(retry).Seconds())+1)}
+				l.lim.RequestsPerMinute, int(retry.Sub(now).Seconds())+1)}
 		}
 		t.count++
 		t.mu.Unlock()
@@ -217,7 +230,7 @@ func (l *Limiter) AcquireSpare(tenantID string, reserveFrac float64) (release fu
 	if l.lim.RequestsPerMinute > 0 {
 		limit := reserved(l.lim.RequestsPerMinute, reserveFrac)
 		t.mu.Lock()
-		now := time.Now()
+		now := l.clock()
 		if w := now.Truncate(time.Minute); w.After(t.windowStart) {
 			t.windowStart, t.count = w, 0
 		}
@@ -311,12 +324,12 @@ func (l *Limiter) AllowAction(key, what string, perHour int) error {
 		h = &hourly{}
 		l.actions.put(key, h)
 	}
-	now := time.Now()
+	now := l.clock()
 	if w := now.Truncate(time.Hour); w.After(h.windowStart) {
 		h.windowStart, h.count = w, 0
 	}
 	if h.count >= perHour {
-		retry := int(time.Until(h.windowStart.Add(time.Hour)).Seconds()) + 1
+		retry := int(h.windowStart.Add(time.Hour).Sub(now).Seconds()) + 1
 		return statusError{http.StatusTooManyRequests, fmt.Sprintf(
 			"rate limit: %d %s per hour for this account; retry in %ds", perHour, what, retry)}
 	}

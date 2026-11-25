@@ -315,7 +315,7 @@ func TestSignalNeedsTheTenantsTokenAndCannotReachAnotherTenant(t *testing.T) {
 func TestSignalIsMetered(t *testing.T) {
 	t.Setenv("CONTEXT_GURU_CLIENT_SIGNALS", "on")
 	k, _, _ := testKeeper(t, Limits{})
-	h := &Handler{keeper: k, limiter: NewLimiter(Limits{RequestsPerMinute: 1})}
+	h := &Handler{keeper: k, limiter: pinned(NewLimiter(Limits{RequestsPerMinute: 1}))}
 	h.static.Store(&Tenancy{ID: "t1"})
 	body := `{"session":"abc-1","event":"SessionEnd"}`
 	if c := sigPost(h, body); c != http.StatusNoContent {
