@@ -61,6 +61,25 @@ SECONDS=0
 ( PATH=$d/bin:$PATH OFFLOAD_FETCH_RETRY_SLEEP=5 fetch_pr_refs "$d/main" 1 main 2>/dev/null ) \
   && bad "(a) another error passed" || { [ "$SECONDS" -lt 4 ] && ok "(a) another error is not tried again" || bad "(a) another error was retried"; }
 
+# (f) a held lock on the shared ref refs/remotes/origin/main must not stop the fetch, and the shared
+# ref must not move. Origin main moves first, so a write to the shared ref would show.
+( cd "$d/main" && git checkout -q main && echo 2 > f && git commit -qam two && git push -q origin main \
+  && git update-ref refs/remotes/origin/main HEAD~1 )
+before=$(git -C "$d/main" rev-parse refs/remotes/origin/main)
+: > "$d/main/.git/refs/remotes/origin/main.lock"
+SECONDS=0
+if OFFLOAD_FETCH_RETRY_SLEEP=100 fetch_pr_refs "$d/main" 1 main 2>"$d/err" && [ "$SECONDS" -lt 3 ] \
+  && [ "$(git -C "$d/main" rev-parse refs/remotes/origin/main)" = "$before" ] \
+  && [ "$(git -C "$d/main" rev-parse refs/offload-review/pr1/base)" = "$(git -C "$d/origin.git" rev-parse main)" ]
+then ok "(f) the fetch ignores a held lock on refs/remotes/origin/main, with no retry"
+else bad "(f) fetch touched the shared ref: $(cat "$d/err")"; fi
+# The same fetch without --refmap= must fail. That shows (f) can catch the bug.
+if git -C "$d/main" fetch -q --no-write-fetch-head origin "+refs/pull/1/head:refs/offload-review/pr1/head" \
+  "+refs/heads/main:refs/offload-review/pr1/base" 2>"$d/err"
+then bad "(f) the fetch without --refmap= passed: the test cannot catch the bug"
+else ok "(f) the fetch without --refmap= fails on that lock ($(head -1 "$d/err"))"; fi
+rm -f "$d/main/.git/refs/remotes/origin/main.lock"
+
 # (b) a stale lock with a dead pid is taken over.
 mkdir "$lockdir"; ( exit 0 ) & dead=$!; wait $dead; echo "$dead" > "$lockdir/pid"
 ( lock ) 2>"$d/err" && [ "$(cat "$lockdir/pid")" != "$dead" ] && ok "(b) a dead holder's lock is taken over" || bad "(b) stale lock not taken: $(cat "$d/err")"
@@ -82,7 +101,7 @@ mkdir "$lockdir"; echo "$live" > "$lockdir/pid"
 # The holder lets go while a waiter waits: the waiter gets the lock.
 ( sleep 1; rm -rf "$lockdir" ) & 
 ( OFFLOAD_LOCK_TRIES=100 lock ) 2>/dev/null && ok "(c) a waiter gets the lock when the holder lets go" || bad "(c) waiter did not get the lock"
-wait; kill "$live" 2>/dev/null; rm -rf "$lockdir"
+kill "$live" 2>/dev/null; wait; rm -rf "$lockdir"
 
 # (e) the EXIT trap removes a lock this process holds, and keeps a lock of another process.
 ( trap unlock_if_held EXIT; lock; exit 0 ); [ ! -d "$lockdir" ] && ok "(e) the exit trap removes the lock this process holds" || bad "(e) lock left behind"
@@ -103,7 +122,8 @@ chmod +x "$d/bin/gh"; rm -f "$d/bin/git"
 fetch_pr_refs "$d/main" 1 main
 # The script reads backends from the toplevel of the cwd, so the temp repo gets a copy of scripts/.
 mkdir -p "$d/main/scripts" && cp -R "$here/offload-review.sh" "$here/offload-review" "$d/main/scripts/"
-( cd "$d/main" && PATH=$d/bin:$PATH "$d/main/scripts/offload-review.sh" 1 --cleanup >/dev/null 2>"$d/err" ) \
+mkdir "$d/rules"; : > "$d/rules/offload-review-pr1-rules.md"
+( cd "$d/main" && OFFLOAD_RULES_DIR=$d/rules PATH=$d/bin:$PATH "$d/main/scripts/offload-review.sh" 1 --cleanup >/dev/null 2>"$d/err" ) \
   || bad "(d) --cleanup failed: $(cat "$d/err")"
 if git -C "$d/main" rev-parse -q --verify refs/offload-review/pr1/head >/dev/null \
   || git -C "$d/main" rev-parse -q --verify refs/offload-review/pr1/base >/dev/null; then bad "(d) per-PR refs left"

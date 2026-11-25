@@ -39,6 +39,14 @@
 # --cleanup runs after the PR merges or closes. It removes the reviewer worktrees, the backend's
 # sessions for them, and the live-test rules file.
 #
+# Environment (all optional):
+#   OFFLOAD_LOCK_TRIES         waits for the worktree lock this many 0.1 s steps (default 600 = 60 s)
+#   OFFLOAD_FETCH_RETRY_SLEEP  seconds between 2 tries of a fetch that hit "cannot lock ref" (default 2)
+#   OFFLOAD_RULES_DIR          folder of the live-test rules file that --cleanup removes (default /tmp)
+#
+# Runs for different PRs may run at the same time. Each one fetches into its own refs,
+# refs/offload-review/pr<N>/*, and --cleanup deletes them.
+#
 # Exit codes:
 #   0  both reviews are posted (or --cleanup is done)
 #   1  a reviewer failed, or the input is wrong, or the PR head is not in refs/pull/N/head yet
@@ -125,7 +133,7 @@ if [ "$cleanup" = 1 ]; then
     git -C "$main" worktree remove --force "$wt"
     echo "Removed $wt"
   done
-  rm -f "/tmp/offload-review-pr$pr-rules.md"
+  rm -f "${OFFLOAD_RULES_DIR:-/tmp}/offload-review-pr$pr-rules.md"
   delete_pr_refs "$main" "$pr"
   exit 0
 fi

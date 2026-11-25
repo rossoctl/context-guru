@@ -10,7 +10,8 @@ reviewer tool. Each one posts its review on the PR. You fix the findings, push, 
 skill again for round 2. Reviewer N in round 2 resumes its own round-1 session.
 
 Runs for different PRs are safe at the same time. Each run fetches into its own refs
-(`refs/offload-review/pr<N>/*`), and a stale worktree lock from a dead run is removed.
+(`refs/offload-review/pr<N>/*`) and does not update `refs/remotes/origin/*`. Runs take turns on
+one worktree lock, and a lock left by a dead run is removed.
 
 The reviewer tool is a backend in `scripts/offload-review/backends/<name>.sh`:
 
