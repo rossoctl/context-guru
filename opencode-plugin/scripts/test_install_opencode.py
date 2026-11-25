@@ -236,6 +236,87 @@ class InstallerTest(unittest.TestCase):
 
         self.assertEqual(connection.provider, "anthropic-gateway")
 
+    # ---------------------------------------------------------------------- the connection
+    GATEWAY = ("2", "https://gw.example", "", "m", "s")  # path, URL, format (default), model, small model
+
+    def test_path_2_writes_the_gateway_provider_and_both_models(self):
+        code = self.installer(*self.GATEWAY, "y", "n").install()  # consent, test prompt
+
+        self.assertEqual(code, 0)
+        document = self.read("opencode.json")
+        self.assertEqual(document["provider"]["anthropic-gateway"], {
+            "npm": "@ai-sdk/anthropic", "name": "Anthropic gateway", "options": {"baseURL": "https://gw.example/v1"},
+            "models": {"m": {"name": "m"}, "s": {"name": "s"}}})
+        self.assertEqual((document["model"], document["small_model"]), ("anthropic-gateway/m", "anthropic-gateway/s"))
+
+    def test_path_1_writes_no_provider_and_no_model(self):
+        self.installer("1", "y", "n").install()
+
+        self.assertEqual(set(self.read("opencode.json")), {"$schema", "plugin"})
+
+    def test_uninstall_puts_back_the_old_model_and_removes_the_gateway(self):
+        self.write("opencode.json", {"model": "anthropic/claude-x"})
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        code = self.installer("y").uninstall()  # delete local data
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.read("opencode.json"), {"model": "anthropic/claude-x"})
+
+    def test_uninstall_keeps_an_empty_provider_object_the_user_had(self):
+        self.write("opencode.json", {"provider": {}})
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.read("opencode.json"), {"provider": {}})
+
+    def test_uninstall_of_a_created_config_removes_the_file(self):
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.installer("y").uninstall()
+
+        self.assertIsNone(self.read("opencode.json"))
+
+    def test_uninstall_keeps_a_model_the_user_changed_after_install(self):
+        self.installer(*self.GATEWAY, "y", "n").install()
+        document = self.read("opencode.json")
+        document["model"] = "openai/gpt-x"
+        self.write("opencode.json", document)
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.read("opencode.json"), {"$schema": "https://opencode.ai/config.json",
+                                                      "model": "openai/gpt-x"})
+
+    def test_a_second_install_with_the_same_answers_changes_nothing(self):
+        self.write("opencode.json", {"model": "anthropic/claude-x"})
+        self.installer(*self.GATEWAY, "y", "n").install()
+        first_file = (self.config / "opencode.json").read_text()
+        first_before = json.loads(install_opencode.record_path().read_text())["connection"]["before"]
+
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.assertEqual((self.config / "opencode.json").read_text(), first_file)
+        self.assertEqual(json.loads(install_opencode.record_path().read_text())["connection"]["before"], first_before)
+        self.assertEqual(first_before["model"], "anthropic/claude-x")
+
+    def test_an_existing_gateway_with_another_url_asks_before_replacing(self):
+        before = {"provider": {"anthropic-gateway": {"options": {"baseURL": "https://old.example/v1"}}}}
+        self.write("opencode.json", before)
+
+        code = self.installer(*self.GATEWAY, "n").install()  # replace: no
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read("opencode.json"), before)
+        self.assertEqual(self.npm_calls(), [])
+        self.assertIn("https://old.example/v1", self.terminal.text())
+
+        self.installer(*self.GATEWAY, "y", "y", "n").install()  # replace: yes, consent, test prompt
+
+        self.assertEqual(self.read("opencode.json")["provider"]["anthropic-gateway"]["options"]["baseURL"],
+                         "https://gw.example/v1")
+
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):
         code = self.installer("1", "y", "n").install()

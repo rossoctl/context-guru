@@ -49,6 +49,7 @@ How do you reach your models?
   2) A custom base URL (a company gateway)
   3) Another provider: exit, change nothing"""
 NOT_SUPPORTED = "Nothing was changed. context-guru supports Anthropic and OpenAI models."
+ABSENT = {"absent": True}  # in the record: the key was not there before the install
 UNINSTALL_STEPS = ("Stop the proxies", "Remove the plugin", "Local data", "OpenCode itself")
 
 
@@ -139,6 +140,12 @@ def dialect(provider_id):
     """The API format the plugin routes a provider id as (index.js providerDialect), or None."""
     lower = str(provider_id).lower()
     return "anthropic" if "anthropic" in lower else "openai" if "openai" in lower else None
+
+
+def slot(document, key):
+    """(the object that holds `key`, the name in it). `provider.<id>` is nested; the other keys are top level."""
+    head, _, rest = key.partition(".")
+    return (document.get(head), rest) if rest else (document, head)
 
 
 def manual_steps():
@@ -288,6 +295,11 @@ class Installer:
                            f"{f' at {base}' if base else ''}. context-guru routes one {api} upstream only, so it "
                            f"cannot add {url} too. Remove \"{other}\" from {config_dir() / 'opencode.json'}, "
                            "then run this again. Nothing was changed.")
+        old = (((documents["opencode.json"].get("provider") or {}).get(provider) or {}).get("options") or {}).get("baseURL")
+        if old and old != url:
+            self.terminal.say(f"OpenCode's config already has \"{provider}\" at {old}.")
+            if not self.yes(f"Replace it with {url}?", default=False):
+                raise Stop("Nothing was changed.")
         return Connection(provider, url, model.strip(), small.strip())
 
     @staticmethod
@@ -406,6 +418,8 @@ class Installer:
                 shutil.copy2(path, backup_dir() / name)
             elif not document:
                 document["$schema"] = schema
+            if name == "opencode.json":
+                self.write_connection(document)
             entries = document.get("plugin") if isinstance(document.get("plugin"), list) else []
             ours = [entry for entry in entries if is_ours(entry)]
             options = self.carried_options(document)
@@ -417,6 +431,52 @@ class Installer:
                 if entry_path(entry) != new:
                     self.terminal.say(f"Replaced another copy of the plugin in {name}: {entry_path(entry)}")
         self.terminal.say(f"✓ context-guru plugin installed for every project ({config_dir()}).")
+
+    def write_connection(self, document):
+        """A gateway's provider and models into opencode.json. The record keeps each key's value from before the
+        first install, so uninstall can put it back."""
+        connection = self.connection
+        if not connection.provider:
+            return
+        provider, npm, name = GATEWAYS[dialect(connection.provider)]
+        models = dict.fromkeys((connection.model, connection.small_model))
+        wrote = {f"provider.{provider}": {"npm": npm, "name": name, "options": {"baseURL": connection.base_url},
+                                          "models": {model: {"name": model} for model in models}},
+                 "model": f"{provider}/{connection.model}", "small_model": f"{provider}/{connection.small_model}"}
+        made_provider = "provider" not in document
+        if not isinstance(document.setdefault("provider", {}), dict):
+            raise Stop(f"\"provider\" in {config_dir() / 'opencode.json'} is not a JSON object. Fix it, then run "
+                       "this again.")
+        old = self.record.get("connection") or {}
+        before = {}
+        for key in wrote:
+            holder, field = slot(document, key)
+            before[key] = holder[field] if field in holder else ABSENT
+        for key, value in wrote.items():
+            holder, field = slot(document, key)
+            holder[field] = value
+        # A second run keeps the first run's "before", and what each run wrote.
+        self.record["connection"] = {"wrote": {**old.get("wrote", {}), **wrote},
+                                     "before": {**before, **old.get("before", {})},
+                                     "made_provider": old.get("made_provider", made_provider)}
+
+    @staticmethod
+    def restore_connection(document, connection):
+        """Put back each key the installer wrote, when it still has the installer's value. True when it changed."""
+        changed = False
+        for key, wrote in (connection or {}).get("wrote", {}).items():
+            holder, field = slot(document, key)
+            if not isinstance(holder, dict) or holder.get(field) != wrote:
+                continue
+            before = connection["before"].get(key, ABSENT)
+            if before == ABSENT:
+                del holder[field]
+            else:
+                holder[field] = before
+            changed = True
+        if changed and document.get("provider") == {} and connection.get("made_provider"):
+            del document["provider"]
+        return changed
 
     def finish(self):
         self.step("Check that it works", "One short test prompt through OpenCode starts the proxy and checks it.")
@@ -456,18 +516,7 @@ class Installer:
             self.terminal.say(f"✓ Proxies stopped ({len(resets)} projects).")
             self.step("Remove the plugin", "It removes each context-guru entry from OpenCode's config, also one you "
                                            "added by hand. Your other entries stay.")
-            files = record.get("files") or {}
-            known = {str(Path(record["plugin"]) / file) for _, file, _ in CONFIGS} if record.get("plugin") else set()
-            by_hand = []
-            for name, file, schema in CONFIGS:
-                path = config_dir() / name
-                try:
-                    self.remove_entries(path, load_json(path), files.get(name) or {}, schema, known)
-                except Stop:
-                    by_hand.append(f"{path}: remove this entry by hand: \"{plugin_dir() / file}\"")
-            jsonc = config_dir() / "opencode.jsonc"
-            if jsonc.exists():
-                by_hand.append(f"{jsonc}: remove a context-guru entry by hand, if it has one")
+            by_hand = self.revert(record)
             if record.get("plugin"):
                 shutil.rmtree(record["plugin"], ignore_errors=True)
                 try:
@@ -499,14 +548,34 @@ class Installer:
             self.terminal.say(f"context-guru: {stop}")
             return 1
 
+    def revert(self, record):
+        """Remove the plugin entries and put back the connection keys. Returns the lines to change by hand."""
+        files = record.get("files") or {}
+        known = {str(Path(record["plugin"]) / file) for _, file, _ in CONFIGS} if record.get("plugin") else set()
+        by_hand = []
+        for name, file, schema in CONFIGS:
+            path = config_dir() / name
+            try:
+                document = load_json(path)
+                changed = name == "opencode.json" and self.restore_connection(document, record.get("connection"))
+                self.remove_entries(path, document, files.get(name) or {}, schema, known, changed)
+            except Stop:
+                by_hand.append(f"{path}: remove this entry by hand: \"{plugin_dir() / file}\"")
+        jsonc = config_dir() / "opencode.jsonc"
+        if jsonc.exists():
+            by_hand.append(f"{jsonc}: remove a context-guru entry by hand, if it has one")
+        return by_hand
+
     @staticmethod
-    def remove_entries(path, document, record, schema, known):
+    def remove_entries(path, document, record, schema, known, changed=False):
         entries = document.get("plugin")
-        if not isinstance(entries, list) or not any(is_ours(entry, known) for entry in entries):
+        ours = isinstance(entries, list) and any(is_ours(entry, known) for entry in entries)
+        if not ours and not changed:
             return
-        document["plugin"] = [entry for entry in entries if not is_ours(entry, known)]
-        if not document["plugin"] and record.get("had_plugin") is False:
-            del document["plugin"]
+        if ours:
+            document["plugin"] = [entry for entry in entries if not is_ours(entry, known)]
+            if not document["plugin"] and record.get("had_plugin") is False:
+                del document["plugin"]
         if record.get("created") and set(document) <= {"$schema"} and document.get("$schema", schema) == schema:
             path.unlink()
         else:
