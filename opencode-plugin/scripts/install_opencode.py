@@ -34,7 +34,8 @@ CONFIGS = (("opencode.json", "index.js", "https://opencode.ai/config.json"),
            ("tui.json", "tui.js", "https://opencode.ai/tui.json"))
 DOWNLOAD_STEP = "Download context-guru for OpenCode"
 INSTALL_STEPS = ("Check this computer", "Your models", "OpenCode", "Your consent", "The context-guru plugin",
-                 "Check that it works")
+                 "Login", "Check that it works")
+DIRECT = ("anthropic", "openai")  # the built-in provider ids that the plugin routes
 # API format -> (provider id, AI SDK package, display name). A gateway gets its own id, so a direct login's key
 # never goes to it. The plugin routes any id that contains "anthropic" or "openai" (index.js providerDialect).
 GATEWAYS = {"anthropic": ("anthropic-gateway", "@ai-sdk/anthropic", "Anthropic gateway"),
@@ -148,6 +149,14 @@ def slot(document, key):
     return (document.get(head), rest) if rest else (document, head)
 
 
+def logged_in(text):
+    """The provider ids with a login, from `opencode auth list`: the first word of each `●` line, lower case. A key
+    in the environment (the Environment block) counts too."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return {line.split("●", 1)[1].split()[0].lower() for line in plain.splitlines()
+            if "●" in line and line.split("●", 1)[1].split()}
+
+
 def manual_steps():
     lines = ["To install it by hand, add these entries to the \"plugin\" list:"]
     for name, file, _ in CONFIGS:
@@ -206,6 +215,13 @@ class Shell:
     def which(self, name):
         return shutil.which(name)
 
+    def interactive(self, cmd):
+        """Runs a program on the user's terminal (a login), and returns its exit code."""
+        try:
+            return subprocess.run(cmd).returncode
+        except FileNotFoundError:
+            return 127
+
     def run(self, cmd, cwd=None):
         try:
             # OpenCode takes its project folder from PWD as well, so PWD must name the same folder as cwd.
@@ -248,6 +264,7 @@ class Installer:
                                                  "project. Your config files are backed up first.")
             self.install_plugin(documents)
             self.save_record()
+            self.login()
             self.finish()
             return 0
         except Stop as stop:
@@ -432,6 +449,55 @@ class Installer:
                     self.terminal.say(f"Replaced another copy of the plugin in {name}: {entry_path(entry)}")
         self.terminal.say(f"✓ context-guru plugin installed for every project ({config_dir()}).")
 
+    def logins(self):
+        return logged_in(self.shell.run(["opencode", "auth", "list"]).stdout)
+
+    def login(self):
+        self.step("Login", "OpenCode keeps your key in its own login store. The installer never sees the key.")
+        gateway = self.connection.provider
+        wanted = {gateway} if gateway else set(DIRECT)
+        if wanted & self.logins():
+            self.terminal.say(f"✓ OpenCode already has a login for {gateway or 'Anthropic or OpenAI'}.")
+            return
+        if gateway:
+            self.terminal.say("OpenCode asks for the provider next. In the list, pick Other (the last choice), then "
+                              f"type: {gateway}\nThen paste your gateway key.")
+        else:
+            self.terminal.say("OpenCode asks for the provider next. Pick Anthropic or OpenAI, then log in.")
+        before = self.logins()
+        self.shell.interactive(["opencode", "auth", "login"])
+        after = self.logins()
+        if wanted & after:
+            self.record["login_started"] = sorted(wanted & after)[0]
+            self.save_record()
+            self.terminal.say("✓ OpenCode has the login.")
+            return
+        other = sorted(after - before)
+        self.terminal.say(f"context-guru cannot route {', '.join(other)}. It routes Anthropic and OpenAI only." if other
+                          else f"OpenCode has no login for {gateway or 'Anthropic or OpenAI'}.")
+        if self.yes("Undo the changes of this install?", default=True):
+            self.undo()
+            raise Stop("the install is undone.")
+        raise Stop(f"to finish, run: opencode auth login{f' (pick Other, then type: {gateway})' if gateway else ''}. "
+                   "Then run this installer again.")
+
+    def undo(self):
+        """Uninstall without its questions: config entries and keys, the plugin copy, a login the installer started.
+        An OpenCode that the installer installed stays, and the record keeps that fact for uninstall."""
+        self.revert(self.record)
+        if self.record.get("plugin"):
+            shutil.rmtree(self.record["plugin"], ignore_errors=True)
+        if self.record.get("login_started"):
+            self.shell.run(["opencode", "auth", "logout", self.record["login_started"]])
+        shutil.rmtree(backup_dir(), ignore_errors=True)
+        if self.record.get("opencode_installed"):
+            self.record = {"opencode_installed": True}
+            self.save_record()
+            self.terminal.say("✓ The changes are undone. OpenCode stays installed. The uninstall removes it.")
+        else:
+            record_path().unlink(missing_ok=True)
+            self.terminal.say("✓ The changes are undone.")
+
     def write_connection(self, document):
         """A gateway's provider and models into opencode.json. The record keeps each key's value from before the
         first install, so uninstall can put it back."""
@@ -517,6 +583,8 @@ class Installer:
             self.step("Remove the plugin", "It removes each context-guru entry from OpenCode's config, also one you "
                                            "added by hand. Your other entries stay.")
             by_hand = self.revert(record)
+            if record.get("login_started"):
+                self.shell.run(["opencode", "auth", "logout", record["login_started"]])
             if record.get("plugin"):
                 shutil.rmtree(record["plugin"], ignore_errors=True)
                 try:

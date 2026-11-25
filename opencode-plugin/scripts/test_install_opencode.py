@@ -54,6 +54,16 @@ class FakeShell:
         self.run_fails = False  # "exit": exit 1 with an error; "error-exit-0": the error with exit 0
         self.npm_shadowed = False  # an older opencode comes first on PATH, so npm's new one does not run
         self.opencode_version_text = None
+        self.logins = {"anthropic", "anthropic-gateway"}  # provider ids with an OpenCode login
+        self.login_adds, self.login_fails = "anthropic-gateway", False  # what the user's login does
+        self.interactive_calls = []
+
+    def interactive(self, cmd):
+        self.interactive_calls.append(list(cmd))
+        if self.login_fails:
+            return 1
+        self.logins.add(self.login_adds)
+        return 0
 
     def which(self, name):
         if name == "opencode":
@@ -82,6 +92,13 @@ class FakeShell:
         if cmd[:2] == ["npm", "uninstall"]:
             self.opencode = None
             return ok()
+        if cmd[:3] == ["opencode", "auth", "list"]:
+            names = {"anthropic": "Anthropic", "openai": "OpenAI"}
+            return ok("\x1b[0m┌  Credentials /x/auth.json\n│\n" + "".join(
+                f"●  {names.get(login, login)} api\n" for login in sorted(self.logins)) + "└  done\n")
+        if cmd[:3] == ["opencode", "auth", "logout"]:
+            self.logins.discard(cmd[3])
+            return ok("Logout successful\n")
         if cmd[:2] == ["opencode", "run"]:
             # The plugin starts in the folder OpenCode runs in, and writes its scripts there.
             state = install_opencode.state_root() / hashlib.sha256(cwd.encode()).hexdigest()[:16]
@@ -316,6 +333,90 @@ class InstallerTest(unittest.TestCase):
 
         self.assertEqual(self.read("opencode.json")["provider"]["anthropic-gateway"]["options"]["baseURL"],
                          "https://gw.example/v1")
+
+    # ---------------------------------------------------------------------------- the login
+    def logouts(self):
+        return [call for call in self.shell.calls if call[:3] == ["opencode", "auth", "logout"]]
+
+    def test_logged_in_reads_credentials_and_environment(self):
+        text = ("\x1b[0m┌  Credentials /x/auth.json\n│\n●  Anthropic api\n●  anthropic-gateway api\n└  2 credentials\n"
+                "┌  Environment\n│\n●  \x1b[1mOpenAI\x1b[0m OPENAI_API_KEY\n└  1 environment variable\n")
+
+        self.assertEqual(install_opencode.logged_in(text), {"anthropic", "anthropic-gateway", "openai"})
+
+    def test_path_2_starts_the_login_and_names_the_gateway_id(self):
+        self.shell.logins = {"anthropic"}
+
+        code = self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.shell.interactive_calls, [["opencode", "auth", "login"]])
+        self.assertIn("pick Other (the last choice), then type: anthropic-gateway", self.terminal.text())
+        self.assertEqual(json.loads(install_opencode.record_path().read_text())["login_started"], "anthropic-gateway")
+
+    def test_path_2_with_a_direct_anthropic_login_never_touches_that_login(self):
+        self.shell.logins = {"anthropic"}
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.logouts(), [["opencode", "auth", "logout", "anthropic-gateway"]])
+        self.assertEqual(self.shell.logins, {"anthropic"})
+
+    def test_an_existing_login_skips_the_login(self):
+        code = self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.shell.interactive_calls, [])
+        self.assertNotIn("login_started", json.loads(install_opencode.record_path().read_text()))
+
+    def test_uninstall_does_not_log_out_a_login_the_installer_did_not_start(self):
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.logouts(), [])
+
+    def test_a_failed_login_offers_undo_and_exits_1(self):
+        self.shell.logins, self.shell.login_fails = {"anthropic"}, True
+
+        code = self.installer(*self.GATEWAY, "y", "y").install()  # consent, undo
+
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.read("opencode.json"))
+        self.assertIsNone(self.read("tui.json"))
+        self.assertFalse(self.plugin_copy.exists())
+        self.assertFalse(install_opencode.record_path().exists())
+        self.assertNotIn("✓ The proxy started", self.terminal.text())
+
+    def test_a_failed_login_without_undo_says_how_to_finish(self):
+        self.shell.logins, self.shell.login_fails = {"anthropic"}, True
+
+        code = self.installer(*self.GATEWAY, "y", "n").install()  # consent, undo: no
+
+        self.assertEqual(code, 1)
+        self.assertIn("anthropic-gateway", self.read("opencode.json")["provider"])
+        self.assertIn("opencode auth login", self.terminal.text())
+
+    def test_path_1_with_a_provider_it_cannot_route_offers_undo_and_exits_1(self):
+        self.shell.logins, self.shell.login_adds = set(), "groq"
+
+        code = self.installer("1", "y", "y").install()  # path, consent, undo
+
+        self.assertEqual(code, 1)
+        self.assertIn("context-guru cannot route", self.terminal.text())
+        self.assertIsNone(self.read("opencode.json"))
+
+    def test_undo_keeps_an_opencode_this_run_installed_and_says_so(self):
+        self.shell.opencode = None
+        self.shell.logins, self.shell.login_fails = set(), True
+
+        code = self.installer("1", "y", "y", "y").install()  # path, install OpenCode, consent, undo
+
+        self.assertEqual(code, 1)
+        self.assertEqual([call for call in self.npm_calls() if call[1] == "uninstall"], [])
+        self.assertIn("OpenCode stays", self.terminal.text())
+        self.assertEqual(json.loads(install_opencode.record_path().read_text()), {"opencode_installed": True})
 
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):
