@@ -566,8 +566,10 @@ left most old outputs unasked. Now a list longer than 12 is **split into balance
 - All verdicts are merged into **one held answer**, keyed by tool-use id, with no output judged twice. The next cold
   request does **one recheck and one cut**.
 - The answer cost is the sum of every batch's usage. `sweep_ask_batches` counts the questions asked.
-- **The keep-alive cost ceiling prices every question the sweep will ask**, not one: `k x (prefix read + answer guess)`.
-  If the ceiling admits fewer than planned, the sweep asks that many and leaves the smallest outputs unasked
+- **The keep-alive cost rule prices every question the sweep will ask**, not one: `k x (prefix read + answer guess)`.
+  A set `keepalive_max_usd_per_ping` caps it. With none set, the value rule decides: the `k` questions must cost less
+  than the one miss they protect. The rule weighs the calls against that miss alone, so one idle span can cost more
+  than one miss in total. If the rule admits fewer than planned, the sweep asks that many and leaves the smallest outputs unasked
   (`sweep_batches_lowered`, `sweep_over_ask_cap`). If it admits none, the ordinary ping goes out.
 - **A batch never starts after the sweep's deadline.** The keeper's timeout (300 s) bounds the whole sweep and each
   question has its own 90 s bound, so `k` slow questions could add up past it. The rest are skipped
@@ -792,7 +794,7 @@ At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `
 `sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
 `sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
 candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
-`keepalive_sweep_over_budget`, `sweep_batch_by_index` (per batch position: asked, items, judged,
+`keepalive_sweep_over_budget` (counts both refusals: over the cap and not worth it), `sweep_batch_by_index` (per batch position: asked, items, judged,
 fabricated, to see whether later batches judge worse), and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 

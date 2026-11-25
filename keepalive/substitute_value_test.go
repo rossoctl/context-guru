@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -118,7 +119,7 @@ func TestSweepBatchesAreWeighedAgainstOneMiss(t *testing.T) {
 	k, _, _ := testKeeper(t)
 	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
 	one := k.projectedSweepBatchesUSD("claude-sonnet-5", "", 20000, 1)
-	inf := 1e300
+	inf := math.Inf(1)
 	for _, tc := range []struct {
 		miss float64
 		want int
@@ -126,6 +127,10 @@ func TestSweepBatchesAreWeighedAgainstOneMiss(t *testing.T) {
 		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, inf, tc.miss); got != tc.want {
 			t.Errorf("miss %.4f: %d batches, want %d", tc.miss, got, tc.want)
 		}
+	}
+	// A huge FINITE cap is unlimited and must not overflow the int conversion on any platform.
+	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, 1e300, 0); got != 4 {
+		t.Errorf("a finite cap of 1e300: %d batches, want 4", got)
 	}
 	// The explicit cap still applies on top of the value.
 	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, 1.5*one, 100); got != 1 {

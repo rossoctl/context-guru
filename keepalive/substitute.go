@@ -164,8 +164,8 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	cost := k.projectedSummaryUSD(model, endpoint, prefix)
 	if v := capPol.SubstituteVerdict(cost, miss); v != VerdictOK {
 		k.summarySubstituteOverBudget.Add(1)
-		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute would exceed the "+
-			"per-ping cost cap; pinging normally instead",
+		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute refused ("+v.Reason()+
+			"); pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session,
 			"estimate_usd", cost, "miss_usd", miss, "cap_usd", capPol.PingCap(), "verdict", v.Reason())
 		return false
@@ -375,8 +375,9 @@ func (k *Keeper) projectedSweepBatchesUSD(model, endpoint string, prefix int64, 
 	return float64(n) * (float64(prefix)*price.CacheRead + float64(sweepOutputBudgetGuess)*price.Output)
 }
 
-// affordableSweepBatches is how many of the planned batches the per-ping ceiling admits: the largest
-// n <= planned with n x (one question's projected cost) <= ceiling. 0 means not even one fits, and the
+// affordableSweepBatches is how many of the planned batches the operator's cap (Policy.PingCap(), +Inf when
+// unset) and the value rule admit: the largest n <= planned with n x (one question's projected cost) <=
+// ceiling and below miss (SubstituteVerdict). 0 means not even one fits, and the
 // caller sends the ordinary ping. A ceiling that admits fewer than planned LOWERS the batch count, so a
 // ping still sweeps what it can afford (the smallest candidates are left unasked).
 func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, planned int, ceiling, miss float64) int {
@@ -387,13 +388,13 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 	if one <= 0 { // unpriced: the old behaviour, nothing to compare, nothing to lower
 		return planned
 	}
-	// NO CAP admits every planned batch. Policy.Ceiling() returns +Inf for a negative MaxUSDPerPing ("no
+	// NO CAP admits every planned batch. Policy.PingCap() returns +Inf for an unset or negative MaxUSDPerPing ("no
 	// ceiling", which somebody has to type on purpose). Dividing +Inf by a cost and converting it to int is
 	// implementation-defined (MinInt64 on gc); the clamp below would turn that into "zero batches", so the
 	// one policy that asks for no cap would get no sweep at all.
 	//
 	// A ceiling of zero or less (or NaN) keeps the meaning the old check had: every positive cost exceeds
-	// it, so nothing is admitted. Policy.Ceiling() never returns one (it resolves zero to the default), so
+	// it, so nothing is admitted. Policy.PingCap() never returns one (zero and below give +Inf), so
 	// this is only a guard for a direct caller. It is EXPLICIT because int(NaN) and int(-Inf) are
 	// implementation-defined: on gc they happen to be negative, which the clamp below also turns into zero,
 	// so a test on this platform cannot tell this guard from that accident. The guard keeps the answer
@@ -403,7 +404,13 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 		if !(ceiling > 0) {
 			return 0
 		}
-		n = min(planned, max(0, int(ceiling/one)))
+		// A huge finite cap is unlimited: int() of a float past the int range is implementation-defined
+		// (MinInt64 on gc/amd64), which the clamp would turn into zero batches.
+		if q := ceiling / one; q >= float64(planned) {
+			n = planned
+		} else {
+			n = max(0, int(q))
+		}
 	}
 	// THE VALUE RULE (#1439): the questions of one ping slot protect ONE miss, so n of them are
 	// weighed together against it, as K pings are. Lower n until the batch costs less than the miss.
@@ -479,7 +486,7 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	if allowed < 1 {
 		cost := k.projectedSweepUSD(model, endpoint, prefix)
 		k.sweepOverBudget.Add(1)
-		slog.Debug("context-guru: sweep keep-alive question would exceed the per-ping cost cap; "+
+		slog.Debug("context-guru: sweep keep-alive question refused by the cost cap or the value rule; "+
 			"pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "miss_usd", miss, "cap_usd", ceiling)
 		return false
@@ -488,7 +495,7 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	if allowed < planned {
 		k.sweepBatchesLowered.Add(1)
 		wait.MaxBatches = allowed
-		slog.Debug("context-guru: sweep keep-alive: the per-ping cost cap admits fewer questions than planned; "+
+		slog.Debug("context-guru: sweep keep-alive: the cost cap or the value rule admits fewer questions than planned; "+
 			"asking fewer",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "planned", planned, "allowed", allowed,
 			"ceiling_usd", ceiling)
