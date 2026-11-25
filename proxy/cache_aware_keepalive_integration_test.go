@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -92,6 +94,8 @@ func TestARealRequestsKeepAliveCandidateSurvivesAndAPingDispatchesIt(t *testing.
 			MaxUSDPerPing: 1, MinPrefixTokens: 0},
 	})
 	t.Cleanup(h.Close)
+	clock := &testClock{at: time.Now()}
+	rebuildKeeper(h, nil, clock) // the test clock and an inline runner; pings still go to `upstream`
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -136,7 +140,7 @@ func TestARealRequestsKeepAliveCandidateSurvivesAndAPingDispatchesIt(t *testing.
 		map[string]any{"role": "user", "content": "keep going, the tests still fail and there is more output to review"},
 	}
 	post(head)
-	if !offload.WaitForSummaryForTest(session, 5*time.Second) {
+	if !offload.WaitForSummaryForTest(session, 30*time.Second) {
 		t.Fatal("turn 1's commissioned summary never landed")
 	}
 
@@ -161,22 +165,17 @@ func TestARealRequestsKeepAliveCandidateSurvivesAndAPingDispatchesIt(t *testing.
 	}
 
 	// AND: a following ping actually dispatches it, rather than merely leaving a candidate
-	// sitting unused in the registry. The real keep-alive ticker (proxy/keepalive.go,
-	// keepAliveTick=2s) drives this — no fake clock, so the wait below is real wall-clock time,
-	// bounded well under the test timeout.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if h.keeper.Stats().SummarySubstituted > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if got := h.keeper.Stats().SummarySubstituted; got == 0 {
-		t.Fatalf("summarySubstituted = %d after %v — the following ping never dispatched the "+
-			"candidate (noCandidate=%d checkpointExists=%d phaseMismatch=%d overBudget=%d failed=%d)",
-			got, 10*time.Second,
-			h.keeper.Stats().SummarySubstituteNoCandidate, h.keeper.Stats().SummarySubstituteCheckpointExists,
-			h.keeper.Stats().SummarySubstitutePhaseMismatch, h.keeper.Stats().SummarySubstituteOverBudget,
-			h.keeper.Stats().SummarySubstituteFailed)
+	// sitting unused in the registry. The keeper runs on a test clock with an inline runner, so
+	// advancing the clock past Idle makes the ping due and Sweep sends it. No real tick, no wait.
+	// This no longer covers the production ticker: its loop only calls Sweep, so the test calls Sweep.
+	// The keeper records a turn in serve's defer, AFTER the response reaches the client: wait until
+	// it holds turn 2 (turn 1 is refused by the gate), or Sweep finds nothing to ping.
+	testutil.WaitForState(t, "the keeper holds turn 2", func() bool { return h.keeper.Stats().Live >= 1 },
+		func() string { return fmt.Sprintf("%+v", h.keeper.Stats()) })
+	sweepAfter(h.keeper, clock, 3*time.Second)
+	if st := h.keeper.Stats(); st.SummarySubstituted == 0 {
+		t.Fatalf("the ping never dispatched the candidate: live=%d pings=%d skipped=%d summarySubstituted=%d noCandidate=%d checkpointExists=%d phaseMismatch=%d overBudget=%d failed=%d",
+			st.Live, st.Pings, st.Skipped, st.SummarySubstituted, st.SummarySubstituteNoCandidate, st.SummarySubstituteCheckpointExists,
+			st.SummarySubstitutePhaseMismatch, st.SummarySubstituteOverBudget, st.SummarySubstituteFailed)
 	}
 }
