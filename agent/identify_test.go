@@ -197,3 +197,23 @@ func TestClientSubagentID(t *testing.T) {
 		}
 	}
 }
+
+func TestClientModelAgentEqualsTheStoredRowValue(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, want string
+		h                    http.Header
+	}{
+		{"claude code", "anthropic", "claude-cli", hdr("User-Agent", "claude-cli/2.1.0 (external, cli)")},
+		{"codex", "openai", "codex", hdr("User-Agent", "codex_cli_rs/0.50.0")},
+		{"opencode", "anthropic", "opencode", hdr("User-Agent", "opencode/1.2.3")},
+		{"pi on anthropic", "anthropic", "anthropic", hdr("User-Agent", "Anthropic/JS 0.60.0", "x-context-guru-client", "pi")},
+		{"pi on openai", "openai", "openai", hdr("User-Agent", "OpenAI/JS 5.0.0", "x-context-guru-client", "pi")},
+		{"bob", "anthropic", "bob", hdr("User-Agent", "bobshell/1.0")},
+		{"empty", "anthropic", "unknown", nil},
+	} {
+		c := Identify(tc.h)
+		if got := c.ModelAgent(tc.provider); got != tc.want || got != ModelAgentOf(c.Label, tc.provider) {
+			t.Errorf("%s: ModelAgent = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

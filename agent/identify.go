@@ -185,6 +185,11 @@ func ModelAgentOf(label, provider string) string {
 	return provider
 }
 
+// ModelAgent is the agent value the prediction model reads for a live request from c. It is the
+// value training reads from the stored row of the same request: ModelAgentOf(c.Label, provider).
+// A host passes the Client it found once and the request's provider, and nothing else.
+func (c Client) ModelAgent(provider string) string { return ModelAgentOf(c.Label, provider) }
+
 // MarkedCompaction reports whether the client marked this request as its own compaction, by a mark that
 // needs no request text: the headers (Client.Compaction), or Codex's body metadata. body is the request
 // as the client sent it.
