@@ -3,7 +3,9 @@
 > **Experimental.** The plugin is new. It ran in a real OpenCode only once (1.19.5). It needs proxy v0.7.1 or later.
 
 The OpenCode plugin routes Anthropic and OpenAI model requests through a local context-guru proxy.
-It is project-safe and reversible. The installer never reads or stores an API key.
+It is project-safe and reversible. On the direct path, the installer never sees your key: OpenCode's own
+login asks for it. On the gateway path, the installer asks for the gateway key and puts it in OpenCode's key
+file. It never shows, logs or records it anywhere else.
 
 ## You need
 
@@ -31,8 +33,9 @@ It asks before each change:
 4. **The plugin:** it installs the release's plugin, checked by SHA-256, at
    `~/.local/share/context-guru-opencode/plugin/`. It adds it to the global `opencode.json` and `tui.json`,
    and removes another copy of the plugin there first. Your other entries stay. Old plugin options stay.
-5. **Login:** when OpenCode has no login for that provider, it starts `opencode auth login`. You type the key
-   into OpenCode, and OpenCode stores it. If the login fails, the installer offers to undo the install.
+5. **Login:** for a gateway, the installer saves the key you gave it in OpenCode's key file. For a direct
+   connection with no login yet, it starts `opencode auth login`: pick Anthropic (or OpenAI) in OpenCode's
+   list. If that login fails, the installer offers to undo the install.
 6. **A check** (default yes): one short test prompt. It passes only when OpenCode answered and the proxy
    counted the request. A failed check exits with code 1 and names the cause.
 It does not change an `opencode.jsonc` or a config file with comments. It prints the entries to add by hand.
@@ -49,19 +52,24 @@ npm installs OpenCode from `https://registry.npmjs.org/`. Set `CG_OC_NPM_REGISTR
 
 Pick "A custom base URL" when you reach the models through a gateway such as LiteLLM. The installer asks for:
 
-1. **The base URL**, for example `https://gw.example`. It must be `https://` (`http://` only on `127.0.0.1` or
-   `localhost`). A trailing `/v1` is fine.
-2. **The API format:** `anthropic` (the default) or `openai`.
-3. **The model**, as the gateway names it, for example `aws/claude-sonnet-5-5`.
-4. **The small model**, which OpenCode uses for session titles. The default is the same model. Set it: the
-   OpenCode default (`claude-haiku-5-5`) usually has another name at a gateway.
+1. **The base URL**, for example `https://litellm.example.com`. It must be `https://` (`http://` only on
+   `127.0.0.1` or `localhost`), with no user name, password or query. A trailing `/v1` is fine.
+2. **The API format:** `1` Anthropic (the default, for Claude models) or `2` OpenAI.
+3. **Your key for the gateway.** The input is hidden: paste it, then press Enter. When OpenCode already has a
+   key for the gateway, the installer offers to use it.
+4. **The installer checks the key** with the gateway's model list. If the gateway refuses the key, it asks
+   again (3 times at most). If it cannot read the list, it says why, and you type the model names.
+5. **The model** and **the small model** (for session titles): a number from the list, or a model name. The
+   defaults are the first model with `sonnet` and the first with `haiku`. Set the small model: the OpenCode
+   default (`claude-haiku-5-5`) usually has another name at a gateway.
 
 It adds the provider `anthropic-gateway` (or `openai-gateway`) to `opencode.json`, and sets `model` and
 `small_model` to it. The gateway has its own provider ID, so a direct Anthropic or OpenAI login keeps its own
 key, and that key never goes to the gateway.
 
-At the login, OpenCode shows a list of providers. Pick **Other** (the last choice), type `anthropic-gateway`
-(or `openai-gateway`), then paste your gateway key.
+The key goes to OpenCode's own key file (`~/.local/share/opencode/auth.json`, mode 0600), as
+`opencode auth login` would write it. Uninstall removes that entry (with `opencode auth logout`), and only when
+the installer wrote it.
 
 For a scripted install, these variables answer the questions in advance:
 
@@ -72,7 +80,7 @@ For a scripted install, these variables answer the questions in advance:
 | `CG_OC_MODEL` | the model |
 | `CG_OC_SMALL_MODEL` | the small model |
 
-The login and the check still need a terminal.
+The key question and the check still need a terminal.
 
 ## Install by hand
 

@@ -6,8 +6,8 @@
 #
 # It downloads the release's OpenCode plugin, checks it against the release's SHA-256, unpacks it, and runs its
 # installer (scripts/install_opencode.py). The installer asks before each change: how you reach your models,
-# install or update OpenCode, and the consent to route OpenCode through context-guru. It never reads a key:
-# OpenCode's own login asks for it. The SHA-256 is the only integrity
+# install or update OpenCode, and the consent to route OpenCode through context-guru. For a gateway it also asks
+# for the gateway key, which goes to OpenCode's key file only. The SHA-256 is the only integrity
 # check, so a mismatch or a missing sum stops before anything runs.
 #
 # Everything is inside main, called on the last line: a download cut short runs nothing.

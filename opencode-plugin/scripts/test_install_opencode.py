@@ -30,6 +30,12 @@ class FakeTerminal:
     def say(self, text):
         self.shown.append(text)
 
+    def secret(self, question):
+        self.shown.append(question)  # the question only: a hidden answer is never shown
+        if not self.answers:
+            raise AssertionError(f"unexpected secret question: {question}")
+        return self.answers.pop(0)
+
     def ask(self, question, default=""):
         self.shown.append(question)
         if not self.answers and self.eof:
@@ -40,6 +46,21 @@ class FakeTerminal:
 
     def text(self):
         return "\n".join(self.shown)
+
+
+class FakeWeb:
+    """The gateway: answers GET /v1/models, and keeps each URL and its headers."""
+
+    def __init__(self):
+        self.calls, self.status, self.error = [], 200, None
+        self.models = ["aws/claude-haiku-5-5", "aws/claude-sonnet-5-5", "gpt-x"]
+
+    def get(self, url, headers):
+        self.calls.append((url, dict(headers)))
+        if self.error:
+            raise OSError(self.error)
+        status = self.status.pop(0) if isinstance(self.status, list) else self.status
+        return status, json.dumps({"data": [{"id": model} for model in self.models]})
 
 
 class FakeShell:
@@ -137,12 +158,13 @@ class InstallerTest(unittest.TestCase):
             os.environ.pop(name, None)
         self.addCleanup(self.home.cleanup)
         self.shell = FakeShell()
+        self.web = FakeWeb()
         self.config = root / "config/opencode"
         self.plugin_copy = root / "data/context-guru-opencode/plugin"
 
     def installer(self, *answers, eof=False):
         self.terminal = FakeTerminal(answers, eof)
-        return install_opencode.Installer(self.terminal, self.shell, SOURCE)
+        return install_opencode.Installer(self.terminal, self.shell, SOURCE, web=self.web)
 
     def read(self, name):
         path = self.config / name
@@ -207,25 +229,28 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(connection, install_opencode.Connection(None, None, None, None))
 
     def test_path_2_asks_url_format_model_and_small_model(self):
-        connection = self.installer("2", "https://gw.example", "", "aws/claude-sonnet-5-5",
+        connection = self.installer("2", "https://gw.example", "", "KEY", "aws/claude-sonnet-5-5",
                                     "aws/claude-haiku-5-5").ask_connection({"opencode.json": {}})
 
         self.assertEqual(connection, install_opencode.Connection(
             "anthropic-gateway", "https://gw.example/v1", "aws/claude-sonnet-5-5", "aws/claude-haiku-5-5"))
 
     def test_path_2_small_model_defaults_to_the_model(self):
-        connection = self.installer("2", "https://gw.example", "", "m", "").ask_connection({"opencode.json": {}})
+        self.web.error = "no route to host"  # no model list, so no list default either
+        connection = self.installer("2", "https://gw.example", "", "KEY", "m", "").ask_connection(
+            {"opencode.json": {}})
 
         self.assertEqual(connection.small_model, "m")
 
     def test_path_2_openai_format_gives_openai_gateway(self):
-        connection = self.installer("2", "https://gw.example", "openai", "m", "").ask_connection(
+        connection = self.installer("2", "https://gw.example", "openai", "KEY", "m", "").ask_connection(
             {"opencode.json": {}})
 
         self.assertEqual(connection.provider, "openai-gateway")
 
-    def test_path_2_model_has_no_default_and_asks_again(self):
-        connection = self.installer("2", "https://gw.example", "", "", "m", "").ask_connection(
+    def test_path_2_without_a_model_list_has_no_default_and_asks_again(self):
+        self.web.error = "no route to host"
+        connection = self.installer("2", "https://gw.example", "", "KEY", "", "m", "").ask_connection(
             {"opencode.json": {}})
 
         self.assertEqual(connection.model, "m")
@@ -234,7 +259,7 @@ class InstallerTest(unittest.TestCase):
         os.environ.update(CG_OC_GATEWAY_URL="https://gw.example", CG_OC_API="openai", CG_OC_MODEL="m",
                           CG_OC_SMALL_MODEL="s")
 
-        connection = self.installer().ask_connection({"opencode.json": {}})
+        connection = self.installer("KEY").ask_connection({"opencode.json": {}})  # the key is still asked
 
         self.assertEqual(connection, install_opencode.Connection("openai-gateway", "https://gw.example/v1", "m", "s"))
 
@@ -263,13 +288,13 @@ class InstallerTest(unittest.TestCase):
     def test_a_provider_of_the_other_format_does_not_stop_the_gateway(self):
         self.write("opencode.json", {"provider": {"openai": {"options": {"baseURL": "https://other.example/v1"}}}})
 
-        connection = self.installer("2", "https://gw.example", "", "m", "").ask_connection(
+        connection = self.installer("2", "https://gw.example", "", "KEY", "m", "").ask_connection(
             {"opencode.json": self.read("opencode.json")})
 
         self.assertEqual(connection.provider, "anthropic-gateway")
 
     # ---------------------------------------------------------------------- the connection
-    GATEWAY = ("2", "https://gw.example", "", "m", "s")  # path, URL, format (default), model, small model
+    GATEWAY = ("2", "https://gw.example", "", "KEY", "m", "s")  # path, URL, format (default), key, model, small
 
     def test_path_2_writes_the_gateway_provider_and_both_models(self):
         code = self.installer(*self.GATEWAY, "y", "n").install()  # consent, test prompt
@@ -337,14 +362,14 @@ class InstallerTest(unittest.TestCase):
         before = {"provider": {"anthropic-gateway": {"options": {"baseURL": "https://old.example/v1"}}}}
         self.write("opencode.json", before)
 
-        code = self.installer(*self.GATEWAY, "n").install()  # replace: no
+        code = self.installer("2", "https://gw.example", "", "n").install()  # path, URL, format, replace: no
 
         self.assertEqual(code, 1)
         self.assertEqual(self.read("opencode.json"), before)
         self.assertEqual(self.npm_calls(), [])
         self.assertIn("https://old.example/v1", self.terminal.text())
 
-        self.installer(*self.GATEWAY, "y", "y", "n").install()  # replace: yes, consent, test prompt
+        self.installer("2", "https://gw.example", "", "y", "KEY", "m", "s", "y", "n").install()  # replace: yes
 
         self.assertEqual(self.read("opencode.json")["provider"]["anthropic-gateway"]["options"]["baseURL"],
                          "https://gw.example/v1")
@@ -359,43 +384,140 @@ class InstallerTest(unittest.TestCase):
 
         self.assertEqual(install_opencode.logged_in(text), {"anthropic", "anthropic-gateway", "openai"})
 
-    def test_path_2_starts_the_login_and_names_the_gateway_id(self):
-        self.shell.logins = {"anthropic"}
+    def auth(self):
+        path = Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def write_auth(self, value):
+        path = Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+
+    def test_path_2_asks_url_format_then_a_hidden_key(self):
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        text = self.terminal.text()
+        self.assertIn("The gateway's base URL (for example https://litellm.example.com):", text)
+        self.assertIn("1) Anthropic (recommended for Claude models)", text)
+        self.assertIn("Your key for this gateway (the input is hidden: paste it, then press Enter):", text)
+        self.assertLess(text.index("base URL (for example"), text.index("1) Anthropic (recommended"))
+        self.assertLess(text.index("1) Anthropic (recommended"), text.index("Your key for this gateway"))
+        self.assertNotIn("KEY\n", text + "\n")
+
+    def test_path_2_writes_the_key_to_opencodes_key_file_with_mode_0600(self):
+        self.write_auth({"anthropic": {"type": "api", "key": "DIRECT"}})
 
         code = self.installer(*self.GATEWAY, "y", "n").install()
 
         self.assertEqual(code, 0)
-        self.assertEqual(self.shell.interactive_calls, [["opencode", "auth", "login"]])
-        self.assertIn("pick Other (the last choice), then type: anthropic-gateway", self.terminal.text())
-        self.assertEqual(json.loads(install_opencode.record_path().read_text())["login_started"], "anthropic-gateway")
+        self.assertEqual(self.auth(), {"anthropic": {"type": "api", "key": "DIRECT"},
+                                       "anthropic-gateway": {"type": "api", "key": "KEY"}})
+        path = Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.shell.interactive_calls, [])
+        record = install_opencode.record_path().read_text()
+        self.assertEqual(json.loads(record)["login_started"], "anthropic-gateway")
+        self.assertNotIn("KEY", record.replace("_KEY", ""))
+
+    def test_the_key_check_lists_the_claude_models_and_defaults_to_sonnet_and_haiku(self):
+        connection = self.installer("2", "https://gw.example", "", "KEY", "", "").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual((connection.model, connection.small_model), ("aws/claude-sonnet-5-5", "aws/claude-haiku-5-5"))
+        text = self.terminal.text()
+        self.assertIn("✓ The gateway accepted the key.", text)
+        self.assertIn("1) aws/claude-haiku-5-5", text)
+        self.assertNotIn("gpt-x", text)
+        self.assertEqual(self.web.calls[0][0], "https://gw.example/v1/models")
+        self.assertEqual(self.web.calls[0][1]["x-api-key"], "KEY")
+
+    def test_the_model_list_is_shown_once(self):
+        self.installer("2", "https://gw.example", "", "KEY", "", "").ask_connection({"opencode.json": {}})
+
+        self.assertEqual(self.terminal.text().count("Models at the gateway:"), 1)
+
+    def test_a_model_number_picks_from_the_list(self):
+        connection = self.installer("2", "https://gw.example", "", "KEY", "1", "1").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual((connection.model, connection.small_model), ("aws/claude-haiku-5-5", "aws/claude-haiku-5-5"))
+
+    def test_a_refused_key_asks_again(self):
+        self.web.status = [401, 200]
+
+        connection = self.installer("2", "https://gw.example", "", "BAD", "KEY", "", "").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual(connection.provider, "anthropic-gateway")
+        self.assertIn("The gateway refused the key.", self.terminal.text())
+
+    def test_a_key_refused_3_times_stops_with_no_change(self):
+        self.web.status = 403
+
+        code = self.installer("2", "https://gw.example", "", "A", "B", "C").install()
+
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.read("opencode.json"))
+        self.assertIsNone(self.auth())
+        self.assertEqual(self.npm_calls(), [])
+
+    def test_a_network_error_names_the_host_and_asks_for_the_model_names(self):
+        self.web.error = "CERTIFICATE_VERIFY_FAILED"
+
+        connection = self.installer("2", "https://gw.example", "", "KEY", "m", "s").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual((connection.model, connection.small_model), ("m", "s"))
+        self.assertIn("cannot read the model list from gw.example", self.terminal.text())
+
+    def test_a_saved_gateway_key_is_offered_and_not_written_again(self):
+        self.write_auth({"anthropic-gateway": {"type": "api", "key": "SAVED"}})
+
+        code = self.installer("2", "https://gw.example", "", "y", "m", "s", "y", "n").install()  # use saved: y
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.web.calls[0][1]["x-api-key"], "SAVED")
+        self.assertNotIn("Your key for this gateway", self.terminal.text())
+        self.assertNotIn("login_started", json.loads(install_opencode.record_path().read_text()))
 
     def test_path_2_with_a_direct_anthropic_login_never_touches_that_login(self):
-        self.shell.logins = {"anthropic"}
+        self.write_auth({"anthropic": {"type": "api", "key": "DIRECT"}})
         self.installer(*self.GATEWAY, "y", "n").install()
 
         self.installer("y").uninstall()
 
         self.assertEqual(self.logouts(), [["opencode", "auth", "logout", "anthropic-gateway"]])
-        self.assertEqual(self.shell.logins, {"anthropic"})
+        self.assertEqual(self.auth()["anthropic"], {"type": "api", "key": "DIRECT"})
+        self.assertEqual([url for url, _ in self.web.calls], ["https://gw.example/v1/models"])
 
-    def test_an_existing_login_skips_the_login(self):
-        code = self.installer(*self.GATEWAY, "y", "n").install()
+    def test_an_existing_direct_login_skips_the_login(self):
+        code = self.installer("1", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.shell.interactive_calls, [])
         self.assertNotIn("login_started", json.loads(install_opencode.record_path().read_text()))
 
-    def test_uninstall_does_not_log_out_a_login_the_installer_did_not_start(self):
-        self.installer(*self.GATEWAY, "y", "n").install()
+    def test_uninstall_does_not_log_out_a_key_the_installer_did_not_write(self):
+        self.write_auth({"anthropic-gateway": {"type": "api", "key": "SAVED"}})
+        self.installer("2", "https://gw.example", "", "y", "m", "s", "y", "n").install()
 
         self.installer("y").uninstall()
 
         self.assertEqual(self.logouts(), [])
 
-    def test_a_failed_login_offers_undo_and_exits_1(self):
-        self.shell.logins, self.shell.login_fails = {"anthropic"}, True
+    def test_path_1_names_the_provider_to_pick_and_the_way_back_to_a_gateway(self):
+        self.shell.logins = set()
 
-        code = self.installer(*self.GATEWAY, "y", "y").install()  # consent, undo
+        self.installer("1", "y", "n").install()
+
+        text = self.terminal.text()
+        self.assertIn("In OpenCode's list, pick Anthropic (or OpenAI), then follow its steps.", text)
+        self.assertIn("For a company gateway, press Ctrl-C and run the installer again with choice 2.", text)
+
+    def test_a_failed_login_offers_undo_and_exits_1(self):
+        self.shell.logins, self.shell.login_fails = set(), True
+
+        code = self.installer("1", "y", "y").install()  # path, consent, undo
 
         self.assertEqual(code, 1)
         self.assertIsNone(self.read("opencode.json"))
@@ -405,13 +527,28 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn("✓ The proxy started", self.terminal.text())
 
     def test_a_failed_login_without_undo_says_how_to_finish(self):
-        self.shell.logins, self.shell.login_fails = {"anthropic"}, True
+        self.shell.logins, self.shell.login_fails = set(), True
 
-        code = self.installer(*self.GATEWAY, "y", "n").install()  # consent, undo: no
+        code = self.installer("1", "y", "n").install()  # path, consent, undo: no
 
         self.assertEqual(code, 1)
-        self.assertIn("anthropic-gateway", self.read("opencode.json")["provider"])
+        self.assertEqual(len(self.read("opencode.json")["plugin"]), 1)
         self.assertIn("opencode auth login", self.terminal.text())
+
+    def test_ctrl_c_stops_with_exit_130_and_no_traceback(self):
+        terminal = FakeTerminal(["2"])
+        terminal.ask = mock.Mock(side_effect=["2", KeyboardInterrupt()])
+        installer = install_opencode.Installer(terminal, self.shell, SOURCE, web=self.web)
+
+        code = installer.install()
+
+        self.assertEqual(code, 130)
+        self.assertIn("Stopped. Nothing more was changed.", terminal.text())
+
+    def test_the_first_step_shows_the_config_folder(self):
+        self.installer("3").install()
+
+        self.assertIn(f"OpenCode's config folder: {self.config}", self.terminal.text())
 
     def test_path_1_with_a_provider_it_cannot_route_offers_undo_and_exits_1(self):
         self.shell.logins, self.shell.login_adds = set(), "groq"
@@ -481,16 +618,15 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("Not checked.", self.terminal.text())
         self.assertNotIn(["opencode", "run", "Reply with the single word: ok"], self.shell.calls)
 
-    def test_consent_names_the_connection(self):
+    def test_consent_names_the_choice(self):
         self.installer(*self.GATEWAY, "y", "n").install()
-        self.assertIn("through the gateway at gw.example", self.terminal.text())
+        self.assertIn("You chose: the gateway at gw.example.", self.terminal.text())
 
         self.installer("1", "y", "n").install()
-        self.assertIn("OpenCode reaches Anthropic or OpenAI directly", self.terminal.text())
+        self.assertIn("You chose: Anthropic or OpenAI directly (no gateway).", self.terminal.text())
 
     def test_a_key_never_reaches_output_record_or_config(self):
-        self.shell.logins = {"anthropic"}
-        self.installer(*self.GATEWAY, "y", "y").install()  # consent, test prompt
+        self.installer("2", "https://gw.example", "", CANARY, "m", "s", "y", "y").install()  # consent, check
         self.assertIn(CANARY, (Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json").read_text())  # it ran
         record = install_opencode.record_path().read_text()
         shown = self.terminal.text()
@@ -504,6 +640,7 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn(CANARY, record)
         for path in files:
             self.assertNotIn(CANARY, path.read_text(errors="replace"), str(path))
+        self.assertEqual({url.split("/")[2] for url, _ in self.web.calls}, {"gw.example"})
 
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):
