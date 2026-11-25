@@ -343,7 +343,7 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 	// thread our search already rewrote keeps it: its turns must declare the same tools (the search
 	// tool, and the tools added back), or the names list the model reads points at a tool that is
 	// gone. The host holds the response and answers a search in band, as on any other turn.
-	chained := gjson.GetBytes(r.Orig, "previous_response_id").Exists()
+	chained := cgschema.ServerHeldHistory(r.Orig)
 	if !chained && cgschema.IsResponses(wire) && !gjson.GetBytes(r.Orig, "input").IsArray() {
 		o.Why = "input_not_array"
 		return o, nil

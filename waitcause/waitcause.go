@@ -339,7 +339,7 @@ func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, nor
 }
 
 func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) Observation {
-	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+	if schema.ServerHeldHistory(body) {
 		// A Responses request continuing SERVER-HELD history: `input` here is only the
 		// newest turn, not the full conversation. apply.NormalizeMessages does not special-
 		// case this (normalizeResponses reads `input` as-is, which is right for the

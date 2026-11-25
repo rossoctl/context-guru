@@ -5,7 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/tidwall/gjson"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // The work bounds of ScanBody. They bound the WORK, not the time: the byte bound refuses a body before any read; the message bound refuses a list after it is
@@ -59,7 +59,7 @@ func ScanBody(stop func() bool, provider bschemas.ModelProvider, body []byte) (r
 	if len(body) == 0 || len(body) > MaxScanBytes || (stop != nil && stop()) {
 		return nil
 	}
-	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+	if schema.ServerHeldHistory(body) {
 		return nil // server-held history: this body is only the newest turn
 	}
 	entries := apply.NormalizeMessages(provider, body)

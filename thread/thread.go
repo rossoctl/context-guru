@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -568,7 +569,7 @@ func Fingerprint(body []byte) ([]uint64, bool) {
 // request is an old conversation — is about content, and a tool result's content is most of it.
 func fingerprint(body []byte) ([]uint64, []int, bool) {
 	root := gjson.ParseBytes(body)
-	if !root.IsObject() || root.Get("previous_response_id").String() != "" {
+	if !root.IsObject() || schema.ServerHeldHistory(body) {
 		return nil, nil, false
 	}
 	items := root.Get("messages")

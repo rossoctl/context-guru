@@ -254,3 +254,16 @@ func TestResponsesSpliceSumsUsage(t *testing.T) {
 		})
 	}
 }
+
+// conversation and item_reference hold history at the provider, so the request is not stateless (#1298).
+func TestStatelessResponsesServerHeldHistoryForms(t *testing.T) {
+	for _, body := range []string{
+		`{"store":false,"conversation":"conv_1"}`,
+		`{"store":false,"conversation":{"id":"conv_1"}}`,
+		`{"store":false,"input":[{"type":"item_reference","id":"msg_1"}]}`,
+	} {
+		if StatelessResponses([]byte(body)) {
+			t.Errorf("%s: reported stateless", body)
+		}
+	}
+}

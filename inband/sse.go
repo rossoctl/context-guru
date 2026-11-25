@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -849,7 +850,7 @@ func (sp *SSESplicer) terminateResponses() {
 // exactly this. A missing store field means the API default, which is true.
 func StatelessResponses(body []byte) bool {
 	st := gjson.GetBytes(body, "store")
-	return st.Exists() && st.Type == gjson.False && !gjson.GetBytes(body, "previous_response_id").Exists()
+	return st.Exists() && st.Type == gjson.False && !schema.ServerHeldHistory(body)
 }
 
 // FirstByte is when the client got its first byte (zero before any).
