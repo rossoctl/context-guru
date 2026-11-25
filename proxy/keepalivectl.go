@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"math"
 	"net/http"
 	"time"
@@ -172,16 +173,17 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 		"durable":           false,
 		"min_prefix_tokens": o.pol.MinPrefixTokens,
 	}
-	// The per-ping guard that will actually be ENFORCED, reported because the body's value is
-	// ignored. Through CachePolicy.Ceiling(), so the number shown is the number enforced: the
-	// account's document stores 0 for "unconfigured", and reporting that raw told the operator
-	// the ceiling was $0.00 on exactly the accounts — keep-alive off, one session armed by hand
-	// — where the guard resolves to the default instead.
-	// The flat cap is opt-in (#1420): no default. Absent means the value rule alone decides.
+	// The flat per-ping cap that is enforced, reported because the body's value is ignored. It is opt-in
+	// (#1420): none by default, and then the key is absent and the value rule alone decides. The cap is the
+	// effective one: the account's, as a matching manager strategy leaves or replaces it (ApplyStrategy).
 	capUSD := CachePolicy{}.PingCap()
 	if h.opts.Tenants != nil {
 		if tn, err := h.opts.Tenants.ForTenant(t); err == nil {
-			capUSD = CachePolicy{MaxUSDPerPing: tn.Cache.MaxUSDPerPing}.PingCap()
+			pol := tn.Cache
+			if h.keeper != nil {
+				pol, _ = h.keeper.resolvePolicy(tn, session, bschemas.Anthropic, tn.Cache, predDecision{}, false)
+			}
+			capUSD = pol.PingCap()
 		}
 	}
 	if !math.IsInf(capUSD, 1) {

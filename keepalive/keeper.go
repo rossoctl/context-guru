@@ -178,7 +178,7 @@ type kaEntry struct {
 	// to 2 and the next ping is the 1-hour ping, with no substitute. Guarded by Keeper.mu.
 	oneHourSubstituted bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
-	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
+	// rate. Checked by Policy.PingVerdict (value rule, then any operator cap) before anything is sent.
 	pingUSD float64
 	// missUSD is the extra cost of a cache miss on this prefix (MissUSD), priced at the same tier. The
 	// value rule weighs the planned ping chain against it (Policy.PingVerdict). Zero when unpriced.
@@ -1133,7 +1133,7 @@ func (k *Keeper) Record(r Record) {
 		recordedReal: time.Now(),
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
-		missUSD: k.projectedMissUSD(model, prefix, r.Endpoint, ttl1h),
+		missUSD: k.projectedMissUSD(model, prefix, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour)),
 		hdr:     hdr, tag: r.Tag,
 	}
 	e.refreshedAt = startedAt // the real request refreshed the provider's entry
@@ -1296,6 +1296,13 @@ func (k *Keeper) projectedMissUSD(model string, prefix int64, endpoint string, o
 		return 0
 	}
 	return MissUSD(price, model, prefix, oneHour)
+}
+
+// missAtOneHour says whether a miss on this entry would rewrite at the 1-hour tier though the provider has
+// not billed it so yet: the policy writes at 1 hour (HeadTTL1h, OneHourAlways) or plans the 1-hour ping.
+// The dearer rate keeps the guard on the cautious side.
+func missAtOneHour(pol Policy, oneHourPing bool) bool {
+	return pol.HeadTTL1h || pol.OneHourAlways || oneHourPing
 }
 
 // verdict is the value rule for this entry's own plan: its planned ping count against one miss

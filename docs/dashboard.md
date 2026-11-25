@@ -402,7 +402,7 @@ the key from the start of the LAST REAL request for at most 300 seconds on a 5-m
 59 minutes on a 1-hour cache (the proxy reads the tier from the traffic), then releases and zeroes them. Only a
 new request starts that time again. A press never does, so pressing
 cannot keep a credential held. The usual limits still apply: 32 MiB per body (8 MiB for an unpriced model), 512 threads, 128 MiB in all, and
-the per-ping cost ceiling. One account may hold at most 16 such threads and 32 MiB, and they are released
+the value rule (a ping must cost less than the miss it protects), plus the operator's own per-ping cap if one is set. One account may hold at most 16 such threads and 32 MiB, and they are released
 before any automatic keep-alive hold, so a client that sends the header cannot starve other accounts. Claude Code sends the
 header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context-guru-ping: 1` (one `Name: Value`
 per line when there are several headers). The proxy never forwards it upstream.

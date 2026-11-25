@@ -78,7 +78,7 @@ cache:
 A ping must be worth its cost (#1420). At record time the proxy compares two figures, both priced at the tier of the prompt size:
 
 - **The chain.** The planned pings of one idle span, each at its projected cost (the prefix at the cache-read rate, plus the output).
-- **The miss.** What the next request pays extra when the cache is gone: the prefix at the write rate of the entry (5 minutes, or 1 hour for an entry billed at 1 hour), minus the read it would have had. On OpenAI the write rate is the input rate.
+- **The miss.** What the next request pays extra when the cache is gone: the prefix at the write rate of the entry (5 minutes, or 1 hour for an entry billed at 1 hour), minus the read it would have had. On OpenAI the write rate is the input rate before GPT-5.6, and 1.25x input from GPT-5.6.
 
 The proxy pings when the chain costs less than one miss. It refuses with the reason `not worth it` otherwise. An unpriced model is pinged, as before.
 Example: a GPT-5.5 ping at 600K tokens costs about $0.60 and protects a miss of about $5.40.

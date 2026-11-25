@@ -72,8 +72,9 @@ func MissUSD(price Price, model string, prefix int64, oneHour bool) float64 {
 // cost (MissUSD), pings the planned count K (below 1 counts as 1).
 //
 // A zero pingUSD (unpriced) is always allowed. A zero missUSD is also allowed: it means the miss
-// cost is unknown (a price list with no write or read rate), and the guard fails open then, as it
-// does for an unpriced model. The operator's flat cap still applies.
+// cost is unknown (no price) or degenerate (the write rate is not above the read rate, so a miss
+// costs nothing extra to the price list), and the guard fails open for both, as it does for an
+// unpriced model. The operator's flat cap still applies.
 func (p Policy) PingVerdict(pingUSD, missUSD float64, pings int) Verdict {
 	if pingUSD <= 0 {
 		return VerdictOK

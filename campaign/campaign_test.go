@@ -1,18 +1,22 @@
 package campaign
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 func rowsOnly(reqs []*kvcache.Request, price func(model string, promptTokens int64) (pIn, pOut, pRead, pWrite float64, ok bool), sessionEnd bool, untilMs int64) []predictive.AutoRow {
@@ -21,11 +25,11 @@ func rowsOnly(reqs []*kvcache.Request, price func(model string, promptTokens int
 }
 
 func TestRowFactsDefaultGates(t *testing.T) {
-	ok := RowFacts{Turn: 1, Prefix: 80000, Ping: 0.6, Stake: 5} // a $0.60 ping that protects a $5 miss: the value rule lets it through
+	ok := RowFacts{Turn: 1, Prefix: 80000, Ping: 0.6, Miss: 5} // a $0.60 ping that protects a $5 miss: the value rule lets it through
 	if ok.DefaultK() != 2 {
 		t.Fatalf("an eligible row gets %d pings, want 2", ok.DefaultK())
 	}
-	for name, f := range map[string]RowFacts{"first request": {Turn: 0, Prefix: 80000}, "small prefix": {Turn: 1, Prefix: 79999}, "dear ping": {Turn: 1, Prefix: 80000, Ping: 0.51, Stake: 0.2}, "two pings cost more than the miss": {Turn: 1, Prefix: 80000, Ping: 0.6, Stake: 1}} {
+	for name, f := range map[string]RowFacts{"first request": {Turn: 0, Prefix: 80000}, "small prefix": {Turn: 1, Prefix: 79999}, "dear ping": {Turn: 1, Prefix: 80000, Ping: 0.51, Miss: 0.2}, "two pings cost more than the miss": {Turn: 1, Prefix: 80000, Ping: 0.6, Miss: 1}} {
 		if f.DefaultK() != 0 {
 			t.Errorf("%s: %d pings, want 0", name, f.DefaultK())
 		}
@@ -395,16 +399,66 @@ func TestShadowConstantsMatchTheEngineCalibration(t *testing.T) {
 	}
 }
 
-// Replay and the live keeper decide with one function (keepalive.Policy.PingVerdict). On a grid of pings
-// and misses, the replay's default plan fires exactly when the keeper's verdict is OK for the default K.
+// stubHost is the smallest dispatch.Dispatcher a real keeper needs to decide: it holds nothing and prices
+// every model the same.
+type stubHost struct{ price keepalive.Price }
+
+func (stubHost) Do(context.Context, dispatch.Request) (dispatch.Response, error) {
+	return dispatch.Response{}, dispatch.ErrNotHeld
+}
+func (stubHost) Release(dispatch.Ref) {}
+func (h stubHost) Price(context.Context, string, string, int64) (keepalive.Price, bool) {
+	return h.price, true
+}
+
+const stubBody = `{"model":"claude-sonnet-5","max_tokens":32000,"stream":true,` +
+	`"tools":[{"name":"Bash","description":"run","input_schema":{"type":"object"}}],` +
+	`"system":[{"type":"text","text":"you are claude code","cache_control":{"type":"ephemeral"}}],` +
+	`"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
+
+// The replay's default gate and the live keeper's REAL record path (kaEntry.verdict through Record) agree
+// on a grid of ping costs, with K = 2 and no wait cause. The replay builds its facts from the same
+// prices and the same prefix. The live side sends no ping: it only decides whether it holds the thread.
 func TestReplayDecidesLikeTheLiveKeeper(t *testing.T) {
-	for _, ping := range []float64{0.001, 0.2, 0.51, 0.6, 3} {
-		for _, stake := range []float64{0, 0.3, 1, 5.4, 40} {
-			f := RowFacts{Turn: 1, Prefix: 600_000, Ping: ping, Stake: stake}
-			live := (keepalive.Policy{}).PingVerdict(ping, stake, config.DefaultKeepAliveMaxPings) == keepalive.VerdictOK
-			if got := f.DefaultK() > 0; got != live {
-				t.Errorf("ping %v stake %v: replay fires %v, live allows %v", ping, stake, got, live)
+	const prefix = 90_000
+	base := keepalive.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6}
+	for _, out := range []float64{1e-9, 1e-6, 20e-6, 100e-6, 1e-3, 1e-2} {
+		price := base
+		price.Output = out
+		now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+		k := keepalive.New(keepalive.Options{Dispatcher: stubHost{price}, Now: func() time.Time { return now }, Go: func(f func()) { f() }})
+		key := keepalive.Key{Tenant: "t", Session: "s"}
+		pol := keepalive.Policy{KeepAlive: true, Idle: 240 * time.Second, MaxPings: config.DefaultKeepAliveMaxPings, MinPrefixTokens: 80000}
+		for _, d := range []time.Duration{-time.Second, 0} {
+			h := http.Header{}
+			h.Set("Authorization", "Bearer x")
+			k.Record(keepalive.Record{Key: key, StartedAt: now.Add(d), Body: []byte(stubBody), Provider: "anthropic",
+				Route: "/v1/messages", Status: http.StatusOK, Usage: keepalive.Usage{CacheRead: prefix},
+				UsageOK: true, Policy: pol, Header: h,
+				Hold: func() dispatch.Ref { return dispatch.Ref("r") }})
+		}
+		_, live := k.Entry(key)
+		// The replay's facts: one ping reads the prefix and sends one output token; a miss is the write minus the read.
+		f := RowFacts{Turn: 1, Prefix: prefix, Ping: prefix*price.CacheRead + out*1, Miss: Stake(prefix, price.CacheRead, price.CacheWrite)}
+		if got := f.DefaultK() > 0; got != live {
+			t.Errorf("output rate %v: replay fires %v, the live keeper holds %v (ping %.4f, miss %.4f)", out, got, live, f.Ping, f.Miss)
+		}
+	}
+}
+
+// With a wait cause the replay weighs the same planned count as the live wait plan, and it is never
+// more permissive than live: the replay's chain is at most the keeper's.
+func TestReplayChainNeverExceedsTheLiveWaitPlan(t *testing.T) {
+	pol := keepalive.Policy{KeepAlive: true, MaxPings: 2, WaitPlan: true}
+	for _, cause := range []string{"", waitcause.WaitingOwnTool, waitcause.WaitingBackground, waitcause.WaitingHuman} {
+		for _, sub := range []bool{false, true} {
+			f := &RowFacts{Cause: cause, Subagent: sub}
+			if got, live := replayChain(pol, f), pol.WaitPings(cause, sub); got > live || (cause != "" && got != max(pol.MaxPings, live)) {
+				t.Errorf("cause %q subagent %v: replay chain %d, live %d", cause, sub, got, live)
 			}
 		}
+	}
+	if got := replayChain(pol, &RowFacts{Cause: waitcause.WaitingOwnTool}); got != 8 {
+		t.Errorf("a tool wait replays K=%d, want 8", got)
 	}
 }

@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -165,6 +168,31 @@ func TestArmingIgnoresAPostedPerPingBudget(t *testing.T) {
 	// The value rule is the guard then. Reporting the old $0.50 would state a limit nobody enforces.
 	if got, has := out["max_usd_per_ping"]; has {
 		t.Errorf("max_usd_per_ping = %v on an account that configured none; want it absent", got)
+	}
+}
+
+// An account that set a flat cap sees it in the arm answer: the report is the cap that is enforced.
+func TestArmingReportsAnAccountCap(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, id := f.signUpJar(t, "boss@ibm.com")
+	// The fixture's builder ignores the document. This one reads its `cache:` block, as the proxy binary's does.
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		c, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		return BuiltConfig{Pipe: components.NewPipeline(nil, e), Store: store.NewMemory(store.Options{}),
+			Preset: "test", Cache: keepalive.FromConfig(c.Cache.Resolved())}, nil
+	}, 0)
+	setDoc(t, f, id, "cache:\n  keepalive: true\n  keepalive_max_usd_per_ping: 0.25\n")
+	until := time.Now().Add(time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"session":"s-1","idle_seconds":280,"max_pings":2,"until":%d}`, until)
+	w, out := f.do(t, http.MethodPost, "/api/me/keepalive/sessions", body, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("arm = %d: %s", w.Code, w.Body)
+	}
+	if got, has := out["max_usd_per_ping"].(float64); !has || got != 0.25 {
+		t.Errorf("max_usd_per_ping = %v (present %v), want the account's 0.25", out["max_usd_per_ping"], has)
 	}
 }
 

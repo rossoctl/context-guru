@@ -1537,7 +1537,8 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // What this buys is therefore not a different headline: it is a column that models the policy it
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
-// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
+// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It models neither
+// the value rule (#1420) nor an operator's flat per-ping cap; those need the entry's prices. It
 // gates at the shipped floors by wait cause (80k for a main thread that waits for a person or for an unknown cause, 20k otherwise): the host hands this package the plan settings and both floors (SetWaitPolicy);
 // a floor it leaves at zero is the shipped one. A strategy's own floor is not replayed.
 //

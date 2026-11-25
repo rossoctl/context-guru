@@ -138,3 +138,37 @@ func TestRecordHoldsTheGPT55PingThatTheFlatCapRefused(t *testing.T) {
 		t.Errorf("reason %q, want %q", st.Reason, ReasonOverBudget)
 	}
 }
+
+// A policy that writes at 1 hour (HeadTTL1h, OneHourAlways) or plans the 1-hour ping would rewrite at the 1-hour
+// rate on a miss, though the provider has not billed the entry at 1 hour yet. The miss is priced at that rate.
+func TestMissIsPricedAtOneHourWhenThePolicyWritesAtOneHour(t *testing.T) {
+	p := modelinfo.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Output: 15e-6}
+	missOf := func(pol Policy) float64 {
+		k, fd, clock := testKeeper(t)
+		fd.setPrices(proxyPricer{fixedPrice{p}})
+		pol.ManualHold = true
+		key := Key{Tenant: "t1", Session: "miss-1"}
+		for _, d := range []time.Duration{-time.Second, 0} {
+			k.Record(Record{Key: key, StartedAt: clock.now().Add(d), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+				Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200},
+				UsageOK: true, Policy: pol, Header: kaHeader(), Hold: fd.hold(key)})
+		}
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		for _, e := range k.live {
+			return e.missUSD
+		}
+		t.Fatal("nothing held")
+		return 0
+	}
+	const prefix = 48576 + 1200
+	five, hour := float64(prefix)*(3.75e-6-0.3e-6), float64(prefix)*(6e-6-0.3e-6)
+	if got := missOf(Policy{}); !near(got, five) {
+		t.Errorf("plain policy miss = %v, want the 5-minute %v", got, five)
+	}
+	for name, pol := range map[string]Policy{"HeadTTL1h": {HeadTTL1h: true}, "OneHourAlways": {OneHourAlways: true}} {
+		if got := missOf(pol); !near(got, hour) {
+			t.Errorf("%s miss = %v, want the 1-hour %v", name, got, hour)
+		}
+	}
+}

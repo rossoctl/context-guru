@@ -73,7 +73,7 @@ func CurrentPlan(pol keepalive.Policy, se bool, camp *Active, facts []RowFacts) 
 	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
-		if f.Turn < 1 || f.Prefix < int64(RowFloor(pol, f)) || pol.PingVerdict(f.Ping, f.Stake, pol.MaxPings) != keepalive.VerdictOK || (pol.PredictorID != "" && (gate == nil || gate(f.Stop) < pol.PredictorThreshold)) {
+		if f.Turn < 1 || f.Prefix < int64(RowFloor(pol, f)) || pol.PingVerdict(f.Ping, f.Miss, replayChain(pol, f)) != keepalive.VerdictOK || (pol.PredictorID != "" && (gate == nil || gate(f.Stop) < pol.PredictorThreshold)) {
 			return 0, x, se
 		}
 		return pol.MaxPings, x, se
@@ -118,4 +118,15 @@ func capNote(pol keepalive.Policy) string {
 		return fmt.Sprintf(", <= $%.2f a ping", c)
 	}
 	return ""
+}
+
+// replayChain is the planned ping count the value rule weighs for a replayed row: the live keeper's
+// wait-plan count when the row stores its wait cause, the base count otherwise (never more than live).
+// The replay prices a miss at the 5-minute write rate, so on an entry billed at 1 hour it is less
+// permissive than live, never more.
+func replayChain(pol keepalive.Policy, f *RowFacts) int {
+	if f.OpenAI {
+		return pol.MaxPings
+	}
+	return max(pol.MaxPings, pol.WaitPings(f.Cause, f.Subagent))
 }
