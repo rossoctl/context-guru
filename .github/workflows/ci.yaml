@@ -58,6 +58,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: decide
+        # shell: bash adds -o pipefail, so a failed gh call fails the step and the run goes red.
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -65,6 +67,8 @@ jobs:
             2> >(tee -a "$GITHUB_STEP_SUMMARY" >&2) | tee -a "$GITHUB_OUTPUT"
 
   lint-build:
+    # Not on the schedule: an unchanged main then costs only changed-since-green.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "1"
@@ -112,7 +116,7 @@ jobs:
             GOFLAGS=-json make cover > test.json 2>&1 || rc=$?
             # Make the log readable again, and write the 30 slowest tests (race, with -coverpkg).
             grep -v '^{' test.json || true
-            jq -jR 'fromjson? | select(.Action=="output") | .Output' test.json
+            jq -jR 'fromjson? | select(.Action=="output" or .Action=="build-output") | .Output' test.json
             {
               echo "### 30 slowest tests (go test -race -json, seconds)"
               echo '| s | package | test |'
@@ -179,6 +183,8 @@ jobs:
   # at a nonexistent path anyway, as a tripwire for the day somebody sets CGO_ENABLED=1 in this job
   # and expects it to still be testing the same thing.
   purego:
+    # Not on the schedule: an unchanged main then costs only changed-since-green.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "0"
@@ -294,10 +300,16 @@ jobs:
             echo
             echo "Fix forward with a new PR (RELEASING.md, \"Heavy CI on main\")."
           } > "$body"
-          if [ -n "$open" ]; then gh issue comment "$open" --body-file "$body"
+          if [ -n "$open" ]; then
+            # Comment only when the sha is new: a retry on the same red sha adds nothing.
+            if gh issue view "$open" --json body,comments --jq '[.body, (.comments[].body)] | join("\n")' | grep -qF "$SHA"; then
+              echo "Issue #$open already names $SHA." >> "$GITHUB_STEP_SUMMARY"
+            else gh issue comment "$open" --body-file "$body"; fi
           else gh issue create --title "$title" --body-file "$body"; fi
 
   trivy:
+    # Not on the schedule: an unchanged main then costs only changed-since-green.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

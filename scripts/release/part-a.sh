@@ -6,11 +6,13 @@
 # (tier 2) are scripts/dev/local-tests.sh. The scheduled GitHub run is the other tier-3 half
 # (.github/workflows/ci.yaml). See RELEASING.md, "Heavy CI on main".
 #
-# CPU cost: each run of a step adds a line "time <step> user=<s>s sys=<s>s maxrss_kb=<n>" to the
-# summary (the step name has ".rerun" added for a second run). It comes from /usr/bin/time: -l on
+# CPU cost: each run of a step adds a line "time    <step> user=<s>s sys=<s>s maxrss_kb=<n>" to the
+# summary ("?" marks a value the script could not parse from the time output)
+# (the step name has ".rerun" added for a second run). It comes from /usr/bin/time: -l on
 # macOS, -v on Linux. With no usable /usr/bin/time the steps run as before, with no time line.
-# local-tests.sh and check-ready.sh read only the lines that start with ok, flaky, FAILED, skip,
-# commit, timing-tests and DONE, so the time lines do not change their result.
+# local-tests.sh reads summary.txt, and only the lines that start with ok, flaky, FAILED, skip,
+# commit, timing-tests and DONE, so the time lines do not change its result. check-ready.sh does
+# not read summary.txt.
 #
 # Each step writes <out-dir>/<step>.log. The summary is <out-dir>/summary.txt, and its last line
 # is "DONE rc=<n>" on every exit except SIGKILL: also when a step fails or the script is stopped
@@ -38,7 +40,8 @@ trap 'echo "DONE rc=$rc" >> "$sum"' EXIT
 # A stop must not read as a pass: without this, the EXIT trap writes the rc=0 it started with.
 # Bash runs a trap only when the foreground command ends, so each step runs in the background and
 # the script waits for it; the trap then stops the step at once instead of after it finishes.
-# With the time wrapper the child is /usr/bin/time: stop its own child (pkill -P with a pid) first.
+# With the time wrapper the child is /usr/bin/time: stop its own child first. pkill -P <pid> signals
+# only the children of that one known pid. Never change it to a name pattern (shared box).
 trap 'rc=143; [ -n "$child" ] && { pkill -TERM -P "$child" 2>/dev/null; kill -TERM "$child" 2>/dev/null; }; exit 143' HUP INT TERM
 GO=${GO:-$(command -v go || echo /usr/local/go/bin/go)}
 echo "commit $(git rev-parse --verify -q HEAD 2>/dev/null || echo unknown)" >> "$sum"
@@ -65,6 +68,8 @@ timeline() {
     gnu) u=$(awk -F': ' '/User time \(seconds\)/{print $2}' "$f") sy=$(awk -F': ' '/System time \(seconds\)/{print $2}' "$f")
          rss=$(awk -F': ' '/Maximum resident set size/{print $2}' "$f") ;;
   esac
+  # A value that is not a number (a time format we do not know) shows as "?".
+  for v in u sy rss; do [[ ${!v} =~ ^[0-9]+(\.[0-9]+)?$ ]] || printf -v "$v" '?'; done
   echo "time    $name user=${u:-?}s sys=${sy:-?}s maxrss_kb=${rss:-?}" >> "$sum"
 }
 

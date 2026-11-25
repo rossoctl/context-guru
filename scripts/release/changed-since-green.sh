@@ -5,8 +5,8 @@
 #
 # - workflow_dispatch and a push of a v* tag: always run.
 # - schedule: run only when main moved since the last green heavy run. The last green heavy run is
-#   the newest successful run of ci.yaml on main, from a schedule or a workflow_dispatch event.
-#   A run counts as green only when its job build-test succeeded: a run that skipped the heavy
+#   the newest run of ci.yaml with a green build-test, from a schedule or a workflow_dispatch event
+#   on main, or a v* tag push. A run counts as green only when its job build-test succeeded: a run that skipped the heavy
 #   jobs does not count. With no such run, run.
 #
 # GH: the gh binary (default: gh). It needs GH_TOKEN (or a login) with read access to Actions.
@@ -21,11 +21,20 @@ case $event in
   *) echo "reason: $event always runs the heavy jobs" >&2; echo "run=true"; exit 0 ;;
 esac
 
+# For each event, scan the newest runs first until one has a green build-test. Do not filter by the
+# run's own conclusion: a run whose build-test passed but whose fast job failed is red overall, and
+# it still proves the heavy suites at its sha. Skipped scheduled runs pile up (8 a day), so the limit
+# is far above that. A v* tag run (event push, head branch v<N>) also counts, when it ran at main's sha.
+limit=${CG_GREEN_SCAN_LIMIT:-300}
 green=
-for ev in schedule workflow_dispatch; do
-  ids=$("$GH" run list --repo "$repo" --workflow ci.yaml --branch main --event "$ev" \
-    --status success --limit 20 --json databaseId,createdAt \
-    --jq 'sort_by(.createdAt) | reverse | .[] | .databaseId')
+for ev in schedule workflow_dispatch push; do
+  case $ev in
+    push) branch=; filter='select(.headBranch | test("^v[0-9]"))' ;;
+    *)    branch=main; filter='.' ;;
+  esac
+  ids=$("$GH" run list --repo "$repo" --workflow ci.yaml ${branch:+--branch "$branch"} --event "$ev" \
+    --limit "$limit" --json databaseId,createdAt,headBranch \
+    --jq "sort_by(.createdAt) | reverse | .[] | $filter | .databaseId")
   for id in $ids; do
     # The run is green for tier 3 only when build-test ran and passed.
     row=$("$GH" run view "$id" --repo "$repo" --json jobs,headSha,createdAt \
