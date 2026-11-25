@@ -255,7 +255,7 @@ Owner decision (David Amid, 2026-11-25): "option E it is", then "E without the l
 ### A PR is ready when
 
 - It has 2 approvals at its final head.
-  A merge of main that resolves only the 2 timing lists keeps them: see the "Lists-only rule" in
+  A merge of main that resolves only the 2 timing lists keeps them when it removes and adds the same list lines as at the approved head: see the "Lists-only rule" in
   [RELEASING.md](RELEASING.md#when-the-head-moves-after-an-approval).
 - CI is green. A PR runs only the fast jobs (lint-build, purego, trivy).
 - Tier 2 passed on the laptop at the head (after the interim rule ends; until then, see the

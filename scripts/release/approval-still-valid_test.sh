@@ -25,7 +25,7 @@ cd "$d/w" || exit 1
 git remote add origin "$d/origin.git"
 mkdir -p scripts/release internal/timingguard
 printf 'a1\na2\na3\na4\n' > $L1
-printf 'b1\nb2\n' > $L2
+printf 'b1\nb2\nc x=5\n' > $L2
 printf 'package x\n' > code.go
 git add -A && git commit -qm base && git push -q origin main
 M0=$(git rev-parse HEAD)
@@ -33,10 +33,10 @@ M0=$(git rev-parse HEAD)
 printf 'a1\na2\na4\n' > $L1
 git commit -qam "main: fix a3" && git push -q origin main
 M1=$(git rev-parse HEAD)
-# the PR, from M0: it removes a2 and b1, and adds code
+# the PR, from M0: it removes a2 and b1, lowers the count c x=5 to c x=3 (1 removed, 1 added line), and adds code
 git checkout -q -b pr "$M0"
 printf 'a1\na3\na4\n' > $L1
-printf 'b2\n' > $L2
+printf 'b2\nc x=3\n' > $L2
 printf 'package x\nvar y = 1\n' > code.go
 git commit -qam "pr: fix a2, b1" && APPROVED=$(git rev-parse HEAD)
 
@@ -57,8 +57,8 @@ check() {
 }
 
 CODE='package x\nvar y = 1\n'
-check "(a) merge resolves only list conflicts" 0 "LISTS ONLY" "$(merged 'a1\na4\n' 'b2\n' "$CODE")"
-check "(b) an extra list line is added" 1 "CHANGED" "$(merged 'a1\na4\na5\n' 'b2\n' "$CODE")"
-check "(c) a removed line is restored" 1 "CHANGED" "$(merged 'a1\na2\na4\n' 'b2\n' "$CODE")"
-check "(d) a code change" 1 "CHANGED" "$(merged 'a1\na4\n' 'b2\n' 'package x\nvar y = 2\n')"
+check "(a)+(e) merge resolves only list conflicts; a lowered count is the same at both heads" 0 "LISTS ONLY" "$(merged 'a1\na4\n' 'b2\nc x=3\n' "$CODE")"
+check "(b) an extra list line, beyond the approved head's" 1 "CHANGED" "$(merged 'a1\na4\na5\n' 'b2\nc x=3\n' "$CODE")"
+check "(c) a removed line is restored" 1 "CHANGED" "$(merged 'a1\na2\na4\n' 'b2\nc x=3\n' "$CODE")"
+check "(d) a code change" 1 "CHANGED" "$(merged 'a1\na4\n' 'b2\nc x=3\n' 'package x\nvar y = 2\n')"
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

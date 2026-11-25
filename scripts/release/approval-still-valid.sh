@@ -14,7 +14,8 @@
 # hand-resolved conflicts are only in the 2 timing list files (see `lists` below) keeps both
 # approvals, when both hold: (1) without those 2 files, the PR's change has the same patch-id at
 # the approved head and at the new head; (2) in those 2 files, the PR removes exactly the same
-# lines as at the approved head (each against its own merge base) and adds none. It prints
+# lines and adds the same lines as at the approved head (each against its own merge base). A
+# lowered baseline count is one removed and one added line. It prints
 # `LISTS ONLY` and exits 0.
 # It prints `git range-diff` either way, so the result can be posted on the PR. When the new head
 # is a merge of the base into the branch, also check `git show --remerge-diff <merge>`: it must be
@@ -45,11 +46,11 @@ list_lines() {
   git diff "$2" "$3" -- "${lists[@]}" | grep -E "^\\${sign}[^${sign}]" | sort || true
 }
 # lists_only: succeed when the code part has the same patch-id, the head removes the same list
-# lines as the approved head, and the head adds no list line.
+# lines and adds the same list lines as the approved head (each against its own merge base).
 lists_only() {
   [ "$(code_pid "$ob" "$old")" = "$(code_pid "$nb" "$new")" ] || return 1
   [ "$(list_lines - "$ob" "$old")" = "$(list_lines - "$nb" "$new")" ] || return 1
-  [ -z "$(list_lines + "$nb" "$new")" ]
+  [ "$(list_lines + "$ob" "$old")" = "$(list_lines + "$nb" "$new")" ]
 }
 # comments_only <old> <new>: succeed only when every changed file is .go or .sh and every added
 # or removed line is blank or a whole-line comment. A line counts as a comment only when it is:
@@ -106,7 +107,7 @@ if [ "$ob" = "$nb" ] && git merge-base --is-ancestor "$old" "$new" && comments_o
   exit 0
 fi
 if lists_only; then
-  echo "LISTS ONLY: the code is the same, and the 2 timing list files remove the same lines and add none. The approval of ${old:0:12} still counts (owner rule 2026-11-25). Say so on the PR."
+  echo "LISTS ONLY: the code is the same, and the 2 timing list files remove and add the same lines as at the approved head. The approval of ${old:0:12} still counts (owner rule 2026-11-25). Say so on the PR."
   exit 0
 fi
 echo "CHANGED: the head has new code or a conflict resolution. Each reviewer re-checks the delta."
