@@ -595,6 +595,11 @@ type Event struct {
 	// CacheMissCause says what changed on a miss that is not hit, cold_start or ttl_expiry.
 	// Set only from a measured comparison (Cause* constants). "" when nothing was measured.
 	CacheMissCause string `json:"cache_miss_cause,omitempty"`
+	// PrefixCompared says that the thread had an earlier request to compare this one with, so an
+	// empty CacheMissCause means "nothing differed", not "nothing to compare with" (for example,
+	// the first request of a live thread after a restart). Not persisted: only the live metric
+	// llm_cache_misses_total reads it.
+	PrefixCompared bool `json:"-"`
 	// SystemHash is the system prompt's hash, for the prefix comparison only. Not persisted.
 	SystemHash string `json:"-"`
 

@@ -206,7 +206,7 @@ func newInferenceWith(t *testing.T, prices modelinfo.Pricer) (*InferenceMetrics,
 func missEvent(reason, cause string) *dash.Event {
 	e := goodEvent()
 	e.CacheRead, e.CacheWrite, e.CacheWrite1h = 0, 1000, 0
-	e.CacheMissReason, e.CacheMissCause = reason, cause
+	e.CacheMissReason, e.CacheMissCause, e.PrefixCompared = reason, cause, true
 	return e
 }
 
@@ -226,13 +226,39 @@ func TestMissCauseMapsIntoTheSpecSet(t *testing.T) {
 		{dash.CacheUnknown, dash.CauseToolsChanged, "prefix_change", true},
 		{dash.CacheUnknown, dash.CauseSystemChanged, "prefix_change", true},
 		{dash.CacheUnknown, dash.CauseEffortChanged, "prefix_change", true},
-		{dash.CacheUnknown, dash.CauseConcurrent, "other", true},
-		{dash.CacheUnknown, "", "other", true},
+		{dash.CacheUnknown, dash.CauseConcurrent, "concurrent", true},
+		{dash.CacheUnknown, "", "unexplained", true},
+		{dash.CacheUnknown, "some_new_cause", "other", true},
+		{dash.CachePrefixChange, "some_new_cause", "other", true},
 	} {
 		got, miss := missCause(missEvent(tc.reason, tc.cause))
 		if got != tc.want || miss != tc.miss {
 			t.Errorf("(%q,%q) = (%q,%v), want (%q,%v)", tc.reason, tc.cause, got, miss, tc.want, tc.miss)
 		}
+	}
+}
+
+// A miss with no measured difference that wrote nothing re-created no prefix: it is other, not
+// unexplained, and a concurrent miss stays concurrent with or without a write.
+func TestMissCauseNoWriteIsOther(t *testing.T) {
+	e := missEvent(dash.CacheUnknown, "")
+	e.CacheWrite = 0
+	if got, miss := missCause(e); got != "other" || !miss {
+		t.Errorf("unknown, no write = (%q,%v), want (other,true)", got, miss)
+	}
+	e.CacheMissCause = dash.CauseConcurrent
+	if got, _ := missCause(e); got != "concurrent" {
+		t.Errorf("concurrent, no write = %q, want concurrent", got)
+	}
+}
+
+// A miss with nothing to compare with (the first of a live thread after a restart) is other, not
+// unexplained, even when it wrote cache tokens: no comparison ran, so the proxy does not guess.
+func TestMissCauseWithNoBaselineIsOther(t *testing.T) {
+	e := missEvent(dash.CacheUnknown, "")
+	e.PrefixCompared = false
+	if got, miss := missCause(e); got != "other" || !miss {
+		t.Errorf("unknown, no baseline = (%q,%v), want (other,true)", got, miss)
 	}
 }
 
