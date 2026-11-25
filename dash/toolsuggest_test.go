@@ -458,23 +458,25 @@ func tieredDeclPrice(string) (modelinfo.Price, bool) {
 func TestDeclFilterSavingsPricesAtPromptSize(t *testing.T) {
 	cases := []struct {
 		name        string
-		fresh, read int64
-		rate        float64
+		fresh, read, removed int64
+		rate                 float64
 	}{
-		{"above the line", 40_000, 60_001, 5 * 1e-7},
-		{"at the line", 40_000, 60_000, 1e-7},
-		{"fresh_input missing", 0, 60_001, 1e-7},
+		{"above the line", 40_000, 60_001, 1000, 5 * 1e-7},
+		{"at the line", 40_000, 59_000, 1000, 1e-7},
+		// Sent 99,000 is below the line, but 99,000 + 4,000 removed is 103,000, above it.
+		{"sent below, without the filter above", 9_000, 90_000, 4000, 5 * 1e-7},
+		{"fresh_input missing", 0, 60_001, 1000, 1e-7},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			db := openTestDB(t)
 			e := mkEvent(1000, "s", "claude", 100, 90)
-			e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, 1000
+			e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, int(c.removed)
 			e.FreshInput, e.CacheRead, e.CacheWrite = c.fresh, c.read, 0
 			if err := db.insertBatch([]*Event{e}); err != nil {
 				t.Fatal(err)
 			}
-			want := 1000 * c.rate
+			want := float64(c.removed) * c.rate
 			got, err := db.DeclFilterSavings(Filter{Tenant: "t1"}, tieredDeclPrice)
 			if err != nil {
 				t.Fatal(err)

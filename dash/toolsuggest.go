@@ -241,7 +241,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		p, priced = price(model)
 		// The request bills at the rates of ITS prompt size (#1407). A row from before fresh_input
 		// was stored has 0 there: its size is then too small, so its tier is never too dear.
-		p = p.At(modelinfo.PromptTokens(fresh, cacheRead, cacheWrite))
+		p = p.At(modelinfo.PromptTokens(fresh, cacheRead, cacheWrite) + tok) // the size WITHOUT the filter: sent plus removed
 	}
 	switch {
 	case cacheRead > 0:
