@@ -105,7 +105,7 @@ func TestLiteLLMConcurrentSingleFlight(t *testing.T) {
 		atomic.AddInt64(&hits, 1)
 		select {
 		case <-release:
-		case <-time.After(60 * time.Second):
+		case <-time.After(60 * time.Second): //timing:ok backstop only: a broken single-flight must fail, not hang
 		}
 		w.Write([]byte(sample))
 	}))
@@ -127,7 +127,7 @@ func TestLiteLLMConcurrentSingleFlight(t *testing.T) {
 	go func() { wg.Wait(); close(returned) }()
 	select {
 	case <-returned: // every caller returned while the upstream was still blocked
-	case <-time.After(30 * time.Second):
+	case <-time.After(30 * time.Second): //timing:ok backstop only: the wait ends on the event, not on this bound
 		t.Fatal("Window calls did not all return while the upstream was blocked: Window blocks on the fetch")
 	}
 	releaseUp()
