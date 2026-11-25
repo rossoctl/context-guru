@@ -70,11 +70,25 @@ r=$(mktemp -d); trap 'rm -rf "$d" "$r"' EXIT
   printf 'const timing = process.env.CG_TIMING_TESTS === "1"\ntest("a", () => {})\ntest("b", () => {})\n' > d.test.ts; git commit -qam ts-change; git tag tschange
   printf 'def f(): return 1\n' > e.py; git commit -qam py-plain; git tag pyplain
 ) >/dev/null 2>&1
+# A large file and a large diff: the detector must not lose to SIGPIPE (#1378). 20 runs each.
+(
+  cd "$r" || exit 1
+  { echo 'TIMING = os.environ.get("CG_TIMING_TESTS") == "1"'; for i in $(seq 1 20000); do echo "def test_$i(): pass"; done; } > big.py
+  git add big.py && git commit -qm big; git tag big
+  echo 'def test_more(): pass' >> big.py; git commit -qam big-change; git tag bigchange
+  { echo '# CG_TIMING_TESTS'; for i in $(seq 1 20000); do echo "line $i"; done; } > big.txt
+  git add big.txt && git commit -qm bigdiff; git tag bigdiff
+) >/dev/null 2>&1
 needs() { (cd "$r" && "$root/scripts/dev/timing-tests-needed.sh" "$1" "$2"); }
 for c in "base docs skip" "docs plain skip" "plain timingfile run" "timingfile newtiming run" "newtiming suites run" "suites pychange run" "pychange tschange run" "tschange pyplain skip"; do
   set -- $c
   got=$(needs "$1" "$2")
   if [ "$got" = "$3" ]; then echo "ok   timing-needed $1..$2 = $3"; else echo "FAIL timing-needed $1..$2 = $got, want $3"; fails=1; fi
+done
+for c in "big bigchange" "bigchange bigdiff"; do
+  set -- $c; n=0
+  for _ in $(seq 1 20); do [ "$(needs "$1" "$2")" = run ] && n=$((n+1)); done
+  if [ "$n" = 20 ]; then echo "ok   timing-needed $1..$2 = run, 20 of 20"; else echo "FAIL timing-needed $1..$2 = run only $n of 20 (SIGPIPE race)"; fails=1; fi
 done
 
 # check-ready.sh: a failing gh must exit 2, not print NOT READY.
