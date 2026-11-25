@@ -16,13 +16,6 @@ dash/janitor_checkpoint_test.go after=2
 dash/prompttext_test.go sleep=4 poll=3
 dash/sse_test.go sleep=2 after=1
 internal/modelinfo/litellm/zz_price_live_test.go sleep=1
-keepalive/inflight_test.go after=1
-keepalive/manualhold_test.go sleep=1 poll=1
-keepalive/openaiphase_test.go sleep=2 poll=2
-keepalive/substitute_test.go sleep=9 poll=8
-keepalive/summarytextturn_test.go sleep=4 poll=3
-keepalive/sweepsubstitute_test.go sleep=5 poll=4
-keepalive/waitplan_test.go sleep=1
 modes/modes_test.go sleep=2 poll=1 after=3
 proxy/accountant_async_test.go sleep=3 after=3
 proxy/accountant_inject_test.go sleep=2
