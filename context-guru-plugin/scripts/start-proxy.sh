@@ -608,18 +608,26 @@ fingerprint_want() {
 # uses it. Fails open: this never stops a proxy from starting.
 USE_CONFIG=1
 STRATEGY_RESOLVED=0
+RS_RESULT=""
 resolve_strategy() {
   [ "$STRATEGY_RESOLVED" = 1 ] && return 0
   STRATEGY_RESOLVED=1
   case "$SYNC_STRATEGY" in ''|none) return 0 ;; esac
   [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] || return 0
+  # --bin "$BIN": ask the binary this script will launch, not the one settings.py would find itself.
   rs_out=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy known \
-             --port "$PORT" --name "$SYNC_STRATEGY" 2>/dev/null) || rs_out=""
+             --port "$PORT" --name "$SYNC_STRATEGY" --bin "$BIN" 2>/dev/null) || rs_out=""
   rs_result=$(printf '%s\n' "$rs_out" | sed -n 's/^result=//p' | head -1)
   [ "$rs_result" = known ] && return 0
-  note "preset is off: neither this plugin nor the installed proxy (${HAVE:-unknown version}) knows the"
-  note "strategy \`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml (check: ${rs_result:-no answer})."
-  note "the proxy starts without that file. The file is kept. Upgrade the plugin and the proxy (/context-guru:update)."
+  case "$rs_result" in unknown) ;; *) rs_result=unchecked ;; esac
+  RS_RESULT="$rs_result"
+  if [ "$rs_result" = unknown ]; then
+    note "preset is off: the installed proxy (${HAVE:-unknown version}) does not know the strategy"
+    note "\`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
+  else
+    note "preset is off: could not check if the installed proxy (${HAVE:-unknown version}) knows the"
+    note "strategy \`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
+  fi
   USE_CONFIG=0
   PRESET=off
   SYNC_STRATEGY=none
@@ -701,17 +709,28 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   fp_have=$(cat "$FINGERPRINT" 2>/dev/null)
   fp_want=$(fingerprint_want)
   owner_have=$(cat "$OWNER" 2>/dev/null)
+  owner_now=theirs_unset
+  [ -n "$owner_have" ] && owner_now=$(owner_verdict "$owner_have")
   # Only when a restart looks due: ask whether the binary knows the strategy, then decide again.
   if [ -n "$fp_have" ] && [ -n "$SYNC_STRATEGY" ] && [ "$fp_have" != "$fp_want" ] \
-     && ! { [ -n "$owner_have" ] && [ "$(owner_verdict "$owner_have")" = "theirs" ]; }; then
+     && [ "$owner_now" != "theirs" ]; then
     resolve_strategy
+    if [ "$RS_RESULT" = unchecked ]; then
+      # The check could not run. A running proxy is evidence the binary works, and a wrong restart
+      # costs more than a stale configuration: leave it alone. (Owner decision, 2026-11-25.)
+      note "the running proxy on port ${PORT} is left as it is."
+      exit 0
+    fi
     fp_want=$(fingerprint_want)
+    if [ "$RS_RESULT" = unknown ] && [ "$fp_have" = "$fp_want" ]; then
+      # Steady state: the running proxy already failed over. Nothing starts in this session.
+      note "the running proxy already runs without that file. Upgrade the plugin and the proxy (/context-guru:update)."
+    fi
   fi
   # Leave it alone unless we can prove a change is needed. Three of these four cases are deliberate
   # no-ops, because the cost of a wrong restart (interrupting somebody else's session) is higher than
   # the cost of a stale preset (reported, and fixed by the next cold start).
-  owner_have=$(cat "$OWNER" 2>/dev/null)
-  if [ -n "$owner_have" ] && [ "$(owner_verdict "$owner_have")" = "theirs" ]; then
+  if [ "$owner_now" = "theirs" ]; then
     # ANOTHER PROJECT's proxy, whatever the fingerprint says. This is the regression the per-project
     # port exists to remove: two projects sharing port 8787 with different presets took turns killing
     # each other's proxy on every session start, and each kill wiped the in-memory store. A restart
@@ -918,6 +937,9 @@ compute_preset_and_strategy_notes() {
   fi
 }
 resolve_strategy
+if [ -n "$RS_RESULT" ]; then
+  note "the proxy starts without that file. Upgrade the plugin and the proxy (/context-guru:update)."
+fi
 compute_preset_and_strategy_notes
 
 # attempt_launch: the re-probe, the launch, and the health-wait loop, as a function rather than

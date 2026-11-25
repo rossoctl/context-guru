@@ -3993,6 +3993,14 @@ def _names(rows) -> str:
     return ",".join(r["name"] for r in rows)
 
 
+_STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*\S", re.M)
+
+
+def _file_sets_strategy_key(text: str) -> bool:
+    """Does the file set a `strategy:` key (under `cache:`) that the proxy must resolve by name?"""
+    return bool(_STRATEGY_KEY.search("\n".join(text.split("\n")[1:])))
+
+
 def _is_new_form(text: str, name: str) -> bool:
     """Is `text` the file this version renders for `name`, apart from its preset line?"""
     return _set_preset_line(text, "x") == _render_strategy(name, "x")
@@ -4030,14 +4038,20 @@ def cmd_strategy(args) -> int:
             text = open(path, encoding="utf-8").read()
         except OSError:
             text = ""
-        if text and _strategy_is_ours(text) and not _is_new_form(text, _strategy_name_in(text)):
-            # A file written before the proxy owned the table carries its own keys and names no
-            # strategy to the proxy, so there is nothing for the proxy to reject.
+        if text and _strategy_is_ours(text) and not _file_sets_strategy_key(text):
+            # A file written before the proxy owned the table carries its own keys and sets no
+            # `strategy:` key, so there is nothing for the proxy to reject. A file that sets the key
+            # always goes to the table check below, however it was edited.
             emit(result="known", strategy=name, reason="own_keys")
             return 0
-        if not _proxy_version_at_least(STRATEGY_MIN_PROXY):
-            # An older binary answers `strategies` by serving until the time limit: do not run it.
-            emit(result="unchecked", strategy=name, reason="proxy_too_old_or_unversioned")
+        # A record that names a version below the minimum means that binary answers `strategies` by
+        # serving until the time limit: do not run it. NO record is not a reason to refuse (a binary
+        # put in place by hand has none, and nobody runs a proxy older than the minimum): ask the
+        # binary, and let the time limit protect the check.
+        have = _version_tuple(_installed_proxy_version())
+        need = _version_tuple(STRATEGY_MIN_PROXY)
+        if have and need and have < need:
+            emit(result="unchecked", strategy=name, reason="proxy_too_old")
             return 0
         try:
             table = load_strategy_table(getattr(args, "bin", ""))
