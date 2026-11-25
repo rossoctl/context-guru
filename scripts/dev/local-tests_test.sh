@@ -113,4 +113,9 @@ mkgh "plain body" "no waiver here"; run
 if [ "$rc" = 1 ] && grep -q "no local-tests comment" <<<"$out"; then echo "ok   no-waiver-not-ready"; else echo "FAIL no-waiver-not-ready (rc=$rc)"; fails=1; fi
 mkgh $'Local tests: waived (owner rule)\n' "" fail; run
 if [ "$rc" = 2 ] && grep -q "could not read the comments" <<<"$out"; then echo "ok   waiver-comments-error"; else echo "FAIL waiver-comments-error (rc=$rc)"; fails=1; fi
+# A marker at the current head decides, also with a waiver present. An older head does not.
+mkgh $'Local tests: waived (owner rule)\n' $'<!-- local-tests sha=abc123 result=fail -->\n'; run
+if [ "$rc" = 1 ] && grep -q "result=fail" <<<"$out" && ! grep -q "waived" <<<"$out"; then echo "ok   waiver-fail-marker-at-head"; else echo "FAIL waiver-fail-marker-at-head (rc=$rc)"; fails=1; fi
+mkgh $'Local tests: waived (owner rule)\n' $'<!-- local-tests sha=def456 result=fail -->\n'; run
+if [ "$rc" = 0 ] && grep -q "waived" <<<"$out"; then echo "ok   waiver-beats-old-marker"; else echo "FAIL waiver-beats-old-marker (rc=$rc)"; fails=1; fi
 exit "$fails"

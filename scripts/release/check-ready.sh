@@ -86,14 +86,16 @@ done <<<"$runs"
 cbodies=$(api "the comments" api --paginate "repos/$repo/issues/$pr/comments" --jq '.[].body')
 waiver=$(printf '%s\n%s\n' "$(jq -r '.body // ""' <<<"$pj")" "$cbodies" | grep -ciE '^[[:space:]]*Local tests: waived \(owner rule\)[[:space:]]*$' || true)
 lt=$(printf '%s\n' "$cbodies" | grep -oE '<!-- local-tests sha=[0-9a-f]+ result=[a-z]+ -->' | tail -1 || true)
-if [ "${waiver:-0}" -gt 0 ]; then
+lsha=; [ -z "$lt" ] || lsha=$(sed -E 's/.*sha=([0-9a-f]+).*/\1/' <<<"$lt")
+# A marker at the current head decides, also when it says fail. The waiver applies only when there
+# is no marker, or the marker names an older head.
+if [ "${waiver:-0}" -gt 0 ] && [ "$lsha" != "$sha" ]; then
   echo "local tests: waived (owner rule)"
 elif [ -z "$lt" ]; then
   heavy=$(printf '%s\n' "$runs" | awk -F'\t' '$3=="build-test" && $1=="completed" && $2=="success"{print "ok"; exit}')
   if [ "$heavy" = ok ]; then echo "local tests: none, but the heavy CI job passed on the head"
   else no "no local-tests comment (run scripts/dev/local-tests.sh $pr in the PR worktree)"; fi
 else
-  lsha=$(sed -E 's/.*sha=([0-9a-f]+).*/\1/' <<<"$lt")
   lres=$(sed -E 's/.*result=([a-z]+).*/\1/' <<<"$lt")
   if [ "$lsha" != "$sha" ]; then no "the last local-tests comment is for ${lsha:0:12}, not the head (run scripts/dev/local-tests.sh $pr again)"
   elif [ "$lres" != pass ]; then no "local tests at the head: result=$lres"
