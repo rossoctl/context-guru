@@ -1192,6 +1192,8 @@ func (d *dashEmitter) observeMetrics(ev *dash.Event, r components.KeepAliveRepor
 	}()
 	sinks.inference.Observe(ev, 0)
 	if priced && sinks.savings != nil {
+		// Output stays unset on purpose. A ping row books only a spend op. Its output is priced through the
+		// spend Call, and output is not the same across a rescue.
 		sinks.savings.Observe(acmetrics.Observation{
 			Meta: accountant.RequestMeta{RequestID: "", Session: r.Session, Model: r.Model,
 				At: time.UnixMilli(r.TS), Billing: accountant.Billing{Mode: accountant.BillingAPI}},
