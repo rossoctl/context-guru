@@ -193,6 +193,14 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(install_opencode.gateway_url("http://127.0.0.1:4000"), "http://127.0.0.1:4000/v1")
         self.assertEqual(install_opencode.gateway_url("http://localhost:4000/v1"), "http://localhost:4000/v1")
 
+    def test_gateway_url_refuses_a_user_password_or_query_and_never_echoes_it(self):
+        for text in ("https://user:SECRET-TOKEN@gw.example/v1", "https://SECRET-TOKEN@gw.example",
+                     "https://gw.example/v1?key=SECRET-TOKEN", "https://gw.example/v1#SECRET-TOKEN",
+                     "http://SECRET-TOKEN@gw.example"):
+            with self.subTest(text=text), self.assertRaises(install_opencode.Stop) as stop:
+                install_opencode.gateway_url(text)
+            self.assertNotIn("SECRET-TOKEN", str(stop.exception))
+
     def test_path_1_gives_an_empty_connection(self):
         connection = self.installer("1").ask_connection({"opencode.json": {}})
 

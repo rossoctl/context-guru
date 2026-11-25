@@ -129,11 +129,18 @@ def write_json(path, value):
 
 def gateway_url(text):
     """`<url>/v1` for a gateway base URL: https, or http on this computer only."""
-    url = urlsplit(text.strip())
-    local = url.hostname in ("127.0.0.1", "localhost")
-    if not url.hostname or not (url.scheme == "https" or (url.scheme == "http" and local)):
-        raise Stop(f"the base URL must start with https:// (http:// only on 127.0.0.1 or localhost): {text!r}. "
+    # The message never repeats the text: a pasted URL can hold a key.
+    try:
+        url = urlsplit(text.strip())
+        host = url.hostname
+    except ValueError:
+        host = None
+    if not host or not (url.scheme == "https" or (url.scheme == "http" and host in ("127.0.0.1", "localhost"))):
+        raise Stop("the base URL must start with https:// (http:// only on 127.0.0.1 or localhost). "
                    "Nothing was changed.")
+    if "@" in url.netloc or url.query or url.fragment:
+        raise Stop("the base URL must not hold a user name, a password, a query or a fragment. OpenCode's login "
+                   "keeps the key. Nothing was changed.")
     path = url.path.rstrip("/").removesuffix("/v1")
     return urlunsplit((url.scheme, url.netloc, path + "/v1", "", ""))
 
