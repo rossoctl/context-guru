@@ -112,7 +112,8 @@ out=$(PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
 if [ "$rc" = 2 ] && grep -q "could not read the comments" <<<"$out" && ! grep -q "no local-tests comment" <<<"$out"; then echo "ok   check-ready-comments-error"; else echo "FAIL check-ready-comments-error (rc=$rc)"; echo "$out" | tail -3; fails=1; fi
 # The interim waiver: "Local tests: waived (owner rule)" in the PR body or in a comment.
 # Every other call is fine, so only the waiver decides the local-tests point.
-mkgh() { # $1 = PR body, $2 = comments text, $3 = "fail" to make the comments call fail
+mkgh() { # $1 = PR body, $2 = comments text, $3 = "fail" to make the comments call fail; files in $d/files.txt
+  [ -e "$d/files.txt" ] || : > "$d/files.txt"
   printf '%s' "$1" > "$d/body.txt"; printf '%s' "$2" > "$d/comments.txt"
   cat > "$d/bin/gh" <<GH
 #!/bin/sh
@@ -121,6 +122,7 @@ case "\$*" in
   *issues/*/comments*) [ "${3:-}" = fail ] && exit 1; cat "$d/comments.txt" ;;
   *reviews*) echo '<!-- offload-review reviewer=1 round=1 sha=abc123 backend=x verdict=approve -->'; echo '<!-- offload-review reviewer=2 round=1 sha=abc123 backend=x verdict=approve -->' ;;
   *check-runs*) printf 'completed\tsuccess\tpurego\tgithub-actions\ncompleted\tsuccess\tCodeQL\tgithub-advanced-security\n' ;;
+  *pulls/*/files*) cat "$d/files.txt" ;;
   *pulls/*/commits*) exit 0 ;;
   *) exit 1 ;;
 esac
@@ -140,4 +142,209 @@ mkgh $'Local tests: waived (owner rule)\n' $'<!-- local-tests sha=abc123 result=
 if [ "$rc" = 1 ] && grep -q "result=fail" <<<"$out" && ! grep -q "waived" <<<"$out"; then echo "ok   waiver-fail-marker-at-head"; else echo "FAIL waiver-fail-marker-at-head (rc=$rc)"; fails=1; fi
 mkgh $'Local tests: waived (owner rule)\n' $'<!-- local-tests sha=def456 result=fail -->\n'; run
 if [ "$rc" = 0 ] && grep -q "waived" <<<"$out"; then echo "ok   waiver-beats-old-marker"; else echo "FAIL waiver-beats-old-marker (rc=$rc)"; fails=1; fi
+
+# ---- check-ready.sh: the tier-2 marker, scope=none, the old marker and its cut-off ----------------
+chk() { # <name> <want-rc> <want-text>
+  if [ "$rc" = "$2" ] && grep -qF -- "$3" <<<"$out"; then echo "ok   $1"; else echo "FAIL $1 (rc=$rc, want rc=$2 and '$3')"; echo "$out" | tail -3; fails=1; fi
+}
+printf 'README.md\ndocs/a.md\n' > "$d/files.txt"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 scope=changed -->\n'; run
+chk tier2-marker-ready 0 "tier 2, scope changed"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 scope=full -->\n'; run
+chk tier2-full-ready 0 "tier 2, scope full"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 scope=none -->\n'; run
+chk tier2-scope-none-ready 0 "scope none"
+mkgh "b" $'<!-- local-tests sha=abc123 result=fail tier=2 scope=changed -->\n'; run
+chk tier2-marker-fail 1 "result=fail"
+mkgh "b" $'<!-- local-tests sha=def456 result=pass tier=2 scope=changed -->\n'; run
+chk tier2-marker-old-head 1 "not the head"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=3 scope=changed -->\n'; run
+chk tier3-marker-refused 1 "tier=2 is needed"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 -->\n'; run
+chk tier2-marker-without-scope-refused 1 "has no scope="
+# scope=none on a PR that changes a Go file, go.mod, a testdata file or a scripts/ file: refused.
+for f in proxy/a.go go.mod x/testdata/in.json scripts/dev/a.sh; do
+  printf 'README.md\n%s\n' "$f" > "$d/files.txt"
+  mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 scope=none -->\n'; run
+  chk "scope-none-refused-on-$(tr '/' '_' <<<"$f")" 1 "says scope=none"
+done
+# A renamed file counts under both names.
+printf 'docs/b.md\nold/a.go\n' > "$d/files.txt"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 scope=none -->\n'; run
+chk scope-none-refused-on-rename 1 "says scope=none"
+: > "$d/files.txt"
+# The old marker (no tier): valid up to the cut-off date, refused after it.
+cutoff=$(sed -n 's/^OLD_MARKER_VALID_UNTIL=//p' scripts/release/check-ready.sh)
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass -->\n'
+out=$(CG_TODAY=$cutoff PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
+chk old-marker-on-cutoff-day 0 "old marker"
+out=$(CG_TODAY=2026-11-26 PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
+chk old-marker-before-cutoff 0 "old marker"
+out=$(CG_TODAY=2099-01-01 PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
+chk old-marker-after-cutoff 1 "stopped counting after $cutoff"
+# The waiver stays valid after the cut-off, next to a tier-2 marker for an older head.
+mkgh $'Local tests: waived (owner rule)\n' $'<!-- local-tests sha=def456 result=pass tier=2 scope=changed -->\n'
+out=$(CG_TODAY=2099-01-01 PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
+chk waiver-after-cutoff 0 "local tests: waived (owner rule)"
+
+# ---- local-tests.sh reads a tier-2 summary: the marker, the race packages, the CPU lines -----------
+mk2() { # <scope> <steps...>: a tier-2 summary at HEAD
+  local sc=$1; shift
+  { echo "commit $H"; echo "timing-tests 0"; echo "scope $sc"; echo "steps $*"; echo "race-packages ./a ./b"
+    for s in "$@"; do echo "ok      $s"; done; echo "cpu vet user=1.5s sys=0.5s maxrss=100MB"; echo "DONE rc=0"; } > "$d/summary.txt"
+}
+mk2 changed vet test-norace race-changed; expect tier2-marker 0 "<!-- local-tests sha=$H result=pass tier=2 scope=changed -->"
+expect tier2-race-line 0 "race packages: ./a ./b"
+expect tier2-cpu-line 0 "| vet | 1.5s | 0.5s | 100MB |"
+mk2 none vet depguard; expect tier2-scope-none 0 "scope=none -->"
+mk2 changed vet test-norace race-changed; sed -i.bak '/^ok      race-changed/d' "$d/summary.txt"; expect tier2-step-missing 1 "race-changed | **FAIL**: no result line"
+mk2 changed vet race-changed; sed -i.bak 's/^ok      race-changed/FAILED  race-changed (twice)/' "$d/summary.txt"
+printf -- '--- FAIL: TestReal (0s)\nFAIL\nFAIL\tx/a\t1s\n' > "$d/race-changed.log"; expect tier2-real-failure 1 "result=fail"
+rm -f "$d/race-changed.log"
+
+# ---- tier2-steps.sh: scope, packages and commands, from a diff in a scratch repo (--plan) -----------
+t=$(mktemp -d); trap 'rm -rf "$d" "$r" "$t"' EXIT
+T2=$root/scripts/dev/tier2-steps.sh
+(
+  cd "$t" && git init -q . && git config user.email t@t && git config user.name t
+  mkdir -p context-guru-plugin config leaf pkg/a pkg/a/testdata dash/ui bob-plugin proxy internal/record scripts opencode-plugin/test tools
+  mkdir -p scripts/release && cp "$root/scripts/release/part-a.sh" scripts/release/part-a.sh
+  for p in context-guru-plugin config leaf pkg/a dash bob-plugin proxy internal/record; do printf 'package x\n' > "$p/x.go"; done
+  printf '//go:build cg_record\npackage proxy\n' > proxy/rec.go
+  printf 'package dash\nimport "embed"\n//go:embed ui\nvar f embed.FS\n' > dash/ui.go
+  printf 'x\n' > dash/ui/app.js; printf 'x\n' > pkg/a/testdata/in.json
+  printf 'package main\n//go:build ignore\n' > tools/gen.go
+  printf 'doc\n' > README.md; printf 'module m\n' > go.mod; printf 's\n' > go.sum
+  printf 't\n' > opencode-plugin/test/a.test.mjs; printf 'p\n' > opencode-plugin/index.mjs
+  printf 'n\n' > dash/n.test.mjs
+  git add . && git commit -qm base && git tag base
+  printf 'doc2\n' > README.md; git commit -qam docs; git tag docs
+  printf 'package x\n//c\n' > pkg/a/x.go; printf 'package x\n//c\n' > config/x.go; printf 'package x\n//c\n' > leaf/x.go; git commit -qam gochange; git tag gochange
+  printf 'x2\n' > dash/ui/app.js; git commit -qam embed; git tag embed
+  printf 'j\n' > pkg/a/testdata/in.json; git commit -qam testdata; git tag testdata
+  printf 'sh\n' > scripts/a.sh; git add -A; git commit -qm script; git tag script
+  printf 'module m2\n' > go.mod; git commit -qam gomod; git tag gomod
+  printf 'package proxy\n//c\n' > proxy/rec.go; git commit -qam tagged; git tag tagged
+  printf 'package x\n//c\n' > proxy/x.go; git commit -qam untagged; git tag untagged
+  printf 'package x\n//c\n' > internal/record/x.go; printf 'package x\n//c\n' > bob-plugin/x.go; git commit -qam rec-bob; git tag recbob
+  git rm -q leaf/x.go; git commit -qm delpkg; git tag delpkg
+  printf 'n2\n' > dash/n.test.mjs; git commit -qam node1; git tag node1
+  printf 'p2\n' > opencode-plugin/index.mjs; git commit -qam node2; git tag node2
+  for p in dash context-guru-plugin pkg/a internal/record; do printf 'package x\n//d\n' > $p/x.go; done; git commit -qam dashchange; git tag dashchange
+) >/dev/null 2>&1
+plan() { (cd "$t" && CG_TIMING_TESTS=0 bash "$T2" --plan --base "$1" --head "$2" 2>&1); }
+pchk() { # <name> <base> <head> <must-have...> : every text must be in the plan; a text starting with ! must not be
+  local name=$1 b=$2 h=$3 pl x ok=1; shift 3; pl=$(plan "$b" "$h")
+  for x in "$@"; do
+    if [ "${x:0:1}" = '!' ]; then grep -qF -- "${x:1}" <<<"$pl" && ok=0
+    elif [ "${x:0:1}" = '=' ]; then grep -qxF -- "${x:1}" <<<"$pl" || ok=0
+    else grep -qF -- "$x" <<<"$pl" || ok=0; fi
+  done
+  if [ "$ok" = 1 ]; then echo "ok   $name"; else echo "FAIL $name"; echo "$pl" | head -20; fails=1; fi
+}
+pchk scope-none base docs "scope: none" "step vet:" "step depguard:" "!test-norace" "!race-changed" "=race packages: "
+pchk scope-changed docs gochange "scope: changed" "race packages: ./config ./leaf ./pkg/a" "step race-changed:" "step test-norace:" \
+  "-race -timeout 25m -p 2 -skip TestBobReleasePythonSuite ./config ./leaf ./pkg/a"
+# Non-race: tier-1 packages and bob-plugin out; the others in. Timing tests off.
+pchk norace-set docs gochange "step test-norace: env CGO_ENABLED=0 CG_TIMING_TESTS=0 go test -timeout 30m -p 2" " ./dash" " ./internal/record" " ./pkg/a" " ./proxy" "!test-norace: env CGO_ENABLED=0 CG_TIMING_TESTS=0 go test -timeout 30m -p 2 -skip TestBobReleasePythonSuite ./bob-plugin"
+if plan docs gochange | grep '^step test-norace:' | grep -qE ' \./(config|components|apply|store)( |$)| \./proxy( |$)| \./bob-plugin( |$)'; then
+  echo "FAIL norace-excludes-tier1-and-bob"; fails=1; else echo "ok   norace-excludes-tier1-and-bob"; fi
+pchk scope-full script gomod "scope: full" "run: scripts/release/part-a.sh" "!step test-norace"
+pchk go-mod-in-subdir-is-not-none base docs "scope: none"
+pchk embedded-file-maps-to-package gochange embed "scope: changed" "race packages: ./dash"
+pchk testdata-maps-to-package embed testdata "scope: changed" "race packages: ./pkg/a"
+pchk script-file-is-changed testdata script "scope: changed" "=race packages: " "!race-changed"
+pchk record-off-for-untagged-change tagged untagged "race packages: ./proxy" "!race-record"
+pchk record-on-for-tagged-file gomod tagged "scope: changed" "race packages: ./proxy" "step race-record:" "-tags cg_record" "./proxy"
+pchk record-on-for-internal-record untagged recbob "step race-record:" "-tags cg_record ./internal/record" "race packages: ./bob-plugin ./internal/record"
+pchk deleted-package-skipped delpkg delpkg "scope: none"
+pchk deleted-file-package-skipped recbob delpkg "scope: changed" "=race packages: " "!./leaf"
+pchk node-test-file delpkg node1 "scope: none" "step node-changed: env CG_TIMING_TESTS=0 node --test dash/n.test.mjs"
+pchk node-opencode-all node1 node2 "step node-changed:" "opencode-plugin/test/a.test.mjs"
+pchk node-timing-skipped base docs "skip node-timing (CG_TIMING_TESTS=0)"
+# Time limits (the same as scripts/release/part-a.sh): dash 40m alone, the plugin 30m alone, the
+# record set 40m, the rest 25m. A dash change must not get the default limit.
+pchk dash-gets-40m node2 dashchange "step race-dash: env CGO_ENABLED=1 go test -race -timeout 40m -p 2 ./dash" \
+  "step race-plugin: env CGO_ENABLED=1 go test -race -timeout 30m -p 2 ./context-guru-plugin" \
+  "step race-changed: env CGO_ENABLED=1 go test -race -timeout 25m -p 2 -skip TestBobReleasePythonSuite ./internal/record ./pkg/a" \
+  "step race-record: env CGO_ENABLED=1 go test -race -timeout 40m -p 2 -tags cg_record ./internal/record"
+# The limits in the script equal the ones in part-a.sh.
+for pair in "RACE_TIMEOUT_DASH race-dash" "RACE_TIMEOUT_PLUGIN race-plugin" "RACE_TIMEOUT_RECORD race-record"; do
+  set -- $pair
+  mine=$(sed -n "s/^$1=//p" scripts/dev/tier2-steps.sh)
+  theirs=$(grep -E "^step $2 " scripts/release/part-a.sh | grep -oE -- '-timeout [0-9]+m' | awk '{print $2}')
+  if [ -n "$mine" ] && [ "$mine" = "$theirs" ]; then echo "ok   $1 = part-a.sh $2 ($mine)"; else echo "FAIL $1 = $mine, part-a.sh $2 = $theirs"; fails=1; fi
+done
+# The env limits in the plan.
+pchk load-limits base docs "GOFLAGS=-p=2 GOMAXPROCS=4"
+# classify: file names on stdin.
+cl() { (cd "$t" && printf '%s\n' "$@" | bash "$T2" --classify); }
+for c in "none README.md docs/x.md" "changed a/b.go" "changed dash/ui/app.js" "changed scripts/x.sh" "changed p/testdata/y" "full go.mod" "full README.md go.sum"; do
+  set -- $c; w=$1; shift; g=$(cl "$@")
+  if [ "$g" = "$w" ]; then echo "ok   classify $*"; else echo "FAIL classify $* = $g, want $w"; fails=1; fi
+done
+# The tier-1 package list in tier2-steps.sh must equal the list the CI job "purego" tests.
+ci=$(grep -oE 'go test [^|]*\./config/\.\.\.[^|]*$' .github/workflows/ci.yaml | grep -oE '\./[a-z]+/\.\.\.' | sed -E 's|\./([a-z]+)/\.\.\.|\1|' | sort | tr '\n' ' ')
+me=$(sed -n "s/^TIER1_RE='\^\\\\.\/(\(.*\))(\/|\$)'/\1/p" scripts/dev/tier2-steps.sh | tr '|' '\n' | sort | tr '\n' ' ')
+if [ -n "$ci" ] && [ "$ci" = "$me" ]; then echo "ok   tier1-list-matches-ci ($ci)"; else echo "FAIL tier1-list-matches-ci (ci='$ci' script='$me')"; fails=1; fi
+
+# ---- scope full: part-a.sh runs without the tier-2 load limits ---------------------------------------
+fa=$d/fake-part-a.sh
+cat > "$fa" <<'FAKEA'
+#!/bin/sh
+echo "GOFLAGS=[$GOFLAGS] GOMAXPROCS=[${GOMAXPROCS-unset}] TIMING=[$CG_TIMING_TESTS]" > "$FAKE_ENV"
+printf 'commit x\nok      vet\nDONE rc=0\n' > "$1/summary.txt"
+FAKEA
+chmod +x "$fa"; rm -f "$d/fake.env"
+(cd "$t" && env -u GOMAXPROCS GOFLAGS=-vet=off CG_PART_A="$fa" FAKE_ENV="$d/fake.env" CG_TIMING_TESTS=0 bash "$T2" --base docs --head gomod "$d/out-full" >/dev/null 2>&1)
+if [ "$(cat "$d/fake.env" 2>/dev/null)" = "GOFLAGS=[-vet=off] GOMAXPROCS=[unset] TIMING=[0]" ] && grep -q '^scope full' "$d/out-full/summary.txt" && grep -q '^ok      vet' "$d/out-full/summary.txt"; then
+  echo "ok   scope-full-part-a-has-no-load-limits"; else echo "FAIL scope-full-part-a-has-no-load-limits: $(cat "$d/fake.env" 2>/dev/null)"; fails=1; fi
+
+# ---- tier2-steps.sh run mode, with a fake go: the rerun of the failed packages only -----------------
+fg=$d/fakego.sh
+cat > "$fg" <<'FAKE'
+#!/bin/sh
+# A fake go. FAKE_MODE: flaky (a failure on the first run only), panic, always, ok.
+echo "$*" >> "$FAKE_LOG"
+[ "$1" = test ] || exit 0
+case "$*" in *-race*) tag=race ;; *) tag=norace ;; esac
+[ "$tag" = norace ] || exit 0
+case "$*" in
+  *" -run ^("*)  [ "$FAKE_MODE" = always ] && { echo "--- FAIL: TestSlow (0.00s)"; echo FAIL; printf 'FAIL\texample/leaf\t0.1s\n'; exit 1; }
+                 echo "ok  	example/leaf	0.1s"; exit 0 ;;
+  *" example/leaf")  echo "ok  	example/leaf	0.1s"; exit 0 ;;
+  *"-p 2 -skip TestBobReleasePythonSuite ./"*" ./leaf"*)
+    if [ "$FAKE_MODE" = ok ]; then echo "ok  	example/leaf	0.1s"; exit 0; fi
+    echo "ok  	example/dash	0.1s"
+    if [ "$FAKE_MODE" = panic ]; then echo "--- FAIL: TestA (0.00s)"; echo "panic: boom"; echo FAIL; printf 'FAIL\texample/leaf\t0.1s\n'; exit 1; fi
+    echo "--- FAIL: TestSlow (0.00s)"; echo "--- FAIL: TestSlow/sub (0.00s)"; echo "--- FAIL: TestOther (0.00s)"; echo FAIL; printf 'FAIL\texample/leaf\t0.1s\n'; exit 1 ;;
+esac
+exit 0
+FAKE
+chmod +x "$fg"
+runfake() { # <mode>: run tier2-steps.sh in the scratch repo with the fake go; sets $o (out dir)
+  o=$d/out-$1; rm -rf "$o"; : > "$d/fake.log"
+  (cd "$t" && FAKE_MODE=$1 FAKE_LOG="$d/fake.log" GO="$fg" CG_TIMING_TESTS=0 bash "$T2" --base docs --head gochange "$o" >/dev/null 2>&1); rc=$?
+}
+runfake flaky
+if [ "$rc" = 0 ] && grep -q '^flaky   test-norace' "$o/summary.txt" && grep -q '^DONE rc=0' "$o/summary.txt" \
+   && grep -qF -- '-run ^(TestSlow|TestOther)$ example/leaf' "$d/fake.log" && ! grep -E -- '-run .* example/dash' "$d/fake.log" >/dev/null; then
+  echo "ok   rerun-only-failed-package-and-tests"; else echo "FAIL rerun-only-failed-package-and-tests (rc=$rc)"; cat "$o/summary.txt"; cat "$d/fake.log"; fails=1; fi
+# The rerun log holds the rerun only. It has no "dash" line.
+if ! grep -q 'example/dash' "$o/test-norace.rerun.log"; then echo "ok   rerun-log-only-failed"; else echo "FAIL rerun-log-only-failed"; fails=1; fi
+runfake panic
+if grep -qE -- ' example/leaf$' "$d/fake.log" && ! grep -qF -- '-run ^(' "$d/fake.log" && grep -q '^flaky   test-norace' "$o/summary.txt"; then
+  echo "ok   rerun-whole-package-after-panic"; else echo "FAIL rerun-whole-package-after-panic"; cat "$d/fake.log"; fails=1; fi
+runfake always
+if [ "$rc" = 1 ] && grep -q '^FAILED  test-norace' "$o/summary.txt" && grep -q '^DONE rc=1' "$o/summary.txt"; then echo "ok   failed-twice"; else echo "FAIL failed-twice (rc=$rc)"; cat "$o/summary.txt"; fails=1; fi
+runfake ok
+if [ "$rc" = 0 ] && grep -q '^ok      vet' "$o/summary.txt" && grep -q '^scope changed' "$o/summary.txt" && grep -q '^steps vet .*test-norace race-changed' "$o/summary.txt" \
+   && grep -q '^race-packages ./config ./leaf ./pkg/a' "$o/summary.txt"; then echo "ok   run-summary-format"; else echo "FAIL run-summary-format"; cat "$o/summary.txt"; fails=1; fi
+if [ -x /usr/bin/time ]; then
+  if grep -qE '^cpu vet user=[0-9.]+s sys=[0-9.]+s maxrss=[0-9]+MB$' "$o/summary.txt"; then echo "ok   cpu-line"; else echo "FAIL cpu-line"; cat "$o/summary.txt"; fails=1; fi
+fi
+# The summary of a run feeds local-tests.sh (end to end, no network, nothing posted).
+sed -i.bak "1s/.*/commit $H/" "$o/summary.txt"
+out=$(scripts/dev/local-tests.sh --dry-run --reuse "$o" 1 2>&1); rc=$?
+if [ "$rc" = 0 ] && grep -qF "tier=2 scope=changed -->" <<<"$out"; then echo "ok   tier2-run-feeds-local-tests"; else echo "FAIL tier2-run-feeds-local-tests (rc=$rc)"; echo "$out" | head; fails=1; fi
 exit "$fails"

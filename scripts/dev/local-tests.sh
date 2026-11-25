@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # local-tests.sh [--dry-run] [--reuse <out-dir>] <pr> [<repo>]
 #
-# Run the heavy test suites for a PR on this machine, then post ONE PR comment with the result.
-# Run it in the PR's worktree, at the PR's head. CI no longer runs these suites on a PR.
+# Run tier 2 of the test plan for a PR on this machine, then post ONE PR comment with the result.
+# Run it in the PR's worktree, at the PR's head. CI does not run these suites on a PR.
 #
-# The suites are the ones in scripts/release/part-a.sh (about 70 to 90 minutes on a laptop).
+# The steps come from scripts/dev/tier2-steps.sh: the static checks, non-race tests, and -race on
+# the changed packages only (about 2 minutes for a PR with no Go file, about 25 minutes for a typical
+# Go PR; a go.mod change runs the full suite of scripts/release/part-a.sh, 70 to 90 minutes).
 # The comment starts with this marker, which scripts/release/check-ready.sh reads:
-#   <!-- local-tests sha=<full head sha> result=pass|fail -->
+#   <!-- local-tests sha=<full head sha> result=pass|fail tier=2 scope=none|changed|full -->
+# A summary with no "scope" line (an old part-a.sh run, with --reuse) gets the old marker with no
+# tier and no scope. check-ready.sh accepts that one only until a cut-off date.
 # A step that fails only on tests named in scripts/release/known-laptop-failures.txt does not make
 # the result "fail". The comment names those tests.
 #
@@ -15,7 +19,7 @@
 # and in Part A.
 #
 # --dry-run     print the comment instead of posting it.
-# --reuse <dir> do not run the suites; read the summary and logs that part-a.sh left in <dir>.
+# --reuse <dir> do not run the suites; read the summary and logs that tier2-steps.sh (or part-a.sh) left in <dir>.
 #
 # If posting fails, the script says so and prints the comment. It then exits 3.
 # Exit 0: result pass. Exit 1: result fail. Exit 2: wrong input. Exit 3: could not post.
@@ -52,7 +56,7 @@ out=${reuse:-$(mktemp -d "${TMPDIR:-/tmp}/local-tests-pr$pr.XXXXXX")}
 if [ -z "$reuse" ]; then
   if [ "$("$here/timing-tests-needed.sh")" = run ]; then timing=1; else timing=0; fi
   echo "running the suites (timing tests: $timing); logs in $out"
-  CG_TIMING_TESTS=$timing "$here/../release/part-a.sh" "$out" || true
+  CG_TIMING_TESTS=$timing "$here/tier2-steps.sh" "$out" || true
 fi
 sum=$out/summary.txt
 [ -s "$sum" ] || { echo "ERROR: no summary at $sum" >&2; exit 2; }
@@ -65,7 +69,7 @@ if [ "$sumsha" != "$head" ]; then
   exit 2
 fi
 done_rc=$(sed -n 's/^DONE rc=//p' "$sum" | tail -1)
-# part-a.sh records whether the timing tests ran. A summary from an older part-a.sh has no line.
+# tier2-steps.sh and part-a.sh record whether the timing tests ran. A summary from an older part-a.sh has no line.
 case $(sed -n 's/^timing-tests //p' "$sum" | head -1) in
   1) if [ "$("$here/timing-tests-needed.sh")" = run ]; then timing_line="timing tests: run (this PR adds or changes one)"
      else timing_line="timing tests: run"; fi ;;
@@ -80,7 +84,11 @@ rows=
 # fails only on known laptop failures stays a pass). Any other rc is a run that stopped (143) or
 # broke: fail. Every step that part-a.sh runs must also have a line, or the run stopped short.
 case $done_rc in 0|1) ;; *) result=fail; rows+="| (run) | **FAIL**: stopped, DONE rc=$done_rc |"$'\n' ;; esac
-for st in $(grep -oE '^[[:space:]]*step [a-z0-9-]+' "$here/../release/part-a.sh" | awk '{print $2}'); do
+# The expected steps: the "steps" line of a tier-2 summary, else the steps of part-a.sh.
+scope=$(sed -n 's/^scope //p' "$sum" | head -1)
+stepnames=$(sed -n 's/^steps //p' "$sum" | head -1)
+[ -n "$stepnames" ] || stepnames=$(grep -oE '^[[:space:]]*step [a-z0-9-]+' "$here/../release/part-a.sh" | awk '{print $2}')
+for st in $stepnames; do
   grep -qE "^(ok|flaky|FAILED|skip) +$st( |\$)" "$sum" || { result=fail; rows+="| $st | **FAIL**: no result line |"$'\n'; }
 done
 notes=
@@ -114,9 +122,14 @@ while read -r state name _; do
 done < <(grep -E '^(ok|flaky|FAILED|skip) ' "$sum")
 grep -qE '^(ok|flaky|FAILED) ' "$sum" || result=fail
 
+racepk=$(sed -n 's/^race-packages *//p' "$sum" | head -1)
+cpu=$(grep -E '^cpu ' "$sum" || true)
+marker="<!-- local-tests sha=$head result=$result -->"
+[ -z "$scope" ] || marker="<!-- local-tests sha=$head result=$result tier=2 scope=$scope -->"
+
 body=$(mktemp "${TMPDIR:-/tmp}/local-tests-body.XXXXXX")
 {
-  echo "<!-- local-tests sha=$head result=$result -->"
+  echo "$marker"
   echo "Local tests at \`${head:0:12}\`: **$result** ($(uname -s), $(go version 2>/dev/null | awk '{print $3}'))"
   echo
   echo "| Step | Result |"
@@ -125,6 +138,16 @@ body=$(mktemp "${TMPDIR:-/tmp}/local-tests-body.XXXXXX")
   echo
   echo "Skipped: TestBobReleasePythonSuite (Bob plugin on hold, #1221)."
   echo "$timing_line"
+  if [ -n "$scope" ]; then
+    echo "scope: $scope"
+    if [ "$scope" = full ]; then echo "race packages: all (the full suite of part-a.sh)"; else echo "race packages: ${racepk:-none}"; fi
+  fi
+  if [ -n "$cpu" ]; then
+    echo
+    echo "| Step | User CPU | System CPU | Max memory |"
+    echo "| --- | --- | --- | --- |"
+    sed -E 's/^cpu ([^ ]+) user=([^ ]+) sys=([^ ]+) maxrss=([^ ]+)$/| \1 | \2 | \3 | \4 |/' <<<"$cpu"
+  fi
   [ -z "$notes" ] || { echo; printf '%s' "$notes"; }
 } > "$body"
 

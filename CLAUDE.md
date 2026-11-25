@@ -217,12 +217,35 @@ accept the waiver).
 
 The rest of this section, about `local-tests.sh`, applies after the interim rule ends.
 
+### Test tiers
+
+Owner decision (David Amid, 2026-11-25): "option E it is", then "E without the lock".
+
+- **Tier 1: CI on every PR.** The jobs `lint-build`, `purego` and `trivy`. `purego` runs `go test`
+  without `-race` on `config`, `components`, `apply`, `proxy` and `store`.
+- **Tier 2: the PR owner, on the laptop, once per head.** `scripts/dev/local-tests.sh` runs
+  `scripts/dev/tier2-steps.sh`. It runs:
+  - the static steps (`vet`, builds, `depguard`), always;
+  - non-race tests, once, for the packages tier 1 does not run;
+  - `-race` on the changed packages only;
+  - the node tests the PR changes;
+  - a rerun of only the failed packages.
+  It limits the load: `GOFLAGS=-p=2`, `GOMAXPROCS=4`. It takes about 2 minutes for a PR with no
+  Go file and about 25 minutes for a typical Go PR (estimates). A `go.mod` or `go.sum` change runs
+  the full suite of Part A.
+- **Tier 3: the integrator.** Heavy CI (`-race` on all packages) and Part A, before each cut and
+  on a schedule. Tier 3 catches what tier 2 skips: a race in a package the PR did not change, and
+  the heavy tests of unchanged packages. Its own rules come in a separate change.
+- **The tier-2 marker replaces the interim waiver once the owner says so.** Until then,
+  `check-ready.sh` accepts both. The waiver line stays valid.
+- **Tier 2 proves less than a full run.** Say so in the PR. Do not claim more.
+
 ### Timing tests
 
 - **A timing test asserts a wall-clock bound or races a rate limit.** It starts with
   `testutil.RequireTiming(t)` (Go) or uses `timingOnly` from `opencode-plugin/test/helpers.mjs`
   (node). It runs only with `CG_TIMING_TESTS=1`.
-- **`scripts/dev/local-tests.sh` skips the timing tests.** It runs them only when the PR adds or
+- **Tier 2 (`scripts/dev/local-tests.sh`) skips the timing tests.** It runs them only when the PR adds or
   changes one (`scripts/dev/timing-tests-needed.sh` decides, from the diff). The integrator runs
   them in heavy CI and in Part A. That covers the Go tests and the OpenCode node tests (the step
   `node-timing`).
@@ -233,10 +256,13 @@ The rest of this section, about `local-tests.sh`, applies after the interim rule
 
 - It has 2 approvals at its final head.
 - CI is green. A PR runs only the fast jobs (lint-build, purego, trivy).
-- The heavy tests passed on the laptop at the head (after the interim rule ends; until then, see the
+- Tier 2 passed on the laptop at the head (after the interim rule ends; until then, see the
   interim rule above: `Local tests: waived (owner rule)`). Run `scripts/dev/local-tests.sh <pr>` in the
-  PR's worktree. It posts one comment with `<!-- local-tests sha=<head> result=pass -->`. A new
-  commit, even comment-only, needs a new run. It takes 70 to 90 minutes: run it detached.
+  PR's worktree. It posts one comment with
+  `<!-- local-tests sha=<head> result=pass tier=2 scope=none|changed|full -->`. A new commit, even
+  comment-only, needs a new run. It takes 2 to 45 minutes (see [Test tiers](#test-tiers)): run it
+  detached. `check-ready.sh` accepts an old marker with no `tier=` until the date in its constant
+  `OLD_MARKER_VALID_UNTIL`.
   A laptop failure of a test listed in `scripts/release/pending-timing-fixes.txt` does not block the
   PR, as long as the PR does not change that test's package. Check the list by hand.
 - It merges cleanly on `main`.
