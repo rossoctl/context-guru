@@ -4019,6 +4019,36 @@ def cmd_strategy(args) -> int:
     port = args.port
     path = strategy_path(port)
 
+    if args.op == "known":
+        # start-proxy.sh asks this BEFORE it restarts or starts a proxy for a strategy name: does the
+        # proxy binary it is about to run know `--name`? The plugin holds no table (the proxy owns it),
+        # so a name from a newer release reaches an older binary, which exits on it and leaves the
+        # session with no proxy (#1383). `known` is the only answer that keeps the config; anything
+        # else (`unknown`, `unchecked`) makes the caller start without it. Never an error exit.
+        name = args.name.strip()
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            text = ""
+        if text and _strategy_is_ours(text) and not _is_new_form(text, _strategy_name_in(text)):
+            # A file written before the proxy owned the table carries its own keys and names no
+            # strategy to the proxy, so there is nothing for the proxy to reject.
+            emit(result="known", strategy=name, reason="own_keys")
+            return 0
+        if not _proxy_version_at_least(STRATEGY_MIN_PROXY):
+            # An older binary answers `strategies` by serving until the time limit: do not run it.
+            emit(result="unchecked", strategy=name, reason="proxy_too_old_or_unversioned")
+            return 0
+        try:
+            table = load_strategy_table(getattr(args, "bin", ""))
+        except StrategyTableError as exc:
+            emit(result="unchecked", strategy=name, reason="table_unavailable", detail=f"{exc}")
+            return 0
+        names = {r["name"] for r in table["strategies"]} | set(table["aliases"])
+        emit(result="known" if name in names else "unknown", strategy=name,
+             known=_names(table["strategies"]))
+        return 0
+
     if args.op == "show":
         if not os.path.exists(path):
             # No file is not "unknown": it is exactly what `none` means.
@@ -4818,7 +4848,7 @@ def main() -> int:
                    help="SessionStart: point a status line we installed at the running plugin version")
 
     st = sub.add_parser("strategy")
-    st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
+    st.add_argument("op", choices=("list", "show", "set", "clear", "sync", "known"))
     st.add_argument("--name", default="",
                     help="strategy name for `set`; `strategy list` prints the names the proxy offers")
     st.add_argument("--port", default="",

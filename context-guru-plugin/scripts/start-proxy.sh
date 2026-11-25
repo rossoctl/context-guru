@@ -599,6 +599,32 @@ fingerprint_want() {
     "$PRESET" "$SYNC_STRATEGY" "$IDLE_EXIT" "$UPSTREAM" "$PORT" "$HAVE"
 }
 
+# The strategy name in the keep-alive file may come from a newer release than the proxy binary we are
+# about to run (#1383). The plugin holds no table (the proxy owns it), so ask the binary. A binary that
+# does not know the name rejects the whole config at load (config/strategy.go) and exits, and the
+# session has no proxy. So when the answer is anything but `known` (`unknown`, or `unchecked`: the
+# check could not run, was too old, or timed out), start with preset `off` and WITHOUT --config,
+# because the proxy cannot load that file. The file is never edited or deleted, so a later upgrade
+# uses it. Fails open: this never stops a proxy from starting.
+USE_CONFIG=1
+STRATEGY_RESOLVED=0
+resolve_strategy() {
+  [ "$STRATEGY_RESOLVED" = 1 ] && return 0
+  STRATEGY_RESOLVED=1
+  case "$SYNC_STRATEGY" in ''|none) return 0 ;; esac
+  [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] || return 0
+  rs_out=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy known \
+             --port "$PORT" --name "$SYNC_STRATEGY" 2>/dev/null) || rs_out=""
+  rs_result=$(printf '%s\n' "$rs_out" | sed -n 's/^result=//p' | head -1)
+  [ "$rs_result" = known ] && return 0
+  note "preset is off: neither this plugin nor the installed proxy (${HAVE:-unknown version}) knows the"
+  note "strategy \`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml (check: ${rs_result:-no answer})."
+  note "the proxy starts without that file. The file is kept. Upgrade the plugin and the proxy (/context-guru:update)."
+  USE_CONFIG=0
+  PRESET=off
+  SYNC_STRATEGY=none
+}
+
 # Stop the proxy we started, so a new one can come up with the new configuration.
 #
 # PIDFILE FIRST, and never a `pkill` pattern: a pattern matching the word proxy on a shared box has
@@ -674,6 +700,13 @@ stop_running_proxy() {
 if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   fp_have=$(cat "$FINGERPRINT" 2>/dev/null)
   fp_want=$(fingerprint_want)
+  owner_have=$(cat "$OWNER" 2>/dev/null)
+  # Only when a restart looks due: ask whether the binary knows the strategy, then decide again.
+  if [ -n "$fp_have" ] && [ -n "$SYNC_STRATEGY" ] && [ "$fp_have" != "$fp_want" ] \
+     && ! { [ -n "$owner_have" ] && [ "$(owner_verdict "$owner_have")" = "theirs" ]; }; then
+    resolve_strategy
+    fp_want=$(fingerprint_want)
+  fi
   # Leave it alone unless we can prove a change is needed. Three of these four cases are deliberate
   # no-ops, because the cost of a wrong restart (interrupting somebody else's session) is higher than
   # the cost of a stale preset (reported, and fixed by the next cold start).
@@ -837,7 +870,7 @@ compute_preset_and_strategy_notes() {
   # test, which only covered the preset. TestTheStartupNoteUsesAStrategyNameSettingsKnows covers it now
   # (the earlier spelling of that name in this comment was of a test that never existed).
   STRATEGY_NOTE="none"
-  if [ -f "$KEEPALIVE_CFG" ]; then
+  if [ -f "$KEEPALIVE_CFG" ] && [ "$USE_CONFIG" = 1 ]; then
     CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
     # Same fail-open discipline as the preset read below: an unreadable or marker-less file must
     # still start the proxy, and must report what is KNOWN rather than something confident and wrong.
@@ -884,6 +917,7 @@ compute_preset_and_strategy_notes() {
     fi
   fi
 }
+resolve_strategy
 compute_preset_and_strategy_notes
 
 # attempt_launch: the re-probe, the launch, and the health-wait loop, as a function rather than
