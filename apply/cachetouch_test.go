@@ -88,9 +88,9 @@ func TestThePingTouchLandsOnTheKeyTheRequestPathReads(t *testing.T) {
 
 	RecordCacheTouch(st, tenant, body, bschemas.Anthropic, pingAt)
 
-	// aliasSeen is what the request path calls. It must find the ping's timestamp.
+	// aliasSeenState is what the request path calls. It must find the ping's timestamp.
 	if got := recordAndRead(t, st, tenant, body, pingAt+1000); got != pingAt {
-		t.Errorf("aliasSeen read %d, want the ping's %d. A touch written under a key the request "+
+		t.Errorf("aliasSeenState read %d, want the ping's %d. A touch written under a key the request "+
 			"path does not read is invisible, and the defect looks exactly like the ping never "+
 			"happening", got, pingAt)
 	}
@@ -116,10 +116,10 @@ func TestAPingWarmsOnlyItsOwnPrefix(t *testing.T) {
 	}
 }
 
-// recordAndRead calls the request path's own aliasSeen, returning what it found BEFORE writing nowMs.
+// recordAndRead calls the request path's own aliasSeenState, returning what it found BEFORE writing nowMs.
 func recordAndRead(t *testing.T, st store.Store, tenant string, body []byte, nowMs int64) int64 {
 	t.Helper()
-	return aliasSeen(st, aliasFor(t, tenant, body), nowMs)
+	return aliasSeenState(st, aliasFor(t, tenant, body), nowMs).at
 }
 
 // readSeen reads the clock without writing it, so an assertion cannot disturb what it measures.
