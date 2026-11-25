@@ -85,4 +85,29 @@ esac
 GH
 out=$(PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?
 if [ "$rc" = 2 ] && grep -q "could not read the comments" <<<"$out" && ! grep -q "no local-tests comment" <<<"$out"; then echo "ok   check-ready-comments-error"; else echo "FAIL check-ready-comments-error (rc=$rc)"; echo "$out" | tail -3; fails=1; fi
+# The interim waiver: "Local tests: waived (owner rule)" in the PR body or in a comment.
+# Every other call is fine, so only the waiver decides the local-tests point.
+mkgh() { # $1 = PR body, $2 = comments text, $3 = "fail" to make the comments call fail
+  printf '%s' "$1" > "$d/body.txt"; printf '%s' "$2" > "$d/comments.txt"
+  cat > "$d/bin/gh" <<GH
+#!/bin/sh
+case "\$*" in
+  "pr view"*) jq -n --rawfile b "$d/body.txt" '{state:"OPEN",isDraft:false,mergeable:"MERGEABLE",headRefOid:"abc123",title:"t",body:\$b}' ;;
+  *issues/*/comments*) [ "${3:-}" = fail ] && exit 1; cat "$d/comments.txt" ;;
+  *reviews*) echo '<!-- offload-review reviewer=1 round=1 sha=abc123 backend=x verdict=approve -->'; echo '<!-- offload-review reviewer=2 round=1 sha=abc123 backend=x verdict=approve -->' ;;
+  *check-runs*) printf 'completed\tsuccess\tpurego\tgithub-actions\ncompleted\tsuccess\tCodeQL\tgithub-advanced-security\n' ;;
+  *pulls/*/commits*) exit 0 ;;
+  *) exit 1 ;;
+esac
+GH
+}
+run() { out=$(PATH="$d/bin:$PATH" scripts/release/check-ready.sh 1 2>&1); rc=$?; }
+mkgh $'text\nlocal tests: WAIVED (owner rule)\n' ""; run
+if [ "$rc" = 0 ] && grep -q "local tests: waived (owner rule)" <<<"$out"; then echo "ok   waiver-in-body"; else echo "FAIL waiver-in-body (rc=$rc)"; echo "$out" | tail -3; fails=1; fi
+mkgh "plain body" $'hello\nLocal tests: waived (owner rule)\n'; run
+if [ "$rc" = 0 ] && grep -q "local tests: waived (owner rule)" <<<"$out"; then echo "ok   waiver-in-comment"; else echo "FAIL waiver-in-comment (rc=$rc)"; echo "$out" | tail -3; fails=1; fi
+mkgh "plain body" "no waiver here"; run
+if [ "$rc" = 1 ] && grep -q "no local-tests comment" <<<"$out"; then echo "ok   no-waiver-not-ready"; else echo "FAIL no-waiver-not-ready (rc=$rc)"; fails=1; fi
+mkgh $'Local tests: waived (owner rule)\n' "" fail; run
+if [ "$rc" = 2 ] && grep -q "could not read the comments" <<<"$out"; then echo "ok   waiver-comments-error"; else echo "FAIL waiver-comments-error (rc=$rc)"; fails=1; fi
 exit "$fails"
