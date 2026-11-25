@@ -83,8 +83,8 @@ func substituteWindow(seconds int, ttl, idle time.Duration) time.Duration {
 // turn the summary goes out after the last planned ping, at the extra slot, extraSlotMargin before the
 // normal hold deadline (210 s after the last ping at the 5-minute defaults). The cache then has
 // ttl - (idle - extraSlotMargin) left (90 s), so the window widens to that plus two sweep ticks (94 s),
-// and never narrows. A planned ping and every other summary path keep substituteWindow. The owner's
-// choice, 2026-10-30: "give it more time, it can run on the 210 sec mark".
+// and never narrows. A planned ping and every other summary path keep substituteWindow.
+// The extra request runs on the 210 s mark, so the window gets more time.
 func extraSummaryWindow(w, ttl, idle time.Duration) time.Duration {
 	if extra := ttl - (idle - extraSlotMargin) + 2*tick; extra > w {
 		return extra
