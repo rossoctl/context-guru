@@ -5,8 +5,9 @@
 #   curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash -s uninstall
 #
 # It downloads the release's OpenCode plugin, checks it against the release's SHA-256, unpacks it, and runs its
-# installer (scripts/install_opencode.py). The installer asks before each change: install or update OpenCode,
-# and the consent to route OpenCode through context-guru. It asks for no key. The SHA-256 is the only integrity
+# installer (scripts/install_opencode.py). The installer asks before each change: how you reach your models,
+# install or update OpenCode, and the consent to route OpenCode through context-guru. It never reads a key:
+# OpenCode's own login asks for it. The SHA-256 is the only integrity
 # check, so a mismatch or a missing sum stops before anything runs.
 #
 # Everything is inside main, called on the last line: a download cut short runs nothing.

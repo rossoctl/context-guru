@@ -17,6 +17,7 @@ sys.path.insert(0, str(HERE))
 
 import install_opencode  # noqa: E402
 
+CANARY = "CANARY-KEY-4711"
 SOURCE = HERE.parent  # the real opencode-plugin folder: index.js and tui.js carry the marker
 
 
@@ -64,6 +65,10 @@ class FakeShell:
         if self.login_fails:
             return 1
         self.logins.add(self.login_adds)
+        # As the real login does: OpenCode stores the key in its own auth file.
+        auth = Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json"
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text(json.dumps({self.login_adds: {"type": "api", "key": CANARY}}))
         return 0
 
     def which(self, name):
@@ -474,6 +479,23 @@ class InstallerTest(unittest.TestCase):
 
         self.installer("1", "y", "n").install()
         self.assertIn("OpenCode reaches Anthropic or OpenAI directly", self.terminal.text())
+
+    def test_a_key_never_reaches_output_record_or_config(self):
+        self.shell.logins = {"anthropic"}
+        self.installer(*self.GATEWAY, "y", "y").install()  # consent, test prompt
+        self.assertIn(CANARY, (Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json").read_text())  # it ran
+        record = install_opencode.record_path().read_text()
+        shown = self.terminal.text()
+
+        self.installer("n").uninstall()  # keep local data, so the state folder can be read
+        shown += self.terminal.text()
+
+        files = [path for root in (self.config, install_opencode.state_root()) if root.exists()
+                 for path in root.rglob("*") if path.is_file()]
+        self.assertNotIn(CANARY, shown)
+        self.assertNotIn(CANARY, record)
+        for path in files:
+            self.assertNotIn(CANARY, path.read_text(errors="replace"), str(path))
 
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):

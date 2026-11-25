@@ -2,10 +2,11 @@
 """Install or remove OpenCode's context-guru plugin, and OpenCode itself when it is missing, in one run.
 
 install-opencode.sh downloads the release's plugin, checks its SHA-256, and runs this file from it, with the
-user's answers on the terminal. See docs/superpowers/specs/2026-11-23-opencode-one-command-installer-design.md.
+user's answers on the terminal. See docs/superpowers/specs/2026-11-23-opencode-one-command-installer-design.md
+and docs/superpowers/specs/2026-11-25-opencode-installer-provider-setup-design.md.
 
   * OpenCode changes only after a yes. The config files change only after the consent yes.
-  * The installer never reads, asks for, or stores a key: the plugin uses OpenCode's own login.
+  * The installer never reads, asks for, or stores a key: OpenCode's own login (`opencode auth login`) does.
   * A record lists what this file added, so uninstall removes that and nothing else.
 """
 import argparse

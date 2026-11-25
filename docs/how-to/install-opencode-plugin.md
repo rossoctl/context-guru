@@ -3,7 +3,7 @@
 > **Experimental.** The plugin is new. It ran in a real OpenCode only once (1.19.5). It needs proxy v0.7.1 or later.
 
 The OpenCode plugin routes Anthropic and OpenAI model requests through a local context-guru proxy.
-It is project-safe, reversible, and does not add an API key.
+It is project-safe and reversible. The installer never reads or stores an API key.
 
 ## You need
 
@@ -21,25 +21,58 @@ curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/ins
 
 It asks before each change:
 
-1. **OpenCode:** it installs the latest OpenCode with npm if OpenCode is missing, or updates it if it is
+1. **Your models:** context-guru routes Anthropic and OpenAI models only. It asks how you reach them:
+   directly, through a custom base URL (a company gateway), or with another provider. "Another provider" exits
+   and changes nothing. See [A company gateway](#a-company-gateway).
+2. **OpenCode:** it installs the latest OpenCode with npm if OpenCode is missing, or updates it if it is
    older than the latest release, as the Pi installer does for Pi. It never uses `sudo`. The plugin is tested
    on 1.19.5 only; the installer says so for another version.
-2. **Your consent:** it says what turns on, and asks once.
-3. **The plugin:** it installs the release's plugin, checked by SHA-256, at
+3. **Your consent:** it says what turns on, and asks once.
+4. **The plugin:** it installs the release's plugin, checked by SHA-256, at
    `~/.local/share/context-guru-opencode/plugin/`. It adds it to the global `opencode.json` and `tui.json`,
    and removes another copy of the plugin there first. Your other entries stay. Old plugin options stay.
-4. **A check:** one test prompt if you want it. It checks that the proxy started.
-
-It asks for no key. The plugin uses OpenCode's own login (`opencode auth login`).
+5. **Login:** when OpenCode has no login for that provider, it starts `opencode auth login`. You type the key
+   into OpenCode, and OpenCode stores it. If the login fails, the installer offers to undo the install.
+6. **A check** (default yes): one short test prompt. It passes only when OpenCode answered and the proxy
+   counted the request. A failed check exits with code 1 and names the cause.
 It does not change an `opencode.jsonc` or a config file with comments. It prints the entries to add by hand.
 
-To remove it, run the command below. It stops the proxies, removes every entry of this plugin (also one you added by hand), the plugin copy, and OpenCode if it installed OpenCode. Your other entries stay.
+To remove it, run the command below. It stops the proxies, removes every entry of this plugin (also one you added by hand), the plugin copy, and OpenCode if it installed OpenCode. It puts back the `model`, `small_model` and gateway settings that it changed, unless you changed them after the install. It logs out a login that the installer started. Your other entries stay.
 
 ```sh
 curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash -s uninstall
 ```
 
 npm installs OpenCode from `https://registry.npmjs.org/`. Set `CG_OC_NPM_REGISTRY` to use another registry.
+
+### A company gateway
+
+Pick "A custom base URL" when you reach the models through a gateway such as LiteLLM. The installer asks for:
+
+1. **The base URL**, for example `https://gw.example`. It must be `https://` (`http://` only on `127.0.0.1` or
+   `localhost`). A trailing `/v1` is fine.
+2. **The API format:** `anthropic` (the default) or `openai`.
+3. **The model**, as the gateway names it, for example `aws/claude-sonnet-5-5`.
+4. **The small model**, which OpenCode uses for session titles. The default is the same model. Set it: the
+   OpenCode default (`claude-haiku-5-5`) usually has another name at a gateway.
+
+It adds the provider `anthropic-gateway` (or `openai-gateway`) to `opencode.json`, and sets `model` and
+`small_model` to it. The gateway has its own provider ID, so a direct Anthropic or OpenAI login keeps its own
+key, and that key never goes to the gateway.
+
+At the login, OpenCode shows a list of providers. Pick **Other** (the last choice), type `anthropic-gateway`
+(or `openai-gateway`), then paste your gateway key.
+
+For a scripted install, these variables answer the questions in advance:
+
+| Variable | Answers |
+|---|---|
+| `CG_OC_GATEWAY_URL` | "A custom base URL", with this URL |
+| `CG_OC_API` | the API format: `anthropic` or `openai` |
+| `CG_OC_MODEL` | the model |
+| `CG_OC_SMALL_MODEL` | the small model |
+
+The login and the check still need a terminal.
 
 ## Install by hand
 

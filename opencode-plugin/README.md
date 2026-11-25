@@ -36,8 +36,9 @@ The easy way, on macOS or Linux: run this in a terminal.
 curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash
 ```
 
-It installs OpenCode if it is missing, asks for your consent, and adds the plugin to the global
-`opencode.json` and `tui.json`. Add `-s uninstall` after `bash` to remove it. See
+It asks how you reach your models (directly, or through a company gateway), installs OpenCode if it is
+missing, asks for your consent, adds the plugin to the global `opencode.json` and `tui.json`, starts
+OpenCode's own login if needed, and checks that a real request goes through the proxy. Add `-s uninstall` after `bash` to remove it. See
 [docs/how-to/install-opencode-plugin.md](../docs/how-to/install-opencode-plugin.md).
 
 To install by hand, add the local plugin to `~/.config/opencode/opencode.json` for all projects:
