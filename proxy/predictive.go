@@ -360,7 +360,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	lf := u.Live
 	if lf == nil { // a path that did not hand over the capture's facts: read what the body says
 		lf = &LiveFacts{Messages: int(gjson.GetBytes(body, "messages.#").Int()), Tools: int(gjson.GetBytes(body, "tools.#").Int()), Thinking: gjson.GetBytes(body, "thinking.type").String(),
-			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: agent.ModelAgentOf(cl.Label, provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
+			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: cl.ModelAgent(provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
 	}
 	nowMs := now.UnixMilli()
 	cost := float64(u.FreshInput)*pIn + float64(u.CacheRead)*pRead + float64(u.CacheWrite)*pWrite + float64(u.Output)*pOut

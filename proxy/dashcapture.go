@@ -950,7 +950,7 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 		return nil
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
-		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: agent.ModelAgentOf(c.agent.Label, c.provider), Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent.ModelAgent(c.provider), Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }
 
 // noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.

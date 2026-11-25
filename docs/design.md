@@ -344,7 +344,7 @@ The one exception is a store that keeps nothing (`store.Keeps` is false: storage
 
 - **Fields.** `Label` is the dashboard family. `Name` is the narrow identity that rules key on (`claude`, `bob`, `codex`, `opencode`, `pi`, or empty). `SDK` is the User-Agent family: for Pi it is the provider SDK's token, for the others it equals `Label`. `Entrypoint`, `SessionID`, `AgentID`, `AgentIDHeader`, `ParentID` come from headers.
 - **Nil or empty header.** The result is the generic client: `Label` and `SDK` are "unknown", all else is empty. A host that passes no headers gets today's behavior.
-- **Which field to read.** Take `Label` when the harness matters (the dashboard). The prediction model's agent feature reads `agent.ModelAgentOf(label, provider)` on live requests and on stored rows alike (`proxy/dashcapture.go`, `proxy/predictive.go`, `campaign/replay.go`), so the two values are equal for one request. Never pass the raw User-Agent to the model.
+- **Which field to read.** Take `Label` when the harness matters (the dashboard). The prediction model's agent feature reads `Client.ModelAgent(provider)` (`agent.ModelAgentOf(label, provider)`) on live requests, and `agent.ModelAgentOf` on stored rows, (`proxy/dashcapture.go`, `proxy/predictive.go`, `campaign/replay.go`), so the two values are equal for one request. Never pass the raw User-Agent to the model.
 - **Proxy.** It calls `agent.Identify(r.Header)` once per request (`identify` in `proxy/clientid.go`) and uses the `Client`. It holds no client rules.
 - **Bifrost adapter.** The transport must pass the request headers to `Identify`. A host that cannot pass them gets the generic client.
 - **Cortex.** Call `agent.Identify(pctx.Headers)`. When `Client.SessionID` is empty, use the host's own session id (`pctx.SessionID`) as the gap filler.
@@ -356,7 +356,7 @@ The one exception is a store that keeps nothing (`store.Keeps` is false: storage
 |---|---|---|
 | Dashboard request rows (`Event.Agent`, filters) | `Label` (`pi`) | the user wants the harness |
 | Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | raw User-Agent, turned into its family by `dash.AgentFor` | unchanged. A Pi ping row keeps the SDK token. |
-| Prediction model, live (`LiveFacts.Agent`, `predictiveDecide`) | `agent.ModelAgentOf(label, provider)` | the same value training reads (#1349). A raw User-Agent never matched the one-hots. |
+| Prediction model, live (`LiveFacts.Agent`, `predictiveDecide`) | `Client.ModelAgent(provider)` | the same value training reads (#1349). A raw User-Agent never matched the one-hots. |
 | Prediction model, stored rows (`campaign/replay.go`) | `agent.ModelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives a token back (`openai`, `anthropic`, or the provider string) |
 | Compaction point (`proxy/compactioncfg.go`) | `Name` | Pi and OpenCode have no setting |
 | Entry point on the row | `Entrypoint` | Pi gets `other` |

@@ -60,3 +60,17 @@ A host without a client signal gives the generic result.
   request headers, so `agent.Identify` needs the transport to pass them.
 - **Cortex gap:** wire `apply.Opts.ThreadOf` with `thread.ResolveSession` and
   `agent.Identify(pctx.Headers)`. Owner: Cortex repo. A follow-up issue is to be decided with the Cortex integration owner.
+
+## Prediction model agent value
+
+The live value is `Client.ModelAgent(provider)`. It equals what training reads from the stored row.
+
+| Client | Value the model gets |
+|---|---|
+| Claude Code (CLI) | `claude-cli` |
+| Codex | `codex` |
+| OpenCode | `opencode` |
+| Pi | the provider token: `anthropic` or `openai` |
+| Bob | `bob` |
+
+Only `claude-cli`, `openai` and `asyncopenai` have a one-hot in the model. Any other value reads as unseen.
