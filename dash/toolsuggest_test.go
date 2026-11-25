@@ -457,7 +457,7 @@ func tieredDeclPrice(string) (modelinfo.Price, bool) {
 // write only, and so falls to base here.
 func TestDeclFilterSavingsPricesAtPromptSize(t *testing.T) {
 	cases := []struct {
-		name        string
+		name                 string
 		fresh, read, removed int64
 		rate                 float64
 	}{
