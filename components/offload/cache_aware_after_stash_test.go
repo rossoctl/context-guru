@@ -75,7 +75,9 @@ func TestCacheAwareDetachedPrefixAskCommitsAfterTheTurnIsStashed(t *testing.T) {
 	// here, then let the host stash this turn's body (its upstream answered 200) and run its hook as
 	// the request ends. (On this branch that wait finds the held deferral and times out after 1 s;
 	// with an Offload-time start it drains the stale call, which is what this test must catch.)
-	WaitForSummaryForTest(convKey(ctx), time.Second)
+	// waitForSummary, not WaitForSummaryForTest: the test needs that short timeout, and the
+	// exported hook has a 30 s floor.
+	waitForSummary(convKey(ctx), time.Second)
 	asker.put(len(in))
 	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 
@@ -84,7 +86,7 @@ func TestCacheAwareDetachedPrefixAskCommitsAfterTheTurnIsStashed(t *testing.T) {
 		if _, ok := loadCheckpoint(ctx); ok {
 			break
 		}
-		WaitForSummaryForTest(ctx.Session, 100*time.Millisecond)
+		waitForSummary(ctx.Session, 100*time.Millisecond) // a short poll step, so no 30 s floor
 		time.Sleep(5 * time.Millisecond)
 	}
 	if n := CacheAwareSummarizerStalePrefix() - staleBefore; n != 0 {
@@ -126,7 +128,7 @@ func TestAReplacedWarmDeferralIsDispatchedWithoutTheHook(t *testing.T) {
 		if _, ok := loadCheckpoint(ctx); ok {
 			break
 		}
-		WaitForSummaryForTest(ctx.Session, 100*time.Millisecond)
+		waitForSummary(ctx.Session, 100*time.Millisecond) // a short poll step, so no 30 s floor
 		time.Sleep(5 * time.Millisecond)
 	}
 	if _, ok := loadCheckpoint(ctx); !ok {
@@ -221,7 +223,9 @@ func TestWaitForSummaryCoversTheGapBetweenTakeAndStart(t *testing.T) {
 	t.Cleanup(func() { betweenTakeAndStartForTest = nil })
 	go ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	<-inGap
-	if WaitForSummaryForTest(convKey(ctx), 50*time.Millisecond) {
+	// waitForSummary, not WaitForSummaryForTest: the exported hook has a 30 s floor, and this
+	// test needs the short limit to see the wait time out.
+	if waitForSummary(convKey(ctx), 50*time.Millisecond) {
 		t.Fatal("WaitForSummaryForTest returned while a taken deferral had not started yet")
 	}
 	close(release)
