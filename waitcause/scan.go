@@ -5,7 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/tidwall/gjson"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // The work bounds of ScanBody. They bound the WORK, not the time: the byte bound refuses a body before any read; the message bound refuses a list after it is
@@ -44,7 +44,7 @@ func (s *Scan) Messages() []bschemas.ChatMessage {
 // cannot say, and the caller then uses today's path:
 //
 //   - the body is over MaxScanBytes, or its message list over MaxScanMessages (the work bound);
-//   - the body is empty, has no message list, or continues server-held history (previous_response_id);
+//   - the body is empty, has no message list, or continues server-held history (schema.ServerHeldHistory);
 //   - stop reports true (the request ended, so the answer is no longer needed);
 //   - anything panics.
 //
@@ -59,7 +59,7 @@ func ScanBody(stop func() bool, provider bschemas.ModelProvider, body []byte, op
 	if len(body) == 0 || len(body) > MaxScanBytes || (stop != nil && stop()) {
 		return nil
 	}
-	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+	if schema.ServerHeldHistory(body) {
 		return nil // server-held history: this body is only the newest turn
 	}
 	entries := apply.NormalizeMessages(provider, body)
