@@ -40,12 +40,13 @@ type Disk struct {
 	mu      sync.Mutex
 	pending map[string]pendingRow
 
-	flushEvery time.Duration
-	stop       chan struct{}
-	done       chan struct{}
-	closeOnce  sync.Once
-	logged     sync.Map // op -> struct{}: each distinct op is logged once
-	errN       atomic.Int64
+	flushEvery  time.Duration
+	loadTimeout time.Duration
+	stop        chan struct{}
+	done        chan struct{}
+	closeOnce   sync.Once
+	logged      sync.Map // op -> struct{}: each distinct op is logged once
+	errN        atomic.Int64
 }
 
 type pendingRow struct {
@@ -62,8 +63,10 @@ const DefaultStateTTL = 24 * time.Hour
 const (
 	defaultFlushEvery = time.Second
 	sweepEvery        = time.Hour
-	loadTimeout       = 3 * time.Second
-	maxPending        = 50000
+	// defaultLoadTimeout bounds OpenDisk's schema step and each load. DiskOptions.LoadTimeout
+	// overrides it for one Disk.
+	defaultLoadTimeout = 3 * time.Second
+	maxPending         = 50000
 )
 
 // DiskOptions configures OpenDisk. The zero value is "everything", 720 h.
@@ -80,6 +83,9 @@ type DiskOptions struct {
 	Retention time.Duration
 	// FlushEvery is how often pending writes go to the file. Zero => 1 s.
 	FlushEvery time.Duration
+	// LoadTimeout bounds OpenDisk's schema step and each read. Zero => 3 s. Tests on a loaded
+	// machine set a long one. No production caller sets it.
+	LoadTimeout time.Duration
 }
 
 // metadataPrefixes hold counts, hashes, ids, flags and verdicts: no transcript text and no model
@@ -143,7 +149,11 @@ func OpenDisk(db *sql.DB, o DiskOptions) (*Disk, error) {
 	if db == nil {
 		return nil, fmt.Errorf("session state: no database")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+	lt := o.LoadTimeout
+	if lt <= 0 {
+		lt = defaultLoadTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), lt)
 	defer cancel()
 	for _, q := range []string{
 		`CREATE TABLE IF NOT EXISTS session_state (key BLOB PRIMARY KEY, val BLOB NOT NULL, updated INTEGER NOT NULL) WITHOUT ROWID`,
@@ -163,7 +173,7 @@ func OpenDisk(db *sql.DB, o DiskOptions) (*Disk, error) {
 	}
 	d := &Disk{
 		db: db, metaOnly: o.MetadataOnly || o.Hosted, hosted: o.Hosted, retention: ret, now: time.Now,
-		pending: map[string]pendingRow{}, flushEvery: fe,
+		pending: map[string]pendingRow{}, flushEvery: fe, loadTimeout: lt,
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	d.sweep()
@@ -233,7 +243,7 @@ func DeleteSessionState(db *sql.DB, session string) (int64, error) {
 	if db == nil || session == "" {
 		return 0, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultLoadTimeout)
 	defer cancel()
 	var n int64
 	for _, p := range StatePrefixes {
@@ -404,7 +414,7 @@ func (d *Disk) loadSession(session string) ([]diskRow, bool) {
 		conds = append(conds, "(key >= ? AND key < ?)")
 		args = append(args, []byte(lo), []byte(lo+"\xff"))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.loadTimeout)
 	defer cancel()
 	rows, err := d.db.QueryContext(ctx, `SELECT key, val FROM session_state WHERE `+strings.Join(conds, " OR "), args...)
 	if err != nil {
@@ -455,7 +465,7 @@ func (d *Disk) isGlobal(key string) bool { return d.allowed(key) && hasAnyPrefix
 
 // get reads one key.
 func (d *Disk) get(key string) ([]byte, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.loadTimeout)
 	defer cancel()
 	d.mu.Lock()
 	if r, ok := d.pending[key]; ok {
