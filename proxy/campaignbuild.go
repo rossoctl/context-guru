@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
 )
 
@@ -169,7 +170,7 @@ func (h *Handler) ctlBuildCacheCampaign(w http.ResponseWriter, r *http.Request) 
 		ctlErr(w, http.StatusBadRequest, `builder must be "model" or "auto"`)
 		return
 	}
-	if _, ok := segFeatures[in.SegmentBy]; in.SegmentBy != "" && (!ok || in.Builder != "auto") {
+	if ok := campaign.SegmentOf(in.SegmentBy) != nil; in.SegmentBy != "" && (!ok || in.Builder != "auto") {
 		ctlErr(w, http.StatusBadRequest, `segment_by needs builder "auto" and one of dow, hour, prefix, model, client, stop_reason`)
 		return
 	}

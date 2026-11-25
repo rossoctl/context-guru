@@ -13,9 +13,9 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 

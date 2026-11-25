@@ -25,6 +25,7 @@ reference — port its *logic*, re-implement its transport in Go.
   External calls go through the host's `dispatch.Dispatcher`: the core builds the request, the
   host resolves the destination and credential and sends it. Credentials and their masking are
   each host's own business. See `docs/superpowers/specs/2026-10-13-dispatch-design.md`.
+  The checklist is in [What goes in the proxy](#what-goes-in-the-proxy).
 - **Fail open, always.** Any component error/panic reverts that component only; the
   original request is always forwarded as a valid fallback. Every lossy Offload must be
   reversible (a `<<cg:HASH>>` marker + the stashed original in the Store).
@@ -49,6 +50,52 @@ reference — port its *logic*, re-implement its transport in Go.
 - **Keep-alive never shortens the cache strategy.** A request sent in place of a ping may replace
   one only when it renews the same cache entry. See
   [docs/design.md](docs/design.md#keep-alive-the-cache-strategy-comes-first).
+
+## What goes in the proxy
+
+The host packages are `proxy/`, `proxyapp/`, `cmd/context-guru-proxy` and `dash/`. Cortex,
+bifrost and the proxy must give the same behaviour from the same config. Use this test: **if
+Cortex would have to copy the code to behave the same, the code is business logic.** Business
+logic goes in a library package.
+
+**Business logic. Never put it in a host package:**
+
+- A decision on what to trim, offload, expand, cache, ping, defer, filter or compact.
+- A policy choice: which strategy, override or campaign wins, and in what order they apply.
+- Thresholds, defaults, bounds and calibrated constants, for example a prefix floor, an idle
+  limit or a miss rate.
+- Cost, price, savings and accounting math.
+- Reading a provider wire format for meaning: usage, cache tokens, stop reasons, tool calls,
+  cache marks, server-held history.
+- Session, thread and trace identity.
+- The order of the steps around a request: what runs before `apply`, and what each host must
+  record after the response.
+- Edits to the config document, for example adding a tool to `toolfilter.remove`.
+
+**Host code. Keep it in the host package:**
+
+- HTTP handlers that only decode the request, call a library function and encode the result.
+- Byte forwarding, header copying, retries and time-outs on the transport.
+- Credentials, auth modes and masking.
+- Flags, env vars, file paths and other process wiring.
+- Tenant login, rate limits, mail.
+- Prometheus registration and dashboard display.
+
+**Rules for a change in a host package:**
+
+1. Before you add a function to a host package, ask the Cortex test. If the answer is yes, put
+   the function in a library package and call it from the host.
+2. Do not copy a library rule into the host "for now". Call the library function. If it does
+   not fit, change the library function.
+3. A constant that a library package already has is not defined again in a host package.
+4. A library type that only `internal/` holds cannot reach Cortex. When a public host needs it,
+   move it out of `internal/`.
+5. A comment such as "mirrors X" or "keep in sync with Y" in a host package is a defect. Fix it
+   by calling X.
+6. A PR that adds logic to a host package states why it cannot live in a library package. The
+   reviewer checks this.
+
+`offload-review` checks each PR for a new leak, and `refactor-scan` checks each release.
 
 ## Conventions
 
@@ -105,6 +152,94 @@ Write in the style of ASD-STE100 (Simplified Technical English). Less prose, les
 the work. Use short sections such as *Summary*, *What we found*, *Why it happens*, *Proposal* (or
 *What changed* / *How it was tested* for a PR), *Open questions*. If deeper technical detail is
 needed, put it in a separate *Technical notes* section at the end, so the main text stays simple.
+
+## Working on a task
+
+Owner rule (David Amid, 2026-11-24): the integrator holder can change, so no rule here names
+the person. The team knows who holds the role at any time.
+
+- **The main session coordinates.** Subagents do the work. Each subagent uses its own worktree
+  and branch, as in [Branches, worktrees and force-push](#branches-worktrees-and-force-push).
+- **The main session runs `offload-review`.** See [Review process](#review-process).
+
+### Interim rule (in force until the 3-tier test plan lands)
+
+Owner decisions (David Amid): 2026-11-24 "in the meantime ask everyone to stop their heavy tests and
+u coordinate it once flaky is done. so u run all tests every few prs till we get the process right.
+rn everything is in livelock". 2026-11-25 "yes" (write it into CLAUDE.md, and make `check-ready.sh`
+accept the waiver).
+
+- **Do NOT run `scripts/dev/local-tests.sh` or `scripts/release/part-a.sh` on the shared laptop.**
+- **Run only targeted tests** of the packages your PR changes: `go test ./<pkg>/...`. Do not use
+  `-race` on the big suites `proxy` and `dash`. The node and python suites of a plugin you change
+  are fine.
+- **Hand off with this line** in the PR body or in a PR comment: `Local tests: waived (owner rule)`.
+  `scripts/release/check-ready.sh` accepts it in place of the local-tests marker.
+- **The integrator runs the heavy CI on main** (`scripts/release/heavy-ci.sh`) every few merges and
+  before each cut. The integrator also runs Part A before each cut. A failure goes back to the PR
+  that caused it.
+
+The rest of this section, about `local-tests.sh`, applies after the interim rule ends.
+
+### Timing tests
+
+- **A timing test asserts a wall-clock bound or races a rate limit.** It starts with
+  `testutil.RequireTiming(t)` (Go) or uses `timingOnly` from `opencode-plugin/test/helpers.mjs`
+  (node). It runs only with `CG_TIMING_TESTS=1`.
+- **`scripts/dev/local-tests.sh` skips the timing tests.** It runs them only when the PR adds or
+  changes one (`scripts/dev/timing-tests-needed.sh` decides, from the diff). The integrator runs
+  them in heavy CI and in Part A. That covers the Go tests and the OpenCode node tests (the step
+  `node-timing`).
+- **Gate a test only if its result depends on time or load.** Do not gate a test that uses a fake
+  clock, or a long timeout as a safety net.
+
+### A PR is ready when
+
+- It has 2 approvals at its final head.
+- CI is green. A PR runs only the fast jobs (lint-build, purego, trivy).
+- The heavy tests passed on the laptop at the head (after the interim rule ends; until then, see the
+  interim rule above: `Local tests: waived (owner rule)`). Run `scripts/dev/local-tests.sh <pr>` in the
+  PR's worktree. It posts one comment with `<!-- local-tests sha=<head> result=pass -->`. A new
+  commit, even comment-only, needs a new run. It takes 70 to 90 minutes: run it detached.
+  A laptop failure of a test listed in `scripts/release/pending-timing-fixes.txt` does not block the
+  PR, as long as the PR does not change that test's package. Check the list by hand.
+- It merges cleanly on `main`.
+- Every behavior change is named at the top of the PR and has a human developer's yes. See
+  [Behavior changes need a human's permission](RELEASING.md#behavior-changes-need-a-humans-permission).
+- The row in [docs/data-dependence.md](docs/data-dependence.md) is updated.
+- It adds no binary and no LFS file.
+- Exception: a docs-only PR needs only the release owner's review, by hand, unless the owner asks
+  for the 2 reviews. See
+  [RELEASING.md](RELEASING.md#when-the-head-moves-after-an-approval), where the rule stands.
+
+For the details, see [Check that a PR is ready](RELEASING.md#check-that-a-pr-is-ready).
+
+### Hand a ready PR to the integrator
+
+1. Find the session named `integrator` with `ListAgents`.
+2. Send one message to it with `SendMessage`. Use this block:
+
+   ```text
+   PR: <link>
+   Head SHA: <sha>
+   Approvals: round <n>, backend <name>, head <sha> (one line for each reviewer)
+   CI: <result>
+   Behavior change: <none, or the change and where the human's yes is recorded>
+   Data dependence: <none, or the row and what changed>
+   Binaries: <none>
+   Squash notes: keep the Signed-off-by lines
+   ```
+
+3. If no session named `integrator` is listed, do not merge the PR yourself. Tell the human:
+   "PR #N is ready. Please ask the integrator holder on Slack to review and merge it." Add the
+   same block.
+
+### After the hand-off
+
+- After the merge, the PR-owning session runs `scripts/offload-review.sh <pr> --cleanup`. The
+  session also removes its own worktrees and branches.
+- When the integrator asks for "all done", the PR-owning session answers with its PR list. See
+  [What "all done" contains](RELEASING.md#4-freeze).
 
 ## Review process
 

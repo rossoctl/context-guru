@@ -43,7 +43,7 @@ func RestoredInPlace(hashID string) string {
 // `<tool_use_error>Error: No such tool available: context_guru_expand</tool_use_error>` —
 // and the model concludes the content it asked for cannot be had.
 //
-// The response side intercepts the call wherever it can (see proxy/ssepeek.go), but some
+// The response side intercepts the call wherever it can (see inband/sse.go), but some
 // cases are structural: the model batched expand with a tool only the client owns, the
 // continuation round cap, an event stream that will not reconstruct, and a bypassed request
 // carrying markers minted on an earlier turn. Every one of them ends up here, on the next

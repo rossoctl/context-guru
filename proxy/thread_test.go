@@ -16,8 +16,8 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/testutil"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // threadBody is an Anthropic-dialect body whose messages are the given texts, with Claude Code's

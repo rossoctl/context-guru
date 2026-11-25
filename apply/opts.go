@@ -35,7 +35,8 @@ type Opts struct {
 	//	orig := body // the request as the agent sent it, saved before the pipeline runs
 	//	agentID, _ := thread.HeaderAgentID(req.Header.Get(thread.AgentHeader))
 	//	opts.ThreadOf = func(session string) thread.Result {
-	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, thread.IsAgentCompaction(orig))
+	//		// agentall is github.com/rossoctl/context-guru/agent/all. With no headers, pass nil.
+	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, agentall.IsClientCompaction(req.Header, orig))
 	//		return res
 	//	}
 	//
@@ -45,17 +46,22 @@ type Opts struct {
 	// function yourself with Trace.Session, so the finish side below still has a thread.
 	// Trace.Session is "" in that case, so the result is the primary thread.
 	//
+	// lifecycle.Prepare runs the request-side steps in their order, lifecycle.Request.Opts builds the
+	// shared options, and lifecycle.Finish runs the finish-side steps below.
+	//
 	// Host contract. Once ThreadOf is set, components key their state by
 	// thread.Key(session, threadID). Make the finish-side calls with the same thread
 	// (threadID = Trace.Thread.ID, session = Trace.Session), or state is written under one key
 	// and read under another:
 	//
-	//   - RecordBilledInputThread(store, session, threadID, billed), next to RecordBilledInput.
-	//   - offload.ResolveDeferredCacheAwareSummary(session, threadID).
-	//   - offload.ResolveWarmQuestion(session, threadID, forwarded, cacheRead).
-	//   - offload.ClearStaleKeepAliveCandidate(thread.Key(session, threadID), startedAt).
-	//   - every keepalive.Keeper call (ArriveAt, Depart, WaitingFor, RaiseWaitPlan and the
-	//     others) with keepalive.Key{Tenant: tenant, Session: session, Thread: threadID}.
+	//   - lifecycle.Prepare calls offload.ClearStaleKeepAliveCandidate(thread.Key(session, threadID),
+	//     startedAt) for the host, after the pipeline and after the keep-alive arrival.
+	//   - lifecycle.Finish calls, for the host, RecordBilledInput and RecordBilledInputThread (only when
+	//     usage is OK, and in observe mode for the shadow store too), offload.ResolveDeferredCacheAwareSummary
+	//     and offload.ResolveWarmQuestion, all with the same session and threadID.
+	//   - The host keeps every keepalive.Keeper call (ArriveAt, Depart, WaitingFor, RaiseWaitPlan and the
+	//     others) with keepalive.Key{Tenant: tenant, Session: session, Thread: threadID}. It passes them
+	//     to Prepare (Arrive) and Finish (Touch) as function values, so they run in the right order.
 	ThreadOf func(session string) thread.Result
 	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty
 	// in single-tenant use, which leaves session keys byte-identical to before this
@@ -80,7 +86,7 @@ type Opts struct {
 	WindowExact bool
 	// CompactionPoint is C in provider-billed tokens: where the conversation's own compaction
 	// mechanism acts. 0 = unknown, and components fall back to Window. See
-	// internal/compactionpoint for the definition and why it is not the window.
+	// compactionpoint for the definition and why it is not the window.
 	CompactionPoint int
 	// CompactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "operator" | "window_fallback".
 	CompactionPointSource string

@@ -1,0 +1,17 @@
+cache:
+  keepalive: true
+components:
+  dedup:
+    min_tokens: 100
+  toolfilter:
+    defer: auto
+    keep:
+      - WebFetch
+    remove:
+      - mcp__ops
+pipeline:
+  - dedup
+  - cachesplit
+  - format
+  - toon
+PIPELINE dedup,cachesplit,format,toon

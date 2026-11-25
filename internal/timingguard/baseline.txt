@@ -52,17 +52,14 @@ proxy/adaptcache_test.go sleep=1 poll=1
 proxy/adapttoolsctl_test.go sleep=1
 proxy/bobsession_test.go sleep=1
 proxy/bypasstokens_test.go sleep=1
-proxy/cache_aware_keepalive_integration_test.go sleep=1 poll=1
 proxy/campaign_test.go sleep=1 poll=1
 proxy/campaignbuild_test.go sleep=2 poll=2
 proxy/cgllm_test.go sleep=5
-proxy/clientsignal_test.go sleep=3
 proxy/conformance_test.go after=1
 proxy/dash_test.go after=1
 proxy/decldigest_test.go sleep=1
 proxy/entryage_test.go sleep=2 poll=2
 proxy/expandsplice_test.go after=1
-proxy/keepalive_inflight_test.go sleep=18 poll=1 after=2
 proxy/manager_test.go sleep=1 poll=1
 proxy/metricsink_test.go after=1
 proxy/modes_test.go sleep=2 poll=1
@@ -76,11 +73,9 @@ proxy/toolfilter_deferred_test.go sleep=1 poll=1
 proxy/upstreamsilence_test.go sleep=9
 proxy/upstreamtimeout_test.go sleep=2
 proxy/wireinventory_test.go sleep=1
-proxyapp/hooks_test.go sleep=1 poll=1
 proxyapp/idleexit_test.go after=2
 proxyapp/metricspush/central_e2e_test.go sleep=2
 proxyapp/metricspush/central_load_test.go sleep=1 poll=1
 proxyapp/metricspush/central_rules_test.go sleep=1 poll=1
 proxyapp/metricspush/metricspush_test.go sleep=2
-proxyapp/shutdown_test.go sleep=1
 tooldefer/support_test.go sleep=3 after=3

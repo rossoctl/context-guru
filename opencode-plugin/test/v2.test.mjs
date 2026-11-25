@@ -103,6 +103,13 @@ test("v2 http.request hook sets the session header and recovers a dead proxy", a
     const event = { sessionID: "session-v2", request: new Request("http://127.0.0.1:1/x", { method: "POST" }) }
     await hook.callback(event)
     assert.equal(event.request.headers.get("x-context-guru-session"), "session-v2")
+    assert.equal(event.request.headers.get("x-context-guru-request-kind"), null)
+    const compaction = { sessionID: "session-v2", kind: "compaction", request: new Request("http://127.0.0.1:1/x", { method: "POST" }) }
+    await hook.callback(compaction)
+    assert.equal(compaction.request.headers.get("x-context-guru-request-kind"), "compaction")
+    const title = { sessionID: "session-v2", kind: "title", request: new Request("http://127.0.0.1:1/x", { method: "POST" }) }
+    await hook.callback(title)
+    assert.equal(title.request.headers.get("x-context-guru-request-kind"), null)
 
     process.kill(record.pid, "SIGTERM")
     await waitUntilUnhealthy(record.port)

@@ -3,7 +3,7 @@ package keepalive
 import (
 	"testing"
 
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The prefix floor follows the wait cause: 20k for a tool wait and for any subagent wait, 80k for the
@@ -65,5 +65,31 @@ func TestPingableUsesTheFloorOfTheWait(t *testing.T) {
 	}
 	if mk(waitcause.WaitingHuman, "").pingable() {
 		t.Error("a main wait for a person at 30k was pingable")
+	}
+}
+
+// FloorFor is the floor of a stored row, and SpanPrefixOK gates on it.
+func TestFloorForReadsTheStoredWait(t *testing.T) {
+	p := Policy{WaitPlan: true, MinPrefixTokens: 80000}
+	for _, c := range []struct {
+		cause, stop string
+		sub         bool
+		want        int
+	}{
+		{"background", "end_turn", false, 20000},
+		{"teammate", "end_turn", false, 20000},
+		{"human", "end_turn", true, 20000},
+		{"human", "end_turn", false, 80000},
+		{"unknown", "end_turn", false, 80000},
+		{"", "tool_use", false, 20000},
+		{"human", "tool_use", false, 80000},
+		{"", "", true, 80000},
+	} {
+		if got := p.FloorFor(c.cause, c.stop, c.sub); got != c.want {
+			t.Errorf("FloorFor(%q, %q, %v) = %d, want %d", c.cause, c.stop, c.sub, got, c.want)
+		}
+	}
+	if got := (Policy{MinPrefixTokens: 80000}).FloorFor("background", "end_turn", false); got != 80000 {
+		t.Errorf("WaitPlan off: floor %d, want the general 80000", got)
 	}
 }

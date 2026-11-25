@@ -1,0 +1,12 @@
+components:
+  dedup:
+    min_tokens: 100
+  toolfilter:
+    remove:
+      - a
+      - b
+pipeline:
+  - dedup
+  - format
+  - toon
+PIPELINE dedup,format,toon

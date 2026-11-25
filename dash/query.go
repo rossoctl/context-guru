@@ -1707,7 +1707,7 @@ var breakdownDims = map[string]string{
 	// economics. Same observe-mode guard as above and for the same reason.
 	"cache_bp_location": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
 		"'system=' || r.cache_bp_system || ' tools=' || r.cache_bp_tools || " +
-		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks || ' root=' || r.cache_bp_root END",
+		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks || ' top-level=' || r.cache_bp_root END",
 	// Which cache lifetime the request asked for. '' is a real third answer (no cache_control
 	// at all) and, on rows written before the column existed, also the default — which is why
 	// Overview reports a coverage count beside every TTL figure.

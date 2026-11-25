@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -307,5 +307,15 @@ func TestBobModelInfoPassThroughRecordsWindow(t *testing.T) {
 	}
 	if h.bobWindow("claude-opus-5") != 200_000 {
 		t.Errorf("window = %d", h.bobWindow("claude-opus-5"))
+	}
+}
+
+// A `.` element in the system-settings path still reads the file, as os.Open always did.
+func TestReadBobCompactAcceptsADotElementInTheSystemPath(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, filepath.Join(dir, "s.json"), `{"model":{"compressionThreshold":0.7}}`)
+	env := envOf(map[string]string{"BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH": dir + "/./s.json"})
+	if b := ReadBobCompact(env, ""); b.Threshold != "0.7" {
+		t.Errorf("got %+v", b)
 	}
 }

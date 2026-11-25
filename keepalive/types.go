@@ -81,6 +81,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/thread"
@@ -207,7 +208,7 @@ type Policy struct {
 // manager strategy with HeadTTL1h, whose band allows up to 3590 s) and is left alone: no 5-minute
 // Idle can be that long, because config and the override band refuse it.
 func (p Policy) ForOneHour() Policy {
-	if p.Idle >= 300*time.Second {
+	if p.Idle >= OneHourIdleFloor {
 		p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
 		return p
 	}
@@ -320,15 +321,11 @@ func Disabled() bool {
 	return v == "off" || v == "0" || v == "false"
 }
 
-// headTTLBytesPerToken is the factor the old head-TTL gate used (len(body)/4). It equals
-// config.HeadTTLBytesPerToken; keepalive does not import config.
-const headTTLBytesPerToken = 4
-
 // HeadTTLGateBytes is the head-TTL size gate in bytes of the request body: HeadTTLMinBytes, or the
 // deprecated HeadTTLMinTokens x 4 when only that is set. 0 means the upgrade is off.
 func (p Policy) HeadTTLGateBytes() int {
 	if p.HeadTTLMinBytes > 0 {
 		return p.HeadTTLMinBytes
 	}
-	return p.HeadTTLMinTokens * headTTLBytesPerToken
+	return p.HeadTTLMinTokens * config.HeadTTLBytesPerToken
 }

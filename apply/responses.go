@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/schema"
@@ -96,18 +97,15 @@ func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 }
 
 // responsesWire is wireGroups for the Responses wire: for each slot, the index of its input item, which is
-// the accountant's message position (proxy accParse). A string input is one position, index 0. The
+// the accountant's message position (accwire.Responses). A string input is one position, index 0. The
 // instructions slot is the system section, not an input item, and gets -1: no message operation may be
 // placed there.
 func responsesWire(slots []responseSlot) []int {
 	wire := make([]int, len(slots))
 	for i, s := range slots {
-		switch idx, ok := responseInputIndex(s.path); {
-		case ok:
+		if idx, ok := accwire.Responses.WireIndex(s.path); ok {
 			wire[i] = idx
-		case s.path == "input":
-			wire[i] = 0
-		default:
+		} else {
 			wire[i] = -1
 		}
 	}
@@ -537,7 +535,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// delta as agent compaction and report a cached prefix we cannot see. Keep
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
-	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	serverHeldHistory := schema.ServerHeldHistory(o.Body, false)
 	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
 	// lifetime below are one fact — this request's cache lifetime.
 	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
@@ -566,8 +564,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
 				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
-			if at := aliasSeen(st, alias, nowMs); at > prevAt {
-				prevAt = at
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 {
+				res.TouchAtMs, res.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
+			if seen.at > prevAt {
+				prevAt = seen.at
 			}
 			if prevAt > 0 && nowMs >= prevAt {
 				idleMs = nowMs - prevAt

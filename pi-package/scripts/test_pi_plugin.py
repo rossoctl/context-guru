@@ -271,6 +271,85 @@ class Controller(Sandbox):
         self.assertEqual((code, facts["reason"], facts["routing_written"]), (1, "health_check_failed", "false"))
         self.assertFalse(self.models.exists())
 
+    def clock(self):
+        """A fake monotonic clock: sleep moves it, and each healthy() call costs `cost` seconds."""
+        now = {"t": 0.0, "cost": 0.0, "up_at": None, "timeouts": []}
+
+        def healthy(port, timeout=1):
+            now["timeouts"].append(timeout)
+            now["t"] += min(now["cost"], timeout)
+            return now["up_at"] is not None and now["t"] >= now["up_at"]
+        patches = [mock.patch.object(pi_plugin.time, "monotonic", side_effect=lambda: now["t"]),
+                   mock.patch.object(pi_plugin.time, "sleep", side_effect=lambda s: now.__setitem__("t", now["t"] + s)),
+                   mock.patch.object(pi_plugin, "healthy", side_effect=healthy)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return now
+
+    def test_a_cold_start_waits_up_to_20_seconds(self):
+        # #1288: a freshly downloaded proxy can take more than 5 s to answer.
+        now = self.clock()
+        now["up_at"] = 15.0
+        self.assertTrue(pi_plugin.wait_healthy(8800, pi_plugin.COLD_START_SECONDS))
+        self.assertEqual(pi_plugin.COLD_START_SECONDS, 20)
+
+    def test_the_wait_stops_at_its_deadline_even_when_each_check_is_slow(self):
+        # A proxy that accepts the connection but does not answer: each check waits its own time limit.
+        now = self.clock()
+        now["cost"] = 1.0
+        self.assertFalse(pi_plugin.wait_healthy(8800, 20))
+        self.assertLessEqual(now["t"], 20.0 + 1e-9)
+        self.assertTrue(all(t <= 1 for t in now["timeouts"]))
+
+    def test_a_proxy_that_answers_at_once_adds_no_wait(self):
+        now = self.clock()
+        now["up_at"] = 0.0
+        self.assertTrue(pi_plugin.wait_healthy(8800, pi_plugin.COLD_START_SECONDS))
+        self.assertEqual(len(now["timeouts"]), 1)
+        self.assertEqual(now["t"], 0.0)
+
+    def test_restart_and_configure_stay_inside_the_extensions_60_second_limit(self):
+        # Review of #1344: lock wait + the start check + launchd's removal wait + the warm start wait.
+        budget = (pi_plugin.LOCK_WAIT_SECONDS + pi_plugin.START_CHECK_SECONDS + 5 + pi_plugin.WARM_START_SECONDS)
+        self.assertLess(budget, 60)
+
+    def test_setup_and_update_wait_for_a_cold_start_configure_does_not(self):
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", return_value=True) as start:
+            self.run_main("setup", "--i-consent-to-traffic-interception", "--cache-strategy", "none")
+            self.assertTrue(start.call_args.kwargs.get("cold_start"))
+            pi_plugin.write_record({**pi_plugin.read_record(), "preset": "off", "cache_strategy": "none"})
+            pi_plugin.write_proxy_config("off", "none")
+            with mock.patch.object(pi_plugin, "restart_lock", return_value=contextlib.nullcontext()):
+                self.run_main("configure", "--preset", "medium")
+            self.assertFalse(start.call_args.kwargs.get("cold_start", False))
+
+    def test_a_failed_first_setup_removes_the_service_it_started(self):
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "start_service", return_value=False), \
+                mock.patch.object(pi_plugin, "stop_service", return_value="stopped") as stop:
+            code, facts = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["reason"]), (1, "health_check_failed"))
+        stop.assert_called_once()  # nothing is left running with no record (#1288)
+        self.assertEqual(facts["service"], "stopped")
+
+    def test_a_failed_re_setup_keeps_the_service_of_the_earlier_install(self):
+        pi_plugin.write_record({"port": 8800, "binary": "/bin/true"})
+        with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
+                mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
+                mock.patch.object(pi_plugin, "healthy", return_value=False), \
+                mock.patch.object(pi_plugin, "port_free", return_value=True), \
+                mock.patch.object(pi_plugin, "start_service", return_value=False), \
+                mock.patch.object(pi_plugin, "stop_service", return_value="stopped") as stop:
+            code, facts = self.run_main("setup", "--i-consent-to-traffic-interception")
+        self.assertEqual((code, facts["reason"]), (1, "health_check_failed"))
+        stop.assert_not_called()
+
     def test_setup_routes_after_the_proxy_answers(self):
         with mock.patch.object(pi_plugin, "find_binary", return_value="/bin/true"), \
                 mock.patch.object(pi_plugin, "service_kind", return_value="launchd"), \
@@ -292,7 +371,7 @@ class Controller(Sandbox):
         The upstreams the service was started with are kept in self.started."""
         self.started = None
 
-        def start(executable, port, upstreams=None):
+        def start(executable, port, upstreams=None, cold_start=False):
             self.started = dict(upstreams or {})
             return True
 
@@ -416,6 +495,18 @@ class Restart(Sandbox):
         sleep = mock.patch.object(pi_plugin.time, "sleep")
         sleep.start()
         self.addCleanup(sleep.stop)
+        # The lock tests here need the real clock, so only wait_healthy gets a fake one: each sleep moves it.
+        real_wait = pi_plugin.wait_healthy
+
+        def fake_clock_wait(port, seconds=None):
+            now = [0.0]
+
+            def sleep(s):
+                now[0] += s
+            return real_wait(port, seconds, clock=lambda: now[0], sleep=sleep)
+        wait = mock.patch.object(pi_plugin, "wait_healthy", side_effect=fake_clock_wait)
+        wait.start()
+        self.addCleanup(wait.stop)
 
     def restart(self, kind, healthy):
         with mock.patch.object(pi_plugin, "service_kind", return_value=kind), \
@@ -885,8 +976,9 @@ class ConfigByName(Sandbox):
             asked.append(executable)
             return True
 
-        def start(executable, port, upstreams=None):
+        def start(executable, port, upstreams=None, cold_start=False):
             seen["config"] = pi_plugin.proxy_config().read_text()
+            seen["cold_start"] = cold_start
             return True
         with mock.patch.object(pi_plugin, "latest_release_tag", return_value="v0.7.1"), \
                 mock.patch.object(pi_plugin, "binary_version_text", return_value="0.7.0"), \
@@ -895,6 +987,7 @@ class ConfigByName(Sandbox):
                 mock.patch.object(pi_plugin, "start_service", side_effect=start):
             code, facts = self.run_main("update", "--install")
         self.assertEqual((code, facts["result"], facts["config"], facts["restart"]), (0, "updated", "rendered", "completed"))
+        self.assertTrue(seen["cold_start"])  # a new binary is a cold start: it gets 20 s (#1288)
         self.assertEqual(asked, [new])
         self.assertIn("preset: medium\n", seen["config"])
         self.assertIn("  strategy: auto\n", seen["config"])
@@ -930,7 +1023,7 @@ class ConfigByName(Sandbox):
         def setup_ran():
             pi_plugin.write_record({**pi_plugin.read_record(), "upstreams": both, "base_urls": {"openai": "x"}})
 
-        def start(executable, port, upstreams=None):
+        def start(executable, port, upstreams=None, cold_start=False):
             started["upstreams"] = dict(upstreams or {})
             return True
         code, facts = self.during_the_lock_wait(

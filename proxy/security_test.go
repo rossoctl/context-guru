@@ -180,6 +180,7 @@ func TestRegistrationInviteCode(t *testing.T) {
 func TestRegistrationRateLimitedPerIP(t *testing.T) {
 	t.Setenv(envRegisterMode, "open")
 	f := newHostedFixture(t, "up", "openai")
+	f.fixLimiterClocks(midMinute())
 	limited := false
 	for i := 0; i < registrationsPerMinute+3; i++ {
 		code := registerVia(t, f, "u"+strconv.Itoa(i)+"@ibm.com", "", "203.0.113.7:5555")
@@ -337,7 +338,7 @@ func TestEveryAuthenticatedRouteIsMetered(t *testing.T) {
 		{"bob catch-all", func() *httptest.ResponseRecorder { return get("/admin/v1/profile") }, http.StatusOK},
 	} {
 		// A fresh limiter per route, so each one is measured against its own budget of one.
-		f.h.limiter = NewLimiter(Limits{RequestsPerMinute: 1})
+		f.h.limiter = pinned(NewLimiter(Limits{RequestsPerMinute: 1}))
 		if w := tc.call(); w.Code != tc.ok {
 			t.Fatalf("%s: first request = %d, want %d: %s", tc.name, w.Code, tc.ok, w.Body)
 		}
@@ -589,6 +590,7 @@ func TestBindAgentKeyMapsRegistryErrorsToUserStatuses(t *testing.T) {
 // test is not a control.
 func TestFailedProxyAuthIsThrottledPerClientAddress(t *testing.T) {
 	f := newHostedFixtureNoKey(t, "up", "bob")
+	f.fixLimiterClocks(midMinute())
 	tn, _ := f.register(t, "a@ibm.com")
 	if err := f.reg.BindAgentKey(tn.ID, "bob-own-fake-key-for-tests"); err != nil {
 		t.Fatal(err)

@@ -11,7 +11,7 @@ const DEFAULT_PRESET = "off"
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
 // The plugin downloads this release unless CONTEXT_GURU_VERSION says otherwise. `strategies` exists
 // from MIN_VERSION. An older binary cannot give the plugin its strategy table, so there is no fallback.
-const PINNED_VERSION = "v0.7.6"
+const PINNED_VERSION = "v0.7.8"
 const MIN_VERSION = "v0.7.1"
 
 // The strategy table has one owner: the proxy. `context-guru-proxy strategies` prints it as JSON.
@@ -979,7 +979,7 @@ const OWN_FETCH = Symbol("context-guru fail-open fetch")
 
 // Sends to the proxy while it is usable, else to the upstream the proxy would use: the upstream plus
 // the path after /<dialect> (proxy/proxy.go). The direct request carries the caller's own method,
-// headers, body and signal; only the plugin's session header is removed.
+// headers, body and signal; only the plugin's session and request-kind headers are removed.
 function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
   const wrapped = async (input, init) => {
     // The AI SDK passes a string URL. A Request object, or a URL that is not this proxy's route, goes to
@@ -990,6 +990,7 @@ function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
     const direct = () => {
       const headers = new Headers(init?.headers)
       headers.delete("x-context-guru-session")
+      headers.delete("x-context-guru-request-kind")
       return inner(`${upstream.replace(/\/+$/, "")}${url.pathname.slice(prefix.length - 1)}${url.search}`, { ...init, headers })
     }
     if (existsSync(join(state, "disabled")) || proxyHealth.get(state)?.down) return direct()
@@ -1301,12 +1302,77 @@ async function disabledStart(state, log) {
   await log(uninstalledNote(state))
 }
 
+// Lifecycle signals (#1313). The proxy's keep-alive retires a held cache entry when the client says
+// the session ended or was compacted. OpenCode's own events are the source. A signal carries only a
+// session id, an event name and a reason from the proxy's closed set (proxy/clientsignal.go).
+// Fire and forget: a lost signal only means the keep-alive acts as it does without signals.
+//   OpenCode v1 (event hook, v1.18.29 packages/sdk/js/src/v2/gen/types.gen.ts) and v2 (ctx.event.subscribe,
+//   2.4.1 packages/client/src/promise/generated/types.ts):
+//     session.compacted (v1) / session.compaction.ended (v2) -> SessionStart, compact
+//     session.deleted                                         -> SessionEnd, other
+//     permission.asked, permission.v2.asked (v1 SDK type)     -> Notification, permission_prompt
+//     question.asked (v1 only; v2 has no such event)          -> Notification, elicitation_dialog
+const SIGNAL_EVENTS = {
+  "session.compacted": ["SessionStart", "compact"],
+  "session.compaction.ended": ["SessionStart", "compact"],
+  "session.deleted": ["SessionEnd", "other"],
+  "permission.asked": ["Notification", "permission_prompt"],
+  "permission.v2.asked": ["Notification", "permission_prompt"],
+  "question.asked": ["Notification", "elicitation_dialog"],
+}
+// v2 subscribe takes this list as a filter and ignores names the v2 host does not have (the v1 names).
+export const SIGNAL_EVENT_TYPES = Object.keys(SIGNAL_EVENTS)
+const SIGNAL_TIMEOUT_MS = 1000
+// Bound on the sessions a plugin remembers. The oldest id goes first. A dropped id only means no signal
+// for that session, which is what happens without signals.
+const MAX_SIGNAL_SESSIONS = 256
+
+function signalsOff(env = process.env) {
+  return ["off", "0", "false"].includes(String(env.CONTEXT_GURU_CLIENT_SIGNALS ?? "").trim().toLowerCase())
+}
+
+// One per plugin instance. It signals only for a session that already sent a request through the proxy
+// (noteSession), so a session on a provider this plugin did not route never signals.
+export function createSignaler(fetcher = globalThis.fetch) {
+  let port
+  const sessions = new Set()
+  return {
+    setPort(value) { port = value },
+    noteSession(sessionID) {
+      if (typeof sessionID !== "string" || !sessionID) return
+      sessions.delete(sessionID) // a session seen again counts as newest
+      sessions.add(sessionID)
+      if (sessions.size > MAX_SIGNAL_SESSIONS) sessions.delete(sessions.values().next().value)
+    },
+    handle(type, sessionID) {
+      const mapped = SIGNAL_EVENTS[type]
+      if (!mapped || !port || typeof sessionID !== "string" || !sessions.has(sessionID) || signalsOff()) return
+      const [event, kind] = mapped
+      if (event === "SessionEnd") sessions.delete(sessionID)
+      try {
+        void Promise.resolve(fetcher(`http://127.0.0.1:${port}/signal`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: sessionID, event, kind }),
+          signal: AbortSignal.timeout(SIGNAL_TIMEOUT_MS),
+        })).catch(() => undefined)
+      } catch {
+        // A signal must never break OpenCode.
+      }
+    },
+  }
+}
+
 async function ContextGuruPlugin({ directory, client }, options = {}) {
   const { preset, requestedStrategy } = effectiveSettings(stateDirectory(directory), options)
   // On by default: when the proxy is down, a request goes to the provider. `fallback: false` turns it off.
   const fallback = options.fallback !== false
   let routedIds = new Set()
+  const signaler = createSignaler()
   return {
+    event: async ({ event }) => {
+      signaler.handle(event?.type, event?.properties?.sessionID)
+    },
     config: async (config) => {
       const state = stateDirectory(directory)
       if (isDisabled(state)) {
@@ -1331,6 +1397,7 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
         const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client })
         routeProviders(config, proxy.port, own, fallback ? { state, client } : undefined)
         routedIds = new Set(routes.map((route) => route.id))
+        signaler.setPort(proxy.port)
       } catch (error) {
         await safeLog(client, "error", `proxy startup failed: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -1344,7 +1411,16 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
       } catch {
         // Recovery must never break the request it is trying to save.
       }
-      if (input.sessionID) output.headers["x-context-guru-session"] = input.sessionID
+      if (input.sessionID) {
+        output.headers["x-context-guru-session"] = input.sessionID
+        signaler.noteSession(input.sessionID)
+      }
+      // OpenCode 1 runs its summary request as the built-in "compaction" agent: it is named in
+      // packages/opencode/src/agent/agent.ts (name: "compaction") and fetched in
+      // packages/opencode/src/session/compaction.ts (agents.get("compaction")), v1.19.6. The proxy reads
+      // this mark, not the prompt. This keys on the agent NAME, so a user agent with the same name is
+      // marked too. The opposite miss (no mark) is covered by the prompt match in the proxy.
+      if (input.agent === "compaction") output.headers["x-context-guru-request-kind"] = "compaction"
     },
   }
 }
@@ -1363,6 +1439,7 @@ async function setupV2(ctx) {
   // v2 has no client.app.log; the documented channel is the console.
   const log = { app: { log: async ({ body }) => { (body.level === "error" ? console.error : console.log)(body.message) } } }
   let routedIds = []
+  const signaler = createSignaler()
   // Hooks are registered from inside the provider callback, as soon as the routed ids are known, and
   // each hook checks the routed set at request time. So the order of "callback runs" and
   // "transform() resolves" does not matter: a callback that runs late still gets its hooks, and
@@ -1379,13 +1456,35 @@ async function setupV2(ctx) {
       } catch {
         // Recovery must never break the request it is trying to save.
       }
-      if (event.sessionID) event.request.headers.set("x-context-guru-session", event.sessionID)
+      if (event.sessionID) {
+        event.request.headers.set("x-context-guru-session", event.sessionID)
+        signaler.noteSession(event.sessionID)
+      }
+      // The v2 hook names the request: SessionRequestKind is "primary" | "compaction" | "title" | "generate"
+      // (packages/plugin/src/promise/session.ts, v2.4.1).
+      if (event.kind === "compaction") event.request.headers.set("x-context-guru-request-kind", "compaction")
     }, { providerID: id }))
   }
 
   if (isDisabled(state)) {
     await disabledStart(state, (message) => console.log(`opencode-context-guru: ${message}`))
     return
+  }
+
+  // The v2 subscription is optional: a host without ctx.event only loses the signals.
+  try {
+    const events = ctx.event?.subscribe?.({ types: SIGNAL_EVENT_TYPES })
+    if (events) {
+      void (async () => {
+        try {
+          for await (const event of events) signaler.handle(event?.type, event?.data?.sessionID)
+        } catch {
+          // The stream ended or failed: no more signals, nothing else changes.
+        }
+      })()
+    }
+  } catch {
+    // Same: signals are optional.
   }
 
   try {
@@ -1430,6 +1529,7 @@ async function setupV2(ctx) {
         })
       }
       routedIds = targets.map((target) => target.id)
+      signaler.setPort(proxy.port)
       for (const id of routedIds) hookProvider(id)
     })
     // The transform callback may run after transform() resolves, so do not read routedIds here.

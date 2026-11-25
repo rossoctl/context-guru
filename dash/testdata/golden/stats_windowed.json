@@ -10,9 +10,10 @@
  "breakpoints": {
   "blocks": 0,
   "messages": 0,
-  "modal": "system=0, tools=0, messages=0, blocks=0",
+  "modal": "system=0, tools=0, messages=0, blocks=0, top-level=0",
   "modal_requests": 237,
   "requests": 0,
+  "root": 0,
   "system": 0,
   "tools": 0
  },

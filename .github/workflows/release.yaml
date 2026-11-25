@@ -87,6 +87,12 @@ jobs:
           make bob-release BOB_DIST=bob-dist
           cd bob-dist && shasum -a 256 context-guru-bob-*.zip | tee context-guru-bob-SHA256SUMS
 
+      # The Pi one-command installer: the Pi package as one tarball and its SHA-256, which
+      # pi-package/release/install-pi.sh downloads. Built before GoReleaser publishes, like the Bob zip,
+      # into pi-dist/, which --clean does not empty. The version is the tag (git describe), never a branch name.
+      - name: Build the Pi installer package
+        run: sh pi-package/release/package.sh "$(git describe --tags --always)" pi-dist
+
       - name: Release
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -105,6 +111,15 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" bob-dist/context-guru-bob-*.zip
           bob-dist/context-guru-bob-SHA256SUMS bob-plugin/release/install-bob.sh
 
+      - name: Attach the Pi installer to the release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # install-pi.sh keeps its name, so releases/latest/download/install-pi.sh always works.
+        run: >-
+          gh release upload "$GITHUB_REF_NAME" pi-dist/context-guru-pi-*.tar.gz
+          pi-dist/context-guru-pi-SHA256SUMS pi-package/release/install-pi.sh
+
       - name: Upload snapshot artifacts
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
@@ -116,4 +131,7 @@ jobs:
             bob-dist/context-guru-bob-*.zip
             bob-dist/context-guru-bob-SHA256SUMS
             bob-plugin/release/install-bob.sh
+            pi-dist/context-guru-pi-*.tar.gz
+            pi-dist/context-guru-pi-SHA256SUMS
+            pi-package/release/install-pi.sh
           retention-days: 7

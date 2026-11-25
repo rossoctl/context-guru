@@ -20,6 +20,7 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -34,6 +35,16 @@ func (c *accTap) all() []dash.Event {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]dash.Event(nil), c.evs...)
+}
+
+// waitAll waits until the tap holds n events and returns them. The writer counts a batch as
+// written before it calls Tap, so waitForRows alone can return before the tap has the event.
+func (c *accTap) waitAll(t *testing.T, n int) []dash.Event {
+	t.Helper()
+	testutil.WaitForState(t, fmt.Sprintf("%d events on the tap", n),
+		func() bool { return len(c.all()) >= n },
+		func() string { return fmt.Sprintf("%d events on the tap", len(c.all())) })
+	return c.all()
 }
 
 func accHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *accTap) {
@@ -136,7 +147,7 @@ func accRunUsageBody(t *testing.T, in, cr, cw int) ([]dash.Event, []byte) {
 	accPost(t, h, "sess-cf")
 	waitForRows(t, rec, 2)
 	b, _ := fwd.Load().([]byte)
-	return tap.all()[1:], b
+	return tap.waitAll(t, 2)[1:], b
 }
 
 // costOnlyOf prices a copy of a recorded event with Event.Price alone: its cost and no saving,
@@ -257,7 +268,7 @@ func TestNoDashboardBuildsNoTracker(t *testing.T) {
 // caller goes on (issue #918).
 func TestAccBeginRecoversAndDrops(t *testing.T) {
 	s := newSavingsTracker()
-	s.trackers = nil // BeginRequest on a nil Trackers panics
+	s.Trackers = nil // BeginRequest on a nil Trackers panics
 	c := &capture{savings: s}
 	c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s"}, benchBody())
 	c.accEnd(thread.Result{ID: thread.Primary}, benchBody(), nil)
@@ -278,7 +289,7 @@ func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
 	}))
 	defer up.Close()
 	h, _, _ := accHandler(t, up.URL)
-	h.savings.trackers = nil
+	h.savings.Trackers = nil
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
@@ -291,5 +302,23 @@ func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || got != 1 {
 		t.Errorf("status %d, upstream calls %d, want 200 and 1", resp.StatusCode, got)
+	}
+}
+
+// accEndNow copies the reason the Recorder gives into the capture, and leaves the field alone when there is none.
+func TestAccEndNowCopiesTheNoResultReason(t *testing.T) {
+	body := []byte(`{"model":"m","tools":[{"name":"b","defer_loading":true}],"messages":[{"role":"user","content":"hi"}]}`)
+	run := func(preDefer []byte) *capture {
+		c := &capture{savings: newSavingsTracker(), accPreDefer: preDefer, accClient: body}
+		c.accMeta = accountant.RequestMeta{RequestID: "r1", Session: "s"}
+		c.accReq = c.savings.begin(c.accMeta, body)
+		c.accEndNow(thread.Result{ID: thread.Primary}, body, nil)
+		return c
+	}
+	if c := run([]byte(`{}`)); c.accNoResult != accDeferralUnplaced {
+		t.Errorf("an unplaced deferral: accNoResult = %q, want %q", c.accNoResult, accDeferralUnplaced)
+	}
+	if c := run(nil); c.accNoResult != "" {
+		t.Errorf("no deferral: accNoResult = %q, want none", c.accNoResult)
 	}
 }

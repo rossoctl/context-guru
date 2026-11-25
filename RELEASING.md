@@ -36,7 +36,8 @@ The integrator and the reviewers can be people or AI agent sessions. The rules a
 2. **Sort the open PRs into features.** Group them by what a user gets, not by author or by date: for example "save-more commands", "status line", "test fixes". Show which PRs depend on which.
 3. **The release owner picks the groups.** The integrator does not add or drop an item without the owner.
 4. **Record what is out**, and why. An item that moves to the next release keeps its issue.
-5. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
+5. **Scan the host packages for new business logic.** Run the `refactor-scan` skill in its host-leak mode on the diff since the last tag. Open an issue for each leak. A leak does not block the release unless the owner says so.
+6. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
 
 ### Measurements before a release
 
@@ -141,11 +142,14 @@ A review without this block does not count toward the 2.
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
+- the last `local-tests` comment (from `scripts/dev/local-tests.sh`) names this head and says `result=pass`. A green heavy CI run on this head also counts. The heavy suites do not run on a PR;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
 - the head has a passing `CodeQL` check run from GitHub's code-scanning app, which the code-scanning rule reads. **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
 - every commit has a `Signed-off-by:` line.
 
 It does not check for a behavior change. Read the diff for that yourself.
+
+A PR owner sends a ready PR to the integrator as [CLAUDE.md](CLAUDE.md#working-on-a-task) says.
 
 ### When the head moves after an approval
 
@@ -209,6 +213,22 @@ This section is about a stacked PR. For a ready PR that waits only for a merge o
 
 ### Defects found on the way
 
+### Heavy CI on main
+
+Owner decision (David Amid, 2026-11-24): "we dont need a queue, we can risk main not be 100% if an owner of the PR did run it on the laptop." A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
+
+**Interim rule (2026-11-24, in force until the 3-tier test plan lands):** PR owners do not run the heavy suites on the laptop. The integrator runs them on `main` every few merges and before each cut. See [CLAUDE.md, Interim rule](CLAUDE.md#interim-rule-in-force-until-the-3-tier-test-plan-lands).
+
+The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh --wait` (it runs `gh workflow run ci.yaml --ref main`). Run it:
+- about every 5 merges;
+- after a big refactor or a merge that someone resolved by hand;
+- before a merge of a PR that waits on a fix of `main`;
+- always before a cut.
+
+**The heavy jobs run the timing tests.** The jobs `build-test` and `record` set `CG_TIMING_TESTS=1`. `build-test` also runs the OpenCode plugin's node tests with it. A timing test asserts a wall-clock bound or races a rate limit. It fails on a busy machine with nothing wrong in the code, so a PR owner does not run it by default. Owner decision (David Amid, 2026-11-24): "put the switch, but dont run them on local-tests.sh, only run them by integrator. if a PR contributes a new timing test then it runs the timing tests as well".
+
+A release is cut only on a commit with a green heavy run **and** a passing Part A (step 5). A failure on `main` is fixed forward: a new PR with the fix. Nobody reverts to make it green.
+
 A defect in `main` that the PR under review did not cause gets its own issue, its own branch from `main` and its own PR. It never rides on another PR's branch. The release owner decides whether it goes into the release.
 
 ## 4. Freeze
@@ -232,10 +252,11 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
 **Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. The owner's laptop is one such machine. A test machine is not required. It runs:
 - `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`, with and without `-tags cg_record`;
 - the check that the default build links no OpenTelemetry, gRPC or protobuf;
-- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 25m, plugin 30m, rest 20m, record 40m;
+- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 40m, plugin 30m, rest 20m, record 40m;
 - the `-tags cg_record` race tests, as CI runs them.
 
 Notes:
+- **Part A runs the timing tests.** `part-a.sh` sets `CG_TIMING_TESTS=1` unless the caller sets it, and its step `node-timing` runs the OpenCode node tests with it (node 22 is needed). `scripts/dev/local-tests.sh` sets it itself (see CLAUDE.md, "Timing tests").
 - **Part A skips `TestBobReleasePythonSuite` (in `race-rest`).** The owner put the Bob plugin on hold on 2026-11-18. The summary names the skip. Remove the skip in `scripts/release/part-a.sh` when the owner resumes the plugin ([#1221](https://github.com/rossoctl/context-guru/issues/1221)).
 - **The run takes about 70 to 90 minutes on a laptop, so run it detached.** Its summary file always ends with `DONE rc=<n>`, also on a failure. Wait for that line; a marker written only on success makes a failure look like a hang.
 - **Copy the code into an empty directory.** A copy tool that only adds files leaves a deleted test in place, and it keeps running.

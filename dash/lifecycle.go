@@ -2,6 +2,8 @@ package dash
 
 import (
 	"sync"
+
+	"github.com/rossoctl/context-guru/reqfacts"
 )
 
 // Lifecycle signals (issue #424, #427): the few per-request facts that no other column holds,
@@ -32,12 +34,9 @@ type LifecycleRow struct {
 	PingN          int    // >0 on a keep-alive ping row: its ordinal in the idle span
 }
 
-// LifecycleReq is what a request body says about the wait it ended; built off the writer
-// goroutine's closure (proxy/lifecycle.go), with no thread knowledge.
-type LifecycleReq struct {
-	ResultCount, ResultBytes int
-	ResultError              bool
-}
+// LifecycleReq is what a request body says about the wait it ended. It is built by
+// reqfacts.ScanLifecycle, with no thread knowledge.
+type LifecycleReq = reqfacts.Lifecycle
 
 const lifecycleSweepMs = 60_000
 

@@ -2,20 +2,14 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"math"
 	"net/http"
-	"strings"
-	"sync"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/record"
-	"github.com/rossoctl/context-guru/session"
 )
 
 // The request-path half of the session recorder. It has no heavy dependency, so it is in
@@ -84,39 +78,18 @@ func (h *Handler) recordFor(tn *Tenancy) bool {
 
 // newRecCtx resolves the recording context, or the zero value when recording is off.
 //
-// THE TRACE ID IS THE WHOLE POINT OF THIS FUNCTION, and it must not come from tr.Session.
-// In observe mode -- the mode a dual-recorded session runs in -- tr.Session is EMPTY, because
-// observe's byte-identity guarantee is structural: the enforced path never calls BodyOpts, so
-// it has no Trace and no session id (apply.go:1220-1236). Keying on it would produce one file
-// named for the empty string holding every session's spans.
-//
-// So: Claude Code's own UUID from metadata.user_id first. That is what claude-record names its
-// files by, which is what makes the two recorders joinable per session, and session.ExplicitID
-// documents it as stable across compaction where the content-hash fallback is not. The derived
-// key is the fallback, and it is PREFIXED so an analyst can see at a glance that a file is not
-// keyed on a real session. explicitSess is the chat handler's explicit id (explicitSessionOf).
-// So a Bob IDE file is keyed on its X-Task-Id, like the pipeline's session.
+// The trace id is record.TraceID: it must not come from tr.Session, which is empty in observe
+// mode. explicitSess is the chat handler's explicit id (explicitSessionOf), so a Bob IDE file is
+// keyed on its X-Task-Id, like the pipeline's session.
 func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Tenancy, explicitSess string) recCtx {
 	if !h.recordFor(tn) {
 		return recCtx{}
 	}
-	id := session.ExplicitID(gjson.GetBytes(orig, "metadata.user_id").String())
-	if id == "" {
-		// Second choice: the proxy's own resolver, computed off the PRISTINE body. Tenant-
-		// prefixed and possibly a content hash, so it can flip at compaction -- acceptable as
-		// a fallback, not as the primary.
-		if tn != nil {
-			id = apply.SessionIDFor(tn.ID, explicitSess, provider, orig)
-		}
-		if id != "" {
-			id = "cg-derived-" + id
-		}
+	var derived func() string
+	if tn != nil {
+		derived = func() string { return apply.SessionIDFor(tn.ID, explicitSess, provider, orig) }
 	}
-	if id == "" {
-		// Never empty: an empty id yields a hidden ".wire.jsonl" file, and merges every unkeyed
-		// session into one trace.
-		id = "cg-unkeyed-" + unkeyedSuffix()
-	}
+	id := record.TraceID(orig, derived)
 	// bytes.Clone, not an alias: the pipeline owns `body` from here and a future refactor that
 	// mutated the backing array in place would silently corrupt every recorded request. ~200 KB
 	// on an opt-in path buys the invariant outright.
@@ -125,25 +98,6 @@ func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Te
 		tenantID = tn.ID // recordFor guarantees tn != nil here
 	}
 	return recCtx{pristine: bytes.Clone(orig), traceID: id, tenantID: tenantID}
-}
-
-// unkeyedProcess is minted once so every unkeyed session in one process shares a file, rather
-// than scattering one file per request.
-var unkeyedProcess struct {
-	once sync.Once
-	hex  string
-}
-
-func unkeyedSuffix() string {
-	unkeyedProcess.once.Do(func() {
-		var b [4]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			unkeyedProcess.hex = "0"
-			return
-		}
-		unkeyedProcess.hex = hex.EncodeToString(b[:])
-	})
-	return unkeyedProcess.hex
 }
 
 // teeBody reads the tee out for the recorder.
@@ -158,25 +112,9 @@ func teeBody(t *recTee, isSSE bool, incomplete *string) (body []byte, sse bool) 
 	}
 	b, whole := t.bytes()
 	if !whole {
-		*incomplete = joinIncomplete(*incomplete, record.IncompleteTeeCap)
+		*incomplete = record.JoinIncomplete(*incomplete, record.IncompleteTeeCap)
 	}
 	return b, isSSE
-}
-
-// joinIncomplete composes reasons the way record.markIncomplete does -- first reason wins,
-// distinct reasons append comma-separated -- for the proxy-side string that is assembled
-// before a Turn exists.
-func joinIncomplete(existing, reason string) string {
-	if reason == record.IncompleteNone {
-		return existing
-	}
-	if existing == record.IncompleteNone {
-		return reason
-	}
-	if strings.Contains(existing, reason) {
-		return existing
-	}
-	return existing + "," + reason
 }
 
 // firstByteOrZero returns the observed time to first byte, or 0 when none was observed.

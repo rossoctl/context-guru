@@ -827,7 +827,7 @@ function stackedShare(host, rows, opts = {}) {
  * renderCacheDetail is the Usage tab's prompt-cache panel: the tier split, WHERE the
  * breakpoints sit, which TTL tier was asked for, and why the cache missed.
  *
- * Placement is the point, and it is the half that was missing. Four columns have recorded it
+ * Placement is the point, and it is the half that was missing. Five columns have recorded it
  * per request since the placement work landed, and they were readable one request at a time in
  * a drawer — so "which of my prompts protect the right prefix" could not be asked at all. The
  * provider caps a request at four breakpoints and its automatic caching consumes one slot, so
@@ -854,7 +854,7 @@ function renderCacheDetail(o) {
 
   // 2. Placement BY LOCATION. Aggregated for the first time.
   const bp = o.breakpoints || {};
-  const bpTotal = (bp.system || 0) + (bp.tools || 0) + (bp.messages || 0) + (bp.blocks || 0);
+  const bpTotal = (bp.system || 0) + (bp.tools || 0) + (bp.messages || 0) + (bp.blocks || 0) + (bp.root || 0);
   host.appendChild(el('h3', {}, 'Where the cache markers sit in your prompts'));
   if (!bpTotal) {
     emptyState(host.appendChild(el('div')), 'No breakpoints recorded in this window',
@@ -865,6 +865,7 @@ function renderCacheDetail(o) {
       { label: 'tools', value: bp.tools || 0, note: 'protects the tool declarations' },
       { label: 'messages', value: bp.messages || 0, note: 'protects transcript history' },
       { label: 'blocks', value: bp.blocks || 0, note: 'inside a single content block' },
+      { label: 'top-level', value: bp.root || 0, note: 'automatic caching: the provider marks the last block' },
     ], { testid: 'cache-bp-share', format: num,
       note: 'Counted over ' + num(bp.requests) + ' requests that carried at least one. '
         + 'The provider caps a request at FOUR breakpoints and its own automatic caching '

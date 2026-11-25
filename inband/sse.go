@@ -1,0 +1,859 @@
+package inband
+
+import (
+	"bufio"
+	"bytes"
+	"io"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+)
+
+// The expand continuation loop has to see a whole response to know whether the model called
+// ONLY the expand tool. For a streaming response that first meant buffering the entire
+// stream, and because the tool is advertised for any tools-bearing client, every response in
+// a session was buffered. Measured in production over ~37h:
+//
+//	sse_streamed 2,779 · sse_buffered 1,393        -> 33.4% of responses
+//
+// against a whole-pipeline cg_added_ms_avg of 154 ms. (The buffered set is also
+// later-in-session and longer-generating, so the raw ttfb gap between the two buckets is
+// mostly generation time, not buffering — what buffering definitely costs is holding a whole
+// response in memory and forbidding the client any early byte. Measured end to end on this
+// box, 23 of 30 real streaming responses were buffered before the peek and 0 of 30 after, on
+// byte-identical request bodies.)
+//
+// The upstream DOES stream, so that cost is real. An older comment here claimed the opposite
+// ("that gateway does not stream either, ttfb/wall 1.000 on 6 of 6 turns"); it was wrong, and
+// two independent re-measurements say so. With no proxy in the path, 22 of 22 responses came
+// back as text/event-stream with ttfb/wall 0.47-0.78 (p50 0.58-0.68). Timestamping every
+// event of 39 more turns on two models (aws/claude-sonnet-5 n=36, aws/claude-opus-4-7 n=3):
+// the first event lands at a MEDIAN of 0.49 of wall, range 0.23-0.81, and the deltas stream
+// across the rest. Individual
+// turns do read 1.000 when generation finishes fast enough to arrive in one burst, which is
+// the likeliest thing the original 6 turns caught.
+//
+// The first fix decided from the FRONT of the stream: buffer up to the first
+// content_block_start, and stream the rest unless the response OPENED with a call to the
+// expand tool. That removed the buffering — and removed the interception with it, because a
+// tool_use is almost never the first block. A turn opens with thinking or with text and calls
+// its tools after. Production, over 1,687 streamed responses:
+//
+//	sse_expand_after_stream 22 · sse_buffered 1
+//
+// so the loop missed ~22 calls for each one it caught, and each miss handed a client a
+// tool_use for a tool only this proxy implements — `No such tool available:
+// context_guru_expand`. (An earlier comment blamed extended thinking and claimed it was on
+// for 100% of captured traffic. It is on for about half of it, and it is not the cause: a
+// leading `text` block does exactly the same thing.)
+//
+// Peeking FURTHER — decide at the first tool_use block instead of the first block — was
+// measured and rejected. Both arms are derivable from one response's event timeline, so the
+// comparison is paired by construction with no proxy restart inside the arm: forwarding from
+// the first event against forwarding from the first tool_use block. Over 36 sonnet turns,
+// deciding at the first tool_use withholds 98.3% +/- 2.1% of the streaming span on
+// tool-calling turns, 99.0% +/- 1.6% with thinking on, and 100% on a turn with no tool_use at
+// all, where the decision point becomes message_stop; +3.2 s to +4.5 s of client wait per
+// response. Note that peek-further >= this is an identity of the construction, so the sign is
+// not evidence; the magnitudes and the prose-only case are. It would pay that on nearly every
+// response to intercept the ~1.3% that call expand. Rows in
+// docs/results/expand-splice-2026-08.
+//
+// So decide per BLOCK instead of per response, which is the upgrade path this file used to
+// name: forward events as they arrive, stop at the content_block_start that calls the expand
+// tool, run the continuation, and splice round 2's blocks into the same stream with their
+// indices remapped. The client keeps its stream — the reasoning and prose ahead of the tool
+// call are most of a turn's tokens and are already on the wire — and it never receives the
+// one block that is ours to answer.
+//
+// The honest limits:
+//
+//   - The model can batch expand alongside a tool only the CLIENT implements. The proxy
+//     cannot answer half a batch, so the withheld events are handed back as they arrived and
+//     the client does see the raw call. Counted (sse_expand_after_stream), never silent.
+//   - Same for a stream that will not reconstruct, a Continuation that will not build, and
+//     the round cap. (`got == 0` is NOT one of them: a call that resolves nothing continues
+//     with a placeholder tool_result, so that turn completes.)
+//   - A block the model generated AFTER the expand call is withheld with it and, on a
+//     successful continuation, never reaches the client — while the continuation DID send it
+//     back upstream, so the model believes it said something the client never saw. The
+//     realistic shape is thinking interleaved after a tool call.
+//   - Chat Completions streams are spliced only when the request declares our own tool search
+//     (#825, #879): there the dialect differs only in how a call is detected and renumbered
+//     (see chatProxyToolCallName and rewriteChat). Responses streams are spliced only when the
+//     request declares it too AND is stateless (#884, StatelessResponses): the client then
+//     never chains on a response id, so round 1's id can stand for the whole stream. Other
+//     non-Anthropic streams are not spliced.
+//   - The forwarded bytes are retained until the round ends, because Continuation needs the
+//     whole assistant turn — bounded by sseRetainMaxBytes. Measured on a 2.25 MB round, the
+//     largest a 128K-output model typically produces: the RETAINED bytes are what the old
+//     whole-response buffering held, and it now applies to every tools-bearing streaming
+//     response rather than only marker-bearing ones (33.4%), since injection stopped
+//     requiring markers. Allocation is the separate number, and the two must not be
+//     conflated. Reading events one at a time churns more than buffering the response whole
+//     did, and the ladder is measured recorder-free so the numbers are one unit: 9.60x the
+//     stream per-event, 8.01x once the event buffer is reused, 4.81x once the substring
+//     pre-filters skip the parse — against 3.16x for the whole-response buffering this
+//     replaced. So a halving, and still 1.52x more than what it replaced.
+//
+// Every one of those paths ends at the same place on the NEXT request, so they are closed
+// there instead: expand.RepairToolResults replaces the client's `No such tool available` with
+// the content the model asked for, so the error never reaches the model even when the block
+// could not be withheld.
+
+// SSESplicer joins the rounds of an expand continuation into ONE client event stream.
+//
+// Round 1's events are forwarded as they arrive and forwarding stops at the expand call.
+// The continuation's blocks are then written into the same open response, renumbered to
+// follow the blocks already sent and with their message_start dropped, because a client sees
+// one message per turn. If the loop cannot answer after all, handBack writes the withheld
+// events through the same transform — which, for a round whose blocks were not renumbered,
+// is byte-for-byte the stream as it arrived: exactly the old pass-through.
+type SSESplicer struct {
+	w           http.ResponseWriter
+	copyHeaders func(dst, src http.Header)
+	flush       http.Flusher
+	headers     bool        // response headers and status are on the wire
+	msgStart    bool        // the client has its message_start
+	ended       bool        // a message_stop has gone out: the client's turn is closed
+	blocks      int         // content blocks the client holds
+	base        int         // index offset applied to the round being forwarded
+	first       time.Time   // when the client got its first byte
+	thinking    bool        // the client holds a thinking block from an earlier round
+	remap       map[int]int // this round's block index -> the client's index; -1 = withheld
+
+	// Chat Completions (#879). The same splice in another chunk format: a call's name arrives
+	// on the first chunk of choices[].delta.tool_calls[] for its index, blocks counts the
+	// tool-call indexes the client holds, and a later round's chunks take round 1's id.
+	chat   bool
+	rounds int    // upstream rounds started
+	chatID string // the chunk id the client sees
+	said   bool   // the client holds content or reasoning text
+	cutOff bool   // the last round's read stopped mid-event or on a read error, not on a clean EOF
+
+	// OpenAI Responses (#884). A call's name arrives on response.output_item.added, blocks counts
+	// the output items the client holds, and the stream ends with ONE response.completed that
+	// lists every item the client saw. The splice is only used for a stateless request
+	// (store:false, no previous_response_id), so the client never chains on an id: it gets
+	// round 1's id on the whole stream.
+	resp      bool
+	respID    string           // the response id the client sees (round 1's)
+	items     map[int]string   // output_item.done items sent to the client, by client index
+	prevItems []string         // the items the client held when the current round began
+	evCount   int              // events written to the client, to number a later round's events
+	usage     map[string]int64 // input, output and total tokens summed over the rounds
+}
+
+// copyHeaders is the host's header copy for the first round's response headers. The host owns
+// it because it decides which headers may reach its client. Nil means "copy no headers".
+func NewSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
+	f, _ := w.(http.Flusher)
+	return &SSESplicer{w: w, flush: f, copyHeaders: copyHeaders}
+}
+
+// NewChatSSESplicer is the splicer for a Chat Completions stream.
+func NewChatSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
+	sp := NewSSESplicer(w, copyHeaders)
+	sp.chat = true
+	return sp
+}
+
+// NewResponsesSSESplicer is the splicer for an OpenAI Responses stream.
+func NewResponsesSSESplicer(w http.ResponseWriter, copyHeaders func(dst, src http.Header)) *SSESplicer {
+	sp := NewSSESplicer(w, copyHeaders)
+	sp.resp = true
+	sp.items = map[int]string{}
+	sp.usage = map[string]int64{}
+	return sp
+}
+
+// opened reports whether the client holds any of the model's answer: a content block on
+// Anthropic, text, reasoning or a tool call on Chat Completions. A round whose proxy call came
+// before any of it made the client wait for the whole continuation.
+func (sp *SSESplicer) Opened() bool {
+	if sp.chat {
+		return sp.said || sp.blocks > 0
+	}
+	return sp.blocks > 0
+}
+
+// round starts an upstream round. Its blocks are numbered from the end of what the client
+// already holds, and only the first round's headers and status are sent — by the time a
+// continuation answers, the response is long open.
+func (sp *SSESplicer) Round(resp *http.Response) {
+	sp.base = sp.blocks
+	sp.remap = nil
+	sp.rounds++
+	if sp.resp {
+		sp.prevItems = sp.heldItems()
+	}
+	if sp.headers {
+		return
+	}
+	if sp.copyHeaders != nil {
+		sp.copyHeaders(sp.w.Header(), resp.Header)
+	}
+	sp.w.WriteHeader(resp.StatusCode)
+	sp.headers = true
+}
+
+// sseRetainMaxBytes bounds what one round may retain. pass keeps the round's bytes because
+// Continuation needs the whole assistant turn, and the peek this replaced had its own bound
+// (an unreadable or oversized preamble bailed out at 64 KB) — removing it left one
+// pathological stream, a runaway generation or an upstream that never sends message_stop,
+// retained in full with nothing to stop it. This is that bound, restored at the only place it
+// can now live.
+//
+// The number is the first power of two above the largest round a model can legitimately
+// produce, so it never fires on real traffic and only ever catches pathology. Re-derive it if
+// it ever looks tight, because the input that moves is not ours: this proxy never caps
+// max_tokens, it only reads it, so the ceiling is whatever the UPSTREAM allows and it changes
+// when the upstream does. Measured against the gateway this deployment fronts, which accepts
+// max_tokens up to 128,000 (200,000 is refused with "the maximum allowed number of output
+// tokens"), and an event stream runs ~35 bytes per output
+// token — ~4 bytes of text plus ~123 bytes of framing per delta of ~4 tokens — so a
+// full-length response is ~4.5 MB, which is 3.4x under the bound. A stream that emitted ONE
+// token per delta would pay that framing per TOKEN instead, ~127 bytes, and reach ~16.3 MB:
+// a margin of about 3%, not headroom.
+//
+// That margin is deliberately not treated as a cliff, because overshoot is graceful by
+// construction. Past the bound the round is forwarded whole, the call is counted, and the
+// repair answers it next request — which is precisely the behaviour of every release before
+// the splice existed. A bound that occasionally gives up on the largest imaginable stream
+// costs one interception; no bound at all costs the process.
+//
+// Past it the round is forwarded whole and nothing is intercepted, so the feature degrades
+// rather than breaking: the client gets the model's own expand call, it is counted, and
+// expand.RepairToolResults answers it on the next request.
+const sseRetainMaxBytes = 16 << 20
+
+// pass forwards this round's events until the one that calls the expand tool, and returns
+// the round's whole event stream — forwarded and withheld together — because the
+// continuation loop reconstructs the assistant turn from all of it. withheld is the
+// deciding event and everything after it: the caller either answers it or hands it back.
+// called is WHICH proxy tools the round named, in order of first appearance and deduplicated:
+// the caller counts a leaked tool_use by tool (#174), which a bare `found` could not tell it.
+//
+// Past sseRetainMaxBytes it returns whole=nil: the turn can no longer be rebuilt, so nothing
+// can be intercepted, and everything is forwarded as it arrives. called still reports which
+// proxy tools the response named, because the client then receives those calls and the caller
+// has to count them.
+//
+// ONE REQUIRED NAME plus a variadic tail, rather than a bare `proxyTools ...string`. A bare variadic
+// compiles with NO names at all, and an empty withhold set silently disables this entire defence:
+// startsProxyToolCall can never match, called stays empty, cut stays -1, and every proxy-injected
+// tool_use streams straight to the client while the call site reads as though it were protected. The
+// two-argument signature this grew out of made that unrepresentable; this keeps that property while
+// still taking a set.
+func (sp *SSESplicer) Pass(body io.Reader, proxyTool string, moreProxyTools ...string) (whole, withheld []byte, called []string) {
+	proxyTools := append([]string{proxyTool}, moreProxyTools...)
+	br := bufio.NewReader(body)
+	// One event buffer for the round, not one per event: a 2.25 MB round is ~19,000 events.
+	// Worth doing and not where the money was — recorder-free, per-event churn is 9.60x the
+	// stream and reuse alone takes it to 8.01x; the substring pre-filters below are what reach
+	// 4.81x (8.54x incl_recorder). Every consumer of ev is done with it before the next read
+	// overwrites it.
+	var buf, ev bytes.Buffer
+	cut := -1     // where withholding began; -1 = forwarding
+	over := false // past the bound: the turn cannot be rebuilt
+	for {
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			sent := false
+			var name string
+			if sp.resp {
+				name = responsesProxyToolCallName(e, proxyTools)
+				if bytes.Contains(e, []byte("response.completed")) {
+					sp.addUsage(e)
+				}
+			} else if sp.chat {
+				name = chatProxyToolCallName(e, proxyTools)
+			} else {
+				name = proxyToolCallName(e, proxyTools)
+			}
+			if name != "" {
+				if !slices.Contains(called, name) {
+					called = append(called, name)
+				}
+				if !over && cut < 0 {
+					cut = buf.Len()
+				}
+			}
+			if !over {
+				buf.Write(e)
+				if buf.Len() > sseRetainMaxBytes {
+					// Nothing is dropped: whatever was already withheld goes to the client
+					// now, and the rest of the stream follows it event by event. The flush
+					// includes THIS event, so it must not also be forwarded below.
+					if cut >= 0 {
+						sp.HandBack(buf.Bytes()[cut:])
+						cut, sent = -1, true
+					}
+					over, buf = true, bytes.Buffer{}
+				}
+			}
+			if cut < 0 && !sent {
+				sp.forward(e)
+			}
+		}
+		if err != nil {
+			// A clean EOF comes between events. A partial event or another read error means the
+			// upstream cut the round off, which terminateChat must tell from a clean close.
+			sp.cutOff = len(e) > 0 || err != io.EOF
+			if over {
+				return nil, nil, called
+			}
+			whole = buf.Bytes()
+			if cut < 0 {
+				return whole, nil, called
+			}
+			return whole, whole[cut:], called
+		}
+	}
+}
+
+// handBack sends events the splice withheld — the fail-open path, and the one that hands a
+// client the model's own expand call when nothing else can be done with it.
+func (sp *SSESplicer) HandBack(withheld []byte) {
+	br := bufio.NewReader(bytes.NewReader(withheld))
+	var ev bytes.Buffer
+	for {
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			sp.forward(e)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// forward sends one complete event, transformed as the splice requires.
+func (sp *SSESplicer) forward(ev []byte) {
+	ev, ok := sp.rewrite(ev)
+	if !ok {
+		return
+	}
+	sp.evCount++
+	if sp.first.IsZero() {
+		sp.first = time.Now()
+	}
+	sp.w.Write(ev)
+	if sp.flush != nil {
+		sp.flush.Flush()
+	}
+}
+
+// rewrite drops a second message_start and shifts block indices past the blocks the client
+// already has. With no offset to apply it returns the event untouched — byte-for-byte,
+// which is what keeps a response that never calls expand an exact pass-through.
+func (sp *SSESplicer) rewrite(ev []byte) ([]byte, bool) {
+	if sp.resp {
+		return sp.rewriteResponses(ev)
+	}
+	if sp.chat {
+		return sp.rewriteChat(ev), true
+	}
+	// With no offset to apply, the only events that can change what the client holds are a
+	// message_start (de-duplicated) and a content_block_start (counted) — one per block, so
+	// counting starts alone is exact. Every delta of a long turn skips the parse below, which
+	// is not a micro-optimisation: a 2.25 MB round is ~18,750 events and building each
+	// event's payload string cost 1.6x the stream, twice over.
+	if sp.base == 0 && !bytes.Contains(ev, []byte("_start")) && !bytes.Contains(ev, []byte("message_stop")) {
+		return ev, true
+	}
+	payload := sseEventPayload(ev)
+	if payload == "" {
+		return ev, true
+	}
+	p := gjson.Parse(payload)
+	switch p.Get("type").String() {
+	case "message_start":
+		if sp.msgStart {
+			return nil, false
+		}
+		sp.msgStart = true
+	case "message_stop":
+		sp.ended = true
+	case "content_block_start", "content_block_delta", "content_block_stop":
+		local := int(p.Get("index").Int())
+		if sp.base > 0 && sp.thinking {
+			// The API refuses an assistant turn that carries thinking blocks from two
+			// responses ("cannot be modified"), and the client now holds round 0's. So a
+			// continuation's own thinking never reaches it.
+			if p.Get("type").String() == "content_block_start" {
+				if sp.remap == nil {
+					sp.remap = map[int]int{}
+				}
+				if t := p.Get("content_block.type").String(); t == "thinking" || t == "redacted_thinking" {
+					sp.remap[local] = -1
+				} else {
+					sp.remap[local] = sp.blocks
+				}
+			}
+			c, ok := sp.remap[local]
+			if !ok {
+				return ev, true // fail open: an index we never saw start goes as it came
+			}
+			if c < 0 {
+				return nil, false
+			}
+			if c >= sp.blocks {
+				sp.blocks = c + 1
+			}
+			np, err := sjson.Set(payload, "index", c)
+			if err != nil {
+				break
+			}
+			return bytes.Replace(ev, []byte(payload), []byte(np), 1), true
+		}
+		if p.Get("type").String() == "content_block_start" {
+			if t := p.Get("content_block.type").String(); t == "thinking" || t == "redacted_thinking" {
+				sp.thinking = true
+			}
+		}
+		idx := local + sp.base
+		if idx >= sp.blocks {
+			sp.blocks = idx + 1
+		}
+		if sp.base == 0 {
+			break
+		}
+		np, err := sjson.Set(payload, "index", idx)
+		if err != nil {
+			break // fail open: an event we cannot renumber goes as it came
+		}
+		ev = bytes.Replace(ev, []byte(payload), []byte(np), 1)
+	}
+	return ev, true
+}
+
+// readSSEEvent reads one complete Server-Sent Event into ev: every line up to and including
+// the blank line that terminates it, verbatim, framing included. On a read error it returns
+// whatever it holds — a partial final event still has to be forwarded, or the stream loses
+// its tail. ev is the caller's, reset here and valid until the next call.
+func readSSEEvent(br *bufio.Reader, ev *bytes.Buffer) ([]byte, error) {
+	ev.Reset()
+	for {
+		line, err := br.ReadBytes('\n')
+		ev.Write(line)
+		if err != nil {
+			return ev.Bytes(), err
+		}
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			return ev.Bytes(), nil
+		}
+	}
+}
+
+// sseEventPayload returns the JSON carried by an event's data: line, or "" if it has none.
+func sseEventPayload(ev []byte) string {
+	for _, line := range bytes.Split(ev, []byte("\n")) {
+		i := bytes.IndexByte(line, ':')
+		if i < 0 || !bytes.Equal(bytes.TrimSpace(line[:i]), []byte("data")) {
+			continue
+		}
+		p := string(bytes.TrimSpace(line[i+1:]))
+		if p == "[DONE]" {
+			return ""
+		}
+		return p
+	}
+	return ""
+}
+
+// startsProxyToolCall reports whether this event OPENS a tool_use block for ANY tool the proxy
+// injected — the one class of block a client must never receive, because only this proxy implements
+// those tools. A set rather than one name because the proxy now advertises two — expand and the
+// adjudication tool — and withholding only the first let the second stream straight to the client,
+// which is the #103 class of defect: a client cannot execute a tool it never declared, so it answers
+// "not found" and the agent loses a turn. Unlike expand, an agent call to the adjudication tool is
+// never useful, so there is nothing on the other side of the trade.
+func startsProxyToolCall(ev []byte, proxyTools []string) bool {
+	return proxyToolCallName(ev, proxyTools) != ""
+}
+
+// proxyToolCallName is startsProxyToolCall's answering half: WHICH injected tool the block calls,
+// or "". pass needs the name, not only the fact, so it can hand the caller the attribution a
+// leaked tool_use is counted by (#174) — a boolean found collapsed the two tools into one bucket.
+func proxyToolCallName(ev []byte, proxyTools []string) string {
+	if !bytes.Contains(ev, []byte("content_block_start")) {
+		return "" // cheap reject: the parse below is the expensive half
+	}
+	p := gjson.Parse(sseEventPayload(ev))
+	if p.Get("type").String() != "content_block_start" {
+		return ""
+	}
+	cb := p.Get("content_block")
+	if cb.Get("type").String() != "tool_use" {
+		return ""
+	}
+	name := cb.Get("name").String()
+	for _, t := range proxyTools {
+		if t != "" && name == t {
+			return t
+		}
+	}
+	return ""
+}
+
+// terminate closes the client's turn if nothing has. A continuation round is not obliged to
+// carry a message_stop — it can come back empty, truncated, or in another dialect — and the
+// round whose terminator the splice withheld is the only other place one exists. Without
+// this the client is left with a half-open message, which is worse than the leaked tool_use
+// it replaced: on main those rounds cannot arise at all.
+func (sp *SSESplicer) Terminate(withheld []byte) {
+	if sp.ended || !sp.msgStart {
+		return
+	}
+	if sp.chat {
+		sp.terminateChat(withheld)
+		return
+	}
+	if sp.resp {
+		sp.terminateResponses()
+		return
+	}
+	// Only the CLOSING events, never the content: the withheld bytes begin with the expand
+	// call, which is the one block the client must not receive. So this closes the message
+	// with the model's own message_delta and message_stop and invents nothing.
+	br := bufio.NewReader(bytes.NewReader(withheld))
+	var ev bytes.Buffer
+	for {
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			switch gjson.Parse(sseEventPayload(e)).Get("type").String() {
+			case "message_delta", "message_stop":
+				sp.forward(e)
+			}
+		}
+		if err != nil {
+			if !sp.ended {
+				// The withheld round had no closer either — it was truncated too, so there
+				// are no closing events anywhere to forward. The turn DID fail, and an
+				// `error` event is how this protocol says so: the client gets a diagnosable
+				// end instead of a socket that stops mid-message. Not a synthetic
+				// message_stop — no stop_reason in the enum means "truncated", and end_turn
+				// would tell the client a broken turn finished normally.
+				sp.forward([]byte("event: error\ndata: {\"type\":\"error\",\"error\":" +
+					"{\"type\":\"api_error\",\"message\":\"upstream ended the turn " +
+					"without a terminator\"}}\n\n"))
+				sp.ended = true
+			}
+			return
+		}
+	}
+}
+
+// chatProxyToolCallName is proxyToolCallName for a Chat Completions chunk: the injected tool a
+// call STARTED in this chunk names, or "". Only a call's first chunk carries function.name, so
+// the chunks after it (arguments only) never match, and the cut lands on the first.
+func chatProxyToolCallName(ev []byte, proxyTools []string) string {
+	if !bytes.Contains(ev, []byte("tool_calls")) {
+		return "" // cheap reject: text and reasoning chunks skip the parse
+	}
+	found := ""
+	gjson.Get(sseEventPayload(ev), "choices").ForEach(func(_, ch gjson.Result) bool {
+		ch.Get("delta.tool_calls").ForEach(func(_, tc gjson.Result) bool {
+			name := tc.Get("function.name").String()
+			for _, t := range proxyTools {
+				if t != "" && name == t {
+					found = t
+					return false
+				}
+			}
+			return true
+		})
+		return found == ""
+	})
+	return found
+}
+
+// isChatDone reports whether an event is the stream's `data: [DONE]` terminator.
+func isChatDone(ev []byte) bool {
+	for _, line := range bytes.Split(ev, []byte("\n")) {
+		i := bytes.IndexByte(line, ':')
+		if i >= 0 && bytes.Equal(bytes.TrimSpace(line[:i]), []byte("data")) {
+			return bytes.Equal(bytes.TrimSpace(line[i+1:]), []byte("[DONE]"))
+		}
+	}
+	return false
+}
+
+// rewriteChat is rewrite for a Chat Completions chunk. Round 1's chunks go as they came,
+// byte-for-byte; the splicer only notes the id, the tool-call indexes and whether text has gone
+// out. A later round's chunks take round 1's id and have their tool-call indexes moved past the
+// ones the client holds, so the client reads one answer. A chunk it cannot parse goes as it came.
+func (sp *SSESplicer) rewriteChat(ev []byte) []byte {
+	sp.msgStart = true
+	if isChatDone(ev) {
+		sp.ended = true
+		return ev
+	}
+	// A finish_reason closes the answer too: a gateway that omits [DONE] must not get an error
+	// chunk appended to a complete stream (terminateChat). Every chunk carries the field, null
+	// until the last, so only a string value counts.
+	if bytes.Contains(ev, []byte(`"finish_reason":"`)) || bytes.Contains(ev, []byte(`"finish_reason": "`)) {
+		sp.ended = true
+	}
+	later := sp.rounds > 1
+	calls := bytes.Contains(ev, []byte("tool_calls"))
+	if !later && !calls && sp.chatID != "" && (sp.said || !bytes.Contains(ev, []byte("content"))) {
+		return ev // the common delta: nothing to note, nothing to change
+	}
+	payload := sseEventPayload(ev)
+	if payload == "" || !gjson.Valid(payload) {
+		return ev
+	}
+	p := gjson.Parse(payload)
+	np := payload
+	if id := p.Get("id"); id.Exists() {
+		if sp.chatID == "" {
+			sp.chatID = id.String()
+		} else if later && id.String() != sp.chatID {
+			np, _ = sjson.Set(np, "id", sp.chatID)
+		}
+	}
+	p.Get("choices").ForEach(func(ci, ch gjson.Result) bool {
+		d := ch.Get("delta")
+		if d.Get("content").String() != "" || d.Get("reasoning_content").String() != "" || d.Get("reasoning").String() != "" {
+			sp.said = true
+		}
+		d.Get("tool_calls").ForEach(func(ti, tc gjson.Result) bool {
+			idx := int(tc.Get("index").Int()) + sp.base
+			if idx >= sp.blocks {
+				sp.blocks = idx + 1
+			}
+			if later && sp.base > 0 {
+				path := "choices." + ci.String() + ".delta.tool_calls." + ti.String() + ".index"
+				if out, err := sjson.Set(np, path, idx); err == nil {
+					np = out
+				}
+			}
+			return true
+		})
+		return true
+	})
+	if np == payload {
+		return ev
+	}
+	return bytes.Replace(ev, []byte(payload), []byte(np), 1)
+}
+
+// terminateChat is terminate for Chat Completions: it forwards the withheld round's closing
+// chunks (the finish_reason chunk, the usage chunk and [DONE]) and never a chunk that carries
+// the withheld call or text. With no [DONE] anywhere, it ends the stream with an error chunk.
+func (sp *SSESplicer) terminateChat(withheld []byte) {
+	if withheld == nil && sp.rounds <= 1 && !sp.cutOff {
+		// One round, nothing withheld, and the upstream closed cleanly: a gateway that ends a
+		// complete answer without [DONE]. The client got the upstream's bytes, exactly.
+		return
+	}
+	br := bufio.NewReader(bytes.NewReader(withheld))
+	var ev bytes.Buffer
+	for {
+		e, err := readSSEEvent(br, &ev)
+		if len(e) > 0 {
+			if isChatDone(e) {
+				sp.forward(e)
+			} else if p := sseEventPayload(e); p != "" && gjson.Valid(p) {
+				closing := true
+				gjson.Get(p, "choices").ForEach(func(_, ch gjson.Result) bool {
+					d := ch.Get("delta")
+					closing = !d.Get("tool_calls").Exists() && d.Get("content").String() == "" &&
+						d.Get("reasoning_content").String() == "" && d.Get("reasoning").String() == ""
+					return closing
+				})
+				if closing {
+					sp.forward(e)
+				}
+			}
+		}
+		if err != nil {
+			if !sp.ended {
+				sp.forward([]byte("data: {\"error\":{\"type\":\"api_error\",\"message\":" +
+					"\"upstream ended the turn without a terminator\"}}\n\n"))
+				sp.ended = true
+			}
+			return
+		}
+	}
+}
+
+// responsesProxyToolCallName is proxyToolCallName for a Responses event: the injected tool a
+// function_call item STARTS as, or "". The name is on response.output_item.added, so the cut
+// lands on the event that opens the call.
+func responsesProxyToolCallName(ev []byte, proxyTools []string) string {
+	if !bytes.Contains(ev, []byte("output_item.added")) {
+		return "" // cheap reject: text deltas skip the parse
+	}
+	p := gjson.Parse(sseEventPayload(ev))
+	if p.Get("type").String() != "response.output_item.added" || p.Get("item.type").String() != "function_call" {
+		return ""
+	}
+	name := p.Get("item.name").String()
+	for _, t := range proxyTools {
+		if t != "" && name == t {
+			return t
+		}
+	}
+	return ""
+}
+
+// heldItems lists the output items the client holds, in order.
+func (sp *SSESplicer) heldItems() []string {
+	idx := make([]int, 0, len(sp.items))
+	for i := range sp.items {
+		idx = append(idx, i)
+	}
+	slices.Sort(idx)
+	out := make([]string, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, sp.items[i])
+	}
+	return out
+}
+
+// addUsage adds a response.completed event's token counts to the running sum, so the merged
+// terminal event reports every round.
+func (sp *SSESplicer) addUsage(ev []byte) {
+	p := gjson.Parse(sseEventPayload(ev))
+	if p.Get("type").String() != "response.completed" {
+		return
+	}
+	u := p.Get("response.usage")
+	for _, k := range []string{"input_tokens", "output_tokens", "total_tokens"} {
+		sp.usage[k] += u.Get(k).Int()
+	}
+	// The nested counts (cached_tokens, reasoning_tokens, ...) add up too.
+	for _, d := range []string{"input_tokens_details", "output_tokens_details"} {
+		u.Get(d).ForEach(func(k, v gjson.Result) bool {
+			if v.Type == gjson.Number {
+				sp.usage[d+"."+k.String()] += v.Int()
+			}
+			return true
+		})
+	}
+}
+
+// rewriteResponses is rewrite for a Responses event. Round 1's events go as they came,
+// byte-for-byte; the splicer only notes the id, the items and the end. A later round loses its
+// response.created / in_progress, takes round 1's id, has output_index moved past the items the
+// client holds and sequence_number continued, and its response.completed is replaced by one that
+// lists every item the client saw. An event it cannot parse goes as it came.
+func (sp *SSESplicer) rewriteResponses(ev []byte) ([]byte, bool) {
+	if isChatDone(ev) {
+		sp.ended = true // a gateway that ends the stream with [DONE]: no response.failed after it
+		return ev, true
+	}
+	later := sp.rounds > 1
+	if !later && !bytes.Contains(ev, []byte("response.created")) && !bytes.Contains(ev, []byte("output_item.")) &&
+		!bytes.Contains(ev, []byte("response.completed")) && !bytes.Contains(ev, []byte("response.failed")) &&
+		!bytes.Contains(ev, []byte("response.incomplete")) {
+		return ev, true // the common delta: nothing to note, nothing to change
+	}
+	payload := sseEventPayload(ev)
+	if payload == "" || !gjson.Valid(payload) {
+		return ev, true
+	}
+	p := gjson.Parse(payload)
+	typ := p.Get("type").String()
+	if later && (typ == "response.created" || typ == "response.in_progress" || typ == "response.queued") {
+		return nil, false
+	}
+	np := payload
+	set := func(path string, v any) {
+		if out, err := sjson.Set(np, path, v); err == nil {
+			np = out
+		}
+	}
+	switch typ {
+	case "response.created":
+		sp.msgStart = true
+		if sp.respID == "" {
+			sp.respID = p.Get("response.id").String()
+		}
+	case "response.completed", "response.failed", "response.incomplete":
+		sp.ended = true
+	}
+	if later {
+		if p.Get("sequence_number").Exists() {
+			set("sequence_number", sp.evCount)
+		}
+		if oi := p.Get("output_index"); oi.Exists() {
+			set("output_index", int(oi.Int())+sp.base)
+		}
+		if p.Get("response.id").Exists() && sp.respID != "" {
+			set("response.id", sp.respID)
+		}
+	}
+	idx := int(p.Get("output_index").Int()) + sp.base
+	switch typ {
+	case "response.output_item.added":
+		if idx >= sp.blocks {
+			sp.blocks = idx + 1
+		}
+	case "response.output_item.done":
+		if idx >= sp.blocks {
+			sp.blocks = idx + 1
+		}
+		if it := p.Get("item"); it.Exists() {
+			sp.items[idx] = it.Raw
+		}
+	case "response.completed":
+		if later {
+			// ONE terminal event: the items the client holds from the earlier rounds, then
+			// this round's own, and the tokens of every round.
+			out := append([]string{}, sp.prevItems...)
+			p.Get("response.output").ForEach(func(_, it gjson.Result) bool {
+				out = append(out, it.Raw)
+				return true
+			})
+			if o, err := sjson.SetRaw(np, "response.output", "["+strings.Join(out, ",")+"]"); err == nil {
+				np = o
+			}
+			// Written even when this round's own terminal event has no usage: the sum still
+			// holds every earlier round.
+			for k, v := range sp.usage {
+				set("response.usage."+k, v)
+			}
+		}
+	}
+	if np == payload {
+		return ev, true
+	}
+	return bytes.Replace(ev, []byte(payload), []byte(np), 1), true
+}
+
+// terminateResponses is terminate for Responses. The withheld round holds the call and the
+// terminal event, and the terminal event lists the call, so none of it is forwarded (hence no
+// withheld argument): a turn
+// that ends without a terminator of its own gets a response.failed, as an Anthropic one gets an
+// error event. sp.ended is checked by terminate, so this runs only when none went out.
+func (sp *SSESplicer) terminateResponses() {
+	// A Responses stream always ends with a terminal event, so a missing one is a failed turn
+	// even when the upstream closed cleanly.
+	sp.forward([]byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":" +
+		"{\"id\":" + strconv.Quote(sp.respID) + ",\"object\":\"response\",\"status\":\"failed\"," +
+		"\"error\":{\"code\":\"server_error\",\"message\":\"upstream ended the turn without a terminator\"}}}\n\n"))
+	sp.ended = true
+}
+
+// StatelessResponses reports whether a Responses request never relies on the server keeping
+// the response: store is false and there is no previous_response_id. Codex over HTTP sends
+// exactly this. A missing store field means the API default, which is true.
+func StatelessResponses(body []byte) bool {
+	st := gjson.GetBytes(body, "store")
+	return st.Exists() && st.Type == gjson.False && !gjson.GetBytes(body, "previous_response_id").Exists()
+}
+
+// FirstByte is when the client got its first byte (zero before any).
+func (sp *SSESplicer) FirstByte() time.Time { return sp.first }
+
+// Blocks is the number of content blocks the client holds.
+func (sp *SSESplicer) Blocks() int { return sp.blocks }

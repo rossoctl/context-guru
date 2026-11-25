@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch"
 )
@@ -145,8 +146,9 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	// 1-hour ping, so any stale touch (an hour old, or on a route switched off) ends here, as at a real request
 	// (#1258). A refused or failed-early press never reaches this line.
 	k.mu.Lock()
-	delete(k.oneHourTouches, id)
+	delete(k.oneHourThreads, id)
 	k.mu.Unlock()
+	job.sentOneHour = apply.AllBreakpointsAskExtendedTTL(body)
 	start := k.now()
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	resp, err := k.o.Dispatcher.Do(ctx, dispatch.Request{Purpose: dispatch.PurposeKeepAlivePing,
@@ -183,7 +185,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		// A ping that read the entry refreshed it; one that wrote re-created it and started a fresh
 		// lifetime (#580). The same rule record1 applies, and the same two clocks it moves. The
 		// switch above returns on 429, 5xx, 4xx and on no usage, so in practice only a 2xx reaches here.
-		job.touch(job.provider, start.UnixMilli())
+		job.touch(job.provider, start.UnixMilli(), job.sentOneHour, oneHourRoute(job.provider, endpoint, job.route, job.model))
 		k.mu.Lock()
 		e.refreshedAt = start
 		// An automatic entry's schedule restarts from a ping that read the cache. A write does not
@@ -246,4 +248,41 @@ func (k *Keeper) unclaimManual(id string, at time.Time) {
 		delete(k.manualAt, id)
 	}
 	k.mu.Unlock()
+}
+
+// ManualPingMinGap is the least time between two manual pings of the same thread.
+const ManualPingMinGap = 30 * time.Second
+
+// Why a manual ping is refused before the keeper is asked, from the host's view of the thread's cache.
+const (
+	ManualBlockAtOneHour = "at one hour"
+	ManualBlockCold      = "cold"
+)
+
+// ManualPingBlock is the cold gate of the Ping button. It reports why a press must not be sent, or ""
+// when it may be.
+//
+// A live free 1-hour ping comes first: the billed tier is 5 minutes, so the cold gate would give a
+// press 5 to 60 minutes after the ping the wrong reason ("cold") for an entry that is still warm
+// (#1259), and a press would move the entry back to 5 minutes. Then the cold gate: the entry is cold
+// when its last touch (lastTouch) plus the TTL it was written at has passed. oneHourLive is
+// Keeper.OneHourTouchLive.
+func ManualPingBlock(oneHourLive bool, lastTouch time.Time, ttl time.Duration, now time.Time) string {
+	if oneHourLive {
+		return ManualBlockAtOneHour
+	}
+	if !now.Before(lastTouch.Add(ttl)) {
+		return ManualBlockCold
+	}
+	return ""
+}
+
+// ManualSavedUSD is the money one manual ping kept: the rewrite it avoided less its own cost. A ping
+// that read nothing (AvoidedUSD is 0), or cost more than the write, kept nothing warm, so it saved 0.
+func ManualSavedUSD(rewriteUSD float64, res ManualResult) float64 {
+	saved := rewriteUSD - res.CostUSD
+	if saved < 0 || res.AvoidedUSD == 0 {
+		return 0
+	}
+	return saved
 }

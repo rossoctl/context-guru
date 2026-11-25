@@ -32,7 +32,7 @@ Line numbers point at the code on `main` when this page was written.
 
 | What | Local | Hosted | Why | Data stored |
 |---|---|---|---|---|
-| Start preset for new accounts ([tenant/tenant.go:102](https://github.com/rossoctl/context-guru/blob/main/tenant/tenant.go#L102)) | The preset the user chose | `house` | "on a SHARED box ... it makes no cheap-model calls, so it adds no upstream spend ... and costs near-zero added latency" | None |
+| Start preset for new accounts ([tenant/tenant.go:102](https://github.com/rossoctl/context-guru/blob/main/tenant/tenant.go#L102)) | The preset the user chose | `conservative` | "on a SHARED box ... it makes no cheap-model calls, so it adds no upstream spend ... and costs near-zero added latency" | None |
 | Keep-alive strategies ([keepalivestrategy.go:44](https://github.com/rossoctl/context-guru/blob/main/proxy/keepalivestrategy.go#L44)) | Not read | Read from the account registry | Each account has its own strategies | Strategy rows |
 | Manual-ping ceiling ([keepalivectl.go:180](https://github.com/rossoctl/context-guru/blob/main/proxy/keepalivectl.go#L180)) | The default ceiling | The account's own ceiling | Each account has its own cache setting | None |
 | Tool deferral file ([tooldefer.go:121](https://github.com/rossoctl/context-guru/blob/main/proxy/tooldefer.go#L121)) | Same in both modes | Same in both modes | Use a file when the session store is not durable (#871) | Tool names |

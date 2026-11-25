@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -93,6 +95,7 @@ func TestPlainHTTPToARemoteHostIsRefused(t *testing.T) {
 
 // A collector that refuses must not delay the code that records a metric (R16, R20).
 func TestRefusingCollectorDoesNotBlockRecording(t *testing.T) {
+	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	url := srv.URL
 	srv.Close() // now nothing listens there
@@ -117,6 +120,7 @@ func TestRefusingCollectorDoesNotBlockRecording(t *testing.T) {
 
 // A collector that hangs must not delay recording either.
 func TestHangingCollectorDoesNotBlockRecording(t *testing.T) {
+	testutil.RequireTiming(t)
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
 	defer srv.Close()
