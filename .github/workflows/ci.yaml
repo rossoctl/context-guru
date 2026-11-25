@@ -43,7 +43,7 @@ permissions:
 # Lean process. A PR runs only the fast jobs: lint-build, purego, trivy.
 # The heavy jobs (build-test, record) are tier 3. They run on workflow_dispatch, on a v* tag, and on
 # the 3-hour schedule when main moved since the last green heavy run (job changed-since-green).
-# Option E, approved by the owner on 2026-11-25. The integrator reads the result in the run summary
+# The integrator reads the result in the run summary
 # and in the open issue "Heavy CI failed on main" (job report). See RELEASING.md, "Heavy CI on main".
 jobs:
   # Decides if the scheduled run does any work. The other events always run the heavy jobs.

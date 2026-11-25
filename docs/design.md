@@ -290,8 +290,7 @@ sends may shorten that.**
   The sweep question takes the slot only when no summary is due.
 - **A `cache_state: pre_expiry` summary at that slot.** For this one request only, its pre-expiry
   window widens to cover the slot, so it runs about 90 s before the cache expires instead of in the
-  usual last 64 s. A summary that takes a planned ping keeps the #715 / #717 window. The owner chose
-  this on 2026-10-30: "give it more time, it can run on the 210 sec mark".
+  usual last 64 s. A summary that takes a planned ping keeps the #715 / #717 window.
 - "Text turn" is read from metadata only: the role and block type of the held request's last
   non-system message. It is an internal flag on the held entry, not a published metric. It never
   applies on OpenAI, whose cache has no breakpoints and no text-turn rule.
