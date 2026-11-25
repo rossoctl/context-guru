@@ -642,6 +642,46 @@ class InstallerTest(unittest.TestCase):
             self.assertNotIn(CANARY, path.read_text(errors="replace"), str(path))
         self.assertEqual({url.split("/")[2] for url, _ in self.web.calls}, {"gw.example"})
 
+    # ------------------------------------------------------------------ projects turned off
+    def turned_off(self, folder, directory):
+        """A project state folder with the marker that /context-guru-uninstall writes."""
+        state = install_opencode.state_root() / folder
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "install.json").write_text(json.dumps({"directory": directory, "port": 8790}))
+        (state / "disabled").write_text("disabled by context-guru-uninstall\n")
+        return state
+
+    def test_install_turns_context_guru_on_again_in_projects_that_were_off(self):
+        one, two = self.turned_off("aaaa", "/Users/me/cg-try"), self.turned_off("bbbb", "/Users/me/work")
+
+        code = self.installer("1", "y", "n").install()
+
+        self.assertEqual(code, 0)
+        self.assertFalse((one / "disabled").exists())
+        self.assertFalse((two / "disabled").exists())
+        self.assertIn("context-guru is on again in 2 projects that were turned off:\n  /Users/me/cg-try\n  /Users/me/work",
+                      self.terminal.text())
+
+    def test_no_project_turned_off_says_nothing_about_it(self):
+        self.installer("1", "y", "n").install()
+
+        self.assertNotIn("on again in", self.terminal.text())
+
+    def test_a_no_to_consent_leaves_projects_off(self):
+        state = self.turned_off("aaaa", "/Users/me/cg-try")
+
+        self.installer("1", "n").install()
+
+        self.assertTrue((state / "disabled").exists())
+
+    def test_undo_turns_those_projects_off_again(self):
+        state = self.turned_off("aaaa", "/Users/me/cg-try")
+        self.shell.logins, self.shell.login_fails = set(), True
+
+        self.installer("1", "y", "y").install()  # path, consent, undo
+
+        self.assertTrue((state / "disabled").exists())
+
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):
         code = self.installer("1", "y", "n").install()

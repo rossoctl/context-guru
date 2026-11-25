@@ -33,6 +33,8 @@ It asks before each change:
 4. **The plugin:** it installs the release's plugin, checked by SHA-256, at
    `~/.local/share/context-guru-opencode/plugin/`. It adds it to the global `opencode.json` and `tui.json`,
    and removes another copy of the plugin there first. Your other entries stay. Old plugin options stay.
+   It also turns context-guru on again in each project where `/context-guru-uninstall` turned it off, and
+   names those folders.
 5. **Login:** for a gateway, the installer saves the key you gave it in OpenCode's key file. For a direct
    connection with no login yet, it starts `opencode auth login`: pick Anthropic (or OpenAI) in OpenCode's
    list. If that login fails, the installer offers to undo the install.
