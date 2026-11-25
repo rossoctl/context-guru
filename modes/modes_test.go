@@ -579,6 +579,19 @@ func TestFullQueueDropsAndNeverBlocks(t *testing.T) {
 }
 
 func TestStopLeaksNoGoroutines(t *testing.T) {
+	// Everything unrelated (a previous test's Stop waiter, say) must be gone BEFORE the baseline,
+	// so the only difference this measures is the pool's. The count must hold still over
+	// several polls in a row.
+	var last, steady int
+	testutil.WaitFor(t, "the goroutine count is quiet", func() bool {
+		n := runtime.NumGoroutine()
+		if n == last {
+			steady++
+		} else {
+			last, steady = n, 0
+		}
+		return steady >= 5
+	})
 	before := runtime.NumGoroutine()
 
 	p := NewPool(16, 4)
@@ -589,10 +602,11 @@ func TestStopLeaksNoGoroutines(t *testing.T) {
 	}
 	p.Stop() // idempotent
 
-	testutil.WaitForState(t, "the pool goroutines exit", func() bool { return runtime.NumGoroutine() <= before },
-		func() string {
-			return "goroutines before " + strconv.Itoa(before) + ", now " + strconv.Itoa(runtime.NumGoroutine())
-		})
+	var now int
+	testutil.WaitForState(t, "the pool goroutines exit", func() bool {
+		now = runtime.NumGoroutine()
+		return now <= before
+	}, func() string { return "goroutines before " + strconv.Itoa(before) + ", now " + strconv.Itoa(now) })
 	if p.Enqueue("b", func(context.Context) {}) {
 		t.Fatal("a stopped pool accepted a job")
 	}
