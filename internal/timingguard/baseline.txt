@@ -1,13 +1,10 @@
 # Timing patterns in test files, per file and kind. See timingguard_test.go.
 # This file only shrinks. Regenerate: go test ./internal/timingguard -run TestTestTiming -update
-components/offload/cache_aware_after_stash_test.go sleep=2 poll=2
-components/offload/cache_aware_trigger_test.go sleep=2
 components/offload/common_test.go after=1
 components/offload/extract_econ_test.go after=1
 components/offload/extract_sweep_apply_test.go sleep=4 after=1
 components/offload/extract_sweep_ping_test.go sleep=1
 components/offload/extract_sweep_warm_test.go sleep=5 poll=3 after=1
-components/offload/summarize_thread_test.go sleep=1
 context-guru-plugin/beep_test.go sleep=1 poll=1
 context-guru-plugin/leak_test.go sleep=3
 context-guru-plugin/plugin_test.go sleep=5 poll=5
