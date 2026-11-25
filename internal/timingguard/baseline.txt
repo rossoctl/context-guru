@@ -34,9 +34,6 @@ dash/tenant_scope_test.go sleep=2 poll=2
 dash/thread_test.go sleep=1 poll=1
 dash/toolinventory_test.go sleep=1 poll=1
 dash/tooluseproject_test.go sleep=1 poll=1
-internal/modelinfo/litellm/chain_test.go sleep=6
-internal/modelinfo/litellm/ratefill_test.go sleep=1
-internal/modelinfo/litellm/unresolved_test.go sleep=1
 internal/modelinfo/litellm/zz_price_live_test.go sleep=1
 keepalive/inflight_test.go after=1
 keepalive/manualhold_test.go sleep=1 poll=1

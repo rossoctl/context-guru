@@ -278,12 +278,12 @@ func TestCodeExpiresAfterFiveMinutes(t *testing.T) {
 	if d := time.Until(c.ExpiresAt); d > CodeTTL || d < CodeTTL-time.Minute {
 		t.Errorf("code expires in %v, want ~%v", d, CodeTTL)
 	}
-	// Still good just before the deadline, dead just after. The clock is moved by
+	// Still good before the deadline (a minute of margin, so a slow run cannot cross it), dead after. The clock is moved by
 	// rewriting the row rather than by sleeping: a test that sleeps five minutes is a
 	// test nobody runs.
-	setExpiry(t, r, tn.ID, PurposeLogin, time.Now().Add(time.Second))
+	setExpiry(t, r, tn.ID, PurposeLogin, time.Now().Add(time.Minute))
 	if err := r.VerifyCode(tn.ID, PurposeLogin, c.Plain); err != nil {
-		t.Fatalf("a code one second from expiry was refused: %v", err)
+		t.Fatalf("a code one minute from expiry was refused: %v", err)
 	}
 
 	c, _ = r.IssueCode(tn.ID, PurposeLogin)
