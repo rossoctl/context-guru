@@ -1,8 +1,11 @@
 package dash
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func bypassEvent(ts int64, accounting string, count func() (int, int)) *Event {
@@ -13,13 +16,8 @@ func bypassEvent(ts int64, accounting string, count func() (int, int)) *Event {
 
 func waitWritten(t *testing.T, r *Recorder, n int64) {
 	t.Helper()
-	for i := 0; i < 400; i++ {
-		if r.Stats().Written >= n {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("only %d of %d rows written", r.Stats().Written, n)
+	testutil.WaitForState(t, "the rows are written", func() bool { return r.Stats().Written >= n },
+		func() string { return fmt.Sprintf("%d of %d rows written", r.Stats().Written, n) })
 }
 
 func rowBySession(t *testing.T, r *Recorder, session string) *Event {
@@ -51,12 +49,10 @@ func TestBypassCountDoesNotBlockTheWriter(t *testing.T) {
 	}
 	close(release)
 	var got *Event
-	for i := 0; i < 400; i++ {
-		if got = rowBySession(t, r, "s-bypass"); got.TokensBefore > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the count lands in the row", func() bool {
+		got = rowBySession(t, r, "s-bypass")
+		return got.TokensBefore > 0
+	})
 	if got.TokensBefore != 500 || got.TokensAfter != 500 || got.AttemptedTokens != 400 || got.FrozenTokens != 100 {
 		t.Errorf("before/after/attempted/frozen = %d/%d/%d/%d, want 500/500/400/100",
 			got.TokensBefore, got.TokensAfter, got.AttemptedTokens, got.FrozenTokens)
@@ -81,12 +77,10 @@ func TestBypassCountFlipsMissingToPartialOnly(t *testing.T) {
 	waitWritten(t, r, 2)
 	for _, c := range []struct{ session, want string }{{"s-missing", AccountingPartial}, {"s-complete", AccountingComplete}} {
 		var got *Event
-		for i := 0; i < 400; i++ {
-			if got = rowBySession(t, r, c.session); got.TokensBefore > 0 {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		testutil.WaitFor(t, "the count lands in the row of "+c.session, func() bool {
+			got = rowBySession(t, r, c.session)
+			return got.TokensBefore > 0
+		})
 		if got.TokensBefore != 300 || got.TokenAccounting != c.want {
 			t.Errorf("%s: tokens_before %d accounting %q, want 300 / %q", c.session, got.TokensBefore, got.TokenAccounting, c.want)
 		}
@@ -141,9 +135,7 @@ func TestBypassCountQueueIsBoundedByBytes(t *testing.T) {
 	waitWritten(t, r, 2)
 	// The writer counts a row as written BEFORE it hands the row to enqueueCount, so Written
 	// reaching 2 does not mean the drop has been counted yet. Wait for the drop itself.
-	for i := 0; i < 400 && r.countsDropped.Load() == 0; i++ {
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the drop is counted", func() bool { return r.countsDropped.Load() > 0 })
 	if got := r.countsDropped.Load(); got != 1 {
 		t.Errorf("countsDropped = %d, want 1: a job that would exceed the byte bound was queued", got)
 	}

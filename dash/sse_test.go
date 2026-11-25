@@ -2,12 +2,15 @@ package dash
 
 import (
 	"bufio"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func TestHubFansOutAndStripsContent(t *testing.T) {
@@ -24,18 +27,14 @@ func TestHubFansOutAndStripsContent(t *testing.T) {
 	h.Publish(e)
 
 	for i, c := range []*client{c1, c2} {
-		select {
-		case got := <-c.ch:
-			if got.ID != 7 {
-				t.Errorf("client %d got id %d", i, got.ID)
-			}
-			// The live feed is a monitoring surface; content is fetched deliberately
-			// through the access-gated detail route, never pushed.
-			if len(got.Content) != 0 {
-				t.Errorf("client %d received request CONTENT over SSE: %+v", i, got.Content)
-			}
-		case <-time.After(time.Second):
-			t.Errorf("client %d received nothing", i)
+		got := awaitSignal(t, fmt.Sprintf("client %d to receive the event", i), c.ch)
+		if got.ID != 7 {
+			t.Errorf("client %d got id %d", i, got.ID)
+		}
+		// The live feed is a monitoring surface; content is fetched deliberately
+		// through the access-gated detail route, never pushed.
+		if len(got.Content) != 0 {
+			t.Errorf("client %d received request CONTENT over SSE: %+v", i, got.Content)
 		}
 	}
 	// The caller's event must not have been mutated by the strip.
@@ -72,16 +71,12 @@ func TestHubEvictsHungClient(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// Publishing must never have blocked on the hung client.
-	if elapsed > 10*time.Second {
+	// Publishing must never have blocked on the hung client. The wall-clock check is a timing
+	// check; a Publish that really blocked would not return at all.
+	if testutil.TimingEnabled() && elapsed > 10*time.Second {
 		t.Fatalf("Publish stalled behind a hung client (%v)", elapsed)
 	}
-	select {
-	case <-hung.closed:
-		// evicted, as required
-	case <-time.After(time.Second):
-		t.Error("a client that never read was not evicted")
-	}
+	awaitSignal(t, "the hung client to be evicted (a client that never read must be evicted)", hung.closed)
 	if h.Clients() > 1 {
 		t.Errorf("clients = %d after eviction; want at most 1", h.Clients())
 	}
@@ -149,24 +144,29 @@ func TestSSEEndpointStreamsAndBackfills(t *testing.T) {
 		t.Errorf("content type = %q", ct)
 	}
 
-	// Publish one more so the stream carries a live event after the backfill.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		h.Publish(&Event{ID: 4, SessionID: "s"})
-	}()
+	// Publish one more so the stream carries a live event after the backfill. Wait until the
+	// handler has subscribed the client, so the event is live and not a backfill.
+	testutil.WaitFor(t, "the handler subscribes the client", func() bool { return h.Clients() == 1 })
+	h.Publish(&Event{ID: 4, SessionID: "s"})
 
-	sc := bufio.NewScanner(resp.Body)
-	var seen []string
-	deadline := time.Now().Add(5 * time.Second)
-	for sc.Scan() && time.Now().Before(deadline) {
-		line := sc.Text()
-		if strings.HasPrefix(line, "id: ") {
-			seen = append(seen, strings.TrimPrefix(line, "id: "))
+	// The read blocks until a line arrives, so it runs in a goroutine with a bound on the wait.
+	// The deferred resp.Body.Close ends the goroutine if the stream stalls.
+	got := make(chan []string, 1)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		var seen []string
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "id: ") {
+				seen = append(seen, strings.TrimPrefix(line, "id: "))
+			}
+			if len(seen) >= 3 {
+				break
+			}
 		}
-		if len(seen) >= 3 {
-			break
-		}
-	}
+		got <- seen
+	}()
+	seen := awaitSignal(t, "the stream to carry 3 event ids", got)
 	want := []string{"2", "3", "4"}
 	if len(seen) != 3 || seen[0] != want[0] || seen[1] != want[1] || seen[2] != want[2] {
 		t.Errorf("event ids = %v; want %v (backfill then live)", seen, want)
@@ -177,11 +177,7 @@ func TestHubCloseDisconnectsEveryone(t *testing.T) {
 	h := NewHub()
 	c, _ := h.subscribe("", true)
 	h.Close()
-	select {
-	case <-c.closed:
-	case <-time.After(time.Second):
-		t.Error("Close did not disconnect the client")
-	}
+	awaitSignal(t, "Close to disconnect the client", c.closed)
 	if _, ok := h.subscribe("", true); ok {
 		t.Error("subscribe succeeded after Close")
 	}

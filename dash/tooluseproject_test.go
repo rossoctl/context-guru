@@ -20,7 +20,8 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The column exists, is in the key, and distinguishes two folders in one session.
@@ -167,20 +168,14 @@ func TestTheLiveInventoryWriterRecordsTheProject(t *testing.T) {
 		[]map[string]any{{"name": "Bash", "input": map[string]any{}}}))
 	rec.RecordInventory("t1", "s-live", 1000, inv, true, "/Users/v/notes")
 	db := rec.DB()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// The inventory writer flushes on a 2 s ticker, so this wait is a few seconds long.
+	testutil.WaitFor(t, "the live path writes an invocation row", func() bool {
 		var n int
 		if err := db.sql.QueryRow(`SELECT COUNT(*) FROM tool_uses`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		if n > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the live path wrote no invocation row")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return n > 0
+	})
 	var proj string
 	if err := db.sql.QueryRow(
 		`SELECT project FROM tool_uses WHERE name = 'Bash'`).Scan(&proj); err != nil {
