@@ -196,3 +196,62 @@ test("uninstall, then a restart has no commands; the install script brings all s
     if (port) await waitUntilUnhealthy(port)
   }
 })
+
+// In the session of an uninstall, before a restart, OpenCode keeps the commands it loaded. Each one must then
+// say that context-guru is uninstalled and change nothing, as the Pi package does (#1290).
+const GUARDED = ["context-guru-update", "context-guru-preset", "context-guru-strategy"]
+
+test("in the session of an uninstall, update, preset and strategy say uninstalled and change nothing", async () => {
+  const directory = "/tmp/context-guru-disabled-session"
+  const config = await startV1(directory, [])
+  assert.equal(guruCommands(config).length, 6)
+  const state = disable(directory)
+
+  for (const name of GUARDED) {
+    for (const args of [[], ["set", "none"], ["--yes"]]) {
+      const { status, stdout } = await sh(join(state, name), args)
+      assert.equal(status, 0, `${name} ${args.join(" ")}`)
+      const lines = stdout.trim().split("\n")
+      assert.deepEqual(lines.slice(0, 1), ["enabled=no"], `${name} ${args.join(" ")}: ${stdout}`)
+      assert.match(lines[1].replace(/^note=/, ""), WAY_BACK)
+      assert.equal(lines.length, 2, `${name} ${args.join(" ")} printed more: ${stdout}`)
+    }
+  }
+})
+
+test("a command whose script is gone says uninstalled instead of a shell error", async () => {
+  const directory = "/tmp/context-guru-disabled-gone"
+  const config = await startV1(directory, [])
+  const state = stateDirectory(directory)
+  const block = config.command["context-guru-preset"].template.match(/!`([^`]+)`/)[1]
+  const { rmSync } = await import("node:fs")
+  rmSync(join(state, "context-guru-preset"))
+
+  const out = await new Promise((resolve) => {
+    const child = spawn("sh", ["-c", block])
+    let text = ""
+    child.stdout.on("data", (chunk) => { text += chunk })
+    child.stderr.on("data", (chunk) => { text += chunk })
+    child.on("close", (status) => resolve({ status, text }))
+  })
+
+  assert.equal(out.status, 0)
+  assert.equal(out.text, "enabled=no\nnote=context-guru is uninstalled for this project; restart OpenCode to remove these commands\n")
+})
+
+test("runCommandScript for a script that is gone says uninstalled (OpenCode 2 and the TUI)", async () => {
+  const { runCommandScript } = await import("../index.js")
+  const state = mkdtempSync(join(tmpdir(), "context-guru-gone-"))
+
+  const out = await runCommandScript(state, "context-guru-strategy", ["set", "none"])
+
+  assert.deepEqual(out, { status: 0, output: "enabled=no\nnote=context-guru is uninstalled for this project; restart OpenCode to remove these commands\n" })
+})
+
+test("every command text but status tells the agent to stop at enabled=no", async () => {
+  const config = await startV1("/tmp/context-guru-disabled-text", [])
+
+  for (const name of COMMANDS.filter((command) => command !== "context-guru-status")) {
+    assert.match(config.command[name].template, /If the block printed enabled=no, say only that context-guru is uninstalled for this project, give the way back from its note, and do nothing else\./, name)
+  }
+})

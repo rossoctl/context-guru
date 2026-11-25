@@ -332,6 +332,19 @@ function uninstalledNote(state) {
   return `context-guru is uninstalled for this project; to turn it on again, run: sh ${join(state, "context-guru-install")}, then restart OpenCode`
 }
 
+// What a command says when its script is gone (an uninstall with --purge, or the installer removed the
+// state folder), in the OpenCode session that still lists the commands.
+const GONE_OUTPUT = "enabled=no\nnote=context-guru is uninstalled for this project; restart OpenCode to remove these commands\n"
+
+// The first lines of a script that changes or downloads something: after an uninstall, in the session that
+// still lists the commands, it says so and stops, as the Pi package does (#1290).
+function stopIfUninstalled() {
+  return `if [ -f "$STATE/disabled" ]; then
+  printf '%s\\n' "enabled=no" "note=${uninstalledNote("$STATE")}"
+  exit 0
+fi`
+}
+
 // The uninstall script writes this marker. With it, a new start registers no command and routes nothing.
 export function isDisabled(state) {
   return existsSync(join(state, "disabled"))
@@ -426,6 +439,7 @@ set -u
 REPO="\${CONTEXT_GURU_REPO:-rossoctl/context-guru}"
 RELEASES="\${CONTEXT_GURU_RELEASES_URL:-https://github.com/\$REPO/releases}"
 STATE=${shQuote(state)}
+${stopIfUninstalled()}
 ROOT=${shQuote(dirname(state))}
 ${RELEASE_SHARED}
 if [ -f "$STATE/install.env" ]; then
@@ -637,6 +651,7 @@ function pickerScript(state, kind) {
 #   set NAME --restart save NAME and restart this project's proxy now
 set -u
 STATE=${shQuote(state)}
+${stopIfUninstalled()}
 KIND=${kind}
 if [ "$KIND" = preset ]; then
   VALID=${shQuote(PRESETS.join(" "))}
@@ -845,14 +860,22 @@ const COMMAND_SPECS = [
   },
 ]
 
+// Status reports enabled=no among its other facts; every other command stops there.
+const STOP_AT_UNINSTALLED = "If the block printed enabled=no, say only that context-guru is uninstalled for this project, give the way back from its note, and do nothing else."
+
 function commandText(spec, block, path) {
-  return spec.intro + "\n\n" + block + "\n\n" + spec.outro(path)
+  const stop = spec.name === "context-guru-status" ? "" : STOP_AT_UNINSTALLED + " "
+  return spec.intro + "\n\n" + block + "\n\n" + stop + spec.outro(path)
 }
 
 function registerCommands(config, state, options) {
   mkdirSync(state, { recursive: true, mode: 0o700 })
   writeCommandScripts(state, options)
-  const embed = (name) => "!`sh " + JSON.stringify(join(state, name)) + "`"
+  // A script that is gone prints GONE_OUTPUT, not a shell error.
+  const embed = (name) => {
+    const script = JSON.stringify(join(state, name))
+    return "!`if [ -f " + script + " ]; then sh " + script + "; else printf '%s' " + shQuote(GONE_OUTPUT) + "; fi`"
+  }
   const path = (name) => JSON.stringify(join(state, name))
   config.command ||= {}
   for (const spec of COMMAND_SPECS) {
@@ -866,6 +889,7 @@ function registerCommands(config, state, options) {
 // The one way any host runs a command script: the v2 chat path and the native TUI dialogs both
 // call this, so a switch cannot differ between them.
 export function runCommandScript(state, name, args = []) {
+  if (!existsSync(join(state, name))) return Promise.resolve({ status: 0, output: GONE_OUTPUT })
   return new Promise((resolve) => {
     const child = spawn("sh", [join(state, name), ...args])
     let output = ""
