@@ -272,8 +272,11 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 }
 
 // missCause maps the event's reason and cause to the spec's set: ttl_expiry, prefix_change,
-// model_changed, compaction_after_rewrite, bypass_flip, cold_start, other. A hit is not a miss.
-// tools, system and effort changes all change the cached prefix, so they are prefix_change.
+// model_changed, compaction_after_rewrite, bypass_flip, concurrent, unexplained, cold_start,
+// other. A hit is not a miss. tools, system and effort changes all change the cached prefix, so
+// they are prefix_change. unexplained is a miss that wrote cache tokens while the comparison with
+// the previous request found no difference. A miss that wrote nothing re-created no prefix: it
+// stays other, and its miss cost is zero.
 func missCause(e *dash.Event) (string, bool) {
 	switch e.CacheMissReason {
 	case dash.CacheHit, "":
@@ -292,6 +295,11 @@ func missCause(e *dash.Event) (string, bool) {
 		return "bypass_flip", true
 	case dash.CauseToolsChanged, dash.CauseSystemChanged, dash.CauseEffortChanged:
 		return "prefix_change", true
+	case dash.CauseConcurrent:
+		return "concurrent", true
+	}
+	if e.CacheMissReason == dash.CacheUnknown && e.CacheMissCause == "" && e.CacheWrite > 0 {
+		return "unexplained", true
 	}
 	return "other", true
 }

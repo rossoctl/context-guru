@@ -344,7 +344,7 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 
 | Metric | Type | Unit | Labels | Meaning |
 |---|---|---|---|---|
-| `llm_cache_misses_total` | counter | 1 | `model`, `cause` | Misses by cause from `cache_miss_cause`: `ttl_expiry`, `prefix_change`, `model_changed`, `compaction_after_rewrite`, `bypass_flip`, `cold_start`, `other`. |
+| `llm_cache_misses_total` | counter | 1 | `model`, `cause` | Misses by cause from `cache_miss_cause`: `ttl_expiry`, `prefix_change`, `model_changed`, `compaction_after_rewrite`, `bypass_flip`, `concurrent`, `unexplained`, `cold_start`, `other`. |
 | `llm_cache_miss_cost_usd_total` | counter | none | `model`, `cause` | Extra cost of those misses: the write premium (see below). Not the price of the request. |
 
 **What counts as a miss.** A request is a miss when the proxy's cache verdict for it is not a hit. Keep-alive pings are never misses. Each proxy uses its own verdict. context-guru uses `cache_miss_reason`, so a partial read that re-wrote most of the prompt is a miss (#496). A proxy that has no such verdict counts a request with no cache-read tokens.
@@ -357,9 +357,11 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 4. `compaction_after_rewrite`: a bypass request after the proxy rewrote earlier turns.
 5. `bypass_flip`: bypass turned on or off with no earlier rewrite.
 6. `prefix_change`: the tools, the system prompt, or the effort or thinking settings changed.
-7. `other`: anything else, for example parallel requests (`concurrent`) or a miss with no measured difference.
+7. `concurrent`: nothing measured changed, and the previous request of the thread started less than a short gap ago. The provider can read a cache entry only after the first response starts, so parallel requests (for example, sub-agents) miss.
+8. `unexplained`: the proxy compared the request with the previous one and found no difference, but the request missed and wrote cache tokens. A partial read that re-wrote most of the prompt with no measured change is here too.
+9. `other`: anything else. For example, a miss that wrote nothing, or a cause value that this list does not name.
 
-Rules 3 to 6 apply only when the request wrote cache tokens. A changed prefix that wrote nothing re-created no prefix, so it is `other`. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it. It does not guess.
+Rules 3 to 6 and 8 apply only when the request wrote cache tokens. A miss that wrote nothing re-created no prefix, so it is `other`, and its miss cost is zero. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it, not `unexplained`. It does not guess. Data written before `concurrent` and `unexplained` existed stays `other`.
 
 **The miss cost is the write premium.** It is what the written prefix cost above a read of the same tokens, which is what a hit would have charged:
 
