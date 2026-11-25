@@ -8,6 +8,9 @@ cd "$root"
 H=$(git rev-parse HEAD)
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 fails=0
+# A fixture list of known laptop failures, so the cases do not depend on the real list.
+printf '# fixture\nTestNoHooksKeepsTheBinaryDefaults\n' > "$d/known.txt"
+export CG_KNOWN_FAILURES_FILE="$d/known.txt"
 steps=$(grep -oE '^[[:space:]]*step [a-z0-9-]+' scripts/release/part-a.sh | awk '{print $2}')
 mk() { { echo "commit $1"; for s in $steps; do echo "ok      $s"; done; } > "$d/summary.txt"; }
 # expect <name> <want-rc> <want-text> : run local-tests.sh on the fixture in $d
