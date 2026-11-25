@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
@@ -52,7 +53,7 @@ func (h *Handler) autoOwn(d *autoData, tenant string, untilMs int64) (own []*kvc
 
 // rowsWith is the tuner's rows for one tenant: the fleet's rows of every other tenant, plus the tenant's own rows built from own (its rows in
 // the fleet read are replaced, so each is counted once).
-func (d *autoData) rowsWith(own []*kvcache.Request, tenant string, price func(string) (float64, float64, float64, float64, bool), sessionEnd bool, untilMs int64) autoRowSet {
+func (d *autoData) rowsWith(own []*kvcache.Request, tenant string, price func(string, int64) (float64, float64, float64, float64, bool), sessionEnd bool, untilMs int64) autoRowSet {
 	fr, ok := d.fleetRows[sessionEnd]
 	if !ok {
 		fr.rows, fr.facts = campaign.Rows(d.fleet, price, sessionEnd, untilMs)
@@ -71,7 +72,7 @@ func (d *autoData) rowsWith(own []*kvcache.Request, tenant string, price func(st
 
 // autoRowsFor is rowsWith on the tenant's own read. The tenant's requests are read here and dropped once its rows are built, so a refresh pass
 // holds the fleet read plus one tenant's read at a time (each at most the dashboard's row cap). ownTruncated: the tenant's own read hit the cap.
-func (h *Handler) autoRowsFor(d *autoData, tenant string, price func(string) (float64, float64, float64, float64, bool), sessionEnd bool, untilMs int64) (set autoRowSet, ownTruncated bool, err error) {
+func (h *Handler) autoRowsFor(d *autoData, tenant string, price func(string, int64) (float64, float64, float64, float64, bool), sessionEnd bool, untilMs int64) (set autoRowSet, ownTruncated bool, err error) {
 	own, ownTruncated, err := h.autoOwn(d, tenant, untilMs)
 	if err != nil {
 		return autoRowSet{}, false, err
@@ -285,21 +286,27 @@ func readJSONFile(path string, v any) error {
 	return json.Unmarshal(b, v)
 }
 
-// autoPrice is the per-model price lookup of an auto build, memoised for one build.
-func (h *Handler) autoPrice() func(string) (float64, float64, float64, float64, bool) {
+// autoPrice is the per-model price lookup of an auto build, memoised for one build. The lookup is
+// by model, then the rates are the ones of the request's prompt size (modelinfo.Price.At): a long
+// request replays at its tier, as it was billed.
+func (h *Handler) autoPrice() func(string, int64) (float64, float64, float64, float64, bool) {
 	type pr struct {
-		in, out, read, write float64
-		ok                   bool
+		p  modelinfo.Price
+		ok bool
 	}
 	prices := map[string]pr{}
-	return func(m string) (float64, float64, float64, float64, bool) {
+	return func(m string, promptTokens int64) (float64, float64, float64, float64, bool) {
 		p, seen := prices[m]
 		if !seen && h.opts.Prices != nil {
 			if q, ok := h.opts.Prices.Price(context.Background(), m); ok && !q.Zero() {
-				p = pr{q.Input, q.Output, q.CacheRead, q.CacheWrite, true}
+				p = pr{q, true}
 			}
 			prices[m] = p
 		}
-		return p.in, p.out, p.read, p.write, p.ok
+		if !p.ok {
+			return 0, 0, 0, 0, false
+		}
+		q := p.p.At(promptTokens)
+		return q.Input, q.Output, q.CacheRead, q.CacheWrite, true
 	}
 }

@@ -410,7 +410,7 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 	if di == nil || !usageOK {
 		return
 	}
-	b, ok := h.deferFlow(nil).Book(ctx, di, tooldefer.Response{CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
+	b, ok := h.deferFlow(nil).Book(ctx, di, tooldefer.Response{FreshInput: u.FreshInput, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 		CacheWrite1h: u.CacheWrite1h, Searches: u.Searches, SearchLoaded: u.SearchLoaded, SearchDropped: u.SearchDropped}, usageOK, st)
 	if ok {
 		cp.noteDefer(b.Request, b.Money, b.Distinct)

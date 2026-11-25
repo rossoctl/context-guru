@@ -312,6 +312,9 @@ func declares(body []byte, name string) bool {
 
 // Response is the part of one finished response that deferral's ledger reads.
 type Response struct {
+	// FreshInput is the input billed at the full rate. With CacheRead and CacheWrite it makes the
+	// prompt size, which picks the price tier (modelinfo.PromptTokens). 0 reads as unknown: the base rates.
+	FreshInput                          int64
 	CacheRead, CacheWrite, CacheWrite1h int64
 	// Searches, SearchLoaded and SearchDropped are the server-side searches the stream-through path
 	// read off its window.
@@ -337,7 +340,8 @@ func (f Flow) Book(ctx context.Context, di *Info, u Response, usageOK bool, st S
 		return Booked{}, false
 	}
 	r := Request{Tenant: di.Tenant, Model: di.Model, DeferredTokens: di.Outcome.DeferredTokens,
-		ListTokens: di.Outcome.ListTokens, Tier: TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
+		ListTokens: di.Outcome.ListTokens, Tier: TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h),
+		PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}
 	n := u.Searches + st.N
 	loaded := append(append([]string(nil), u.SearchLoaded...), st.Loaded...)
 	loaded = append(loaded, di.Outcome.Loads...) // client-search mode (#898): answers written on this request
