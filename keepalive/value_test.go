@@ -67,9 +67,9 @@ func TestExplicitCapStillRefusesAndNoCapIsNotACap(t *testing.T) {
 	if v := (Policy{MaxUSDPerPing: -1}).PingVerdict(0.6, 5.4, 1); v != VerdictOK {
 		t.Errorf("negative cap: verdict %v, want OK", v)
 	}
-	// The cap the summary and sweep calls use is unchanged: zero still resolves to the default.
+	// Ceiling() is the old flat default. No keeper path reads it since #1439; it stays pinned to config's default.
 	if got := (Policy{}).Ceiling(); got != DefaultMaxUSDPerPing {
-		t.Errorf("Ceiling() = %v, want the default for summary and sweep calls", got)
+		t.Errorf("Ceiling() = %v, want the pinned default", got)
 	}
 }
 

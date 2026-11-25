@@ -172,7 +172,9 @@ type CacheConfig struct {
 	// this. 0 (the default) means the operator set none, and only the value rule applies: a planned
 	// ping chain must cost less than the miss it protects (keepalive.Policy.PingVerdict). The
 	// loader does not fill the field, so a set value is always the operator's own. Summary and
-	// sweep calls still use DefaultKeepAliveMaxUSDPerPing as their cap when this is 0.
+	// sweep calls that replace a ping follow the same rule (#1439): unset means no flat cap, and a call
+	// is allowed when its cost is below the miss it protects. A set value still caps each call.
+	// DefaultKeepAliveMaxUSDPerPing is no longer a cap for them.
 	//
 	// PER PING and not per session, which is the opposite of the obvious design and is
 	// measured. Ping cost is bimodal — p50 $0.0004, mean $0.0084, p99 $0.2275, max $0.3780 —

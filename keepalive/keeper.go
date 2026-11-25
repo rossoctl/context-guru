@@ -612,7 +612,8 @@ type Keeper struct {
 	// summarySubstituteFailed counts a substitute attempt that fell back to an ordinary ping
 	// because the call itself declined, timed out, errored, or came back empty.
 	summarySubstituteFailed atomic.Int64
-	// summarySubstituteOverBudget counts a substitute attempt refused BEFORE being dispatched
+	// summarySubstituteOverBudget counts a substitute attempt refused BEFORE being dispatched (over the operator's cap or not worth it, #1439:
+	// the name stays for dashboards)
 	// because its projected cost exceeded the keep-alive per-ping $ cap.
 	summarySubstituteOverBudget atomic.Int64
 	// summarySubstitutePhaseMismatch counts a `cache_state: pre_expiry` candidate declined
@@ -653,7 +654,7 @@ type Keeper struct {
 	// sweepAskFailed counts a question that left the process but never touched the cache, that
 	// never left, or that panicked: the ordinary ping went out instead.
 	sweepAskFailed atomic.Int64
-	// sweepOverBudget counts a question refused BEFORE sending because its projected cost exceeded
+	// sweepOverBudget (also counts a value refusal, #1439) counts a question refused BEFORE sending because its projected cost exceeded
 	// the per-ping ceiling.
 	sweepOverBudget atomic.Int64
 	// sweepBatchesLowered counts sweeps where the per-ping cost ceiling admitted fewer questions than the
@@ -1310,11 +1311,7 @@ func missAtOneHour(pol Policy, oneHourPing, subagent bool) bool {
 // (Policy.PingVerdict). A manual-only entry carries a zero policy, so it counts one ping and the
 // cap it was admitted under.
 func (e *kaEntry) verdict() Verdict {
-	pol := e.pol
-	if e.manualOnly {
-		pol = Policy{MaxUSDPerPing: e.ceiling}
-	}
-	return pol.PingVerdict(e.pingUSD, e.missUSD, e.pol.MaxPings)
+	return e.capPolicy().PingVerdict(e.pingUSD, e.missUSD, e.pol.MaxPings)
 }
 
 // summaryOutputBudgetGuess is the assumed output size of a keep-alive-substituted summary call,
