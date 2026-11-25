@@ -386,7 +386,8 @@ to a single-tenant proxy.
 while the proxy holds the thread. When it is false, `ping_reason` is one of:
 `not opted in` (no keep-alive for the account and the request did not carry the header),
 `below limits` (keep-alive is on, but the thread is under its minimum prefix or fails its gates),
-`over budget` (one ping would cost more than the per-ping cost ceiling),
+`over budget` (one ping would cost more than the flat per-ping cap the operator set; there is none by default),
+`not worth it` (the planned pings cost at least as much as the one cache miss they protect, #1420),
 `too large` (the body is over the per-body limit, 32 MiB, or 8 MiB for a model with no price), `unsupported` (extended thinking, or a route that cannot be pinged cheaply),
 `done` (the thread's last response ended with a terminal tool such as `StructuredOutput`, so the agent is finished and the proxy sends no pings),
 `unavailable` (the route is failing in a row, or the provider refused this credential),
@@ -404,7 +405,7 @@ the key from the start of the LAST REAL request for at most 300 seconds on a 5-m
 59 minutes on a 1-hour cache (the proxy reads the tier from the traffic), then releases and zeroes them. Only a
 new request starts that time again. A press never does, so pressing
 cannot keep a credential held. The usual limits still apply: 32 MiB per body (8 MiB for an unpriced model), 512 threads, 128 MiB in all, and
-the per-ping cost ceiling. One account may hold at most 16 such threads and 32 MiB, and they are released
+the value rule (a ping must cost less than the miss it protects), plus the operator's own per-ping cap if one is set. One account may hold at most 16 such threads and 32 MiB, and they are released
 before any automatic keep-alive hold, so a client that sends the header cannot starve other accounts. Claude Code sends the
 header when `ANTHROPIC_CUSTOM_HEADERS` in its settings `env` contains `x-context-guru-ping: 1` (one `Name: Value`
 per line when there are several headers). The proxy never forwards it upstream.
@@ -415,7 +416,7 @@ category of their own: they join `total_saved_usd`, and no cache strategy's ledg
 The figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
 `avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
 `saved_usd` in the reply is never below 0, so the two need not match. A press is refused with
-`409 over budget` when one ping would cost more than the per-ping ceiling, and `?tenant=` is ignored:
+`409 over budget` when one ping would cost more than the operator's per-ping cap, or more than the miss it protects, and `?tenant=` is ignored:
 it pings only the caller's own account.
 
 Top to bottom, the panel shows:

@@ -61,7 +61,7 @@ cache:
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
   keepalive_min_prefix_tokens: 80000   # the gate for a main thread that waits for a person or for an unknown cause
-  keepalive_max_usd_per_ping: 0.50
+  # keepalive_max_usd_per_ping: 0.50  # OPT-IN flat cap per ping; unset by default (#1420). The value rule always applies.
   keepalive_max_body_bytes: 33554432   # largest request body held per thread (memory guard); 8388608 restores the limit before #1100
   keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
   keepalive_max_pings_1h: 1            # K for a 1-hour cache
@@ -73,6 +73,19 @@ cache:
   keepalive_human_extra_pings: 1       # end_turn, waiting for a person: K + 1
 ```
 
+### The ping value rule
+
+A ping must be worth its cost (#1420). At record time the proxy compares two figures, both priced at the tier of the prompt size:
+
+- **The chain.** The planned pings of one idle span, each at its projected cost (the prefix at the cache-read rate, plus the output).
+- **The miss.** What the next request pays extra when the cache is gone: the prefix at the write rate of the entry (5 minutes, or 1 hour for an entry billed at 1 hour), minus the read it would have had. On OpenAI the write rate is the input rate before GPT-5.6, and 1.25x input from GPT-5.6.
+
+The proxy pings when the chain costs less than one miss. It refuses with the reason `not worth it` otherwise. An unpriced model is pinged, as before.
+Example: a GPT-5.5 ping at 600K tokens costs about $0.60 and protects a miss of about $5.40.
+
+`keepalive_max_usd_per_ping` is an opt-in flat cap on top of this rule. No default and no strategy sets it. A ping over it is refused with the reason `over budget`.
+Summary and sweep calls that replace a ping still use a $0.50 cap when you set none.
+
 ### A named strategy
 
 `cache.strategy` sets several keys at once from a built-in table: `none`, `auto`, `1-ping`,
@@ -81,7 +94,7 @@ cache:
 ```yaml
 cache:
   strategy: 2-ping
-  keepalive_max_usd_per_ping: 0.25   # a key you set yourself wins over the strategy
+  keepalive_max_usd_per_ping: 0.25   # an opt-in flat cap on top of the value rule; no strategy sets it
 ```
 
 - `1-hour-head` asks for the 1-hour cache on `tools` and `system` only, and turns the pings off.
