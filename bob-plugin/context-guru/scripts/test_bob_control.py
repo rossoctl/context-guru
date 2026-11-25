@@ -22,6 +22,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# TIMING is True only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
 from test_bob_plugin import (  # noqa: E402
     FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary,
     block_network, TIMING)
