@@ -17,8 +17,8 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/campaign"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -318,7 +318,7 @@ func (pc *predCampaign) sweepLocked(nowMs int64) {
 }
 
 // decide runs the campaign for one finished response. ok=false means no campaign applies (the caller proceeds exactly as before).
-func (k *keeper) predictiveDecide(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, userAgent string, u Usage) (d predDecision, ok bool) {
+func (k *keeper) predictiveDecide(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, cl agent.Client, u Usage) (d predDecision, ok bool) {
 	// A campaign must never change what the keeper does by failing: any panic in the model or the tracker means "no campaign applies" for this response.
 	defer func() {
 		if r := recover(); r != nil {
@@ -326,10 +326,10 @@ func (k *keeper) predictiveDecide(a *predictive.Arrival, optedOut bool, tenantID
 			d, ok = predDecision{}, false
 		}
 	}()
-	return k.predictiveDecideInner(a, optedOut, tenantID, session, thread, provider, startedAt, body, userAgent, u)
+	return k.predictiveDecideInner(a, optedOut, tenantID, session, thread, provider, startedAt, body, cl, u)
 }
 
-func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, userAgent string, u Usage) (predDecision, bool) {
+func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, cl agent.Client, u Usage) (predDecision, bool) {
 	pc := k.pred.forTenant(tenantID)
 	if pc == nil || u.CacheRead+u.CacheWrite <= 0 {
 		return predDecision{}, false
@@ -360,7 +360,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	lf := u.Live
 	if lf == nil { // a path that did not hand over the capture's facts: read what the body says
 		lf = &LiveFacts{Messages: int(gjson.GetBytes(body, "messages.#").Int()), Tools: int(gjson.GetBytes(body, "tools.#").Int()), Thinking: gjson.GetBytes(body, "thinking.type").String(),
-			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: dash.AgentFor(userAgent), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
+			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: agent.ModelAgentOf(cl.Label, provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
 	}
 	nowMs := now.UnixMilli()
 	cost := float64(u.FreshInput)*pIn + float64(u.CacheRead)*pRead + float64(u.CacheWrite)*pWrite + float64(u.Output)*pOut

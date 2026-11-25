@@ -393,7 +393,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 				arr = u.Live.Arrival
 			}
 			pdec, pdecOK = k.predictiveDecide(arr, !tn.Cache.KeepAlive, tn.ID, session, threadID,
-				string(provider), startedAt, body, r.UserAgent(), u)
+				string(provider), startedAt, body, cl, u)
 		}
 		// The wait-cause windows, today's reading against the wide one, are keepalive.ResolveWithWindows.
 		// This host supplies the tracker, the request's usage and its own strategy, campaign and override.

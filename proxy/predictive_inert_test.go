@@ -9,6 +9,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 )
@@ -141,10 +142,10 @@ func TestOverlappingRequestsOnAThreadKeepTheirOwnState(t *testing.T) {
 	body := []byte(`{"model":"aws/claude-opus-4","messages":[]}`)
 	u := Usage{CacheRead: 120000, StopReason: "end_turn"}
 	// responses end in the opposite order
-	if _, ok := k.predictiveDecide(a2, false, "t1", "s", "", "anthropic", t0.Add(2*time.Second), body, "claude-cli", u); !ok {
+	if _, ok := k.predictiveDecide(a2, false, "t1", "s", "", "anthropic", t0.Add(2*time.Second), body, agent.IdentifyUserAgent("claude-cli"), u); !ok {
 		t.Fatal("second decision refused")
 	}
-	if _, ok := k.predictiveDecide(a1, false, "t1", "s", "", "anthropic", t0, body, "claude-cli", u); !ok {
+	if _, ok := k.predictiveDecide(a1, false, "t1", "s", "", "anthropic", t0, body, agent.IdentifyUserAgent("claude-cli"), u); !ok {
 		t.Fatal("first decision refused")
 	}
 	pc.mu.Lock()
