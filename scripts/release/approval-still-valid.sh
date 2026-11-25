@@ -10,7 +10,7 @@
 # commits in between change only comments (see comments_only below). Owner rule, 2026-11-08: a
 # comments-only commit keeps both approvals. It prints `COMMENTS ONLY` and exits 0. When unsure,
 # a line counts as code.
-# Another case: LISTS ONLY. Owner rule, David Amid, 2026-11-25: a merge of the base whose
+# Another case: LISTS ONLY. Rule: a merge of the base whose
 # hand-resolved conflicts are only in the 2 timing list files (see `lists` below) keeps both
 # approvals, when both hold: (1) without those 2 files, the PR's change has the same patch-id at
 # the approved head and at the new head; (2) in those 2 files, the PR removes exactly the same
@@ -107,7 +107,7 @@ if [ "$ob" = "$nb" ] && git merge-base --is-ancestor "$old" "$new" && comments_o
   exit 0
 fi
 if lists_only; then
-  echo "LISTS ONLY: the code is the same, and the 2 timing list files remove and add the same lines as at the approved head. The approval of ${old:0:12} still counts (owner rule 2026-11-25). Say so on the PR."
+  echo "LISTS ONLY: the code is the same, and the 2 timing list files remove and add the same lines as at the approved head. The approval of ${old:0:12} still counts. Say so on the PR."
   exit 0
 fi
 echo "CHANGED: the head has new code or a conflict resolution. Each reviewer re-checks the delta."
