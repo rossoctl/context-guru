@@ -1958,6 +1958,20 @@ func (d *DB) LastBilledPrefix(f Filter, session string) (int64, string, error) {
 	return prefix.Int64, model.String, err
 }
 
+// LastBilledProvider is the provider of the session's most recent request, as the request path stored it
+// ("anthropic", "openai", ...). Empty when the session has no row.
+func (d *DB) LastBilledProvider(f Filter, session string) (string, error) {
+	cond, args := f.where()
+	var provider sql.NullString
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.provider FROM requests r
+		WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+		append(append([]any(nil), args...), session)...).Scan(&provider)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return provider.String, err
+}
+
 // The recommendation's admission rule. All three must hold, and condition 3 does the work.
 const (
 	// recMinMisses is the addressable-expiry floor. Below it a bootstrap over sessions has

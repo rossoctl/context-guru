@@ -181,7 +181,15 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 		if tn, err := h.opts.Tenants.ForTenant(t); err == nil {
 			pol := tn.Cache
 			if h.keeper != nil {
-				pol, _ = h.keeper.resolvePolicy(tn, session, bschemas.Anthropic, tn.Cache, predDecision{}, false)
+				// The provider of the session's own last request, so the strategy layer applies in the report
+				// exactly when it applies in enforcement (Resolve skips strategies for OpenAI). No row: Anthropic.
+				provider := bschemas.Anthropic
+				if h.rec != nil {
+					if p, err := h.rec.DB().LastBilledProvider(dash.Filter{Tenant: t.ID}, session); err == nil && p != "" {
+						provider = bschemas.ModelProvider(p)
+					}
+				}
+				pol, _ = h.keeper.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
 			}
 			capUSD = pol.PingCap()
 		}

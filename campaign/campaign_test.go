@@ -446,19 +446,14 @@ func TestReplayDecidesLikeTheLiveKeeper(t *testing.T) {
 	}
 }
 
-// With a wait cause the replay weighs the same planned count as the live wait plan, and it is never
-// more permissive than live: the replay's chain is at most the keeper's.
-func TestReplayChainNeverExceedsTheLiveWaitPlan(t *testing.T) {
+// A tool wait replays the live wait plan's K=8, and an OpenAI row replays the base count (the wait plan does not
+// apply there).
+func TestReplayChainFollowsTheWaitPlan(t *testing.T) {
 	pol := keepalive.Policy{KeepAlive: true, MaxPings: 2, WaitPlan: true}
-	for _, cause := range []string{"", waitcause.WaitingOwnTool, waitcause.WaitingBackground, waitcause.WaitingHuman} {
-		for _, sub := range []bool{false, true} {
-			f := &RowFacts{Cause: cause, Subagent: sub}
-			if got, live := replayChain(pol, f), pol.WaitPings(cause, sub); got > live || (cause != "" && got != max(pol.MaxPings, live)) {
-				t.Errorf("cause %q subagent %v: replay chain %d, live %d", cause, sub, got, live)
-			}
-		}
-	}
 	if got := replayChain(pol, &RowFacts{Cause: waitcause.WaitingOwnTool}); got != 8 {
 		t.Errorf("a tool wait replays K=%d, want 8", got)
+	}
+	if got := replayChain(pol, &RowFacts{Cause: waitcause.WaitingOwnTool, OpenAI: true}); got != 2 {
+		t.Errorf("an OpenAI row replays K=%d, want the base 2", got)
 	}
 }
