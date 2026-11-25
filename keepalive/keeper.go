@@ -427,6 +427,8 @@ type Record struct {
 	TouchAlias string
 	// TouchAtMs is the time that request wrote under TouchAlias (apply.Trace.TouchAtMs). Record ends only the carry
 	// written at that time (apply.ConfirmRealTouch). 0: the request wrote no clock, and nothing ends.
+	// A request that took no clock step (a bypassed one) has TouchAtMs 0: it ends neither the stored carry nor, with
+	// a store that keeps nothing, the keeper's own record of the ping (resolveOneHourProbe).
 	// A host that runs apply MUST pass Trace.TouchAtMs and Trace.TouchSeq. Without them the confirm is a no-op, and
 	// a free 1-hour ping stays under the clock until its hour ends, with no error.
 	TouchAtMs int64
@@ -881,7 +883,7 @@ func (k *Keeper) Record(r Record) {
 	key := r.Key.id()
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
 	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
-	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
+	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten, r.TouchAtMs > 0)
 	// An ACCEPTED real request is the next touch (#1350): it ends the tier carried in the stored clock, the
 	// one record of the fact (#1365). A request that failed never gets here, so the record stays. Where this is
 	// never reached (a timeout, a cancel, no Record call) it stays too, and ends an hour after the ping. The

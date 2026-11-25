@@ -336,7 +336,7 @@ time, so it cannot disagree with the store. Each event writes the store record o
 
 Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.
 
-The one exception is a store that keeps nothing (`store.Keeps` is false: storage switched off, or no store). There is no record to read, so the keeper's index also holds the ping time (`storeOffAt`) and the cache clock and the manual-ping refusal answer from it, as before #1365. With a real store that field is always 0.
+The one exception is a store that keeps nothing (`store.Keeps` is false: storage switched off, or no store). There is no record to read, so the keeper's index also holds the ping time (`storeOffAt`) and the cache clock and the manual-ping refusal answer from it, as before #1365. The cold check reads it too: apply asks the host's `Opts.FreePing`, and only when `store.Keeps` is false, so no cold-only cut applies inside the ping's hour at any storage level (#1350). It counts as a carried ping: it can only make a cold verdict warm, inside `EntryLifetime` of the ping. With a real store that field is always 0 and the hook is never asked.
 
 ## Identify the client
 

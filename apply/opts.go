@@ -137,6 +137,18 @@ type Opts struct {
 	// CanKeepAlive, when set, tells a component whether the host's keep-alive can ping the thread of
 	// the session this request belongs to. See components.Ctx.CanKeepAlive. nil => it cannot.
 	CanKeepAlive func(session, thread string) bool
+	// FreePing asks the host for the free 1-hour ping that was the last touch of a conversation: its start time in
+	// milliseconds, and whether one stands. It is the host's fact for ONE case: the store keeps nothing
+	// (store.Keeps is false: storage off, or no store), so the ping's clock was never written and the cold check
+	// has nothing to read (#1350). apply asks it ONLY then. With a real store the stored clock stays the one record
+	// and this is never called. It can only make a cold verdict warm, and only inside the entry lifetime of the
+	// ping (EntryLifetime). nil asks for nothing, and so does a panic (fail open, as CanKeepAlive).
+	//
+	// It is asked by the cold clock's ALIAS (Trace.TouchAlias, from the body), not by session id and thread: the
+	// stored clock is keyed by the alias, and the same conversation may arrive under two session ids (with and
+	// without the client's session header). Asking by alias makes the store-off answer as id-independent as the
+	// stored one.
+	FreePing func(alias string) (atMs int64, ok bool)
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.
@@ -182,6 +194,21 @@ func canKeepAliveFor(f func(session, thread string) bool, session, thread string
 		}()
 		return f(session, thread)
 	}
+}
+
+// freePingFor asks the host's FreePing hook for one request's alias. nil in, nothing out. A panic in the hook reads
+// "no ping" (fail open: the cold check then decides without it, as before).
+func (o Opts) freePingFor(alias string) (atMs int64, ok bool) {
+	if o.FreePing == nil {
+		return 0, false
+	}
+	defer func() {
+		if recover() != nil {
+			atMs, ok = 0, false
+		}
+	}()
+	atMs, ok = o.FreePing(alias)
+	return atMs, ok && atMs > 0
 }
 
 // resolveThread runs ThreadOf once for the resolved session id. Fails open: a panic in the hook

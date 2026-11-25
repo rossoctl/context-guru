@@ -275,11 +275,16 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 // (the 5-minute entry would be gone); a cold rebuild (a near-zero read and a large write) proves a
 // downgrade. A return inside 5 minutes, over an hour later, a partial read, a return on another model, or
 // a return after the client rewrote the prefix (prefixRewritten) proves nothing: the probe is released.
-func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, usageOK bool, model string, prefixRewritten bool) {
+func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, usageOK bool, model string, prefixRewritten bool, tookClock bool) {
 	k.mu.Lock()
 	p, ok := k.oneHourProbes[key]
 	delete(k.oneHourProbes, key)
-	delete(k.oneHourThreads, key) // a real request is the next touch: this index entry has nothing left to point at
+	// A real request is the next touch: this index entry has nothing left to point at. Except for a store that keeps
+	// nothing and a request that took no clock step (a bypassed one): with a store such a request ends nothing
+	// (ConfirmRealTouch has no clock to match), so with none it must not end the ping's record either.
+	if t, listed := k.oneHourThreads[key]; !listed || tookClock || store.Keeps(t.st) {
+		delete(k.oneHourThreads, key)
+	}
 	k.mu.Unlock()
 	if !ok {
 		return
@@ -390,6 +395,34 @@ func (k *Keeper) OneHourTouchLive(key Key) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.oneHourTouchLiveLocked(key.id(), k.now())
+}
+
+// StoreOffPing is the keeper's record of the free 1-hour ping that was the last touch of a conversation, for a store
+// that keeps nothing (storeOffAt), found by the cold clock's alias. It is what the cold check reads then, so a
+// cold-only cut cannot fire inside the ping's hour at any storage level (#1350). It answers only for that case: with
+// a real store the stored clock is the one record and this says no. A route that is switched off gave no tier, so it
+// says no too; a costly route did rewrite the prefix at 1 hour, so it stands. It is the latest time a ping started:
+// the caller decides how long it counts (EntryLifetime). Nil-safe.
+//
+// By alias, not by session id and thread: the stored clock is keyed by the alias, and one conversation may arrive
+// under two session ids (with and without the client's session header). It scans the index, which holds at most
+// MaxTurnKeys entries, and only a request with no store asks.
+func (k *Keeper) StoreOffPing(alias string) (atMs int64, ok bool) {
+	if k == nil || alias == "" {
+		return 0, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, t := range k.oneHourThreads {
+		if t.alias != alias || store.Keeps(t.st) || t.storeOffAt <= 0 || t.storeOffAt <= atMs {
+			continue
+		}
+		if st := k.oneHourRoutes[t.route]; st != nil && st.off {
+			continue
+		}
+		atMs, ok = t.storeOffAt, true
+	}
+	return atMs, ok
 }
 
 // OneHourTouch is what the dashboard needs of it.

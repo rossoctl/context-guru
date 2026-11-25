@@ -729,16 +729,35 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				loadSessionState(st, alias)
 			}
 			seen, seq := aliasSeenWrite(st, alias, nowMs)
-			if seq > 0 { // seq is 0 when no clock was written (no store)
+			if seq > 0 { // seq is 0 when the request took no clock step (bypassed)
 				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
 			}
 			aliasAt := seen.at
+			// A store that keeps nothing never held the ping's clock (#1350). The host's own record of the ping
+			// stands in for it, asked only then: with a real store the stored clock is the one record. It joins
+			// the clocks the way the carried ping does: it can only move prevAt later and only extend the lifetime
+			// to the ping's hour, so it makes a cold verdict warm and never the other way.
+			storeOffPingAt := int64(0)
+			if !store.Keeps(st) {
+				if at, ok := o.freePingFor(alias); ok && at <= nowMs {
+					storeOffPingAt = at
+				}
+			}
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
 			// request that wrote no alias clock (a bypassed one) has moved the entry since.
 			carriedAt := int64(0)
 			if seen.carriedAt > 0 && seen.at >= prevAt {
 				carriedAt = seen.carriedAt
+			}
+			if storeOffPingAt > 0 {
+				// Counted as a carried ping: a failed request after it touched nothing, so its hour runs on.
+				if carriedAt == 0 || storeOffPingAt > carriedAt {
+					carriedAt = storeOffPingAt
+				}
+				if storeOffPingAt > prevAt {
+					prevAt = storeOffPingAt
+				}
 			}
 			if aliasAt > prevAt {
 				prevAt = aliasAt
@@ -1389,17 +1408,21 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 	return prev
 }
 
-// touchSeq numbers the real requests that write a clock in this process. A carry holds the number of the request
-// that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
+// touchSeq numbers the real requests that take the clock step in this process (with no store the step writes
+// nothing, but the request still has its number). A carry holds the number of the request that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
 // errs toward the old behavior (a shared confirm), not toward a new failure.
 var touchSeq atomic.Int64
 
-// aliasSeenWrite is aliasSeenState that also returns the number of this request's write (0 when none was made).
+// aliasSeenWrite is aliasSeenState that also returns the number of this request's clock step (0 when the request
+// took none: a bypassed one). With no store the step writes nothing, but the request still has its number.
 func aliasSeenWrite(st store.Store, alias string, nowMs int64) (prev seenState, seq int64) {
-	if st == nil || nowMs <= 0 {
+	if nowMs <= 0 {
 		return seenState{}, 0
 	}
-	seq = touchSeq.Add(1)
+	seq = touchSeq.Add(1) // the request went through the clock step, also when there is no store to write to
+	if st == nil {
+		return seenState{}, seq
+	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
 		prev = parseSeenState(b)

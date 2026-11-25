@@ -46,6 +46,8 @@ type coldRig struct {
 	alias string
 	atMs  int64 // the clock the last real request wrote (apply.Trace.TouchAtMs)
 	seq   int64 // its number (apply.Trace.TouchSeq)
+	// session is the explicit session id the next request carries ("" = the client sent no header).
+	session string
 }
 
 func newColdRig(t *testing.T, usage Usage) *coldRig {
@@ -62,6 +64,10 @@ func (r *coldRig) request(at time.Time) (cold bool, ttl time.Duration) {
 	r.t.Helper()
 	res := apply.BodyOpts(context.Background(), r.pipe, r.st, apply.Opts{
 		Provider: bschemas.Anthropic, Body: []byte(kaBody), Tracker: r.tr, Now: at, Tenant: "t",
+		// The host's hook, as the proxy wires it: the keeper's record of the thread's last free ping, which apply
+		// asks only when the store keeps nothing (#1350).
+		// It asks by the alias apply hands it, so the answer cannot depend on the session id.
+		FreePing: r.k.StoreOffPing, Session: r.session,
 	})
 	r.alias, r.atMs, r.seq = res.TouchAlias, res.TouchAtMs, res.TouchSeq
 	if len(r.cold) == 0 {

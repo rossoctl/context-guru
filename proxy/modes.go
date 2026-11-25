@@ -70,6 +70,8 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// The 1-hour-on-wait strategy on a route where the switch costs a rewrite: a main thread writes at 1
 	// hour from its first request (keepalive.Keeper.OneHourFirst, #1261). Only for an account that opted in.
 	o.OneHourFirst = h.oneHourFirstFor(r)
+	// The keeper's record of the last free 1-hour ping, for a store that keeps nothing: apply asks it only then.
+	o.FreePing = h.freePing
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, o)
 	added := time.Since(start)
 	if res.Body == nil {
@@ -187,6 +189,9 @@ func (h *Handler) observe(r *reqInfo) {
 		// clean (a real request must never replay a decision that was never enforced),
 		// but the frozen decisions still have to accumulate across turns or the
 		// projection under-reports what enforcing would achieve.
+		// A read of the keeper's record of the last free 1-hour ping, so a Nop shadow store reads the entry as warm
+		// as the enforced path does (apply asks it only when the store keeps nothing).
+		oo.FreePing = h.freePing
 		apply.BodyOpts(logging.With(ctx, lg), info.tn.Pipe, info.tn.Shadow, oo)
 		// The pipeline already emitted mode-stamped reports through the emitter; the
 		// Aggregator routes anything stamped observe into the potential_* namespace. No
@@ -203,4 +208,10 @@ func (h *Handler) requestOf(r *reqInfo) lifecycle.Request {
 		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
 		Tracker: h.tracker,
 	}
+}
+
+// freePing is apply.Opts.FreePing: the keeper's record of the free 1-hour ping under the cold clock's alias. The
+// alias already names the tenant, so no tenant is passed. The proxy only forwards the fact.
+func (h *Handler) freePing(alias string) (int64, bool) {
+	return h.keeper.StoreOffPing(alias)
 }
