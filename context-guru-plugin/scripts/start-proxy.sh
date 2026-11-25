@@ -613,6 +613,11 @@ fingerprint_want() {
 USE_CONFIG=1
 STRATEGY_RESOLVED=0
 RS_RESULT=""
+RS_UNKNOWN_NAME=""
+note_unknown_off() {
+  note "preset is off: the installed proxy (${HAVE:-unknown version}) does not know the strategy"
+  note "\`${RS_UNKNOWN_NAME:-$SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
+}
 resolve_strategy() {
   [ "$STRATEGY_RESOLVED" = 1 ] && return 0
   STRATEGY_RESOLVED=1
@@ -626,8 +631,9 @@ resolve_strategy() {
   case "$rs_result" in unknown) ;; *) rs_result=unchecked ;; esac
   RS_RESULT="$rs_result"
   if [ "$rs_result" = unknown ]; then
-    note "preset is off: the installed proxy (${HAVE:-unknown version}) does not know the strategy"
-    note "\`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
+    RS_UNKNOWN_NAME="$SYNC_STRATEGY"
+    # A warm start sets RS_DEFER: it prints this note only after the old proxy is gone.
+    if [ "${RS_DEFER:-0}" != 1 ]; then note_unknown_off; fi
   else
     note "could not check if the installed proxy (${HAVE:-unknown version}) knows the"
     note "strategy \`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
@@ -718,7 +724,9 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   # Only when a restart looks due: ask whether the binary knows the strategy, then decide again.
   if [ -n "$fp_have" ] && [ -n "$SYNC_STRATEGY" ] && [ "$fp_have" != "$fp_want" ] \
      && [ "$owner_now" != "theirs" ]; then
+    RS_DEFER=1
     resolve_strategy
+    RS_DEFER=0
     if [ "$RS_RESULT" = unchecked ]; then
       # The check could not run. A running proxy is evidence the binary works, and a wrong restart
       # costs more than a stale configuration: leave it alone. (Owner decision, 2026-11-25.)
@@ -772,9 +780,11 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
     fi
     # Not answering: the port is free even though the old process has not exited. Fall through and
     # start the new one, or the session is left routed at a port nothing is listening on.
+    [ "$RS_RESULT" = unknown ] && note_unknown_off
     note "the old proxy on port ${PORT} stopped answering but has not exited yet; starting the new one."
     rm -f "$FINGERPRINT" 2>/dev/null || true
   else
+    [ "$RS_RESULT" = unknown ] && note_unknown_off
     note "configuration changed, restarting the proxy on port ${PORT}."
     note "  was: ${fp_have}"
     note "  now: ${fp_want}"

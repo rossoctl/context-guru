@@ -3996,6 +3996,10 @@ def _names(rows) -> str:
 _STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*[^ \t#]")
 
 
+# Flow style on the top-level line: `cache: {strategy: x}` or `cache: {a: 1, strategy: x}`.
+_FLOW_CACHE_STRATEGY = re.compile(r"^cache:[ \t]*\{(?:[^}]*[,{ \t])?strategy[ \t]*:[ \t]*[^ \t,}]")
+
+
 def _file_sets_strategy_key(text: str) -> bool:
     """Does the file set `strategy:` as a direct child of `cache:`? Other nested keys (such as
     `components.extract_llm.strategy`) are not a cache strategy name."""
@@ -4005,7 +4009,10 @@ def _file_sets_strategy_key(text: str) -> bool:
             continue
         width = len(line) - len(line.lstrip(" \t"))
         if width == 0:
-            in_cache, indent = line.split("#")[0].strip() == "cache:", 0
+            code = line.split("#")[0].strip()
+            if _FLOW_CACHE_STRATEGY.match(code):
+                return True
+            in_cache, indent = code == "cache:", 0
         elif in_cache:
             indent = indent or width
             if width == indent and _STRATEGY_KEY.match(line):
@@ -4043,8 +4050,9 @@ def cmd_strategy(args) -> int:
         # start-proxy.sh asks this BEFORE it restarts or starts a proxy for a strategy name: does the
         # proxy binary it is about to run know `--name`? The plugin holds no table (the proxy owns it),
         # so a name from a newer release reaches an older binary, which exits on it and leaves the
-        # session with no proxy (#1383). `known` is the only answer that keeps the config; anything
-        # else (`unknown`, `unchecked`) makes the caller start without it. Never an error exit.
+        # session with no proxy (#1383). `known` is the only answer that keeps the config. For
+        # `unknown` the caller starts without it, with preset off. For `unchecked` a cold caller does
+        # the same, and a warm caller keeps the running proxy as it is. Never an error exit.
         name = args.name.strip()
         try:
             text = open(path, encoding="utf-8").read()
@@ -4066,7 +4074,10 @@ def cmd_strategy(args) -> int:
             emit(result="unchecked", strategy=name, reason="proxy_too_old")
             return 0
         explicit = getattr(args, "bin", "") or ""
-        if explicit and not (shutil.which(explicit) or os.access(explicit, os.X_OK)):
+        # A bare name is looked up on PATH, like `command -v` in start-proxy.sh. A name that holds
+        # a `/` is a path: check that file itself.
+        runnable = shutil.which(explicit) if "/" not in explicit else os.access(explicit, os.X_OK)
+        if explicit and not runnable:
             # The caller named the binary it will launch. Another one must not answer for it.
             emit(result="unchecked", strategy=name, reason="table_unavailable",
                  detail=f"{explicit} cannot be run")

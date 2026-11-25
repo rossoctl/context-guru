@@ -1179,3 +1179,121 @@ func TestUnknownStrategyFailOverKeepsTheFile(t *testing.T) {
 		t.Errorf("the keep-alive file was changed:\n%s", got)
 	}
 }
+
+// A bare --bin name is looked up on PATH, as `command -v` does in start-proxy.sh. A file with that
+// name in the working directory, which is not on PATH, must not count.
+func TestStrategyKnownWithABareDashDashBinOffPathIsUnchecked(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	local := filepath.Join(dir, "cg-local-only-bin")
+	if err := os.Rename(bin, local); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", "cg-local-only-bin")
+	cmd.Dir = dir
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=unchecked") || !strings.Contains(string(b), "cannot be run") {
+		t.Errorf("a bare name found only in the working directory was not refused up front:\n%s", b)
+	}
+}
+
+// A hand-written flow-style `cache:` line names a strategy too. The table check must run.
+func TestUnknownStrategyInAFlowStyleFileStillFailsOver(t *testing.T) {
+	for _, line := range []string{
+		"cache: {strategy: future-x}\n",
+		"cache: {keepalive_max_pings: 3, strategy: future-x, keepalive_idle_seconds: 240}\n",
+	} {
+		cfg := "# context-guru: strategy=future-x written by /context-guru:cache-strategy-picker\n" +
+			"preset: off\n" + line
+		r := unknownStrategyCase(t, cfg, tableWith("none", "auto"), true)
+		if !strings.Contains(r.fp, "preset=off") || !strings.Contains(r.fp, "strategy=none") ||
+			strings.Contains(r.args, "--config") {
+			t.Errorf("flow-style file %q was passed to the proxy: fp=%q args=%q\n%s", line, r.fp, r.args, r.out)
+		}
+	}
+}
+
+// A `strategy` key under another top-level block does not count, even in flow style.
+func TestOldFormFileWithFlowStyleNestedStrategyStaysKnown(t *testing.T) {
+	old := "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+		"preset: off\n" +
+		"cache:\n" +
+		"  keepalive_idle_seconds: 240\n" +
+		"components: {extract_llm: {strategy: code}}\n"
+	r := unknownStrategyCase(t, old, tableWith("none", "auto"), true)
+	if strings.Contains(r.out, "preset is off") || !strings.Contains(r.args, "--config") {
+		t.Errorf("a nested flow-style key sent the file to the table check: args=%q\n%s", r.args, r.out)
+	}
+}
+
+// Warm unknown, normal stop: the "preset is off" note prints, after the old proxy is stopped.
+func TestWarmUnknownSaysPresetIsOffAfterTheStop(t *testing.T) {
+	r := unknownStrategyCase(t, futureStrategyFile, tableWith("none", "auto"), false)
+	i, j := strings.Index(r.out, "preset is off"), strings.Index(r.out, "configuration changed")
+	if i < 0 || j < 0 || r.first == r.after {
+		t.Fatalf("want a restart with the note:\n%s", r.out)
+	}
+	if i > j {
+		t.Errorf("the off note must come before the restart note, once the stop worked:\n%s", r.out)
+	}
+}
+
+// Warm unknown, and the old proxy ignores SIGTERM and keeps answering: nothing changed, so the
+// "preset is off" note must not print. (Takes about 30 s: the stop waits that long.)
+func TestWarmUnknownWithAProxyThatIgnoresSigtermDoesNotSayPresetIsOff(t *testing.T) {
+	requireTool(t, "python3")
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	stubborn := filepath.Join(dir, "stubborn-proxy")
+	body := "#!/usr/bin/env bash\nexec python3 -c '\n" +
+		"import sys, signal, http.server\n" +
+		"signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n" +
+		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n" +
+		"' " + port + "\n"
+	if err := os.WriteFile(stubborn, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pidfile := filepath.Join(state, "proxy-"+port+".pid")
+	t.Cleanup(func() {
+		if pid := strings.TrimSpace(readFileString(t, pidfile)); pid != "" {
+			_ = exec.Command("kill", "-9", pid).Run()
+		}
+	})
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v9.9.8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	limit := "CONTEXT_GURU_STRATEGIES_TIMEOUT=15"
+	if o, code := startProxyIn(t, state, stubborn, port, "TMPDIR="+dir, limit); code != 0 {
+		t.Fatalf("first start failed: exit %d %s", code, o)
+	}
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v9.9.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := tableProxy(t, dir, port, tableWith("none", "auto"))
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir, limit, "CLAUDE_PLUGIN_OPTION_PRESET=conservative")
+	if code != 0 {
+		t.Fatalf("second start failed: exit %d %s", code, out)
+	}
+	if !strings.Contains(out, "STILL ANSWERING") {
+		t.Fatalf("the test proxy did not stay up:\n%s", out)
+	}
+	if strings.Contains(out, "preset is off") {
+		t.Errorf("claimed the preset is off although the old proxy still answers:\n%s", out)
+	}
+}
