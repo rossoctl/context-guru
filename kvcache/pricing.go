@@ -72,9 +72,12 @@ const (
 	DefaultWrite1hMultiple = modelinfo.AnthropicCacheWrite1hFrac
 	// DefaultPingOutputTokens is the smallest generation Anthropic's Messages API accepts.
 	DefaultPingOutputTokens = 1
-	// DefaultPingInputTokens is the fresh input a ping carries beyond the cached prefix —
-	// the one-token user turn that makes it a legal request.
-	DefaultPingInputTokens = 1
+	// DefaultPingInputTokens is the fresh input a ping carries beyond the cached prefix: the
+	// measured law of a keep-alive's own cost, about 7 tokens (first measured with the predictive
+	// keep-alive campaigns, commit 47ea64765). It is the ONE number for a ping's own input. The
+	// keeper (keepalive.PingPrompt), the predictive PingCost and the campaign replay all read it,
+	// so a ping near a price line gets the same tier everywhere.
+	DefaultPingInputTokens = 7
 )
 
 // Multipliers are the deployment-wide fractions used to fill in a rate a price list does
