@@ -359,9 +359,9 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 6. `prefix_change`: the tools, the system prompt, or the effort or thinking settings changed.
 7. `concurrent`: nothing measured changed, and the previous request of the thread started less than a short gap ago. The provider can read a cache entry only after the first response starts, so parallel requests (for example, sub-agents) miss.
 8. `unexplained`: the proxy compared the request with the previous one and found no difference, but the request missed and wrote cache tokens. A partial read that re-wrote most of the prompt with no measured change is here too.
-9. `other`: anything else. For example, a miss that wrote nothing, or a cause value that this list does not name.
+9. `other`: anything else. For example, a miss that wrote nothing, a miss with no earlier request to compare with (the first request of a live thread after a proxy restart), or a cause value that this list does not name.
 
-Rules 3 to 6 and 8 apply only when the request wrote cache tokens. A miss that wrote nothing re-created no prefix, so it is `other`, and its miss cost is zero. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it, not `unexplained`. It does not guess. Data written before `concurrent` and `unexplained` existed stays `other`.
+Rules 3 to 6 and 8 apply only when the request wrote cache tokens. Rule 7 applies with or without a write; with no write, its miss cost is zero. A miss that wrote nothing re-created no prefix, so it is `other`, and its miss cost is zero. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it, not `unexplained`. It does not guess. Data written before `concurrent` and `unexplained` existed stays `other`.
 
 **The miss cost is the write premium.** It is what the written prefix cost above a read of the same tokens, which is what a hit would have charged:
 
@@ -411,7 +411,7 @@ Estimate series per machine. A histogram has 12 buckets, plus a sum and a count:
 | `ttfb_seconds` | 10 x 14 | 140 |
 | `added_seconds` | 10 x 14 | 140 |
 | `component_duration_seconds` | 30 x 14 | 420 |
-| Keep-alive and cache health | about 10 models x 4 outcomes + 7 causes x 2 | about 150 |
+| Keep-alive and cache health | about 10 models x 4 outcomes + 9 causes x 2 | about 150 |
 | Proxy health and failures | about 100 | about 100 |
 | **Total** | | **about 1,700** (the 40 for bytes is inside the rounding) |
 

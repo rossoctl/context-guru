@@ -275,8 +275,13 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 // model_changed, compaction_after_rewrite, bypass_flip, concurrent, unexplained, cold_start,
 // other. A hit is not a miss. tools, system and effort changes all change the cached prefix, so
 // they are prefix_change. unexplained is a miss that wrote cache tokens while the comparison with
-// the previous request found no difference. A miss that wrote nothing re-created no prefix: it
-// stays other, and its miss cost is zero.
+// the previous request found no difference. A miss with nothing to compare with (the first of a
+// live thread after a restart) is other: the proxy does not guess. A miss that wrote nothing
+// re-created no prefix: it stays other, and its miss cost is zero.
+//
+// It stays in this host package for now: its inputs (dash.Event, the Cache* and Cause* values and
+// AttributeCache that sets them) are all in dash/, also a host package. Moving it alone would
+// define those values again in a library package.
 func missCause(e *dash.Event) (string, bool) {
 	switch e.CacheMissReason {
 	case dash.CacheHit, "":
@@ -298,7 +303,7 @@ func missCause(e *dash.Event) (string, bool) {
 	case dash.CauseConcurrent:
 		return "concurrent", true
 	}
-	if e.CacheMissReason == dash.CacheUnknown && e.CacheMissCause == "" && e.CacheWrite > 0 {
+	if e.CacheMissReason == dash.CacheUnknown && e.CacheMissCause == "" && e.PrefixCompared && e.CacheWrite > 0 {
 		return "unexplained", true
 	}
 	return "other", true

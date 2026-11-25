@@ -206,7 +206,7 @@ func newInferenceWith(t *testing.T, prices modelinfo.Pricer) (*InferenceMetrics,
 func missEvent(reason, cause string) *dash.Event {
 	e := goodEvent()
 	e.CacheRead, e.CacheWrite, e.CacheWrite1h = 0, 1000, 0
-	e.CacheMissReason, e.CacheMissCause = reason, cause
+	e.CacheMissReason, e.CacheMissCause, e.PrefixCompared = reason, cause, true
 	return e
 }
 
@@ -249,6 +249,16 @@ func TestMissCauseNoWriteIsOther(t *testing.T) {
 	e.CacheMissCause = dash.CauseConcurrent
 	if got, _ := missCause(e); got != "concurrent" {
 		t.Errorf("concurrent, no write = %q, want concurrent", got)
+	}
+}
+
+// A miss with nothing to compare with (the first of a live thread after a restart) is other, not
+// unexplained, even when it wrote cache tokens: no comparison ran, so the proxy does not guess.
+func TestMissCauseWithNoBaselineIsOther(t *testing.T) {
+	e := missEvent(dash.CacheUnknown, "")
+	e.PrefixCompared = false
+	if got, miss := missCause(e); got != "other" || !miss {
+		t.Errorf("unknown, no baseline = (%q,%v), want (other,true)", got, miss)
 	}
 }
 

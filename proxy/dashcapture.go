@@ -804,6 +804,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
+	e.PrefixCompared = known
 	e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
