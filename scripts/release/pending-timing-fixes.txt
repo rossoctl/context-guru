@@ -80,11 +80,6 @@ keepalive TestSubstitutePingCarriesTheGapWindow
 keepalive TestTheManualHoldTimerReleasesAndZeroisesWithoutASweep
 keepalive TestWaitPlanNoExtraQuestionAfterAToolWaitButOneAfterEndTurn
 keepalive TestWhenTheSummarizerTriggerFiresTheSummaryTakesThePingAndTheSweepDoesNotAsk
-modes TestEnqueueDedupIsAtomic
-modes TestFullQueueDropsAndNeverBlocks
-modes TestPanickingJobIsContained
-modes TestPoolRunsJobs
-modes TestStopLeaksNoGoroutines
 opencode-plugin picker confirm and cancel (uses settle())
 opencode-plugin v2: setup waits for the host transform callback before judging providers
 opencode-plugin waitForRecord helper (v1 and v2 signal tests)
