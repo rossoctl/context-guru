@@ -102,7 +102,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 	}
 	// The scheduled path's cost guard applies to a press too: with no limiter configured the
 	// per-thread gap is the only other brake, and a huge prefix would pass it every 30 s.
-	if e.pingUSD > e.entryCeiling() {
+	if e.verdict() != VerdictOK {
 		k.mu.Unlock()
 		return ManualResult{}, ErrTooCostly
 	}

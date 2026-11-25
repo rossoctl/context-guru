@@ -168,8 +168,11 @@ type CacheConfig struct {
 	// worse, the 1-hour premium 39% of the cost. The owner's laptop: -25%. See the strategy 1-hour-always and
 	// docs/how-to/cache-strategies.md.
 	KeepAliveOneHourAlways bool `yaml:"keepalive_one_hour_always"`
-	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
-	// DefaultKeepAliveMaxUSDPerPing.
+	// KeepAliveMaxUSDPerPing is an OPT-IN flat cap: it refuses a ping whose projected cost exceeds
+	// this. 0 (the default) means the operator set none, and only the value rule applies: a planned
+	// ping chain must cost less than the miss it protects (keepalive.Policy.PingVerdict). The
+	// loader does not fill the field, so a set value is always the operator's own. Summary and
+	// sweep calls still use DefaultKeepAliveMaxUSDPerPing as their cap when this is 0.
 	//
 	// PER PING and not per session, which is the opposite of the obvious design and is
 	// measured. Ping cost is bimodal — p50 $0.0004, mean $0.0084, p99 $0.2275, max $0.3780 —
@@ -346,9 +349,6 @@ func (c CacheConfig) Resolved() CacheConfig {
 	}
 	if c.KeepAliveMaxPings1h <= 0 {
 		c.KeepAliveMaxPings1h = DefaultKeepAliveMaxPings1h
-	}
-	if c.KeepAliveMaxUSDPerPing <= 0 {
-		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
 	}
 	if c.KeepAliveMaxBodyBytes <= 0 {
 		c.KeepAliveMaxBodyBytes = DefaultKeepAliveMaxBodyBytes

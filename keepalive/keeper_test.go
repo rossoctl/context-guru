@@ -845,25 +845,33 @@ func TestRetainedBodyIsMaskedAtRest(t *testing.T) {
 // infinity was enforced, on the one path where per-ping cost is unbounded by anything else.
 // (The override that switches such a policy on is the proxy's, and tested there.)
 func TestAZeroCeilingPolicyStillHasAPingCeiling(t *testing.T) {
-	// What a session override makes of a zero account policy: on, with no ceiling configured.
+	// What a session override makes of a zero account policy: on, with no flat cap configured. The value
+	// rule is the guard then (#1420): K planned pings against one miss.
 	pol := Policy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 2}
-	// It BITES: an entry whose projected ping cost is over the default is refused.
-	over := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: DefaultMaxUSDPerPing + 0.01}
+	// It BITES: two pings that cost more than the one miss they protect are refused.
+	over := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: 0.51, missUSD: 1.0}
 	if over.pingable() {
-		t.Errorf("a ping projected at $%.2f passed the guard on an account with no configured "+
-			"ceiling; the p99 ping is $0.2275 and the max $0.3780, which is what the guard is "+
-			"for", over.pingUSD)
+		t.Errorf("a chain of 2 x $%.2f passed the guard against a $%.2f miss", over.pingUSD, over.missUSD)
 	}
-	under := &kaEntry{turn: 1, prefix: 1_000_000, pol: pol, pingUSD: DefaultMaxUSDPerPing - 0.01}
+	if over.verdict() != VerdictNotWorth {
+		t.Errorf("verdict = %v, want VerdictNotWorth", over.verdict())
+	}
+	// A $0.60 ping that protects a $5 miss passes: the old flat $0.50 refused it.
+	under := &kaEntry{turn: 1, prefix: 1_000_000, pol: Policy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 1}, pingUSD: 0.60, missUSD: 5.4}
 	if !under.pingable() {
-		t.Error("a ping inside the default ceiling was refused; the guard has become a block")
+		t.Error("a ping worth 9x its cost was refused; the guard has become a block")
 	}
-	// A caller who really wants no ceiling has to type a negative number.
-	none := &kaEntry{turn: 1, prefix: 1_000_000, pingUSD: 99,
+	// An explicit operator cap still refuses, whatever the value.
+	capped := &kaEntry{turn: 1, prefix: 1_000_000, pingUSD: 0.60, missUSD: 5.4,
+		pol: Policy{KeepAlive: true, Idle: 280 * time.Second, MaxPings: 1, MaxUSDPerPing: 0.5}}
+	if capped.pingable() || capped.verdict() != VerdictOverCap {
+		t.Error("an explicit $0.50 cap did not refuse a $0.60 ping")
+	}
+	// A caller who really wants no cap types a negative number: no flat cap, and it was never the value rule.
+	none := &kaEntry{turn: 1, prefix: 1_000_000, pingUSD: 99, missUSD: 0,
 		pol: Policy{KeepAlive: true, Idle: time.Second, MaxPings: 1, MaxUSDPerPing: -1}}
 	if !none.pingable() {
-		t.Error("an explicitly negative ceiling did not mean unlimited; that is the only way to " +
-			"ask for it and it has to keep working")
+		t.Error("an explicitly negative ceiling did not mean unlimited")
 	}
 }
 

@@ -32,7 +32,7 @@ cache:
   keepalive_max_pings: 2               # flat cap per idle span
   keepalive_min_prefix_tokens: 80000   # skip small prefixes of a main thread that waits for a person or for an unknown cause (the default)
   keepalive_tool_wait_min_prefix_tokens: 20000  # the lower floor for a tool wait, background work, a teammate and a subagent (the default)
-  keepalive_max_usd_per_ping: 0.50     # per-ping cost ceiling
+  # keepalive_max_usd_per_ping: 0.50  # opt-in flat cap per ping; unset by default, the value rule applies (#1420)
 ```
 
 `keepalive_max_pings` is a **ceiling** other policies (including the predictor-driven budget

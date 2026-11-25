@@ -1,10 +1,13 @@
 package dash
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // TestComponentsCached guards the fix: /api/components had no cache at all (unlike /api/stats and
@@ -70,20 +73,13 @@ func TestComponentsCached(t *testing.T) {
 	}
 
 	// ...and that background refresh must actually land, or "stale" would be permanent.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testutil.WaitForState(t, "the background refresh replaces the stale body (a refresh that cannot "+
+		"complete makes every reader permanently stale, which is worse than the blocking recompute "+
+		"this replaced)", func() bool {
 		_, body = get(t, a, "/api/components", "127.0.0.1:1")
 		rows, _ = body["components"].([]any)
-		if len(rows) == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the background refresh never replaced the stale body: still %d rows after 5s. "+
-				"A refresh that cannot complete makes every reader permanently stale, which is worse "+
-				"than the blocking recompute this replaced.", len(rows))
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return len(rows) == 2
+	}, func() string { return fmt.Sprintf("%d rows", len(rows)) })
 
 	// Past the staleness cap, a reader waits for fresh numbers instead. Seed a third component so
 	// "fresh" is distinguishable from whatever is cached.

@@ -103,6 +103,7 @@ type RowFacts struct {
 	Returned           bool
 	ToEnd              float64 // seconds from this response's end to the end of the session's last response (any model): SessionEnd cancels pings after it
 	Stake, Ping        float64 // one avoided rewrite (prefix x (write - read)) and one ping, gateway $
+	Miss               float64 // the miss the value rule weighs (keepalive.MissUSD): the same figure at the ping's prompt tier, 5-minute write rate. 0 = unknown, and the rule fails open
 	Turn               int     // requests of the conversation before this one
 	Prefix             int64
 	Hour, Dow          int // request start, UTC
@@ -125,10 +126,13 @@ func (f *RowFacts) Outcome(k int, x float64, sessionEnd bool) (fired int, rescue
 	return PlanOutcome(k, x, f.U, f.Gap, f.Returned, stop)
 }
 
-// The shipped default keep-alive (config.Default*): K2 at 240 s on a prefix of at least 80K tokens, at most $0.50 a ping, never after a thread's first
+// defaultPlan is the shipped plan the replay's gate weighs: K base pings with the per-wait plan on, as the live keeper plans them.
+var defaultPlan = keepalive.Policy{MaxPings: config.DefaultKeepAliveMaxPings, WaitPlan: true}
+
+// The shipped default keep-alive (config.Default*): K2 at 240 s on a prefix of at least 80K tokens, every chain costing less than the miss it protects, never after a thread's first
 // request, with SessionEnd.
 func (f *RowFacts) DefaultK() int {
-	if f.Turn < 1 || f.Prefix < config.DefaultKeepAliveMinPrefix || f.Ping > keepalive.DefaultMaxUSDPerPing {
+	if f.Turn < 1 || f.Prefix < config.DefaultKeepAliveMinPrefix || (keepalive.Policy{}).PingVerdict(f.Ping, f.Miss, defaultPlan.WaitPings(f.Cause, f.Subagent)) != keepalive.VerdictOK {
 		return 0
 	}
 	return config.DefaultKeepAliveMaxPings
@@ -190,14 +194,18 @@ func Rows(reqs []*kvcache.Request, price func(model string, promptTokens int64) 
 			continue
 		}
 		// A replayed ping reads CachedContext plus its own input: priced at that size, not at the row's.
-		pingIn, pingOut, pingRead, _, pingOK := price(r.Model, r.CachedContext+kvcache.DefaultPingInputTokens)
+		pingIn, pingOut, pingRead, pingWrite, pingOK := price(r.Model, r.CachedContext+kvcache.DefaultPingInputTokens)
 		if !pingOK {
 			pingIn, pingOut, pingRead = pIn, pOut, pRead
+		}
+		miss := Stake(r.CachedContext, pRead, pWrite)
+		if pingOK {
+			miss = Stake(r.CachedContext, pingRead, pingWrite)
 		}
 		key, tk := sk{r.User, r.ConversationID}, sk{r.User, r.ConversationID + "\x00" + r.ThreadID}
 		st := time.UnixMilli(r.TS).UTC()
 		f := RowFacts{U: r.UpstreamMs / 1000, Returned: r.HasNext, ToEnd: float64(max(0, lastEnd[key]-end)) / 1000,
-			Stake: Stake(r.CachedContext, pRead, pWrite), Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pingIn, POut: pingOut, PRead: pingRead}).PingCost(),
+			Stake: Stake(r.CachedContext, pRead, pWrite), Miss: miss, Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pingIn, POut: pingOut, PRead: pingRead}).PingCost(),
 			Turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), Prefix: r.CachedContext,
 			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: agent.ModelAgentOf(r.Agent, r.Provider), Stop: r.StopReason, Cause: r.WaitingFor, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
 		f.Span = math.Inf(1)

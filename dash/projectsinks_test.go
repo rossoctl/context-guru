@@ -4,7 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // A credential-shaped launch directory must not survive on ANY sink: the requests table, the
@@ -31,26 +32,15 @@ func TestACredentialDirectoryNeverReachesTheFeedOrToolUses(t *testing.T) {
 		[]map[string]any{{"name": "Bash", "input": map[string]any{}}}))
 	rec.RecordInventory("", "s1", 1000, inv, false, canaryDir)
 
-	select {
-	case e := <-c.ch:
-		if strings.Contains(e.Project, "sk-ant") {
-			t.Errorf("the feed carried the credential: %q", e.Project)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no event published")
+	if e := awaitSignal(t, "an event to be published", c.ch); strings.Contains(e.Project, "sk-ant") {
+		t.Errorf("the feed carried the credential: %q", e.Project)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// The inventory writer flushes on a 2 s ticker, so this wait is a few seconds long.
+	testutil.WaitFor(t, "a tool_uses row is written", func() bool {
 		var n int
 		rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM tool_uses`).Scan(&n)
-		if n > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no tool_uses row written")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return n > 0
+	})
 	var bad int
 	rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM tool_uses WHERE project LIKE '%sk-ant%'`).Scan(&bad)
 	if bad != 0 {
