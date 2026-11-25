@@ -328,7 +328,7 @@ func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.Mo
 }
 
 // ObserveWith is Observe with the normalized messages supplied by the caller (norm is called
-// at most once, and not at all for a previous_response_id body), so a caller that also needs
+// at most once, and not at all for a server-held-history body, see schema.ServerHeldHistory), so a caller that also needs
 // the normalization can share one pass over the body.
 func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) (obs Observation) {
 	defer func() { recover() }() //nolint:errcheck // fail open; see package doc

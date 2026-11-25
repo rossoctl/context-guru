@@ -199,7 +199,9 @@ func TestStatelessResponses(t *testing.T) {
 		`{"input":[]}`:               false,
 		`{"store":true}`:             false,
 		`{"store":false,"previous_response_id":"resp_1"}`: false,
-		`{"store":"false"}`: false,
+		`{"store":false,"previous_response_id":""}`:       true,
+		`{"store":false,"previous_response_id":null}`:     true,
+		`{"store":"false"}`:                               false,
 	} {
 		if got := StatelessResponses([]byte(body)); got != want {
 			t.Errorf("%s: got %v want %v", body, got, want)

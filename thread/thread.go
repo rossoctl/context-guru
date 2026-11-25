@@ -536,7 +536,7 @@ func (t *Tracker) pruneLocked(now time.Time) {
 // Fingerprint returns the cumulative fingerprint of a request's message list: element i is the
 // hash of messages[0..i]. ok is false when the body carries no message list to match on — no
 // `messages` or `input` array, or a Responses request that continues server-held history
-// (`previous_response_id`), whose `input` is only the newest turn.
+// (`schema.ServerHeldHistory`: previous_response_id, conversation, item_reference), whose `input` is only the newest turn.
 //
 // The fingerprint covers what decides whether the agent CONTINUED a conversation, and leaves out
 // what the agent rewrites in place without starting a new one:

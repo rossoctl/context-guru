@@ -44,7 +44,7 @@ func (s *Scan) Messages() []bschemas.ChatMessage {
 // cannot say, and the caller then uses today's path:
 //
 //   - the body is over MaxScanBytes, or its message list over MaxScanMessages (the work bound);
-//   - the body is empty, has no message list, or continues server-held history (previous_response_id);
+//   - the body is empty, has no message list, or continues server-held history (schema.ServerHeldHistory);
 //   - stop reports true (the request ended, so the answer is no longer needed);
 //   - anything panics.
 //

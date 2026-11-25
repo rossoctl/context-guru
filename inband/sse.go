@@ -140,7 +140,7 @@ type SSESplicer struct {
 	// OpenAI Responses (#884). A call's name arrives on response.output_item.added, blocks counts
 	// the output items the client holds, and the stream ends with ONE response.completed that
 	// lists every item the client saw. The splice is only used for a stateless request
-	// (store:false, no previous_response_id), so the client never chains on an id: it gets
+	// (store:false, no server-held history: schema.ServerHeldHistory), so the client never chains on an id: it gets
 	// round 1's id on the whole stream.
 	resp      bool
 	respID    string           // the response id the client sees (round 1's)
@@ -846,7 +846,7 @@ func (sp *SSESplicer) terminateResponses() {
 }
 
 // StatelessResponses reports whether a Responses request never relies on the server keeping
-// the response: store is false and there is no previous_response_id. Codex over HTTP sends
+// the response: store is false and the body holds no server-held history (schema.ServerHeldHistory: previous_response_id, conversation, item_reference). Codex over HTTP sends
 // exactly this. A missing store field means the API default, which is true.
 func StatelessResponses(body []byte) bool {
 	st := gjson.GetBytes(body, "store")

@@ -338,7 +338,7 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 		o.Why = "no_tools"
 		return o, nil
 	}
-	// A Responses turn that chains on previous_response_id holds only the new items: the transcript,
+	// A Responses turn with server-held history (schema.ServerHeldHistory: previous_response_id, conversation, item_reference) holds only the new items: the transcript,
 	// the names list included, is stored at the provider. Such a turn never makes a decision. But a
 	// thread our search already rewrote keeps it: its turns must declare the same tools (the search
 	// tool, and the tools added back), or the names list the model reads points at a tool that is
@@ -354,7 +354,7 @@ func ApplySearch(env Env, wire string, r Req) (o Outcome, loaded []string) {
 	}
 	rec, ok := LoadSearch(rs, r.Session, r.Thread)
 	if !ok && chained {
-		o.Why = "previous_response_id"
+		o.Why = "server_held_history"
 		return o, nil
 	}
 	if !ok {
