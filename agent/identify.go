@@ -199,3 +199,20 @@ func MarkedCompaction(c Client, body []byte) bool {
 func IsClientCompaction(c Client, body []byte) bool {
 	return thread.IsAgentCompactionHint(MarkedCompaction(c, body), body)
 }
+
+// SubagentID is the id of this request's thread when the client says the request comes from a
+// subagent, or "" for a main thread and for a client that gives no signal. Claude Code: the agent
+// header. Codex: the request's own thread-id, when it names a parent thread. OpenCode: the request's
+// own session id, when it names a parent session. A host passes it to thread.HeaderAgentID, then to
+// thread.Tracker.ResolveSession.
+func (c Client) SubagentID() string {
+	switch {
+	case c.AgentIDHeader == claudecode.AgentHeader:
+		return c.AgentID
+	case c.Name == ClientCodex && c.ParentID != "":
+		return c.AgentID
+	case c.Name == ClientOpenCode && c.ParentID != "":
+		return c.SessionID
+	}
+	return ""
+}

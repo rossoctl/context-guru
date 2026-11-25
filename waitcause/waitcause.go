@@ -28,6 +28,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
@@ -112,7 +113,10 @@ const (
 // that calls one of these — even alongside other tools — means WaitingHuman, never
 // WaitingOwnTool; and a bare tool_result that answers one of these (the Messages API returns
 // every tool's answer the same way, human or not) means WakeHuman, never WakeToolResult.
-var askHumanTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": true}
+//
+// "request_user_input" is Codex's question tool (openai/codex f64f003,
+// codex-rs/core/src/tools/handlers/request_user_input_spec.rs, REQUEST_USER_INPUT_TOOL_NAME).
+var askHumanTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": true, "request_user_input": true}
 
 // WaitPrompt values: whether the turn ends on a prompt that a person must answer (#1198).
 const (
@@ -134,7 +138,7 @@ func PromptOf(toolUseNames []string) string {
 		if !askHumanTools[n] {
 			continue
 		}
-		if n == "AskUserQuestion" {
+		if n == "AskUserQuestion" || n == "request_user_input" {
 			return PromptQuestion
 		}
 		out = PromptOther
@@ -180,6 +184,29 @@ func ClassifyWaitingFor(toolUseNames []string, stopReason string, failed, usageO
 // is terminal the answer is WaitingDone. When it is a handback tool the answer is the one for an
 // end_turn with nothing else open.
 func ClassifyWaitingForTerminal(terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
+	return classifyWaitingFor(WaitingHuman, terminal, toolUseNames, stopReason, failed, usageOK, openBackground, openTeammate)
+}
+
+// HumanFallback reports whether an end_turn with nothing open reads "human" for this client. It does
+// for Claude Code, whose own signals (the agent header, the question tools, the task markers) rule
+// out the other causes, and for Bob, whose behavior stays as it was. For any other client the proxy
+// cannot tell a person from a subagent hand-back, a background terminal or a tool it does not know,
+// so the cause reads "unknown". A request with no User-Agent (agent.Identify of no headers, Label
+// "unknown", or a zero Client from a host that passes none) names no client and keeps "human", as before.
+func HumanFallback(cl agent.Client) bool {
+	return cl.Name == agent.ClientClaude || cl.Name == agent.ClientBob || cl.Label == "unknown" || cl.Label == ""
+}
+
+// ClassifyWaitingForClient is ClassifyWaitingForTerminal for the client that sent the request (see agent.Identify): the only difference is the end_turn-with-nothing-open fallback (see HumanFallback).
+func ClassifyWaitingForClient(cl agent.Client, terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
+	fallback := WaitingHuman
+	if !HumanFallback(cl) {
+		fallback = WaitingUnknown
+	}
+	return classifyWaitingFor(fallback, terminal, toolUseNames, stopReason, failed, usageOK, openBackground, openTeammate)
+}
+
+func classifyWaitingFor(fallback string, terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
 	if failed {
 		return WaitingRetry, ""
 	}
@@ -211,7 +238,7 @@ func ClassifyWaitingForTerminal(terminal []string, toolUseNames []string, stopRe
 	case openTeammate > 0:
 		return WaitingTeammate, ""
 	default:
-		return WaitingHuman, ""
+		return fallback, ""
 	}
 }
 
@@ -319,26 +346,49 @@ func Key(tenant, session, threadID string) string {
 // per-provider body parser (see the package doc). Fails open: any panic (a malformed body, an
 // unexpected shape) yields the zero Observation (WakeCause "", read by callers as unknown)
 // rather than escaping.
-func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte) (obs Observation) {
+func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte, opts ...Option) (obs Observation) {
 	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
 	if t == nil {
 		return Observation{}
 	}
-	return t.observe(tenant, session, threadID, body, func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) })
+	return t.observe(tenant, session, threadID, body, func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) }, opts)
 }
 
 // ObserveWith is Observe with the normalized messages supplied by the caller (norm is called
 // at most once, and not at all for a server-held-history body, see schema.ServerHeldHistory), so a caller that also needs
 // the normalization can share one pass over the body.
-func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) (obs Observation) {
+func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage, opts ...Option) (obs Observation) {
 	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
 	if t == nil {
 		return Observation{}
 	}
-	return t.observe(tenant, session, threadID, body, norm)
+	return t.observe(tenant, session, threadID, body, norm, opts)
 }
 
-func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) Observation {
+// Option tells a scan which client sent the body. Without one, a scan applies only the rules that hold
+// for every client (the Claude Code markers).
+type Option func(*scanCfg)
+
+type scanCfg struct{ codex bool }
+
+// ForClient turns on the markers that only one client writes. The Codex terminal markers ("Process
+// running with session ID N", "Process exited with code C") are read only for the Codex client: a
+// Claude Code tool result that echoes the same text must not open a background task.
+func ForClient(cl agent.Client) Option {
+	return func(c *scanCfg) { c.codex = cl.Name == agent.ClientCodex }
+}
+
+func cfgOf(opts []Option) scanCfg {
+	var c scanCfg
+	for _, o := range opts {
+		if o != nil {
+			o(&c)
+		}
+	}
+	return c
+}
+
+func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage, opts []Option) Observation {
 	if schema.ServerHeldHistory(body) {
 		// A Responses request continuing SERVER-HELD history: `input` here is only the
 		// newest turn, not the full conversation. apply.NormalizeMessages does not special-
@@ -389,7 +439,7 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm fu
 		// open" guard on each open; a delete of an absent key is a no-op) except the
 		// Skill-anonymous close fallback, which is explicitly guarded by ts.appliedCloses —
 		// see scanOpenState's doc for why that ONE path needs it.
-		scanOpenState(ts, entries, now, nil)
+		scanOpenState(ts, entries, now, nil, cfgOf(opts))
 		obs.OpenBackground, obs.MonitorExpiryMs = countBackgroundLocked(ts, now)
 		obs.OpenTeammate = countTeammatesLocked(ts, now)
 	}()
@@ -590,7 +640,13 @@ var (
 	monitorTimeoutMsRE = regexp.MustCompile(`timeout\s+(\d+)ms`)
 	asyncAgentStartRE  = regexp.MustCompile(`(?s)Async agent launched successfully.*?agentId:\s*(\S+)`)
 	bgSkillStartRE     = regexp.MustCompile(`launched \(forked execution, running in the background\)`)
-	durationPartsRE    = regexp.MustCompile(`(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?`)
+	// Codex's background terminal (openai/codex f64f003, codex-rs/core/src/tools/context.rs,
+	// response_header): an exec_command or write_stdin result says "Process running with session ID N"
+	// while the process lives, and "Process exited with code C" when it ends. An exit result has no
+	// session ID, so the close reads the id from the write_stdin call's own `session_id` argument.
+	codexRunningRE  = regexp.MustCompile(`Process running with session ID\s+(\S+)`)
+	codexExitedRE   = regexp.MustCompile(`Process exited with code\s+-?\d+`)
+	durationPartsRE = regexp.MustCompile(`(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?`)
 )
 
 // systemMarkers are substrings that mark a block of text as something context-guru's own
@@ -639,7 +695,7 @@ func hasSystemMarker(text string) bool {
 // threadState.appliedCloses and closeOldestAnon's own idempotency guard.
 // stop, when non-nil, is polled once per message; a true stops the scan and the function returns false
 // (the state is then partial and the caller must discard it). nil never stops.
-func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time, stop func() bool) bool {
+func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time, stop func() bool, cfg scanCfg) bool {
 	openBG := func(id string, dur time.Duration) {
 		if _, exists := ts.openBackground[id]; exists {
 			return // already open — do NOT reset firstSeen on a resend
@@ -686,6 +742,9 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 		closeOldestAnon(sigPrefix + ":" + id)
 	}
 
+	// calls keeps each call's name and arguments by id, for a result that must read its call (a Codex
+	// write_stdin exit names its process only in the call).
+	calls := map[string]block{}
 	for _, e := range entries {
 		if stop != nil && stop() {
 			return false
@@ -693,6 +752,9 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 		for _, b := range blocksOf(e) {
 			switch b.kind {
 			case kindToolUse:
+				if b.toolUseID != "" && b.toolName == "write_stdin" {
+					calls[b.toolUseID] = b
+				}
 				switch b.toolName {
 				case "SendMessage":
 					to := b.input.Get("to").String()
@@ -723,6 +785,17 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 					openBG(m[1], 0)
 				} else if bgSkillStartRE.MatchString(text) {
 					openAnon(b.toolUseID)
+				} else if m := codexRunningRE.FindStringSubmatch(text); cfg.codex && m != nil {
+					openBG("codex-exec:"+m[1], 0)
+				} else if cfg.codex && codexExitedRE.MatchString(text) {
+					if c, ok := calls[b.toolUseID]; ok {
+						// A Responses call keeps its arguments as a JSON string inside the normalized call.
+						args := c.input
+						if args.Type == gjson.String {
+							args = gjson.Parse(args.String())
+						}
+						delete(ts.openBackground, "codex-exec:"+args.Get("session_id").String())
+					}
 				}
 			case kindText:
 				text := b.text

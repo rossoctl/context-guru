@@ -50,7 +50,7 @@ func (s *Scan) Messages() []bschemas.ChatMessage {
 //
 // stop is polled before and after the normalization and once per message, so the work in progress when it
 // turns true is at most one message. nil never stops. No timer decides anything.
-func ScanBody(stop func() bool, provider bschemas.ModelProvider, body []byte) (res *Scan) {
+func ScanBody(stop func() bool, provider bschemas.ModelProvider, body []byte, opts ...Option) (res *Scan) {
 	defer func() {
 		if recover() != nil {
 			res = nil // fail open
@@ -68,7 +68,7 @@ func ScanBody(stop func() bool, provider bschemas.ModelProvider, body []byte) (r
 	}
 	now := time.Now()
 	ts := newThreadState()
-	if !scanOpenState(ts, entries, now, stop) {
+	if !scanOpenState(ts, entries, now, stop, cfgOf(opts)) {
 		return nil
 	}
 	bg, _ := countBackgroundLocked(ts, now) // ts is private to this call: no lock needed

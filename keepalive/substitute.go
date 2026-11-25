@@ -421,7 +421,7 @@ func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
 	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(j.tenant, j.session, j.thread)
 	}
-	waitingFor, tool := waitcause.ClassifyWaitingForTerminal(terminal, names, stop, false, usageOK, bg, tm)
+	waitingFor, tool := waitcause.ClassifyWaitingForClient(e.identity, terminal, names, stop, false, usageOK, bg, tm)
 	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool, LastTurnRead: int(turnRead)}
 }
 

@@ -14,15 +14,18 @@ Checked against main on 2026-11-25. The release check keeps this table current.
 | Client | Subagent thread | Wait cause | Session key | Lifecycle signals | Compaction detection | Label | Our tools: inject and in-band answer |
 |---|---|---|---|---|---|---|---|
 | Claude Code | covered | covered | covered | covered | covered | covered | not checked |
-| Codex | fallback: prefix match | fallback: reads `human` | covered: `session-id` header | covered (no notification) | covered: `request_kind` in the client metadata | covered | fallback: continuations go over WebSocket; the proxy answers 426 and the client falls back to full-history HTTP. A fail-open in a stream hands back the raw call; the client returns an error to the model and continues (see notes) |
-| OpenCode | fallback: prefix match | fallback: reads `human` | covered: `x-opencode-session-id` | covered | covered: plugin header `x-context-guru-request-kind` | covered: first User-Agent token (`opencode/<version>`) | fallback: same as Codex (WebSocket 426, then full-history HTTP; raw call on a fail-open, error to the model) |
-| Pi | fallback: prefix match | fallback: reads `human` | covered: plugin header | covered | covered: plugin header `x-context-guru-request-kind` | covered: `x-context-guru-client` | fallback: raw call on a fail-open; the client returns an error to the model and continues (from the report, not verified here). WebSocket: not checked |
+| Codex | covered: `thread-id` with `x-codex-parent-thread-id` (`agent.Client.SubagentID`) | covered: `request_user_input` and the terminal markers (Codex client only). An end turn with nothing open reads `unknown` | covered: `session-id` header | covered (no notification) | covered: `request_kind` in the client metadata | covered | fallback: continuations go over WebSocket; the proxy answers 426 and the client falls back to full-history HTTP. A fail-open in a stream hands back the raw call; the client returns an error to the model and continues (see notes) |
+| OpenCode | covered: `x-opencode-parent-session-id`; the thread id is `x-opencode-session-id` | fallback: an end turn with nothing open reads `unknown` (auto) | covered: `x-opencode-session-id` | covered | covered: plugin header `x-context-guru-request-kind` | covered: first User-Agent token (`opencode/<version>`) | fallback: same as Codex (WebSocket 426, then full-history HTTP; raw call on a fail-open, error to the model) |
+| Pi | fallback: prefix match | fallback: an end turn with nothing open reads `unknown` (auto) | covered: plugin header | covered | covered: plugin header `x-context-guru-request-kind` | covered: `x-context-guru-client` | fallback: raw call on a fail-open; the client returns an error to the model and continues (from the report, not verified here). WebSocket: not checked |
 | Bob | fallback | fallback: reads `human` | covered | fallback: start and compact only | covered | covered | not checked |
 
 Notes:
 
 - **Subagent thread** and **Wait cause** for Claude Code read `x-claude-code-agent-id` and the
-  Claude Code markers. Other clients read as the main agent waiting for a person.
+  Claude Code markers. Codex and OpenCode name a subagent with their own headers (above).
+  Codex adds its question tool and terminal markers. For a client that is not Claude Code or Bob,
+  an end turn with nothing open reads `unknown`, not `human`. Pi and OpenCode have no wait-cause
+  signal of their own yet.
 - **Pi and OpenCode** send the session key in `x-context-guru-session`. The plugin sets it.
 - **Bob** is on hold. Its fallbacks stay as they are.
 - **One `agent.Identify` per request.** The host calls it once. Library code takes the `agent.Client`
@@ -50,7 +53,9 @@ A host without a client signal gives the generic result.
 
 - **Cortex** source: `core/plugins/contextguru/plugin.go` in `rossoctl/cortex`. It wires no thread
   tracker, so every request is the primary thread. It has `pctx.Headers`, so the plugin
-  can call `agent.Identify`.
+  can call `agent.Identify`. `waitcause` is public, so Cortex can call
+  `waitcause.ClassifyWaitingForClient` with that `Client`. Cortex has no keep-alive, so it has no use
+  for the wait cause today.
 - **bifrost adapter:** `resolveSession` sees only a session id from the host context. It never sees
   request headers, so `agent.Identify` needs the transport to pass them.
 - **Cortex gap:** wire `apply.Opts.ThreadOf` with `thread.ResolveSession` and

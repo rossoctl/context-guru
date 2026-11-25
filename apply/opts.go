@@ -33,7 +33,7 @@ type Opts struct {
 	// panic. Keep one thread.Tracker per process, because it holds per-session state:
 	//
 	//	orig := body // the request as the agent sent it, saved before the pipeline runs
-	//	agentID, _ := thread.HeaderAgentID(req.Header.Get(thread.AgentHeader))
+	//	agentID, _ := thread.HeaderAgentID(agent.Identify(req.Header).SubagentID())
 	//	opts.ThreadOf = func(session string) thread.Result {
 	//		// agentall is github.com/rossoctl/context-guru/agent/all. With no headers, pass nil.
 	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, agentall.IsClientCompaction(req.Header, orig))

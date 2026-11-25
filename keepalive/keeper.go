@@ -12,6 +12,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
@@ -120,8 +121,10 @@ type kaEntry struct {
 	ref                         dispatch.Ref
 	provider                    bschemas.ModelProvider
 	model, route, preset, agent string
-	pol                         Policy
-	pings                       int
+	// identity is the client the host named for the request (Record.Identity).
+	identity agent.Client
+	pol      Policy
+	pings    int
 	// turn is how many requests this session sent BEFORE the one that established this entry.
 	// 0 means the session's first request, which the gate skips.
 	turn int
@@ -449,8 +452,11 @@ type Record struct {
 	// differently (a client that sends an id but is keyed by another; Codex no longer, since its
 	// session-id is the key). "" when there is none. MarkEnded and
 	// RetireSessionStartedBefore match on either Key.Session or Client.
-	Client  string
-	UsageOK bool
+	Client string
+	// Identity is the client agent.Identify named from the request headers. The zero value names no
+	// client; a wait for a person then reads "human" for an end_turn with nothing open (waitcause.HumanFallback).
+	Identity agent.Client
+	UsageOK  bool
 	// ToolUseNames is every tool_use name the response carried, in order. Read only to classify what
 	// the thread is about to wait on (waitcause.ClassifyWaitingFor), which the sweep's held answer
 	// stores (#404, #453). A field of Record, not of Usage, so Usage stays comparable.
@@ -1060,11 +1066,11 @@ func (k *Keeper) Record(r Record) {
 		if planned {
 			open = r.OpenTasks
 		}
-		wait = k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, open)
+		wait = k.WaitingFor(r.Key, r.Identity, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, open)
 		if open != nil {
 			// Keep-alive never shortens: the plan is the larger count of the two causes, and the floor the
 			// lower one, whatever the extra-ping settings are. Today's cause is the tracker alone.
-			if base := k.WaitingFor(r.Key, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, nil); base != wait {
+			if base := k.WaitingFor(r.Key, r.Identity, r.ToolUseNames, r.ToolUseIncomplete, u.StopReason, usageOK, nil); base != wait {
 				sub := IsSubagentThread(threadID)
 				// With only the background count merged this cannot fire today (background has the lowest
 				// floor); it keeps the rule true if the merge ever widens.
@@ -1116,7 +1122,7 @@ func (k *Keeper) Record(r Record) {
 		st:       r.Store,
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
-		agent: r.Agent, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
+		agent: r.Agent, identity: r.Identity, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
 		wait:         wait,
 		oneHour:      oneHour,
 		planPings:    planPings,

@@ -170,3 +170,30 @@ func TestCompactionMark(t *testing.T) {
 		t.Errorf("a non-Codex caller must not mark: %+v", other)
 	}
 }
+
+func TestClientSubagentID(t *testing.T) {
+	h := func(kv ...string) http.Header {
+		out := http.Header{}
+		for i := 0; i < len(kv); i += 2 {
+			out.Set(kv[i], kv[i+1])
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		in   http.Header
+		want string
+	}{
+		{"no header", h(), ""},
+		{"claude subagent", h("User-Agent", "claude-cli/2.1", "x-claude-code-agent-id", "agentS"), "agentS"},
+		{"codex main", h("User-Agent", "codex_cli_rs/0.1", "thread-id", "t0"), ""},
+		{"codex sub-agent", h("User-Agent", "codex_cli_rs/0.1", "thread-id", "t1", "x-codex-parent-thread-id", "t0"), "t1"},
+		{"codex parent, no own id", h("User-Agent", "codex_cli_rs/0.1", "x-codex-parent-thread-id", "t0"), ""},
+		{"opencode root", h("User-Agent", "opencode/2.4.1", "x-opencode-session-id", "ses_a"), ""},
+		{"opencode child", h("User-Agent", "opencode/2.4.1", "x-opencode-session-id", "ses_b", "x-opencode-parent-session-id", "ses_a"), "ses_b"},
+	} {
+		if got := Identify(tc.in).SubagentID(); got != tc.want {
+			t.Errorf("%s: SubagentID = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
