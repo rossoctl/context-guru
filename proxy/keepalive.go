@@ -148,11 +148,16 @@ func newKeeperWith(h *Handler, o keepalive.Options) *keeper {
 func (h *Handler) dispatcher() *Dispatcher {
 	if h.dispatch == nil {
 		h.dispatch = NewDispatcher(h.client)
-		h.dispatch.price = func(ctx context.Context, _, model string, _ int64) (keepalive.Price, bool) {
+		h.dispatch.price = func(ctx context.Context, _, model string, promptTokens int64) (keepalive.Price, bool) {
 			if h.opts.Prices == nil {
 				return keepalive.Price{}, false
 			}
-			return h.opts.Prices.Price(ctx, model)
+			p, ok := h.opts.Prices.Price(ctx, model)
+			if !ok {
+				return p, false
+			}
+			// The rates of the prompt size the caller names (0 or unknown: the base rates).
+			return p.At(promptTokens), true
 		}
 	}
 	return h.dispatch

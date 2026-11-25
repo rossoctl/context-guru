@@ -15,7 +15,7 @@ import (
 	"github.com/rossoctl/context-guru/predictive"
 )
 
-func rowsOnly(reqs []*kvcache.Request, price func(model string) (pIn, pOut, pRead, pWrite float64, ok bool), sessionEnd bool, untilMs int64) []predictive.AutoRow {
+func rowsOnly(reqs []*kvcache.Request, price func(model string, promptTokens int64) (pIn, pOut, pRead, pWrite float64, ok bool), sessionEnd bool, untilMs int64) []predictive.AutoRow {
 	rows, _ := Rows(reqs, price, sessionEnd, untilMs)
 	return rows
 }
@@ -244,7 +244,7 @@ func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
 	}
 }
 
-func flatPrice(string) (float64, float64, float64, float64, bool) {
+func flatPrice(string, int64) (float64, float64, float64, float64, bool) {
 	return 3e-6, 15e-6, 3e-7, 3.75e-6, true
 }
 
