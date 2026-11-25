@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -90,11 +91,9 @@ func registerSweep(t *testing.T, st store.Store, asker components.PrefixAsker, m
 
 func waitSweepOutcome(t *testing.T, k *Keeper, fs *fakeDispatcher) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.sweepSubstituted.Load()+k.sweepAskFailed.Load()+k.sweepOverBudget.Load()+
-		int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a sweep outcome", func() bool {
+		return k.sweepSubstituted.Load()+k.sweepAskFailed.Load()+k.sweepOverBudget.Load()+int64(fs.n()) >= 1
+	})
 }
 
 // ⭐ POINT 1 (A1): the question takes the place of the ping. It is counted once as THE ping for the
@@ -281,10 +280,9 @@ func TestKeepAliveSummaryTakesThePingBeforeTheSweep(t *testing.T) {
 
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a substitute or a plain ping", func() bool {
+		return k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) >= 1
+	})
 	if k.summarySubstituted.Load() != 1 || k.sweepSubstituted.Load() != 0 || asker.calls.Load() != 0 {
 		t.Errorf("summary %d, sweep %d, sweep asks %d: the summary must take the ping",
 			k.summarySubstituted.Load(), k.sweepSubstituted.Load(), asker.calls.Load())
@@ -310,7 +308,6 @@ func TestNoKeepAliveNoQuestion(t *testing.T) {
 			if n := k.Sweep(clock.advance(281 * time.Second)); n != 0 {
 				t.Fatalf("a ping fired (%d) where the keeper should track nothing", n)
 			}
-			time.Sleep(20 * time.Millisecond)
 			if asker.calls.Load() != 0 || fs.n() != 0 {
 				t.Fatalf("question asks %d, pings %d, want none", asker.calls.Load(), fs.n())
 			}
@@ -422,10 +419,9 @@ func TestWhenTheSummarizerTriggerFiresTheSummaryTakesThePingAndTheSweepDoesNotAs
 
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a substitute or a plain ping", func() bool {
+		return k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) >= 1
+	})
 	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 {
 		t.Errorf("summary substituted %d, summary calls %d, want 1 and 1", k.summarySubstituted.Load(), model.calls.Load())
 	}
@@ -481,10 +477,7 @@ func TestOnePingNeverRunsBothCallsWithTwoThreadsDue(t *testing.T) {
 	if n := k.Sweep(clock.advance(283 * time.Second)); n != 2 {
 		t.Fatalf("fired %d pings, want 2 (both threads due at once)", n)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && k.pings.Load() < 2 {
-		time.Sleep(time.Millisecond)
-	}
+	waitPings(t, k, 2)
 	if got := k.pings.Load(); got != 2 {
 		t.Fatalf("pings = %d, want 2: one per thread, never 2 on one thread", got)
 	}

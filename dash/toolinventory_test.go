@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/internal/deferred"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -374,20 +374,14 @@ func TestRecordInventoryEndToEnd(t *testing.T) {
 	rec.RecordInventory("t1", "", 1000, inv, true, "") // no session: nothing to key on, dropped
 	rec.RecordInventory("t1", "s2", 1000, nil, true, "")
 	db := rec.DB()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// The inventory writer flushes on a 2 s ticker, so this wait is a few seconds long.
+	testutil.WaitFor(t, "the inventory is written", func() bool {
 		d, _, err := db.countInventoryRows()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("nothing was written")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return d > 0
+	})
 	var sessions int
 	if err := db.sql.QueryRow(`SELECT COUNT(DISTINCT session_id) FROM tool_declarations`).Scan(&sessions); err != nil {
 		t.Fatal(err)

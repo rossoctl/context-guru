@@ -466,10 +466,12 @@ async function armSession(s) {
       ? `at worst ${num(out.worst_case_pings)} pings costing ${usd(out.worst_case_usd)}`
       : `at worst ${num(out.worst_case_pings)} pings — this model is not on the price list, ` +
         'so the cost cannot be stated';
-    // Both guards in force, stated. The per-ping ceiling resolves to the service default on an
-    // account that configured none, and the prefix floor is whatever this override set — which
+    // Both guards in force, stated. The flat per-ping cap is reported only when the account or
+    // its strategy set one (none by default: the value rule decides), and the prefix floor is whatever this override set — which
     // may be lower than the account's, and 0 means every request on the session is pingable.
-    const guards = `No single ping may cost more than ${usd(out.max_usd_per_ping)}, and ` +
+    const guards = (out.max_usd_per_ping > 0
+      ? `No single ping may cost more than ${usd(out.max_usd_per_ping)}, no ping chain may cost more than the cache miss it protects, and `
+      : 'No ping chain may cost more than the cache miss it protects, and ') +
       (out.min_prefix_tokens > 0
         ? `only requests with a cached prompt over ${compact(out.min_prefix_tokens)} ` +
           'tokens are pinged'

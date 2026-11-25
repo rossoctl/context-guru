@@ -1537,7 +1537,8 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // What this buys is therefore not a different headline: it is a column that models the policy it
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
-// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
+// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It models neither
+// the value rule (#1420) nor an operator's flat per-ping cap; those need the entry's prices. It
 // gates at the shipped floors by wait cause (80k for a main thread that waits for a person or for an unknown cause, 20k otherwise): the host hands this package the plan settings and both floors (SetWaitPolicy);
 // a floor it leaves at zero is the shipped one. A strategy's own floor is not replayed.
 //
@@ -1955,6 +1956,20 @@ func (d *DB) LastBilledPrefix(f Filter, session string) (int64, string, error) {
 		return 0, "", nil
 	}
 	return prefix.Int64, model.String, err
+}
+
+// LastBilledProvider is the provider of the session's most recent request, as the request path stored it
+// ("anthropic", "openai", ...). Empty when the session has no row.
+func (d *DB) LastBilledProvider(f Filter, session string) (string, error) {
+	cond, args := f.where()
+	var provider sql.NullString
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.provider FROM requests r
+		WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+		append(append([]any(nil), args...), session)...).Scan(&provider)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return provider.String, err
 }
 
 // The recommendation's admission rule. All three must hold, and condition 3 does the work.

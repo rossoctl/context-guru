@@ -81,7 +81,10 @@ while IFS= read -r line; do
     *SessionEnd*) send "$route" "$body" ;; # the process is about to exit: finish the one request here
     # Hook groups of one event run in parallel, so a SessionStart event can race the hook that starts
     # the proxy: retry a refused connection twice, a second apart, then give up silently (detached).
-    *) ( for _ in 1 2 3; do send "$route" "$body" && break; sleep 1; done & ) >/dev/null 2>&1 ;;
+    # CG_TEST_SIGNAL_DONE_FILE is for tests only, and nothing of the plugin sets it: when it is set, each
+    # detached sender appends one line to that file as it ends, so a test can wait for the send.
+    *) ( { for _ in 1 2 3; do send "$route" "$body" && break; sleep 1; done
+           [ -z "${CG_TEST_SIGNAL_DONE_FILE:-}" ] || echo done >>"$CG_TEST_SIGNAL_DONE_FILE"; } & ) >/dev/null 2>&1 ;;
   esac
 done <<<"$BODIES"
 exit 0

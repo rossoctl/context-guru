@@ -1,50 +1,21 @@
 # Timing patterns in test files, per file and kind. See timingguard_test.go.
 # This file only shrinks. Regenerate: go test ./internal/timingguard -run TestTestTiming -update
-components/offload/cache_aware_after_stash_test.go sleep=2 poll=2
-components/offload/cache_aware_trigger_test.go sleep=2
 components/offload/common_test.go after=1
 components/offload/extract_econ_test.go after=1
 components/offload/extract_sweep_apply_test.go sleep=4 after=1
 components/offload/extract_sweep_ping_test.go sleep=1
 components/offload/extract_sweep_warm_test.go sleep=5 poll=3 after=1
-components/offload/summarize_thread_test.go sleep=1
 context-guru-plugin/beep_test.go sleep=1 poll=1
-context-guru-plugin/leak_test.go sleep=3
-context-guru-plugin/plugin_test.go sleep=5 poll=5
-context-guru-plugin/signal_test.go sleep=3 poll=1 after=8
+context-guru-plugin/leak_test.go sleep=1
+context-guru-plugin/plugin_test.go sleep=3 poll=3
+context-guru-plugin/signal_test.go after=5
 context-guru-plugin/statusline_golden_test.go sleep=1 poll=1 after=4
-dash/bypasscount_test.go sleep=4
-dash/cachecost_test.go sleep=3 poll=3
-dash/capture_test.go after=1
-dash/componentscache_test.go sleep=1 poll=1
 dash/contentgate_test.go sleep=2 poll=2
-dash/dedupetext_test.go sleep=3 poll=2
-dash/inventory_shutdown_test.go after=1
+dash/dedupetext_test.go sleep=2 poll=2
 dash/janitor_checkpoint_test.go after=2
-dash/jsoncache_age_test.go sleep=2 poll=2 after=1
-dash/jsoncache_flight_test.go after=2
-dash/jsoncache_refresh_test.go sleep=1 poll=1 after=1
-dash/meta_test.go sleep=1 poll=1
-dash/prefixcause_test.go sleep=1 poll=1
-dash/projectsinks_test.go sleep=1 poll=1 after=1
 dash/prompttext_test.go sleep=4 poll=3
-dash/restartseed_test.go sleep=1 poll=1
-dash/sse_test.go sleep=3 poll=1 after=4
-dash/tenant_scope_test.go sleep=2 poll=2
-dash/thread_test.go sleep=1 poll=1
-dash/toolinventory_test.go sleep=1 poll=1
-dash/tooluseproject_test.go sleep=1 poll=1
-internal/modelinfo/litellm/chain_test.go sleep=6
-internal/modelinfo/litellm/ratefill_test.go sleep=1
-internal/modelinfo/litellm/unresolved_test.go sleep=1
+dash/sse_test.go sleep=2 after=1
 internal/modelinfo/litellm/zz_price_live_test.go sleep=1
-keepalive/inflight_test.go after=1
-keepalive/manualhold_test.go sleep=1 poll=1
-keepalive/openaiphase_test.go sleep=2 poll=2
-keepalive/substitute_test.go sleep=9 poll=8
-keepalive/summarytextturn_test.go sleep=4 poll=3
-keepalive/sweepsubstitute_test.go sleep=5 poll=4
-keepalive/waitplan_test.go sleep=1
 modes/modes_test.go after=3
 proxy/accountant_async_test.go sleep=3 after=3
 proxy/accountant_inject_test.go sleep=2

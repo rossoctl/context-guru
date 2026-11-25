@@ -37,11 +37,7 @@ func TestConcurrentColdReadsOfDifferentCachesDoNotShareAComputation(t *testing.T
 		}(c.name, c.cache)
 	}
 	for i := 0; i < 2; i++ {
-		select {
-		case <-started:
-		case <-time.After(3 * time.Second):
-			t.Fatal("the second cache's compute never started: it joined the first one's flight")
-		}
+		awaitSignal(t, "the second cache's compute to start (a join onto the first one's flight never starts it)", started)
 	}
 	close(release)
 	for i := 0; i < 2; i++ {
@@ -75,11 +71,7 @@ func TestConcurrentColdReadsOfDifferentKeysInOneCacheDoNotShareAComputation(t *t
 		}(name)
 	}
 	for i := 0; i < 2; i++ {
-		select {
-		case <-started:
-		case <-time.After(3 * time.Second):
-			t.Fatal("the second key's compute never started: it joined the first one's flight")
-		}
+		awaitSignal(t, "the second key's compute to start (a join onto the first one's flight never starts it)", started)
 	}
 	close(release)
 	for i := 0; i < 2; i++ {

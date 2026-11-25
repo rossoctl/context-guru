@@ -10,6 +10,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The manual-only hold: a request that asks for it (Policy.ManualHold, the host's reading of the
@@ -199,13 +200,27 @@ func TestManualHoldRespectsTheBodyEntryAndByteCaps(t *testing.T) {
 // The per-ping ceiling decides before anything is kept.
 func TestManualHoldRefusesAThreadWhosePingWouldBeOverTheCeiling(t *testing.T) {
 	k, fd, clock := testKeeper(t)
-	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-3, Output: 1e-3, CacheRead: 1e-3, CacheWrite: 1e-3}}})
-	recordHold(k, sess1, clock.now(), kaBody, offPolicy, true) // 49k tokens x $0.001 = $49 per ping
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-3, Output: 1e-3, CacheRead: 1e-3, CacheWrite: 1.25e-3}}})
+	// 49k tokens x $0.001 = $49 per ping, over the operator's own $0.50 cap. The cap is explicit; there is no default one (#1420).
+	recordHold(k, sess1, clock.now(), kaBody, Policy{MaxUSDPerPing: 0.5}, true)
 	if _, ok := k.Entry(sess1); ok {
 		t.Error("held a thread whose ping is over the ceiling")
 	}
 	if st := stateOf(k, sess1); st.Reason != ReasonOverBudget {
 		t.Errorf("reason = %q, want %q", st.Reason, ReasonOverBudget)
+	}
+}
+
+// With no cap set, the value rule decides a press: a ping dearer than the miss it protects is not held.
+func TestManualHoldRefusesAPingDearerThanTheMissWithNoCapSet(t *testing.T) {
+	k, fd, clock := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 1e-3, Output: 1e-3, CacheRead: 1e-3, CacheWrite: 1.25e-3}}})
+	recordHold(k, sess1, clock.now(), kaBody, offPolicy, true) // ping $49, miss 49k x $0.00025 = $12
+	if _, ok := k.Entry(sess1); ok {
+		t.Error("held a thread whose ping costs more than the miss")
+	}
+	if st := stateOf(k, sess1); st.Reason != ReasonNotWorth {
+		t.Errorf("reason = %q, want %q", st.Reason, ReasonNotWorth)
 	}
 }
 
@@ -524,17 +539,11 @@ func TestTheManualHoldTimerReleasesAndZeroisesWithoutASweep(t *testing.T) {
 	k3.manualHoldMax = 40 * time.Millisecond
 	recordHold(k3, sess1, c3.now(), kaBody, offPolicy, true)
 	c3.advance(time.Second)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, "the entry's own timer to release it", func() bool {
 		k3.mu.Lock()
-		n := len(k3.live)
-		k3.mu.Unlock()
-		if n == 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Error("the entry's own timer never released it")
+		defer k3.mu.Unlock()
+		return len(k3.live) == 0
+	})
 }
 
 // ---- nothing of a tenant survives Forget, and RetireSession clears its reasons ----

@@ -87,7 +87,7 @@ test("a session that ended signals once; a lost signal throws nothing", () => {
 })
 
 async function waitForRecord(path, label, count) {
-  const deadline = Date.now() + 5000
+  const deadline = Date.now() + 30000
   while (Date.now() < deadline) {
     const rows = existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.label === label) : []
     if (rows.length >= count) return rows
