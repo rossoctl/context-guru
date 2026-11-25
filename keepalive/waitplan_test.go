@@ -286,6 +286,7 @@ func TestWaitPlanNoExtraQuestionAfterAToolWaitButOneAfterEndTurn(t *testing.T) {
 				waitPings(t, k, int64(i))
 			}
 			k.Sweep(clock.advance(250 * time.Second))
+			// The asks == 0 case is exact only because testKeeper runs Options.Go inline.
 			if tc.asks > 0 {
 				testutil.WaitFor(t, "the extra question", func() bool { return asker.calls.Load() >= tc.asks })
 			}

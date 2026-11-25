@@ -8,6 +8,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -49,10 +50,7 @@ func TestAPreExpirySubstituteTakesAnOpenAIPing(t *testing.T) {
 			UsageOK: true, Policy: pol, Header: kaHeader(), Hold: fakeOf(k).hold(sess1)})
 	}
 	k.Sweep(clock.advance(modelinfo.OpenAIDefaultKeepAliveIdle + time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the summary substitute to take the ping", func() bool { return k.summarySubstituted.Load() >= 1 })
 	if n := k.summarySubstitutePhaseMismatch.Load(); n != 0 {
 		t.Fatalf("the substitute was refused as a phase mismatch %d time(s): at 28 of 30 min, either "+
 			"the cache was read as a 5-min one or the default window did not cover the ping", n)
@@ -87,10 +85,7 @@ func TestAPreExpirySubstituteStillTakesAnAnthropicPingWithTheDefaultWindow(t *te
 	kaCandidateWithCacheState(t, "sess-1", st, model, "pre_expiry", 0)
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the summary substitute to take the ping", func() bool { return k.summarySubstituted.Load() >= 1 })
 	if k.summarySubstituted.Load() != 1 || fs.n() != 0 {
 		t.Fatalf("substituted %d, ordinary pings %d: the default window must still cover an Anthropic ping",
 			k.summarySubstituted.Load(), fs.n())

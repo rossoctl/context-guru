@@ -38,8 +38,6 @@ internal/modelinfo/litellm/chain_test.go sleep=6
 internal/modelinfo/litellm/ratefill_test.go sleep=1
 internal/modelinfo/litellm/unresolved_test.go sleep=1
 internal/modelinfo/litellm/zz_price_live_test.go sleep=1
-keepalive/inflight_test.go after=1
-keepalive/openaiphase_test.go sleep=2 poll=2
 modes/modes_test.go sleep=2 poll=1 after=3
 proxy/accountant_async_test.go sleep=3 after=3
 proxy/accountant_inject_test.go sleep=2
