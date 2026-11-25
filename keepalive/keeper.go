@@ -2601,9 +2601,7 @@ func (k *Keeper) extraReadyLocked(e *kaEntry, now time.Time) bool {
 // already spent.
 //
 // WHEN A SUMMARY IS DUE, ONLY THE SUMMARY GOES, even if it declines. The sweep question then does not go
-// in that span. The owner's rule, 2026-10-30: "as for sweep after summary. dont do that. it can
-// probably have the sweep question pay a cache write like the problem with the ping... so we should
-// probably just do summary at that point". The sweep question takes the slot only when no summary is
+// in that span, because it would pay a cache write, like the ping problem. The sweep question takes the slot only when no summary is
 // registered for the thread at all.
 func (k *Keeper) fireExtra(j pingJob) {
 	claim := offload.ClaimPing(thread.Key(j.session, j.thread))

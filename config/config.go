@@ -109,8 +109,8 @@ type CacheConfig struct {
 	// timeout = 300 s, the 5-minute lifetime. Measured on a live proxy: 92 of 95 failed pings were
 	// 60 s timeouts, and at 270 a ping that times out returns about 30 s after the cache expired,
 	// so it can only lose the cache (#707). 240 lowers that risk; it does not remove it, because a
-	// ping that runs to its timeout at 240 s still leaves no time to retry. The owner chose 240 and
-	// asked for it to be measured (#716). The earlier 270 choice (#435) was for robustness to where
+	// ping that runs to its timeout at 240 s still leaves no time to retry. The value 240 needs a
+	// measurement (#716). The earlier 270 choice (#435) was for robustness to where
 	// the provider's cache cliff sits, from replays that did not count failed pings.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for

@@ -22,7 +22,7 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
-// WHICH MODEL EACH CALL USES (#491, David). A GLM-only experiment must cost $0, so with the pipeline
+// WHICH MODEL EACH CALL USES (#491). A GLM-only experiment must cost $0, so with the pipeline
 // [extract_llm_sweep] and the keep-alive on, EVERY call the proxy makes upstream must carry the request's
 // own model: the forwarded request, the sweep's ask (cold and warm), and the keep-alive ping.
 //
