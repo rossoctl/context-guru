@@ -7,7 +7,7 @@
 #     both naming this exact head (an approval of an older head does not count; see
 #     approval-still-valid.sh for a head that moved);
 #   - every check run on the head has finished with success (or skipped / neutral). The heavy CI jobs
-#     do not run on a PR (lean process, 2026-11-24), so the next point replaces them;
+#     do not run on a PR (lean process), so the next point replaces them;
 #   - the PR body or a PR comment holds the line "Local tests: waived (owner rule)" (any case): the
 #     interim rule in CLAUDE.md, "Working on a task". It replaces the next point. Or:
 #   - a comment from scripts/dev/local-tests.sh names this exact head with result=pass and tier=2:
