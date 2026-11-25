@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,7 +176,7 @@ func goBudget(c budgetCase, f budgetFixture) (int, bool, []float64, []float64) {
 			CacheRead:       c.InputRate * kvcache.DefaultCacheReadMultiple,
 			Write5m:         c.InputRate * kvcache.DefaultWrite5mMultiple,
 			Write1h:         c.InputRate * kvcache.DefaultWrite1hMultiple,
-			PingInputTokens: 1, PingOutputTokens: 1, Known: true,
+			PingInputTokens: kvcache.DefaultPingInputTokens, PingOutputTokens: kvcache.DefaultPingOutputTokens, Known: true,
 		},
 	}
 	pol := kvcache.BudgetPolicy{
@@ -298,5 +299,29 @@ func TestThePortsSelfTestPasses(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "self-test OK") {
 		t.Errorf("unexpected self-test output: %s", out)
+	}
+}
+
+// The Python ports must default a ping's own input to Go's one constant. The other drift tests set
+// the value on both sides, so they cannot see two defaults that differ (#1437).
+func TestPingInputDefaultAgreesWithGo(t *testing.T) {
+	for _, mod := range []string{"kv_ttl_keepalive_policy", "kv_ttl_cost_model"} {
+		py := pythonBinFor(t, mod)
+		if py == "" {
+			t.Skip("no usable Python for " + mod)
+		}
+		expr := "m.Rates.from_input_rate(1.0).ping_input_tokens"
+		if mod == "kv_ttl_cost_model" {
+			expr = "m.DEFAULT_PING_INPUT_TOKENS"
+		}
+		cmd := exec.Command(py, "-I", "-c", "import sys; sys.path.insert(0, '.'); import "+mod+" as m; print("+expr+")")
+		cmd.Dir = "."
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", mod, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != strconv.Itoa(kvcache.DefaultPingInputTokens) {
+			t.Fatalf("%s defaults a ping's input to %s, Go to %d", mod, got, kvcache.DefaultPingInputTokens)
+		}
 	}
 }

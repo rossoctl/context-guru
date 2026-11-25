@@ -192,8 +192,8 @@ func TestNextRequestUSDUsesTheTierOfThePrefix(t *testing.T) {
 	if !accNear(warm, 300_000*1e-6) || !accNear(cold, 300_000*10e-6) {
 		t.Fatalf("above the line: warm %v cold %v", warm, cold)
 	}
-	warm, cold = NextRequestUSD(gpt56(), 271_999, 300)
-	if !accNear(warm, 271_999*0.5e-6) || !accNear(cold, 271_999*5e-6) {
+	warm, cold = NextRequestUSD(gpt56(), 271_990, 300)
+	if !accNear(warm, 271_990*0.5e-6) || !accNear(cold, 271_990*5e-6) {
 		t.Fatalf("below the line: warm %v cold %v", warm, cold)
 	}
 	// A prefix of exactly 272,000 plus the next request's input is above the line.

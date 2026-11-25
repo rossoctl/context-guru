@@ -32,7 +32,7 @@ func TestReplayPingIsPricedAtItsOwnSize(t *testing.T) {
 	if !found {
 		t.Fatalf("no price lookup at the ping's size, got %v", sizes)
 	}
-	// 7 fresh input tokens (pingFresh) at 2, output 1 at 2.
+	// 7 fresh input tokens (kvcache.DefaultPingInputTokens) at 2, output 1 at 2.
 	if want := 272_000*2.0 + 7*2 + 2; facts[0].Ping != want {
 		t.Fatalf("ping cost %v want %v", facts[0].Ping, want)
 	}

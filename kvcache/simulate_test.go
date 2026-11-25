@@ -38,7 +38,7 @@ const (
 	prefix     = 100_000 // req()'s CachedContext
 	freshTok   = 100     // req()'s InputTokens
 	outTok     = 50      // req()'s OutputTokens
-	overhead   = 1*pIn + 1*pOut
+	overhead   = DefaultPingInputTokens*pIn + DefaultPingOutputTokens*pOut
 	costMiss   = freshTok*pIn + prefix*pWrite5m + outTok*pOut
 	costMiss1h = freshTok*pIn + prefix*pWrite1h + outTok*pOut
 	costHit    = freshTok*pIn + prefix*pRead + outTok*pOut
