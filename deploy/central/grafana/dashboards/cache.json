@@ -226,7 +226,7 @@
       "id": 4,
       "type": "stat",
       "title": "Ping failure ratio",
-      "description": "Share of the sent pings that failed or timed out over the selected range. A failed or timed-out ping does not keep the cache warm, and a timeout is still booked at its projected cost (#754). A skipped ping was not sent, so it is not in the ratio. No data means no ping was sent in the range.",
+      "description": "Share of the sent pings that failed or timed out over the selected range. A failed or timed-out ping does not keep the cache warm, and a timeout is still booked at its projected cost (#754). A skipped ping was not sent, so it is not in the ratio. The first failure of a model can read as 0, because increase() does not count the first sample of a new series. No data means no ping was sent in the range.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -254,8 +254,24 @@
           "noValue": "no data",
           "decimals": 1,
           "color": {
-            "mode": "fixed",
-            "fixedColor": "#F2495C"
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#73BF69",
+                "value": null
+              },
+              {
+                "color": "#FF9830",
+                "value": 0.01
+              },
+              {
+                "color": "#F2495C",
+                "value": 0.05
+              }
+            ]
           }
         },
         "overrides": []

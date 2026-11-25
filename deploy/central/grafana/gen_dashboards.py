@@ -79,6 +79,14 @@ def stat(pid, title, expr, x, y, w=4, h=4, unit="short", desc="", decimals=None,
     return d
 
 
+def failure_colors(d):
+    """A failure share is green at 0, orange from 1 %, red from 5 %. A fixed red showed 0 % in red."""
+    d["fieldConfig"]["defaults"]["color"] = {"mode": "thresholds"}
+    d["fieldConfig"]["defaults"]["thresholds"] = {"mode": "absolute", "steps": [
+        {"color": GREEN, "value": None}, {"color": ORANGE, "value": 0.01}, {"color": RED, "value": 0.05}]}
+    return d
+
+
 def series(pid, title, targets, x, y, w=12, h=8, unit="short", stack=False, desc="", kind="timeseries",
            colors=None, bars=False, vertical=False, instant=False, time_from=None, interval=None):
     d = {"id": pid, "type": kind, "title": title, "description": desc, "datasource": DS,
@@ -243,10 +251,10 @@ def cache():
                     0, 8, 8, 8, unit=USD, kind="bargauge", instant=True,
                     desc="The write premium on the re-written prefix, priced with each model's own rate. A model with no rate counts the miss and books no money."))
     sent = inc("llm_keepalive_pings_total", extra=PING_SENT)
-    P.append(stat(4, "Ping failure ratio",
+    P.append(failure_colors(stat(4, "Ping failure ratio",
                   f'({inc("llm_keepalive_pings_total", extra=PING_FAILED)} or {sent} * 0) / (({sent}) > 0)',
-                  8, 8, w=10, h=8, unit="percentunit", decimals=1, c=RED, big=True,
-                  desc="Share of the sent pings that failed or timed out over the selected range. A failed or timed-out ping does not keep the cache warm, and a timeout is still booked at its projected cost (#754). A skipped ping was not sent, so it is not in the ratio. No data means no ping was sent in the range."))
+                  8, 8, w=10, h=8, unit="percentunit", decimals=1, big=True,
+                  desc="Share of the sent pings that failed or timed out over the selected range. A failed or timed-out ping does not keep the cache warm, and a timeout is still booked at its projected cost (#754). A skipped ping was not sent, so it is not in the ratio. The first failure of a model can read as 0, because increase() does not count the first sample of a new series. No data means no ping was sent in the range.")))
     P.append(stat(5, "Pings that paid",
                   f'({inc("llm_savings_cache_effect_usd_total", extra=RESCUE_SAVED)} - {inc("llm_savings_cache_effect_usd_total", extra=RESCUE_ADDED)}) / clamp_min({inc("llm_keepalive_cost_usd_total")}, 1e-9)',
                   18, 8, w=6, h=4, unit="suffix: x", decimals=1, c=GREEN, big=True,
