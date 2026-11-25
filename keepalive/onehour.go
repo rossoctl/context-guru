@@ -179,12 +179,17 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 	case read >= oneHourFreeRead*prefix && write <= oneHourFreeWrite*prefix:
 		k.mu.Lock()
 		st := k.oneHourRoutes[rk]
-		// The last touch of this thread was a FREE 1-hour ping: until its next real request, or an hour
-		// from the ping, the clock counts an hour from it (OneHourTouches). Kept apart from the entry,
-		// which the keeper forgets after about 8 minutes.
-		k.makeRoomForTouchLocked(start)
-		k.oneHourTouches[j.key.id()] = oneHourTouch{key: j.key, at: start, route: rk,
+		// The last touch of this thread was a FREE 1-hour ping. The tier and the time are in the store, where
+		// the ping's touch wrote them (pingJob.touch). The keeper keeps only WHERE to look (the thread's
+		// alias) and which route made the ping. Kept apart from the entry, which the keeper forgets after
+		// about 8 minutes.
+		k.makeRoomForThreadLocked(start)
+		th := oneHourThread{key: j.key, route: rk,
 			provider: j.provider, model: e.model, st: j.st, alias: touchAliasOf(j)}
+		if !store.Keeps(j.st) {
+			th.storeOffAt = start.UnixMilli() // the store holds nothing: see storeOffAt
+		}
+		k.oneHourThreads[j.key.id()] = th
 		if st != nil && st.proven {
 			e.ttl1h = true // a route proven to grant: from now until the next real request it is a 1-hour session
 		} else {
@@ -202,22 +207,23 @@ func (k *Keeper) judgeOneHour(j pingJob, status int, u Usage, start time.Time) {
 	}
 }
 
-// makeRoomForTouchLocked keeps the touch map bounded. It drops the touches that are no longer live first. If
-// every one is live, it starts over. A bound is a capacity event, not a fact about any entry: the stored mirrors are
-// NOT ended here, they expire by apply.EntryLifetime, so a live entry still reads warm in the cold check. Only
-// the keeper's own index (the dashboard, the press refusal) loses a touch then. A route switch-off is different:
-// there the tier was never granted, and oneHourSwitchOff ends the mirrors.
-func (k *Keeper) makeRoomForTouchLocked(now time.Time) {
-	if len(k.oneHourTouches) < MaxTurnKeys {
+// makeRoomForThreadLocked keeps the thread index bounded. It drops the threads whose stored touch is no longer a
+// live free 1-hour ping first (the store says so, not the index). If every one is live, it starts over. A bound is
+// a capacity event, not a fact about any entry: the stored records are NOT ended here, they expire by
+// apply.EntryLifetime, so a live entry still reads warm in the cold check. Only the index (the dashboard, the
+// press refusal) loses a thread then. A route switch-off is different: there the tier was never granted, and
+// oneHourSwitchOff ends the records.
+func (k *Keeper) makeRoomForThreadLocked(now time.Time) {
+	if len(k.oneHourThreads) < MaxTurnKeys {
 		return
 	}
-	for id, t := range k.oneHourTouches {
-		if !t.live(now) {
-			delete(k.oneHourTouches, id)
+	for id, t := range k.oneHourThreads {
+		if _, live := t.standing(now); !live {
+			delete(k.oneHourThreads, id)
 		}
 	}
-	if len(k.oneHourTouches) >= MaxTurnKeys {
-		k.oneHourTouches = map[string]oneHourTouch{}
+	if len(k.oneHourThreads) >= MaxTurnKeys {
+		k.oneHourThreads = map[string]oneHourThread{}
 	}
 }
 
@@ -246,16 +252,17 @@ func (k *Keeper) oneHourSwitchOff(rk string, provider bschemas.ModelProvider, ro
 	}
 	first := !st.off
 	st.off, st.costly, st.proven, st.probeUntil = true, false, false, time.Time{}
-	// The touches this route gave no longer count, here or in the stored mirror the cold check reads.
-	var ended []oneHourTouch
-	for _, t := range k.oneHourTouches {
+	// The pings this route gave no longer count. The one record is the store's, so ending it there ends it for
+	// the cold check, the dashboard and the manual ping at once.
+	var ended []oneHourThread
+	for _, t := range k.oneHourThreads {
 		if t.route == rk {
 			ended = append(ended, t)
 		}
 	}
 	k.mu.Unlock()
 	for _, t := range ended {
-		apply.EndTouchTier(t.st, t.alias, t.at.UnixMilli())
+		apply.EndTouchTier(t.st, t.alias, apply.RouteTag(t.route))
 	}
 	if first {
 		slog.Warn("context-guru: no more 1-hour keep-alive pings on this route; the threads fall back to the plain schedule: "+why,
@@ -272,7 +279,7 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 	k.mu.Lock()
 	p, ok := k.oneHourProbes[key]
 	delete(k.oneHourProbes, key)
-	delete(k.oneHourTouches, key) // a real request is the next touch: the 1-hour clock ends
+	delete(k.oneHourThreads, key) // a real request is the next touch: this index entry has nothing left to point at
 	k.mu.Unlock()
 	if !ok {
 		return
@@ -313,25 +320,38 @@ func (k *Keeper) resolveOneHourProbe(key string, startedAt time.Time, u Usage, u
 	}
 }
 
-// oneHourTouch is the fact "the last touch of this thread was a free 1-hour ping". Metadata only.
-type oneHourTouch struct {
+// oneHourThread is the index entry of a thread whose ping was a free 1-hour ping: WHERE the one record of the fact
+// lives (the store and the alias) and which route made the ping. It holds no tier and no time, so it cannot
+// disagree with the store: a reader asks the store (apply.LiveOneHourPing) and uses the entry only to find it.
+// Metadata only.
+type oneHourThread struct {
 	key   Key
-	at    time.Time // when the ping started
 	route string
-	// provider and model give the lifetime of the touch (apply.EntryLifetime), so no duration is stored.
+	// provider and model give the lifetime (apply.EntryLifetime), so no duration is stored.
 	provider bschemas.ModelProvider
 	model    string
-	// st and alias are where the SAME fact is mirrored for the cold check (cg:seen:<alias>, "<ms>:1h"). The
-	// keeper's map is the index by thread (the dashboard, the manual ping); the stored tier is its mirror.
-	// They are written at the same ping, ended at the same real request, and ended together when the route is
-	// switched off (oneHourSwitchOff), and both expire by the one function. One fact, two indexes.
+	// st and alias are the record: cg:seen:<alias>, "<ms>:1h" or "<ms>^<pingMs>".
 	st    store.Store
 	alias string
+	// storeOffAt is the time of the ping, in milliseconds, ONLY when the store keeps nothing (store.Keeps is
+	// false: storage switched off, or a host with no store). Then there is no stored record to read, and the keeper
+	// answers as it did before the store was the one record: from this. With a real store it is always 0, and the
+	// store alone says the tier and the time (a test pins it). It is a fallback for a store that holds nothing,
+	// never a second opinion next to a store that does.
+	storeOffAt int64
 }
 
-// live reports whether the touch still counts at now: under its lifetime old, from the one function.
-func (t oneHourTouch) live(now time.Time) bool {
-	return now.Before(t.at.Add(apply.EntryLifetime(apply.CacheFacts{Provider: t.provider, Model: t.model, LastOneHour: true})))
+// standing is the time of the live free 1-hour ping the store holds for this thread, asked of the one function.
+func (t oneHourThread) standing(now time.Time) (atMs int64, live bool) {
+	if !store.Keeps(t.st) {
+		// Storage is off: nothing was stored, so nothing can be read. The ping time kept at the ping stands for
+		// the hour, as before. The same lifetime function decides when it ends.
+		if t.storeOffAt <= 0 || now.UnixMilli() >= t.storeOffAt+apply.EntryLifetime(apply.CacheFacts{Provider: t.provider, Model: t.model, LastOneHour: true}).Milliseconds() {
+			return 0, false
+		}
+		return t.storeOffAt, true
+	}
+	return apply.LiveOneHourPing(t.st, t.alias, t.provider, t.model, now.UnixMilli())
 }
 
 // touchAliasOf is the cold clock's key for a job: the one the host handed in, else the one its body derives.
@@ -342,11 +362,19 @@ func touchAliasOf(j pingJob) string {
 	return apply.TouchAliasFor(j.tenant, j.raw, j.provider)
 }
 
-// oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: under an
-// hour old, on a route not switched off. The same test as OneHourTouches. The caller holds k.mu.
+// The keeper reads the store while it holds k.mu (here, in OneHourTouches and in makeRoomForThreadLocked). That
+// costs one map lookup on store.Memory. A slow store would hold the lock for each read, one per thread of the
+// asked session: such a host must give the keeper a store with a fast PeekValue.
+//
+// oneHourTouchLiveLocked reports whether the thread's last touch was a free 1-hour ping that still counts: the store
+// says a ping stands and is under an hour old (apply.LiveOneHourPing), on a route not switched off. The same test
+// as OneHourTouches. The caller holds k.mu.
 func (k *Keeper) oneHourTouchLiveLocked(id string, now time.Time) bool {
-	t, ok := k.oneHourTouches[id]
-	if !ok || !t.live(now) {
+	t, ok := k.oneHourThreads[id]
+	if !ok {
+		return false
+	}
+	if _, live := t.standing(now); !live {
 		return false
 	}
 	st := k.oneHourRoutes[t.route]
@@ -383,15 +411,19 @@ func (k *Keeper) OneHourTouches(tenant string, all bool, session string) map[str
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	out := map[string]OneHourTouch{}
-	for _, t := range k.oneHourTouches {
-		if t.key.Session != session || (!all && t.key.Tenant != tenant) || !t.live(now) {
+	for _, t := range k.oneHourThreads {
+		if t.key.Session != session || (!all && t.key.Tenant != tenant) {
+			continue
+		}
+		at, live := t.standing(now)
+		if !live {
 			continue
 		}
 		st := k.oneHourRoutes[t.route]
 		if st != nil && (st.off || st.costly) {
 			continue
 		}
-		out[t.key.Thread] = OneHourTouch{At: t.at, Proven: st != nil && st.proven}
+		out[t.key.Thread] = OneHourTouch{At: time.UnixMilli(at), Proven: st != nil && st.proven}
 	}
 	return out
 }
