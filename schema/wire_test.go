@@ -17,24 +17,21 @@ func TestWireFor(t *testing.T) {
 	}
 }
 
-func TestServerHeldHistoryHasTwoForms(t *testing.T) {
+func TestServerHeldHistory(t *testing.T) {
 	for _, c := range []struct {
-		body         string
-		wide, narrow bool
+		body string
+		want bool
 	}{
-		{`{"input":"x"}`, false, false},
-		{`{"previous_response_id":"r1","input":"x"}`, true, true},
-		{`{"conversation":"c1","input":"x"}`, true, false},
-		{`{"conversation":{"id":"c1"},"input":"x"}`, true, false},
-		{`{"conversation":"","input":"x"}`, false, false},
-		{`{"input":[{"type":"item_reference","id":"i"}]}`, true, false},
-		{`{"input":[{"type":"message"}]}`, false, false},
+		{`{"input":"x"}`, false},
+		{`{"previous_response_id":"r1","input":"x"}`, true},
+		{`{"conversation":"c1","input":"x"}`, true},
+		{`{"conversation":{"id":"c1"},"input":"x"}`, true},
+		{`{"conversation":"","input":"x"}`, false},
+		{`{"input":[{"type":"item_reference","id":"i"}]}`, true},
+		{`{"input":[{"type":"message"}]}`, false},
 	} {
-		if got := ServerHeldHistory([]byte(c.body), true); got != c.wide {
-			t.Errorf("wide %s: %v want %v", c.body, got, c.wide)
-		}
-		if got := ServerHeldHistory([]byte(c.body), false); got != c.narrow {
-			t.Errorf("narrow %s: %v want %v", c.body, got, c.narrow)
+		if got := ServerHeldHistory([]byte(c.body)); got != c.want {
+			t.Errorf("%s: %v want %v", c.body, got, c.want)
 		}
 	}
 }

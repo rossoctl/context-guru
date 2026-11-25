@@ -107,3 +107,31 @@ func TestPlanRestoreSkipsAnArrayAnswerThatIsTheOriginal(t *testing.T) {
 		t.Fatalf("an anchor was recorded for an answer that is the original: %+v", a)
 	}
 }
+
+// A Responses request whose history the server holds shows only a delta. No anchor is stated in it.
+func TestPlanRestoreSkipsResponsesHistoryTheServerHolds(t *testing.T) {
+	for _, c := range []struct{ name, extra string }{
+		{"none", ``},
+		{"previous_response_id", `"previous_response_id":"r1",`},
+		{"conversation", `"conversation":"conv_1",`},
+		{"item_reference", `"item_reference_marker":1,`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			input := `[{"role":"user","content":"a"},{"role":"user","content":"b"}]`
+			if c.name == "item_reference" {
+				input = `[{"type":"item_reference","id":"i1"},{"role":"user","content":"b"}]`
+			}
+			body := []byte(`{"model":"gpt-5.6",` + c.extra + `"input":` + input + `}`)
+			msgs := gjson.GetBytes(body, "input").Array()
+			pipe := components.NewPipeline(nil, nil)
+			pipe.SetFixedRestore(true)
+			st := store.NewMemory(store.Options{})
+			st.Put("H1", []byte("ORIGINAL OUTPUT"))
+			expand.RecordAnchor(st, "sess", expand.Anchor{ID: "H1", At: 2, Fp: expand.Fingerprint(msgs[1])})
+			got := planRestore(pipe, st, "sess", "responses", body, msgs)
+			if want := c.name == "none"; (len(got) > 0) != want {
+				t.Fatalf("plan has %d items, want a plan: %v", len(got), want)
+			}
+		})
+	}
+}

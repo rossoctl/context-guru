@@ -14,4 +14,4 @@ var (
 	pingFromReport = accrec.PingFromReport
 )
 
-func responsesServerHeldHistory(body []byte) bool { return schema.ServerHeldHistory(body, true) }
+func responsesServerHeldHistory(body []byte) bool { return schema.ServerHeldHistory(body) }

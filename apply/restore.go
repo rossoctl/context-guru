@@ -38,7 +38,7 @@ func planRestore(pipe *components.Pipeline, st store.Store, session, wire string
 	if !pipe.FixedRestore() || session == "" || len(msgs) == 0 {
 		return nil
 	}
-	if schema.IsResponses(wire) && schema.ServerHeldHistory(body, false) {
+	if schema.IsResponses(wire) && schema.ServerHeldHistory(body) {
 		return nil // the visible input is a delta, not the transcript an anchor is stated in
 	}
 	// The repair path: the client received our tool_use and answered it, so the call is in its
