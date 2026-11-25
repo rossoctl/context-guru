@@ -273,7 +273,7 @@ Limits:
   re-rate, and a price with no tiers gives the figures of before.
   Totals that sum tokens by model, with no request size (for example the per-model tier cost split, the
   replay figures of legacy rows and the summary and sweep model
-  estimates) still use the base rates. The savings counters of the metrics module push
+  estimates) still use the base rates. The declaration-filter saving (#1438) is not in that list: each of its rows is priced at the size of its own prompt (fresh input, cache reads and cache writes). A row stored before `fresh_input` existed has 0 there, so its size is too small and its tier is never too dear. The savings counters of the metrics module push
   (`llm_savings_saved_usd_total`, `llm_savings_added_usd_total`) use the same
   rule as the dashboard: each side is priced at its own prompt size, the tokens that stay are re-rated,
   and so is the output. Set `flat: true` on a price-file entry to turn the tiers off for it.
