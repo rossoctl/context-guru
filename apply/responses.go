@@ -530,12 +530,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
-	// A previous_response_id request contains only this turn's delta, not a
+	// A server-held-history request (schema.ServerHeldHistory) contains only this turn's delta, not a
 	// cumulatively growing transcript. Boundary/TurnAt would interpret a smaller
 	// delta as agent compaction and report a cached prefix we cannot see. Keep
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
-	serverHeldHistory := schema.ServerHeldHistory(o.Body, false)
+	serverHeldHistory := schema.ServerHeldHistory(o.Body)
 	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
 	// lifetime below are one fact — this request's cache lifetime.
 	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
@@ -603,7 +603,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		NoCacheBreakpoint: !explicitBreakpointProvider(bschemas.OpenAI),
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
-		// A previous_response_id points to upstream-held history that this
+		// Server-held history (schema.ServerHeldHistory) is upstream-held history that this
 		// request cannot inspect or replace. Summarizing only the visible tail
 		// would claim to compact a history that remains in the provider's state.
 		DisallowCountChange: !gjson.GetBytes(o.Body, "input").IsArray() || serverHeldHistory,

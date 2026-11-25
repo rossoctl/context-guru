@@ -27,23 +27,16 @@ func WireFor(provider, api string) string {
 func IsResponses(wire string) bool { return wire == WireResponses }
 
 // ServerHeldHistory says whether an OpenAI Responses body leaves part of its prompt on the provider's side, so
-// the host cannot see the prefix the provider reads. It has two forms, and they differ on purpose until #1298 is
-// decided:
+// the host cannot see the prefix the provider reads. It is true for:
 //
-//   - wide (the accountant's rule): previous_response_id (the earlier turns of a response chain), conversation (a
-//     stored conversation's items, a string id or an object), and an input item of type item_reference (an item the
-//     provider expands from its own store). The accountant has no record for such a request (fallback
-//     server_held_history, #899).
-//   - narrow (apply's and expand's rule): previous_response_id only.
+//   - previous_response_id (the earlier turns of a response chain);
+//   - conversation (a stored conversation's items, a string id or an object);
+//   - an input item of type item_reference (an item the provider expands from its own store).
 //
-// Making apply and expand use the wide form is a behaviour change. It is held in #1298. Do not widen the narrow
-// callers here.
-func ServerHeldHistory(body []byte, wide bool) bool {
+// The accountant, apply and expand all use this one rule.
+func ServerHeldHistory(body []byte) bool {
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {
 		return true
-	}
-	if !wide {
-		return false
 	}
 	switch c := gjson.GetBytes(body, "conversation"); {
 	case c.Type == gjson.String && c.String() != "", c.IsObject():

@@ -183,7 +183,7 @@ func stripCacheControl(v any) any {
 // the turn that expanded — will sit in the client's next request. body is the request as the
 // client sent it. ok is false when the transcript is not one an anchor can be stated in.
 func AnchorPoint(wire string, body []byte) (at int, fp string, ok bool) {
-	if schema.IsResponses(wire) && schema.ServerHeldHistory(body, false) {
+	if schema.IsResponses(wire) && schema.ServerHeldHistory(body) {
 		return 0, "", false // history held upstream: these items are not the transcript
 	}
 	msgs := gjson.GetBytes(body, MessagesField(wire)).Array()

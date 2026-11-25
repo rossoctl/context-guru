@@ -1436,7 +1436,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// last full body as a client edit, and price a prefix the proxy cannot see. The event
 				// is marked instead, so the dashboard says why it has no saving (#899).
 				if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
-					schema.ServerHeldHistory(orig, true) {
+					schema.ServerHeldHistory(orig) {
 					cp.accServerHeldHistory = true
 				} else if cp != nil && cp.savings != nil && tr.Session != "" {
 					cp.accBegin(accountant.RequestMeta{
