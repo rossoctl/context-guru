@@ -7,8 +7,8 @@
 #
 # Examples:
 #   scripts/with-guru.sh conservative -- claude   # route Claude Code through the proxy
-#   scripts/with-guru.sh medium -- codex         # route Codex (OpenAI dialect)
-#   scripts/with-guru.sh                           # default preset: conservative. Start proxy, print the env to paste
+#   scripts/with-guru.sh medium -- codex          # route Codex (OpenAI dialect)
+#   scripts/with-guru.sh                          # default preset: conservative; print the env to paste
 #
 # Starts context-guru-proxy on $PORT (default 4000), exports ANTHROPIC_BASE_URL and
 # OPENAI_BASE_URL pointing at it, then execs the given command (or prints the exports
