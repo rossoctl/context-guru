@@ -12,10 +12,5 @@
 components/offload TestAWarmQuestionAndAPingQuestionNeverRunTogetherOnAThread
 components/offload TestTheWarmQuestionIsJudgedByTheSharedCacheReadRule
 components/offload TestTheWarmSweepOuterTimeoutFitsSeveralBatches
-modes TestEnqueueDedupIsAtomic
-modes TestFullQueueDropsAndNeverBlocks
-modes TestPanickingJobIsContained
-modes TestPoolRunsJobs
-modes TestStopLeaksNoGoroutines
 opencode-plugin picker confirm and cancel (uses settle())
 opencode-plugin v2: setup waits for the host transform callback before judging providers

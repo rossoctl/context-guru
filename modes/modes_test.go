@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // --- Tracker ----------------------------------------------------------------
@@ -498,10 +500,10 @@ func TestPoolRunsJobs(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second): // a hang detector, not a timing check
 		t.Fatal("job never ran")
 	}
-	waitFor(t, func() bool { return p.Stats().Processed == 1 })
+	testutil.WaitFor(t, "the pool state", func() bool { return p.Stats().Processed == 1 })
 }
 
 // TestEnqueueDedupIsAtomic hammers one key from many goroutines while the worker is
@@ -531,7 +533,7 @@ func TestEnqueueDedupIsAtomic(t *testing.T) {
 		t.Fatalf("dedup admitted %d jobs for one key, want 1", n)
 	}
 	close(release)
-	waitFor(t, func() bool { return p.Stats().Pending == 0 })
+	testutil.WaitFor(t, "the pool state", func() bool { return p.Stats().Pending == 0 })
 	if n := ran.Load(); n != 1 {
 		t.Fatalf("job body ran %d times, want 1", n)
 	}
@@ -546,11 +548,11 @@ func TestFullQueueDropsAndNeverBlocks(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	p.Enqueue("busy", func(context.Context) { <-release }) // occupy the single worker
-	waitFor(t, func() bool { return p.Stats().Pending == 1 })
+	testutil.WaitFor(t, "the pool state", func() bool { return p.Stats().Pending == 1 })
 
 	noop := func(context.Context) {}
 	accepted, dropped := 0, 0
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(30 * time.Second) // a hang detector: Enqueue never blocks
 	for i := 0; i < 50; i++ {
 		ok := make(chan bool, 1)
 		go func(i int) { ok <- p.Enqueue(strconv.Itoa(i), noop) }(i)
@@ -577,21 +579,34 @@ func TestFullQueueDropsAndNeverBlocks(t *testing.T) {
 }
 
 func TestStopLeaksNoGoroutines(t *testing.T) {
-	settle()
+	// Everything unrelated (a previous test's Stop waiter, say) must be gone BEFORE the baseline,
+	// so the only difference this measures is the pool's. The count must hold still over
+	// several polls in a row.
+	var last, steady int
+	testutil.WaitFor(t, "the goroutine count is quiet", func() bool {
+		n := runtime.NumGoroutine()
+		if n == last {
+			steady++
+		} else {
+			last, steady = n, 0
+		}
+		return steady >= 5
+	})
 	before := runtime.NumGoroutine()
 
 	p := NewPool(16, 4)
 	p.Enqueue("a", func(context.Context) {})
-	waitFor(t, func() bool { return p.Stats().Processed >= 1 })
+	testutil.WaitFor(t, "the pool state", func() bool { return p.Stats().Processed >= 1 })
 	if !p.Stop() {
 		t.Fatal("Stop reported an unclean exit with no job running")
 	}
 	p.Stop() // idempotent
 
-	settle()
-	if after := runtime.NumGoroutine(); after > before {
-		t.Fatalf("goroutine leak: %d before, %d after Stop", before, after)
-	}
+	var now int
+	testutil.WaitForState(t, "the pool goroutines exit", func() bool {
+		now = runtime.NumGoroutine()
+		return now <= before
+	}, func() string { return "goroutines before " + strconv.Itoa(before) + ", now " + strconv.Itoa(now) })
 	if p.Enqueue("b", func(context.Context) {}) {
 		t.Fatal("a stopped pool accepted a job")
 	}
@@ -613,6 +628,11 @@ func TestStopDoesNotWaitForASlowJob(t *testing.T) {
 	})
 	<-started
 
+	// The grace period is the behavior, so the tight bound runs only in the timing pool.
+	stopLimit := stopGrace + 30*time.Second
+	if testutil.TimingEnabled() {
+		stopLimit = stopGrace + 3*time.Second
+	}
 	done := make(chan bool, 1)
 	go func() { done <- p.Stop() }()
 	select {
@@ -620,7 +640,7 @@ func TestStopDoesNotWaitForASlowJob(t *testing.T) {
 		if clean {
 			t.Fatal("Stop reported a clean exit while a job was still running")
 		}
-	case <-time.After(stopGrace + 3*time.Second):
+	case <-time.After(stopLimit):
 		t.Fatal("Stop blocked past its grace period on an uncancellable job")
 	}
 }
@@ -630,36 +650,13 @@ func TestPanickingJobIsContained(t *testing.T) {
 	p := NewPool(0, 1)
 	defer p.Stop()
 	p.Enqueue("boom", func(context.Context) { panic("nope") })
-	waitFor(t, func() bool { return p.Stats().Errors == 1 })
+	testutil.WaitFor(t, "the pool state", func() bool { return p.Stats().Errors == 1 })
 
 	done := make(chan struct{})
 	p.Enqueue("after", func(context.Context) { close(done) })
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second): // a hang detector, not a timing check
 		t.Fatal("the worker died with the panicking job")
-	}
-}
-
-// --- helpers ----------------------------------------------------------------
-
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("condition never became true")
-}
-
-// settle gives already-finishing goroutines a chance to exit so a leak check compares
-// like with like.
-func settle() {
-	for i := 0; i < 20; i++ {
-		runtime.Gosched()
-		time.Sleep(5 * time.Millisecond)
 	}
 }
