@@ -3,6 +3,7 @@
 
 # self_pid: the pid of the current shell. Bash 4+ gives the pid of a subshell (BASHPID). Bash 3.2
 # has no BASHPID, so a subshell then reports the pid of the script that started it.
+# Do not call it in $(...): that runs a new subshell, with another BASHPID.
 self_pid() { echo "${BASHPID:-$$}"; }
 
 # lock: take the worktree lock, a directory with the holder's pid in it. A lock whose holder is
@@ -50,7 +51,7 @@ unlock() { rm -rf -- "$lockdir"; }
 # unlock_if_held: for an EXIT trap. Removes the lock only when this process holds it.
 unlock_if_held() {
   [ -n "${lockdir:-}" ] || return 0
-  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$(self_pid)" ] && unlock
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ] && unlock
   return 0
 }
 
