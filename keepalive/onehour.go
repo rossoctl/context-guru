@@ -425,6 +425,24 @@ func (k *Keeper) StoreOffPing(alias string) (atMs int64, ok bool) {
 	return atMs, ok
 }
 
+// endStoreOffPings ends the free 1-hour pings whose record is the keeper's own (store.Keeps is false) for this alias:
+// the end of storeOffAt, as apply.ConfirmRealTouch is for the stored clock. It ends only a ping that started BEFORE
+// the request's clock step (atMs). A ping that started after it (the inflight guard is per thread key, so another
+// thread of the same conversation can ping while the request runs) is newer than the request's touch and stands.
+// A ping at the same millisecond stands too: that errs warm. A thread with a real store is left alone.
+func (k *Keeper) endStoreOffPings(alias string, atMs int64) {
+	if k == nil || alias == "" || atMs <= 0 {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for id, t := range k.oneHourThreads {
+		if t.alias == alias && !store.Keeps(t.st) && t.storeOffAt > 0 && t.storeOffAt < atMs {
+			delete(k.oneHourThreads, id)
+		}
+	}
+}
+
 // OneHourTouch is what the dashboard needs of it.
 type OneHourTouch struct {
 	At time.Time

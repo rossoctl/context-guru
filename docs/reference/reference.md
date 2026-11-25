@@ -944,6 +944,12 @@ public map does not list either.
 another rate, for example `1.0` for the input rate. A 1-hour write never costs less than a
 5-minute write, so a value below the entry's 5-minute rate gives the 5-minute rate.
 
+`flat: true` turns the built-in prompt-size tiers off for one entry. Some models bill every token
+at higher rates when the prompt is large (for example gpt-5.5 above 272,000 tokens, Claude Haiku 5.5
+above 100,000). The proxy adds these tiers to a price-file entry by default. Set `flat: true` when
+your gateway bills one flat rate. The key is per entry. It does not pass to another entry. Absent,
+or `false`, the built-in tiers apply. A value that is not `true` or `false` stops the load.
+
 These are list prices, not credentials, and the file holds no secret. A malformed one is a
 **startup error** rather than a fallback: a price list that silently failed to load is
 indistinguishable from "every model is free".

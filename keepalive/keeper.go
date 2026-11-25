@@ -894,12 +894,18 @@ func (k *Keeper) Record(r Record) {
 	// one record of the fact (#1365). A request that failed never gets here, so the record stays. Where this is
 	// never reached (a timeout, a cancel, no Record call) it stays too, and ends an hour after the ping. The
 	// thread's index entry went with resolveOneHourProbe above: it only says where to look.
+	alias := r.TouchAlias
+	if alias == "" && (r.Store != nil || r.TouchAtMs > 0) {
+		alias = apply.TouchAliasFor(r.Key.Tenant, body, r.Provider)
+	}
 	if r.Store != nil {
-		alias := r.TouchAlias
-		if alias == "" {
-			alias = apply.TouchAliasFor(r.Key.Tenant, body, r.Provider)
-		}
 		apply.ConfirmRealTouch(r.Store, alias, r.TouchAtMs, r.TouchSeq)
+	}
+	// With a store that keeps nothing the ping's record is the keeper's own index entry, found by the same alias.
+	// The request may come under the other session-id shape, so the key-based end above can miss it. A request
+	// that took no clock step ends nothing, and a ping newer than the step stands, as on the stored path.
+	if r.TouchAtMs > 0 {
+		k.endStoreOffPings(alias, r.TouchAtMs)
 	}
 	k.checkOneHourFirstDowngrade(key, r.Provider, r.Endpoint, r.Route, model, body, u, usageOK)
 	if usageOK {

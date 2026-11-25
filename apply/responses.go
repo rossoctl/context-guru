@@ -551,9 +551,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			// because a refresh under either one kept the provider's single entry warm (#766).
 			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
 			// metadata id when the body carries one, else the content hash. alias below stays
-			// the bare content hash for the cold decision's own clock (aliasSeen).
+			// the bare content hash for the cold decision's own clock (aliasSeenState).
 			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
-			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
+			// so load them before aliasSeenState reads. Kept on the bare-hash alias, as #770
 			// wrote it — the store's alias keys use that id.
 			if alias != res.Session {
 				loadSessionState(st, alias)

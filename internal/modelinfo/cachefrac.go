@@ -162,31 +162,28 @@ func chargesCacheWritePremium(model string) bool {
 
 // GPT56OrLater reports whether an OpenAI GPT model uses the GPT-5.6+ cache rules.
 // Routed model IDs (for example, azure/gpt-5.6-luna) are supported.
-func GPT56OrLater(model string) bool {
+func GPT56OrLater(model string) bool { return gptAtLeast(model, 6) }
+
+// gptAtLeast reports whether an OpenAI GPT model is version 5.minMinor or later: a later major
+// version always counts, and version 5 needs a minor number. The final "gpt-" token is the model
+// the request selects, because a routing prefix may itself contain an older GPT name. This is the
+// ONE parser of the GPT version.
+func gptAtLeast(model string, minMinor int) bool {
 	model = strings.ToLower(model)
-	// A routing prefix may itself contain an older GPT name. The final model
-	// token is the one the request actually selects.
 	i := strings.LastIndex(model, "gpt-")
 	if i < 0 {
 		return false
 	}
-	v := model[i+4:]
-	major, n := 0, 0
-	for n < len(v) && v[n] >= '0' && v[n] <= '9' {
-		major = major*10 + int(v[n]-'0')
-		n++
-	}
-	if n == 0 || major != 5 {
-		return major > 5
-	}
-	if n == len(v) || v[n] != '.' {
+	major, rest, ok := leadingInt(model[i+4:])
+	if !ok {
 		return false
 	}
-	v = v[n+1:]
-	minor, digits := 0, 0
-	for digits < len(v) && v[digits] >= '0' && v[digits] <= '9' {
-		minor = minor*10 + int(v[digits]-'0')
-		digits++
+	if major != 5 {
+		return major > 5
 	}
-	return digits > 0 && minor >= 6
+	if rest == "" || rest[0] != '.' {
+		return false
+	}
+	minor, _, ok := leadingInt(rest[1:])
+	return ok && minor >= minMinor
 }

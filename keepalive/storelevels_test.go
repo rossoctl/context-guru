@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -186,5 +187,101 @@ func TestABypassedAcceptedRequestDoesNotEndTheStoreOffPing(t *testing.T) {
 				t.Errorf("%s: a bypassed request ended the ping's hour", tc.name)
 			}
 		})
+	}
+}
+
+// An accepted return under the OTHER session-id shape ends the store-off ping too (#1390). A has the session header
+// and gets the free 1-hour ping. B is the same conversation without the header, so its key differs from the
+// ping thread's key. With a store the stored clock (by alias) ends at B. With the store off the keeper's record
+// must end at B as well, by alias, so the cold check reads as it does with a Memory store.
+func TestAnAcceptedReturnUnderTheOtherSessionIdEndsTheStoreOffPing(t *testing.T) {
+	run := func(st store.Store) (ended, cold bool) {
+		r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+		r.st = st
+		r.session = "client-session-S" // request A carries the header
+		proveRoute(r.k)
+		t0 := r.clock.now()
+		r.request(t0)
+		r.record(t0, "end_turn", onWaitPolicy())
+		r.clock.advance(240 * time.Second)
+		r.k.Sweep(r.clock.now())
+		waitPings(t, r.k, 1)
+		r.session = "" // request B, the same conversation without the header
+		bAt := t0.Add(6 * time.Minute)
+		r.request(bAt)
+		otherKey := sess1
+		otherKey.Session = "derived-session-of-B"
+		r.k.Record(Record{Key: otherKey, StartedAt: bAt, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: 200, UsageOK: true, Policy: onWaitPolicy(),
+			Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
+			Hold: fakeOf(r.k).hold(otherKey), Store: st, TouchAlias: r.alias, TouchAtMs: r.atMs, TouchSeq: r.seq})
+		_, standing := r.k.StoreOffPing(r.alias)
+		c, _ := r.request(t0.Add(13 * time.Minute))
+		return !standing, c
+	}
+	_, withStore := run(store.NewMemory(store.Options{}))
+	for _, st := range []store.Store{store.Nop{}, nil} {
+		ended, cold := run(st)
+		if !ended {
+			t.Errorf("%T: StoreOffPing still says yes after an accepted return under the other session id", st)
+		}
+		if cold != withStore {
+			t.Errorf("%T: cold=%v, with a Memory store %v", st, cold, withStore)
+		}
+	}
+}
+
+// A ping that starts AFTER a request's clock step stands when that request is accepted (#1402). R is the same
+// conversation under the other session-id shape. It takes its clock step, then the keeper pings the thread of shape
+// A (the inflight guard is per thread key), then R is accepted. R's touch is older than the ping, so it must not end
+// the ping's record. The stored path keeps it too (ConfirmRealTouch ends only the carry R wrote), so every store kind
+// reads the same.
+func TestAnAcceptedRequestDoesNotEndAPingThatStartedAfterItsClockStep(t *testing.T) {
+	run := func(st store.Store) (standing, cold bool) {
+		r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+		r.st = st
+		r.session = "client-session-S"
+		proveRoute(r.k)
+		t0 := r.clock.now()
+		r.request(t0)
+		r.record(t0, "end_turn", onWaitPolicy())
+		alias := r.alias
+		r.session = ""
+		rAt := t0.Add(time.Minute)
+		r.request(rAt) // R's clock step
+		atMs, seq := r.atMs, r.seq
+		r.clock.advance(240 * time.Second)
+		r.k.Sweep(r.clock.now()) // the ping of thread A fires after R's step
+		waitPings(t, r.k, 1)
+		otherKey := sess1
+		otherKey.Session = "derived-session-of-R"
+		r.k.Record(Record{Key: otherKey, StartedAt: rAt, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: 200, UsageOK: true, Policy: onWaitPolicy(),
+			Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
+			Hold: fakeOf(r.k).hold(otherKey), Store: st, TouchAlias: alias, TouchAtMs: atMs, TouchSeq: seq})
+		if mem, ok := st.(*store.Memory); ok {
+			b, _ := mem.Get(store.SeenPrefix + alias)
+			if !strings.Contains(string(b), ":1h") {
+				t.Errorf("the stored record is %q, want the ping's :1h to stand", b)
+			}
+			standing = true
+		} else {
+			_, standing = r.k.StoreOffPing(alias)
+		}
+		c, _ := r.request(t0.Add(13 * time.Minute))
+		return standing, c
+	}
+	_, withStore := run(store.NewMemory(store.Options{}))
+	for _, st := range []store.Store{store.Nop{}, nil} {
+		standing, cold := run(st)
+		if !standing {
+			t.Errorf("%T: an older request ended a ping that started after its clock step", st)
+		}
+		if cold != withStore {
+			t.Errorf("%T: cold=%v, with a Memory store %v", st, cold, withStore)
+		}
+	}
+	if withStore {
+		t.Error("the Memory store reads cold inside the ping's hour")
 	}
 }

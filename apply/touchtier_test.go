@@ -129,8 +129,8 @@ func TestTheTierRecordIsMonotoneAndReadable(t *testing.T) {
 	if _, err := strconv.ParseInt(string(b), 10, 64); err != nil {
 		t.Errorf("a 5-minute touch must stay a plain integer, got %q", b)
 	}
-	if prev, oneHour := aliasSeenTier(st, "a", 4000); prev != 3000 || oneHour {
-		t.Errorf("aliasSeenTier = %d %v", prev, oneHour)
+	if v := aliasSeenState(st, "a", 4000); v.at != 3000 || v.oneHour {
+		t.Errorf("aliasSeenState = %d %v", v.at, v.oneHour)
 	}
 	if b, _ = st.Get(store.SeenPrefix + "a"); string(b) != "4000" {
 		t.Errorf("a real request left %q, want a plain 4000", b)
