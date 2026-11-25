@@ -344,7 +344,7 @@ The one exception is a store that keeps nothing (`store.Keeps` is false: storage
 
 - **Fields.** `Label` is the dashboard family. `Name` is the narrow identity that rules key on (`claude`, `bob`, `codex`, `opencode`, `pi`, or empty). `SDK` is the User-Agent family: for Pi it is the provider SDK's token, for the others it equals `Label`. `Entrypoint`, `SessionID`, `AgentID`, `AgentIDHeader`, `ParentID` come from headers.
 - **Nil or empty header.** The result is the generic client: `Label` and `SDK` are "unknown", all else is empty. A host that passes no headers gets today's behavior.
-- **Which field to read.** Take `Label` when the harness matters (the dashboard). Take `SDK` when the logic depends on the provider (the prediction model's agent feature).
+- **Which field to read.** Take `Label` when the harness matters (the dashboard). Take the raw User-Agent when the logic needs it: the prediction model's agent feature reads it directly on live requests. For stored rows it uses `agent.ModelAgentOf(label, provider)` (`campaign/replay.go`), which maps a stored label back by provider.
 - **Proxy.** It calls `agent.Identify(r.Header)` once per request (`identify` in `proxy/clientid.go`) and uses the `Client`. It holds no client rules.
 - **Bifrost adapter.** The transport must pass the request headers to `Identify`. A host that cannot pass them gets the generic client.
 - **Cortex.** Call `agent.Identify(pctx.Headers)`. When `Client.SessionID` is empty, use the host's own session id (`pctx.SessionID`) as the gap filler.
