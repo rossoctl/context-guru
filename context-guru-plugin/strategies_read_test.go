@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // --- the plugin reads the table from the proxy -------------------------------------------------
@@ -132,7 +133,7 @@ func TestAnOldProxyBinaryGetsTheUpdateMessageWithinTheTimeLimit(t *testing.T) {
 	if !strings.Contains(facts["note"], "update the proxy to v0.7.1 or later") {
 		t.Errorf("the error does not say to update the proxy to v0.7.1: %q", facts["note"])
 	}
-	if took > 8*time.Second {
+	if testutil.TimingEnabled() && took > 8*time.Second {
 		t.Errorf("took %s; the time limit was 1 s", took)
 	}
 	if got := readFileString(t, marker); !strings.Contains(got, "LISTEN_ADDR=127.0.0.1:0") {

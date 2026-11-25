@@ -17,6 +17,10 @@ import {
 } from "../extensions/context-guru.ts";
 import contextGuru from "../extensions/context-guru.ts";
 
+// A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+// CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+const timing = process.env.CG_TIMING_TESTS === "1";
+
 const install = {
   port: 8800,
   base_urls: { anthropic: "http://127.0.0.1:8800/anthropic", openai: "http://127.0.0.1:8800/openai/v1" },
@@ -242,7 +246,7 @@ test("a proxy that accepts but never answers fails the check at the time limit",
   try {
     const start = Date.now();
     assert.equal(await proxyAnswers(port, 200), false);
-    assert.ok(Date.now() - start < 2000);
+    if (timing) assert.ok(Date.now() - start < 2000);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -270,7 +274,7 @@ test("a stopped check ends at once, before its time limit", async () => {
     const pending = proxyAnswers(port, 5000, fetch, stop.signal);
     setTimeout(() => stop.abort(), 50);
     assert.equal(await pending, false);
-    assert.ok(Date.now() - start < 1000);
+    if (timing) assert.ok(Date.now() - start < 1000);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -358,7 +362,7 @@ test("a request waits at most the limit, 10 seconds by default", async () => {
   gate.hold(); // never released
   const start = Date.now();
   await gate.wait(30);
-  assert.ok(Date.now() - start < 500);
+  if (timing) assert.ok(Date.now() - start < 500);
 });
 
 test("the start check holds requests only while it restarts, also when the restart throws", async () => {

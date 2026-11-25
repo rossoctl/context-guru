@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -230,7 +231,10 @@ func TestWaitAllIsOneBound(t *testing.T) {
 	if waitAll(ctx, never1) {
 		t.Fatal("reported done")
 	}
-	if waitAll(ctx, never1, never2) || time.Since(t0) > time.Second {
+	if waitAll(ctx, never1, never2) {
+		t.Fatal("reported done")
+	}
+	if testutil.TimingEnabled() && time.Since(t0) > time.Second {
 		t.Fatalf("waited %v for one 50 ms bound", time.Since(t0))
 	}
 	closed := make(chan struct{})

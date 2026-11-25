@@ -84,7 +84,7 @@ func TestWaitForGivesUpBeforeTheTestDeadlineWithItsOwnMessage(t *testing.T) {
 		}()
 		WaitFor(d, "never", func() bool { return false })
 	}()
-	if el := time.Since(start); el > 3*time.Second {
+	if el := time.Since(start); TimingEnabled() && el > 3*time.Second {
 		t.Fatalf("WaitFor waited %v; it must stop before the test deadline", el)
 	}
 	if !strings.Contains(d.msg, "waiting for never") {

@@ -10,7 +10,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-failop
 process.env.CONTEXT_GURU_PORT_START = "9200"
 
 import plugin, { routeProviders, stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy, timingOnly } from "./helpers.mjs"
+import { stubProxyBinary, waitUntilUnhealthy, timingOnly, timingEnabled } from "./helpers.mjs"
 
 // Ports only this file uses. 9263 stays closed: nothing listens there.
 const UPSTREAM_PORT = 9260
@@ -387,7 +387,7 @@ test("a restarted binary that exits at once fails the restart at once and starts
 
 // fallback: false keeps the old restart: it polls /healthz and does not stop when the started process exits.
 // A wrapper that starts the proxy in the background and exits 0 still gives a working restart.
-test("with fallback: false, a restart whose binary exits while the proxy comes up still succeeds", { timeout: 60000 }, async () => {
+test("with fallback: false, a restart whose binary exits while the proxy comes up still succeeds", { ...timingOnly, timeout: 60000 }, async () => {
   const stub = stubProxyBinary()
   const project = await failingRestart("/tmp/context-guru-failopen-wrapper", `(sleep 1; exec ${JSON.stringify(stub)} "$@") >/dev/null 2>&1 &\nexit 0`, { fallback: false })
   try {
@@ -410,7 +410,7 @@ test("with fallback: false, a restart whose binary is missing returns at once", 
   try {
     const waited = await timed(project.ask)
 
-    assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
+    if (timingEnabled) assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
   } finally {
     await project.cleanup()
   }
@@ -500,7 +500,7 @@ test("a restart that is healthy before the 5 s cap sends the next request to the
   }
 })
 
-test("a restart that succeeds after the capped wait sends the next request to the proxy", { timeout: 60000 }, async () => {
+test("a restart that succeeds after the capped wait sends the next request to the proxy", { ...timingOnly, timeout: 60000 }, async () => {
   const upstream = await recorder(UPSTREAM_PORT)
   process.env.CONTEXT_GURU_BIN = stubProxyBinary()
   let project
