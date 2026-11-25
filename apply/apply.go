@@ -20,20 +20,26 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -229,6 +235,12 @@ type Trace struct {
 	// body that goes upstream gives another key when the host edits the head (tool deferral).
 	// "" when apply derived none.
 	TouchAlias string
+	// TouchAtMs is the time this request wrote under TouchAlias (the cold clock, before the forward). The host
+	// hands it back to ConfirmRealTouch, so a confirm ends only the carry its OWN request wrote. 0 when this
+	// request wrote no clock (a bypassed one).
+	TouchAtMs int64
+	// TouchSeq numbers that write (the carry it makes holds it). The host hands it back with TouchAtMs.
+	TouchSeq int64
 	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
 	Thread         thread.Result
 	ThreadResolved bool
@@ -362,6 +374,51 @@ func ExplicitSession(header string, body []byte, host ...string) string {
 		r := md.Get(k)
 		return r.Str, r.Type == gjson.String
 	}, host...)
+}
+
+// SessionHeader is the header a client or its plugin names the session with. It wins over every other id.
+const SessionHeader = "x-context-guru-session"
+
+// ExplicitSessionFor is the explicit session id for one request, for a host that has the request headers.
+// The order is fixed here, so every host gets the same answer:
+//
+//  1. the SessionHeader header;
+//  2. the body's own ids (session.Explicit), when the header is empty;
+//  3. the id of the agent that owns the route (route.SessionID(h), for example Bob's X-Task-Id);
+//  4. the client's own id from its headers (cl.SessionID: Codex session-id, OpenCode x-opencode-session-id).
+//
+// 3 and 4 come after every other id. A route with no agent id and a client with no id give the header
+// unchanged. cl is agent.Identify(h), computed once per request by the host.
+//
+// route may be nil (a host that has no route agent). A panic in route.SessionID gives no id for it:
+// the request keeps the session it has without one (fail open). In Cortex there is no route agent:
+// pass nil, and pass the host's own session id (pctx.SessionID) as the header value when it is set.
+func ExplicitSessionFor(h http.Header, route agent.Agent, cl agent.Client, body []byte) string {
+	sess := h.Get(SessionHeader)
+	id := routeSessionID(h, route)
+	if id == "" {
+		id = cl.SessionID
+	}
+	if id == "" {
+		return sess
+	}
+	return ExplicitSession(sess, body, id)
+}
+
+// routeSessionID is route.SessionID(h), fail open.
+func routeSessionID(h http.Header, route agent.Agent) (id string) {
+	if route == nil {
+		return ""
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			slog.Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", route), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return route.SessionID(h)
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
@@ -671,14 +728,36 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			if alias != sessionID {
 				loadSessionState(st, alias)
 			}
-			seen := aliasSeenState(st, alias, nowMs)
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 { // seq is 0 when the request took no clock step (bypassed)
+				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
 			aliasAt := seen.at
+			// A store that keeps nothing never held the ping's clock (#1350). The host's own record of the ping
+			// stands in for it, asked only then: with a real store the stored clock is the one record. It joins
+			// the clocks the way the carried ping does: it can only move prevAt later and only extend the lifetime
+			// to the ping's hour, so it makes a cold verdict warm and never the other way.
+			storeOffPingAt := int64(0)
+			if !store.Keeps(st) {
+				if at, ok := o.freePingFor(alias); ok && at <= nowMs {
+					storeOffPingAt = at
+				}
+			}
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
 			// request that wrote no alias clock (a bypassed one) has moved the entry since.
 			carriedAt := int64(0)
 			if seen.carriedAt > 0 && seen.at >= prevAt {
 				carriedAt = seen.carriedAt
+			}
+			if storeOffPingAt > 0 {
+				// Counted as a carried ping: a failed request after it touched nothing, so its hour runs on.
+				if carriedAt == 0 || storeOffPingAt > carriedAt {
+					carriedAt = storeOffPingAt
+				}
+				if storeOffPingAt > prevAt {
+					prevAt = storeOffPingAt
+				}
 			}
 			if aliasAt > prevAt {
 				prevAt = aliasAt
@@ -1310,16 +1389,39 @@ type seenState struct {
 	// carriedAt is the time of a free 1-hour ping that still stands under a real request nobody has confirmed
 	// (ConfirmRealTouch). 0 = none.
 	carriedAt int64
+	// tag names the route that made the 1-hour ping ("" = not named). A route switch-off ends only a ping that
+	// carries its own tag (EndTouchTier), so it can never end a later ping another route made.
+	tag string
+	// seq names the request that wrote a carry (touchSeq, one per request of this process). A confirm ends only a
+	// carry with its own time AND its own seq, so two requests that wrote in the same millisecond cannot end
+	// each other's carry. 0 = none.
+	seq int64
 }
 
 // aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
 // that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
 // provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
-// accepted (ConfirmRealTouch, the keeper's Record), the same line that ends the keeper's own touch. So both
-// records of the fact end at ONE event and cannot disagree, whatever the failure path (#1350).
+// accepted (ConfirmRealTouch, the keeper's Record). The store value is the ONE record of the fact: the keeper
+// keeps no tier and no time of its own, so no failure path can leave two records apart (#1350, #1365).
 func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
-	if st == nil || nowMs <= 0 {
-		return seenState{}
+	prev, _ = aliasSeenWrite(st, alias, nowMs)
+	return prev
+}
+
+// touchSeq numbers the real requests that take the clock step in this process (with no store the step writes
+// nothing, but the request still has its number). A carry holds the number of the request that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
+// errs toward the old behavior (a shared confirm), not toward a new failure.
+var touchSeq atomic.Int64
+
+// aliasSeenWrite is aliasSeenState that also returns the number of this request's clock step (0 when the request
+// took none: a bypassed one). With no store the step writes nothing, but the request still has its number.
+func aliasSeenWrite(st store.Store, alias string, nowMs int64) (prev seenState, seq int64) {
+	if nowMs <= 0 {
+		return seenState{}, 0
+	}
+	seq = touchSeq.Add(1) // the request went through the clock step, also when there is no store to write to
+	if st == nil {
+		return seenState{}, seq
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
@@ -1328,22 +1430,27 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 	v := strconv.FormatInt(nowMs, 10)
 	switch {
 	case prev.oneHour:
-		v += seenCarrySep + strconv.FormatInt(prev.at, 10)
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
 	case prev.carriedAt > 0:
-		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10)
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
 	}
 	st.Put(k, []byte(v))
-	return prev
+	return prev, seq
 }
 
 // seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
 const seenCarrySep = "^"
 
-// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that a real request was
-// accepted, so the entry's tier is now that request's own. The time stays. Nothing changes when nothing is
-// carried. The keeper calls it where it ends its own touch.
-func ConfirmRealTouch(st store.Store, alias string) {
-	if st == nil || alias == "" {
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that the real request
+// that wrote the clock at atMs was accepted, so the entry's tier is now that request's own. The time stays.
+//
+// It ends only the carry that request wrote (the value's own time is atMs). Another request on the same alias may
+// have written its clock since, over a ping that came after this request's clock: that carry is not this
+// request's to end, and if that request then fails, the ping's hour must stand (#1365). The value's request number
+// (seq) makes the match exact: two requests that wrote in one millisecond cannot end each other's carry. atMs 0
+// (this request wrote no clock) ends nothing. The keeper calls it where it ends its own index entry.
+func ConfirmRealTouch(st store.Store, alias string, atMs, seq int64) {
+	if st == nil || alias == "" || atMs <= 0 || seq <= 0 {
 		return
 	}
 	k := store.SeenPrefix + alias
@@ -1351,7 +1458,7 @@ func ConfirmRealTouch(st store.Store, alias string) {
 		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
 		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
 		// clock, so its `:1h` stays) errs warm only: no cut.
-		if v := parseSeenState(b); v.carriedAt > 0 {
+		if v := parseSeenState(b); v.carriedAt > 0 && v.at == atMs && v.seq == seq {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
@@ -1367,25 +1474,63 @@ func parseSeen(b []byte) (ms int64, oneHour bool) {
 	return v.at, v.oneHour
 }
 
-// parseSeenState reads all three shapes of a value: "<ms>", "<ms>:1h" and "<ms>^<pingMs>". One it cannot read
-// is the zero state, which is never cold.
+// parseSeenState reads all the shapes of a value: "<ms>", "<ms>:1h", "<ms>:1h:<tag>", "<ms>^<pingMs>" and
+// "<ms>^<pingMs>:<tag>". One it cannot read is the zero state, which is never cold. An older reader fails to
+// parse any suffixed shape and reads 0, which is never cold either.
 func parseSeenState(b []byte) (v seenState) {
 	str := string(b)
 	if i := strings.Index(str, seenCarrySep); i >= 0 {
-		c, err := strconv.ParseInt(str[i+1:], 10, 64)
+		rest := str[i+1:]
+		if j := strings.Index(rest, ":"); j >= 0 {
+			v.tag, rest = rest[j+1:], rest[:j]
+		}
+		if j := strings.Index(rest, seenSeqSep); j >= 0 {
+			q, err := strconv.ParseInt(rest[j+1:], 10, 64)
+			if err != nil {
+				return seenState{}
+			}
+			v.seq, rest = q, rest[:j]
+		}
+		c, err := strconv.ParseInt(rest, 10, 64)
 		if err != nil {
 			return seenState{}
 		}
 		v.carriedAt, str = c, str[:i]
+	} else if i := strings.Index(str, seenOneHourSuffix); i >= 0 {
+		v.oneHour, v.tag = true, strings.TrimPrefix(str[i+len(seenOneHourSuffix):], ":")
+		str = str[:i]
 	}
-	trimmed := strings.TrimSuffix(str, seenOneHourSuffix)
-	v.oneHour = len(trimmed) != len(str)
-	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	ms, err := strconv.ParseInt(str, 10, 64)
 	if err != nil {
 		return seenState{}
 	}
 	v.at = ms
 	return v
+}
+
+// seenSeqSep marks the number of the request that wrote a carry: "<ms>^<pingMs>#<seq>".
+const seenSeqSep = "#"
+
+func seqSuffix(seq int64) string {
+	if seq <= 0 {
+		return ""
+	}
+	return seenSeqSep + strconv.FormatInt(seq, 10)
+}
+
+// tagSuffix is the written form of a route tag: ":<tag>", or nothing when there is none.
+func tagSuffix(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return ":" + tag
+}
+
+// RouteTag is the short name of a route a 1-hour ping is stamped with. It is a hash, so the store value holds no
+// provider, endpoint or model text.
+func RouteTag(route string) string {
+	h := sha256.Sum256([]byte(route))
+	return hex.EncodeToString(h[:4])
 }
 
 // RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
@@ -1473,19 +1618,60 @@ func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider b
 	RecordCacheTouchAliasTier(st, TouchAliasFor(tenant, body, provider), nowMs, oneHour)
 }
 
-// EndTouchTier ends the 1-hour tier of the touch made at atMs, keeping its time: the plain clock value stays.
-// The keeper calls it when the route that gave the tier is switched off, so the stored fact and the keeper's
-// own never disagree. A later touch (another time or tier) is left alone.
-func EndTouchTier(st store.Store, alias string, atMs int64) {
-	if st == nil || alias == "" {
+// EndTouchTier ends the free 1-hour ping that stands under the alias's clock, keeping the clock's time: the plain
+// value stays. It ends a plain `:1h` and a carried ping alike, and only one stamped with tag, the route that made
+// it (RouteTag). A later ping of another route, a ping with no tag and a plain value stay. The keeper calls it
+// when the route that gave the tier is switched off, so the cold check never keeps an hour for a tier
+// no route granted, and never loses one a different route granted. It is the only way the keeper ends a tier: the store record is the one record of the fact.
+func EndTouchTier(st store.Store, alias, tag string) {
+	if st == nil || alias == "" || tag == "" {
 		return
 	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
-		if v := parseSeenState(b); (v.oneHour && v.at == atMs) || (v.carriedAt > 0 && v.carriedAt == atMs) {
+		if v := parseSeenState(b); (v.oneHour || v.carriedAt > 0) && v.tag == tag {
 			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
 		}
 	}
+}
+
+// StandingOneHourPing reads the one record of the fact "the last touch of this entry was a free 1-hour ping":
+// the time that ping started, and whether one stands. It is the `:1h` value (the ping is the last touch) or the
+// carry under a real request nobody has confirmed (the request touched nothing yet). A plain value, a value it
+// cannot read and a missing value all say no: an unreadable record never reads as a tier. It does not slide the
+// store's TTL (store.PeekValue): asking is not a touch.
+//
+// Every reader asks this, not a copy of the fact: the dashboard's cache clock, the manual-ping refusal and the
+// probe. The cold check reads the same value through aliasSeenState, where it also writes its own clock.
+func StandingOneHourPing(st store.Store, alias string) (atMs int64, ok bool) {
+	if st == nil || alias == "" {
+		return 0, false
+	}
+	b, got := store.PeekValue(st, store.SeenPrefix+alias)
+	if !got {
+		return 0, false
+	}
+	v := parseSeenState(b)
+	switch {
+	case v.carriedAt > 0:
+		return v.carriedAt, true
+	case v.oneHour && v.at > 0:
+		return v.at, true
+	}
+	return 0, false
+}
+
+// LiveOneHourPing is StandingOneHourPing that also asks the one lifetime function: the ping counts until
+// EntryLifetime of the 1-hour tier for this provider and model has passed since it started.
+func LiveOneHourPing(st store.Store, alias string, provider bschemas.ModelProvider, model string, nowMs int64) (atMs int64, live bool) {
+	at, ok := StandingOneHourPing(st, alias)
+	if !ok {
+		return 0, false
+	}
+	if nowMs >= at+EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true}).Milliseconds() {
+		return 0, false
+	}
+	return at, true
 }
 
 // RecordCacheTouchAliasTier is RecordCacheTouchAlias with the tier of the touch.
@@ -1499,6 +1685,13 @@ func EndTouchTier(st store.Store, alias string, atMs int64) {
 // A touch with oneHour false is the new LAST touch and ends the tier: a manual 5-minute ping moves a
 // 1-hour entry back to 5 minutes (#1258). The clock stays monotone: an older touch changes nothing.
 func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHour bool) {
+	RecordCacheTouchAliasRoute(st, alias, nowMs, oneHour, "")
+}
+
+// RecordCacheTouchAliasRoute is RecordCacheTouchAliasTier that also stamps a 1-hour touch with the tag of the
+// route that made it (RouteTag), so a switch-off of that route can end it and no other. The tag is ignored for
+// a 5-minute touch. tag must come from RouteTag (hex): a tag with "^", "#" or ":" would break the value's shape.
+func RecordCacheTouchAliasRoute(st store.Store, alias string, nowMs int64, oneHour bool, tag string) {
 	if st == nil || nowMs <= 0 || alias == "" {
 		return
 	}
@@ -1513,7 +1706,7 @@ func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHou
 	}
 	v := strconv.FormatInt(nowMs, 10)
 	if oneHour {
-		v += seenOneHourSuffix
+		v += seenOneHourSuffix + tagSuffix(tag)
 	}
 	st.Put(k, []byte(v))
 }

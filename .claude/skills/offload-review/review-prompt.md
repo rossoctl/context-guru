@@ -44,6 +44,14 @@ cannot read something, say so in the review and use `Verdict: blocking`.
   savings math, or reading a provider wire format for meaning. See `CLAUDE.md`, *What goes in
   the proxy*. It is not a finding when the PR says why the code cannot live in a library package.
   A copy of a library constant or rule in a host package is always a finding.
+- **Client rules.** A rule that names one client (Claude Code, Codex, OpenCode, Pi, Bob) lives in
+  `agent.Identify` and the agent packages. A header, User-Agent value, tool name or phrase
+  of one client outside them is a blocking finding. So is library code that reads User-Agent or a
+  vendor header, and a rule that finds a client by route path (Bob's gateway is the one exception).
+  Each client rule must state its fallback, and the PR must cite the client's source and version
+  for a new signal. The PR must list each supported client as covered or fallback and update
+  `docs/client-coverage.md`. See `CLAUDE.md`, *Client-specific code*. Code that fails both this
+  check and *Host boundary* is reported once, as a client rule.
 - Report real defects: wrong behavior, data loss, a broken fail-open path, a missing test for
   new behavior, a security problem.
 - Leave out style nitpicks. If a small point is worth noting, put it under "Non-blocking".

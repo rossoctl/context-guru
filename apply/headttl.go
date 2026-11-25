@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -273,7 +274,7 @@ func relabelOps(before, after []byte) []accountant.Operation {
 		h.Write([]byte(b[i].Raw))
 		ops = append(ops, accountant.Operation{
 			Kind:       accountant.KindRewrite,
-			Operator:   "context-guru.headttl",
+			Operator:   accwire.Operator(accwire.OpHeadTTL),
 			At:         accountant.Position{Section: accountant.SectionMessages, Index: i},
 			SizeBefore: accountant.Size{Bytes: len(b[i].Raw)},
 			SizeAfter:  accountant.Size{Bytes: len(a[i].Raw)},

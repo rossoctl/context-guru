@@ -13,6 +13,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
@@ -106,6 +107,7 @@ type RowFacts struct {
 	Hour, Dow          int // request start, UTC
 	StartMs            int64
 	Model, Agent, Stop string
+	Cause              string  // the row's stored wait cause (waiting_for), "" on an old row
 	Subagent           bool    // the request is on a subagent thread (keepalive.IsSubagentThread)
 	OpenAI             bool    // an OpenAI request: the keeper gives it the general floor only
 	PRead, PWrite      float64 // gateway rates of the row's model
@@ -191,7 +193,7 @@ func Rows(reqs []*kvcache.Request, price func(model string) (pIn, pOut, pRead, p
 		f := RowFacts{U: r.UpstreamMs / 1000, Returned: r.HasNext, ToEnd: float64(max(0, lastEnd[key]-end)) / 1000,
 			Stake: Stake(r.CachedContext, pRead, pWrite), Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pIn, POut: pOut, PRead: pRead}).PingCost(),
 			Turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), Prefix: r.CachedContext,
-			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: r.Agent, Stop: r.StopReason, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
+			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: agent.ModelAgentOf(r.Agent, r.Provider), Stop: r.StopReason, Cause: r.WaitingFor, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
 		f.Span = math.Inf(1)
 		ss := byThr[tk]
 		if j := sort.Search(len(ss), func(i int) bool { return ss[i] > r.TS }); j < len(ss) {

@@ -44,6 +44,10 @@ type coldRig struct {
 	cold  []bool
 	ttl   []int64
 	alias string
+	atMs  int64 // the clock the last real request wrote (apply.Trace.TouchAtMs)
+	seq   int64 // its number (apply.Trace.TouchSeq)
+	// session is the explicit session id the next request carries ("" = the client sent no header).
+	session string
 }
 
 func newColdRig(t *testing.T, usage Usage) *coldRig {
@@ -60,8 +64,12 @@ func (r *coldRig) request(at time.Time) (cold bool, ttl time.Duration) {
 	r.t.Helper()
 	res := apply.BodyOpts(context.Background(), r.pipe, r.st, apply.Opts{
 		Provider: bschemas.Anthropic, Body: []byte(kaBody), Tracker: r.tr, Now: at, Tenant: "t",
+		// The host's hook, as the proxy wires it: the keeper's record of the thread's last free ping, which apply
+		// asks only when the store keeps nothing (#1350).
+		// It asks by the alias apply hands it, so the answer cannot depend on the session id.
+		FreePing: r.k.StoreOffPing, Session: r.session,
 	})
-	r.alias = res.TouchAlias
+	r.alias, r.atMs, r.seq = res.TouchAlias, res.TouchAtMs, res.TouchSeq
 	if len(r.cold) == 0 {
 		r.t.Fatal("the pipeline did not run")
 	}
@@ -79,7 +87,7 @@ func (r *coldRig) record(at time.Time, stop string, pol Policy) {
 		}
 		r.k.Record(Record{Key: sess1, StartedAt: when, Body: []byte(kaBody), Provider: bschemas.Anthropic,
 			Route: "/v1/messages", Status: http.StatusOK, Usage: u, UsageOK: true, Policy: pol,
-			ToolUseNames: names, Header: kaHeader(), Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias})
+			ToolUseNames: names, Header: kaHeader(), Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias, TouchAtMs: r.atMs, TouchSeq: r.seq})
 	}
 }
 
@@ -217,7 +225,7 @@ func (r *coldRig) recordStatus(at time.Time, status int) {
 	r.k.Record(Record{Key: sess1, StartedAt: at, Body: []byte(kaBody), Provider: bschemas.Anthropic,
 		Route: "/v1/messages", Status: status, UsageOK: status == 200, Policy: onWaitPolicy(),
 		Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
-		Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias})
+		Hold: fakeOf(r.k).hold(sess1), Store: r.st, TouchAlias: r.alias, TouchAtMs: r.atMs, TouchSeq: r.seq})
 }
 
 // A real request that FAILS touched nothing at the provider, so the ping's hour still runs. Apply wrote the plain
@@ -278,40 +286,50 @@ func TestASubstituteTouchTakesItsTierFromTheBodysMarkers(t *testing.T) {
 				provider: bschemas.Anthropic, raw: tc.raw}
 			r.k.recordSubstitutePing(j, "", Usage{CacheRead: 40_000, Output: 1}, 5, r.clock.now(), 0, nil)
 			b, _ := st.Get(store.SeenPrefix + "al")
-			if got := string(b); got != strconv.FormatInt(r.clock.now().UnixMilli(), 10)+tc.want {
-				t.Errorf("clock = %q, want the time and tier %q", got, tc.want)
+			want := strconv.FormatInt(r.clock.now().UnixMilli(), 10) + tc.want
+			if tc.want != "" { // a 1-hour touch is stamped with its route
+				want += ":" + apply.RouteTag(oneHourRoute(bschemas.Anthropic, e.endpoint, e.route, e.model))
+			}
+			if got := string(b); got != want {
+				t.Errorf("clock = %q, want the time, tier and route %q", got, want)
 			}
 		})
 	}
 }
 
-// The touch map is bounded. That is a capacity event, not a fact about any entry: it must not end the stored tier
-// of a live touch, or the cold check reads a warm 1-hour entry as cold and a cold cut rewrites it.
+// The thread index is bounded. That is a capacity event, not a fact about any entry: it must not end the stored tier
+// of a live touch, or the cold check reads a warm 1-hour entry as cold and a cold cut rewrites it. The index drops
+// first the threads the STORE says no longer hold a live free ping.
 func TestTheCapacityBoundDoesNotEndALiveTouchsTier(t *testing.T) {
 	r, t0 := pingedThread(t)
 	now := r.clock.now()
-	r.k.mu.Lock()
-	live := r.k.oneHourTouches[sess1.id()] // the real touch, with its store and alias
-	r.k.oneHourTouches = map[string]oneHourTouch{}
-	old := now.Add(-2 * time.Hour)
-	for i := 0; i < MaxTurnKeys-1; i++ { // dead touches fill the map first
-		id := "dead" + strconv.Itoa(i)
-		r.k.oneHourTouches[id] = oneHourTouch{key: Key{Tenant: "t", Session: id}, at: old, provider: bschemas.Anthropic, model: "m"}
+	big := store.NewMemory(store.Options{MaxEntries: 4 * MaxTurnKeys})
+	put := func(id string, at time.Time) oneHourThread {
+		alias := "al-" + id
+		apply.RecordCacheTouchAliasTier(big, alias, at.UnixMilli(), true)
+		return oneHourThread{key: Key{Tenant: "t", Session: id}, provider: bschemas.Anthropic, model: "m", st: big, alias: alias}
 	}
-	r.k.oneHourTouches[sess1.id()] = live
-	r.k.makeRoomForTouchLocked(now.Add(0)) // evicts the dead ones, keeps the live one
-	n := len(r.k.oneHourTouches)
-	_, kept := r.k.oneHourTouches[sess1.id()]
-	// Now every touch is live: the map starts over, and the stored tier must stay.
+	r.k.mu.Lock()
+	live := r.k.oneHourThreads[sess1.id()] // the real thread, with its store and alias
+	r.k.oneHourThreads = map[string]oneHourThread{}
+	for i := 0; i < MaxTurnKeys-1; i++ { // threads whose stored ping is an hour old fill the index first
+		id := "dead" + strconv.Itoa(i)
+		r.k.oneHourThreads[id] = put(id, now.Add(-2*time.Hour))
+	}
+	r.k.oneHourThreads[sess1.id()] = live
+	r.k.makeRoomForThreadLocked(now) // evicts the dead ones, keeps the live one
+	n := len(r.k.oneHourThreads)
+	_, kept := r.k.oneHourThreads[sess1.id()]
+	// Now every thread is live: the index starts over, and the stored tier must stay.
 	for i := 0; i < MaxTurnKeys; i++ {
 		id := "live" + strconv.Itoa(i)
-		r.k.oneHourTouches[id] = oneHourTouch{key: Key{Tenant: "t", Session: id}, at: now, provider: bschemas.Anthropic, model: "m"}
+		r.k.oneHourThreads[id] = put(id, now)
 	}
-	// The map starts over only when all are live: the real touch is among them and is dropped from the keeper.
-	r.k.makeRoomForTouchLocked(now)
+	// The index starts over only when all are live: the real thread is among them and is dropped from the index.
+	r.k.makeRoomForThreadLocked(now)
 	r.k.mu.Unlock()
 	if !kept || n != 1 {
-		t.Errorf("the bound dropped a live touch: kept=%v, %d left, want only the live one", kept, n)
+		t.Errorf("the bound dropped a live thread: kept=%v, %d left, want only the live one", kept, n)
 	}
 	if cold, _ := r.request(t0.Add(13 * time.Minute)); cold {
 		t.Error("the capacity bound ended the stored tier: a warm 1-hour entry read cold")

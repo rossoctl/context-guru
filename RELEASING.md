@@ -36,7 +36,7 @@ The integrator and the reviewers can be people or AI agent sessions. The rules a
 2. **Sort the open PRs into features.** Group them by what a user gets, not by author or by date: for example "save-more commands", "status line", "test fixes". Show which PRs depend on which.
 3. **The release owner picks the groups.** The integrator does not add or drop an item without the owner.
 4. **Record what is out**, and why. An item that moves to the next release keeps its issue.
-5. **Scan the host packages for new business logic.** Run the `refactor-scan` skill in its host-leak mode on the diff since the last tag. Open an issue for each leak. A leak does not block the release unless the owner says so.
+5. **Scan for new business logic in host packages and for client rules outside `agent.Identify`.** Run `refactor-scan` on the diff since the last tag, in its host-leak and client-rule modes (host-leak: logic in `proxy/` that a library package should hold; client-rule: a rule that names one client, outside `agent.Identify`). Open an issue for each leak. A leak does not block the release unless the owner says so.
 6. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
 
 ### Measurements before a release
@@ -216,6 +216,8 @@ This section is about a stacked PR. For a ready PR that waits only for a merge o
 ### Heavy CI on main
 
 Owner decision (David Amid, 2026-11-24): "we dont need a queue, we can risk main not be 100% if an owner of the PR did run it on the laptop." A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
+
+**Interim rule (2026-11-24, in force until the 3-tier test plan lands):** PR owners do not run the heavy suites on the laptop. The integrator runs them on `main` every few merges and before each cut. See [CLAUDE.md, Interim rule](CLAUDE.md#interim-rule-in-force-until-the-3-tier-test-plan-lands).
 
 The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh --wait` (it runs `gh workflow run ci.yaml --ref main`). Run it:
 - about every 5 merges;

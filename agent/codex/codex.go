@@ -78,6 +78,13 @@ func IsCompaction(h http.Header, body []byte) bool {
 	if marksCompaction(h.Get(turnMetadata)) {
 		return true
 	}
+	return BodyMarksCompaction(body)
+}
+
+// BodyMarksCompaction reports whether the body's `client_metadata` holds the compaction turn metadata
+// (the form a WebSocket request carries). It does not check that the caller is Codex: agent.Identify
+// has done that. Metadata only, no request text.
+func BodyMarksCompaction(body []byte) bool {
 	return marksCompaction(gjson.GetBytes(body, "client_metadata").Get(turnMetadata).String())
 }
 

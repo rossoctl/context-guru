@@ -137,6 +137,7 @@ nav:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
       - Data dependence & storage off: data-dependence.md
+      - Client coverage: client-coverage.md
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
       - Keep an idle prompt cache warm: how-to/cache-keepalive.md

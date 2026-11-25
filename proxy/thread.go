@@ -3,8 +3,9 @@ package proxy
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
+	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/agent/claudecode"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -17,11 +18,13 @@ import (
 //
 // Fails open to the session (ResolveSession recovers): an error here must never block or change
 // the request, and the session key is exactly the behaviour before threads existed.
-func (h *Handler) threadFor(r *http.Request, tenantID, session string, body []byte, agentCompaction bool, lg *slog.Logger) thread.Result {
-	raw := r.Header.Get(thread.AgentHeader)
-	agentID, ok := thread.HeaderAgentID(raw)
-	if !ok && session != "" {
-		lg.Debug("cg.thread_header_invalid", "len", len(strings.TrimSpace(raw)))
+func (h *Handler) threadFor(r *http.Request, cl agent.Client, tenantID, session string, body []byte, agentCompaction bool, lg *slog.Logger) thread.Result {
+	// Only Claude Code's header names a subagent here. Identify has checked the id (thread.ValidHeaderID):
+	// a header that is present but unusable gives "" and falls back to prefix continuity. Codex and
+	// OpenCode ids are in the Client too; a host that uses them (#1318) widens this test.
+	agentID := ""
+	if cl.AgentIDHeader == claudecode.AgentHeader {
+		agentID = cl.AgentID
 	}
 	res, err := h.threads.ResolveSession(tenantID, session, agentID, body, agentCompaction)
 	if err != nil {

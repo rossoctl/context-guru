@@ -23,7 +23,7 @@ func stateRows(t *testing.T, db *DB) int {
 
 func putState(t *testing.T, db *DB, session string) {
 	t.Helper()
-	d, err := store.OpenDisk(db.SQL(), store.DiskOptions{})
+	d, err := store.OpenDisk(db.SQL(), store.DiskOptions{LoadTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestPruneKeepsSessionState(t *testing.T) {
 func TestStateSweepLeavesDashboardTables(t *testing.T) {
 	db := openTestDB(t)
 	seedSessions(t, db, "t1", 2, 2)
-	d, err := store.OpenDisk(db.SQL(), store.DiskOptions{Retention: time.Nanosecond})
+	d, err := store.OpenDisk(db.SQL(), store.DiskOptions{Retention: time.Nanosecond, LoadTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestArchiveDeletesSessionState(t *testing.T) {
 // row. Run it under -race.
 func TestDashboardWriterAndStateFlushTogether(t *testing.T) {
 	db := openTestDB(t)
-	d, err := store.OpenDisk(db.SQL(), store.DiskOptions{FlushEvery: time.Millisecond})
+	d, err := store.OpenDisk(db.SQL(), store.DiskOptions{FlushEvery: time.Millisecond, LoadTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

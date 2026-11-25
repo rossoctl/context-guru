@@ -26,6 +26,7 @@ reference — port its *logic*, re-implement its transport in Go.
   host resolves the destination and credential and sends it. Credentials and their masking are
   each host's own business. See `docs/superpowers/specs/2026-10-13-dispatch-design.md`.
   The checklist is in [What goes in the proxy](#what-goes-in-the-proxy).
+  The rule for code that names one client is in [Client-specific code](#client-specific-code).
 - **Fail open, always.** Any component error/panic reverts that component only; the
   original request is always forwarded as a valid fallback. Every lossy Offload must be
   reversible (a `<<cg:HASH>>` marker + the stashed original in the Store).
@@ -97,6 +98,41 @@ logic goes in a library package.
 
 `offload-review` checks each PR for a new leak, and `refactor-scan` checks each release.
 
+## Client-specific code
+
+Clients with agent rules (Claude Code, Codex, OpenCode, Pi, Bob) differ in headers, session ids and
+prompts. Other names that the dashboard shows as labels (cursor, cline, aider, gemini-cli) have no
+rules. Use this test: **if a rule names one client, it lives in `agent.Identify`, and nowhere else.**
+
+**Client rules. Keep them in `agent.Identify` and the agent packages:**
+
+- A header, User-Agent value, tool name, marker or prompt phrase that only one client sends.
+- A client's session id, subagent id, compaction phrase or label.
+- The choice of which client sent a request.
+
+**Not client rules. Keep them where they are:**
+
+- A rule that holds for every client, such as "an `end_turn` with nothing open".
+- A signal that a host sets for all clients, such as `x-context-guru-session`.
+- The fallback when no client is found. It is the generic rule.
+
+**Rules for a client rule:**
+
+1. Find the client by its headers and User-Agent, not by the route path. A path may break a tie.
+   One exception: an agent that owns a route, such as Bob's gateway.
+2. Library code takes the `agent.Client` value. It never reads User-Agent or a vendor header again.
+3. Every client rule states its fallback: no headers, another client, or a host without the
+   signal (Cortex, the bifrost adapter). The fallback is never worse than the generic result.
+4. A new client signal cites the client's source and version. Never guess a header or a phrase.
+5. Code in `proxy/` or `internal/` follows [What goes in the proxy](#what-goes-in-the-proxy). In
+   addition, it must not depend on the proxy's route paths.
+6. A PR that adds a client rule lists each supported client as covered or fallback, and updates
+   [docs/client-coverage.md](docs/client-coverage.md).
+
+The code is in `agent/identify.go` and the table is in `docs/client-coverage.md`. `offload-review` checks each PR for a client rule outside `agent.Identify`.
+`refactor-scan` checks each release. `agent/all/coverage_test.go` fails when a registered agent has
+no row in the coverage table.
+
 ## Conventions
 
 - Go 1.26, module `github.com/rossoctl/context-guru`. The build is pure Go — `make build` sets
@@ -162,6 +198,25 @@ the person. The team knows who holds the role at any time.
   and branch, as in [Branches, worktrees and force-push](#branches-worktrees-and-force-push).
 - **The main session runs `offload-review`.** See [Review process](#review-process).
 
+### Interim rule (in force until the 3-tier test plan lands)
+
+Owner decisions (David Amid): 2026-11-24 "in the meantime ask everyone to stop their heavy tests and
+u coordinate it once flaky is done. so u run all tests every few prs till we get the process right.
+rn everything is in livelock". 2026-11-25 "yes" (write it into CLAUDE.md, and make `check-ready.sh`
+accept the waiver).
+
+- **Do NOT run `scripts/dev/local-tests.sh` or `scripts/release/part-a.sh` on the shared laptop.**
+- **Run only targeted tests** of the packages your PR changes: `go test ./<pkg>/...`. Do not use
+  `-race` on the big suites `proxy` and `dash`. The node and python suites of a plugin you change
+  are fine.
+- **Hand off with this line** in the PR body or in a PR comment: `Local tests: waived (owner rule)`.
+  `scripts/release/check-ready.sh` accepts it in place of the local-tests marker.
+- **The integrator runs the heavy CI on main** (`scripts/release/heavy-ci.sh`) every few merges and
+  before each cut. The integrator also runs Part A before each cut. A failure goes back to the PR
+  that caused it.
+
+The rest of this section, about `local-tests.sh`, applies after the interim rule ends.
+
 ### Timing tests
 
 - **A timing test asserts a wall-clock bound or races a rate limit.** It starts with
@@ -178,7 +233,8 @@ the person. The team knows who holds the role at any time.
 
 - It has 2 approvals at its final head.
 - CI is green. A PR runs only the fast jobs (lint-build, purego, trivy).
-- The heavy tests passed on the laptop at the head. Run `scripts/dev/local-tests.sh <pr>` in the
+- The heavy tests passed on the laptop at the head (after the interim rule ends; until then, see the
+  interim rule above: `Local tests: waived (owner rule)`). Run `scripts/dev/local-tests.sh <pr>` in the
   PR's worktree. It posts one comment with `<!-- local-tests sha=<head> result=pass -->`. A new
   commit, even comment-only, needs a new run. It takes 70 to 90 minutes: run it detached.
   A laptop failure of a test listed in `scripts/release/pending-timing-fixes.txt` does not block the

@@ -158,22 +158,6 @@ func TestCaptureFillsTheZoneOnlyOnALocalProxy(t *testing.T) {
 	}
 }
 
-func TestClientEntrypoint(t *testing.T) {
-	for ua, want := range map[string]string{
-		"claude-cli/2.1.0 (external, cli)":     "cli",
-		"claude-cli/2.1.0 (external, sdk-cli)": "headless",
-		"claude-cli/2.1.0 (external, sdk-ts)":  "sdk",
-		"claude-cli/2.1.0 (external, vscode)":  "other",
-		"codex_cli_rs/0.5 (Mac)":               "cli",
-		"curl/8":                               "other",
-		"":                                     "",
-	} {
-		if got := clientEntrypoint(ua); got != want {
-			t.Errorf("%q = %q, want %q", ua, got, want)
-		}
-	}
-}
-
 func TestPermissionModeOf(t *testing.T) {
 	for in, want := range map[string]string{"": "", "plan": "plan", "bypassPermissions": "bypassPermissions", "dontAsk": "dontAsk", "newmode": "other"} {
 		if got := permissionModeOf(in); got != want {

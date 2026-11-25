@@ -209,9 +209,11 @@ func TestPingSpanIsPerThread(t *testing.T) {
 	}
 }
 
-// The adapt replay gives a row the floor of its wait, as the keeper does: 20k for a tool stop or a
-// subagent, the general floor otherwise, and the general floor only for OpenAI (the keeper plans no
-// wait for OpenAI).
+// The adapt replay gives a row the floor of its wait, as the keeper does. It reads the row's stored
+// wait cause and stop reason through keepalive.Policy.FloorFor: 20k for a tool, background or teammate
+// wait and for a subagent, the general floor for a person or an unknown wait, and the general floor only
+// for OpenAI (the keeper plans no wait for OpenAI). A tool stop stored as human, done or retry keeps that
+// cause, so it gets the general floor.
 func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
 	pol := keepalive.Policy{WaitPlan: true, MinPrefixTokens: 80000}
 	for _, c := range []struct {
@@ -222,6 +224,17 @@ func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
 		{"main tool stop", RowFacts{Stop: "tool_use"}, 20000},
 		{"main end_turn", RowFacts{Stop: "end_turn"}, 80000},
 		{"subagent end_turn", RowFacts{Stop: "end_turn", Subagent: true}, 20000},
+		{"main background wait", RowFacts{Stop: "end_turn", Cause: "background"}, 20000},
+		{"main teammate wait", RowFacts{Stop: "end_turn", Cause: "teammate"}, 20000},
+		{"main own-tool wait", RowFacts{Stop: "end_turn", Cause: "own_tool"}, 20000},
+		{"subagent human wait", RowFacts{Stop: "end_turn", Cause: "human", Subagent: true}, 20000},
+		{"main person wait", RowFacts{Stop: "end_turn", Cause: "human"}, 80000},
+		{"main unknown wait", RowFacts{Stop: "end_turn", Cause: "unknown"}, 80000},
+		{"old row, no cause, no stop", RowFacts{}, 80000},
+		{"old row on a subagent", RowFacts{Subagent: true}, 20000},
+		{"tool stop stored as human stays human", RowFacts{Stop: "tool_use", Cause: "human"}, 80000},
+		{"tool stop stored as background", RowFacts{Stop: "tool_use", Cause: "background"}, 20000},
+		{"openai background", RowFacts{Stop: "end_turn", Cause: "background", OpenAI: true}, 80000},
 		{"openai tool stop", RowFacts{Stop: "tool_calls", OpenAI: true}, 80000},
 		{"openai subagent", RowFacts{Stop: "end_turn", OpenAI: true, Subagent: true}, 80000},
 	} {

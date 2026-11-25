@@ -2,7 +2,7 @@ package dash
 
 import (
 	"context"
-	"strings"
+	"github.com/rossoctl/context-guru/agent"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
@@ -1196,26 +1196,4 @@ func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChang
 
 // AgentFor classifies a client User-Agent into an agent family so the dashboard
 // can filter by application.
-func AgentFor(ua string) string { return agentFromUserAgent(ua) }
-
-// agentFromUserAgent classifies the client into an agent family so the dashboard
-// can filter by application. Unknown clients keep their raw first token rather
-// than being lumped into "other" — a filter is useless if everything is "other".
-func agentFromUserAgent(ua string) string {
-	l := strings.ToLower(ua)
-	for _, known := range []string{"claude-code", "claude-cli", "codex", "cursor", "cline", "aider", "gemini-cli", "bob"} {
-		if strings.Contains(l, known) {
-			return known
-		}
-	}
-	if l == "" {
-		return "unknown"
-	}
-	if i := strings.IndexAny(l, "/ "); i > 0 {
-		return l[:i]
-	}
-	if len(l) > 32 {
-		return l[:32]
-	}
-	return l
-}
+func AgentFor(ua string) string { return agent.IdentifyUserAgent(ua).Label }

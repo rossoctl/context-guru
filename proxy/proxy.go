@@ -34,7 +34,6 @@ import (
 	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
-	"github.com/rossoctl/context-guru/agent/codex"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/compactionpoint"
@@ -798,38 +797,8 @@ const bobModelPath = bob.ModelPath
 // header unchanged, as a route no agent owns does. So an agent that does not override SessionID
 // changes nothing on its route. (The body's own ids, such as Bob Shell's metadata.taskId, are read
 // downstream either way: sessionIDFrom.)
-func (h *Handler) explicitSessionOf(r *http.Request, upPath string, body []byte) string {
-	sess := r.Header.Get("x-context-guru-session")
-	id := agentSessionID(r, h.agentFor(upPath))
-	if id == "" {
-		id = codexSessionID(r.Header)
-	}
-	if id == "" {
-		return sess
-	}
-	return apply.ExplicitSession(sess, body, id)
-}
-
-// codexSessionID is Codex's own session id (agent/codex), by the caller's headers and not by the
-// route, so a host with other paths gets the same answer. "" for any other caller. The proxy only
-// passes its headers here (#1311).
-func codexSessionID(h http.Header) string {
-	f, _ := codex.Identify(h)
-	return f.SessionID
-}
-
-// agentSessionID is a.SessionID, fail open: a panic in the agent gives "", no agent id, so the
-// request keeps the session it has without one.
-func agentSessionID(r *http.Request, a agent.Agent) (id string) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			// The panic's type only: its message could hold a header value.
-			logging.From(r.Context()).Error("context-guru: recovered from panic in the agent's session id; using none",
-				"agent", fmt.Sprintf("%T", a), "panic", fmt.Sprintf("%T", rec))
-			id = ""
-		}
-	}()
-	return a.SessionID(r.Header)
+func (h *Handler) explicitSessionOf(r *http.Request, cl agent.Client, upPath string, body []byte) string {
+	return apply.ExplicitSessionFor(r.Header, h.agentFor(upPath), cl, body)
 }
 
 func isBobProfile(r *http.Request) bool { return bob.IsProfile(r.Method, r.URL.Path) }
@@ -848,6 +817,7 @@ func stripProfileRegion(b []byte) ([]byte, bool) { return bob.StripProfileRegion
 // overrides (when Options.PipelineFor is set): ?preset=<name> or header
 // x-context-guru-pipeline: comp1,comp2. Session/bypass honor the usual headers.
 func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
+	cl := identify(r) // once per request; passed down
 	// Hosted mode authenticates AND METERS this endpoint too. It runs the pipeline over a
 	// caller-supplied transcript and can invoke the cheap model, so leaving it open would
 	// be both an unmetered compute endpoint and a way to write into whichever state store
@@ -866,7 +836,7 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// Unconditional: every caller of this endpoint wants exactly this — a body already
 	// larger than maxRequestBytes is the normal, intended input here (its whole job is to
 	// shrink whatever it's given), never a reason to reject up front.
-	body, ok := readGatedBody(w, r, true)
+	body, ok := readGatedBody(w, r, cl, true)
 	if !ok {
 		return
 	}
@@ -928,11 +898,11 @@ func (h *Handler) compact(w http.ResponseWriter, r *http.Request) {
 	// eval measures a different component than the one that ships. That is the same class of
 	// divergence as the window this handler used to hard-code as unknown, a few lines above —
 	// and it went unnoticed for the same reason, because both are silent.
-	cp := h.newCapture(r, string(provider), "/compact", tn)
+	cp := h.newCapture(r, cl, string(provider), "/compact", tn)
 	cp.notePreset(effPreset)
 	cp.noteModel(gjson.GetBytes(body, "model").String())
 	// C resolved ONCE: the gate below and the row the dashboard reads must carry the same figure.
-	cpoint := h.compactionPointFor(r, body, window)
+	cpoint := h.compactionPointFor(r, cl, body, window)
 	cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 	start := time.Now()
 	// cp.llmCtx: our own compaction-model spend under this context is charged to THIS
@@ -1260,6 +1230,7 @@ func failAuthAs(w http.ResponseWriter, err error, reason refusalReason, tenantID
 
 func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick func(*Tenancy) string, api string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		cl := identify(r) // once per request; passed down
 		// Authenticate FIRST, before reading a body or doing any work. In hosted mode
 		// an unauthenticated caller must not be able to make the proxy buffer 32 MiB.
 		tn, err := h.authenticate(r)
@@ -1301,10 +1272,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			h.refuseRoute(w, r, tn, err)
 			return
 		}
-		// Not unconditional: only the agent's OWN compaction request (agent/all.IsClientCompaction,
+		// Not unconditional: only the agent's OWN compaction request (agent.IsClientCompaction with the request's Client,
 		// checked inside readGatedBody) may read past maxRequestBytes here — everything
 		// else still gets refused at the default ceiling exactly as before.
-		body, ok := readGatedBody(w, r, false)
+		body, ok := readGatedBody(w, r, cl, false)
 		if !ok {
 			return
 		}
@@ -1320,7 +1291,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// /compact — identical requests, no agent nondeterminism, no repeated LLM spend.
 		captureRequest(string(provider), body)
 		// Once, so the pipeline, the expand repair and the wire recorder use one id.
-		explicitSess := h.explicitSessionOf(r, static.path, body)
+		explicitSess := h.explicitSessionOf(r, cl, static.path, body)
 		// Rewrite the messages via the shared apply path; fail open. Supply the
 		// LLM clients NeedsModel components may call: the per-request "incoming"
 		// model (the route's upstream + the gateway's real key + the request's
@@ -1333,7 +1304,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// triggers scale with the model; 0 when unknown (absolutes apply).
 		window, windowExact := h.resolveWindow(r.Context(), body)
 		// C beside the window, resolved once for both the enforced and the observed path.
-		cpoint := h.compactionPointFor(r, body, window)
+		cpoint := h.compactionPointFor(r, cl, body, window)
 		bypassed := strings.EqualFold(r.Header.Get("x-context-guru-bypass"), "true")
 		// The agent's OWN compaction request (thread.IsAgentCompaction) is NOT bypassed. Only the
 		// header above bypasses. The request goes through the normal pipeline, like any other.
@@ -1357,7 +1328,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// compactions pass through. The counter is a report with Skipped set because the
 		// aggregator counts a report that is not skipped as a run that mutated the request, and
 		// this one mutates nothing.
-		agentCompaction := isClientCompaction(r, body)
+		agentCompaction := isClientCompaction(cl, body)
 		bypassed, gate := lifecycle.CompactionGate(bypassed, agentCompaction, len(body), maxRequestBytes)
 		if gate != "" {
 			if h.agg != nil {
@@ -1369,7 +1340,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		}
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
-		cp := h.newCapture(r, string(provider), up.path, tn)
+		cp := h.newCapture(r, cl, string(provider), up.path, tn)
 		cp.noteModel(gjson.GetBytes(body, "model").String())
 		cp.noteReadSets(up.base, h.keeper.readSetsTTL)
 		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
@@ -1402,7 +1373,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			Orig: orig,
 			MakeThreadOf: func() func(string) thread.Result {
 				return func(sess string) thread.Result {
-					return h.threadFor(r, tn.ID, sess, orig, agentCompaction, lg)
+					return h.threadFor(r, cl, tn.ID, sess, orig, agentCompaction, lg)
 				}
 			},
 			// A client that received our own expand tool_use answered it itself, with an error. The
@@ -1525,7 +1496,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					if cp != nil {
 						cp.accPreDefer = preDefer
 					}
-					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, b)...)
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps(accwire.OpToolDefer, preDefer, b)...)
 				}
 				return b
 			},
@@ -1551,8 +1522,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias)
+		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
+			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
 	}
 }
 
@@ -1613,7 +1584,7 @@ var maxRequestBytes int64 = 32 << 20 // 32 MiB
 
 // maxCompactionRequestBytes is the ceiling readGatedBody extends to for the two cases whose
 // entire point is a body already larger than maxRequestBytes: the agent's own compaction
-// request (agent/all.IsClientCompaction — see agentcompaction.go; it goes through the pipeline like any
+// request (agent.IsClientCompaction with the request's Client — see agentcompaction.go; it goes through the pipeline like any
 // other request) and the standalone /compact endpoint, whose whole job is to
 // receive and shrink a body that is, by definition, already large. Matches the existing
 // generous-but-bounded precedent already used in this package for a comparable purpose
@@ -1632,7 +1603,7 @@ var maxCompactionRequestBytes int64 = 128 << 20 // 128 MiB
 //
 // Returns ok=false once a response has already been written; the caller must return
 // immediately without writing anything further.
-func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride bool) (body []byte, ok bool) {
+func readGatedBody(w http.ResponseWriter, r *http.Request, cl agent.Client, unconditionalOverride bool) (body []byte, ok bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
@@ -1651,7 +1622,7 @@ func readGatedBody(w http.ResponseWriter, r *http.Request, unconditionalOverride
 		refuseTooLarge(w, maxCompactionRequestBytes)
 		return nil, false
 	}
-	if !unconditionalOverride && !isClientCompaction(r, body) {
+	if !unconditionalOverride && !isClientCompaction(cl, body) {
 		refuseTooLarge(w, maxRequestBytes)
 		return nil, false
 	}
@@ -1743,7 +1714,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string, touchAtMs, touchSeq int64) {
 	wire := schema.WireFor(string(provider), up.path)
 	// The agent that owns the route may correct the shared parser's usage reading
 	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
@@ -1883,7 +1854,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// went upstream on the final round (an expand round rewrites it) and the prefix a ping
 			// would replay is the one the provider just hashed. Costs nothing when no tenant has opted in.
 			Touch: func() {
-				cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
+				cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, touchAtMs, touchSeq, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
 			},
 			Ledger: func() {
 				h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
@@ -1894,7 +1865,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, provider bschema
 			// as in the observe job. tr.Session is "" in observe mode, so the thread is resolved from
 			// the same inputs the off-path run's ThreadOf uses (agent header, then prefix continuity).
 			ObserveSession: func() string {
-				return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, up.path, body), wire, provider, false, body)
+				return apply.EnforcedSessionIDFor(tn.Pipe, tn.ID, h.explicitSessionOf(r, cl, up.path, body), wire, provider, false, body)
 			},
 			ObserveThread: threadOf,
 			Counters: func() {

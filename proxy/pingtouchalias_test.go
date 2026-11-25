@@ -75,7 +75,7 @@ func TestAPingOnADeferredBodyKeepsTheNextRequestWarm(t *testing.T) {
 			for _, d := range []time.Duration{-time.Second, 0} {
 				r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
 				r.Header.Set("Authorization", "Bearer sk-caller-secret")
-				k.recordTouch(alias, tn, "sess-1", "", start.Add(d), sent,
+				k.recordTouch(alias, 0, 0, tn, "sess-1", "", start.Add(d), sent,
 					upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
 					http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 100}, true, nil)
 			}

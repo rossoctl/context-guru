@@ -425,11 +425,20 @@ type Record struct {
 	// the host has none, and the touch derives its key from Body, which is right only when the
 	// host sent the transcript unchanged. Tool deferral changes the head, so the proxy sets it.
 	TouchAlias string
-	Provider   bschemas.ModelProvider
-	Endpoint   string // upstream host, passed to Dispatcher.Price
-	Route      string // upstream path
-	Status     int
-	Usage      Usage
+	// TouchAtMs is the time that request wrote under TouchAlias (apply.Trace.TouchAtMs). Record ends only the carry
+	// written at that time (apply.ConfirmRealTouch). 0: the request wrote no clock, and nothing ends.
+	// A request that took no clock step (a bypassed one) has TouchAtMs 0: it ends neither the stored carry nor, with
+	// a store that keeps nothing, the keeper's own record of the ping (resolveOneHourProbe).
+	// A host that runs apply MUST pass Trace.TouchAtMs and Trace.TouchSeq. Without them the confirm is a no-op, and
+	// a free 1-hour ping stays under the clock until its hour ends, with no error.
+	TouchAtMs int64
+	// TouchSeq numbers that write (apply.Trace.TouchSeq), so the confirm is exact within one millisecond.
+	TouchSeq int64
+	Provider bschemas.ModelProvider
+	Endpoint string // upstream host, passed to Dispatcher.Price
+	Route    string // upstream path
+	Status   int
+	Usage    Usage
 	// Cred is an opaque credential id the host computes for the request's provider key; ""
 	// means a server-held key (never subject to the dead-credential mark, only ever the route
 	// breaker). The package scopes it by Key.Tenant itself, so the host passes the bare id with
@@ -555,11 +564,12 @@ type Keeper struct {
 	// oneHourProbes holds, per THREAD (keyed like live), the free probe the thread left for its return.
 	// Resolved and deleted by that thread's next real request. Bounded by MaxTurnKeys.
 	oneHourProbes map[string]oneHourProbe
-	// oneHourTouches holds, per THREAD (keyed like live), that its last touch was a free 1-hour ping, until
-	// its next real request or an hour from the ping. Read by OneHourTouches for the cache clock, and by PingNow, which refuses a press
-	// while the touch is live (#1259).
+	// oneHourThreads is the index of the threads whose last ping was a free 1-hour ping: per THREAD (keyed like
+	// live), where the one record of that fact lives (the store and the alias) and the route. It holds no tier and
+	// no time: the store's cg:seen: value is the only record of both. Read by OneHourTouches for the cache clock,
+	// and by PingNow, which refuses a press while the ping is live (#1259), each through apply.LiveOneHourPing.
 	// Bounded by MaxTurnKeys.
-	oneHourTouches map[string]oneHourTouch
+	oneHourThreads map[string]oneHourThread
 	// oneHourFirst holds, per THREAD (keyed like live), the main threads that write at 1 hour from now on
 	// (onehour.go: C from the first request, D from its first big cold rebuild, or the thread that paid the
 	// probe's rewrite). A thread not in it stays on auto. Bounded by MaxTurnKeys.
@@ -661,7 +671,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourTouches: map[string]oneHourTouch{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourThreads: map[string]oneHourThread{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -873,17 +883,17 @@ func (k *Keeper) Record(r Record) {
 	key := r.Key.id()
 	// A thread that left a free 1-hour probe: this request is its return (onehour.go).
 	model := gjson.GetBytes(body, "model").String() // parsed once: the probe return and the rest of Record use it
-	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten)
-	// The same line that ended the keeper's 1-hour touch ends the tier carried in the stored clock: an
-	// ACCEPTED real request is the next touch (#1350). A request that failed never gets here, so both records
-	// of the fact stay, together. Where this is never reached (a timeout, a cancel, no Record call) they stay
-	// together too, and both end an hour after the ping.
+	k.resolveOneHourProbe(key, startedAt, u, usageOK, model, r.PrefixRewritten, r.TouchAtMs > 0)
+	// An ACCEPTED real request is the next touch (#1350): it ends the tier carried in the stored clock, the
+	// one record of the fact (#1365). A request that failed never gets here, so the record stays. Where this is
+	// never reached (a timeout, a cancel, no Record call) it stays too, and ends an hour after the ping. The
+	// thread's index entry went with resolveOneHourProbe above: it only says where to look.
 	if r.Store != nil {
 		alias := r.TouchAlias
 		if alias == "" {
 			alias = apply.TouchAliasFor(r.Key.Tenant, body, r.Provider)
 		}
-		apply.ConfirmRealTouch(r.Store, alias)
+		apply.ConfirmRealTouch(r.Store, alias, r.TouchAtMs, r.TouchSeq)
 	}
 	k.checkOneHourFirstDowngrade(key, r.Provider, r.Endpoint, r.Route, model, body, u, usageOK)
 	if usageOK {
@@ -1998,7 +2008,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// runs after record1 returns. It is read rather than the masked kaEntry.body because the alias is
 	// derived from the transcript head, which a masked copy does not contain.
 	if status >= 200 && status < 300 && (u.CacheRead > 0 || u.CacheWrite > 0) {
-		j.touch(provider, startedAt.UnixMilli(), j.sentOneHour)
+		j.touch(provider, startedAt.UnixMilli(), j.sentOneHour, oneHourRoute(provider, endpoint, route, model))
 	}
 	cost, _ := k.pingCost(endpoint, model, prefix, u)
 	k.mu.Lock()
@@ -2611,10 +2621,14 @@ func (k *Keeper) fireSubstitute(j pingJob) bool {
 // touch that left it there (#1350), and the 5-minute one from a touch that did not. A touch always states
 // its tier: the last touch is the one that counts, so a 5-minute touch after a 1-hour ping moves the entry
 // back (#1258).
-func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
+//
+// route is the route key (oneHourRoute) of the request. A 1-hour touch is stamped with its tag, so a switch-off of
+// that route ends this touch and never one another route wrote.
+func (j pingJob) touch(provider bschemas.ModelProvider, nowMs int64, oneHour bool, route string) {
+	tag := apply.RouteTag(route)
 	if j.touchAlias != "" {
-		apply.RecordCacheTouchAliasTier(j.st, j.touchAlias, nowMs, oneHour)
+		apply.RecordCacheTouchAliasRoute(j.st, j.touchAlias, nowMs, oneHour, tag)
 		return
 	}
-	apply.RecordCacheTouchTier(j.st, j.tenant, j.raw, provider, nowMs, oneHour)
+	apply.RecordCacheTouchAliasRoute(j.st, touchAliasOf(j), nowMs, oneHour, tag)
 }
