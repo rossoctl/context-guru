@@ -12,7 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/predictive"
 )
 
-func flatPrice(string) (float64, float64, float64, float64, bool) {
+func flatPrice(string, int64) (float64, float64, float64, float64, bool) {
 	return 3e-6, 15e-6, 3e-7, 3.75e-6, true
 }
 

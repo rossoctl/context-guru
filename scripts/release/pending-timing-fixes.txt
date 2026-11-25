@@ -89,8 +89,3 @@ opencode-plugin picker confirm and cancel (uses settle())
 opencode-plugin v2: setup waits for the host transform callback before judging providers
 opencode-plugin waitForRecord helper (v1 and v2 signal tests)
 tenant TestCodeExpiresAfterFiveMinutes
-tooldefer TestEnsurePersistsOutsideTheLock
-tooldefer TestForgetDoesNotPersistOnTheCaller
-tooldefer TestHistoryPersistsAcrossRestart
-tooldefer TestHistorySeedsOneTenantFromDashboardTables
-tooldefer TestHistorySetLoadedTwice

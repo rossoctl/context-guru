@@ -70,4 +70,4 @@ proxyapp/metricspush/central_e2e_test.go sleep=2
 proxyapp/metricspush/central_load_test.go sleep=1 poll=1
 proxyapp/metricspush/central_rules_test.go sleep=1 poll=1
 proxyapp/metricspush/metricspush_test.go sleep=2
-tooldefer/support_test.go sleep=3 after=3
+tooldefer/support_test.go after=3

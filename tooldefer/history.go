@@ -202,6 +202,12 @@ func (m *Mem) Ready() bool {
 // history). It reports whether the load finished. For a host's start-up only, never the request
 // path: the first request after a start then reads the stored verdicts.
 func (m *Mem) WaitReady(d time.Duration) bool {
+	// A ready history always reads ready. A select with both cases ready picks one at random.
+	select {
+	case <-m.ready:
+		return true
+	default:
+	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

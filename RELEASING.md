@@ -170,7 +170,19 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   ```
   Write the body to a file first. A shell can change text that is passed inline. If `gh pr merge` fails with a GraphQL error, use `gh api -X PUT repos/<org>/<repo>/pulls/<n>/merge` with `sha`, `merge_method=squash`, `commit_title` and `commit_message`.
 - **Never merge past a failed DCO check.** Only the author can sign off a commit. If a merge past it seems needed, stop and ask the release owner for that PR.
+- **Write issue numbers in a PR body as `Refs #N` only.** GitHub closes an issue when "close", "fix" or "resolve" (or a form of them) stands before `#N` anywhere in the PR body. A negative sentence such as "Does not close #1303" also closes it. That is how #1303 closed by mistake when #1370 merged.
+  - Before each merge, grep the PR body for those words before a `#number`.
+  - If one is there, fix the body before the merge. If the issue closed already, reopen it.
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
+- **After every merge, tell the PR owner in the same step** (owner rule, David Amid, 2026-11-25: "put the rule into the realsing.md file so other integrators on other machines would know it"). Treat the merge and the message as one step.
+  - Send the session that owns the PR one short message with `SendMessage`, as in [Working on a task](CLAUDE.md#working-on-a-task): `merged as <sha>`. Add what the owner can do next: close the issues it said it would close, merge `main` into a PR stacked on this one, and clean up its review and fix worktrees.
+  - For a PR by a person with no session, post the same text as a PR comment.
+  - When several PRs of one owner merge in a batch, send one message per owner.
+  - **Why:** #1394 merged and its owner session was not told. The session kept waiting to close #1388.
+- **A PR stuck in a merge-of-`main` loop gets a FULL merge freeze until it lands.** Freeze every merge, not a list of files. A file-list freeze missed `campaign/replay.go`, and #1331 needed a 7th merge of `main`.
+  1. Tell the other sessions about the freeze.
+  2. Merge the stuck PR first.
+  3. End the freeze.
 - **Merge each PR on its own green CI, then watch `main`** (owner rule, David Amid, 2026-11-16: "what is the benefit of waiting for each to be green, and wasting wallclock instead of just merging one and then waiting to see if the other one remains green. if it isn't we fix it?").
   - Merge a PR when it has its 2 approvals at its head, green CI at its head, and git can merge it cleanly. Do not re-run a PR's CI only because another PR merged first.
   - After each merge, watch the CI of `main`. If it turns red, fix forward with a fix PR. Do not revert a good PR, unless the fix is not clear.
