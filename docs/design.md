@@ -362,7 +362,7 @@ The one exception is a store that keeps nothing (`store.Keeps` is false: storage
 | Entry point on the row | `Entrypoint` | Pi gets `other` |
 | `dash/kvcache.go` (offline rows) | `Label` | the provider is its own column in the same row |
 
-Rule: logic that depends on the provider reads the raw User-Agent, `SDK` or the provider field, never `Label`. A new reader picks one and adds a row here.
+Rule: logic that depends on the provider reads the raw User-Agent, `SDK` or the provider field, never `Label`. One exception: the prediction model reads `Label` through `Client.ModelAgent(provider)`, which adds the provider back for Pi (see the "Prediction model, live" row above). A new reader picks one and adds a row here.
 
 ## Session keying
 
