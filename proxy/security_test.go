@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/cheapmodel"
@@ -86,8 +85,7 @@ func TestPublishedTenancyIsNotMutated(t *testing.T) {
 // Bounding the limiter's map must not throw away every OTHER key's rate window.
 // Before the fix, entry 10001 replaced the whole map with itself.
 func TestLimiterBoundEvictsOneKeyNotAll(t *testing.T) {
-	l := NewLimiter(Limits{RequestsPerMinute: 1})
-	minuteAtStart := time.Now().Truncate(time.Minute)
+	l := pinned(NewLimiter(Limits{RequestsPerMinute: 1}))
 	// Fill past the bound, oldest first.
 	keys := make([]string, maxLimiterKeys+1)
 	for i := range keys {
@@ -104,14 +102,6 @@ func TestLimiterBoundEvictsOneKeyNotAll(t *testing.T) {
 	}
 	// The most recent keys kept their window: a second request in the same minute is
 	// refused. If the map had been cleared, every one of these would be allowed again.
-	//
-	// The window is a WALL-CLOCK minute, so if the fill above straddled a minute
-	// boundary every window legitimately reset and the assertion below would fail for a
-	// reason that has nothing to do with the bound. The fill takes ~60ms, so this is a
-	// ~0.1% flake per run and was worth one branch rather than a rare mystery failure.
-	if !time.Now().Truncate(time.Minute).Equal(minuteAtStart) {
-		t.Skip("the fill straddled a minute boundary, so every rate window reset legitimately")
-	}
 	for _, k := range keys[len(keys)-100:] {
 		if _, err := l.Acquire(k); err == nil {
 			t.Fatalf("%s lost its rate window when the bound was reached", k)

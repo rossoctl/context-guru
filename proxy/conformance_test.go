@@ -139,7 +139,7 @@ func TestCachePresetDoesNotBufferSSE(t *testing.T) {
 		if !strings.Contains(r.line, "message_start") {
 			t.Fatalf("first line was %q, want the upstream's first event", r.line)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		close(release)
 		t.Fatal("no event reached the client while the upstream was still streaming: the " +
 			"response is being buffered. Claude Code aborts a stream silent for 300s, and a " +

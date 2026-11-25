@@ -11,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -197,13 +198,10 @@ func TestBobObserveModeRecordsBilledInputUnderXTaskID(t *testing.T) {
 		t.Fatalf("proxy returned %d", resp.StatusCode)
 	}
 	// The record is written in a defer on the response path, so poll for it.
-	for i := 0; i < 200; i++ {
-		if _, ok := h.shadow.Get(store.BilledPrefix + bobIDETask); ok {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("no cg:bin: record in the shadow store under the X-Task-Id %q", bobIDETask)
+	testutil.WaitFor(t, "a cg:bin: record in the shadow store under the X-Task-Id "+bobIDETask, func() bool {
+		_, ok := h.shadow.Get(store.BilledPrefix + bobIDETask)
+		return ok
+	})
 }
 
 func bobObserveHandler(t *testing.T) (*httptest.Server, *Handler) {

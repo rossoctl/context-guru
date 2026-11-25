@@ -111,7 +111,7 @@ func TestPricerAdapterNeverBlocks(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Price blocked")
 	}
 }

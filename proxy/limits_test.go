@@ -196,7 +196,7 @@ func TestAcquireSpareLeavesRealTrafficAlone(t *testing.T) {
 		// tenant nothing. The earlier order incremented the minute counter first and never gave
 		// it back, so ten refused pings ate ten of a hundred requests a minute, precisely when
 		// the tenant was busiest.
-		l := NewLimiter(Limits{RequestsPerMinute: 10, Concurrent: 1})
+		l := pinned(NewLimiter(Limits{RequestsPerMinute: 10, Concurrent: 1}))
 		for i := 0; i < 10; i++ {
 			if rel, err := l.AcquireSpare("t", 0.25); err == nil {
 				rel()

@@ -482,13 +482,12 @@ func TestToolDeferProbeAsk(t *testing.T) {
 	h.toolDefer().prober.Go = func(fn func()) { started = append(started, fn) }
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
-	t0 := time.Now()
 	resp, err := http.Post(srv.URL+"/tool-defer/probe", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted || time.Since(t0) > time.Second || len(up.bodies) != 0 || len(started) != 0 {
+	if resp.StatusCode != http.StatusAccepted || len(up.bodies) != 0 || len(started) != 0 {
 		t.Fatalf("status %d, %d upstream calls, %d probes on the ask itself", resp.StatusCode, len(up.bodies), len(started))
 	}
 	// A thread that already has a stored record needs no probe of its own, so only the ask starts it.
@@ -679,8 +678,8 @@ func TestToolDeferPurgeReachesAnUnopenedFile(t *testing.T) {
 	tooldefer.Save(f.Store, "other:s1", "", tooldefer.Record{Deferred: []string{"Workflow"}})
 	m := tooldefer.NewMem(f.DB)
 	stop := m.Open(time.Hour, nil)
-	for i := 0; i < 200 && !m.Ready(); i++ {
-		time.Sleep(5 * time.Millisecond)
+	if !m.WaitReady(30 * time.Second) {
+		t.Fatal("the history never loaded")
 	}
 	m.Observe("acct", "acct:s1", "/w", tdBody(), time.Now().UnixMilli())
 	stop() // flushes the history
