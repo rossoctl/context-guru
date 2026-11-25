@@ -1525,7 +1525,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					if cp != nil {
 						cp.accPreDefer = preDefer
 					}
-					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, b)...)
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps(accwire.OpToolDefer, preDefer, b)...)
 				}
 				return b
 			},

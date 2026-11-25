@@ -8,6 +8,7 @@ import (
 	"time"
 
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/buildinfo"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -59,7 +60,7 @@ func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset s
 		slog.Warn("context-guru: metrics push is off; the proxy runs without it", "err", err)
 		return metricsSinks{}, nop
 	}
-	sink, err := proxy.NewMetricsSink(provider.Meter("context-guru"), prices, components.Names()...)
+	sink, err := proxy.NewMetricsSink(provider.Meter("context-guru"), prices, accrec.MetricComponents()...)
 	if err != nil {
 		slog.Warn("context-guru: metrics are off; could not build the sink", "err", err)
 		stopProvider(shutdown)
