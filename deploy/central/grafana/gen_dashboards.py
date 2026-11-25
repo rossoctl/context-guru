@@ -267,9 +267,8 @@ def cache():
         (f'{rate("llm_keepalive_cost_usd_total")} * 3600', "ping cost"),
         (f'({rescue(RESCUE_SAVED)} - {rescue(RESCUE_ADDED)}) * 3600', "rescue (net of reads)"),
         (f'(({rescue(RESCUE_SAVED)} - {rescue(RESCUE_ADDED)}) - {rate("llm_keepalive_cost_usd_total")}) * 3600', "net")],
-        0, 16, 16, 8, unit=USD, colors={"ping cost": ORANGE, "rescue (net of reads)": GREEN, "net": BLUE},
+        0, 16, 24, 8, unit=USD, colors={"ping cost": ORANGE, "rescue (net of reads)": GREEN, "net": BLUE},
         desc="Do the pings pay? The rescue is a write that became a read, so its value is the write saved minus the read paid."))
-    P.append(text(7, "Shared-warm tokens", "**No data yet.**\n\nThe counter `llm_keepalive_shared_warm_tokens_total` needs #853.", 16, 16, 8, 8))
     return dash("central-cache", "Cache and keep-alive", "Does the cache pay, and do pings pay?", P, ["cache"])
 
 

@@ -403,7 +403,7 @@
       "gridPos": {
         "x": 0,
         "y": 16,
-        "w": 16,
+        "w": 24,
         "h": 8
       },
       "targets": [
@@ -497,21 +497,6 @@
           "displayMode": "table",
           "placement": "bottom"
         }
-      }
-    },
-    {
-      "id": 7,
-      "type": "text",
-      "title": "Shared-warm tokens",
-      "gridPos": {
-        "x": 16,
-        "y": 16,
-        "w": 8,
-        "h": 8
-      },
-      "options": {
-        "mode": "markdown",
-        "content": "**No data yet.**\n\nThe counter `llm_keepalive_shared_warm_tokens_total` needs #853."
       }
     }
   ]
