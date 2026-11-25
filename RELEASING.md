@@ -142,7 +142,7 @@ A review without this block does not count toward the 2.
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
-- the last `local-tests` comment (from `scripts/dev/local-tests.sh`) names this head and says `result=pass`. A green heavy CI run on this head also counts. The heavy suites do not run on a PR;
+- the last `local-tests` comment (from `scripts/dev/local-tests.sh`) names this head and says `result=pass tier=2`. If it says `scope=none`, the script checks that the PR has no Go, `go.mod`, `go.sum`, `testdata`, embedded or `scripts/` file. An old marker with no `tier=` counts until `OLD_MARKER_VALID_UNTIL` in the script. The line `Local tests: waived (owner rule)` also counts (interim rule). A green heavy CI run on this head also counts. The heavy suites do not run on a PR;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
 - the head has a passing `CodeQL` check run from GitHub's code-scanning app, which the code-scanning rule reads. **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
 - every commit has a `Signed-off-by:` line.
@@ -226,6 +226,8 @@ The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh -
 - always before a cut.
 
 **The heavy jobs run the timing tests.** The jobs `build-test` and `record` set `CG_TIMING_TESTS=1`. `build-test` also runs the OpenCode plugin's node tests with it. A timing test asserts a wall-clock bound or races a rate limit. It fails on a busy machine with nothing wrong in the code, so a PR owner does not run it by default. Owner decision (David Amid, 2026-11-24): "put the switch, but dont run them on local-tests.sh, only run them by integrator. if a PR contributes a new timing test then it runs the timing tests as well".
+
+**Tier 2 (the PR owner's run).** Owner decision (David Amid, 2026-11-25): "option E it is", then "E without the lock". A PR owner runs `scripts/dev/local-tests.sh`, which runs `scripts/dev/tier2-steps.sh`: the static steps, non-race tests of the packages that the CI job `purego` does not run, `-race` on the changed packages only, and a rerun of only the failed packages. The load is limited (`-p 2`, `GOMAXPROCS=4`). It is weaker than a full run. **Tier 3 is the integrator's heavy CI and Part A, and it catches what tier 2 skips** (a race in a package the PR did not change, the heavy tests of unchanged packages, the `-race` build of `proxy` with `cg_record` when no tagged file changed). Tier 3 has its own rules in a separate change. The tier-2 marker replaces the interim rule above once the owner says so.
 
 A release is cut only on a commit with a green heavy run **and** a passing Part A (step 5). A failure on `main` is fixed forward: a new PR with the fix. Nobody reverts to make it green.
 
