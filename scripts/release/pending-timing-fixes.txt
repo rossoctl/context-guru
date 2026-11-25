@@ -23,14 +23,6 @@ context-guru-plugin TestStatuslineBudgetPrivateCacheDirAndTTL
 context-guru-plugin TestStatuslineCacheCountdownMath
 context-guru-plugin TestStatuslineCachesStatsAcrossQuickRenders
 context-guru-plugin TestSyncKeepsAnOldKeysFileAndOnlyMovesItsPreset
-internal/modelinfo/litellm TestChainPriceSkipsNonPricers
-internal/modelinfo/litellm TestLiteLLMBlankCacheReadFollowsTheModelTier
-internal/modelinfo/litellm TestLiteLLMConcurrentSingleFlight
-internal/modelinfo/litellm TestLiteLLMPriceFindsDatedAndWrappedIDs
-internal/modelinfo/litellm TestLiteLLMPrices
-internal/modelinfo/litellm TestLiteLLMResolvesAndNormalizes
-internal/modelinfo/litellm TestRateFillLiteLLM
-internal/modelinfo/litellm TestTheBackgroundRefreshRecordsItsFailure
 modes TestEnqueueDedupIsAtomic
 modes TestFullQueueDropsAndNeverBlocks
 modes TestPanickingJobIsContained
@@ -38,7 +30,6 @@ modes TestPoolRunsJobs
 modes TestStopLeaksNoGoroutines
 opencode-plugin picker confirm and cancel (uses settle())
 opencode-plugin v2: setup waits for the host transform callback before judging providers
-opencode-plugin waitForRecord helper (v1 and v2 signal tests)
 proxy TestANonClaudeModelOnARelayIsNotPingedUnlessNamed
 proxy TestARetiredModelEndpointBuildsServesAndIsNeverCalled
 proxy TestAccEndDoesNotWaitForTheAccountantWork
@@ -72,4 +63,3 @@ proxy TestToolDeferProbeAsk
 proxy TestToolDeferPurgeReachesAnUnopenedFile
 proxy TestToolDeferTenantAfterStartBuildsTheState
 proxy TestToolFilterRefusesADeferredTool
-tenant TestCodeExpiresAfterFiveMinutes

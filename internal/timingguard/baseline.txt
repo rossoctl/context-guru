@@ -15,9 +15,6 @@ dash/dedupetext_test.go sleep=2 poll=2
 dash/janitor_checkpoint_test.go after=2
 dash/prompttext_test.go sleep=4 poll=3
 dash/sse_test.go sleep=2 after=1
-internal/modelinfo/litellm/chain_test.go sleep=6
-internal/modelinfo/litellm/ratefill_test.go sleep=1
-internal/modelinfo/litellm/unresolved_test.go sleep=1
 internal/modelinfo/litellm/zz_price_live_test.go sleep=1
 modes/modes_test.go sleep=2 poll=1 after=3
 proxy/accountant_async_test.go sleep=3 after=3
