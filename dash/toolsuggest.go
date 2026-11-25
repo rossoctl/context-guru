@@ -179,12 +179,12 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	sessions := map[string]bool{}
 	for rows.Next() {
 		var session, model string
-		var tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
+		var tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
 		var fallback bool
-		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline, &fallback); err != nil {
+		if err := rows.Scan(&session, &model, &tok, &fresh, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline, &fallback); err != nil {
 			return nil, err
 		}
-		usd := accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
+		usd := accumulateDeclFilterRow(out, sessions, session, model, tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
 		if fallback {
 			out.FallbackUSD += usd
 		}
@@ -218,7 +218,7 @@ const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM req
 func declFilterSavingsQuery(f Filter) (string, []any) {
 	where, args := f.where()
 	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.cache_write_1h, r.ts, ` + declFilterInBaseline + `, r.acc_fallback <> '' FROM requests r
+		r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.ts, ` + declFilterInBaseline + `, r.acc_fallback <> '' FROM requests r
 		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
 }
 
@@ -228,7 +228,7 @@ func declFilterSavingsQuery(f Filter) (string, []any) {
 // drift on how a row is priced. skipUSD keeps the row's requests, tokens and dates and adds no dollars:
 // the accountant already booked them (declFilterInBaseline).
 func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
-	session, model string, tok, cacheRead, cacheWrite, cacheWrite1h, ts int64, skipUSD bool, price func(string) (modelinfo.Price, bool)) float64 {
+	session, model string, tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts int64, skipUSD bool, price func(string) (modelinfo.Price, bool)) float64 {
 	out.Requests++
 	sessions[session] = true
 	out.Reads += tok
@@ -239,6 +239,9 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 	p, priced := modelinfo.Price{}, false
 	if price != nil && model != "" {
 		p, priced = price(model)
+		// The request bills at the rates of ITS prompt size (#1407). A row from before fresh_input
+		// was stored has 0 there: its size is then too small, so its tier is never too dear.
+		p = p.At(modelinfo.PromptTokens(fresh, cacheRead, cacheWrite) + tok) // the size WITHOUT the filter: sent plus removed
 	}
 	switch {
 	case cacheRead > 0:
@@ -279,7 +282,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.cache_write_1h, r.ts, `+declFilterInBaseline+` FROM requests r
+		r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.ts, `+declFilterInBaseline+` FROM requests r
 		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
 		return nil, err
@@ -289,8 +292,8 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 	sessions := map[string]map[string]bool{}
 	for rows.Next() {
 		var tenant, session, model string
-		var tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
-		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline); err != nil {
+		var tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
+		if err := rows.Scan(&tenant, &session, &model, &tok, &fresh, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline); err != nil {
 			return nil, err
 		}
 		s, ok := out[tenant]
@@ -299,7 +302,7 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 			out[tenant] = s
 			sessions[tenant] = map[string]bool{}
 		}
-		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
+		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
