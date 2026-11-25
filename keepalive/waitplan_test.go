@@ -7,6 +7,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 
 	"github.com/rossoctl/context-guru/store"
 )
@@ -285,7 +286,9 @@ func TestWaitPlanNoExtraQuestionAfterAToolWaitButOneAfterEndTurn(t *testing.T) {
 				waitPings(t, k, int64(i))
 			}
 			k.Sweep(clock.advance(250 * time.Second))
-			time.Sleep(20 * time.Millisecond)
+			if tc.asks > 0 {
+				testutil.WaitFor(t, "the extra question", func() bool { return asker.calls.Load() >= tc.asks })
+			}
 			if asker.calls.Load() != tc.asks || fs.n() != tc.pings {
 				t.Errorf("asks %d, plain %d; want %d and %d", asker.calls.Load(), fs.n(), tc.asks, tc.pings)
 			}
