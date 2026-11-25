@@ -273,7 +273,8 @@ Limits:
   re-rate, and a price with no tiers gives the figures of before.
   Totals that sum tokens by model, with no request size (for example the per-model tier cost split, the
   replay figures of legacy rows and the summary and sweep model
-  estimates) still use the base rates. The `cg_*` savings counters (the metrics module) use the same
+  estimates) still use the base rates. The savings counters of the metrics module push
+  (`llm_savings_saved_usd_total`, `llm_savings_added_usd_total`) use the same
   rule as the dashboard: each side is priced at its own prompt size, the tokens that stay are re-rated,
   and so is the output. Set `flat: true` on a price-file entry to turn the tiers off for it.
   Other Claude models are flat across their window, so the tiers change nothing for them.

@@ -86,7 +86,7 @@ func TestMetricsSinkBooksTheFullBillDifferenceAcrossALine(t *testing.T) {
 	}
 }
 
-// Without the output, the output re-rate (2,000 tokens x 2e-6) is lost.
+// Without the output, the output re-rate (1,000 tokens x (6e-6 - 4e-6)) is lost.
 func TestMetricsSinkBooksTheOutputReRate(t *testing.T) {
 	p := metricsPricer{prices: sizedTierPricer{}}
 	with, _ := sinkSums(t, p, trimObs("gpt-5.6", 250_000, 1_000, 50_000, 10_000))
