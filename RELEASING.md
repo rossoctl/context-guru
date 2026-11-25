@@ -6,7 +6,7 @@ The process was first used for v0.5.1 and v0.5.2.
 
 ## Where context-guru runs
 
-Owner decision, 2026-11-18.
+Laptops are production.
 
 - **Production is the personal laptop.** Each user runs context-guru on their own laptop, as the owner does. A release reaches every user at once through `releases/latest`.
 - **One difference from a plain local install:** a copy of the savings metrics and metadata also goes to a central store for analysis. The data stays in the local SQLite database too.
@@ -72,7 +72,7 @@ A PR must not change behavior unless a human developer allows it. This holds mos
   - Put all the pending behavior changes in one table (PR, who it affects, old, new, how to turn it off), so the owner can answer them in one message.
   - Quote the yes, with its date, in the squash-merge body.
   - The owner may type in another keyboard layout by mistake. Say how you read such an answer, and wait if you are not sure.
-- **The central copy must match the local data** (owner rule, David Amid, 2026-11-18: "anything that is added to the data dependence needs to then update the event going to the central store, once we have that functionality"). Once the central store is live, a PR that adds or changes data in a row of [docs/data-dependence.md](docs/data-dependence.md) also updates the event sent to the central store. Then the central copy matches the local data. Until the central store is live, this rule does not apply.
+- **The central copy must match the local data** Once the central store is live, a PR that adds or changes data in a row of [docs/data-dependence.md](docs/data-dependence.md) also updates the event sent to the central store. Then the central copy matches the local data. Until the central store is live, this rule does not apply.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
 - **To revert a merged PR during a release** (as with #768):
   1. Try `git revert <merge-commit>` on a throwaway branch from `main`. Run vet, the build and the test suites there.
@@ -127,7 +127,7 @@ A review without this block does not count toward the 2.
 **The session that says a PR is ready owns it until it is ready:** the rebase on `main`, the 2 approvals at the final head, and green CI. The integrator checks; it does not rebase, review or fix. If something is missing, tell the owning session exactly what. There are two exceptions:
 
 - **A flaky CI test.** The integrator may re-run once a flaky CI test that the PR does not touch.
-- **A merge of `main`** (owner rule, David Amid, 2026-11-11: "typically if the holding pattern is a merge of main, this should be under your responsibility"). This holds when a ready PR waits for nothing else. `main` moved after the approvals, often because of the integrator's own merge order. The integrator does the merge. It does not ask the PR owner and wait.
+- **A merge of `main`.** This holds when a ready PR waits for nothing else. `main` moved after the approvals, often because of the integrator's own merge order. The integrator does the merge. It does not ask the PR owner and wait.
   1. The integrator starts a subagent with its own worktree.
   2. The subagent merges `origin/main` with `git merge --signoff`, and tests the packages where `main` and the PR overlap (on a machine with Go and cgo).
   3. The subagent pushes without force.
@@ -156,7 +156,7 @@ A PR owner sends a ready PR to the integrator as [CLAUDE.md](CLAUDE.md#working-o
 An approval counts only for the head it names. If the head moves (a rebase, a fix, a conflict resolution):
 
 - **A rebase with no other change:** run `scripts/release/approval-still-valid.sh <pr> <approved-sha>`. It compares the patch of the approved head with the patch of the new head, each against its own base, and prints `git range-diff`. The same patch means only the base moved, so both approvals still count. Post its output on the PR.
-- **A commit that changes only comments** (owner rule, David Amid, 2026-11-08: "doc comments don't change the approval"): both approvals stay valid. No new review round. The script prints `COMMENTS ONLY` when the new head descends from the approved head, has the same merge base, and every changed file is `.go` or `.sh` with only blank or whole-line comment changes (`//`, `/* */`, `#`). These are not comments: code, a line with code and a trailing comment, string literals, struct tags, `//go:` directives, `// +build`, `#!`, `# shellcheck`, `.md` pages, config. Those need a re-check of the delta. The PR owner posts the script output on the PR.
+- **A commit that changes only comments**: both approvals stay valid. No new review round. The script prints `COMMENTS ONLY` when the new head descends from the approved head, has the same merge base, and every changed file is `.go` or `.sh` with only blank or whole-line comment changes (`//`, `/* */`, `#`). These are not comments: code, a line with code and a trailing comment, string literals, struct tags, `//go:` directives, `// +build`, `#!`, `# shellcheck`, `.md` pages, config. Those need a re-check of the delta. The PR owner posts the script output on the PR.
 - **Any new code, or a conflict resolution:** each reviewer whose approval should still count re-checks the delta. The integrator can instead start a new independent reviewer for the delta.
 
 **A docs-only PR** needs only the release owner's review, by hand, unless the owner asks for the 2 reviews.
@@ -175,7 +175,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   - If one is there, fix the body before the merge. If the issue closed already, reopen it.
 - **Refuse a PR whose `go.mod` diff adds a pseudo-version for one of our modules, or for a module that publishes tags.** A pseudo-version pins a commit, not a released tag. Ask the author to release the dependency and pin the tag. A third-party module with no tags keeps its pseudo-version. See the [`go.mod` rule in CLAUDE.md](CLAUDE.md#conventions).
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
-- **After every merge, tell the PR owner in the same step** (owner rule, David Amid, 2026-11-25: "put the rule into the realsing.md file so other integrators on other machines would know it"). Treat the merge and the message as one step.
+- **After every merge, tell the PR owner in the same step**. Treat the merge and the message as one step.
   - Send the session that owns the PR one short message with `SendMessage`, as in [Working on a task](CLAUDE.md#working-on-a-task): `merged as <sha>`. Add what the owner can do next: close the issues it said it would close, merge `main` into a PR stacked on this one, and clean up its review and fix worktrees.
   - For a PR by a person with no session, post the same text as a PR comment.
   - When several PRs of one owner merge in a batch, send one message per owner.
@@ -184,7 +184,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   1. Tell the other sessions about the freeze.
   2. Merge the stuck PR first.
   3. End the freeze.
-- **Merge each PR on its own green CI, then watch `main`** (owner rule, David Amid, 2026-11-16: "what is the benefit of waiting for each to be green, and wasting wallclock instead of just merging one and then waiting to see if the other one remains green. if it isn't we fix it?").
+- **Merge each PR on its own green CI, then watch `main`.** Waiting for each PR to be green wastes wall-clock time. If `main` turns red after a merge, we fix it.
   - Merge a PR when it has its 2 approvals at its head, green CI at its head, and git can merge it cleanly. Do not re-run a PR's CI only because another PR merged first.
   - After each merge, watch the CI of `main`. If it turns red, fix forward with a fix PR. Do not revert a good PR, unless the fix is not clear.
   - **Why:** a serial re-run costs about one full CI run (about 40 minutes) for each pair of PRs. A break between 2 green PRs is rare: about 1 in 30 merges in the v0.7.4 cycle. A fix PR is cheap.
@@ -228,7 +228,7 @@ This section is about a stacked PR. For a ready PR that waits only for a merge o
 
 ### Heavy CI on main
 
-Owner decision (David Amid, 2026-11-24): "we dont need a queue, we can risk main not be 100% if an owner of the PR did run it on the laptop." A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
+There is no merge queue. `main` may be less than 100% green, because the PR owner runs the heavy suites on the laptop. A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
 
 **Interim rule (2026-11-24, in force until the 3-tier test plan lands):** PR owners do not run the heavy suites on the laptop. The integrator runs them on `main` every few merges and before each cut. See [CLAUDE.md, Interim rule](CLAUDE.md#interim-rule-in-force-until-the-3-tier-test-plan-lands).
 
@@ -238,7 +238,7 @@ The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh -
 - before a merge of a PR that waits on a fix of `main`;
 - always before a cut.
 
-**Tier 3 runs on a schedule (owner decision, David Amid, 2026-11-25: "option E it is", then "E without the lock").** Tier 3 is the heavy suites on `main`: the CI jobs `build-test` and `record`, and Part A.
+**Tier 3 runs on a schedule.** Tier 3 is the heavy suites on `main`: the CI jobs `build-test` and `record`, and Part A.
 - **Schedule:** the cron `17 */3 * * *` runs the heavy jobs every 3 hours. GitHub runs a cron only from the default branch, so it starts when this change is on `main`.
 - **Only when `main` moved:** the first job, `changed-since-green`, compares `main` with the last green heavy run. If they match, the heavy jobs do not run. `scripts/release/changed-since-green.sh` holds the rule.
 - **Before each cut:** run `scripts/release/heavy-ci.sh --wait` (it always runs the heavy jobs) and Part A (step 5). A `v*` tag also runs them.
@@ -246,9 +246,9 @@ The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh -
 - **Slowest tests:** a scheduled run writes the 30 slowest tests to its run summary. For a manual run, set the input `per_test_times`.
 - **Part A cost:** `part-a.sh` adds a `time <step> user=.. sys=.. maxrss_kb=..` line per step to `summary.txt`.
 
-**The heavy jobs run the timing tests.** The jobs `build-test` and `record` set `CG_TIMING_TESTS=1`. `build-test` also runs the OpenCode plugin's node tests with it. A timing test asserts a wall-clock bound or races a rate limit. It fails on a busy machine with nothing wrong in the code, so a PR owner does not run it by default. Owner decision (David Amid, 2026-11-24): "put the switch, but dont run them on local-tests.sh, only run them by integrator. if a PR contributes a new timing test then it runs the timing tests as well".
+**The heavy jobs run the timing tests.** The jobs `build-test` and `record` set `CG_TIMING_TESTS=1`. `build-test` also runs the OpenCode plugin's node tests with it. A timing test asserts a wall-clock bound or races a rate limit. It fails on a busy machine with nothing wrong in the code, so a PR owner does not run it by default. `local-tests.sh` does not run them. Only the integrator runs them. A PR that adds a timing test runs the timing tests too.
 
-**Tier 2 (the PR owner's run).** Owner decision (David Amid, 2026-11-25): "option E it is", then "E without the lock". A PR owner runs `scripts/dev/local-tests.sh`, which runs `scripts/dev/tier2-steps.sh`: the static steps, non-race tests of the packages that the CI job `purego` does not run, `-race` on the changed packages only, and a rerun of only the failed packages. The load is limited (`-p 2`, `GOMAXPROCS=4`). It is weaker than a full run. **Tier 3 is the integrator's heavy CI and Part A, and it catches what tier 2 skips** (a race in a package the PR did not change, the heavy tests of unchanged packages, the `-race` build of `proxy` with `cg_record` when no tagged file changed). Tier 3 has its own rules in a separate change. The tier-2 marker replaces the interim rule above once the owner says so.
+**Tier 2 (the PR owner's run).** A PR owner runs `scripts/dev/local-tests.sh`, which runs `scripts/dev/tier2-steps.sh`: the static steps, non-race tests of the packages that the CI job `purego` does not run, `-race` on the changed packages only, and a rerun of only the failed packages. The load is limited (`-p 2`, `GOMAXPROCS=4`). It is weaker than a full run. **Tier 3 is the integrator's heavy CI and Part A, and it catches what tier 2 skips** (a race in a package the PR did not change, the heavy tests of unchanged packages, the `-race` build of `proxy` with `cg_record` when no tagged file changed). Tier 3 has its own rules in a separate change. The tier-2 marker replaces the interim rule above once the owner says so.
 
 A release is cut only on a commit with a green heavy run **and** a passing Part A (step 5). A failure on `main` is fixed forward: a new PR with the fix. Nobody reverts to make it green.
 

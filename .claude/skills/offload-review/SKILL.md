@@ -124,7 +124,7 @@ The next round starts that reviewer fresh, and does not resume the session that 
 
 ## Comments after the approval
 
-Owner rule (David Amid, 2026-11-08): "doc comments don't change the approval." A commit made after
+Doc comments do not change the approval. A commit made after
 both approvals that changes **only comments** keeps both approvals. Do not run a new round for it.
 
 - **Comments are:** Go `//` and `/* */` lines, and `#` lines in shell scripts.

@@ -3,7 +3,7 @@
 # gets fixed to wait on the condition itself. A test where time IS the behavior is gated with
 # testutil.RequireTiming instead, and is not listed here.
 #
-# Owner rule (2026-11-24): on the laptop, a failure of a test listed here does not block a PR, as long
+# Rule: on the laptop, a failure of a test listed here does not block a PR, as long
 # as the PR does not change that test's package. local-tests.sh does not read this file: check it by
 # hand. A PR that fixes a listed test removes its line in the same PR.
 #

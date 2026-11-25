@@ -7,7 +7,7 @@
 # (a clean rebase, or a clean merge of the base), so the approval still counts. Different: the
 # head carries new code or a conflict resolution, and a reviewer must re-check the delta.
 # One more case: the head descends from the approved head, has the same merge base, and the
-# commits in between change only comments (see comments_only below). Owner rule, 2026-11-08: a
+# commits in between change only comments (see comments_only below). A
 # comments-only commit keeps both approvals. It prints `COMMENTS ONLY` and exits 0. When unsure,
 # a line counts as code.
 # It prints `git range-diff` either way, so the result can be posted on the PR. When the new head

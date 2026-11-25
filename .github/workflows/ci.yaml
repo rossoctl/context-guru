@@ -40,7 +40,7 @@ concurrency:
 permissions:
   contents: read
 
-# Lean process (owner decision, 2026-11-24). A PR runs only the fast jobs: lint-build, purego, trivy.
+# Lean process. A PR runs only the fast jobs: lint-build, purego, trivy.
 # The heavy jobs (build-test, record) are tier 3. They run on workflow_dispatch, on a v* tag, and on
 # the 3-hour schedule when main moved since the last green heavy run (job changed-since-green).
 # Option E, approved by the owner on 2026-11-25. The integrator reads the result in the run summary

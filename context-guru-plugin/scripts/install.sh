@@ -753,7 +753,7 @@ or written." ;;
   elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ]; then
     # Attach mode installs no binary, so the name can never be checked later. An unchecked name is
     # refused, not reported as a fact: this is the "dropped decision that reports success" shape.
-    # Two names pass unchecked (owner decision): `none` needs no table, and `auto` is the plugin's own
+    # Two names pass unchecked: `none` needs no table, and `auto` is the plugin's own
     # default, which the remote proxy checks when it loads the setting.
     route_needs "strategy_unchecked" "--cache-strategy $R_STRATEGY cannot be checked: there is no \
 context-guru-proxy binary on this machine to list the strategies, and attach mode installs none. \
