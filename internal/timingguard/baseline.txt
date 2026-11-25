@@ -52,7 +52,6 @@ proxy/adapttoolsctl_test.go sleep=1
 proxy/bypasstokens_test.go sleep=1
 proxy/campaign_test.go sleep=1 poll=1
 proxy/campaignbuild_test.go sleep=2 poll=2
-proxy/cgllm_test.go sleep=1
 proxy/conformance_test.go after=1
 proxy/dash_test.go after=1
 proxy/entryage_test.go sleep=2 poll=2

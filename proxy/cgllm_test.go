@@ -567,18 +567,11 @@ func TestObserveModeRecordsBilledInputIntoTheShadowStore(t *testing.T) {
 	})
 	// The per-thread record the billed-growth horizon reads (primary thread: the key is the session).
 	// Written after cg:bin:, so poll for it too.
-	var foundThread bool
-	for i := 0; i < 200; i++ {
-		if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
-			foundThread = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !foundThread {
-		t.Errorf("no cg:bint: record in the shadow store under %q: the billed-growth horizon would "+
-			"read an unknown thread figure forever in observe mode", sid)
-	}
+	testutil.WaitFor(t, fmt.Sprintf("a cg:bint: record in the shadow store under %q (without it the billed-growth "+
+		"horizon reads an unknown thread figure forever in observe mode)", sid), func() bool {
+		_, ok := shadow.Get(store.BilledThreadPrefix + sid)
+		return ok
+	})
 }
 
 // The enforced path records the per-thread figure next to the session figure.
