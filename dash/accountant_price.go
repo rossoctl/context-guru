@@ -102,8 +102,9 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	for _, u := range e.accRes.Unpriced {
 		unpricedIDs[u.OpID] = true
 	}
-	owner := map[string]string{} // ChangeID -> component; empty ChangeIDs are never owners
-	var shares []reRateShare     // the counted operations with a net saving: they own the re-rate
+	owner := map[string]string{}        // ChangeID -> component; empty ChangeIDs are never owners
+	var effCaused accountant.TierTokens // the Caused tokens of the cache effects booked below
+	var shares []reRateShare            // the counted operations with a net saving: they own the re-rate
 	for _, o := range e.accRes.Ops {
 		if o.DryRun || o.Call != nil {
 			continue
@@ -145,6 +146,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		//               client moved its own mark past the host's, accountant v0.6.0), Caused the read the
 		//               host's mark made possible on the next request: value > 0 (a saving).
 		value := tierUSD(pb, ce.Saved) - tierUSD(pw, ce.Caused)
+		effCaused = addTier(effCaused, bookedCaused(ce, owner))
 		switch ce.Kind {
 		case accountant.EffectBreak:
 			switch c, ok := owner[ce.ChangeID]; {
@@ -194,11 +196,33 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		}
 		f.Estimated = f.Estimated || ce.Estimated
 	}
-	f.bookReRate(e.reRateUSD(pw, pb), shares)
+	f.bookReRate(e.reRateUSD(pw, pb, effCaused), shares)
 	for _, u := range e.accRes.Unpriced {
 		f.Unpriced = append(f.Unpriced, u.OpID+":"+u.Reason)
 	}
 	return f
+}
+
+func addTier(a, b accountant.TierTokens) accountant.TierTokens {
+	return accountant.TierTokens{Input: a.Input + b.Input, CacheRead: a.CacheRead + b.CacheRead,
+		CacheWrite5m: a.CacheWrite5m + b.CacheWrite5m, CacheWrite1h: a.CacheWrite1h + b.CacheWrite1h}
+}
+
+// bookedCaused is the Caused tokens of a cache effect when AccountantFigure books its value, else zero.
+// It follows the switch there: a break the client body has too (InBaseline), a break no counted
+// operation owns, and an unknown kind are not booked.
+func bookedCaused(ce accountant.CacheEffect, owner map[string]string) accountant.TierTokens {
+	switch ce.Kind {
+	case accountant.EffectBreak:
+		if _, ok := owner[ce.ChangeID]; ce.InBaseline || (ce.ChangeID != "" && !ok) {
+			return accountant.TierTokens{}
+		}
+	case accountant.EffectRescue, accountant.EffectSplit, accountant.EffectTTLPremium, accountant.EffectTTLRescue,
+		accountant.EffectMarkPremium, accountant.EffectMarkPayback:
+	default:
+		return accountant.TierTokens{}
+	}
+	return ce.Caused
 }
 
 // reRateShare is a counted operation with a net saving (saved minus caused tokens, above 0).
@@ -218,7 +242,7 @@ func tierTotal(t accountant.TierTokens) int {
 // the billed tokens of the tier minus what the counted operations caused in it. All output stays:
 // output x (output rate without - output rate billed). 0 when no line is crossed, so a price with no
 // tiers, or an unknown size, gives the figures of before. It can be negative.
-func (e *Event) reRateUSD(pw, pb modelinfo.Price) float64 {
+func (e *Event) reRateUSD(pw, pb modelinfo.Price, effCaused accountant.TierTokens) float64 {
 	if pw == pb || e.accRes == nil {
 		return 0
 	}
@@ -233,6 +257,13 @@ func (e *Event) reRateUSD(pw, pb modelinfo.Price) float64 {
 		stay.CacheWrite5m -= o.Caused.CacheWrite5m
 		stay.CacheWrite1h -= o.Caused.CacheWrite1h
 	}
+	// A booked cache effect prices its own full difference (saved at the size without, caused at the
+	// size sent), so its Caused tokens must not be re-rated again. A break the client body has too
+	// (InBaseline) is booked nowhere, so its tokens stay.
+	stay.Input -= effCaused.Input
+	stay.CacheRead -= effCaused.CacheRead
+	stay.CacheWrite5m -= effCaused.CacheWrite5m
+	stay.CacheWrite1h -= effCaused.CacheWrite1h
 	stay.Input, stay.CacheRead = max(stay.Input, 0), max(stay.CacheRead, 0)
 	stay.CacheWrite5m, stay.CacheWrite1h = max(stay.CacheWrite5m, 0), max(stay.CacheWrite1h, 0)
 	return tierUSD(pb, stay) - tierUSD(pw, stay) + float64(e.OutputTokens)*(pb.Output-pw.Output)

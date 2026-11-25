@@ -214,3 +214,40 @@ func TestHeldFloorUsesTheSavedSidePrice(t *testing.T) {
 		t.Fatalf("floor %v want %v", got, want)
 	}
 }
+
+// A cache effect and a crossed line. Billed 270,000: input 100,000, read 150,000, write 20,000.
+// A trim saves 50,000 input; a rescue turns a 1,000 write into a read; a break (owned by the trim)
+// turns a 20,000 read into a write. The request without context-guru has 320,000 tokens (2x): input
+// 150,000, read 169,000, write 1,000. The booked total must equal the bill difference, with no
+// token re-rated twice: the Caused tokens of a booked cache effect do not stay.
+func TestFigureReRateDoesNotCountCacheEffectTokensTwice(t *testing.T) {
+	e := &Event{FreshInput: 100_000, CacheRead: 150_000, CacheWrite: 20_000}
+	e.SetAccountant(accountant.Result{
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c1", Saved: accountant.TierTokens{Input: 50_000}}},
+		CacheEffects: []accountant.CacheEffect{
+			{Kind: accountant.EffectRescue, Saved: accountant.TierTokens{CacheWrite5m: 1_000}, Caused: accountant.TierTokens{CacheRead: 1_000}},
+			{Kind: accountant.EffectBreak, ChangeID: "c1", Saved: accountant.TierTokens{CacheRead: 20_000}, Caused: accountant.TierTokens{CacheWrite5m: 20_000}},
+		}})
+	f := e.AccountantFigure(gpt56())
+	without := 150_000*10e-6 + 169_000*1e-6 + 1_000*10e-6
+	sent := 100_000*5e-6 + 150_000*0.5e-6 + 20_000*5e-6
+	total := f.DeltaUSD + f.KeepAliveSavedUSD + f.SplitUSD + f.TTLUSD
+	if !accNear(total, without-sent) {
+		t.Fatalf("booked %v, bill difference %v", total, without-sent)
+	}
+}
+
+// A break the client body has too is booked nowhere, so its tokens stay and are re-rated once.
+func TestFigureReRateKeepsInBaselineBreakTokens(t *testing.T) {
+	e := &Event{FreshInput: 100_000, CacheWrite: 20_000}
+	e.SetAccountant(accountant.Result{
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", Saved: accountant.TierTokens{Input: 180_000}}},
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectBreak, InBaseline: true,
+			Saved: accountant.TierTokens{CacheRead: 20_000}, Caused: accountant.TierTokens{CacheWrite5m: 20_000}}}})
+	f := e.AccountantFigure(gpt56()) // without: 300,000 (2x); sent: 120,000 (1x)
+	// Stay: input 100,000 and the 20,000 write: both re-rate.
+	want := 180_000*10e-6 + 100_000*5e-6 + 20_000*5e-6
+	if !accNear(f.DeltaUSD, want) {
+		t.Fatalf("delta %v want %v", f.DeltaUSD, want)
+	}
+}
