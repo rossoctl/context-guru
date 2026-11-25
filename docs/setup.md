@@ -104,7 +104,7 @@ docker compose \
 ### 3. Sweep many task × config cells
 
 [`deploy/eval-containers/sweep.py`](https://github.com/rossoctl/context-guru/blob/main/deploy/eval-containers/sweep.py) automates the matrix
-(baseline vs each component alone vs the `cg-balanced` cell (`balanced` is an obsolete preset, kept for these runs) vs competitors) over a task list. It
+(baseline vs each component alone vs the `cg-conservative` cell vs competitors) over a task list. It
 runs each cell, waits for the runner to exit, and appends reward + wall-clock + `/stats` savings
 to `deploy/eval-containers/sweep-results.csv`. It is **resumable** — cells already in the CSV are
 skipped.

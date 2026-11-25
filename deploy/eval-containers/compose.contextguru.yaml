@@ -10,7 +10,7 @@
 #   OPENAI_API_KEY/OPENAI_API_BASE are unused for Anthropic but the base service
 #   marks them required (:?), so pass any placeholder.
 #   CONTEXT_GURU_PRESET selects the pipeline: `off` (baseline passthrough),
-#   `safe`, `balanced`, ...
+#   `conservative`, `medium`, ...
 services:
   # SWE-bench runner images are published amd64-only; pin the platform so an
   # arm64 host pulls/runs the amd64 image under emulation instead of failing with

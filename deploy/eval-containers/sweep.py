@@ -12,7 +12,7 @@ skipped, so it can be re-run/continued freely.
 Config selector grammar (col 3):
   cg:off               our gateway, empty pipeline (passthrough baseline)
   cg:<a,b,c>           our gateway, CONTEXT_GURU_PIPELINE=a,b,c
-  cg:preset=balanced   our gateway, a named preset
+  cg:preset=conservative   our gateway, a named preset
   headroom             headroom gateway (wired via a separate override)
 
 Usage:
@@ -55,7 +55,7 @@ CONFIGS = [
     ("cg-extract", "claude-code", "cg:extract"),
     ("cg-phi_evict", "claude-code", "cg:phi_evict"),
     # combined + competitors
-    ("cg-balanced", "claude-code", "cg:preset=balanced"),
+    ("cg-conservative", "claude-code", "cg:preset=conservative"),
     ("rtk", "claude-code-rtk", "cg:off"),
     ("headroom", "claude-code", "headroom"),
     # LLM-based (model.source: incoming -> same model as the agent, claude-sonnet-4-6)
