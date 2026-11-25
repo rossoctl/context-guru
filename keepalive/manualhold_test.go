@@ -10,6 +10,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The manual-only hold: a request that asks for it (Policy.ManualHold, the host's reading of the
@@ -524,17 +525,11 @@ func TestTheManualHoldTimerReleasesAndZeroisesWithoutASweep(t *testing.T) {
 	k3.manualHoldMax = 40 * time.Millisecond
 	recordHold(k3, sess1, c3.now(), kaBody, offPolicy, true)
 	c3.advance(time.Second)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, "the entry's own timer to release it", func() bool {
 		k3.mu.Lock()
-		n := len(k3.live)
-		k3.mu.Unlock()
-		if n == 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Error("the entry's own timer never released it")
+		defer k3.mu.Unlock()
+		return len(k3.live) == 0
+	})
 }
 
 // ---- nothing of a tenant survives Forget, and RetireSession clears its reasons ----
