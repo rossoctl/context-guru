@@ -17,33 +17,24 @@ dash/prompttext_test.go sleep=4 poll=3
 dash/sse_test.go sleep=2 after=1
 internal/modelinfo/litellm/zz_price_live_test.go sleep=1
 modes/modes_test.go sleep=2 poll=1 after=3
-proxy/accountant_async_test.go sleep=3 after=3
-proxy/accountant_inject_test.go sleep=2
+proxy/accountant_async_test.go sleep=2 after=3
 proxy/adaptcache_test.go sleep=1 poll=1
 proxy/adapttoolsctl_test.go sleep=1
-proxy/bobsession_test.go sleep=1
 proxy/bypasstokens_test.go sleep=1
 proxy/campaign_test.go sleep=1 poll=1
 proxy/campaignbuild_test.go sleep=2 poll=2
-proxy/cgllm_test.go sleep=5
 proxy/conformance_test.go after=1
 proxy/dash_test.go after=1
-proxy/decldigest_test.go sleep=1
 proxy/entryage_test.go sleep=2 poll=2
 proxy/expandsplice_test.go after=1
 proxy/manager_test.go sleep=1 poll=1
 proxy/metricsink_test.go after=1
 proxy/modes_test.go sleep=2 poll=1
-proxy/observelog_test.go sleep=1 poll=1
 proxy/proxy_test.go after=3
 proxy/rejected_savings_test.go sleep=1 poll=1
-proxy/sweep_model_audit_test.go sleep=2
-proxy/tooldefer_866_test.go sleep=1 after=2
-proxy/tooldefer_test.go sleep=1
-proxy/toolfilter_deferred_test.go sleep=1 poll=1
-proxy/upstreamsilence_test.go sleep=9
+proxy/tooldefer_866_test.go after=1
+proxy/upstreamsilence_test.go sleep=6
 proxy/upstreamtimeout_test.go sleep=2
-proxy/wireinventory_test.go sleep=1
 proxyapp/idleexit_test.go after=2
 proxyapp/metricspush/central_e2e_test.go sleep=2
 proxyapp/metricspush/central_load_test.go sleep=1 poll=1

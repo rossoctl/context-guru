@@ -9,10 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func TestResponsesRouteFeedsTheInventoryOnTheResponsesWire(t *testing.T) {
@@ -38,7 +38,8 @@ func TestResponsesRouteFeedsTheInventoryOnTheResponsesWire(t *testing.T) {
 
 	price := func(string) (modelinfo.Price, bool) { return modelinfo.Price{Input: 1e-6}, true }
 	var names map[string]bool
-	for i := 0; i < 400; i++ { // the inventory is written by its own goroutine
+	// The inventory is written by its own goroutine.
+	testutil.WaitFor(t, "the tool inventory to hold a tool", func() bool {
 		rep, err := rec.DB().ToolReportFor(dash.Filter{TenantAll: true}, price)
 		if err != nil {
 			t.Fatal(err)
@@ -47,11 +48,8 @@ func TestResponsesRouteFeedsTheInventoryOnTheResponsesWire(t *testing.T) {
 		for _, s := range append(append([]dash.ToolStat{}, rep.Tools...), rep.Aside...) {
 			names[s.Name] = true
 		}
-		if len(names) > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return len(names) > 0
+	})
 	if !names["ResTool"] || !names["OtherTool"] || names["function"] {
 		t.Errorf("inventory names = %v, want ResTool and OtherTool read off the flat Responses tools", names)
 	}

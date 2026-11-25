@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // A deferred MCP tool is a name in a message, which the proxy filter cannot remove. The page no
@@ -18,20 +19,13 @@ func TestToolFilterRefusesADeferredTool(t *testing.T) {
 		{Kind: dash.KindMCPTool, Name: "mcp__dfr__a", Server: "dfr", Tokens: 10, Deferred: true},
 		{Kind: dash.KindMCPTool, Name: "mcp__arr__b", Server: "arr", Tokens: 400},
 	}}, false, "")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testutil.WaitFor(t, "the deferred row to be written", func() bool {
 		ok, err := f.rec.DB().IsDeferredDecl(id, "mcp__dfr__a")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the deferred row was never written")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return ok
+	})
 
 	for _, body := range []string{
 		`{"kind":"mcp_server","server":"dfr","action":"exclude"}`,

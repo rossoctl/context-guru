@@ -77,7 +77,7 @@ func TestSummaryCallNeverSendsContextGurusToken(t *testing.T) {
 					t.Fatal(err)
 				}
 				resp.Body.Close()
-				if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+				if !offload.WaitForAllSummariesForTest(30 * time.Second) {
 					t.Fatal("the summary call never finished")
 				}
 

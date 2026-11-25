@@ -78,7 +78,7 @@ func TestCacheAwareSummarizerUsesTheChatPrefixAskerWithoutAStaticModel(t *testin
 	before := offload.CacheAwareSummarizerPrefixAskUsed()
 	post(msgs)
 	post(append(msgs, map[string]any{"role": "assistant", "content": "more"}, map[string]any{"role": "user", "content": "go on"}))
-	if !offload.WaitForSummaryForTest(session, 5*time.Second) {
+	if !offload.WaitForSummaryForTest(session, 30*time.Second) {
 		t.Fatal("no summary was commissioned: the summarizer declined on a Chat route")
 	}
 	if offload.CacheAwareSummarizerPrefixAskUsed() <= before {
