@@ -488,7 +488,7 @@ The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
 | Cache read ratio | time series | by `model` |
 | Misses by cause | stacked bars | `llm_cache_misses_total` by `cause` |
 | Miss cost by cause | bar | `llm_cache_miss_cost_usd_total` |
-| Ping outcomes | stacked bars | by `outcome` |
+| Ping failure ratio | stat | `failed` and `timeout` over `ok`, `failed` and `timeout` pings. A `skipped` ping is not sent, so it is in neither. 0 % with no failure, no data with no ping |
 | Ping cost vs rescue | time series | cost, rescue and net |
 | Estimated ping cost | stat | `llm_keepalive_estimated_cost_usd_total / llm_keepalive_cost_usd_total` (rule 6) |
 | Pings that paid | stat | `rescue_usd / cost_usd` |
