@@ -257,9 +257,16 @@ Limits:
   write, 1.5x output), and `claude-haiku-5-5` above 100,000 (5x every rate). The LiteLLM feed's
   `*_above_<N>k_tokens` fields win over these built-in tiers. `cost_usd`, the keep-alive per-ping dollar
   limit (`max_usd_per_ping`) and the cache-state and keep-alive figures use the tier of the request they
-  describe. A saving compares two requests: the one sent and the one the client built. They can sit on
-  different sides of the line, so each side is priced at its own prompt size: removed tokens at the size
-  without context-guru, added tokens at the size with it. A saving can rise or fall because of this.
+  describe. A saving is the bill of the request without context-guru minus the bill of the request as
+  sent, each priced at its own prompt size. The two can sit on different sides of a line, and then the
+  tokens that stay in both requests change rate too. Example, gpt-5.6, line at 272,000: a trim takes
+  290,000 tokens to 250,000. The saving is 290,000 x 2x minus 250,000 x 1x on input, plus the output
+  re-rate (output bills 1.5x above the line, and all output stays). Removed tokens price at the size
+  without context-guru, added tokens at the size with it. The re-rate is split over the components in
+  proportion to each one's net saved tokens (saved minus caused, only where above 0), so the rows add up
+  to the request total. With no such component it books to the `ended_change` row. A re-rate can be
+  negative, and a component can then show a saving below 0. A request that crosses no line has no
+  re-rate, and a price with no tiers gives the figures of before.
   Totals that sum tokens by model, with no request size (for example the per-model tier cost split, the
   replay figures of legacy rows, the metrics module's savings counters and the summary and sweep model
   estimates) still use the base rates. Set `flat: true` on a price-file entry to turn the tiers off for it.

@@ -85,7 +85,8 @@ type AccFigure struct {
 // p carries the model's prompt-size tiers. A saving compares two requests: the one sent (with
 // context-guru) and the one the client built (without it). They can sit in different tiers, so
 // each side is priced at its own prompt size: Saved tokens at the size without, Caused tokens at
-// the size with (accPrices).
+// the size with (accPrices). The tokens that stay change rate when the sizes straddle a line: that
+// re-rate is part of the saving (reRateUSD, bookReRate).
 func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	pw, pb := e.accPrices(p)
 	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{},
@@ -102,6 +103,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		unpricedIDs[u.OpID] = true
 	}
 	owner := map[string]string{} // ChangeID -> component; empty ChangeIDs are never owners
+	var shares []reRateShare     // the counted operations with a net saving: they own the re-rate
 	for _, o := range e.accRes.Ops {
 		if o.DryRun || o.Call != nil {
 			continue
@@ -116,6 +118,9 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		}
 		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
 			continue
+		}
+		if n := tierTotal(o.Saved) - tierTotal(o.Caused); n > 0 {
+			shares = append(shares, reRateShare{c, n})
 		}
 		net := tierUSD(pb, o.Saved) - tierUSD(pw, o.Caused)
 		f.ByComponent[c] += net
@@ -189,10 +194,73 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		}
 		f.Estimated = f.Estimated || ce.Estimated
 	}
+	f.bookReRate(e.reRateUSD(pw, pb), shares)
 	for _, u := range e.accRes.Unpriced {
 		f.Unpriced = append(f.Unpriced, u.OpID+":"+u.Reason)
 	}
 	return f
+}
+
+// reRateShare is a counted operation with a net saving (saved minus caused tokens, above 0).
+type reRateShare struct {
+	component string
+	net       int
+}
+
+func tierTotal(t accountant.TierTokens) int {
+	return t.Input + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h
+}
+
+// reRateUSD is the change of rate of the tokens that stay in both requests. The saving of a request is
+// the bill without context-guru minus the bill as sent, each at its own prompt size. Pricing the moved
+// tokens is not the whole difference: when the two sizes sit on different sides of a price line, the
+// tokens that stay change rate too. Per tier it is stay x (rate without - rate billed), where stay is
+// the billed tokens of the tier minus what the counted operations caused in it. All output stays:
+// output x (output rate without - output rate billed). 0 when no line is crossed, so a price with no
+// tiers, or an unknown size, gives the figures of before. It can be negative.
+func (e *Event) reRateUSD(pw, pb modelinfo.Price) float64 {
+	if pw == pb || e.accRes == nil {
+		return 0
+	}
+	stay := accountant.TierTokens{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
+		CacheWrite5m: int(max(e.CacheWrite-e.CacheWrite1h, 0)), CacheWrite1h: int(e.CacheWrite1h)}
+	for _, o := range e.accRes.Ops {
+		if o.DryRun || o.Call != nil {
+			continue
+		}
+		stay.Input -= o.Caused.Input
+		stay.CacheRead -= o.Caused.CacheRead
+		stay.CacheWrite5m -= o.Caused.CacheWrite5m
+		stay.CacheWrite1h -= o.Caused.CacheWrite1h
+	}
+	stay.Input, stay.CacheRead = max(stay.Input, 0), max(stay.CacheRead, 0)
+	stay.CacheWrite5m, stay.CacheWrite1h = max(stay.CacheWrite5m, 0), max(stay.CacheWrite1h, 0)
+	return tierUSD(pb, stay) - tierUSD(pw, stay) + float64(e.OutputTokens)*(pb.Output-pw.Output)
+}
+
+// bookReRate splits the re-rate over the counted components in proportion to each one's net saved
+// tokens, so the components add up to the request total. It books in the first-removal column, with the
+// moved tokens it follows. With no such component nobody owns it: it books to EndedBreakUSD, the one
+// counted request-level figure with no owner (accOverride gives it the ended_change row), so the rows
+// still add up to DeltaUSD. A negative re-rate follows the same split, and a component can go below 0.
+func (f *AccFigure) bookReRate(r float64, shares []reRateShare) {
+	if r == 0 {
+		return
+	}
+	f.DeltaUSD += r
+	total := 0
+	for _, sh := range shares {
+		total += sh.net
+	}
+	if total == 0 {
+		f.EndedBreakUSD += r
+		return
+	}
+	for _, sh := range shares {
+		v := r * float64(sh.net) / float64(total)
+		f.ByComponent[sh.component] += v
+		f.ByComponentFirst[sh.component] += v
+	}
 }
 
 // Fallback reasons: why PriceMode booked no saving on an event. AccountantFallback
