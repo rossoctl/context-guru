@@ -541,6 +541,10 @@ func TestStatuslineBudgetPrivateCacheDirAndTTL(t *testing.T) {
 	xdg, tmp := t.TempDir(), t.TempDir()
 	env := routedEnv(port)
 	env["XDG_CACHE_HOME"], env["TMPDIR"] = xdg, tmp
+	// The script's cache clock is pinned: files written by the renders are never older than it, so
+	// no render can outlive a TTL, and the age of the backdated files below is exact.
+	pin := time.Now()
+	env["CG_TEST_NOW"] = fmt.Sprint(pin.Unix())
 	stdin := `{"session_id":"sess-b","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
 	for i := 0; i < 3; i++ {
 		runStatusline(t, env, stdin, "--layout=balanced")
@@ -559,7 +563,7 @@ func TestStatuslineBudgetPrivateCacheDirAndTTL(t *testing.T) {
 		t.Errorf("cache files leaked into the shared temp dir: %v", m)
 	}
 	// 12 s later the cachestate copy (10 s) is stale and refetched; the stats copy (30 s) is not.
-	old := time.Now().Add(-12 * time.Second)
+	old := time.Unix(pin.Unix()-12, 0)
 	files, _ := filepath.Glob(filepath.Join(xdg, "context-guru", "context-guru-statusline-*-cs-sess-b.json"))
 	if len(files) != 1 {
 		t.Fatalf("cachestate cache file not found in the private dir: %v", files)
@@ -588,9 +592,12 @@ func TestStatuslineBudgetBacksOffAfterFailure(t *testing.T) {
 	xdg := t.TempDir()
 	env := routedEnv(port)
 	env["XDG_CACHE_HOME"] = xdg
+	// The script's cache clock is pinned, so the back-off window cannot run out between renders.
+	pin := time.Now()
+	env["CG_TEST_NOW"] = fmt.Sprint(pin.Unix())
 	stdin := `{"session_id":"sess-f","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
 	runStatusline(t, env, stdin, "--layout=balanced")
-	old := time.Now().Add(-time.Hour)
+	old := time.Unix(pin.Unix()-3600, 0)
 	filepath.WalkDir(filepath.Join(xdg, "context-guru"), func(p string, d os.DirEntry, err error) error { //nolint:errcheck
 		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".json") {
 			os.Chtimes(p, old, old) //nolint:errcheck
