@@ -342,16 +342,16 @@
      "strategy_usd": 3.2207171999999993
     },
     {
-     "absolute_usd": -0.06645659999999953,
+     "absolute_usd": -0.06645659999999998,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -2.063409975889828,
+     "percent_usd": -2.063409975889842,
      "strategy": "fixed-1h",
-     "strategy_usd": 3.287173799999999
+     "strategy_usd": 3.2871737999999993
     },
     {
      "absolute_usd": 0.4802615999999995,
@@ -558,16 +558,16 @@
      "strategy_usd": 3.2207171999999993
     },
     {
-     "absolute_usd": -0.054599399999999854,
+     "absolute_usd": -0.0545994000000003,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2207171999999993,
      "hit_delta": -1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -1.6952559510658018,
+     "percent_usd": -1.6952559510658156,
      "strategy": "historical-probability",
-     "strategy_usd": 3.275316599999999
+     "strategy_usd": 3.2753165999999996
     },
     {
      "absolute_usd": 0,
@@ -627,16 +627,16 @@
    "best_usd": 0.3652197,
    "candidates": [
     {
-     "absolute_usd": -0.3013152000000001,
+     "absolute_usd": -0.3013152,
      "baseline": "fixed-5m",
      "baseline_usd": 0.4113648,
      "hit_delta": -3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -73.2476867247757,
+     "percent_usd": -73.24768672477569,
      "strategy": "no-cache",
-     "strategy_usd": 0.7126800000000001
+     "strategy_usd": 0.71268
     },
     {
      "absolute_usd": 0,
@@ -1200,16 +1200,16 @@
      "strategy_usd": 1.4979551999999998
     },
     {
-     "absolute_usd": 0.006803999999999588,
+     "absolute_usd": 0.00680399999999981,
      "baseline": "fixed-5m",
      "baseline_usd": 1.4979551999999998,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 0.4542191916019644,
+     "percent_usd": 0.4542191916019792,
      "strategy": "sticky-session-1h",
-     "strategy_usd": 1.4911512000000002
+     "strategy_usd": 1.4911512
     },
     {
      "absolute_usd": 0.2344451999999999,
@@ -1269,16 +1269,16 @@
      "strategy_usd": 3.2589636
     },
     {
-     "absolute_usd": 1.0609151999999993,
+     "absolute_usd": 1.0609151999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 32.553760342705246,
+     "percent_usd": 32.55376034270526,
      "strategy": "fixed-1h",
-     "strategy_usd": 2.1980484000000007
+     "strategy_usd": 2.1980484000000002
     },
     {
      "absolute_usd": 1.3235376,
@@ -1509,16 +1509,16 @@
      "strategy_usd": 3.2589636
     },
     {
-     "absolute_usd": 1.0609151999999993,
+     "absolute_usd": 1.0609151999999997,
      "baseline": "fixed-5m",
      "baseline_usd": 3.2589636,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 32.553760342705246,
+     "percent_usd": 32.55376034270526,
      "strategy": "sticky-session-1h",
-     "strategy_usd": 2.1980484000000007
+     "strategy_usd": 2.1980484000000002
     },
     {
      "absolute_usd": 1.3235376,
@@ -1554,16 +1554,16 @@
    "best_usd": 1.8552612,
    "candidates": [
     {
-     "absolute_usd": -1.8314076000000004,
+     "absolute_usd": -1.8314076,
      "baseline": "fixed-5m",
      "baseline_usd": 2.0395103999999997,
      "hit_delta": -5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -89.79643349698048,
+     "percent_usd": -89.79643349698046,
      "strategy": "no-cache",
-     "strategy_usd": 3.870918
+     "strategy_usd": 3.8709179999999996
     },
     {
      "absolute_usd": 0,
@@ -2166,51 +2166,51 @@
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 3.4315352999999993,
+   "baseline_usd": 3.4315352999999997,
    "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.2830170999999995,
    "candidates": [
     {
-     "absolute_usd": -1.4126007000000014,
+     "absolute_usd": -1.4126007000000018,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": -11,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -41.16526791958112,
+     "percent_usd": -41.165267919581126,
      "strategy": "no-cache",
-     "strategy_usd": 4.844136000000001
+     "strategy_usd": 4.8441360000000016
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 3.4315352999999993
+     "strategy_usd": 3.4315352999999997
     },
     {
-     "absolute_usd": 0.3022334999999998,
+     "absolute_usd": 0.30223350000000027,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.807529970622767,
+     "percent_usd": 8.80752997062278,
      "strategy": "fixed-1h",
      "strategy_usd": 3.1293017999999995
     },
     {
      "absolute_usd": 1.0800473999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2222,7 +2222,7 @@
     {
      "absolute_usd": 1.1485181999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2234,7 +2234,7 @@
     {
      "absolute_usd": 1.1485181999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2246,7 +2246,7 @@
     {
      "absolute_usd": 1.0800473999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2258,7 +2258,7 @@
     {
      "absolute_usd": 1.0115765999999997,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2270,7 +2270,7 @@
     {
      "absolute_usd": 0.9431057999999997,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2282,7 +2282,7 @@
     {
      "absolute_usd": 0.874635,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2294,7 +2294,7 @@
     {
      "absolute_usd": 0.8061642,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2306,7 +2306,7 @@
     {
      "absolute_usd": 0.7376933999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 7,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2318,7 +2318,7 @@
     {
      "absolute_usd": 0.6692225999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2330,7 +2330,7 @@
     {
      "absolute_usd": 0.6007517999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2342,7 +2342,7 @@
     {
      "absolute_usd": 0.5322810000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2354,7 +2354,7 @@
     {
      "absolute_usd": 0.4638102000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2366,7 +2366,7 @@
     {
      "absolute_usd": 0.16529189999999971,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2378,7 +2378,7 @@
     {
      "absolute_usd": 0.23376269999999977,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2390,7 +2390,7 @@
     {
      "absolute_usd": -2.4196158,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2402,55 +2402,55 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 3.4315352999999993
+     "strategy_usd": 3.4315352999999997
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "historical-probability",
-     "strategy_usd": 3.4315352999999993
+     "strategy_usd": 3.4315352999999997
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 3.4315352999999993
+     "strategy_usd": 3.4315352999999997
     },
     {
-     "absolute_usd": 0.3022334999999998,
+     "absolute_usd": 0.30223350000000027,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.807529970622767,
+     "percent_usd": 8.80752997062278,
      "strategy": "sticky-session-1h",
      "strategy_usd": 3.1293017999999995
     },
     {
      "absolute_usd": 1.0800473999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.4315352999999993,
+     "baseline_usd": 3.4315352999999997,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2463,7 +2463,7 @@
    "hour_utc": 16,
    "insufficient_data": false,
    "optimal_known": true,
-   "optimal_saving_usd": 1.2657869999999996,
+   "optimal_saving_usd": 1.265787,
    "optimal_usd": 2.1657482999999997,
    "requests": 26,
    "saving_known": true,
@@ -2784,51 +2784,51 @@
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 4.8635226000000005,
+   "baseline_usd": 4.8635226,
    "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 3.364963799999999,
    "candidates": [
     {
-     "absolute_usd": -1.7226353999999997,
+     "absolute_usd": -1.7226354000000015,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": -10,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -35.41950026098367,
+     "percent_usd": -35.41950026098371,
      "strategy": "no-cache",
-     "strategy_usd": 6.586158
+     "strategy_usd": 6.586158000000001
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 4.8635226000000005
+     "strategy_usd": 4.8635226
     },
     {
-     "absolute_usd": 1.1506410000000011,
+     "absolute_usd": 1.1506410000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 23.658592642295957,
+     "percent_usd": 23.658592642295943,
      "strategy": "fixed-1h",
      "strategy_usd": 3.7128815999999993
     },
     {
      "absolute_usd": 1.3418196000000013,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2840,7 +2840,7 @@
     {
      "absolute_usd": 1.4985588000000014,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2852,7 +2852,7 @@
     {
      "absolute_usd": 1.4985588000000014,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2864,7 +2864,7 @@
     {
      "absolute_usd": 1.3418196000000013,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2876,7 +2876,7 @@
     {
      "absolute_usd": 1.1850804000000013,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2888,7 +2888,7 @@
     {
      "absolute_usd": 1.0283412000000016,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2900,7 +2900,7 @@
     {
      "absolute_usd": 0.8716020000000015,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2912,7 +2912,7 @@
     {
      "absolute_usd": 0.7148628000000015,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2924,7 +2924,7 @@
     {
      "absolute_usd": 0.5581236000000009,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2936,7 +2936,7 @@
     {
      "absolute_usd": 0.9195054000000011,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2948,7 +2948,7 @@
     {
      "absolute_usd": 0.8080002000000013,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2960,7 +2960,7 @@
     {
      "absolute_usd": 0.6964950000000014,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2972,7 +2972,7 @@
     {
      "absolute_usd": 0.5849898000000016,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2984,7 +2984,7 @@
     {
      "absolute_usd": 0.927630600000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -2996,7 +2996,7 @@
     {
      "absolute_usd": 1.0391358000000013,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3008,7 +3008,7 @@
     {
      "absolute_usd": -4.058530199999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3020,55 +3020,55 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 4.8635226000000005
+     "strategy_usd": 4.8635226
     },
     {
      "absolute_usd": -0.27199799999999996,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": -1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -5.592613057868795,
+     "percent_usd": -5.592613057868796,
      "strategy": "historical-probability",
-     "strategy_usd": 5.1355206
+     "strategy_usd": 5.1355205999999995
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 4.8635226000000005
+     "strategy_usd": 4.8635226
     },
     {
-     "absolute_usd": 1.0792530000000014,
+     "absolute_usd": 1.0792530000000005,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 22.190767654703635,
+     "percent_usd": 22.19076765470362,
      "strategy": "sticky-session-1h",
      "strategy_usd": 3.784269599999999
     },
     {
      "absolute_usd": 1.3418196000000013,
      "baseline": "fixed-5m",
-     "baseline_usd": 4.8635226000000005,
+     "baseline_usd": 4.8635226,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3093,7 +3093,7 @@
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 5.263727399999999,
+   "baseline_usd": 5.2637274,
    "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.7278753999999994,
@@ -3101,43 +3101,43 @@
     {
      "absolute_usd": -1.2161826000000007,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": -8,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -23.104969303691544,
+     "percent_usd": -23.10496930369154,
      "strategy": "no-cache",
-     "strategy_usd": 6.479909999999999
+     "strategy_usd": 6.47991
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 5.263727399999999
+     "strategy_usd": 5.2637274
     },
     {
-     "absolute_usd": 1.752288599999999,
+     "absolute_usd": 1.7522886,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 33.28988123511106,
+     "percent_usd": 33.289881235111075,
      "strategy": "fixed-1h",
      "strategy_usd": 3.5114387999999996
     },
     {
      "absolute_usd": 2.456080799999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3149,7 +3149,7 @@
     {
      "absolute_usd": 2.5358519999999993,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3161,7 +3161,7 @@
     {
      "absolute_usd": 2.5358519999999993,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3173,7 +3173,7 @@
     {
      "absolute_usd": 2.456080799999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3185,7 +3185,7 @@
     {
      "absolute_usd": 2.376309599999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3197,7 +3197,7 @@
     {
      "absolute_usd": 2.2965383999999993,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3209,7 +3209,7 @@
     {
      "absolute_usd": 2.216767199999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3221,7 +3221,7 @@
     {
      "absolute_usd": 2.136995999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3233,7 +3233,7 @@
     {
      "absolute_usd": 2.0572247999999993,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 8,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3245,7 +3245,7 @@
     {
      "absolute_usd": 1.9774535999999991,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3257,7 +3257,7 @@
     {
      "absolute_usd": 1.8976823999999994,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3269,7 +3269,7 @@
     {
      "absolute_usd": 1.8179111999999993,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3281,7 +3281,7 @@
     {
      "absolute_usd": 1.7381399999999996,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3293,7 +3293,7 @@
     {
      "absolute_usd": 1.5927461999999992,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3305,7 +3305,7 @@
     {
      "absolute_usd": 1.672517399999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3317,7 +3317,7 @@
     {
      "absolute_usd": -3.7899336000000012,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3329,55 +3329,55 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 5.263727399999999
+     "strategy_usd": 5.2637274
     },
     {
-     "absolute_usd": 0.12055499999999952,
+     "absolute_usd": 0.12055500000000041,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 2.290297176103754,
+     "percent_usd": 2.2902971761037705,
      "strategy": "historical-probability",
      "strategy_usd": 5.143172399999999
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 5.263727399999999
+     "strategy_usd": 5.2637274
     },
     {
-     "absolute_usd": 0.9845976000000007,
+     "absolute_usd": 0.9845976000000016,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 18.70533037102189,
+     "percent_usd": 18.705330371021905,
      "strategy": "sticky-session-1h",
      "strategy_usd": 4.279129799999998
     },
     {
      "absolute_usd": 2.456080799999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 5.263727399999999,
+     "baseline_usd": 5.2637274,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3402,7 +3402,7 @@
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 3.1729469999999997,
+   "baseline_usd": 3.1729469999999993,
    "best_description": "Hold every prefix at the 5-minute tier and refresh it with keep-alives while idle. The cheapest tier to create, refreshed at 0.1x; a model with a lower read tier reads for less. Capped to a single keep-alive per idle span, then lets the entry lapse.",
    "best_strategy": "keepalive-5m-once",
    "best_usd": 2.3789759999999998,
@@ -3410,43 +3410,43 @@
     {
      "absolute_usd": -0.7614630000000004,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": -2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -23.998604451949575,
+     "percent_usd": -23.99860445194958,
      "strategy": "no-cache",
-     "strategy_usd": 3.93441
+     "strategy_usd": 3.9344099999999997
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 3.1729469999999997
+     "strategy_usd": 3.1729469999999993
     },
     {
-     "absolute_usd": -0.23462099999999975,
+     "absolute_usd": -0.2346210000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -7.394419131488794,
+     "percent_usd": -7.394419131488809,
      "strategy": "fixed-1h",
      "strategy_usd": 3.4075679999999995
     },
     {
      "absolute_usd": 0.7230690000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3458,7 +3458,7 @@
     {
      "absolute_usd": 0.793971,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3470,7 +3470,7 @@
     {
      "absolute_usd": 0.793971,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3482,7 +3482,7 @@
     {
      "absolute_usd": 0.7230690000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3494,7 +3494,7 @@
     {
      "absolute_usd": 0.6521670000000004,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3506,7 +3506,7 @@
     {
      "absolute_usd": 0.5812650000000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3518,7 +3518,7 @@
     {
      "absolute_usd": 0.5103629999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3530,7 +3530,7 @@
     {
      "absolute_usd": 0.4394610000000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3542,7 +3542,7 @@
     {
      "absolute_usd": 0.3685590000000003,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3554,7 +3554,7 @@
     {
      "absolute_usd": 0.29765700000000006,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3566,7 +3566,7 @@
     {
      "absolute_usd": 0.22675499999999982,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3578,7 +3578,7 @@
     {
      "absolute_usd": 0.15585300000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3590,7 +3590,7 @@
     {
      "absolute_usd": 0.08495100000000022,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3602,7 +3602,7 @@
     {
      "absolute_usd": -0.3764249999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3614,7 +3614,7 @@
     {
      "absolute_usd": -0.30552299999999954,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3626,7 +3626,7 @@
     {
      "absolute_usd": -2.1859830000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3638,55 +3638,55 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 3.1729469999999997
+     "strategy_usd": 3.1729469999999993
     },
     {
-     "absolute_usd": 0.17680499999999988,
+     "absolute_usd": 0.17680499999999943,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 5.572264522540083,
+     "percent_usd": 5.5722645225400695,
      "strategy": "historical-probability",
      "strategy_usd": 2.996142
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 3.1729469999999997
+     "strategy_usd": 3.1729469999999993
     },
     {
-     "absolute_usd": 0.2957939999999999,
+     "absolute_usd": 0.29579399999999945,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 9.322374436131454,
+     "percent_usd": 9.322374436131442,
      "strategy": "sticky-session-1h",
      "strategy_usd": 2.877153
     },
     {
      "absolute_usd": 0.7230690000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 3.1729469999999997,
+     "baseline_usd": 3.1729469999999993,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3699,7 +3699,7 @@
    "hour_utc": 23,
    "insufficient_data": false,
    "optimal_known": true,
-   "optimal_saving_usd": 1.0904939999999996,
+   "optimal_saving_usd": 1.0904939999999992,
    "optimal_usd": 2.082453,
    "requests": 7,
    "saving_known": true,
@@ -3711,51 +3711,51 @@
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 0.647091,
+   "baseline_usd": 0.6470909999999999,
    "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
-   "best_usd": 0.44101290000000004,
+   "best_usd": 0.4410129000000001,
    "candidates": [
     {
-     "absolute_usd": -0.07637400000000005,
+     "absolute_usd": -0.07637400000000039,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": -5,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -11.80266763098236,
+     "percent_usd": -11.802667630982413,
      "strategy": "no-cache",
-     "strategy_usd": 0.723465
+     "strategy_usd": 0.7234650000000002
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 0.647091
+     "strategy_usd": 0.6470909999999999
     },
     {
-     "absolute_usd": 0.20607809999999993,
+     "absolute_usd": 0.20607809999999976,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.846849979369196,
+     "percent_usd": 31.84684997936918,
      "strategy": "fixed-1h",
-     "strategy_usd": 0.44101290000000004
+     "strategy_usd": 0.4410129000000001
     },
     {
      "absolute_usd": 0.1684372500000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3767,7 +3767,7 @@
     {
      "absolute_usd": 0.19651095000000007,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3779,7 +3779,7 @@
     {
      "absolute_usd": 0.19651095000000007,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3791,7 +3791,7 @@
     {
      "absolute_usd": 0.1684372500000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3803,7 +3803,7 @@
     {
      "absolute_usd": 0.14036355000000011,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3815,7 +3815,7 @@
     {
      "absolute_usd": 0.11228985000000014,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3827,7 +3827,7 @@
     {
      "absolute_usd": 0.08421615000000016,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3839,7 +3839,7 @@
     {
      "absolute_usd": 0.056142450000000066,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3851,7 +3851,7 @@
     {
      "absolute_usd": 0.028068750000000087,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 5,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3863,7 +3863,7 @@
     {
      "absolute_usd": 0.10272570000000003,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3875,7 +3875,7 @@
     {
      "absolute_usd": 0.0836211,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3887,7 +3887,7 @@
     {
      "absolute_usd": 0.06451649999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3899,7 +3899,7 @@
     {
      "absolute_usd": 0.04541190000000006,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3911,7 +3911,7 @@
     {
      "absolute_usd": 0.16786889999999993,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3923,7 +3923,7 @@
     {
      "absolute_usd": 0.1869734999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3935,7 +3935,7 @@
     {
      "absolute_usd": -0.657798,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 6,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3947,19 +3947,19 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 0.647091
+     "strategy_usd": 0.6470909999999999
     },
     {
      "absolute_usd": 0.028164149999999943,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -3971,31 +3971,31 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 0.647091
+     "strategy_usd": 0.6470909999999999
     },
     {
-     "absolute_usd": 0.20607809999999993,
+     "absolute_usd": 0.20607809999999976,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 31.846849979369196,
+     "percent_usd": 31.84684997936918,
      "strategy": "sticky-session-1h",
-     "strategy_usd": 0.44101290000000004
+     "strategy_usd": 0.4410129000000001
     },
     {
      "absolute_usd": 0.1684372500000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 0.647091,
+     "baseline_usd": 0.6470909999999999,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4012,8 +4012,8 @@
    "optimal_usd": 0.32478750000000006,
    "requests": 15,
    "saving_known": true,
-   "saving_pct": 31.846849979369196,
-   "saving_usd": 0.20607809999999993,
+   "saving_pct": 31.84684997936918,
+   "saving_usd": 0.20607809999999976,
    "unpriced_requests": 6,
    "user": "t2",
    "valued": true
@@ -4317,8 +4317,8 @@
    "hour_utc": 1,
    "insufficient_data": false,
    "optimal_known": true,
-   "optimal_saving_usd": 1.0013444999999996,
-   "optimal_usd": 1.5452455500000002,
+   "optimal_saving_usd": 1.0013444999999999,
+   "optimal_usd": 1.54524555,
    "requests": 26,
    "saving_known": true,
    "saving_pct": 16.450969405146296,
@@ -4329,51 +4329,51 @@
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 1.7329875,
+   "baseline_usd": 1.7329875000000001,
    "best_description": "Never write cache_control. Every prompt is billed as fresh input; nothing is held.",
    "best_strategy": "no-cache",
    "best_usd": 1.38813,
    "candidates": [
     {
-     "absolute_usd": 0.3448574999999998,
+     "absolute_usd": 0.34485750000000004,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": -3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 19.899595351957235,
+     "percent_usd": 19.89959535195724,
      "strategy": "no-cache",
      "strategy_usd": 1.38813
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 1.7329875
+     "strategy_usd": 1.7329875000000001
     },
     {
-     "absolute_usd": 0.2331359999999998,
+     "absolute_usd": 0.233136,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 13.452837946032489,
+     "percent_usd": 13.452837946032501,
      "strategy": "fixed-1h",
      "strategy_usd": 1.4998515000000001
     },
     {
      "absolute_usd": -0.2766059999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4385,7 +4385,7 @@
     {
      "absolute_usd": -0.13830300000000006,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4397,7 +4397,7 @@
     {
      "absolute_usd": -0.13830300000000006,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4409,7 +4409,7 @@
     {
      "absolute_usd": -0.2766059999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4421,7 +4421,7 @@
     {
      "absolute_usd": -0.414909,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4433,7 +4433,7 @@
     {
      "absolute_usd": -0.553212,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4445,7 +4445,7 @@
     {
      "absolute_usd": -0.6915150000000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4457,7 +4457,7 @@
     {
      "absolute_usd": -0.8298180000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4469,7 +4469,7 @@
     {
      "absolute_usd": -0.9681210000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 2,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4481,7 +4481,7 @@
     {
      "absolute_usd": -0.3391267499999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4493,7 +4493,7 @@
     {
      "absolute_usd": -0.4105282499999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4505,7 +4505,7 @@
     {
      "absolute_usd": -0.48192975000000016,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4517,7 +4517,7 @@
     {
      "absolute_usd": -0.55333125,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4529,7 +4529,7 @@
     {
      "absolute_usd": 0.09033299999999977,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4541,7 +4541,7 @@
     {
      "absolute_usd": 0.1617344999999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4553,7 +4553,7 @@
     {
      "absolute_usd": -2.06332425,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4565,55 +4565,55 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 1.7329875
+     "strategy_usd": 1.7329875000000001
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": -1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "historical-probability",
-     "strategy_usd": 1.7329875
+     "strategy_usd": 1.7329875000000001
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 1.7329875
+     "strategy_usd": 1.7329875000000001
     },
     {
-     "absolute_usd": 0.2331359999999998,
+     "absolute_usd": 0.233136,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 13.452837946032489,
+     "percent_usd": 13.452837946032501,
      "strategy": "sticky-session-1h",
      "strategy_usd": 1.4998515000000001
     },
     {
      "absolute_usd": -0.20970449999999996,
      "baseline": "fixed-5m",
-     "baseline_usd": 1.7329875,
+     "baseline_usd": 1.7329875000000001,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4626,63 +4626,63 @@
    "hour_utc": 2,
    "insufficient_data": false,
    "optimal_known": true,
-   "optimal_saving_usd": 0.3448574999999998,
+   "optimal_saving_usd": 0.34485750000000004,
    "optimal_usd": 1.38813,
    "requests": 9,
    "saving_known": true,
-   "saving_pct": 19.899595351957235,
-   "saving_usd": 0.3448574999999998,
+   "saving_pct": 19.89959535195724,
+   "saving_usd": 0.34485750000000004,
    "unpriced_requests": 7,
    "user": "t2",
    "valued": true
   },
   {
    "baseline": "fixed-5m",
-   "baseline_usd": 2.4080774999999996,
+   "baseline_usd": 2.4080775,
    "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
    "best_usd": 1.4828219999999999,
    "candidates": [
     {
-     "absolute_usd": -0.4204725000000007,
+     "absolute_usd": -0.42047250000000025,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": -9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -17.4609205891422,
+     "percent_usd": -17.46092058914218,
      "strategy": "no-cache",
      "strategy_usd": 2.8285500000000003
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "fixed-5m",
-     "strategy_usd": 2.4080774999999996
+     "strategy_usd": 2.4080775
     },
     {
-     "absolute_usd": 0.9252554999999998,
+     "absolute_usd": 0.9252555000000002,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 38.42299510709269,
+     "percent_usd": 38.4229951070927,
      "strategy": "fixed-1h",
      "strategy_usd": 1.4828219999999999
     },
     {
      "absolute_usd": 0.5943817499999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4694,7 +4694,7 @@
     {
      "absolute_usd": 0.70042125,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4706,7 +4706,7 @@
     {
      "absolute_usd": 0.70042125,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4718,7 +4718,7 @@
     {
      "absolute_usd": 0.5943817499999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4730,7 +4730,7 @@
     {
      "absolute_usd": 0.4883422500000001,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4742,7 +4742,7 @@
     {
      "absolute_usd": 0.38230275,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4754,7 +4754,7 @@
     {
      "absolute_usd": 0.27626324999999996,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4766,7 +4766,7 @@
     {
      "absolute_usd": 0.1702237499999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4778,7 +4778,7 @@
     {
      "absolute_usd": 0.06418424999999983,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4790,7 +4790,7 @@
     {
      "absolute_usd": 0.4628624999999995,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4802,7 +4802,7 @@
     {
      "absolute_usd": 0.40089149999999973,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4814,7 +4814,7 @@
     {
      "absolute_usd": 0.33892049999999996,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4826,7 +4826,7 @@
     {
      "absolute_usd": 0.27694949999999974,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4838,7 +4838,7 @@
     {
      "absolute_usd": 0.8013134999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4850,7 +4850,7 @@
     {
      "absolute_usd": 0.8632844999999998,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4862,7 +4862,7 @@
     {
      "absolute_usd": -2.3240850000000015,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 4,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4874,55 +4874,55 @@
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "observed-policy",
-     "strategy_usd": 2.4080774999999996
+     "strategy_usd": 2.4080775
     },
     {
-     "absolute_usd": 0.07597124999999982,
+     "absolute_usd": 0.07597125000000027,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 3.1548507055939785,
+     "percent_usd": 3.1548507055939963,
      "strategy": "historical-probability",
      "strategy_usd": 2.33210625
     },
     {
      "absolute_usd": 0,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 0,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0,
      "strategy": "stop-reason-gated",
-     "strategy_usd": 2.4080774999999996
+     "strategy_usd": 2.4080775
     },
     {
      "absolute_usd": 0.014766000000000279,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
      "percent_usd": 0.6131862450440353,
      "strategy": "sticky-session-1h",
-     "strategy_usd": 2.3933114999999994
+     "strategy_usd": 2.3933115
     },
     {
      "absolute_usd": 0.5943817499999999,
      "baseline": "fixed-5m",
-     "baseline_usd": 2.4080774999999996,
+     "baseline_usd": 2.4080775,
      "hit_delta": 3,
      "latency_avoided_ms": 0,
      "latency_known": false,
@@ -4939,8 +4939,8 @@
    "optimal_usd": 1.124478,
    "requests": 17,
    "saving_known": true,
-   "saving_pct": 38.42299510709269,
-   "saving_usd": 0.9252554999999998,
+   "saving_pct": 38.4229951070927,
+   "saving_usd": 0.9252555000000002,
    "unpriced_requests": 7,
    "user": "t2",
    "valued": true
@@ -5811,16 +5811,16 @@
      "strategy_usd": 4.970953499999999
     },
     {
-     "absolute_usd": -0.27049950000000056,
+     "absolute_usd": -0.27049949999999967,
      "baseline": "fixed-5m",
      "baseline_usd": 4.970953499999999,
      "hit_delta": -1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -5.441601897905515,
+     "percent_usd": -5.441601897905497,
      "strategy": "historical-probability",
-     "strategy_usd": 5.241453
+     "strategy_usd": 5.241452999999999
     },
     {
      "absolute_usd": 0,
@@ -5880,16 +5880,16 @@
    "best_usd": 4.446212999999998,
    "candidates": [
     {
-     "absolute_usd": -0.7918597500000004,
+     "absolute_usd": -0.7918597499999995,
      "baseline": "fixed-5m",
      "baseline_usd": 6.107876250000001,
      "hit_delta": -9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -12.964567676039609,
+     "percent_usd": -12.964567676039596,
      "strategy": "no-cache",
-     "strategy_usd": 6.899736000000002
+     "strategy_usd": 6.899736000000001
     },
     {
      "absolute_usd": 0,
@@ -6213,16 +6213,16 @@
      "strategy_usd": 2.1406125
     },
     {
-     "absolute_usd": 0.1862999999999997,
+     "absolute_usd": 0.1862999999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 2.1406125,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.703116514548976,
+     "percent_usd": 8.703116514548986,
      "strategy": "fixed-1h",
-     "strategy_usd": 1.9543125000000003
+     "strategy_usd": 1.9543125000000001
     },
     {
      "absolute_usd": 0.7546387500000002,
@@ -6381,28 +6381,28 @@
      "strategy_usd": 1.3859737499999998
     },
     {
-     "absolute_usd": 0.1862999999999997,
+     "absolute_usd": 0.1862999999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 2.1406125,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.703116514548976,
+     "percent_usd": 8.703116514548986,
      "strategy": "keepalive-1h",
-     "strategy_usd": 1.9543125000000003
+     "strategy_usd": 1.9543125000000001
     },
     {
-     "absolute_usd": 0.1862999999999997,
+     "absolute_usd": 0.1862999999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 2.1406125,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.703116514548976,
+     "percent_usd": 8.703116514548986,
      "strategy": "keepalive-1h-once",
-     "strategy_usd": 1.9543125000000003
+     "strategy_usd": 1.9543125000000001
     },
     {
      "absolute_usd": -0.6112237500000002,
@@ -6453,16 +6453,16 @@
      "strategy_usd": 2.1406125
     },
     {
-     "absolute_usd": 0.1862999999999997,
+     "absolute_usd": 0.1862999999999999,
      "baseline": "fixed-5m",
      "baseline_usd": 2.1406125,
      "hit_delta": 1,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 8.703116514548976,
+     "percent_usd": 8.703116514548986,
      "strategy": "sticky-session-1h",
-     "strategy_usd": 1.9543125000000003
+     "strategy_usd": 1.9543125000000001
     },
     {
      "absolute_usd": 0.7546387500000002,
@@ -6804,19 +6804,19 @@
    "baseline_usd": 3.1498222499999997,
    "best_description": "Always write the prefix at the 1-hour tier (2.0x input to create, 0.1x to read; less on a model with a lower read tier).",
    "best_strategy": "fixed-1h",
-   "best_usd": 2.2260516000000004,
+   "best_usd": 2.226051600000001,
    "candidates": [
     {
-     "absolute_usd": -0.61662975,
+     "absolute_usd": -0.6166297500000004,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": -14,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": -19.576652301570352,
+     "percent_usd": -19.576652301570366,
      "strategy": "no-cache",
-     "strategy_usd": 3.7664519999999997
+     "strategy_usd": 3.766452
     },
     {
      "absolute_usd": 0,
@@ -6831,16 +6831,16 @@
      "strategy_usd": 3.1498222499999997
     },
     {
-     "absolute_usd": 0.9237706499999994,
+     "absolute_usd": 0.9237706499999989,
      "baseline": "fixed-5m",
      "baseline_usd": 3.1498222499999997,
      "hit_delta": 9,
      "latency_avoided_ms": 0,
      "latency_known": false,
      "percent_known": true,
-     "percent_usd": 29.327707301578666,
+     "percent_usd": 29.327707301578656,
      "strategy": "fixed-1h",
-     "strategy_usd": 2.2260516000000004
+     "strategy_usd": 2.226051600000001
     },
     {
      "absolute_usd": 0.63736485,
@@ -7102,8 +7102,8 @@
    "optimal_usd": 1.90880835,
    "requests": 29,
    "saving_known": true,
-   "saving_pct": 29.327707301578666,
-   "saving_usd": 0.9237706499999994,
+   "saving_pct": 29.327707301578656,
+   "saving_usd": 0.9237706499999989,
    "unpriced_requests": 9,
    "user": "t2",
    "valued": true

@@ -605,9 +605,9 @@
      "writes_5m": 297
     }
    ],
-   "cache_premium_usd": -34.427037749999926,
-   "cache_read_usd": 5.649162,
-   "cache_write_usd": 82.07710125000001,
+   "cache_premium_usd": -34.42703774999994,
+   "cache_read_usd": 5.649161999999999,
+   "cache_write_usd": 82.07710125,
    "conversations": 60,
    "decisions": {
     "write_5m": 591
@@ -644,7 +644,7 @@
     "user+model+bucket": 444
    },
    "strategy": "fixed-5m",
-   "total_usd": 88.73720325000001,
+   "total_usd": 88.73720325,
    "uncached_usd": 123.16424099999993,
    "unpriced": 217,
    "valued": true,
@@ -729,7 +729,7 @@
     }
    ],
    "cache_premium_usd": -77.69740289999982,
-   "cache_read_usd": 10.5184581,
+   "cache_read_usd": 10.518458100000002,
    "cache_write_usd": 33.9374400000001,
    "conversations": 60,
    "decisions": {
@@ -852,7 +852,7 @@
     }
    ],
    "cache_premium_usd": -56.57767905000014,
-   "cache_read_usd": 8.474421000000001,
+   "cache_read_usd": 8.474421000000003,
    "cache_write_usd": 46.761363749999795,
    "conversations": 60,
    "decisions": {
@@ -975,7 +975,7 @@
     }
    ],
    "cache_premium_usd": -60.32978415000014,
-   "cache_read_usd": 8.474421000000001,
+   "cache_read_usd": 8.474421000000003,
    "cache_write_usd": 46.761363749999795,
    "conversations": 60,
    "decisions": {
@@ -1098,7 +1098,7 @@
     }
    ],
    "cache_premium_usd": -75.99621089999982,
-   "cache_read_usd": 10.5184581,
+   "cache_read_usd": 10.518458100000002,
    "cache_write_usd": 33.9374400000001,
    "conversations": 60,
    "decisions": {
@@ -1220,9 +1220,9 @@
      "writes_5m": 297
     }
    ],
-   "cache_premium_usd": -34.427037749999926,
-   "cache_read_usd": 5.649162,
-   "cache_write_usd": 82.07710125000001,
+   "cache_premium_usd": -34.42703774999994,
+   "cache_read_usd": 5.649161999999999,
+   "cache_write_usd": 82.07710125,
    "conversations": 60,
    "decisions": {
     "write_5m": 591
@@ -1263,7 +1263,7 @@
     "user+model+bucket": 444
    },
    "strategy": "observed-policy",
-   "total_usd": 88.73720325000001,
+   "total_usd": 88.73720325,
    "uncached_usd": 123.16424099999993,
    "unpriced": 217,
    "valued": true,
@@ -1348,7 +1348,7 @@
     }
    ],
    "cache_premium_usd": -36.03126749999997,
-   "cache_read_usd": 5.851369499999999,
+   "cache_read_usd": 5.851369499999998,
    "cache_write_usd": 79.47450749999996,
    "conversations": 60,
    "decisions": {
@@ -1473,9 +1473,9 @@
      "writes_5m": 297
     }
    ],
-   "cache_premium_usd": -34.427037749999926,
-   "cache_read_usd": 5.649162,
-   "cache_write_usd": 82.07710125000001,
+   "cache_premium_usd": -34.42703774999994,
+   "cache_read_usd": 5.649161999999999,
+   "cache_write_usd": 82.07710125,
    "conversations": 60,
    "decisions": {
     "write_5m": 591
@@ -1512,7 +1512,7 @@
     "user+model+bucket": 444
    },
    "strategy": "stop-reason-gated",
-   "total_usd": 88.73720325000001,
+   "total_usd": 88.73720325,
    "uncached_usd": 123.16424099999993,
    "unpriced": 217,
    "valued": true,
@@ -1597,7 +1597,7 @@
     }
    ],
    "cache_premium_usd": -56.58641505000014,
-   "cache_read_usd": 8.474421000000001,
+   "cache_read_usd": 8.474421000000003,
    "cache_write_usd": 46.761363749999795,
    "conversations": 60,
    "decisions": {
@@ -1721,7 +1721,7 @@
     }
    ],
    "cache_premium_usd": -87.20697239999991,
-   "cache_read_usd": 10.5184581,
+   "cache_read_usd": 10.518458100000002,
    "cache_write_usd": 24.160650000000015,
    "conversations": 60,
    "decisions": {
@@ -1772,45 +1772,45 @@
  ],
  "savings": [
   {
-   "absolute_usd": -34.42703775,
+   "absolute_usd": -34.42703775000001,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": -290,
    "latency_avoided_ms": -4564.227086183322,
    "latency_known": true,
    "percent_known": true,
-   "percent_usd": -38.796622486521734,
+   "percent_usd": -38.796622486521755,
    "strategy": "no-cache",
    "strategy_usd": 123.164241
   },
   {
    "absolute_usd": 0,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 0,
    "latency_avoided_ms": 0,
    "latency_known": true,
    "percent_known": true,
    "percent_usd": 0,
    "strategy": "fixed-5m",
-   "strategy_usd": 88.73720325000001
+   "strategy_usd": 88.73720325
   },
   {
-   "absolute_usd": 43.2703651499999,
+   "absolute_usd": 43.27036514999988,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 241,
    "latency_avoided_ms": 3793.0300957592435,
    "latency_known": true,
    "percent_known": true,
-   "percent_usd": 48.76237199869142,
+   "percent_usd": 48.762371998691414,
    "strategy": "fixed-1h",
    "strategy_usd": 45.46683810000011
   },
   {
    "absolute_usd": 22.150641300000217,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 149,
    "latency_avoided_ms": 2345.0683994528104,
    "latency_known": true,
@@ -1822,7 +1822,7 @@
   {
    "absolute_usd": 25.90274640000021,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 149,
    "latency_avoided_ms": 2345.0683994528104,
    "latency_known": true,
@@ -1834,7 +1834,7 @@
   {
    "absolute_usd": 41.5691731499999,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 241,
    "latency_avoided_ms": 3793.0300957592435,
    "latency_known": true,
@@ -1846,19 +1846,19 @@
   {
    "absolute_usd": 0,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 0,
    "latency_avoided_ms": 0,
    "latency_known": true,
    "percent_known": true,
    "percent_usd": 0,
    "strategy": "observed-policy",
-   "strategy_usd": 88.73720325000001
+   "strategy_usd": 88.73720325
   },
   {
    "absolute_usd": 1.6042297500000444,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 5,
    "latency_avoided_ms": 78.69357045143659,
    "latency_known": true,
@@ -1870,19 +1870,19 @@
   {
    "absolute_usd": 0,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 0,
    "latency_avoided_ms": 0,
    "latency_known": true,
    "percent_known": true,
    "percent_usd": 0,
    "strategy": "stop-reason-gated",
-   "strategy_usd": 88.73720325000001
+   "strategy_usd": 88.73720325
   },
   {
    "absolute_usd": 22.159377300000216,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 92,
    "latency_avoided_ms": 1447.9616963064332,
    "latency_known": true,
@@ -1894,7 +1894,7 @@
   {
    "absolute_usd": 52.77993464999999,
    "baseline": "fixed-5m",
-   "baseline_usd": 88.73720325000001,
+   "baseline_usd": 88.73720325,
    "hit_delta": 44,
    "latency_avoided_ms": 692.503419972642,
    "latency_known": true,

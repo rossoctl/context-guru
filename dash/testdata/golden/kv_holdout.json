@@ -8,7 +8,7 @@
      "chosen": false,
      "strategy": "no-cache",
      "test_known": true,
-     "test_saving_usd": -0.8500515000000002,
+     "test_saving_usd": -0.8500515,
      "train_known": true,
      "train_saving_usd": -2.699568000000001
     },
@@ -215,7 +215,7 @@
      "chosen": false,
      "strategy": "no-cache",
      "test_known": true,
-     "test_saving_usd": -0.24001110000000048,
+     "test_saving_usd": -0.24001110000000003,
      "train_known": true,
      "train_saving_usd": 0.061320299999999994
     },
@@ -233,7 +233,7 @@
      "test_known": true,
      "test_saving_usd": 0.25500269999999947,
      "train_known": true,
-     "train_saving_usd": -0.3214592999999999
+     "train_saving_usd": -0.3214593000000001
     },
     {
      "chosen": false,
@@ -393,7 +393,7 @@
      "test_known": true,
      "test_saving_usd": 0.12029069999999997,
      "train_known": true,
-     "train_saving_usd": -0.5379075000000002
+     "train_saving_usd": -0.5379075
     },
     {
      "chosen": false,
@@ -424,7 +424,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.3013152000000001
+     "train_saving_usd": -0.3013152
     },
     {
      "chosen": false,
@@ -808,7 +808,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.006803999999999588
+     "train_saving_usd": 0.00680399999999981
     },
     {
      "chosen": false,
@@ -838,7 +838,7 @@
      "chosen": false,
      "strategy": "no-cache",
      "test_known": true,
-     "test_saving_usd": -0.1362576000000001,
+     "test_saving_usd": -0.13625759999999998,
      "train_known": true,
      "train_saving_usd": -0.7609848000000001
     },
@@ -854,7 +854,7 @@
      "chosen": false,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": 0.21868560000000004,
+     "test_saving_usd": 0.21868559999999998,
      "train_known": true,
      "train_saving_usd": 0.8422295999999998
     },
@@ -966,7 +966,7 @@
      "chosen": false,
      "strategy": "keepalive-1h",
      "test_known": true,
-     "test_saving_usd": 0.21868560000000004,
+     "test_saving_usd": 0.21868559999999998,
      "train_known": true,
      "train_saving_usd": 0.7080935999999998
     },
@@ -974,7 +974,7 @@
      "chosen": false,
      "strategy": "keepalive-1h-once",
      "test_known": true,
-     "test_saving_usd": 0.21868560000000004,
+     "test_saving_usd": 0.21868559999999998,
      "train_known": true,
      "train_saving_usd": 0.7751615999999999
     },
@@ -998,7 +998,7 @@
      "chosen": false,
      "strategy": "historical-probability",
      "test_known": true,
-     "test_saving_usd": -0.05879520000000005,
+     "test_saving_usd": -0.058795199999999936,
      "train_known": true,
      "train_saving_usd": 0
     },
@@ -1047,7 +1047,7 @@
      "test_known": true,
      "test_saving_usd": 0.06641399999999997,
      "train_known": true,
-     "train_saving_usd": -1.8978216000000003
+     "train_saving_usd": -1.8978215999999999
     },
     {
      "chosen": false,
@@ -1252,7 +1252,7 @@
      "chosen": false,
      "strategy": "no-cache",
      "test_known": true,
-     "test_saving_usd": -0.41609700000000016,
+     "test_saving_usd": -0.4160970000000004,
      "train_known": true,
      "train_saving_usd": 0.3669003000000002
     },
@@ -1461,7 +1461,7 @@
      "test_known": true,
      "test_saving_usd": -0.5805495000000005,
      "train_known": true,
-     "train_saving_usd": -0.8320512
+     "train_saving_usd": -0.8320512000000002
     },
     {
      "chosen": true,
@@ -1475,7 +1475,7 @@
      "chosen": false,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": 0.8141444999999987,
+     "test_saving_usd": 0.8141444999999992,
      "train_known": true,
      "train_saving_usd": -0.5119110000000002
     },
@@ -1587,7 +1587,7 @@
      "chosen": false,
      "strategy": "keepalive-1h",
      "test_known": true,
-     "test_saving_usd": 0.8141444999999987,
+     "test_saving_usd": 0.8141444999999992,
      "train_known": true,
      "train_saving_usd": -0.6488526000000001
     },
@@ -1595,7 +1595,7 @@
      "chosen": false,
      "strategy": "keepalive-1h-once",
      "test_known": true,
-     "test_saving_usd": 0.8141444999999987,
+     "test_saving_usd": 0.8141444999999992,
      "train_known": true,
      "train_saving_usd": -0.5803818000000003
     },
@@ -1635,7 +1635,7 @@
      "chosen": false,
      "strategy": "sticky-session-1h",
      "test_known": true,
-     "test_saving_usd": 0.8141444999999987,
+     "test_saving_usd": 0.8141444999999992,
      "train_known": true,
      "train_saving_usd": -0.5119110000000002
     },
@@ -1874,9 +1874,9 @@
      "chosen": false,
      "strategy": "no-cache",
      "test_known": true,
-     "test_saving_usd": -0.5152680000000001,
+     "test_saving_usd": -0.5152680000000003,
      "train_known": true,
-     "train_saving_usd": -1.2073674000000008
+     "train_saving_usd": -1.2073674000000012
     },
     {
      "chosen": false,
@@ -1890,9 +1890,9 @@
      "chosen": false,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": 0.030294000000000265,
+     "test_saving_usd": 0.030294000000000043,
      "train_known": true,
-     "train_saving_usd": 1.1203470000000002
+     "train_saving_usd": 1.1203469999999998
     },
     {
      "chosen": false,
@@ -2002,7 +2002,7 @@
      "chosen": false,
      "strategy": "keepalive-1h",
      "test_known": true,
-     "test_saving_usd": 0.030294000000000265,
+     "test_saving_usd": 0.030294000000000043,
      "train_known": true,
      "train_saving_usd": 1.0148046000000002
     },
@@ -2010,7 +2010,7 @@
      "chosen": false,
      "strategy": "keepalive-1h-once",
      "test_known": true,
-     "test_saving_usd": 0.030294000000000265,
+     "test_saving_usd": 0.030294000000000043,
      "train_known": true,
      "train_saving_usd": 1.0675758000000002
     },
@@ -2034,9 +2034,9 @@
      "chosen": false,
      "strategy": "historical-probability",
      "test_known": true,
-     "test_saving_usd": 0.08221500000000015,
+     "test_saving_usd": 0.08221499999999993,
      "train_known": true,
-     "train_saving_usd": -0.27199799999999996
+     "train_saving_usd": -0.2719979999999995
     },
     {
      "chosen": false,
@@ -2052,7 +2052,7 @@
      "test_known": true,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 1.0489590000000004
+     "train_saving_usd": 1.048959
     },
     {
      "chosen": false,
@@ -2099,7 +2099,7 @@
      "test_known": true,
      "test_saving_usd": 0.8089829999999993,
      "train_known": true,
-     "train_saving_usd": 0.9433055999999993
+     "train_saving_usd": 0.9433055999999997
     },
     {
      "chosen": false,
@@ -2243,7 +2243,7 @@
      "test_known": true,
      "test_saving_usd": 0.12721499999999963,
      "train_known": true,
-     "train_saving_usd": 0.12055499999999997
+     "train_saving_usd": 0.12055500000000041
     },
     {
      "chosen": false,
@@ -2497,7 +2497,7 @@
      "test_known": true,
      "test_saving_usd": -0.17678775000000002,
      "train_known": true,
-     "train_saving_usd": 0.10041375000000019
+     "train_saving_usd": 0.10041375000000002
     },
     {
      "chosen": false,
@@ -2511,9 +2511,9 @@
      "chosen": true,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": -0.06899624999999995,
+     "test_saving_usd": -0.06899625000000004,
      "train_known": true,
-     "train_saving_usd": 0.27507435000000013
+     "train_saving_usd": 0.27507434999999997
     },
     {
      "chosen": false,
@@ -2625,7 +2625,7 @@
      "test_known": true,
      "test_saving_usd": -0.08746724999999994,
      "train_known": true,
-     "train_saving_usd": 0.27507435000000013
+     "train_saving_usd": 0.27507434999999997
     },
     {
      "chosen": false,
@@ -2633,7 +2633,7 @@
      "test_known": true,
      "test_saving_usd": -0.07823174999999996,
      "train_known": true,
-     "train_saving_usd": 0.27507435000000013
+     "train_saving_usd": 0.27507434999999997
     },
     {
      "chosen": false,
@@ -2673,7 +2673,7 @@
      "test_known": true,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.27507435000000013
+     "train_saving_usd": 0.27507434999999997
     },
     {
      "chosen": false,
@@ -2688,11 +2688,11 @@
    "test_insufficient_data": false,
    "test_known": true,
    "test_requests": 8,
-   "test_saving_usd": -0.06899624999999995,
+   "test_saving_usd": -0.06899625000000004,
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 7,
-   "train_saving_usd": 0.27507435000000013,
+   "train_saving_usd": 0.27507434999999997,
    "user": "t2"
   },
   {
@@ -2718,7 +2718,7 @@
      "chosen": true,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": -0.08249624999999997,
+     "test_saving_usd": -0.08249625,
      "train_known": true,
      "train_saving_usd": 0.5014349999999996
     },
@@ -2895,7 +2895,7 @@
    "test_insufficient_data": false,
    "test_known": true,
    "test_requests": 7,
-   "test_saving_usd": -0.08249624999999997,
+   "test_saving_usd": -0.08249625,
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 19,
@@ -2911,7 +2911,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.3448574999999998
+     "train_saving_usd": 0.34485750000000004
     },
     {
      "chosen": false,
@@ -2927,7 +2927,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.2331359999999998
+     "train_saving_usd": 0.233136
     },
     {
      "chosen": false,
@@ -3039,7 +3039,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.2331359999999998
+     "train_saving_usd": 0.233136
     },
     {
      "chosen": false,
@@ -3047,7 +3047,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.2331359999999998
+     "train_saving_usd": 0.233136
     },
     {
      "chosen": false,
@@ -3087,7 +3087,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.2331359999999998
+     "train_saving_usd": 0.233136
     },
     {
      "chosen": false,
@@ -3107,7 +3107,7 @@
    "train_insufficient_data": true,
    "train_known": true,
    "train_requests": 4,
-   "train_saving_usd": 0.3448574999999998,
+   "train_saving_usd": 0.34485750000000004,
    "user": "t2"
   },
   {
@@ -3119,7 +3119,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": -0.4204725000000007
+     "train_saving_usd": -0.42047250000000025
     },
     {
      "chosen": false,
@@ -3135,7 +3135,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.9252554999999998
+     "train_saving_usd": 0.9252555000000002
     },
     {
      "chosen": false,
@@ -3279,7 +3279,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.07597124999999982
+     "train_saving_usd": 0.07597125000000027
     },
     {
      "chosen": false,
@@ -3315,7 +3315,7 @@
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 14,
-   "train_saving_usd": 0.9252554999999998,
+   "train_saving_usd": 0.9252555000000002,
    "user": "t2"
   },
   {
@@ -3325,7 +3325,7 @@
      "chosen": false,
      "strategy": "no-cache",
      "test_known": true,
-     "test_saving_usd": -1.7068500000000009,
+     "test_saving_usd": -1.7068499999999998,
      "train_known": true,
      "train_saving_usd": -1.8887542500000007
     },
@@ -3341,7 +3341,7 @@
      "chosen": true,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": 0.08495999999999948,
+     "test_saving_usd": 0.0849599999999997,
      "train_known": true,
      "train_saving_usd": 1.3516672499999984
     },
@@ -3453,7 +3453,7 @@
      "chosen": false,
      "strategy": "keepalive-1h",
      "test_known": true,
-     "test_saving_usd": 0.08495999999999948,
+     "test_saving_usd": 0.0849599999999997,
      "train_known": true,
      "train_saving_usd": 1.1539252499999986
     },
@@ -3461,7 +3461,7 @@
      "chosen": false,
      "strategy": "keepalive-1h-once",
      "test_known": true,
-     "test_saving_usd": 0.08495999999999948,
+     "test_saving_usd": 0.0849599999999997,
      "train_known": true,
      "train_saving_usd": 1.2527962499999985
     },
@@ -3501,9 +3501,9 @@
      "chosen": false,
      "strategy": "sticky-session-1h",
      "test_known": true,
-     "test_saving_usd": 0.08495999999999948,
+     "test_saving_usd": 0.0849599999999997,
      "train_known": true,
-     "train_saving_usd": 0.30239550000000026
+     "train_saving_usd": 0.3023955000000007
     },
     {
      "chosen": false,
@@ -3518,7 +3518,7 @@
    "test_insufficient_data": false,
    "test_known": true,
    "test_requests": 12,
-   "test_saving_usd": 0.08495999999999948,
+   "test_saving_usd": 0.0849599999999997,
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 18,
@@ -3758,7 +3758,7 @@
      "test_known": true,
      "test_saving_usd": 0.5759830499999998,
      "train_known": true,
-     "train_saving_usd": 0.3191704499999992
+     "train_saving_usd": 0.31917044999999966
     },
     {
      "chosen": false,
@@ -3949,7 +3949,7 @@
      "test_known": true,
      "test_saving_usd": -0.31238040000000034,
      "train_known": true,
-     "train_saving_usd": -0.4794793500000005
+     "train_saving_usd": -0.47947934999999964
     },
     {
      "chosen": false,
@@ -3965,7 +3965,7 @@
      "test_known": true,
      "test_saving_usd": 0.8759069999999991,
      "train_known": true,
-     "train_saving_usd": 0.2783407499999999
+     "train_saving_usd": 0.2783407500000008
     },
     {
      "chosen": false,
@@ -4109,7 +4109,7 @@
      "test_known": true,
      "test_saving_usd": -0.5374755000000002,
      "train_known": true,
-     "train_saving_usd": 0.05533964999999963
+     "train_saving_usd": 0.055339650000000074
     },
     {
      "chosen": false,
@@ -4125,7 +4125,7 @@
      "test_known": true,
      "test_saving_usd": -0.10374524999999934,
      "train_known": true,
-     "train_saving_usd": 0.7857562499999999
+     "train_saving_usd": 0.7857562500000004
     },
     {
      "chosen": false,
@@ -4172,7 +4172,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.1862999999999997
+     "train_saving_usd": 0.1862999999999999
     },
     {
      "chosen": true,
@@ -4284,7 +4284,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.1862999999999997
+     "train_saving_usd": 0.1862999999999999
     },
     {
      "chosen": false,
@@ -4292,7 +4292,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.1862999999999997
+     "train_saving_usd": 0.1862999999999999
     },
     {
      "chosen": false,
@@ -4332,7 +4332,7 @@
      "test_known": false,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.1862999999999997
+     "train_saving_usd": 0.1862999999999999
     },
     {
      "chosen": false,
@@ -4378,9 +4378,9 @@
      "chosen": false,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": 0.10222455000000008,
+     "test_saving_usd": 0.10222455,
      "train_known": true,
-     "train_saving_usd": 0.08130119999999996
+     "train_saving_usd": 0.08130119999999974
     },
     {
      "chosen": false,
@@ -4571,7 +4571,7 @@
      "test_known": true,
      "test_saving_usd": -0.2529042000000001,
      "train_known": true,
-     "train_saving_usd": -0.3637255500000003
+     "train_saving_usd": -0.36372555000000073
     },
     {
      "chosen": false,
@@ -4585,9 +4585,9 @@
      "chosen": true,
      "strategy": "fixed-1h",
      "test_known": true,
-     "test_saving_usd": 0.02401439999999999,
+     "test_saving_usd": 0.024014399999999936,
      "train_known": true,
-     "train_saving_usd": 0.8997562499999991
+     "train_saving_usd": 0.8997562499999989
     },
     {
      "chosen": false,
@@ -4747,7 +4747,7 @@
      "test_known": true,
      "test_saving_usd": 0,
      "train_known": true,
-     "train_saving_usd": 0.7463900999999993
+     "train_saving_usd": 0.7463900999999988
     },
     {
      "chosen": false,
@@ -4762,11 +4762,11 @@
    "test_insufficient_data": false,
    "test_known": true,
    "test_requests": 10,
-   "test_saving_usd": 0.02401439999999999,
+   "test_saving_usd": 0.024014399999999936,
    "train_insufficient_data": false,
    "train_known": true,
    "train_requests": 19,
-   "train_saving_usd": 0.8997562499999991,
+   "train_saving_usd": 0.8997562499999989,
    "user": "t2"
   }
  ],
