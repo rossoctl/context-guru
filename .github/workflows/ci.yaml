@@ -21,6 +21,15 @@ on:
     paths-ignore: *non-go-paths
   # Heavy jobs on demand: scripts/release/heavy-ci.sh, or "Run workflow" in the Actions tab.
   workflow_dispatch:
+    inputs:
+      per_test_times:
+        description: "Write the 30 slowest tests to the job summary (runs go test -json)"
+        type: boolean
+        default: false
+  # Tier 3 (RELEASING.md, "Heavy CI on main"): the heavy jobs every 3 hours, when main moved since the
+  # last green heavy run. GitHub runs a cron only from the default branch.
+  schedule:
+    - cron: "17 */3 * * *"
 
 # Cancel a PR run that a newer push to the same PR replaced. Push and schedule runs use the commit sha in the
 # group, so each one has its own group. Without that, GitHub drops a queued run of the same group.
@@ -32,11 +41,34 @@ permissions:
   contents: read
 
 # Lean process (owner decision, 2026-11-24). A PR runs only the fast jobs: lint-build, purego, trivy.
-# The heavy jobs (build-test, record) run only on workflow_dispatch and on a v* tag. The PR owner
-# runs the heavy suites on the laptop (scripts/dev/local-tests.sh); the integrator runs them here
-# on main now and then (RELEASING.md, "Heavy CI on main").
+# The heavy jobs (build-test, record) are tier 3. They run on workflow_dispatch, on a v* tag, and on
+# the 3-hour schedule when main moved since the last green heavy run (job changed-since-green).
+# Option E, approved by the owner on 2026-11-25. The integrator reads the result in the run summary
+# and in the open issue "Heavy CI failed on main" (job report). See RELEASING.md, "Heavy CI on main".
 jobs:
+  # Decides if the scheduled run does any work. The other events always run the heavy jobs.
+  changed-since-green:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        # shell: bash adds -o pipefail, so a failed gh call fails the step and the run goes red.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/changed-since-green.sh "${{ github.event_name }}" "${{ github.sha }}" "${{ github.repository }}" \
+            2> >(tee -a "$GITHUB_STEP_SUMMARY" >&2) | tee -a "$GITHUB_OUTPUT"
+
   lint-build:
+    # Not on the schedule: an unchanged main then costs only changed-since-green.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "1"
@@ -54,7 +86,8 @@ jobs:
         run: make build
 
   build-test:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: changed-since-green
+    if: needs.changed-since-green.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "1"
@@ -73,8 +106,28 @@ jobs:
       - name: OpenCode plugin timing tests
         run: node --test opencode-plugin/test/*.test.mjs
       - name: Test & coverage
+        env:
+          # The scheduled run always writes the time table: -json costs no extra test run. A dispatch
+          # writes it only with per_test_times, so a manual run keeps its readable log.
+          PER_TEST: ${{ github.event_name == 'schedule' || inputs.per_test_times }}
         run: |
-          make cover
+          if [ "$PER_TEST" = true ]; then
+            rc=0
+            GOFLAGS=-json make cover > test.json 2>&1 || rc=$?
+            # Make the log readable again, and write the 30 slowest tests (race, with -coverpkg).
+            grep -v '^{' test.json || true
+            jq -jR 'fromjson? | select(.Action=="output" or .Action=="build-output") | .Output' test.json
+            {
+              echo "### 30 slowest tests (go test -race -json, seconds)"
+              echo '| s | package | test |'
+              echo '| ---: | --- | --- |'
+              jq -rR 'fromjson? | select(.Action=="pass" and .Test != null) | "\(.Elapsed)\t\(.Package)\t\(.Test)"' test.json \
+                | sort -t"$(printf '\t')" -k1,1 -rn | head -30 | awk -F'\t' '{printf "| %s | %s | %s |\n", $1, $2, $3}'
+            } >> "$GITHUB_STEP_SUMMARY"
+            [ "$rc" = 0 ] || exit "$rc"
+          else
+            make cover
+          fi
           # Accurate cross-package total (statement-weighted) → PR/run job summary + log.
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')
           echo "### Test coverage: ${total} (cross-package, statement-weighted)" >> "$GITHUB_STEP_SUMMARY"
@@ -130,6 +183,8 @@ jobs:
   # at a nonexistent path anyway, as a tripwire for the day somebody sets CGO_ENABLED=1 in this job
   # and expects it to still be testing the same thing.
   purego:
+    # Not on the schedule: an unchanged main then costs only changed-since-green.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "0"
@@ -174,7 +229,8 @@ jobs:
   # The default build must stay free of OpenTelemetry, gRPC and protobuf (they add 11.5 MB).
   # Both variants are built and tested here. The guard test runs in the untagged `go test`.
   record:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: changed-since-green
+    if: needs.changed-since-green.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
       # The integrator's run: the timing tests run here (testutil.RequireTiming).
@@ -202,7 +258,58 @@ jobs:
           CGO_ENABLED: "1"
         run: go test -race -timeout 40m -tags cg_record -p 1 ./proxy/... ./internal/record/... ./tenant/... ./proxyapp/...
 
+  # Posts the scheduled heavy run's result where the integrator looks: the run summary, and ONE issue
+  # titled "Heavy CI failed on main". A red run opens it, or adds a comment when it is open. A green
+  # run closes it. Only this job has issues: write.
+  report:
+    needs: [changed-since-green, build-test, record]
+    if: always() && github.event_name == 'schedule' && needs.changed-since-green.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_TEST: ${{ needs.build-test.result }}
+      RECORD: ${{ needs.record.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: Summary, and the one issue
+        run: |
+          title="Heavy CI failed on main"
+          {
+            echo "### Heavy CI (tier 3) on \`${SHA:0:12}\`"
+            echo "- build-test: **$BUILD_TEST**"
+            echo "- record: **$RECORD**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          open=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "[.[] | select(.title == \"$title\")] | first | .number // empty")
+          if [ "$BUILD_TEST" = success ] && [ "$RECORD" = success ]; then
+            [ -z "$open" ] || gh issue close "$open" --comment "Green again on \`${SHA:0:12}\`: $RUN_URL"
+            exit 0
+          fi
+          body=$(mktemp)
+          {
+            echo "The scheduled heavy run failed on main at \`$SHA\`."
+            echo
+            echo "- build-test: **$BUILD_TEST**"
+            echo "- record: **$RECORD**"
+            echo "- Run: $RUN_URL"
+            echo
+            echo "Fix forward with a new PR (RELEASING.md, \"Heavy CI on main\")."
+          } > "$body"
+          if [ -n "$open" ]; then
+            # Comment only when the sha is new: a retry on the same red sha adds nothing.
+            if gh issue view "$open" --json body,comments --jq '[.body, (.comments[].body)] | join("\n")' | grep -qF "$SHA"; then
+              echo "Issue #$open already names $SHA." >> "$GITHUB_STEP_SUMMARY"
+            else gh issue comment "$open" --body-file "$body"; fi
+          else gh issue create --title "$title" --body-file "$body"; fi
+
   trivy:
+    # Not on the schedule: an unchanged main then costs only changed-since-green.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
