@@ -39,7 +39,7 @@ func trainingAgent(t *testing.T, cl agent.Client, provider string) string {
 	})
 	req := &kvcache.Request{ID: 1, User: "t1", ConversationID: "s", TS: 1000, Model: row.Model, Provider: row.Provider, Agent: row.Agent,
 		UpstreamMs: 1000, CostKnown: true, CachedContext: 100000}
-	price := func(string) (float64, float64, float64, float64, bool) { return 5, 25, 0.5, 6.25, true }
+	price := func(model string, promptTokens int64) (float64, float64, float64, float64, bool) { return 5, 25, 0.5, 6.25, true }
 	_, facts := campaign.Rows([]*kvcache.Request{req}, price, false, 1<<60)
 	if len(facts) != 1 {
 		t.Fatalf("campaign.Rows kept %d rows, want 1", len(facts))
