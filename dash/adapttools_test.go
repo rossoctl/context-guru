@@ -427,7 +427,7 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 		return doc
 	}
 	seed := func(filtered int) *AdaptToolsDoc { return seedAt(filtered, adaptPrice) }
-	// A tiered price: above 5,050 tokens every rate is 2x (the one-hour request is 5,000 sent: base without the removed tokens). The read request is 1,000 + 100 removed: base.
+	// A tiered price: above 5,050 tokens every rate is 2x (the one-hour request is 5,010 sent, with FreshInput 10 from mkEvent: base without the removed tokens). The read request is 1,000 + 100 removed: base.
 	// The one-hour request is 5,000 + 100 removed: 2x. Items, total and unattributed still agree.
 	tiered := func(m string) (modelinfo.Price, bool) {
 		p, ok := adaptPrice(m)
