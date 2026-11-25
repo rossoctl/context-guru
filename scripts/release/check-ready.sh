@@ -116,13 +116,14 @@ else
       no "the local-tests marker is the old format (no tier=2), and it stopped counting after $OLD_MARKER_VALID_UNTIL (run scripts/dev/local-tests.sh $pr again)"
     else echo "local tests: pass at the head (old marker, no tier; counts until $OLD_MARKER_VALID_UNTIL)"; fi
   elif [ "$ltier" != 2 ]; then no "the local-tests marker says tier=$ltier; tier=2 is needed"
+  elif [ -z "$lscope" ]; then no "the tier-2 local-tests marker has no scope= (run scripts/dev/local-tests.sh $pr again)"
   elif [ "$lscope" = none ]; then
     # scope=none claims the PR has no Go file. Check it against the PR's files (renames: both names).
     pfiles=$(api "the PR files" api --paginate "repos/$repo/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)')
     real=$(cd "$here" && ./../dev/tier2-steps.sh --classify <<<"$pfiles")
     if [ "$real" = none ]; then echo "local tests: pass at the head (tier 2, scope none)"
     else no "the local-tests marker says scope=none, but the PR changes files of scope $real (run scripts/dev/local-tests.sh $pr again)"; fi
-  else echo "local tests: pass at the head (tier 2, scope ${lscope:-unknown})"; fi
+  else echo "local tests: pass at the head (tier 2, scope $lscope)"; fi
 fi
 
 # Code scanning: the "CodeQL" check run, posted by GitHub's code-scanning app

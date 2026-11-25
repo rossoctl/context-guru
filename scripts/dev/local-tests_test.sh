@@ -160,6 +160,8 @@ mkgh "b" $'<!-- local-tests sha=def456 result=pass tier=2 scope=changed -->\n'; 
 chk tier2-marker-old-head 1 "not the head"
 mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=3 scope=changed -->\n'; run
 chk tier3-marker-refused 1 "tier=2 is needed"
+mkgh "b" $'<!-- local-tests sha=abc123 result=pass tier=2 -->\n'; run
+chk tier2-marker-without-scope-refused 1 "has no scope="
 # scope=none on a PR that changes a Go file, go.mod, a testdata file or a scripts/ file: refused.
 for f in proxy/a.go go.mod x/testdata/in.json scripts/dev/a.sh; do
   printf 'README.md\n%s\n' "$f" > "$d/files.txt"
@@ -203,12 +205,11 @@ rm -f "$d/race-changed.log"
 # ---- tier2-steps.sh: scope, packages and commands, from a diff in a scratch repo (--plan) -----------
 t=$(mktemp -d); trap 'rm -rf "$d" "$r" "$t"' EXIT
 T2=$root/scripts/dev/tier2-steps.sh
-mkdir -p "$root/.tier2-scratch-guard" && rmdir "$root/.tier2-scratch-guard"
 (
   cd "$t" && git init -q . && git config user.email t@t && git config user.name t
-  mkdir -p config leaf pkg/a pkg/a/testdata dash/ui bob-plugin proxy internal/record scripts opencode-plugin/test tools
+  mkdir -p context-guru-plugin config leaf pkg/a pkg/a/testdata dash/ui bob-plugin proxy internal/record scripts opencode-plugin/test tools
   mkdir -p scripts/release && cp "$root/scripts/release/part-a.sh" scripts/release/part-a.sh
-  for p in config leaf pkg/a dash bob-plugin proxy internal/record; do printf 'package x\n' > "$p/x.go"; done
+  for p in context-guru-plugin config leaf pkg/a dash bob-plugin proxy internal/record; do printf 'package x\n' > "$p/x.go"; done
   printf '//go:build cg_record\npackage proxy\n' > proxy/rec.go
   printf 'package dash\nimport "embed"\n//go:embed ui\nvar f embed.FS\n' > dash/ui.go
   printf 'x\n' > dash/ui/app.js; printf 'x\n' > pkg/a/testdata/in.json
@@ -229,17 +230,19 @@ mkdir -p "$root/.tier2-scratch-guard" && rmdir "$root/.tier2-scratch-guard"
   git rm -q leaf/x.go; git commit -qm delpkg; git tag delpkg
   printf 'n2\n' > dash/n.test.mjs; git commit -qam node1; git tag node1
   printf 'p2\n' > opencode-plugin/index.mjs; git commit -qam node2; git tag node2
+  for p in dash context-guru-plugin pkg/a internal/record; do printf 'package x\n//d\n' > $p/x.go; done; git commit -qam dashchange; git tag dashchange
 ) >/dev/null 2>&1
 plan() { (cd "$t" && CG_TIMING_TESTS=0 bash "$T2" --plan --base "$1" --head "$2" 2>&1); }
 pchk() { # <name> <base> <head> <must-have...> : every text must be in the plan; a text starting with ! must not be
   local name=$1 b=$2 h=$3 pl x ok=1; shift 3; pl=$(plan "$b" "$h")
   for x in "$@"; do
     if [ "${x:0:1}" = '!' ]; then grep -qF -- "${x:1}" <<<"$pl" && ok=0
+    elif [ "${x:0:1}" = '=' ]; then grep -qxF -- "${x:1}" <<<"$pl" || ok=0
     else grep -qF -- "$x" <<<"$pl" || ok=0; fi
   done
   if [ "$ok" = 1 ]; then echo "ok   $name"; else echo "FAIL $name"; echo "$pl" | head -20; fails=1; fi
 }
-pchk scope-none base docs "scope: none" "step vet:" "step depguard:" "!test-norace" "!race-changed" "race packages: "$'\n'
+pchk scope-none base docs "scope: none" "step vet:" "step depguard:" "!test-norace" "!race-changed" "=race packages: "
 pchk scope-changed docs gochange "scope: changed" "race packages: ./config ./leaf ./pkg/a" "step race-changed:" "step test-norace:" \
   "-race -timeout 25m -p 2 -skip TestBobReleasePythonSuite ./config ./leaf ./pkg/a"
 # Non-race: tier-1 packages and bob-plugin out; the others in. Timing tests off.
@@ -250,15 +253,28 @@ pchk scope-full script gomod "scope: full" "run: scripts/release/part-a.sh" "!st
 pchk go-mod-in-subdir-is-not-none base docs "scope: none"
 pchk embedded-file-maps-to-package gochange embed "scope: changed" "race packages: ./dash"
 pchk testdata-maps-to-package embed testdata "scope: changed" "race packages: ./pkg/a"
-pchk script-file-is-changed testdata script "scope: changed" "race packages: "$'\n' "!race-changed"
+pchk script-file-is-changed testdata script "scope: changed" "=race packages: " "!race-changed"
 pchk record-off-for-untagged-change tagged untagged "race packages: ./proxy" "!race-record"
 pchk record-on-for-tagged-file gomod tagged "scope: changed" "race packages: ./proxy" "step race-record:" "-tags cg_record" "./proxy"
 pchk record-on-for-internal-record untagged recbob "step race-record:" "-tags cg_record ./internal/record" "race packages: ./bob-plugin ./internal/record"
 pchk deleted-package-skipped delpkg delpkg "scope: none"
-pchk deleted-file-package-skipped recbob delpkg "scope: changed" "race packages: "$'\n' "!./leaf"
+pchk deleted-file-package-skipped recbob delpkg "scope: changed" "=race packages: " "!./leaf"
 pchk node-test-file delpkg node1 "scope: none" "step node-changed: env CG_TIMING_TESTS=0 node --test dash/n.test.mjs"
 pchk node-opencode-all node1 node2 "step node-changed:" "opencode-plugin/test/a.test.mjs"
 pchk node-timing-skipped base docs "skip node-timing (CG_TIMING_TESTS=0)"
+# Time limits (the same as scripts/release/part-a.sh): dash 40m alone, the plugin 30m alone, the
+# record set 40m, the rest 25m. A dash change must not get the default limit.
+pchk dash-gets-40m node2 dashchange "step race-dash: env CGO_ENABLED=1 go test -race -timeout 40m -p 2 ./dash" \
+  "step race-plugin: env CGO_ENABLED=1 go test -race -timeout 30m -p 2 ./context-guru-plugin" \
+  "step race-changed: env CGO_ENABLED=1 go test -race -timeout 25m -p 2 -skip TestBobReleasePythonSuite ./internal/record ./pkg/a" \
+  "step race-record: env CGO_ENABLED=1 go test -race -timeout 40m -p 2 -tags cg_record ./internal/record"
+# The limits in the script equal the ones in part-a.sh.
+for pair in "RACE_TIMEOUT_DASH race-dash" "RACE_TIMEOUT_PLUGIN race-plugin" "RACE_TIMEOUT_RECORD race-record"; do
+  set -- $pair
+  mine=$(sed -n "s/^$1=//p" scripts/dev/tier2-steps.sh)
+  theirs=$(grep -E "^step $2 " scripts/release/part-a.sh | grep -oE -- '-timeout [0-9]+m' | awk '{print $2}')
+  if [ -n "$mine" ] && [ "$mine" = "$theirs" ]; then echo "ok   $1 = part-a.sh $2 ($mine)"; else echo "FAIL $1 = $mine, part-a.sh $2 = $theirs"; fails=1; fi
+done
 # The env limits in the plan.
 pchk load-limits base docs "GOFLAGS=-p=2 GOMAXPROCS=4"
 # classify: file names on stdin.
@@ -271,6 +287,18 @@ done
 ci=$(grep -oE 'go test [^|]*\./config/\.\.\.[^|]*$' .github/workflows/ci.yaml | grep -oE '\./[a-z]+/\.\.\.' | sed -E 's|\./([a-z]+)/\.\.\.|\1|' | sort | tr '\n' ' ')
 me=$(sed -n "s/^TIER1_RE='\^\\\\.\/(\(.*\))(\/|\$)'/\1/p" scripts/dev/tier2-steps.sh | tr '|' '\n' | sort | tr '\n' ' ')
 if [ -n "$ci" ] && [ "$ci" = "$me" ]; then echo "ok   tier1-list-matches-ci ($ci)"; else echo "FAIL tier1-list-matches-ci (ci='$ci' script='$me')"; fails=1; fi
+
+# ---- scope full: part-a.sh runs without the tier-2 load limits ---------------------------------------
+fa=$d/fake-part-a.sh
+cat > "$fa" <<'FAKEA'
+#!/bin/sh
+echo "GOFLAGS=[$GOFLAGS] GOMAXPROCS=[${GOMAXPROCS-unset}] TIMING=[$CG_TIMING_TESTS]" > "$FAKE_ENV"
+printf 'commit x\nok      vet\nDONE rc=0\n' > "$1/summary.txt"
+FAKEA
+chmod +x "$fa"; rm -f "$d/fake.env"
+(cd "$t" && env -u GOMAXPROCS GOFLAGS=-vet=off CG_PART_A="$fa" FAKE_ENV="$d/fake.env" CG_TIMING_TESTS=0 bash "$T2" --base docs --head gomod "$d/out-full" >/dev/null 2>&1)
+if [ "$(cat "$d/fake.env" 2>/dev/null)" = "GOFLAGS=[-vet=off] GOMAXPROCS=[unset] TIMING=[0]" ] && grep -q '^scope full' "$d/out-full/summary.txt" && grep -q '^ok      vet' "$d/out-full/summary.txt"; then
+  echo "ok   scope-full-part-a-has-no-load-limits"; else echo "FAIL scope-full-part-a-has-no-load-limits: $(cat "$d/fake.env" 2>/dev/null)"; fails=1; fi
 
 # ---- tier2-steps.sh run mode, with a fake go: the rerun of the failed packages only -----------------
 fg=$d/fakego.sh

@@ -33,6 +33,7 @@
 #
 # CG_TIMING_TESTS: as part-a.sh (default 1 there). local-tests.sh sets it. Go test steps of the
 # non-race step always run with 0.
+# CG_PART_A: the part-a.sh to call for scope full (for the tests).
 # GO: the go binary (default: go on PATH, else /usr/local/go/bin/go).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -42,6 +43,14 @@ cd "$root" || exit 2
 # Packages that the CI job "purego" already tests without -race (ci.yaml): config, components,
 # apply, proxy, store. A drift test in local-tests_test.sh keeps this in step with the workflow.
 TIER1_RE='^\./(config|components|apply|proxy|store)(/|$)'
+# -race time limits per package. They match scripts/release/part-a.sh (race-dash 40m, race-plugin 30m,
+# race-record 40m): on a loaded laptop dash took 1507-1514 s and hit 25m twice (#1381). The limit
+# is per test binary, so dash and the plugin run in their own "go test" call. Every other package
+# gets the default. If part-a.sh changes a limit, change it here too.
+RACE_TIMEOUT_DEFAULT=25m
+RACE_TIMEOUT_DASH=40m
+RACE_TIMEOUT_PLUGIN=30m
+RACE_TIMEOUT_RECORD=40m
 # Packages whose tests change with the build tag cg_record (the old race-record step).
 RECORD_RE='^\./(proxy|proxyapp|internal/record|tenant)(/|$)'
 
@@ -121,6 +130,16 @@ if [ "$scope" = changed ]; then
   fi
 fi
 
+# Split the race set: dash and the plugin each get their own step and limit.
+racedash=(); raceplug=(); racerest=()
+for p in "${race[@]+"${race[@]}"}"; do
+  case $p in
+    ./dash) racedash+=("$p") ;;
+    ./context-guru-plugin) raceplug+=("$p") ;;
+    *) racerest+=("$p") ;;
+  esac
+done
+
 # The cg_record variant: a changed file (now or at the base) with a //go:build line that names
 # cg_record, or any file of internal/record.
 record=0; recpk=()
@@ -167,6 +186,7 @@ if [ "$scope" != full ]; then
 fi
 
 GO=${GO:-$(command -v go || echo /usr/local/go/bin/go)}
+GOFLAGS_ORIG=${GOFLAGS-}; GOMAXPROCS_ORIG=${GOMAXPROCS-}
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=2" GOMAXPROCS=4
 export CG_TIMING_TESTS=${CG_TIMING_TESTS-1}
 SKIPBOB=(-skip TestBobReleasePythonSuite)
@@ -177,7 +197,7 @@ if [ "$scope" = full ]; then
   while IFS= read -r s; do names+=("$s"); done < <(grep -oE '^[[:space:]]*step [a-z0-9-]+' scripts/release/part-a.sh | awk '{print $2}')
 else
   names=(vet build-purego build-record vet-record depguard)
-  [ "$scope" = none ] || { [ "${#norace[@]}" -eq 0 ] || names+=(test-norace); [ "${#race[@]}" -eq 0 ] || names+=(race-changed); [ "$record" = 0 ] || names+=(race-record); }
+  [ "$scope" = none ] || { [ "${#norace[@]}" -eq 0 ] || names+=(test-norace); [ "${#racerest[@]}" -eq 0 ] || names+=(race-changed); [ "${#racedash[@]}" -eq 0 ] || names+=(race-dash); [ "${#raceplug[@]}" -eq 0 ] || names+=(race-plugin); [ "$record" = 0 ] || names+=(race-record); }
   [ "${#nodefiles[@]}" -eq 0 ] || names+=(node-changed)
   names+=(node-timing)
 fi
@@ -194,8 +214,11 @@ define_step() { # sets P and K for a step name
     vet-record)   P=("$GO" vet -tags cg_record ./...) ;;
     depguard)     P=(env CGO_ENABLED=0 "$GO" test -run TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf -count=1 ./proxyapp/) ;;
     test-norace)  P=(env CGO_ENABLED=0 CG_TIMING_TESTS=0 "$GO" test -timeout 30m -p 2 "${SKIPBOB[@]}"); K=("${norace[@]}") ;;
-    race-changed) P=(env CGO_ENABLED=1 "$GO" test -race -timeout 25m -p 2 "${SKIPBOB[@]}"); K=("${race[@]}") ;;
-    race-record)  P=(env CGO_ENABLED=1 "$GO" test -race -timeout 25m -p 2 -tags cg_record); K=("${recpk[@]}") ;;
+    race-changed) P=(env CGO_ENABLED=1 "$GO" test -race -timeout "$RACE_TIMEOUT_DEFAULT" -p 2 "${SKIPBOB[@]}"); K=("${racerest[@]}") ;;
+    race-dash)    P=(env CGO_ENABLED=1 "$GO" test -race -timeout "$RACE_TIMEOUT_DASH" -p 2); K=("${racedash[@]}") ;;
+    race-plugin)  P=(env CGO_ENABLED=1 "$GO" test -race -timeout "$RACE_TIMEOUT_PLUGIN" -p 2); K=("${raceplug[@]}") ;;
+    # Part A runs this with -p 1; tier 2 uses -p 2 (the load limit) and the same 40m limit.
+    race-record)  P=(env CGO_ENABLED=1 "$GO" test -race -timeout "$RACE_TIMEOUT_RECORD" -p 2 -tags cg_record); K=("${recpk[@]}") ;;
     node-changed) P=(env CG_TIMING_TESTS=0 node --test "${nodefiles[@]}") ;;
     node-timing)  P=(env CG_TIMING_TESTS=1 node --test "opencode-plugin/test/*.test.mjs") ;;
   esac
@@ -250,7 +273,7 @@ trun() {
 # cpu_line <step>: add up the user and system time of the step's runs, and the biggest memory.
 cpu_line() {
   local f=() t
-  for t in "$out/$1.time" "$out/$1.rerun.time"; do [ -s "$t" ] && f+=("$t"); done
+  for t in "$out/$1.time" "$out/$1".rerun*.time; do [ -s "$t" ] && f+=("$t"); done
   [ "${#f[@]}" -gt 0 ] || return 0
   awk -v n="$1" '
     / real +[0-9.]+ user +[0-9.]+ sys/ || / user .* sys/ { u+=$3; s+=$5 }
@@ -275,7 +298,7 @@ step() {
   local name=$1 log=$out/$1.log
   define_step "$name"
   if trun "$log" "$out/$name.time" "${P[@]}" "${K[@]+"${K[@]}"}"; then echo "ok      $name" >> "$sum"; cpu_line "$name"; return; fi
-  local rr=$out/$name.rerun.log r=0 reran=0
+  local rr=$out/$name.rerun.log r=0 reran=0 nrr=0
   : > "$rr"
   if [ "${#K[@]}" -gt 0 ]; then
     local pk tests part
@@ -283,13 +306,14 @@ step() {
       [ -n "$pk" ] || continue
       if [ "$tests" = "*" ]; then set -- "${P[@]}" "$pk"; else set -- "${P[@]}" -run "^($tests)\$" "$pk"; fi
       part=$out/$name.rerun.part; reran=1
-      trun "$part" "$out/$name.rerun.time" "$@" || r=1
+      nrr=$((nrr+1))
+      trun "$part" "$out/$name.rerun$nrr.time" "$@" || r=1
       cat "$part" >> "$rr"; rm -f "$part"
     done < <(failed_pkgs "$log")
     # A failure with no "FAIL <pkg>" line (a crash before any package ran) reruns the whole step.
-    if [ "$reran" = 0 ]; then trun "$rr" "$out/$name.rerun.time" "${P[@]}" "${K[@]}" || r=1; fi
+    if [ "$reran" = 0 ]; then trun "$rr" "$out/$name.rerun0.time" "${P[@]}" "${K[@]}" || r=1; fi
   else
-    trun "$rr" "$out/$name.rerun.time" "${P[@]}" || r=1
+    trun "$rr" "$out/$name.rerun0.time" "${P[@]}" || r=1
   fi
   cpu_line "$name"
   if [ "$r" = 0 ]; then echo "flaky   $name (passed on the 2nd run; see $name.log)" >> "$sum"; return; fi
@@ -300,7 +324,8 @@ step() {
 if [ "$scope" = full ]; then
   # Today's full suite. part-a.sh writes its own summary: run it in a sub-directory, then merge.
   mkdir -p "$out/part-a"
-  CG_TIMING_TESTS=$CG_TIMING_TESTS "$here/../release/part-a.sh" "$out/part-a" || true
+  # The load limits are for tier 2 only: Part A runs with the caller's own GOFLAGS and GOMAXPROCS.
+  env -u GOMAXPROCS ${GOMAXPROCS_ORIG:+GOMAXPROCS=$GOMAXPROCS_ORIG} GOFLAGS="$GOFLAGS_ORIG" CG_TIMING_TESTS=$CG_TIMING_TESTS "${CG_PART_A:-$here/../release/part-a.sh}" "$out/part-a" || true
   grep -vE '^(commit|timing-tests|DONE) ' "$out/part-a/summary.txt" >> "$sum"
   prc=$(sed -n 's/^DONE rc=//p' "$out/part-a/summary.txt" | tail -1)
   rc=${prc:-1}

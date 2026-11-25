@@ -140,7 +140,7 @@ body=$(mktemp "${TMPDIR:-/tmp}/local-tests-body.XXXXXX")
   echo "$timing_line"
   if [ -n "$scope" ]; then
     echo "scope: $scope"
-    echo "race packages: ${racepk:-none}"
+    if [ "$scope" = full ]; then echo "race packages: all (the full suite of part-a.sh)"; else echo "race packages: ${racepk:-none}"; fi
   fi
   if [ -n "$cpu" ]; then
     echo
