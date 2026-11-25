@@ -295,7 +295,7 @@ Labels in this section:
 |---|---|---|---|---|
 | `llm_savings_saved_tokens_total` | counter | 1 | `kind`, `tier`, `component` | Tokens the provider did not bill, by tier. |
 | `llm_savings_added_tokens_total` | counter | 1 | `kind`, `tier`, `component` | Tokens the provider billed because of a change. |
-| `llm_savings_saved_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. |
+| `llm_savings_saved_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. When the host's `Pricer` also has `PriceAt`, each side is priced at its own prompt size: the full bill difference, with the tokens that stay and the output re-rated. Context-guru has `PriceAt`, as the dashboard does. |
 | `llm_savings_added_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_added` priced the same way. |
 | `llm_savings_cache_effect_usd_total` | counter | none | `effect`, `cause`, `direction` | Cache effects: `effect` is `break`, `rescue`, `split`, `ttl_premium`, `ttl_rescue`. `direction` is `saved` or `added`. `cause` is `model_changed`, `ended_change` or `none`. |
 | `llm_savings_baseline_usd_total` | counter | none | `model` | What the traffic would have cost with no change. |
