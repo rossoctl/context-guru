@@ -416,8 +416,8 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.shell.interactive_calls, [])
         record = install_opencode.record_path().read_text()
-        self.assertEqual(json.loads(record)["login_started"], "anthropic-gateway")
-        self.assertNotIn("KEY", record.replace("_KEY", ""))
+        self.assertEqual(json.loads(record)["key_written"], "anthropic-gateway")
+        self.assertNotIn('"KEY"', record)
 
     def test_the_key_check_lists_the_claude_models_and_defaults_to_sonnet_and_haiku(self):
         connection = self.installer("2", "https://gw.example", "", "KEY", "", "").ask_connection(
@@ -486,8 +486,8 @@ class InstallerTest(unittest.TestCase):
 
         self.installer("y").uninstall()
 
-        self.assertEqual(self.logouts(), [["opencode", "auth", "logout", "anthropic-gateway"]])
-        self.assertEqual(self.auth()["anthropic"], {"type": "api", "key": "DIRECT"})
+        self.assertEqual(self.logouts(), [])  # the installer removes the key it wrote, from auth.json itself
+        self.assertEqual(self.auth(), {"anthropic": {"type": "api", "key": "DIRECT"}})
         self.assertEqual([url for url, _ in self.web.calls], ["https://gw.example/v1/models"])
 
     def test_an_existing_direct_login_skips_the_login(self):
@@ -676,6 +676,116 @@ class InstallerTest(unittest.TestCase):
         self.installer("1", "y", "n").install()
 
         self.assertNotIn("context-guru is off in", self.terminal.text())
+
+    # -------------------------------------------------------------------- review round 1
+    def test_the_key_check_does_not_follow_a_redirect(self):
+        # A real Web, two local servers: the gateway answers 302 to a second host, which must get no key.
+        import http.server, threading
+        seen = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(dict(self.headers))
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"data": []}')
+
+            def log_message(self, *args):
+                pass
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+        class Gateway(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/v1/models")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        gateway = http.server.HTTPServer(("127.0.0.1", 0), Gateway)
+        for server in (target, gateway):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.shutdown)
+
+        status, _ = install_opencode.Web().get(f"http://127.0.0.1:{gateway.server_port}/v1/models",
+                                               {"x-api-key": "SECRET", "Authorization": "Bearer SECRET"})
+
+        self.assertEqual(status, 302)
+        self.assertEqual(seen, [])
+
+    def test_an_agent_model_of_the_same_format_stops_before_any_change(self):
+        before = {"agent": {"plan": {"model": "anthropic/claude-sonnet-5-5"}}}
+        self.write("opencode.json", before)
+
+        code = self.installer("2", "https://gw.example", "").install()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read("opencode.json"), before)
+        self.assertIn('the anthropic provider "anthropic"', self.terminal.text())
+
+    def test_uninstall_removes_the_gateway_key_from_the_key_file_and_keeps_the_others(self):
+        self.write_auth({"anthropic": {"type": "api", "key": "DIRECT"}})
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.auth(), {"anthropic": {"type": "api", "key": "DIRECT"}})
+
+    def test_undo_removes_the_gateway_key_from_the_key_file(self):
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        installer = self.installer()
+        installer.record = json.loads(install_opencode.record_path().read_text())
+        installer.undo()
+
+        self.assertEqual(self.auth(), {})
+
+    def test_a_gateway_key_that_existed_before_stays_after_uninstall(self):
+        self.write_auth({"anthropic-gateway": {"type": "api", "key": "OLD"}})
+        self.installer("2", "https://gw.example", "", "n", "NEW", "m", "s", "y", "n").install()  # saved key: no
+
+        self.installer("y").uninstall()
+
+        self.assertEqual(self.auth(), {"anthropic-gateway": {"type": "api", "key": "NEW"}})
+        self.assertIn("anthropic-gateway", self.terminal.text())
+
+    def test_the_key_file_stays_a_symlink(self):
+        real = Path(self.home.name) / "dotfiles/auth.json"
+        real.parent.mkdir()
+        real.write_text("{}")
+        link = Path(os.environ["XDG_DATA_HOME"]) / "opencode/auth.json"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(real)
+
+        self.installer(*self.GATEWAY, "y", "n").install()
+
+        self.assertTrue(link.is_symlink())
+        self.assertIn("anthropic-gateway", json.loads(real.read_text()))
+
+    def test_ctrl_c_at_the_direct_login_offers_undo(self):
+        self.shell.logins = set()
+        self.shell.interactive = mock.Mock(side_effect=KeyboardInterrupt())
+
+        code = self.installer("1", "y", "y").install()  # path, consent, undo
+
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.read("opencode.json"))
+        self.assertNotIn("Nothing more was changed", self.terminal.text())
+
+    def test_a_key_with_a_control_character_is_refused_and_never_shown(self):
+        connection = self.installer("2", "https://gw.example", "", "BAD\rKEY", "GOOD", "m", "s").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual(connection.provider, "anthropic-gateway")
+        self.assertNotIn("BAD", self.terminal.text())
+        self.assertEqual(self.web.calls[0][1]["x-api-key"], "GOOD")
+
+    def test_the_small_model_default_without_haiku_is_the_model(self):
+        self.web.models = ["aws/claude-opus-x", "aws/claude-sonnet-x"]
+
+        connection = self.installer("2", "https://gw.example", "", "KEY", "", "").ask_connection({"opencode.json": {}})
+
+        self.assertEqual((connection.model, connection.small_model), ("aws/claude-sonnet-x", "aws/claude-sonnet-x"))
 
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):

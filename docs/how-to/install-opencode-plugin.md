@@ -70,8 +70,9 @@ It adds the provider `anthropic-gateway` (or `openai-gateway`) to `opencode.json
 key, and that key never goes to the gateway.
 
 The key goes to OpenCode's own key file (`~/.local/share/opencode/auth.json`, mode 0600), as
-`opencode auth login` would write it. Uninstall removes that entry (with `opencode auth logout`), and only when
-the installer wrote it.
+`opencode auth login` would write it. Uninstall removes that entry, and only when the installer added it. A key
+that OpenCode had for the gateway before the install stays. The key check never follows a redirect, so the key
+goes to the gateway URL only.
 
 For a scripted install, these variables answer the questions in advance:
 

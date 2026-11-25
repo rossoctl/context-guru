@@ -226,8 +226,10 @@ installer, and picked this way (B) over "log in yourself in a second terminal" (
 **Where the key goes.** After the consent yes, in the step "Your key" (it replaces "Login" on this path), the
 installer adds `{"<gateway id>": {"type": "api", "key": "<key>"}}` to OpenCode's key file
 (`$XDG_DATA_HOME/opencode/auth.json`, default `~/.local/share/opencode/auth.json`). It writes atomically, with
-mode 0600, and keeps the other entries. The record keeps the gateway ID only (`login_started`). Uninstall
-and undo run `opencode auth logout <id>`, as before.
+mode 0600, and keeps the other entries. The record keeps the gateway ID only (`key_written`). Uninstall
+and undo remove that entry from the key file directly, as the inverse of the write (review round 1: a
+`logout` run with no terminal and an unread exit code could leave the key). A key that was there before the
+install stays (`key_kept`). The key check does not follow a redirect.
 
 **What the installer never does with the key.** It never prints it, logs it, puts it in the record or in
 `opencode.json`, puts it in an error message, or sends it to a host other than the gateway URL. The canary

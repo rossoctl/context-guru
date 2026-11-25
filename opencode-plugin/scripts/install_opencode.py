@@ -26,7 +26,7 @@ import tempfile
 from typing import Optional
 from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 OPENCODE_NPM = "opencode-ai"
 TESTED_OPENCODE = "1.19.6"  # only named in a note: the installer installs the latest, as the Pi installer does
@@ -82,17 +82,39 @@ def auth_path():
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode/auth.json"
 
 
-def write_key(provider, key):
-    """Add one API key to OpenCode's key file, as `opencode auth login` does: atomic, mode 0600, other entries
-    stay."""
+def read_keys():
     path = auth_path()
-    keys = load_json(path) if path.exists() else {}
-    keys[provider] = {"type": "api", "key": key}
+    if not path.exists() or not path.read_text().strip():
+        return {}
+    try:
+        keys = json.loads(path.read_text())
+    except ValueError:
+        raise Stop(f"{path}, OpenCode's key file, is not valid JSON. Fix or move it, then run this again.") from None
+    return keys if isinstance(keys, dict) else {}
+
+
+def save_keys(keys):
+    """OpenCode's key file, as `opencode auth login` writes it: atomic, mode 0600. A symlink stays: the write goes
+    to the file it points to."""
+    path = Path(os.path.realpath(auth_path()))
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=".auth.json.")  # mkstemp makes 0600
     with os.fdopen(descriptor, "w") as handle:
         handle.write(json.dumps(keys, indent=2) + "\n")
     os.replace(temp, path)
+
+
+def write_key(provider, key):
+    """Add one API key to OpenCode's key file. The other entries stay."""
+    save_keys({**read_keys(), provider: {"type": "api", "key": key}})
+
+
+def remove_key(provider):
+    """Remove one entry from OpenCode's key file, the inverse of write_key. The other entries stay."""
+    keys = read_keys()
+    if provider in keys:
+        del keys[provider]
+        save_keys(keys)
 
 
 def plugin_dir():
@@ -272,12 +294,19 @@ class Shell:
             return subprocess.CompletedProcess(cmd, 124, "", f"{cmd[0]}: no answer in 10 minutes")
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """A redirect would copy the key headers to the new host, also over http. So a 3xx stays a 3xx."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 class Web:
-    """One HTTPS GET to the gateway. TLS is always checked."""
+    """One HTTPS GET to the gateway. TLS is always checked. A redirect is not followed."""
 
     def get(self, url, headers):
         try:
-            with urlopen(Request(url, headers=headers), timeout=20) as answer:
+            with build_opener(_NoRedirect).open(Request(url, headers=headers), timeout=20) as answer:
                 return answer.status, answer.read().decode(errors="replace")
         except HTTPError as error:
             return error.code, ""
@@ -359,9 +388,17 @@ class Installer:
             api = {"1": "anthropic", "2": "openai"}.get(answer, answer)
         provider = GATEWAYS[api][0]
         # The plugin refuses two upstreams of one API format, and then routes nothing.
-        for other in (documents["opencode.json"].get("provider") or {}):
+        document = documents["opencode.json"]
+        providers = document.get("provider") if isinstance(document.get("provider"), dict) else {}
+        # The plugin routes each provider id of `provider` and of every agent model (index.js modelProviderIds).
+        # `model` and `small_model` are not counted: the installer writes them.
+        agents = document.get("agent") if isinstance(document.get("agent"), dict) else {}
+        agent_ids = [agent["model"].split("/", 1)[0] for agent in agents.values()
+                     if isinstance(agent, dict) and isinstance(agent.get("model"), str) and "/" in agent["model"]]
+        for other in dict.fromkeys([*providers, *agent_ids]):
             if other != provider and dialect(other) == api:
-                base = ((documents["opencode.json"]["provider"][other] or {}).get("options") or {}).get("baseURL")
+                entry = providers.get(other)
+                base = ((entry.get("options") or {}) if isinstance(entry, dict) else {}).get("baseURL")
                 raise Stop(f"OpenCode's config already has the {api} provider \"{other}\""
                            f"{f' at {base}' if base else ''}. context-guru routes one {api} upstream only, so it "
                            f"cannot add {url} too. Remove \"{other}\" from {config_dir() / 'opencode.json'}, "
@@ -383,7 +420,8 @@ class Installer:
     def check_key(self, url, api, provider):
         """Ask for the key (or offer OpenCode's saved one) and check it with the gateway's model list. Returns the
         model ids, or [] when the list cannot be read. The key stays in self.key."""
-        saved = ((load_json(auth_path()) if auth_path().exists() else {}).get(provider) or {}).get("key")
+        saved = (read_keys().get(provider) or {}).get("key")
+        self.key_existed = bool(saved)
         if saved and self.yes(f"Use the key that OpenCode has for {provider}?", default=True):
             self.key, self.key_is_new = saved, False
         else:
@@ -393,6 +431,11 @@ class Installer:
             if self.key is None:
                 self.key = self.terminal.secret(
                     "Your key for this gateway (the input is hidden: paste it, then press Enter):")
+            if any(ord(char) < 32 or ord(char) == 127 for char in self.key):
+                # http.client would refuse the header with an error that holds the key.
+                self.terminal.say("The key has a control character (for example a line break). Paste it again.")
+                self.key = None
+                continue
             try:
                 status, body = self.web.get(f"{url}/models", {"x-api-key": self.key, "anthropic-version": "2023-06-01",
                                                                "Authorization": f"Bearer {self.key}"})
@@ -422,7 +465,7 @@ class Installer:
     def pick(self, question, models, prefer, fallback=None):
         """A model: a number from the list, or a name. The default is the first id with a `prefer` word."""
         default = next((model for model in models for word in prefer if word in model.lower()),
-                       models[0] if models else fallback)
+                       fallback or (models[0] if models else None))
         while True:
             hint = f" [{models.index(default) + 1} = {default}]" if default in models else (
                 f" [{default}]" if default else " (for example aws/claude-sonnet-5-5)")
@@ -592,7 +635,8 @@ class Installer:
             self.step("Login", "The gateway key goes to OpenCode's own key file. It is shown nowhere.")
             if self.key_is_new:
                 write_key(gateway, self.key)
-                self.record["login_started"] = gateway
+                # A key that was there before the install stays at uninstall; only one the installer added goes.
+                self.record["key_kept" if self.key_existed else "key_written"] = gateway
                 self.save_record()
             self.terminal.say(f"✓ OpenCode has the key for {gateway} ({auth_path()}).")
             return
@@ -605,7 +649,10 @@ class Installer:
                           "follow its steps.\nFor a company gateway, press Ctrl-C and run the installer again with "
                           "choice 2.")
         before = self.logins()
-        self.shell.interactive(["opencode", "auth", "login"])
+        try:
+            self.shell.interactive(["opencode", "auth", "login"])
+        except KeyboardInterrupt:  # the text above tells the user to press it; then the undo offer comes
+            self.terminal.say("")
         after = self.logins()
         if wanted & after:
             self.record["login_started"] = sorted(wanted & after)[0]
@@ -628,6 +675,8 @@ class Installer:
             shutil.rmtree(self.record["plugin"], ignore_errors=True)
         if self.record.get("login_started"):
             self.shell.run(["opencode", "auth", "logout", self.record["login_started"]])
+        if self.record.get("key_written"):
+            remove_key(self.record["key_written"])
         shutil.rmtree(backup_dir(), ignore_errors=True)
         if self.record.get("opencode_installed"):
             self.record = {"opencode_installed": True}
@@ -732,6 +781,14 @@ class Installer:
             by_hand = self.revert(record)
             if record.get("login_started"):
                 self.shell.run(["opencode", "auth", "logout", record["login_started"]])
+            if record.get("key_written"):
+                try:
+                    remove_key(record["key_written"])
+                except Stop:
+                    by_hand.append(f"{auth_path()}: remove the \"{record['key_written']}\" entry by hand")
+            if record.get("key_kept"):
+                self.terminal.say(f"The key for {record['key_kept']} stays in {auth_path()}: it was there before the "
+                                  "install.")
             if record.get("plugin"):
                 shutil.rmtree(record["plugin"], ignore_errors=True)
                 try:
