@@ -690,7 +690,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// The Bob IDE's X-Task-Id header is an explicit id, like the session header. So the
 			// grace alias of a Bob IDE session is the content hash.
 			// alias (above) is always the bare content hash. It keys the cold decision's own
-			// clocks (aliasSeen, sessionTTL, RecordCacheTouch).
+			// clocks (aliasSeenState, sessionTTL, RecordCacheTouch).
 			graceAlias := graceAliasID(o.Tenant, body, norm)
 			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
 			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
@@ -720,10 +720,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// timestamp sitting unread in the store. Four turns, header present on 2 and 3:
 			// ColdCache came out [false false false TRUE] with the entry 60 s old.
 			//
-			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
+			// Reading a key we also write is safe: aliasSeenState reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
 			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
-			// so load them before aliasSeen reads. alias and sessionID are declared above,
+			// so load them before aliasSeenState reads. alias and sessionID are declared above,
 			// beside the grace keys — the merge keeps #770's call on the bare-hash alias.
 			if alias != sessionID {
 				loadSessionState(st, alias)
@@ -1354,34 +1354,6 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 	return time.Duration(nowMs-prevAtMs)*time.Millisecond >= ttl+coldMargin
 }
 
-// aliasSeen records activity against a content-derived session id and returns when that id
-// was last seen, or 0 if never. It is the second clock the cold decision consults.
-//
-// Deliberately NOT the Tracker: TurnAt runs the transcript length through modes.Boundary,
-// which counts a compaction reset, so recording a second key per request double-counted that
-// metric. This needs only a timestamp, and the store already holds per-session state.
-//
-// Pinned against LRU (store.SeenPrefix) because losing it makes a warm prefix read cold.
-//
-// ponytail: degrades to 0 on a store that cannot persist, which just restores the old
-// single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
-// clock ever needs the boundary too.
-func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
-	at, _ := aliasSeenTier(st, alias, nowMs)
-	return at
-}
-
-// aliasSeenTier is aliasSeen that also returns the tier of the touch it replaced: true when that touch was a
-// keep-alive request that left the entry at the 1-hour tier (RecordCacheTouchAliasTier).
-//
-// A REAL request writes the plain clock, with no tier. So the tier lives exactly until the next real
-// request, as the clock does, and one record carries the time and the tier of the last touch: they cannot
-// disagree.
-func aliasSeenTier(st store.Store, alias string, nowMs int64) (prev int64, prevOneHour bool) {
-	v := aliasSeenState(st, alias, nowMs)
-	return v.at, v.oneHour
-}
-
 // seenState is what a cg:seen: value says about the last touch.
 type seenState struct {
 	at      int64 // the time of the last touch
@@ -1398,7 +1370,16 @@ type seenState struct {
 	seq int64
 }
 
-// aliasSeenState reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
+// aliasSeenState records activity against a content-derived session id and returns the last touch of that id (zero
+// if never seen). It is the second clock the cold decision consults. It is deliberately NOT the Tracker: TurnAt runs
+// the transcript length through modes.Boundary, which counts a compaction reset, so recording a second key per
+// request double-counted that metric. The state is pinned against LRU (store.SeenPrefix) because losing it makes a
+// warm prefix read cold. On a store that cannot persist it degrades to zero.
+//
+// The tier lives exactly until the next real request, as the clock does: a REAL request writes the plain clock,
+// with no tier, so one record carries the time and the tier of the last touch.
+//
+// It reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
 // that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
 // provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
 // accepted (ConfirmRealTouch, the keeper's Record). The store value is the ONE record of the fact: the keeper
@@ -1574,7 +1555,7 @@ func RouteTag(route string) string {
 // # Why the alias and not the session id
 //
 // Because the provider's entry is keyed on CONTENT, and this must land on the key apply's own
-// aliasSeen will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
+// aliasSeenState will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
 // is what makes the two impossible to drift apart — a second derivation of a cache key is how the
 // cold decision and the dashboard came to disagree once already.
 //

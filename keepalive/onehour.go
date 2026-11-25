@@ -425,6 +425,21 @@ func (k *Keeper) StoreOffPing(alias string) (atMs int64, ok bool) {
 	return atMs, ok
 }
 
+// endStoreOffPings ends the free 1-hour pings whose record is the keeper's own (store.Keeps is false) for this alias:
+// the end of storeOffAt, as apply.ConfirmRealTouch is for the stored clock. A thread with a real store is left alone.
+func (k *Keeper) endStoreOffPings(alias string) {
+	if k == nil || alias == "" {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for id, t := range k.oneHourThreads {
+		if t.alias == alias && !store.Keeps(t.st) {
+			delete(k.oneHourThreads, id)
+		}
+	}
+}
+
 // OneHourTouch is what the dashboard needs of it.
 type OneHourTouch struct {
 	At time.Time

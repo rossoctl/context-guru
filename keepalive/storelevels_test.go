@@ -188,3 +188,44 @@ func TestABypassedAcceptedRequestDoesNotEndTheStoreOffPing(t *testing.T) {
 		})
 	}
 }
+
+// An accepted return under the OTHER session-id shape ends the store-off ping too (#1390). A has the session header
+// and gets the free 1-hour ping. B is the same conversation without the header, so its key differs from the
+// ping thread's key. With a store the stored clock (by alias) ends at B. With the store off the keeper's record
+// must end at B as well, by alias, so the cold check reads as it does with a Memory store.
+func TestAnAcceptedReturnUnderTheOtherSessionIdEndsTheStoreOffPing(t *testing.T) {
+	run := func(st store.Store) (ended, cold bool) {
+		r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+		r.st = st
+		r.session = "client-session-S" // request A carries the header
+		proveRoute(r.k)
+		t0 := r.clock.now()
+		r.request(t0)
+		r.record(t0, "end_turn", onWaitPolicy())
+		r.clock.advance(240 * time.Second)
+		r.k.Sweep(r.clock.now())
+		waitPings(t, r.k, 1)
+		r.session = "" // request B, the same conversation without the header
+		bAt := t0.Add(6 * time.Minute)
+		r.request(bAt)
+		otherKey := sess1
+		otherKey.Session = "derived-session-of-B"
+		r.k.Record(Record{Key: otherKey, StartedAt: bAt, Body: []byte(kaBody), Provider: bschemas.Anthropic,
+			Route: "/v1/messages", Status: 200, UsageOK: true, Policy: onWaitPolicy(),
+			Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
+			Hold: fakeOf(r.k).hold(otherKey), Store: st, TouchAlias: r.alias, TouchAtMs: r.atMs, TouchSeq: r.seq})
+		_, standing := r.k.StoreOffPing(r.alias)
+		c, _ := r.request(t0.Add(13 * time.Minute))
+		return !standing, c
+	}
+	_, withStore := run(store.NewMemory(store.Options{}))
+	for _, st := range []store.Store{store.Nop{}, nil} {
+		ended, cold := run(st)
+		if !ended {
+			t.Errorf("%T: StoreOffPing still says yes after an accepted return under the other session id", st)
+		}
+		if cold != withStore {
+			t.Errorf("%T: cold=%v, with a Memory store %v", st, cold, withStore)
+		}
+	}
+}
