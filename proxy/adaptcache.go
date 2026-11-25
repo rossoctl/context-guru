@@ -18,6 +18,7 @@ import (
 
 	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
@@ -197,7 +198,7 @@ func (h *Handler) adaptReport(tn *Tenancy, basisKey string, since, until int64, 
 		} else {
 			nUnknown++
 		}
-		_, _, pr, pw, ok := price(q.Model)
+		_, _, pr, pw, ok := price(q.Model, modelinfo.PromptTokens(q.InputTokens, q.CacheRead, q.CacheWrite))
 		switch {
 		case q.Rejected:
 			drop["rejected"]++

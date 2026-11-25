@@ -17,6 +17,30 @@ func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
 		float64(t.CacheWrite5m)*p.CacheWrite + float64(t.CacheWrite1h)*(p.CacheWrite+p.CacheWrite1hPremium())
 }
 
+// accPrices returns the rates of the request sent (with context-guru) and of the request the
+// client built (without it). The size with is the billed prompt: fresh input, cache reads and
+// cache writes. The size without adds what the counted operations removed and takes off what they
+// added. A cache effect only moves tokens between tiers, so it does not change the size. With no
+// billed usage, or no tiers, both sides price at the base rate, as before.
+func (e *Event) accPrices(p modelinfo.Price) (with, without modelinfo.Price) {
+	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
+	if w <= 0 || !p.HasTiers() || e.accRes == nil {
+		b := p.At(0)
+		return b, b
+	}
+	tot := func(t accountant.TierTokens) int64 {
+		return int64(t.Input + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h)
+	}
+	n := w
+	for _, o := range e.accRes.Ops {
+		if o.DryRun || o.Call != nil {
+			continue
+		}
+		n += tot(o.Saved) - tot(o.Caused)
+	}
+	return p.At(w), p.At(n)
+}
+
 // AccFigure is the request's savings in dollars, from the library's tokens. Only dollars are
 // summed; token tiers are never collapsed into one total.
 type AccFigure struct {
@@ -57,7 +81,13 @@ type AccFigure struct {
 // AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
 // never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
 // Result.Interaction is ignored on purpose: the library attributes it to nobody.
+//
+// p carries the model's prompt-size tiers. A saving compares two requests: the one sent (with
+// context-guru) and the one the client built (without it). They can sit in different tiers, so
+// each side is priced at its own prompt size: Saved tokens at the size without, Caused tokens at
+// the size with (accPrices).
 func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
+	pw, pb := e.accPrices(p)
 	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{},
 		TokByComponent: map[string]TokenFlow{}}
 	if e.accRes == nil {
@@ -87,12 +117,12 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
 			continue
 		}
-		net := tierUSD(p, o.Saved) - tierUSD(p, o.Caused)
+		net := tierUSD(pb, o.Saved) - tierUSD(pw, o.Caused)
 		f.ByComponent[c] += net
 		f.addTok(c, o.Saved, o.Caused)
-		read := tierUSD(p, accountant.TierTokens{CacheRead: o.Saved.CacheRead})
+		read := tierUSD(pb, accountant.TierTokens{CacheRead: o.Saved.CacheRead})
 		f.ByComponentReplay[c] += read
-		f.ByComponentFirst[c] += tierUSD(p, o.Saved) - read
+		f.ByComponentFirst[c] += tierUSD(pb, o.Saved) - read
 		f.DeltaUSD += net
 		f.Estimated = f.Estimated || o.Estimated
 	}
@@ -109,7 +139,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		//   markPayback: Saved is the input or the write the client body would have billed (a write when the
 		//               client moved its own mark past the host's, accountant v0.6.0), Caused the read the
 		//               host's mark made possible on the next request: value > 0 (a saving).
-		value := tierUSD(p, ce.Net())
+		value := tierUSD(pb, ce.Saved) - tierUSD(pw, ce.Caused)
 		switch ce.Kind {
 		case accountant.EffectBreak:
 			switch c, ok := owner[ce.ChangeID]; {
@@ -489,6 +519,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 // at the read rate: every Saved token as a read, Caused tokens and the cache effects unchanged in
 // dollars. It is never above the ceiling, and equals it when nothing was priced as a write.
 func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
+	_, p = e.accPrices(p) // Saved tokens are the client body's: priced at its size
 	low := delta
 	for _, o := range e.accRes.Ops {
 		if o.DryRun || o.Call != nil || o.Operator == accwire.Operator(DeferComponent) {

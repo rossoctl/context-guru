@@ -263,7 +263,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	var price Price
 	priced := false
 	if model != "" {
-		price, priced = k.price(endpoint, model, prefix)
+		price, priced = k.price(endpoint, model, billedPrompt(u, prefix))
 	}
 	// Same clock, same gate, same reason as record1: a substitute call reads the SAME cached
 	// prefix a ping would (it is built from the byte-identical forwarded body — see
@@ -335,7 +335,7 @@ func (k *Keeper) sweepAnswerUSD(j pingJob, model string, u Usage) float64 {
 	if model == "" {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, billedPrompt(u, prefix))
 	if !ok || price.Zero() {
 		return 0
 	}

@@ -83,6 +83,9 @@ type Request struct {
 	WrongGuesses, DroppedSearches int
 	// Tier is how this request was billed.
 	Tier Tier
+	// PromptTokens is the billed prompt size of the request sent (modelinfo.PromptTokens): it picks
+	// the price tier. 0 is unknown and prices at the base rates.
+	PromptTokens int64
 }
 
 // WrongGuesses is how many wrong guesses one response shows (#866, N8): tools that are in this
@@ -134,7 +137,16 @@ func Price(r Request, p modelinfo.Price) (Money, bool) {
 	}
 	f, _ := tokens.BilledDeltaFactor(r.Model)
 	billed := func(n int) float64 { return float64(n) * f }
-	gross := billed(r.DeferredTokens) * rate(p, r.Tier)
+	// The gross is what the client's request would have billed: a bigger prompt, which can sit in a
+	// dearer tier. The cost is what the request sent billed, at its own tier.
+	pb := p
+	if r.PromptTokens > 0 {
+		pb = p.At(r.PromptTokens + int64(billed(r.DeferredTokens)) - int64(billed(r.ListTokens)))
+		p = p.At(r.PromptTokens)
+	} else {
+		p, pb = p.At(0), p.At(0)
+	}
+	gross := billed(r.DeferredTokens) * rate(pb, r.Tier)
 	cost := billed(r.ListTokens) * rate(p, r.Tier)
 	var search float64 // the cost the bodies do not show; exactly 0 when no search ran
 	if r.Searches > 0 {

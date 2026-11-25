@@ -1008,6 +1008,8 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	}
 	e.TokenAccounting = AccountingComplete
 	e.Currency = p.Unit()
+	// The request bills at the rates of ITS prompt size (a long prompt can sit in a dearer tier).
+	p = p.At(modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite))
 	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
 	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)

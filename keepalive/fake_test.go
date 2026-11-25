@@ -159,8 +159,10 @@ func okPing(DispatchRequest) (Usage, int, error) {
 // pricer by ignoring the endpoint and the prompt size.
 type proxyPricer struct{ p modelinfo.Pricer }
 
-func (a proxyPricer) Price(ctx context.Context, _, model string, _ int64) (Price, bool) {
-	return a.p.Price(ctx, model)
+// Price is the proxy's adapter: the model's price at the prompt size the keeper names.
+func (a proxyPricer) Price(ctx context.Context, _, model string, promptTokens int64) (Price, bool) {
+	p, ok := a.p.Price(ctx, model)
+	return p.At(promptTokens), ok
 }
 
 // fixedPrice prices every model the same, so a cost guard can be tested without a price file.

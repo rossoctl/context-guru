@@ -259,7 +259,7 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 	if !ok {
 		return 0
 	}
-	p = p.Resolved(e.Model)
+	p = p.At(modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)).Resolved(e.Model)
 	w1h := min(max(e.CacheWrite1h, 0), e.CacheWrite)
 	usd := 0.0
 	if prem := p.CacheWrite - p.CacheRead; prem > 0 {
