@@ -632,3 +632,61 @@ func TestTheShapesV078WritesReadTheSameAfterTheUpgrade(t *testing.T) {
 		}
 	}
 }
+
+// #1350 with the store off. The host's FreePing is asked ONLY when the store keeps nothing: with a real store the
+// stored clock is the one record, and a host that answers anyway must not move the verdict. With no store it makes
+// a cold verdict warm inside the ping's hour, never past it, and a panic in it reads "no ping".
+func TestFreePingIsAskedOnlyWhenTheStoreKeepsNothing(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	pingAt := base.Add(4 * time.Minute).UnixMilli()
+	run := func(st store.Store, hook func(session, thread string) (int64, bool), returnAt time.Duration) (cold bool) {
+		var seen []bool
+		pipe := components.NewPipeline([]components.Component{coldSpy{&seen}}, nil)
+		tr := modes.NewTracker(0)
+		do := func(at time.Duration) {
+			BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+				Tenant: "t", Now: base.Add(at), FreePing: hook})
+		}
+		do(0)
+		seen = nil
+		do(returnAt)
+		return seen[len(seen)-1]
+	}
+	var calls int
+	hook := func(session, thread string) (int64, bool) { calls++; return pingAt, true }
+	m := time.Minute
+	// No store: warm 13 minutes after the first request, and cold again past the ping's hour and the margin.
+	for _, st := range []store.Store{store.Nop{}, nil} {
+		calls = 0
+		if run(st, hook, 13*m) {
+			t.Errorf("%T: a cold verdict inside the free ping's hour", st)
+		}
+		if calls == 0 {
+			t.Errorf("%T: the hook was never asked", st)
+		}
+		if !run(st, hook, 4*m+60*m+70*time.Second) {
+			t.Errorf("%T: warm past the ping's hour and the margin", st)
+		}
+		if !run(st, nil, 13*m) {
+			t.Errorf("%T: with no hook the verdict must stay cold (the old behavior)", st)
+		}
+		if !run(st, func(string, string) (int64, bool) { panic("hook") }, 13*m) {
+			t.Errorf("%T: a panicking hook must read as no ping", st)
+		}
+		if !run(st, func(string, string) (int64, bool) { return 0, false }, 13*m) {
+			t.Errorf("%T: a hook that says no ping must leave the verdict cold", st)
+		}
+		// A ping from the future of this request is no evidence.
+		if !run(st, func(string, string) (int64, bool) { return base.Add(time.Hour).UnixMilli(), true }, 13*m) {
+			t.Errorf("%T: a ping later than the request counted", st)
+		}
+	}
+	// A real store: never asked, and the verdict is the store's own (cold: nothing stored a ping).
+	calls = 0
+	if !run(store.NewMemory(store.Options{}), hook, 13*m) {
+		t.Error("a real store: the hook moved the verdict")
+	}
+	if calls != 0 {
+		t.Errorf("a real store: the hook was asked %d times", calls)
+	}
+}

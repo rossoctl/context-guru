@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -17,17 +18,20 @@ import (
 // reads cold there, on main and now (#1350 is not fixable with no store).
 func TestTheThreeReadersAtEachStoreKind(t *testing.T) {
 	for _, tc := range []struct {
-		name                  string
-		st                    store.Store
-		dash, refused, notCld bool
+		name string
+		st   func() store.Store
 	}{
-		{"memory", store.NewMemory(store.Options{}), true, true, true},
-		{"nop", store.Nop{}, true, true, false},
-		{"nil", nil, true, true, false},
+		{"memory", func() store.Store { return store.NewMemory(store.Options{}) }},
+		{"nop", func() store.Store { return store.Nop{} }},
+		{"nil", func() store.Store { return nil }},
 	} {
+		// Every storage level answers the same: the dashboard shows the hour, the manual ping is refused, and the
+		// cold check reads the entry WARM 13 minutes after the first request (9 minutes after the ping), so no
+		// cold-only cut applies (#1350). With no store the cold check reads the keeper's record of the ping
+		// (apply.Opts.FreePing); with a store it reads the stored clock and never asks the keeper.
 		t.Run(tc.name, func(t *testing.T) {
 			r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
-			r.st = tc.st
+			r.st = tc.st()
 			proveRoute(r.k)
 			t0 := r.clock.now()
 			r.request(t0)
@@ -39,8 +43,24 @@ func TestTheThreeReadersAtEachStoreKind(t *testing.T) {
 			refused := r.k.OneHourTouchLive(sess1)
 			cold, _ := r.request(t0.Add(13 * time.Minute))
 			t.Logf("%s: dashboard shows the hour=%v, manual ping refused=%v, cold check warm=%v", tc.name, dash, refused, !cold)
-			if dash != tc.dash || refused != tc.refused || !cold != tc.notCld {
-				t.Errorf("%s: dashboard=%v refused=%v warm=%v, want %v %v %v", tc.name, dash, refused, !cold, tc.dash, tc.refused, tc.notCld)
+			if !dash || !refused || cold {
+				t.Errorf("%s: dashboard=%v refused=%v warm=%v, want true true true", tc.name, dash, refused, !cold)
+			}
+		})
+		// And the hour ends: 70 minutes after the first request (66 after the ping) the entry has really expired,
+		// and the cold check says so at every level.
+		t.Run(tc.name+" after the hour", func(t *testing.T) {
+			r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+			r.st = tc.st()
+			proveRoute(r.k)
+			t0 := r.clock.now()
+			r.request(t0)
+			r.record(t0, "end_turn", onWaitPolicy())
+			r.clock.advance(240 * time.Second)
+			r.k.Sweep(r.clock.now())
+			waitPings(t, r.k, 1)
+			if cold, _ := r.request(t0.Add(70 * time.Minute)); !cold {
+				t.Errorf("%s: the cold check still reads warm 66 minutes after the ping", tc.name)
 			}
 		})
 	}
@@ -69,5 +89,48 @@ func TestAnExpiredStoreRecordShowsNoHour(t *testing.T) {
 	t.Logf("expired record: dashboard shows the hour=%v, manual ping refused=%v", dash, refused)
 	if dash || refused {
 		t.Errorf("an expired record still shows an hour: dashboard=%v refused=%v", dash, refused)
+	}
+}
+
+// With no store the cold check follows the same events as with a store (#1350): after a free 1-hour ping, an
+// accepted request, a failed request and a route switch-off each leave the cold check where the stored clock
+// leaves it. One verdict per event, the same at every storage level.
+func TestTheColdCheckFollowsTheSameEventsAtEveryStoreKind(t *testing.T) {
+	events := map[string]func(r *coldRig, t0 time.Time){
+		"a failed request": func(r *coldRig, t0 time.Time) {
+			r.request(t0.Add(6 * time.Minute))
+			r.recordStatus(t0.Add(6*time.Minute), 500)
+		},
+		"an accepted request": func(r *coldRig, t0 time.Time) {
+			r.request(t0.Add(6 * time.Minute))
+			r.recordStatus(t0.Add(6*time.Minute), 200)
+		},
+		"a route switch-off": func(r *coldRig, t0 time.Time) {
+			r.k.oneHourSwitchOff(oneHourKeyOf(), bschemas.Anthropic, "/v1/messages", "", "aws/claude-sonnet-5", "test")
+		},
+		"nothing": func(r *coldRig, t0 time.Time) {},
+	}
+	for name, event := range events {
+		verdict := func(st store.Store) bool {
+			r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+			r.st = st
+			proveRoute(r.k)
+			t0 := r.clock.now()
+			r.request(t0)
+			r.record(t0, "end_turn", onWaitPolicy())
+			r.clock.advance(240 * time.Second)
+			r.k.Sweep(r.clock.now())
+			waitPings(t, r.k, 1)
+			event(r, t0)
+			cold, _ := r.request(t0.Add(13 * time.Minute))
+			return cold
+		}
+		withStore := verdict(store.NewMemory(store.Options{}))
+		if got := verdict(store.Nop{}); got != withStore {
+			t.Errorf("after %s: cold=%v with Nop, %v with a store", name, got, withStore)
+		}
+		if got := verdict(nil); got != withStore {
+			t.Errorf("after %s: cold=%v with no store, %v with a store", name, got, withStore)
+		}
 	}
 }

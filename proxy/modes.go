@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/thread"
 )
@@ -70,6 +71,10 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// The 1-hour-on-wait strategy on a route where the switch costs a rewrite: a main thread writes at 1
 	// hour from its first request (keepalive.Keeper.OneHourFirst, #1261). Only for an account that opted in.
 	o.OneHourFirst = h.oneHourFirstFor(r)
+	// The keeper's record of the last free 1-hour ping, for a store that keeps nothing: apply asks it only then.
+	o.FreePing = func(session, thread string) (int64, bool) {
+		return h.keeper.StoreOffPing(keepalive.Key{Tenant: r.tn.ID, Session: session, Thread: thread})
+	}
 	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, o)
 	added := time.Since(start)
 	if res.Body == nil {

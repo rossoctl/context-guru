@@ -392,6 +392,28 @@ func (k *Keeper) OneHourTouchLive(key Key) bool {
 	return k.oneHourTouchLiveLocked(key.id(), k.now())
 }
 
+// StoreOffPing is the keeper's record of the free 1-hour ping that was the last touch of the thread, for a store
+// that keeps nothing (storeOffAt). It is what the cold check reads then, so a cold-only cut cannot fire inside the
+// ping's hour at any storage level (#1350). It answers only for that case: with a real store the stored clock is
+// the one record and this says no. A route that is switched off gave no tier, so it says no too; a costly route
+// did rewrite the prefix at 1 hour, so it stands. It is the time the ping started: the caller decides how long it
+// counts (EntryLifetime). Nil-safe.
+func (k *Keeper) StoreOffPing(key Key) (atMs int64, ok bool) {
+	if k == nil || key.Session == "" {
+		return 0, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	t, found := k.oneHourThreads[key.id()]
+	if !found || store.Keeps(t.st) || t.storeOffAt <= 0 {
+		return 0, false
+	}
+	if st := k.oneHourRoutes[t.route]; st != nil && st.off {
+		return 0, false
+	}
+	return t.storeOffAt, true
+}
+
 // OneHourTouch is what the dashboard needs of it.
 type OneHourTouch struct {
 	At time.Time

@@ -62,6 +62,11 @@ func (r *coldRig) request(at time.Time) (cold bool, ttl time.Duration) {
 	r.t.Helper()
 	res := apply.BodyOpts(context.Background(), r.pipe, r.st, apply.Opts{
 		Provider: bschemas.Anthropic, Body: []byte(kaBody), Tracker: r.tr, Now: at, Tenant: "t",
+		// The host's hook, as the proxy wires it: the keeper's record of the thread's last free ping, which apply
+		// asks only when the store keeps nothing (#1350).
+		FreePing: func(_, th string) (int64, bool) {
+			return r.k.StoreOffPing(Key{Tenant: sess1.Tenant, Session: sess1.Session, Thread: th})
+		},
 	})
 	r.alias, r.atMs, r.seq = res.TouchAlias, res.TouchAtMs, res.TouchSeq
 	if len(r.cold) == 0 {

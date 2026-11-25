@@ -685,12 +685,31 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
 			}
 			aliasAt := seen.at
+			// A store that keeps nothing never held the ping's clock (#1350). The host's own record of the ping
+			// stands in for it, asked only then: with a real store the stored clock is the one record. It joins
+			// the clocks the way the carried ping does: it can only move prevAt later and only extend the lifetime
+			// to the ping's hour, so it makes a cold verdict warm and never the other way.
+			storeOffPingAt := int64(0)
+			if !store.Keeps(st) {
+				if at, ok := o.freePingFor(sessionID, tr.Thread.ID); ok && at <= nowMs {
+					storeOffPingAt = at
+				}
+			}
 			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
 			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
 			// request that wrote no alias clock (a bypassed one) has moved the entry since.
 			carriedAt := int64(0)
 			if seen.carriedAt > 0 && seen.at >= prevAt {
 				carriedAt = seen.carriedAt
+			}
+			if storeOffPingAt > 0 {
+				// Counted as a carried ping: a failed request after it touched nothing, so its hour runs on.
+				if carriedAt == 0 || storeOffPingAt > carriedAt {
+					carriedAt = storeOffPingAt
+				}
+				if storeOffPingAt > prevAt {
+					prevAt = storeOffPingAt
+				}
 			}
 			if aliasAt > prevAt {
 				prevAt = aliasAt
