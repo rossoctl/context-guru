@@ -650,7 +650,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	e.BypassCount, e.BypassBytes = c.trace.BypassCount, len(waitBody)
 	e.WaitCause = func() dash.WaitCauseResult {
-		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm, waitcause.ForClient(c.agent))
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
 		waitingFor, waitTool := waitcause.ClassifyWaitingForClient(
 			c.agent, terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
@@ -1009,7 +1009,7 @@ func (c *capture) startEarlyScan(h *Handler, ctx context.Context, provider bsche
 		return
 	}
 	c.scanStat = &h.scan
-	c.early = startEarlyScan(ctx, provider, body, h.scanGate, h.scanDone)
+	c.early = startEarlyScan(ctx, provider, body, h.scanGate, h.scanDone, waitcause.ForClient(c.agent))
 }
 
 // stopEarlyScan ends the scan's work in progress when the request is over. Nil-safe.

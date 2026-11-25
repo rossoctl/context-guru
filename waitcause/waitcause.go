@@ -346,26 +346,49 @@ func Key(tenant, session, threadID string) string {
 // per-provider body parser (see the package doc). Fails open: any panic (a malformed body, an
 // unexpected shape) yields the zero Observation (WakeCause "", read by callers as unknown)
 // rather than escaping.
-func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte) (obs Observation) {
+func (t *Tracker) Observe(tenant, session, threadID string, provider bschemas.ModelProvider, body []byte, opts ...Option) (obs Observation) {
 	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
 	if t == nil {
 		return Observation{}
 	}
-	return t.observe(tenant, session, threadID, body, func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) })
+	return t.observe(tenant, session, threadID, body, func() []bschemas.ChatMessage { return apply.NormalizeMessages(provider, body) }, opts)
 }
 
 // ObserveWith is Observe with the normalized messages supplied by the caller (norm is called
 // at most once, and not at all for a previous_response_id body), so a caller that also needs
 // the normalization can share one pass over the body.
-func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) (obs Observation) {
+func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage, opts ...Option) (obs Observation) {
 	defer func() { recover() }() //nolint:errcheck // fail open; see package doc
 	if t == nil {
 		return Observation{}
 	}
-	return t.observe(tenant, session, threadID, body, norm)
+	return t.observe(tenant, session, threadID, body, norm, opts)
 }
 
-func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage) Observation {
+// Option tells a scan which client sent the body. Without one, a scan applies only the rules that hold
+// for every client (the Claude Code markers).
+type Option func(*scanCfg)
+
+type scanCfg struct{ codex bool }
+
+// ForClient turns on the markers that only one client writes. The Codex terminal markers ("Process
+// running with session ID N", "Process exited with code C") are read only for the Codex client: a
+// Claude Code tool result that echoes the same text must not open a background task.
+func ForClient(cl agent.Client) Option {
+	return func(c *scanCfg) { c.codex = cl.Name == agent.ClientCodex }
+}
+
+func cfgOf(opts []Option) scanCfg {
+	var c scanCfg
+	for _, o := range opts {
+		if o != nil {
+			o(&c)
+		}
+	}
+	return c
+}
+
+func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm func() []bschemas.ChatMessage, opts []Option) Observation {
 	if gjson.GetBytes(body, "previous_response_id").String() != "" {
 		// A Responses request continuing SERVER-HELD history: `input` here is only the
 		// newest turn, not the full conversation. apply.NormalizeMessages does not special-
@@ -416,7 +439,7 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm fu
 		// open" guard on each open; a delete of an absent key is a no-op) except the
 		// Skill-anonymous close fallback, which is explicitly guarded by ts.appliedCloses —
 		// see scanOpenState's doc for why that ONE path needs it.
-		scanOpenState(ts, entries, now, nil)
+		scanOpenState(ts, entries, now, nil, cfgOf(opts))
 		obs.OpenBackground, obs.MonitorExpiryMs = countBackgroundLocked(ts, now)
 		obs.OpenTeammate = countTeammatesLocked(ts, now)
 	}()
@@ -672,7 +695,7 @@ func hasSystemMarker(text string) bool {
 // threadState.appliedCloses and closeOldestAnon's own idempotency guard.
 // stop, when non-nil, is polled once per message; a true stops the scan and the function returns false
 // (the state is then partial and the caller must discard it). nil never stops.
-func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time, stop func() bool) bool {
+func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Time, stop func() bool, cfg scanCfg) bool {
 	openBG := func(id string, dur time.Duration) {
 		if _, exists := ts.openBackground[id]; exists {
 			return // already open — do NOT reset firstSeen on a resend
@@ -762,9 +785,9 @@ func scanOpenState(ts *threadState, entries []bschemas.ChatMessage, now time.Tim
 					openBG(m[1], 0)
 				} else if bgSkillStartRE.MatchString(text) {
 					openAnon(b.toolUseID)
-				} else if m := codexRunningRE.FindStringSubmatch(text); m != nil {
+				} else if m := codexRunningRE.FindStringSubmatch(text); cfg.codex && m != nil {
 					openBG("codex-exec:"+m[1], 0)
-				} else if codexExitedRE.MatchString(text) {
+				} else if cfg.codex && codexExitedRE.MatchString(text) {
 					if c, ok := calls[b.toolUseID]; ok {
 						// A Responses call keeps its arguments as a JSON string inside the normalized call.
 						args := c.input

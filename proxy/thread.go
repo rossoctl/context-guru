@@ -22,7 +22,7 @@ func (h *Handler) threadFor(r *http.Request, cl agent.Client, tenantID, session 
 	// A header that is present but unusable gives "" and falls back to prefix continuity.
 	agentID, ok := thread.HeaderAgentID(cl.SubagentID())
 	if !ok && session != "" {
-		lg.Debug("cg.thread_header_invalid")
+		lg.Debug("cg.thread_header_invalid", "session", session, "header", cl.AgentIDHeader, "client", cl.Name)
 	}
 	res, err := h.threads.ResolveSession(tenantID, session, agentID, body, agentCompaction)
 	if err != nil {

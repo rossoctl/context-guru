@@ -91,11 +91,11 @@ func TestCodexBackgroundTerminal(t *testing.T) {
 		{"a poll that sees the exit closes it", join(codexExec("c1", running), codexPoll("c2", "1001", exited)), 0},
 		{"an exit of another session does not close it", join(codexExec("c1", running), codexPoll("c2", "2002", exited)), 1},
 	} {
-		obs := New().Observe("t", "s", "", bschemas.OpenAI, tc.body)
+		obs := New().Observe("t", "s", "", bschemas.OpenAI, tc.body, ForClient(who("codex_cli_rs/0.162")))
 		if obs.OpenBackground != tc.want {
 			t.Errorf("%s: OpenBackground = %d, want %d", tc.name, obs.OpenBackground, tc.want)
 		}
-		if scan := ScanBody(nil, bschemas.OpenAI, tc.body); scan == nil || scan.OpenBackground != tc.want {
+		if scan := ScanBody(nil, bschemas.OpenAI, tc.body, ForClient(who("codex_cli_rs/0.162"))); scan == nil || scan.OpenBackground != tc.want {
 			t.Errorf("%s: ScanBody disagrees with Observe", tc.name)
 		}
 	}
@@ -125,5 +125,30 @@ func TestClaudeCodeWaitCauseIsUnchanged(t *testing.T) {
 	}
 	if w, _ := ClassifyWaitingForClient(cc, nil, nil, "end_turn", false, true, 0, 0); w != WaitingHuman {
 		t.Errorf("a Claude Code end_turn with nothing open must read human, got %q", w)
+	}
+}
+
+// A Claude Code Bash result that echoes the Codex terminal text opens no task. The same text in a Codex
+// body does. A body with no client (a host that passes none) behaves as Claude Code.
+func TestCodexTerminalMarkersReadOnlyForCodex(t *testing.T) {
+	running := `Chunk ID: a1\nWall time: 10.0 seconds\nProcess running with session ID 1001\nOutput:\nbuilding`
+	body := responsesBody(strings.Join(codexExec("c1", running), ","))
+	claude := agent.IdentifyUserAgent("claude-cli/2.1.294 (external, cli)")
+	codex := agent.IdentifyUserAgent("codex_cli_rs/0.162.1")
+	for _, tc := range []struct {
+		name string
+		opts []Option
+		want int
+	}{
+		{"claude code", []Option{ForClient(claude)}, 0},
+		{"no client", nil, 0},
+		{"codex", []Option{ForClient(codex)}, 1},
+	} {
+		if obs := New().Observe("t", "s", "", bschemas.OpenAI, body, tc.opts...); obs.OpenBackground != tc.want {
+			t.Errorf("%s: Observe OpenBackground = %d, want %d", tc.name, obs.OpenBackground, tc.want)
+		}
+		if s := ScanBody(nil, bschemas.OpenAI, body, tc.opts...); s == nil || s.OpenBackground != tc.want {
+			t.Errorf("%s: ScanBody disagrees", tc.name)
+		}
 	}
 }
