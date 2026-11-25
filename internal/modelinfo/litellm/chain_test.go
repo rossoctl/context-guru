@@ -96,13 +96,17 @@ func TestLiteLLMResolvesAndNormalizes(t *testing.T) {
 func TestLiteLLMConcurrentSingleFlight(t *testing.T) {
 	var hits int64
 	// The handler blocks until the test releases it, so "Window returns before the
-	// upstream answers" is proven by order, not by a time limit.
+	// upstream answers" is proven by order, not by a time limit. The block is bounded,
+	// so a broken single-flight fails with a message and never hangs.
 	release := make(chan struct{})
 	var once sync.Once
 	releaseUp := func() { once.Do(func() { close(release) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
-		<-release
+		select {
+		case <-release:
+		case <-time.After(60 * time.Second):
+		}
 		w.Write([]byte(sample))
 	}))
 	defer srv.Close()
@@ -110,20 +114,26 @@ func TestLiteLLMConcurrentSingleFlight(t *testing.T) {
 	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
 	ctx := context.Background()
 
-	// 20 concurrent cold lookups must each return PROMPTLY (non-blocking).
+	// 20 concurrent cold lookups must each return while the upstream is still blocked.
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			l.Window(ctx, "gpt-4o") // would hang here if it blocked on the upstream
+			l.Window(ctx, "gpt-4o")
 		}()
 	}
-	wg.Wait() // every caller returned while the upstream was still blocked
+	returned := make(chan struct{})
+	go func() { wg.Wait(); close(returned) }()
+	select {
+	case <-returned: // every caller returned while the upstream was still blocked
+	case <-time.After(30 * time.Second):
+		t.Fatal("Window calls did not all return while the upstream was blocked: Window blocks on the fetch")
+	}
 	releaseUp()
 	waitReady(t, l, ctx) // let the single background fetch complete
 	if got := atomic.LoadInt64(&hits); got != 1 {
-		t.Fatalf("single-flight violated: expected 1 fetch, got %d", got)
+		t.Fatalf("single-flight violated: upstream got %d calls, want 1", got)
 	}
 }
 
