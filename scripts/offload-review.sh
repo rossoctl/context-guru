@@ -39,6 +39,14 @@
 # --cleanup runs after the PR merges or closes. It removes the reviewer worktrees, the backend's
 # sessions for them, and the live-test rules file.
 #
+# Environment (all optional):
+#   OFFLOAD_LOCK_TRIES         waits for the worktree lock this many 0.1 s steps (default 600 = 60 s)
+#   OFFLOAD_FETCH_RETRY_SLEEP  seconds between 2 tries of a fetch that hit "cannot lock ref" (default 2)
+#   OFFLOAD_RULES_DIR          folder of the live-test rules file that --cleanup removes (default /tmp)
+#
+# Runs for different PRs may run at the same time. Each one fetches into its own refs,
+# refs/offload-review/pr<N>/*, and --cleanup deletes them.
+#
 # Exit codes:
 #   0  both reviews are posted (or --cleanup is done)
 #   1  a reviewer failed, or the input is wrong, or the PR head is not in refs/pull/N/head yet
@@ -53,6 +61,12 @@
 set -euo pipefail
 # A step that fails under `set -e` would otherwise end the script with no message.
 trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
+script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=offload-review/lib.sh
+. "$script_root/scripts/offload-review/lib.sh"
+skipdir=
+# One EXIT trap for the whole script: it removes the skip folder and any lock this process holds.
+trap '[ -z "$skipdir" ] || rm -rf -- "$skipdir"; unlock_if_held' EXIT
 
 usage="usage: offload-review.sh <pr> [--backend <name>] [--no-fallback] [--live-tests <rules-file>] [--same-head] | <pr> --cleanup"
 pr=${1:?$usage}
@@ -119,7 +133,8 @@ if [ "$cleanup" = 1 ]; then
     git -C "$main" worktree remove --force "$wt"
     echo "Removed $wt"
   done
-  rm -f "/tmp/offload-review-pr$pr-rules.md"
+  rm -f "${OFFLOAD_RULES_DIR:-/tmp}/offload-review-pr$pr-rules.md"
+  delete_pr_refs "$main" "$pr"
   exit 0
 fi
 
@@ -167,28 +182,15 @@ if [ "$round" -gt "$max_rounds" ]; then
   exit 2
 fi
 
-# lock / unlock: one git write at a time, through one lock directory. Two `git worktree add` calls
-# at the same time can fail on a git lock file. So can two fetches: both update
-# refs/remotes/origin/$base_ref. With fallback the reviewers may also need a new worktree at the
-# same moment.
+# lock / unlock: one git write at a time, through one lock directory (see offload-review/lib.sh).
+# Two `git worktree add` calls at the same time can fail on a git lock file. With fallback the
+# reviewers may also need a new worktree at the same moment. The fetch below does not need the
+# lock: it writes only refs of this PR.
 lockdir="$(git rev-parse --path-format=absolute --git-common-dir)/offload-review-worktree.lock"
-lock() {
-  local n=0
-  until mkdir "$lockdir" 2>/dev/null; do
-    n=$((n + 1))
-    [ "$n" -lt 600 ] || { echo "The worktree lock $lockdir is held for over 60 s. Remove it if no review is running." >&2; return 1; }
-    sleep 0.1
-  done
-}
-unlock() { rmdir "$lockdir"; }
 
 # Fetch the head through the PR ref: a fork PR's branch is not on origin, but refs/pull/N/head
-# exists for every PR. The plain base_ref fetch keeps origin/$base_ref current for the merge base.
-lock || exit 1
-rc=0
-git -C "$main" fetch -q origin "refs/pull/$pr/head" "$base_ref" || rc=$?
-unlock
-[ "$rc" -eq 0 ] || exit "$rc"
+# exists for every PR. Both refs are per PR, so runs for different PRs do not share a ref.
+fetch_pr_refs "$main" "$pr" "$base_ref" || exit $?
 # The PR ref can lag the head that gh reported (a push in between). Do not review another commit.
 git -C "$main" cat-file -e "$sha^{commit}" 2>/dev/null || {
   echo "Head $sha of PR #$pr is not in refs/pull/$pr/head yet. Run again in a minute." >&2
@@ -287,7 +289,6 @@ forget_session() {
 # backend is not set up on this machine, so it was not run; its reason is in $skipdir/<backend>.
 # Otherwise the backend's own exit code. The subshell keeps this backend's functions to this attempt.
 skipdir=$(mktemp -d)
-trap 'rm -rf -- "$skipdir"' EXIT
 attempt() {
   local r=$1 b=$2
   (
@@ -317,7 +318,7 @@ $(cat "$rules")"
     fi
 
     label=$(backend_label)
-    base=$(git merge-base "origin/$base_ref" HEAD)
+    base=$(git merge-base "refs/offload-review/pr$pr/base" HEAD)
     marker="<!-- offload-review reviewer=$r round=$round sha=$sha backend=$b verdict=<approve|blocking> -->"
     {
       if [ "$mode" = resumed ] && [ "$rehead" = 1 ]; then
