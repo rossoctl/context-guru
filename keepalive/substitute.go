@@ -133,7 +133,8 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	}
 	e := j.e
 	k.mu.Lock()
-	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
+	model, prefix, ttl1h := e.model, e.prefix, e.ttl1h || e.pol.HeadTTL1h
+	miss, capPol := e.missUSD, e.capPolicy()
 	route := e.route
 	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, model, ttl1h), e.pol.Idle
 	k.mu.Unlock()
@@ -156,13 +157,17 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 		return false
 	}
 	// Respect the keep-alive $ cap on a PROJECTION, before spending anything.
+	//
+	// THE VALUE RULE (#1439). The summary takes the place of one ping and renews the same entry, so
+	// it protects the miss that ping protects. It is allowed when it costs less than that miss
+	// (SubstituteVerdict). An explicit operator cap still applies; unset means no flat cap.
 	cost := k.projectedSummaryUSD(model, endpoint, prefix)
-	if cost > ceiling {
+	if v := capPol.SubstituteVerdict(cost, miss); v != VerdictOK {
 		k.summarySubstituteOverBudget.Add(1)
 		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute would exceed the "+
 			"per-ping cost cap; pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session,
-			"estimate_usd", cost, "ceiling_usd", ceiling)
+			"estimate_usd", cost, "miss_usd", miss, "cap_usd", capPol.PingCap(), "verdict", v.Reason())
 		return false
 	}
 	// REFRESHING an existing reserve (as opposed to creating a session's first one) only earns
@@ -374,7 +379,7 @@ func (k *Keeper) projectedSweepBatchesUSD(model, endpoint string, prefix int64, 
 // n <= planned with n x (one question's projected cost) <= ceiling. 0 means not even one fits, and the
 // caller sends the ordinary ping. A ceiling that admits fewer than planned LOWERS the batch count, so a
 // ping still sweeps what it can afford (the smallest candidates are left unasked).
-func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, planned int, ceiling float64) int {
+func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, planned int, ceiling, miss float64) int {
 	if planned < 1 {
 		planned = 1
 	}
@@ -393,18 +398,17 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 	// implementation-defined: on gc they happen to be negative, which the clamp below also turns into zero,
 	// so a test on this platform cannot tell this guard from that accident. The guard keeps the answer
 	// right on a platform where the conversion differs.
-	if math.IsInf(ceiling, 1) {
-		return planned
+	n := planned
+	if !math.IsInf(ceiling, 1) {
+		if !(ceiling > 0) {
+			return 0
+		}
+		n = min(planned, max(0, int(ceiling/one)))
 	}
-	if !(ceiling > 0) {
-		return 0
-	}
-	n := int(ceiling / one)
-	if n > planned {
-		n = planned
-	}
-	if n < 0 {
-		n = 0
+	// THE VALUE RULE (#1439): the questions of one ping slot protect ONE miss, so n of them are
+	// weighed together against it, as K pings are. Lower n until the batch costs less than the miss.
+	for n > 0 && (Policy{}).SubstituteVerdict(float64(n)*one, miss) != VerdictOK {
+		n--
 	}
 	return n
 }
@@ -459,7 +463,9 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	}
 	e := j.e
 	k.mu.Lock()
-	model, prefix, ceiling, endpoint := e.model, e.prefix, e.pol.Ceiling(), e.endpoint
+	model, prefix, endpoint := e.model, e.prefix, e.endpoint
+	miss, capPol := e.missUSD, e.capPolicy()
+	ceiling := capPol.PingCap()
 	k.mu.Unlock()
 	// THE CEILING PRICES EVERY QUESTION THE SWEEP WILL ASK, not one (#132). The sweep plans info.Batches
 	// questions, each reading the prefix again and paying its own answer. If the ceiling admits fewer than
@@ -469,13 +475,13 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	if planned < 1 {
 		planned = 1
 	}
-	allowed := k.affordableSweepBatches(model, endpoint, prefix, planned, ceiling)
+	allowed := k.affordableSweepBatches(model, endpoint, prefix, planned, ceiling, miss)
 	if allowed < 1 {
 		cost := k.projectedSweepUSD(model, endpoint, prefix)
 		k.sweepOverBudget.Add(1)
 		slog.Debug("context-guru: sweep keep-alive question would exceed the per-ping cost cap; "+
 			"pinging normally instead",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "ceiling_usd", ceiling)
+			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "miss_usd", miss, "cap_usd", ceiling)
 		return false
 	}
 	wait := k.sweepWaitCause(j)

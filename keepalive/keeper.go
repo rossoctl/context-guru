@@ -1310,11 +1310,7 @@ func missAtOneHour(pol Policy, oneHourPing, subagent bool) bool {
 // (Policy.PingVerdict). A manual-only entry carries a zero policy, so it counts one ping and the
 // cap it was admitted under.
 func (e *kaEntry) verdict() Verdict {
-	pol := e.pol
-	if e.manualOnly {
-		pol = Policy{MaxUSDPerPing: e.ceiling}
-	}
-	return pol.PingVerdict(e.pingUSD, e.missUSD, e.pol.MaxPings)
+	return e.capPolicy().PingVerdict(e.pingUSD, e.missUSD, e.pol.MaxPings)
 }
 
 // summaryOutputBudgetGuess is the assumed output size of a keep-alive-substituted summary call,
