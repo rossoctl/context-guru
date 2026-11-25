@@ -180,7 +180,7 @@ const (
 	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
 	FallbackDuplicateName      = "duplicate_name"       // two rows share a component name
 	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
-	FallbackServerHeldHistory  = "server_held_history"  // an OpenAI Responses request with previous_response_id: the provider holds the history
+	FallbackServerHeldHistory  = "server_held_history"  // an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider holds the history
 )
 
 // FallbackUnrecorded is requests.acc_fallback on a row written before the column existed whose components say

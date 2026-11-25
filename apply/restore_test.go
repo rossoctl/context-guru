@@ -114,7 +114,7 @@ func TestPlanRestoreSkipsResponsesHistoryTheServerHolds(t *testing.T) {
 		{"none", ``},
 		{"previous_response_id", `"previous_response_id":"r1",`},
 		{"conversation", `"conversation":"conv_1",`},
-		{"item_reference", `"item_reference_marker":1,`},
+		{"item_reference", ``},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			input := `[{"role":"user","content":"a"},{"role":"user","content":"b"}]`

@@ -197,7 +197,7 @@ type capture struct {
 	endpoint string
 	readSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
 	accReq   *accountant.Request
-	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
+	// accServerHeldHistory is set for an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider
 	// holds its history, so the accountant has no record of it.
 	accServerHeldHistory bool
 	// accNoResult says why no Result was attached when Compute was reached and gave none.
