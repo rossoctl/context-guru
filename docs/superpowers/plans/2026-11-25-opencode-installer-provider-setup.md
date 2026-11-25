@@ -269,3 +269,26 @@ def test_consent_names_the_gateway_host(self): ...    # path 2: "through the gat
   `chore(opencode): mark OpenCode 1.19.6 as tested`.
 - [ ] **Step 4:** Push, open the PR (behavior change named at the top, as the spec says), run the
   `offload-review` skill.
+
+### Task 7: The gateway key (design amendment, 2026-11-25)
+
+**Spec:** the section "Amendment: the gateway key" of the design.
+
+**Interfaces:**
+- `Terminal.secret(self, question: str) -> str` (hidden input; `Stop` at end of input). `FakeTerminal.secret`
+  keeps the question, never the answer.
+- `class Web: get(self, url: str, headers: dict) -> tuple[int, str]` (raises `OSError` on a network or TLS
+  error). `FakeWeb` in the tests keeps each URL and header set.
+- `Installer(terminal, shell, source, downloaded=False, web=None)`.
+- `auth_path() -> Path` = `$XDG_DATA_HOME/opencode/auth.json`; `def write_key(provider: str, key: str) -> None`
+  (atomic, 0600, keeps other entries).
+- The key lives on `self.key` only, never in `Connection`, the record, or a message.
+
+- [ ] Tests first: the question order and wording; hidden key; key check 200 lists `claude` IDs; 401 asks again
+  (3 times, then stops); a network error falls back to typed model names; a saved key is offered; the key goes to
+  `auth.json` with mode 0600 and other entries stay; the record has the ID only; uninstall logs out; the canary
+  test covers the key file, the web requests (only to the gateway host) and all output; Ctrl-C gives exit 130;
+  the config folder is shown; the consent names the choice.
+- [ ] Rewrite the Task 3 tests that expected the "pick Other" login on the gateway path: that behavior is
+  replaced by the amendment.
+- [ ] Commit `feat(opencode): ask the gateway key, check it, and list the models`.

@@ -34,8 +34,9 @@ After one installer run, OpenCode must answer through context-guru with no setup
 
 ## Anti-goals
 
-- **The installer never reads, asks for, or stores a key.** OpenCode's own login stores it. This keeps the
-  decision of the first design.
+- **On the direct path, the installer never reads, asks for, or stores a key.** OpenCode's own login stores
+  it. On the gateway path this rule is replaced (see "Amendment: the gateway key" below): the installer asks
+  for the key, but it never prints, logs or records it, and it writes it only to OpenCode's own key file.
 - A false success. A check that passes when the request went straight to the provider is a failure of this
   design.
 
@@ -195,6 +196,53 @@ unattended install is out of scope.
   The login step then sees the login and skips. The check must still pass with `stats_requests` ≥ 1.
 - A canary test (a fake key value): drive it through install, check and uninstall, and assert that it is in no
   installer output, no record and no config file.
+
+## Amendment: the gateway key (2026-11-25, after the owner's own test)
+
+**Why.** In the owner's test, OpenCode's login menu, started from the installer, waited with no menu on the
+screen. In a test terminal the menu works, but it lists only OpenCode's built-in providers: a provider from
+`opencode.json` does not show, not even in its search. So the user must pick "Other" and type
+`anthropic-gateway`, which confused the owner. The owner expected "the base URL, then the key", as in the Pi
+installer, and picked this way (B) over "log in yourself in a second terminal" (A).
+
+**The gateway path asks, in this order. Each question says what to type, with an example:**
+
+1. **The base URL** (`for example https://litellm.example.com`). As before.
+2. **The API format:** `1) Anthropic (recommended for Claude models)` or `2) OpenAI`. Default 1.
+3. **The key**, with hidden input: "Your key for this gateway (the input is hidden: paste it, then press
+   Enter)". When OpenCode already has a key for the gateway ID, the installer asks "Use the key that OpenCode
+   has for anthropic-gateway? [Y/n]" first.
+4. **The key check:** one `GET <url>/v1/models` with the key (`x-api-key` and `Authorization: Bearer`).
+   - 200: "✓ The gateway accepted the key." The installer lists the model IDs (for the Anthropic format, the
+     IDs that contain `claude`), numbered and sorted.
+   - 401 or 403: "The gateway refused the key." It asks for the key again, at most 3 times, then stops.
+   - Another answer, or a TLS or network error: it says so and names the host. It then asks for the model
+     names as text. The final check tests the key.
+   - It never disables TLS checks.
+5. **The model:** a number from the list, or a model name. Default: the first ID with `sonnet`, else the
+   first ID.
+6. **The small model** (for session titles): the same. Default: the first ID with `haiku`, else the model.
+
+**Where the key goes.** After the consent yes, in the step "Your key" (it replaces "Login" on this path), the
+installer adds `{"<gateway id>": {"type": "api", "key": "<key>"}}` to OpenCode's key file
+(`$XDG_DATA_HOME/opencode/auth.json`, default `~/.local/share/opencode/auth.json`). It writes atomically, with
+mode 0600, and keeps the other entries. The record keeps the gateway ID only (`login_started`). Uninstall
+and undo run `opencode auth logout <id>`, as before.
+
+**What the installer never does with the key.** It never prints it, logs it, puts it in the record or in
+`opencode.json`, puts it in an error message, or sends it to a host other than the gateway URL. The canary
+test drives a fake key through the whole install, check and uninstall, and asserts this.
+
+**The direct path (1) stays:** OpenCode's own login, with clearer text: "In OpenCode's list, pick Anthropic
+(or OpenAI), then follow its steps. For a company gateway, press Ctrl-C and run the installer again with
+choice 2."
+
+**Also, from the owner's test:**
+- The step "Check this computer" shows the OpenCode config folder it uses, so a temp folder (a left-over
+  `XDG_CONFIG_HOME`) is easy to see.
+- The consent names the choice: "You chose: Anthropic or OpenAI directly (no gateway)", or "You chose: the
+  gateway at <host>".
+- Ctrl-C at any question stops with "Stopped. Nothing more was changed." and exit code 130, not a traceback.
 
 ## Left to the builder
 
