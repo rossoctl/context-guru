@@ -23,14 +23,16 @@ SOURCE = HERE.parent  # the real opencode-plugin folder: index.js and tui.js car
 class FakeTerminal:
     """Answers in order. Each question and each line said is kept, to check what the user saw."""
 
-    def __init__(self, answers=()):
-        self.answers, self.shown = list(answers), []
+    def __init__(self, answers=(), eof=False):
+        self.answers, self.shown, self.eof = list(answers), [], eof
 
     def say(self, text):
         self.shown.append(text)
 
     def ask(self, question, default=""):
         self.shown.append(question)
+        if not self.answers and self.eof:
+            raise install_opencode.Stop("no answer (the input ended). Nothing more was changed.")
         if not self.answers:
             raise AssertionError(f"unexpected question: {question}")
         return self.answers.pop(0) or default
@@ -107,14 +109,15 @@ class InstallerTest(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
-        os.environ.pop("CONTEXT_GURU_STATE", None)
+        for name in ("CONTEXT_GURU_STATE", "CG_OC_GATEWAY_URL", "CG_OC_API", "CG_OC_MODEL", "CG_OC_SMALL_MODEL"):
+            os.environ.pop(name, None)
         self.addCleanup(self.home.cleanup)
         self.shell = FakeShell()
         self.config = root / "config/opencode"
         self.plugin_copy = root / "data/context-guru-opencode/plugin"
 
-    def installer(self, *answers):
-        self.terminal = FakeTerminal(answers)
+    def installer(self, *answers, eof=False):
+        self.terminal = FakeTerminal(answers, eof)
         return install_opencode.Installer(self.terminal, self.shell, SOURCE)
 
     def read(self, name):
@@ -128,9 +131,114 @@ class InstallerTest(unittest.TestCase):
     def npm_calls(self):
         return [call for call in self.shell.calls if call[0] == "npm"]
 
+    # --------------------------------------------------------------------------- your models
+    def test_choice_3_changes_nothing_and_exits_0(self):
+        code = self.installer("3").install()
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.read("opencode.json"))
+        self.assertEqual(self.npm_calls(), [])
+        self.assertIn("Nothing was changed. context-guru supports Anthropic and OpenAI models.", self.terminal.text())
+
+    def test_end_of_input_at_the_first_question_changes_nothing_and_exits_0(self):
+        code = self.installer(eof=True).install()
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.read("opencode.json"))
+        self.assertEqual(self.npm_calls(), [])
+        self.assertIn("Nothing was changed. context-guru supports Anthropic and OpenAI models.", self.terminal.text())
+
+    def test_the_first_question_names_the_supported_providers_first(self):
+        self.installer("3").install()
+
+        text = self.terminal.text()
+        self.assertIn("context-guru works with Anthropic and OpenAI models only.", text)
+        self.assertIn("3) Another provider: exit, change nothing", text)
+        self.assertLess(text.index("works with Anthropic and OpenAI models only"),
+                        text.index("How do you reach your models?"))
+
+    def test_gateway_url_strips_v1_and_slash(self):
+        for text in ("https://gw.example/v1", "https://gw.example/v1/", "https://gw.example/", "https://gw.example"):
+            with self.subTest(text=text):
+                self.assertEqual(install_opencode.gateway_url(text), "https://gw.example/v1")
+
+    def test_gateway_url_refuses_http_to_a_remote_host(self):
+        for text in ("http://gw.example", "ftp://gw.example", "gw.example", ""):
+            with self.subTest(text=text), self.assertRaises(install_opencode.Stop):
+                install_opencode.gateway_url(text)
+        self.assertEqual(install_opencode.gateway_url("http://127.0.0.1:4000"), "http://127.0.0.1:4000/v1")
+        self.assertEqual(install_opencode.gateway_url("http://localhost:4000/v1"), "http://localhost:4000/v1")
+
+    def test_path_1_gives_an_empty_connection(self):
+        connection = self.installer("1").ask_connection({"opencode.json": {}})
+
+        self.assertEqual(connection, install_opencode.Connection(None, None, None, None))
+
+    def test_path_2_asks_url_format_model_and_small_model(self):
+        connection = self.installer("2", "https://gw.example", "", "aws/claude-sonnet-5-5",
+                                    "aws/claude-haiku-5-5").ask_connection({"opencode.json": {}})
+
+        self.assertEqual(connection, install_opencode.Connection(
+            "anthropic-gateway", "https://gw.example/v1", "aws/claude-sonnet-5-5", "aws/claude-haiku-5-5"))
+
+    def test_path_2_small_model_defaults_to_the_model(self):
+        connection = self.installer("2", "https://gw.example", "", "m", "").ask_connection({"opencode.json": {}})
+
+        self.assertEqual(connection.small_model, "m")
+
+    def test_path_2_openai_format_gives_openai_gateway(self):
+        connection = self.installer("2", "https://gw.example", "openai", "m", "").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual(connection.provider, "openai-gateway")
+
+    def test_path_2_model_has_no_default_and_asks_again(self):
+        connection = self.installer("2", "https://gw.example", "", "", "m", "").ask_connection(
+            {"opencode.json": {}})
+
+        self.assertEqual(connection.model, "m")
+
+    def test_env_variables_answer_the_questions(self):
+        os.environ.update(CG_OC_GATEWAY_URL="https://gw.example", CG_OC_API="openai", CG_OC_MODEL="m",
+                          CG_OC_SMALL_MODEL="s")
+
+        connection = self.installer().ask_connection({"opencode.json": {}})
+
+        self.assertEqual(connection, install_opencode.Connection("openai-gateway", "https://gw.example/v1", "m", "s"))
+
+    def test_another_provider_with_its_own_base_url_stops_before_any_change(self):
+        before = {"provider": {"anthropic": {"options": {"baseURL": "https://other.example/v1"}}}}
+        self.write("opencode.json", before)
+
+        code = self.installer("2", "https://gw.example", "", "m", "").install()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read("opencode.json"), before)
+        self.assertEqual(self.npm_calls(), [])
+        self.assertIn("https://other.example/v1", self.terminal.text())
+
+    def test_another_provider_of_the_same_format_without_a_base_url_stops_too(self):
+        # The plugin routes it to the default upstream, so a gateway would be a second anthropic upstream.
+        before = {"provider": {"anthropic": {"models": {"x": {}}}}}
+        self.write("opencode.json", before)
+
+        code = self.installer("2", "https://gw.example", "", "m", "").install()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.read("opencode.json"), before)
+        self.assertIn('the anthropic provider "anthropic"', self.terminal.text())
+
+    def test_a_provider_of_the_other_format_does_not_stop_the_gateway(self):
+        self.write("opencode.json", {"provider": {"openai": {"options": {"baseURL": "https://other.example/v1"}}}})
+
+        connection = self.installer("2", "https://gw.example", "", "m", "").ask_connection(
+            {"opencode.json": self.read("opencode.json")})
+
+        self.assertEqual(connection.provider, "anthropic-gateway")
+
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):
-        code = self.installer("y", "n").install()
+        code = self.installer("1", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.read("opencode.json"), {"$schema": "https://opencode.ai/config.json",
@@ -143,7 +251,7 @@ class InstallerTest(unittest.TestCase):
     def test_install_keeps_other_plugins_and_keys(self):
         self.write("opencode.json", {"model": "anthropic/claude-sonnet-5-5", "plugin": ["opencode-foo"]})
 
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         self.assertEqual(self.read("opencode.json"), {"model": "anthropic/claude-sonnet-5-5",
                                                       "plugin": ["opencode-foo", str(self.plugin_copy / "index.js")]})
@@ -156,21 +264,21 @@ class InstallerTest(unittest.TestCase):
         self.write("opencode.json", {"plugin": [[str(clone / "index.js"), {"preset": "medium"}]]})
         self.write("tui.json", {"plugin": [str(clone / "tui.js")]})
 
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         self.assertEqual(self.read("opencode.json")["plugin"], [[str(self.plugin_copy / "index.js"),
                                                                  {"preset": "medium"}]])
         self.assertEqual(self.read("tui.json")["plugin"], [str(self.plugin_copy / "tui.js")])
 
     def test_second_install_adds_no_second_entry(self):
-        self.installer("y", "n").install()
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
+        self.installer("1", "y", "n").install()
 
         self.assertEqual(self.read("opencode.json")["plugin"], [str(self.plugin_copy / "index.js")])
         self.assertEqual(self.read("tui.json")["plugin"], [str(self.plugin_copy / "tui.js")])
 
     def test_no_consent_changes_nothing(self):
-        code = self.installer("n").install()
+        code = self.installer("1", "n").install()
 
         self.assertEqual(code, 0)
         self.assertFalse(self.config.exists())
@@ -178,7 +286,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("context-guru stays off", self.terminal.text())
 
     def test_consent_text_names_routing_and_keep_alive_on_the_users_credential(self):
-        self.installer("n").install()
+        self.installer("1", "n").install()
 
         text = self.terminal.text()
         self.assertIn("Anthropic and OpenAI requests", text)
@@ -188,7 +296,7 @@ class InstallerTest(unittest.TestCase):
         self.config.mkdir(parents=True)
         (self.config / "opencode.json").write_text('{\n  // my comment\n  "plugin": []\n}\n')
 
-        code = self.installer().install()
+        code = self.installer("1").install()
 
         self.assertEqual(code, 1)
         self.assertEqual((self.config / "opencode.json").read_text(), '{\n  // my comment\n  "plugin": []\n}\n')
@@ -199,7 +307,7 @@ class InstallerTest(unittest.TestCase):
         self.config.mkdir(parents=True)
         (self.config / "opencode.jsonc").write_text("{}\n")
 
-        code = self.installer().install()
+        code = self.installer("1").install()
 
         self.assertEqual(code, 1)
         self.assertIn("opencode.jsonc", self.terminal.text())
@@ -208,7 +316,7 @@ class InstallerTest(unittest.TestCase):
     def test_backs_up_an_existing_config_before_writing(self):
         self.write("opencode.json", {"plugin": ["opencode-foo"]})
 
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         backup = install_opencode.state_root() / "installer-backup/opencode.json"
         self.assertEqual(json.loads(backup.read_text()), {"plugin": ["opencode-foo"]})
@@ -220,7 +328,7 @@ class InstallerTest(unittest.TestCase):
     def test_installs_the_latest_opencode_when_missing_after_a_yes(self):
         self.shell.opencode = None
 
-        code = self.installer("y", "y", "n").install()
+        code = self.installer("1", "y", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_calls(), [
@@ -232,7 +340,7 @@ class InstallerTest(unittest.TestCase):
     def test_no_to_installing_opencode_stops_and_changes_nothing(self):
         self.shell.opencode = None
 
-        code = self.installer("n").install()
+        code = self.installer("1", "n").install()
 
         self.assertEqual(code, 1)
         self.assertEqual(self.npm_installs(), [])
@@ -241,7 +349,7 @@ class InstallerTest(unittest.TestCase):
     def test_missing_opencode_and_no_npm_names_the_install_page(self):
         self.shell.opencode, self.shell.has_npm = None, False
 
-        code = self.installer().install()
+        code = self.installer("1").install()
 
         self.assertEqual(code, 1)
         self.assertIn("https://opencode.ai/docs", self.terminal.text())
@@ -249,7 +357,7 @@ class InstallerTest(unittest.TestCase):
     def test_an_installed_opencode_without_npm_stays(self):
         self.shell.opencode, self.shell.has_npm = "1.19.5", False
 
-        code = self.installer("y", "n").install()
+        code = self.installer("1", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_calls(), [])
@@ -258,7 +366,7 @@ class InstallerTest(unittest.TestCase):
     def test_npm_that_cannot_read_the_latest_version_names_the_registry_setting(self):
         self.shell.opencode, self.shell.npm_view_error = None, "E401 Unable to authenticate"
 
-        code = self.installer().install()
+        code = self.installer("1").install()
 
         self.assertEqual(code, 1)
         self.assertIn("E401 Unable to authenticate", self.terminal.text())
@@ -268,7 +376,7 @@ class InstallerTest(unittest.TestCase):
     def test_npm_that_cannot_read_the_latest_version_keeps_a_supported_opencode(self):
         self.shell.opencode, self.shell.npm_view_error = "1.19.5", "E401 Unable to authenticate"
 
-        code = self.installer("y", "n").install()  # no OpenCode question
+        code = self.installer("1", "y", "n").install()  # no OpenCode question
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_installs(), [])
@@ -280,7 +388,7 @@ class InstallerTest(unittest.TestCase):
     def test_an_npm_failure_shows_npms_message_and_never_uses_sudo(self):
         self.shell.opencode, self.shell.npm_install_error = None, "EACCES: permission denied"
 
-        code = self.installer("y").install()
+        code = self.installer("1", "y").install()
 
         self.assertEqual(code, 1)
         self.assertIn("EACCES: permission denied", self.terminal.text())
@@ -290,7 +398,7 @@ class InstallerTest(unittest.TestCase):
     def test_an_older_opencode_is_updated_to_the_latest_after_a_yes(self):
         self.shell.opencode = "1.19.5"
 
-        self.installer("y", "y", "n").install()
+        self.installer("1", "y", "y", "n").install()
 
         self.assertEqual(self.npm_installs()[0][-1], "opencode-ai@1.19.6")
         record = json.loads((install_opencode.state_root() / "installer.json").read_text())
@@ -299,7 +407,7 @@ class InstallerTest(unittest.TestCase):
     def test_no_to_the_update_keeps_a_supported_opencode(self):
         self.shell.opencode = "1.19.5"
 
-        code = self.installer("n", "y", "n").install()
+        code = self.installer("1", "n", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_installs(), [])
@@ -308,7 +416,7 @@ class InstallerTest(unittest.TestCase):
     def test_no_to_the_update_of_a_too_old_opencode_stops_the_install(self):
         self.shell.opencode = "1.17.0"
 
-        code = self.installer("n").install()
+        code = self.installer("1", "n").install()
 
         self.assertEqual(code, 1)
         self.assertIn("1.18.29", self.terminal.text())
@@ -317,14 +425,14 @@ class InstallerTest(unittest.TestCase):
     def test_the_install_uses_the_latest_version_as_npm_prints_it(self):
         self.shell.opencode, self.shell.latest = None, "1.21.0-rc.1"
 
-        self.installer("y", "y", "n").install()
+        self.installer("1", "y", "y", "n").install()
 
         self.assertEqual(self.npm_installs()[0][-1], "opencode-ai@1.21.0-rc.1")
 
     def test_an_older_opencode_first_on_path_is_not_reported_as_updated(self):
         self.shell.opencode, self.shell.npm_shadowed = "1.19.5", True
 
-        code = self.installer("y", "n").install()  # update yes, consent no
+        code = self.installer("1", "y", "n").install()  # update yes, consent no
 
         self.assertEqual(code, 0)
         text = self.terminal.text()
@@ -334,12 +442,12 @@ class InstallerTest(unittest.TestCase):
     def test_the_tested_opencode_line_has_no_trailing_space(self):
         self.shell.opencode = self.shell.latest = "1.19.5"
 
-        self.installer("n").install()
+        self.installer("1", "n").install()
 
         self.assertIn("OpenCode 1.19.5 is installed.", self.terminal.shown)
 
     def test_the_latest_opencode_stays_and_names_the_tested_version(self):
-        code = self.installer("y", "n").install()
+        code = self.installer("1", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_installs(), [])
@@ -349,7 +457,7 @@ class InstallerTest(unittest.TestCase):
     def test_a_newer_pre_release_is_never_downgraded(self):
         self.shell.opencode = "1.20.0-beta.1"
 
-        code = self.installer("y", "n").install()  # no OpenCode question
+        code = self.installer("1", "y", "n").install()  # no OpenCode question
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_installs(), [])
@@ -358,7 +466,7 @@ class InstallerTest(unittest.TestCase):
     def test_an_opencode_whose_version_cannot_be_read_stays_after_a_yes(self):
         self.shell.opencode_version_text = "opencode dev build"
 
-        code = self.installer("y", "y", "n").install()  # go on with it, consent, no test prompt
+        code = self.installer("1", "y", "y", "n").install()  # go on with it, consent, no test prompt
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_installs(), [])
@@ -368,14 +476,14 @@ class InstallerTest(unittest.TestCase):
     def test_an_opencode_whose_version_cannot_be_read_and_a_no_stops(self):
         self.shell.opencode_version_text = "opencode dev build"
 
-        code = self.installer("n").install()
+        code = self.installer("1", "n").install()
 
         self.assertEqual(code, 1)
         self.assertFalse(self.config.exists())
 
     # -------------------------------------------------------------------------- test prompt
     def test_test_prompt_reports_the_proxy_up(self):
-        code = self.installer("y", "y").install()
+        code = self.installer("1", "y", "y").install()
 
         self.assertEqual(code, 0)
         self.assertIn("✓ The proxy started, and OpenCode answered", self.terminal.text())
@@ -383,7 +491,7 @@ class InstallerTest(unittest.TestCase):
     def test_test_prompt_with_the_proxy_down_names_the_login_command(self):
         self.shell.proxy = "down"
 
-        self.installer("y", "y").install()
+        self.installer("1", "y", "y").install()
 
         self.assertIn("opencode auth login", self.terminal.text())
 
@@ -392,7 +500,7 @@ class InstallerTest(unittest.TestCase):
             with self.subTest(failure=failure):
                 self.shell.run_fails = failure
 
-                self.installer("y", "y").install()
+                self.installer("1", "y", "y").install()
 
                 text = self.terminal.text()
                 self.assertNotIn("✓ The proxy started, and OpenCode answered", text)
@@ -401,7 +509,7 @@ class InstallerTest(unittest.TestCase):
                 self.assertIn("opencode auth login", text)
 
     def test_test_prompt_stops_its_own_proxy_and_removes_its_state(self):
-        self.installer("y", "y").install()
+        self.installer("1", "y", "y").install()
 
         resets = [call for call in self.shell.calls if call[0] == "sh" and call[1].endswith("context-guru-reset")]
         self.assertEqual(len(resets), 1)
@@ -412,7 +520,7 @@ class InstallerTest(unittest.TestCase):
     def test_an_opencode_first_on_path_that_is_still_old_stops_before_consent(self):
         self.shell.opencode, self.shell.npm_shadowed = "1.17.0", True
 
-        code = self.installer("y").install()  # one question only: the update
+        code = self.installer("1", "y").install()  # one question only: the update
 
         self.assertEqual(code, 1)
         self.assertIn("still runs OpenCode 1.17.0", self.terminal.text())
@@ -425,7 +533,7 @@ class InstallerTest(unittest.TestCase):
         (clone / "index.js").write_text("// opencode-context-guru\n")
         self.write("opencode.json", {"plugin": [[str(clone / "index.js"), {"preset": "medium"}]]})
 
-        self.installer("n").install()
+        self.installer("1", "n").install()
 
         self.assertIn("The preset is medium", self.terminal.text())
         self.assertNotIn("The preset is off", self.terminal.text())
@@ -437,7 +545,7 @@ class InstallerTest(unittest.TestCase):
         self.config.mkdir(parents=True)
         (self.config / "opencode.json").symlink_to(dotfiles)
 
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         self.assertTrue((self.config / "opencode.json").is_symlink())
         self.assertEqual(json.loads(dotfiles.read_text())["plugin"],
@@ -447,14 +555,14 @@ class InstallerTest(unittest.TestCase):
         self.write("opencode.json", {"plugin": []})
         (self.config / "opencode.json").chmod(0o644)
 
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         self.assertEqual((self.config / "opencode.json").stat().st_mode & 0o777, 0o644)
 
     # ----------------------------------------------------------------------------- uninstall
     def test_uninstall_removes_only_what_install_added(self):
         self.write("opencode.json", {"model": "x", "plugin": ["opencode-foo"]})
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         code = self.installer("y").uninstall()
 
@@ -465,7 +573,7 @@ class InstallerTest(unittest.TestCase):
         self.assertFalse(install_opencode.state_root().exists())
 
     def test_uninstall_stops_each_projects_proxy(self):
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
         project = install_opencode.state_root() / "0123456789abcdef"
         project.mkdir(parents=True)
         (project / "context-guru-reset").write_text("#!/bin/sh\n")
@@ -475,7 +583,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn(["sh", str(project / "context-guru-reset")], self.shell.calls)
 
     def test_uninstall_keeping_local_data_deletes_only_the_installers_files(self):
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
         log = install_opencode.state_root() / "0123456789abcdef/proxy.log"
         log.parent.mkdir(parents=True)
         log.write_text("log\n")
@@ -488,21 +596,21 @@ class InstallerTest(unittest.TestCase):
 
     def test_uninstall_offers_to_remove_opencode_only_when_it_installed_it(self):
         self.shell.opencode = None
-        self.installer("y", "y", "n").install()
+        self.installer("1", "y", "y", "n").install()
 
         self.installer("y", "y").uninstall()
 
         self.assertEqual(self.npm_calls()[-1], ["npm", "uninstall", "-g", "opencode-ai"])
 
     def test_uninstall_leaves_an_opencode_it_did_not_install(self):
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
 
         self.installer("y").uninstall()  # one question only: the local data
 
         self.assertEqual([call for call in self.npm_calls() if call[1] == "uninstall"], [])
 
     def test_uninstall_with_a_jsonc_file_still_stops_proxies_and_removes_the_copy(self):
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
         project = install_opencode.state_root() / "0123456789abcdef"
         project.mkdir(parents=True)
         (project / "context-guru-reset").write_text("#!/bin/sh\n")
@@ -522,7 +630,7 @@ class InstallerTest(unittest.TestCase):
 
     def test_uninstall_removes_the_stable_entry_when_the_copy_is_already_gone(self):
         self.write("opencode.json", {"plugin": ["opencode-foo"]})
-        self.installer("y", "n").install()
+        self.installer("1", "y", "n").install()
         shutil.rmtree(self.plugin_copy)
 
         self.installer("y").uninstall()

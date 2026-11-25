@@ -9,6 +9,7 @@ user's answers on the terminal. See docs/superpowers/specs/2026-11-23-opencode-o
   * A record lists what this file added, so uninstall removes that and nothing else.
 """
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -18,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 OPENCODE_NPM = "opencode-ai"
 TESTED_OPENCODE = "1.19.5"  # only named in a note: the installer installs the latest, as the Pi installer does
@@ -30,12 +33,36 @@ MARKER = "opencode-context-guru"
 CONFIGS = (("opencode.json", "index.js", "https://opencode.ai/config.json"),
            ("tui.json", "tui.js", "https://opencode.ai/tui.json"))
 DOWNLOAD_STEP = "Download context-guru for OpenCode"
-INSTALL_STEPS = ("Check this computer", "OpenCode", "Your consent", "The context-guru plugin", "Check that it works")
+INSTALL_STEPS = ("Check this computer", "Your models", "OpenCode", "Your consent", "The context-guru plugin",
+                 "Check that it works")
+# API format -> (provider id, AI SDK package, display name). A gateway gets its own id, so a direct login's key
+# never goes to it. The plugin routes any id that contains "anthropic" or "openai" (index.js providerDialect).
+GATEWAYS = {"anthropic": ("anthropic-gateway", "@ai-sdk/anthropic", "Anthropic gateway"),
+            "openai": ("openai-gateway", "@ai-sdk/openai", "OpenAI gateway")}
+MODELS_TEXT = """context-guru works with Anthropic and OpenAI models only.
+It can reach them directly, or through a gateway that
+speaks the Anthropic or OpenAI API (for example LiteLLM).
+Other providers (Google, Groq, local models, ...) are not routed.
+
+How do you reach your models?
+  1) Anthropic or OpenAI directly
+  2) A custom base URL (a company gateway)
+  3) Another provider: exit, change nothing"""
+NOT_SUPPORTED = "Nothing was changed. context-guru supports Anthropic and OpenAI models."
 UNINSTALL_STEPS = ("Stop the proxies", "Remove the plugin", "Local data", "OpenCode itself")
 
 
 class Stop(Exception):
     """A step cannot go on. The message says why, and what to do."""
+
+
+@dataclass(frozen=True)
+class Connection:
+    """How OpenCode reaches the models. Directly: all None. A gateway: its provider id, `<url>/v1` and 2 models."""
+    provider: Optional[str]
+    base_url: Optional[str]
+    model: Optional[str]
+    small_model: Optional[str]
 
 
 def config_dir():
@@ -95,6 +122,23 @@ def write_json(path, value):
         handle.write(json.dumps(value, indent=2) + "\n")
     os.chmod(temp, mode)
     os.replace(temp, path)
+
+
+def gateway_url(text):
+    """`<url>/v1` for a gateway base URL: https, or http on this computer only."""
+    url = urlsplit(text.strip())
+    local = url.hostname in ("127.0.0.1", "localhost")
+    if not url.hostname or not (url.scheme == "https" or (url.scheme == "http" and local)):
+        raise Stop(f"the base URL must start with https:// (http:// only on 127.0.0.1 or localhost): {text!r}. "
+                   "Nothing was changed.")
+    path = url.path.rstrip("/").removesuffix("/v1")
+    return urlunsplit((url.scheme, url.netloc, path + "/v1", "", ""))
+
+
+def dialect(provider_id):
+    """The API format the plugin routes a provider id as (index.js providerDialect), or None."""
+    lower = str(provider_id).lower()
+    return "anthropic" if "anthropic" in lower else "openai" if "openai" in lower else None
 
 
 def manual_steps():
@@ -180,6 +224,11 @@ class Installer:
             self.step("Check this computer", "It reads OpenCode's config files. Nothing changes in this step.")
             documents = self.read_configs()
             self.record = load_json(record_path())
+            self.step("Your models", "How OpenCode reaches the models. Nothing changes in this step.")
+            self.connection = self.ask_connection(documents)
+            if self.connection is None:
+                self.terminal.say(NOT_SUPPORTED)
+                return 0
             self.step("OpenCode", "OpenCode is the AI coding agent that context-guru works in. This step installs "
                                   "or updates OpenCode, after your yes.")
             self.ensure_opencode()
@@ -203,6 +252,43 @@ class Installer:
         if jsonc.exists():
             raise Stop(f"OpenCode reads {jsonc}, and the installer does not change JSONC files.\n{manual_steps()}")
         return {name: load_json(config_dir() / name) for name, _, _ in CONFIGS}
+
+    def ask_connection(self, documents):
+        """The connection from the user's answers (or the CG_OC_* variables); None for another provider."""
+        env = os.environ.get
+        if not env("CG_OC_GATEWAY_URL"):
+            self.terminal.say(MODELS_TEXT)
+            choice = None
+            while choice not in ("1", "2", "3"):
+                try:
+                    choice = self.terminal.ask("Your choice [1]:", "1")
+                except Stop:  # the input ended: the same as "another provider"
+                    return None
+            if choice == "3":
+                return None
+            if choice == "1":
+                return Connection(None, None, None, None)
+        url = gateway_url(env("CG_OC_GATEWAY_URL") or self.terminal.ask("The gateway's base URL:"))
+        api = env("CG_OC_API")
+        if api and api not in GATEWAYS:
+            raise Stop(f"CG_OC_API must be anthropic or openai, not {api!r}. Nothing was changed.")
+        while api not in GATEWAYS:
+            api = self.terminal.ask("The gateway's API format, anthropic or openai [anthropic]:", "anthropic").lower()
+        model = env("CG_OC_MODEL") or ""
+        while not model:
+            model = self.terminal.ask("The model, as the gateway names it (for example aws/claude-sonnet-5-5):")
+        small = env("CG_OC_SMALL_MODEL") or self.terminal.ask(
+            f"The small model, for session titles [{model}]:", model)
+        provider = GATEWAYS[api][0]
+        # The plugin refuses two upstreams of one API format, and then routes nothing.
+        for other in (documents["opencode.json"].get("provider") or {}):
+            if other != provider and dialect(other) == api:
+                base = ((documents["opencode.json"]["provider"][other] or {}).get("options") or {}).get("baseURL")
+                raise Stop(f"OpenCode's config already has the {api} provider \"{other}\""
+                           f"{f' at {base}' if base else ''}. context-guru routes one {api} upstream only, so it "
+                           f"cannot add {url} too. Remove \"{other}\" from {config_dir() / 'opencode.json'}, "
+                           "then run this again. Nothing was changed.")
+        return Connection(provider, url, model.strip(), small.strip())
 
     @staticmethod
     def tested_note(shown):
