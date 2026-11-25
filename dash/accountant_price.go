@@ -20,10 +20,7 @@ func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
 // accPrices returns the rates of the request sent (with context-guru) and of the request the
 // client built (without it). The size with is the billed prompt: fresh input, cache reads and
 // cache writes. The size without adds what the counted operations removed and takes off what they
-// added. A cache effect only moves tokens between tiers, so it does not change the size, except the
-// mark effect (markPremium), whose tokens are already in the billed size. Not counting them leaves the
-// size without a little low, so the without side is never priced dearer than it should be: the
-// direction is conservative. With no
+// added. A cache effect only moves tokens between tiers, so it does not change the size. With no
 // billed usage, or no tiers, both sides price at the base rate, as before.
 func (e *Event) accPrices(p modelinfo.Price) (with, without modelinfo.Price) {
 	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
