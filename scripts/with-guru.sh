@@ -3,10 +3,12 @@
 #
 #   scripts/with-guru.sh [preset] [-- command ...]
 #
+# Presets: off, conservative (default), medium, high, xhigh, ultrahigh.
+#
 # Examples:
-#   scripts/with-guru.sh agent -- claude          # route Claude Code through the proxy
-#   scripts/with-guru.sh balanced -- codex        # route Codex (OpenAI dialect)
-#   scripts/with-guru.sh                           # start proxy, print the env to paste
+#   scripts/with-guru.sh conservative -- claude   # route Claude Code through the proxy
+#   scripts/with-guru.sh medium -- codex         # route Codex (OpenAI dialect)
+#   scripts/with-guru.sh                           # default preset: conservative. Start proxy, print the env to paste
 #
 # Starts context-guru-proxy on $PORT (default 4000), exports ANTHROPIC_BASE_URL and
 # OPENAI_BASE_URL pointing at it, then execs the given command (or prints the exports
@@ -17,7 +19,7 @@ set -euo pipefail
 PORT="${PORT:-4000}"
 BIN="${BIN:-./bin/context-guru-proxy}"
 
-preset="balanced"
+preset="conservative"
 if [[ "${1:-}" != "" && "${1:-}" != "--" ]]; then preset="$1"; shift; fi
 [[ "${1:-}" == "--" ]] && shift
 

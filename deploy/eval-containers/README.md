@@ -24,7 +24,7 @@ The gateway (`start`) reads:
 - `EVAL_MODEL=<provider>/<model>` — the model pins every call (`FORCE_MODEL`); the provider selects the upstream.
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — the real key, injected on forward (the agent holds only `sk-proxy`).
 - `OPENAI_API_BASE` / `ANTHROPIC_API_BASE` — optional upstream overrides.
-- `CONTEXT_GURU_PRESET` (default `balanced`, an obsolete preset kept for these runs) — which pipeline preset to run.
+- `CONTEXT_GURU_PRESET` (default `conservative`) — which pipeline preset to run.
 
 Three ways to pick a pipeline, in precedence order — the first non-empty one wins:
 
