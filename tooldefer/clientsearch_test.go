@@ -142,7 +142,7 @@ func TestApplySearchLeavesAnthropicAndOtherCasesAlone(t *testing.T) {
 		t.Fatalf("anthropic wire: %s", show(o))
 	}
 	b := []byte(strings.Replace(string(respBody()), `"input":`, `"previous_response_id":"r1","input":`, 1))
-	if o, _ := ApplySearch(e, cgschema.WireResponses, sreq(b)); o.Changed || o.Why != "previous_response_id" {
+	if o, _ := ApplySearch(e, cgschema.WireResponses, sreq(b)); o.Changed || o.Why != "server_held_history" {
 		t.Fatalf("previous_response_id: %s", show(o))
 	}
 	// Without 3 sessions of history nothing is removed.
@@ -320,7 +320,7 @@ func TestApplySearchChainedTurn(t *testing.T) {
 	}
 	// No record: a chained turn is never a decision.
 	e2 := env(t, unusedHist())
-	if o3, _ := ApplySearch(e2, cgschema.WireResponses, sreq(chained)); o3.Changed || o3.Why != "previous_response_id" {
+	if o3, _ := ApplySearch(e2, cgschema.WireResponses, sreq(chained)); o3.Changed || o3.Why != "server_held_history" {
 		t.Fatalf("no record: %s", show(o3))
 	}
 }

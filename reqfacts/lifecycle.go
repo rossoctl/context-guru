@@ -23,7 +23,7 @@ type Lifecycle struct {
 // once per request).
 func ScanLifecycle(norm func() []bschemas.ChatMessage, body []byte) (q Lifecycle) {
 	defer func() { recover() }() //nolint:errcheck // fail open: a body it cannot read yields no facts
-	if gjson.GetBytes(body, "previous_response_id").String() != "" {
+	if schema.ServerHeldHistory(body) {
 		return q // server-held history: `input` is only the newest turn
 	}
 	msgs := norm()
