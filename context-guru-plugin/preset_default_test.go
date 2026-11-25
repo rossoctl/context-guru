@@ -1196,7 +1196,8 @@ func TestStrategyKnownWithABareDashDashBinOffPathIsUnchecked(t *testing.T) {
 	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
 		"--port", port, "--name", "future-x", "--bin", "cg-local-only-bin")
 	cmd.Dir = dir
-	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
+	// PATH is pinned, so the result does not depend on `.` or an empty entry in the machine's PATH.
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "PATH=/usr/bin:/bin")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v: %s", err, b)
@@ -1211,6 +1212,10 @@ func TestUnknownStrategyInAFlowStyleFileStillFailsOver(t *testing.T) {
 	for _, line := range []string{
 		"cache: {strategy: future-x}\n",
 		"cache: {keepalive_max_pings: 3, strategy: future-x, keepalive_idle_seconds: 240}\n",
+		"cache: {a: {b: 1}, strategy: future-x}\n",
+		"cache: {\n  keepalive_max_pings: 3,\n  strategy: future-x\n}\n",
+		"cache:\n  {strategy: future-x}\n",
+		"cache:\n  {\n    strategy: future-x,\n    a: {b: 1}\n  }\n",
 	} {
 		cfg := "# context-guru: strategy=future-x written by /context-guru:cache-strategy-picker\n" +
 			"preset: off\n" + line
@@ -1248,7 +1253,7 @@ func TestWarmUnknownSaysPresetIsOffAfterTheStop(t *testing.T) {
 }
 
 // Warm unknown, and the old proxy ignores SIGTERM and keeps answering: nothing changed, so the
-// "preset is off" note must not print. (Takes about 30 s: the stop waits that long.)
+// "preset is off" note must not print. (Takes about 45 s: the stop waits 30 s, and the first start and the check add the rest.)
 func TestWarmUnknownWithAProxyThatIgnoresSigtermDoesNotSayPresetIsOff(t *testing.T) {
 	requireTool(t, "python3")
 	dir, state := t.TempDir(), t.TempDir()
@@ -1295,5 +1300,47 @@ func TestWarmUnknownWithAProxyThatIgnoresSigtermDoesNotSayPresetIsOff(t *testing
 	}
 	if strings.Contains(out, "preset is off") {
 		t.Errorf("claimed the preset is off although the old proxy still answers:\n%s", out)
+	}
+}
+
+// A flow-style `cache:` line with no strategy key (also one whose only `strategy` is nested inside
+// another mapping) is known without asking the table, and its config is passed.
+func TestOldFormFileWithFlowStyleOwnKeysKeepsItsConfig(t *testing.T) {
+	for _, line := range []string{
+		"cache: {keepalive_idle_seconds: 240}\n",
+		"cache: {keepalive_idle_seconds: 240, extra: {strategy: code}}\n",
+		"cache: {\n  keepalive_idle_seconds: 240\n}\n",
+	} {
+		old := "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+			"preset: off\n" + line
+		r := unknownStrategyCase(t, old, tableWith("none", "auto"), true)
+		if strings.Contains(r.out, "preset is off") || !strings.Contains(r.args, "--config") {
+			t.Errorf("flow-style file %q without a strategy key was failed over: args=%q\n%s", line, r.args, r.out)
+		}
+	}
+}
+
+// A bare --bin name that is on PATH and knows the strategy is `known`.
+func TestStrategyKnownWithABareDashDashBinOnPathIsKnown(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	onPath := filepath.Join(t.TempDir(), "cg-on-path-bin")
+	if err := os.Rename(bin, onPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", "cg-on-path-bin")
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state,
+		"PATH="+filepath.Dir(onPath)+":/usr/bin:/bin", "CONTEXT_GURU_STRATEGIES_TIMEOUT=15")
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=known") {
+		t.Errorf("a bare name on PATH was not run:\n%s", b)
 	}
 }
