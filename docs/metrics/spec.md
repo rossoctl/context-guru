@@ -481,8 +481,6 @@ The left column ranks components. The table at the bottom right is the one to re
 
 Question: does the cache pay, and do pings pay?
 
-The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
-
 | Panel | Type | Query idea |
 |---|---|---|
 | Cache read ratio | time series | by `model` |
@@ -492,7 +490,6 @@ The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
 | Ping cost vs rescue | time series | cost, rescue and net |
 | Estimated ping cost | stat | `llm_keepalive_estimated_cost_usd_total / llm_keepalive_cost_usd_total` (rule 6) |
 | Pings that paid | stat | `rescue_usd / cost_usd` |
-| Shared-warm tokens | time series | credit not given (#853) |
 
 ### 6.4 Inference
 
