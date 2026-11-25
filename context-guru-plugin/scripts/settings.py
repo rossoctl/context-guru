@@ -3993,12 +3993,24 @@ def _names(rows) -> str:
     return ",".join(r["name"] for r in rows)
 
 
-_STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*\S", re.M)
+_STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*[^ \t#]")
 
 
 def _file_sets_strategy_key(text: str) -> bool:
-    """Does the file set a `strategy:` key (under `cache:`) that the proxy must resolve by name?"""
-    return bool(_STRATEGY_KEY.search("\n".join(text.split("\n")[1:])))
+    """Does the file set `strategy:` as a direct child of `cache:`? Other nested keys (such as
+    `components.extract_llm.strategy`) are not a cache strategy name."""
+    in_cache, indent = False, 0
+    for line in text.split("\n")[1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        width = len(line) - len(line.lstrip(" \t"))
+        if width == 0:
+            in_cache, indent = line.split("#")[0].strip() == "cache:", 0
+        elif in_cache:
+            indent = indent or width
+            if width == indent and _STRATEGY_KEY.match(line):
+                return True
+    return False
 
 
 def _is_new_form(text: str, name: str) -> bool:
@@ -4053,8 +4065,14 @@ def cmd_strategy(args) -> int:
         if have and need and have < need:
             emit(result="unchecked", strategy=name, reason="proxy_too_old")
             return 0
+        explicit = getattr(args, "bin", "") or ""
+        if explicit and not (shutil.which(explicit) or os.access(explicit, os.X_OK)):
+            # The caller named the binary it will launch. Another one must not answer for it.
+            emit(result="unchecked", strategy=name, reason="table_unavailable",
+                 detail=f"{explicit} cannot be run")
+            return 0
         try:
-            table = load_strategy_table(getattr(args, "bin", ""))
+            table = load_strategy_table(explicit)
         except StrategyTableError as exc:
             emit(result="unchecked", strategy=name, reason="table_unavailable", detail=f"{exc}")
             return 0

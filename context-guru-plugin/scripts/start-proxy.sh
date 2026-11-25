@@ -602,10 +602,14 @@ fingerprint_want() {
 # The strategy name in the keep-alive file may come from a newer release than the proxy binary we are
 # about to run (#1383). The plugin holds no table (the proxy owns it), so ask the binary. A binary that
 # does not know the name rejects the whole config at load (config/strategy.go) and exits, and the
-# session has no proxy. So when the answer is anything but `known` (`unknown`, or `unchecked`: the
-# check could not run, was too old, or timed out), start with preset `off` and WITHOUT --config,
-# because the proxy cannot load that file. The file is never edited or deleted, so a later upgrade
-# uses it. Fails open: this never stops a proxy from starting.
+# session has no proxy. The answer is `known`, `unknown` or `unchecked` (the check could not run, the
+# recorded version is too old, or it timed out). `known` keeps the config. Then:
+#   - `unknown` (positive): restart with preset `off` and WITHOUT --config, because the proxy cannot
+#     load that file.
+#   - `unchecked`, warm (a proxy already runs): leave the running proxy alone. Nothing changes.
+#   - `unchecked`, cold (no proxy runs): start with preset `off` and WITHOUT --config, because a
+#     proxy with preset off beats no proxy.
+# The file is never edited or deleted, so a later upgrade uses it. Fails open.
 USE_CONFIG=1
 STRATEGY_RESOLVED=0
 RS_RESULT=""
@@ -625,7 +629,7 @@ resolve_strategy() {
     note "preset is off: the installed proxy (${HAVE:-unknown version}) does not know the strategy"
     note "\`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
   else
-    note "preset is off: could not check if the installed proxy (${HAVE:-unknown version}) knows the"
+    note "could not check if the installed proxy (${HAVE:-unknown version}) knows the"
     note "strategy \`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
   fi
   USE_CONFIG=0
@@ -938,7 +942,7 @@ compute_preset_and_strategy_notes() {
 }
 resolve_strategy
 if [ -n "$RS_RESULT" ]; then
-  note "the proxy starts without that file. Upgrade the plugin and the proxy (/context-guru:update)."
+  note "the proxy starts with preset off and without that file. Upgrade the plugin and the proxy (/context-guru:update)."
 fi
 compute_preset_and_strategy_notes
 

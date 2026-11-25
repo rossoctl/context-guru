@@ -255,7 +255,7 @@ func startProxyIn(t *testing.T, state, bin, port string, extra ...string) (strin
 }
 
 // startProxyArgs is startProxyIn with command-line arguments for the script (for example --bin).
-// A later KEY=value in extra replaces the one the helper sets.
+// A KEY=value in extra replaces any earlier entry for the same key (the helper's or the sandbox's).
 func startProxyArgs(t *testing.T, args []string, state, bin, port string, extra ...string) (string, int) {
 	t.Helper()
 	requireTool(t, "bash")
@@ -266,7 +266,18 @@ func startProxyArgs(t *testing.T, args []string, state, bin, port string, extra 
 		"CLAUDE_PLUGIN_OPTION_PORT="+port,
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 		"CONTEXT_GURU_HEALTH_BUDGET=10")
-	cmd.Env = append(cmd.Env, extra...)
+	replaced := map[string]bool{}
+	for _, kv := range extra {
+		k, _, _ := strings.Cut(kv, "=")
+		replaced[k] = true
+	}
+	kept := cmd.Env[:0:0]
+	for _, kv := range cmd.Env {
+		if k, _, _ := strings.Cut(kv, "="); !replaced[k] {
+			kept = append(kept, kv)
+		}
+	}
+	cmd.Env = append(kept, extra...)
 	b, err := cmd.CombinedOutput()
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -992,6 +1003,9 @@ func TestUnknownStrategyCheckThatCannotRunLeavesARunningProxyAlone(t *testing.T)
 	if !strings.Contains(r.out, "could not check") {
 		t.Errorf("no note that the check could not run:\n%s", r.out)
 	}
+	if strings.Contains(r.out, "preset is off") {
+		t.Errorf("claimed the preset is off although nothing changed:\n%s", r.out)
+	}
 }
 
 // The check cannot run on a COLD start: a proxy with preset off beats no proxy.
@@ -1000,7 +1014,7 @@ func TestUnknownStrategyCheckThatCannotRunStartsColdWithPresetOff(t *testing.T) 
 	if !strings.Contains(r.fp, "preset=off") || !strings.Contains(r.fp, "strategy=none") {
 		t.Errorf("no fail-over to preset off: fp=%q\n%s", r.fp, r.out)
 	}
-	if !strings.Contains(r.out, "could not check") || strings.Contains(r.out, "does not know") {
+	if !strings.Contains(r.out, "could not check") || strings.Contains(r.out, "does not know") || !strings.Contains(r.out, "starts with preset off") {
 		t.Errorf("the note must say the check could not run, not that the proxy does not know:\n%s", r.out)
 	}
 	if strings.Contains(r.args, "--config") {
@@ -1054,6 +1068,68 @@ func TestStrategyKnownWithNoVersionRecordAsksTheBinary(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "result=known") {
 		t.Errorf("want result=known with no version record, got:\n%s", b)
+	}
+}
+
+// An old-form file with its own cache keys and an extract_llm block that sets `strategy: code` sets
+// no cache strategy key. The nested key must not send the file to the table check.
+func TestOldFormFileWithNestedStrategyKeyStaysKnown(t *testing.T) {
+	old := "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+		"preset: off\n" +
+		"cache:\n" +
+		"  keepalive_idle_seconds: 240\n" +
+		"  keepalive_max_pings: 3\n" +
+		"components:\n" +
+		"  extract_llm:\n" +
+		"    strategy: code\n"
+	r := unknownStrategyCase(t, old, tableWith("none", "auto"), true)
+	if strings.Contains(r.out, "preset is off") || !strings.Contains(r.args, "--config") {
+		t.Errorf("a nested strategy key sent an old-form file to the table check: args=%q\n%s", r.args, r.out)
+	}
+}
+
+// A proxy-version record below v0.7.1 means that binary serves on `strategies` until the time
+// limit: answer `unchecked` without running it.
+func TestStrategyKnownWithAVersionRecordBelowTheMinimumIsUnchecked(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v0.6.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", bin)
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=unchecked") || !strings.Contains(string(b), "reason=proxy_too_old") {
+		t.Errorf("want result=unchecked reason=proxy_too_old, got:\n%s", b)
+	}
+}
+
+// An explicit --bin that cannot be run gets `unchecked`. Another binary (here CONTEXT_GURU_BIN)
+// must not answer in its place.
+func TestStrategyKnownWithAnUnrunnableDashDashBinIsUnchecked(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	other := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", filepath.Join(dir, "no-such-binary"))
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "CONTEXT_GURU_BIN="+other)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=unchecked") {
+		t.Errorf("another binary answered for an unrunnable --bin:\n%s", b)
 	}
 }
 
