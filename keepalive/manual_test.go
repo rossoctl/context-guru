@@ -151,7 +151,7 @@ func TestPingNowHonoursThePerPingCeiling(t *testing.T) {
 	k, _, _ := manualKeeper(t)
 	k.mu.Lock()
 	for _, e := range k.live {
-		e.pingUSD = e.pol.Ceiling() + 1
+		e.missUSD, e.pingUSD = 1, 2 // a ping that costs more than the miss it protects
 	}
 	k.mu.Unlock()
 	if _, err := k.PingNow(ManualRequest{Key: sess1}); !errors.Is(err, ErrTooCostly) {

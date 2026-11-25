@@ -35,6 +35,15 @@ func TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys(t *testing.T) {
 			// Resolved() is what the proxy runs on. Strategy is only the name it was filled from.
 			ro, rn := co.Cache.Resolved(), cn.Cache.Resolved()
 			rn.Strategy = ""
+			// An old file wrote keepalive_max_usd_per_ping: 0.5. A strategy no longer writes it (#1420): an
+			// old file keeps its 0.5 as the operator's own flat cap, a new form has none. Compare the rest.
+			if name != "1-hour-head" && ro.KeepAliveMaxUSDPerPing != 0.5 {
+				t.Errorf("%s: the old file lost its flat cap: %v", name, ro.KeepAliveMaxUSDPerPing)
+			}
+			if rn.KeepAliveMaxUSDPerPing != 0 {
+				t.Errorf("%s: the strategy sets a flat cap of %v; it must set none", name, rn.KeepAliveMaxUSDPerPing)
+			}
+			ro.KeepAliveMaxUSDPerPing = 0
 			if !reflect.DeepEqual(ro, rn) {
 				t.Errorf("%s: effective config differs\n old: %+v\n new: %+v", name, ro, rn)
 			}
@@ -52,7 +61,7 @@ func TestStrategyFillsKeys(t *testing.T) {
 	}
 	k := c.Cache
 	if !k.KeepAlive || k.KeepAliveIdleSeconds != 240 || k.KeepAliveMaxPings != 2 ||
-		k.KeepAliveMaxUSDPerPing != 0.5 || k.KeepAliveMinPrefixTokens != 80000 ||
+		k.KeepAliveMaxUSDPerPing != 0 || k.KeepAliveMinPrefixTokens != 80000 ||
 		k.KeepAliveIdleSeconds1h != 3540 || k.KeepAliveMaxPings1h != 2 {
 		t.Fatalf("2-ping keys wrong: %+v", k)
 	}

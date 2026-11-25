@@ -52,7 +52,8 @@ const (
 	ReasonNotOptedIn  = "not opted in" // no automatic keep-alive and the request did not ask to be held
 	ReasonTooLarge    = "too large"    // the body is over the per-body limit (Policy.BodyLimit)
 	ReasonExpired     = "expired"      // it was held, and the hold ran out
-	ReasonOverBudget  = "over budget"  // one ping would cost more than the per-ping ceiling
+	ReasonOverBudget  = "over budget"  // one ping would cost more than the operator's own per-ping cap (keepalive_max_usd_per_ping)
+	ReasonNotWorth    = "not worth it" // the planned pings cost at least as much as the one cache miss they protect (the value rule)
 	ReasonUnsupported = "unsupported"  // a shape that cannot be pinged cheaply (thinking enabled, an unsupported route)
 	// The reasons on an account whose automatic keep-alive is ON (issue #662). None of these is
 	// "not opted in": that stays for a request that carried no opt-in and met no automatic policy.
@@ -174,15 +175,6 @@ func (k *Keeper) PingStates(tenant string, all bool, session string) PingStateMa
 func (k *Keeper) stoppedAndBlockedLocked(e *kaEntry, now time.Time) bool {
 	return e.stopped && (k.routeIsTrippedLocked(routeKey(e.tenant, e.endpoint, e.route, e.model), now) ||
 		k.credIsDeadLocked(e.tenant, e.cred, e.model, now))
-}
-
-// entryCeiling is the per-ping ceiling this entry answers to: its policy's, or the one a manual-only
-// entry was admitted under.
-func (e *kaEntry) entryCeiling() float64 {
-	if e.manualOnly {
-		return e.ceiling
-	}
-	return e.pol.Ceiling()
 }
 
 // autoReleaseReason is why the keeper is letting go of an AUTOMATIC entry on its own: stopped by a

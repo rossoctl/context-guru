@@ -3,13 +3,13 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/keepalive"
-	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -177,13 +177,16 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 	// account's document stores 0 for "unconfigured", and reporting that raw told the operator
 	// the ceiling was $0.00 on exactly the accounts — keep-alive off, one session armed by hand
 	// — where the guard resolves to the default instead.
-	ceiling := CachePolicy{}.Ceiling()
+	// The flat cap is opt-in (#1420): no default. Absent means the value rule alone decides.
+	capUSD := CachePolicy{}.PingCap()
 	if h.opts.Tenants != nil {
 		if tn, err := h.opts.Tenants.ForTenant(t); err == nil {
-			ceiling = CachePolicy{MaxUSDPerPing: tn.Cache.MaxUSDPerPing}.Ceiling()
+			capUSD = CachePolicy{MaxUSDPerPing: tn.Cache.MaxUSDPerPing}.PingCap()
 		}
 	}
-	out["max_usd_per_ping"] = ceiling
+	if !math.IsInf(capUSD, 1) {
+		out["max_usd_per_ping"] = capUSD
+	}
 	// The worst case, priced from THIS SESSION's own last billed prefix at its own model's
 	// cache-read rate — never a service-wide average, because per-ping cost is bimodal. Absent
 	// rather than zero when the model has no rate on the operator's list.
@@ -191,7 +194,7 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 	out["last_prefix_tokens"], out["model"], out["worst_case_pings"] = prefix, model, spans
 	if p := h.opts.Prices; p != nil && model != "" && prefix > 0 {
 		if price, ok := p.Price(context.Background(), model); ok && !price.Zero() {
-			price = price.At(int64(prefix) + kvcache.DefaultPingInputTokens) // the ping reads this prefix: the rates of that prompt size
+			price = price.At(keepalive.PingPrompt(int64(prefix))) // the ping reads this prefix: the rates of that prompt size
 			each := keepalive.PingUSD(prefix, price.CacheRead, price.Output)
 			out["ping_usd_each"] = each
 			out["worst_case_usd"] = each * float64(spans)

@@ -156,7 +156,7 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, keepalive.ErrTooCostly):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "over budget",
-			"detail": "one ping on this thread would cost more than the per-ping ceiling"})
+			"detail": "one ping on this thread would cost more than the operator's per-ping cap, or more than the miss it protects"})
 		return
 	case errors.Is(err, keepalive.ErrAtOneHour):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "at one hour",

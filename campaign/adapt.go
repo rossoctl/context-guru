@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
@@ -72,11 +73,11 @@ func CurrentPlan(pol keepalive.Policy, se bool, camp *Active, facts []RowFacts) 
 	gate, _ := keepalive.PredictorFor(pol.PredictorID)
 	return func(i int) (int, float64, bool) {
 		f := &facts[i]
-		if f.Turn < 1 || f.Prefix < int64(RowFloor(pol, f)) || f.Ping > pol.Ceiling() || (pol.PredictorID != "" && (gate == nil || gate(f.Stop) < pol.PredictorThreshold)) {
+		if f.Turn < 1 || f.Prefix < int64(RowFloor(pol, f)) || pol.PingVerdict(f.Ping, f.Stake, pol.MaxPings) != keepalive.VerdictOK || (pol.PredictorID != "" && (gate == nil || gate(f.Stop) < pol.PredictorThreshold)) {
 			return 0, x, se
 		}
 		return pol.MaxPings, x, se
-	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens for a main thread that waits for a person (%d otherwise), <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), pol.Ceiling()), true
+	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens for a main thread that waits for a person (%d otherwise), a ping chain that costs less than one miss%s", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), capNote(pol)), true
 }
 
 // RowFloor is the prefix floor the keeper would apply to a replayed row. It asks Policy.FloorFor, the
@@ -109,4 +110,12 @@ func ForcePolicy(spec map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// capNote names the operator's own flat cap, when there is one.
+func capNote(pol keepalive.Policy) string {
+	if c := pol.PingCap(); !math.IsInf(c, 1) {
+		return fmt.Sprintf(", <= $%.2f a ping", c)
+	}
+	return ""
 }

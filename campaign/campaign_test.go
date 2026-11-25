@@ -21,11 +21,11 @@ func rowsOnly(reqs []*kvcache.Request, price func(model string, promptTokens int
 }
 
 func TestRowFactsDefaultGates(t *testing.T) {
-	ok := RowFacts{Turn: 1, Prefix: 80000, Ping: 0.5}
+	ok := RowFacts{Turn: 1, Prefix: 80000, Ping: 0.6, Stake: 5} // a $0.60 ping that protects a $5 miss: the value rule lets it through
 	if ok.DefaultK() != 2 {
 		t.Fatalf("an eligible row gets %d pings, want 2", ok.DefaultK())
 	}
-	for name, f := range map[string]RowFacts{"first request": {Turn: 0, Prefix: 80000}, "small prefix": {Turn: 1, Prefix: 79999}, "dear ping": {Turn: 1, Prefix: 80000, Ping: 0.51}} {
+	for name, f := range map[string]RowFacts{"first request": {Turn: 0, Prefix: 80000}, "small prefix": {Turn: 1, Prefix: 79999}, "dear ping": {Turn: 1, Prefix: 80000, Ping: 0.51, Stake: 0.2}, "two pings cost more than the miss": {Turn: 1, Prefix: 80000, Ping: 0.6, Stake: 1}} {
 		if f.DefaultK() != 0 {
 			t.Errorf("%s: %d pings, want 0", name, f.DefaultK())
 		}
@@ -392,5 +392,19 @@ func TestShadowConstantsMatchTheEngineCalibration(t *testing.T) {
 	}
 	if c.Benefit != BenefitScale || c.Ping != PingScale {
 		t.Fatalf("calibration file has %v / %v, campaign/replay.go has %v / %v", c.Benefit, c.Ping, BenefitScale, PingScale)
+	}
+}
+
+// Replay and the live keeper decide with one function (keepalive.Policy.PingVerdict). On a grid of pings
+// and misses, the replay's default plan fires exactly when the keeper's verdict is OK for the default K.
+func TestReplayDecidesLikeTheLiveKeeper(t *testing.T) {
+	for _, ping := range []float64{0.001, 0.2, 0.51, 0.6, 3} {
+		for _, stake := range []float64{0, 0.3, 1, 5.4, 40} {
+			f := RowFacts{Turn: 1, Prefix: 600_000, Ping: ping, Stake: stake}
+			live := (keepalive.Policy{}).PingVerdict(ping, stake, config.DefaultKeepAliveMaxPings) == keepalive.VerdictOK
+			if got := f.DefaultK() > 0; got != live {
+				t.Errorf("ping %v stake %v: replay fires %v, live allows %v", ping, stake, got, live)
+			}
+		}
 	}
 }

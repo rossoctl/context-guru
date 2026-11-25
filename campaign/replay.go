@@ -125,10 +125,10 @@ func (f *RowFacts) Outcome(k int, x float64, sessionEnd bool) (fired int, rescue
 	return PlanOutcome(k, x, f.U, f.Gap, f.Returned, stop)
 }
 
-// The shipped default keep-alive (config.Default*): K2 at 240 s on a prefix of at least 80K tokens, at most $0.50 a ping, never after a thread's first
+// The shipped default keep-alive (config.Default*): K2 at 240 s on a prefix of at least 80K tokens, every chain costing less than the miss it protects, never after a thread's first
 // request, with SessionEnd.
 func (f *RowFacts) DefaultK() int {
-	if f.Turn < 1 || f.Prefix < config.DefaultKeepAliveMinPrefix || f.Ping > keepalive.DefaultMaxUSDPerPing {
+	if f.Turn < 1 || f.Prefix < config.DefaultKeepAliveMinPrefix || (keepalive.Policy{}).PingVerdict(f.Ping, f.Stake, config.DefaultKeepAliveMaxPings) != keepalive.VerdictOK {
 		return 0
 	}
 	return config.DefaultKeepAliveMaxPings

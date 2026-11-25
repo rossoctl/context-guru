@@ -33,8 +33,9 @@ For the keys and the settings page, see [Keep an idle prompt cache warm](cache-k
 
 - **Rebuild.** The cache entry has expired. The next request writes the whole prompt again.
 - **Ping.** A request that the proxy sends while you are away. It sends the whole prompt and asks for almost no output. It reads the cached prompt and
-  so restarts the lifetime. It costs one read. By default the proxy sends no ping that would cost more than
-  $0.50 (`keepalive_max_usd_per_ping`; a manager strategy can change it).
+  so restarts the lifetime. It costs one read. The proxy sends the planned pings of
+  one idle span only when they cost less than the one miss they protect (the value rule, #1420). An operator can also set a flat cap per ping
+  with `keepalive_max_usd_per_ping`. No strategy sets it.
 - **Main agent.** The thread you talk to. **Subagent.** A thread that the main agent starts.
 - **Prefix.** The part of the prompt that the cache holds. The proxy pings only a prefix that is big
   enough (see the table below).
