@@ -25,7 +25,8 @@
 # a Cortex release (with its own pinned context-guru):
 #   agentop update --ref=v0.10.2      # or the release you want
 #
-# Each build stays in ~/.cache/cortex-cg/<cortex>-cg-<version>/.
+# Each build stays in ~/.cache/cortex-cg/<cortex>-cg-<version>/. Nothing removes old
+# ones; delete that folder when you like.
 #
 # The context-guru plugin must be in ~/.cortex/config.yaml under
 # pipeline.outbound.plugins, after the parsers. "agentop setup" adds it. The script
@@ -48,7 +49,7 @@ while [[ $# -gt 0 ]]; do
     --install) install=1 ;;
     --cortex-ref) cortex_ref="${2:?--cortex-ref needs a value}"; shift ;;
     -h|--help) awk 'NR>1 && !/^#/ {exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; exit 0 ;;
-    v*) cg_version="$1" ;;
+    v[0-9]*) cg_version="$1" ;;
     *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -60,11 +61,17 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v go >/dev/null || die "go is not on PATH"
 command -v git >/dev/null || die "git is not on PATH"
 command -v make >/dev/null || die "make is not on PATH"
+command -v curl >/dev/null || die "curl is not on PATH"
+
+# The context-guru version a cortex binary carries, or "" when it has none.
+cg_dep() { go version -m "$1" 2>/dev/null | awk -v m="$CG_MODULE" '$1=="dep" && $2==m {print $3}' || true; }
 
 # The context-guru version: the newest release tag when none is given.
 if [[ -z "$cg_version" ]]; then
+  # "|| true": with pipefail, a failed ls-remote or no match would stop the script
+  # here with no message. The check below reports it instead.
   cg_version=$(git ls-remote --tags --refs "$CG_REPO" 'v*' |
-    sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+    sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
   [[ -n "$cg_version" ]] || die "could not read the context-guru tags"
   say "newest context-guru release: $cg_version"
 fi
@@ -76,15 +83,24 @@ if [[ ! -d "$CORTEX_DIR/.git" ]]; then
 fi
 git -C "$CORTEX_DIR" fetch -q --tags origin
 
+is_commit() { [[ -n "$1" ]] && git -C "$CORTEX_DIR" rev-parse -q --verify "$1^{commit}" >/dev/null; }
+
 # The Cortex version: the installed one, so only context-guru changes.
+#   1. The last word of "cortex --version": "cortex v0.10.2" or "cortex (cpex) v0.10.2".
+#   2. A build from this script says "cortex dev". Its source commit is in the binary
+#      (vcs.revision), so a second run keeps the same Cortex.
+#   3. Else stop: a silent fall back to main would change Cortex too.
 if [[ -z "$cortex_ref" ]]; then
-  if [[ -x "$INSTALLED_CORTEX" ]]; then
-    cortex_ref=$("$INSTALLED_CORTEX" --version 2>/dev/null | awk '{print $2}')
-  fi
-  if [[ -z "$cortex_ref" ]] || ! git -C "$CORTEX_DIR" rev-parse -q --verify "$cortex_ref^{commit}" >/dev/null; then
-    cortex_ref=origin/main
+  [[ -x "$INSTALLED_CORTEX" ]] || die "no Cortex at $INSTALLED_CORTEX; pass --cortex-ref vX.Y.Z"
+  cortex_ref=$("$INSTALLED_CORTEX" --version 2>/dev/null | awk '{print $NF}' || true)
+  if ! is_commit "$cortex_ref"; then
+    rev=$(go version -m "$INSTALLED_CORTEX" 2>/dev/null |
+      awk '$1=="build" && $2 ~ /^vcs.revision=/ {sub(/^vcs.revision=/, "", $2); print $2}' || true)
+    is_commit "$rev" || die "cannot tell which Cortex version is installed ('${cortex_ref:-none}'); pass --cortex-ref vX.Y.Z"
+    cortex_ref=$(git -C "$CORTEX_DIR" describe --tags --exact-match "$rev" 2>/dev/null || echo "$rev")
   fi
 fi
+is_commit "$cortex_ref" || die "'$cortex_ref' is not a commit in $CORTEX_DIR"
 say "Cortex version: $cortex_ref"
 
 # A temporary worktree, so the go.mod / go.sum change never reaches the checkout.
@@ -106,7 +122,7 @@ make -C "$src" cortex agentop PROFILE=full >"$work/build.log" 2>&1 || {
   tail -30 "$work/build.log" >&2; die "build failed (log above)"
 }
 
-built=$(go version -m "$src/bin/cortex" | awk -v m="$CG_MODULE" '$1=="dep" && $2==m {print $3}')
+built=$(cg_dep "$src/bin/cortex")
 [[ "$built" == "$cg_version" ]] || die "the built cortex has context-guru '${built:-none}', not $cg_version"
 go version -m "$src/bin/cortex" | grep -q include_plugin_contextguru ||
   die "the built cortex does not link the context-guru plugin"
@@ -120,7 +136,7 @@ pipeline.outbound.plugins, after the parsers:
       - name: context-guru
         config:
           engine:
-            preset: balanced
+            preset: xhigh
 EOF
 fi
 
@@ -141,6 +157,6 @@ say "installing (agentop setup --from ... --restart); agent sessions pause for a
 for _ in $(seq 1 30); do curl -sf "$HEALTH_URL" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$HEALTH_URL" >/dev/null 2>&1 || die "the proxy is not healthy at $HEALTH_URL"
 
-now=$(go version -m "$INSTALLED_CORTEX" | awk -v m="$CG_MODULE" '$1=="dep" && $2==m {print $3}')
+now=$(cg_dep "$INSTALLED_CORTEX")
 [[ "$now" == "$cg_version" ]] || die "installed cortex has context-guru '${now:-none}', not $cg_version"
 say "done: the running Cortex uses context-guru $now"
