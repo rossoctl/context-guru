@@ -259,9 +259,7 @@ CREATE TABLE IF NOT EXISTS requests (
   defer_gross_usd     REAL    NOT NULL DEFAULT 0,
   defer_net_usd       REAL    NOT NULL DEFAULT 0,
   -- The deferral's cost: the names list and the search turns, gross less net (the accountant's one figure, #1441).
-  -- defer_net_usd is the deferral lever, which on a request the accountant priced is the library's figure less
-  -- the search cost, so gross less net no longer says what the deferral cost. Filled by the migration for rows
-  -- written before this column existed (see backfillDeferCost).
+  -- Filled by the migration for rows written before this column existed (see backfillDeferCost).
   defer_cost_usd      REAL    NOT NULL DEFAULT 0,
   -- C, the client's own compaction point in billed tokens, and its source, written only when the
   -- user's own client setting set it (#948). 0 and '' otherwise: the table value is read back from

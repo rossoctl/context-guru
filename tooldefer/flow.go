@@ -53,7 +53,7 @@ type Flow struct {
 	// Upstream and Route name the endpoint the request goes to. They key the probe verdicts.
 	Upstream, Route string
 	Parts           func() Parts
-	// Prices prices a model for the ledger. nil means no price table.
+	// Prices prices a model. The ledger no longer reads it: the accountant prices deferral (#1441).
 	Prices modelinfo.Pricer
 	// ProjectFor reads the project directory off the client's pristine body: the host passes
 	// apply.ProjectFor. A field, not an import, because apply's own test imports this package.

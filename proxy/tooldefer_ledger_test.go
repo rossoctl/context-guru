@@ -83,6 +83,10 @@ func TestToolDeferLedgerCountsSearchesOnEveryPath(t *testing.T) {
 			if st.Requests != 1 || st.Searches != 1 {
 				t.Fatalf("ledger = %+v, want 1 request with 1 search", st)
 			}
+			// The dashboard is off, so no accountant figure exists: the request counts as unpriced, with no dollars (#1441).
+			if st.Unpriced != 1 || st.Gross != 0 || st.Net != 0 || st.Cost != 0 {
+				t.Fatalf("ledger = %+v, want 1 unpriced request and no dollars with the dashboard off", st)
+			}
 		})
 	}
 }

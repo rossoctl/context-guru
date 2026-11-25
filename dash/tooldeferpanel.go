@@ -47,7 +47,7 @@ type ToolDeferDay struct {
 	NetUSD       float64 `json:"net_usd"`
 	// CostUSD is gross less net: the names list and the search turns. It is read from the request row.
 	CostUSD float64 `json:"cost_usd"`
-	// Unpriced is the changed requests whose model has no price: their dollars read 0, not free.
+	// Unpriced is the changed requests with no accountant figure (no price, a held estimate, no result): their dollars read 0, not free.
 	Unpriced int64 `json:"unpriced_requests"`
 }
 

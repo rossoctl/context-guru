@@ -412,12 +412,19 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 	}
 	b, ok := h.deferFlow(nil).Book(ctx, di, tooldefer.Response{FreshInput: u.FreshInput, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 		CacheWrite1h: u.CacheWrite1h, Searches: u.Searches, SearchLoaded: u.SearchLoaded, SearchDropped: u.SearchDropped}, usageOK, st)
-	if ok && cp != nil {
-		cp.noteDefer(b.Request, b.Distinct)
-		ledger := h.deferFlow(nil).Parts().Ledger
-		tenant := b.Request.Tenant
-		cp.deferBook = func(m tooldefer.Money, priced bool) { ledger.AddMoney(tenant, m, priced) }
+	if !ok {
+		return
 	}
+	ledger := h.deferFlow(nil).Parts().Ledger
+	tenant := b.Request.Tenant
+	if cp == nil {
+		// The dashboard is off: no accountant runs, so no figure exists. The request counts as unpriced, and its
+		// dollars read 0. /stats shows the counts without dollars (#1441).
+		ledger.AddMoney(tenant, tooldefer.Money{}, false)
+		return
+	}
+	cp.noteDefer(b.Request, b.Distinct)
+	cp.deferBook = func(m tooldefer.Money, priced bool) { ledger.AddMoney(tenant, m, priced) }
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.
