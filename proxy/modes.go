@@ -9,6 +9,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -38,7 +39,7 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// Observe: the enforced path does nothing at all. Not "runs and discards" — it never
 	// runs, which is what makes the byte-identity guarantee structural. The measurement
 	// happens off-path, on a copy, and the request pays only the enqueue.
-	if mode == components.ModeObserve && !r.bypassed {
+	if lifecycle.Observing(mode, r.bypassed) {
 		h.observe(r)
 		return r.body, time.Since(start), apply.Trace{}
 	}
@@ -54,27 +55,22 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// service actually runs.
 	headTTL1h, headTTLMinBytes := h.keeper.resolveHeadTTL(r.tn.ID, h.keeper.clockNow(),
 		r.tn.Cache.HeadTTL1h, r.tn.Cache.HeadTTLGateBytes())
-	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, apply.Opts{
-		Provider: r.provider, API: r.api, Body: r.body, Session: r.session, Tenant: r.tn.ID, Bypass: r.bypassed,
-		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,
-		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
-		SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx), ThreadOf: r.threadOf,
-		HeadTTL1h:       headTTL1h,
-		HeadTTLMinBytes: headTTLMinBytes,
-		Mode:            mode, Tracker: h.tracker,
-		// The asker a component may use to put a question to the request's own model over its
-		// cached transcript. nil on a non-Anthropic route or without an incoming client; a
-		// component decides for itself what nil means. See prefixask.go.
-		PrefixAsk: h.prefixAskerForAPI(r.provider, r.api, r.models),
-		// Whether the keep-alive can ping this thread, so a component that prepares something for a
-		// ping keeps nothing for a thread that will never get one. See keeper.canPing.
-		CanKeepAlive: func(session, thread string) bool {
-			return h.keeper.canPing(r.tn, session, thread, r.provider)
-		},
-		// The 1-hour-on-wait strategy on a route where the switch costs a rewrite: a main thread writes at 1
-		// hour from its first request (keepalive.Keeper.OneHourFirst, #1261). Only for an account that opted in.
-		OneHourFirst: h.oneHourFirstFor(r),
-	})
+	o := h.requestOf(r).Opts()
+	o.Bypass, o.SelfRates, o.RatesFor, o.ThreadOf = r.bypassed, r.rates, h.ratesFor(r.ctx), r.threadOf
+	o.HeadTTL1h, o.HeadTTLMinBytes, o.Mode = headTTL1h, headTTLMinBytes, mode
+	// The asker a component may use to put a question to the request's own model over its
+	// cached transcript. nil on a non-Anthropic route or without an incoming client; a
+	// component decides for itself what nil means. See prefixask.go.
+	o.PrefixAsk = h.prefixAskerForAPI(r.provider, r.api, r.models)
+	// Whether the keep-alive can ping this thread, so a component that prepares something for a
+	// ping keeps nothing for a thread that will never get one. See keeper.canPing.
+	o.CanKeepAlive = func(session, thread string) bool {
+		return h.keeper.canPing(r.tn, session, thread, r.provider)
+	}
+	// The 1-hour-on-wait strategy on a route where the switch costs a rewrite: a main thread writes at 1
+	// hour from its first request (keepalive.Keeper.OneHourFirst, #1261). Only for an account that opted in.
+	o.OneHourFirst = h.oneHourFirstFor(r)
+	res := apply.BodyOpts(r.ctx, r.tn.Pipe, r.tn.Store, o)
 	added := time.Since(start)
 	if res.Body == nil {
 		return r.body, added, res.Trace
@@ -108,7 +104,7 @@ type reqInfo struct {
 	// mechanism acts, which is the denominator a fill fraction belongs over rather than the window.
 	// 0 = unknown. compactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "window_fallback", carried so a
 	// decision made on a guess is distinguishable from one made on a measurement.
-	// See internal/compactionpoint.
+	// See compactionpoint.
 	compactionPoint       int
 	compactionPointSource string
 	// rates are the request model's per-token rates, so a component that calls that same
@@ -165,40 +161,46 @@ func (h *Handler) observe(r *reqInfo) {
 	key := "observe:" + tenantLabel(info.tn.ID) + ":" + strconv.FormatUint(h.observeSeq.Add(1), 10)
 
 	h.pool.Enqueue(key, func(ctx context.Context) {
-		apply.BodyOpts(logging.With(ctx, lg), info.tn.Pipe, info.tn.Shadow, apply.Opts{
-			Provider: info.provider, API: info.api, Body: info.body, Session: info.session, Tenant: info.tn.ID,
-			Models: info.models, Window: info.window, WindowExact: info.windowExact, CacheMode: h.opts.CacheMode,
-			CompactionPoint: info.compactionPoint, CompactionPointSource: info.compactionPointSource,
-			Mode: components.ModeObserve,
-			// The thread, resolved from the same facts the response path's billed-input write
-			// uses (serve), so the per-thread figure the off-path run READS (cg:bint:) is the one
-			// that write PUT. Without it every observed run reads the primary thread's key.
-			ThreadOf: info.threadOf,
-			// The Tracker, so the projection is measured under the SAME cached-prefix
-			// boundary an enforcing mode would use. Without it the boundary is unknown,
-			// MaxCachedIdx is -1, the tail gate never fires, and every message in the
-			// transcript looks compactable — which inflates the projection against what
-			// sync actually achieves. Measured on SWE-bench: 9.5% projected against 0.8%
-			// enforced, because 50 extract_llm candidates passed the gate instead of 5.
-			//
-			// Out-of-order jobs no longer leave the boundary untouched: since the
-			// compaction reset (modes.Boundary) a late job carrying a SHORTER turn reads
-			// as a compaction, rebases the boundary on its own length, and bumps
-			// compaction_resets. That errs toward a LOWER boundary — a bigger tail, so a
-			// projection that over- rather than under-states what sync would achieve —
-			// and it cannot touch an enforced request, because observe mode's enforced
-			// path never calls BodyOpts at all. Read compaction_resets in observe mode as
-			// "resets plus off-path reordering", not as a compaction count.
-			SelfRates: r.rates, RatesFor: h.ratesFor(r.ctx),
-			Tracker: h.tracker,
-			// h.shadow, not the live store: see Handler.shadow. The live store must stay
-			// clean (a real request must never replay a decision that was never enforced),
-			// but the frozen decisions still have to accumulate across turns or the
-			// projection under-reports what enforcing would achieve.
-		})
+		oo := h.requestOf(&info).Opts()
+		oo.Mode = components.ModeObserve
+		// The thread, resolved from the same facts the response path's billed-input write
+		// uses (serve), so the per-thread figure the off-path run READS (cg:bint:) is the one
+		// that write PUT. Without it every observed run reads the primary thread's key.
+		oo.ThreadOf = info.threadOf
+		// The Tracker (set by requestOf), so the projection is measured under the SAME cached-prefix
+		// boundary an enforcing mode would use. Without it the boundary is unknown,
+		// MaxCachedIdx is -1, the tail gate never fires, and every message in the
+		// transcript looks compactable — which inflates the projection against what
+		// sync actually achieves. Measured on SWE-bench: 9.5% projected against 0.8%
+		// enforced, because 50 extract_llm candidates passed the gate instead of 5.
+		//
+		// Out-of-order jobs no longer leave the boundary untouched: since the
+		// compaction reset (modes.Boundary) a late job carrying a SHORTER turn reads
+		// as a compaction, rebases the boundary on its own length, and bumps
+		// compaction_resets. That errs toward a LOWER boundary — a bigger tail, so a
+		// projection that over- rather than under-states what sync would achieve —
+		// and it cannot touch an enforced request, because observe mode's enforced
+		// path never calls BodyOpts at all. Read compaction_resets in observe mode as
+		// "resets plus off-path reordering", not as a compaction count.
+		oo.SelfRates, oo.RatesFor = r.rates, h.ratesFor(r.ctx)
+		// info.tn.Shadow, not the live store: see Handler.shadow. The live store must stay
+		// clean (a real request must never replay a decision that was never enforced),
+		// but the frozen decisions still have to accumulate across turns or the
+		// projection under-reports what enforcing would achieve.
+		apply.BodyOpts(logging.With(ctx, lg), info.tn.Pipe, info.tn.Shadow, oo)
 		// The pipeline already emitted mode-stamped reports through the emitter; the
 		// Aggregator routes anything stamped observe into the potential_* namespace. No
 		// separate recording call here, which is what keeps the two namespaces from
 		// drifting apart.
 	})
+}
+
+// requestOf is the part of apply.Opts the enforced path, the observation and /compact share.
+func (h *Handler) requestOf(r *reqInfo) lifecycle.Request {
+	return lifecycle.Request{
+		Provider: r.provider, API: r.api, Body: r.body, Session: r.session, Tenant: r.tn.ID,
+		Models: r.models, Window: r.window, WindowExact: r.windowExact, CacheMode: h.opts.CacheMode,
+		CompactionPoint: r.compactionPoint, CompactionPointSource: r.compactionPointSource,
+		Tracker: h.tracker,
+	}
 }

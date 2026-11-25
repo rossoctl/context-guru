@@ -205,6 +205,9 @@ type kaArrival struct {
 	// refreshedAt is when the provider's entry was last known refreshed: the previous real
 	// request's start, or the start of the last ping that READ or WROTE the cache. Zero when no entry.
 	refreshedAt time.Time
+	// refreshedOneHour: the last touch was a free 1-hour ping that still counts, so the entry is at the
+	// 1-hour tier whatever tier its last write was billed at (#1350). A fact the proxy passes on.
+	refreshedOneHour bool
 }
 
 // arriveAt is arrive plus the instant the provider's entry was last refreshed. The cache-miss
@@ -214,8 +217,10 @@ func (k *keeper) arriveAt(tenant, session, threadID string) kaArrival {
 	if k == nil || session == "" {
 		return kaArrival{}
 	}
-	pings, refreshed, tag, refreshedAt := k.Keeper.ArriveAt(keepalive.Key{Tenant: tenant, Session: session, Thread: threadID})
-	return kaArrival{pings: pings, refreshed: refreshed, strategyID: tag, refreshedAt: refreshedAt}
+	key := keepalive.Key{Tenant: tenant, Session: session, Thread: threadID}
+	pings, refreshed, tag, refreshedAt := k.Keeper.ArriveAt(key)
+	return kaArrival{pings: pings, refreshed: refreshed, strategyID: tag, refreshedAt: refreshedAt,
+		refreshedOneHour: k.Keeper.OneHourTouchLive(key)}
 }
 
 func (k *keeper) retireSession(tenant, session string) {
@@ -312,7 +317,7 @@ func (k *keeper) LiveSessionKeys() []string {
 func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool) {
-	_ = k.recordTouch("", tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK, nil)
+	_ = k.recordTouch("", 0, 0, tn, session, threadID, startedAt, body, up, r, provider, route, status, u, usageOK, nil)
 }
 
 // recordTouch is record with the liveness-clock alias apply derived from the ARRIVING request
@@ -326,7 +331,7 @@ func (k *keeper) record(tn *Tenancy, session, threadID string, startedAt time.Ti
 // open, when non-nil, are the open-task counts of this turn's own body (the early scan, earlyscan.go). The
 // same counts decide the windows here and the plan in Record, so a turn that starts background work gets the
 // background count, the background floor and no windows together (#1225, #1227).
-func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
+func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *Tenancy, session, threadID string, startedAt time.Time, body []byte,
 	up upstream, r *http.Request, provider bschemas.ModelProvider, route string, status int,
 	u Usage, usageOK bool, open *keepalive.TaskCounts) *keepalive.PlanInForce {
 	if k == nil || tn == nil {
@@ -418,7 +423,7 @@ func (k *keeper) recordTouch(touchAlias string, tn *Tenancy, session, threadID s
 	}
 	key := keepalive.Key{Tenant: tn.ID, Session: session, Thread: threadID}
 	// Built before `recorded` is set, so a panic evaluating any of its fields still departs.
-	rec := keepalive.Record{Key: key, StartedAt: startedAt, Body: body, TouchAlias: touchAlias,
+	rec := keepalive.Record{Key: key, StartedAt: startedAt, Body: body, TouchAlias: touchAlias, TouchAtMs: touchAtMs, TouchSeq: touchSeq,
 		Cred: cred, Client: client,
 		Provider: provider, Endpoint: up.base, Route: route, Status: status,
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,

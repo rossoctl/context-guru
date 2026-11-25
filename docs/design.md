@@ -17,9 +17,10 @@ infrastructure the components sit on.
 | `components/all/` | blank-imports every component so `init()` registrations run |
 | `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
 | `accwire/` | the accountant's reader for each wire (Anthropic Messages and Chat Completions, Responses): hashed body positions, cache-mark breakpoints, envelope operations, slot path to wire position. Chosen once per body by `accwire.For` |
-| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, and the rules for which request books no figure |
+| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, the rules for which request books no figure, the `Recorder` (`Begin`/`End`/`Record`/`LowerTTL`/`Price`: the per-thread state and the finish-time pricing), the `PingStore`, and the state-file format (`SnapshotState`/`RestoreState`) |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
+| `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client. Its test helpers are in `internal/inbandtest` |
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
@@ -32,7 +33,14 @@ infrastructure the components sit on.
 | `cheapmodel/` | Anthropic/OpenAI wire-format clients for the cheap-model call (extraction, summarization); hold a `dispatch.Dispatcher` + `dispatch.Ref`, never a credential — a host builds one over its own Dispatcher |
 | `models/` | model context windows and token prices: `Resolver`, `Chain`, `ExactWindow`. A facade over `internal/modelinfo`; the LiteLLM gateway client is in `models/litellm`. A host that needs only these imports them, not `proxyapp`, so it does not link the proxy (#1251) |
 | `modes/` | per-session cached-prefix boundary (`Tracker`) + the bounded off-path worker pool (`Pool`) |
+| `lifecycle/` | the order of the steps around one request, for every host: `Prepare` (expand repair, stray adjudication answers, anchor, pipeline, thread, keep-alive arrival, tool injection, tool deferral), `Finish` (keep-alive touch, deferral ledger, deferred summary, warm question, billed input), `CompactionGate`, `Request.Opts` (the option build shared by the request path, observe and `/compact`), `SelfRates`, `RatesFor`, `ResolveWindow`, `ResolveCompactionPoint`. The host gives function values for what needs its own state |
 | `thread/` | tells apart the threads of one session (main agent, subagents, forks): `Tracker.Resolve` (agent header, then prefix continuity, then the session), `Key`, `AgentThread`, `ValidHeaderID`, `IsAgentCompaction`. A host sets `apply.Opts.ThreadOf` from it; see that field for the host contract |
+| `reqfacts/` | the facts a request states: `Meta` (`MetaFromBody`) and `Lifecycle` (`ScanLifecycle`). `dash.Meta` and `dash.LifecycleReq` are aliases of them |
+| `respfacts/` | the facts a response states, from a body or a stream: usage (`ParseUsage`, `ParseSSEUsage`) and the reason a usage reading is missing (`Miss`) |
+| `compactionpoint/` | where a client compacts its own context, by client and model: `Point`, `For`, `Resolve`. Read by `components/offload`; `lifecycle.ResolveCompactionPoint` returns it |
+| `providerusage/` | the billed token tiers of one response (fresh, cache read, cache write by lifetime): `Parse`, `Tiers`. Returned by `respfacts`; read by `keepalive` and `cheapmodel` |
+| `waitcause/` | what a thread waits for after a reply (a person, a tool, a subagent): `Tracker`, `Scan`, `ClassifyWaitingFor`. `keepalive` and `campaign` read it, and a host feeds it |
+| `adjudicate/` | the in-band tool the cheap model answers through: `ToolName`, the tool definition, and the stray-call answer (`StrayAnswer`, `ResponseCallIDs`). Used by `accwire`, `cheapmodel` and `inband` |
 | `thinkcount/` | the token count of each thinking block, for the accountant: reads a response's signatures and `thinking_tokens` (JSON, or a stream as it goes by) and keeps a bounded table by signature hash, which the host passes to `accountant.NewBodyCounted` |
 | `metrics/` | `Emitter` implementations: `Slog`, `Aggregator` (for `/stats`), `Tee` |
 | `dash/` | the persistent observability layer: SQLite store, off-hot-path capture, SSE hub, JSON API, embedded UI |
@@ -293,6 +301,43 @@ History: #716 measured the miss, #776 / #777 / #779 fixed it, #778 measures it b
 `keepalive/sweeptextturn_test.go` and `keepalive/summarytextturn_test.go` guard the rule for every
 substitute kind.
 
+### One source for the cache lifetime
+
+No code writes "5 minutes", "30 minutes" or "1 hour" for a provider's cache lifetime. Two places hold the
+facts:
+
+- **The table:** `modelinfo.CacheLifetime(provider, model, oneHour)`. `apply.EntryLifetime(CacheFacts)` and
+  `apply.IsCold` are the one decision that wraps it; every reader (the cold check, the keeper, the dashboard)
+  calls them. It gives the lifetime for a provider, a model and a tier. A
+  provider with a fixed lifetime (OpenAI GPT-5.6+, 30 minutes) ignores the tier.
+- **The tier of the last touch:** the `cg:seen:<alias>` clock records the time of the last touch of the
+  entry. A keep-alive request that left the entry at the 1-hour tier writes `<ms>:1h`. A real request, or a
+  5-minute touch, writes the plain `<ms>`. So the tier lasts until the next touch, and a 5-minute
+  touch moves the entry back (#1258). The cold check reads both (#1350). It counts the lifetime of that
+  tier from the touch. Without this, 5 minutes after a free 1-hour ping the check read "cold" on a warm
+  entry, and a cold-only cut made the provider write the whole prefix again.
+
+That value is the **only** record of the fact "the last touch of this thread was a free 1-hour ping" (#1365).
+`apply.StandingOneHourPing` and `apply.LiveOneHourPing` read it. The dashboard's cache clock, the manual-ping
+refusal and the probe ask them, and the cold check reads the same value. The keeper keeps only an index of
+thread to alias (and the route that made the ping), so it knows where to look. The index holds no tier and no
+time, so it cannot disagree with the store. Each event writes the store record once:
+
+| Event | Write |
+| --- | --- |
+| a free 1-hour ping | `<ms>:1h:<tag>` (`<tag>` is a hash of the route that made it) |
+| a real request (before the forward) | `<ms>` or, over a standing ping, `<ms>^<pingMs>#<seq>:<tag>` (the carry; `<seq>` numbers the request) |
+| an accepted real request | the carry that request wrote ends: `<ms>` (`apply.ConfirmRealTouch`, by the request's own clock time) |
+| a failed real request | nothing: the carry stays, the ping's hour runs on |
+| a 5-minute touch, a manual press | `<ms>` |
+| a route switch-off | the tier of a ping stamped with that route's tag ends, the time stays (`apply.EndTouchTier`). A later ping of another route stays. |
+| the index's capacity bound | nothing: only the index loses a thread, the record expires by `EntryLifetime` |
+
+Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.
+
+The one exception is a store that keeps nothing (`store.Keeps` is false: storage switched off, or no store). There is no record to read, so the keeper's index also holds the ping time (`storeOffAt`) and the cache clock and the manual-ping refusal answer from it, as before #1365. With a real store that field is always 0.
+
+
 ## Session keying
 
 `session.Resolve(explicit, system, firstUser)`: an explicit host id wins; otherwise a stable
@@ -462,7 +507,7 @@ constructor verbatim. A `preset` expands to a default pipeline; explicit fields 
 Unknown keys are rejected.
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }

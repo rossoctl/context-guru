@@ -268,7 +268,7 @@ func TestNoDashboardBuildsNoTracker(t *testing.T) {
 // caller goes on (issue #918).
 func TestAccBeginRecoversAndDrops(t *testing.T) {
 	s := newSavingsTracker()
-	s.trackers = nil // BeginRequest on a nil Trackers panics
+	s.Trackers = nil // BeginRequest on a nil Trackers panics
 	c := &capture{savings: s}
 	c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s"}, benchBody())
 	c.accEnd(thread.Result{ID: thread.Primary}, benchBody(), nil)
@@ -289,7 +289,7 @@ func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
 	}))
 	defer up.Close()
 	h, _, _ := accHandler(t, up.URL)
-	h.savings.trackers = nil
+	h.savings.Trackers = nil
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
@@ -302,5 +302,23 @@ func TestAHostileBodyPanicInAccBeginStillForwardsTheRequest(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || got != 1 {
 		t.Errorf("status %d, upstream calls %d, want 200 and 1", resp.StatusCode, got)
+	}
+}
+
+// accEndNow copies the reason the Recorder gives into the capture, and leaves the field alone when there is none.
+func TestAccEndNowCopiesTheNoResultReason(t *testing.T) {
+	body := []byte(`{"model":"m","tools":[{"name":"b","defer_loading":true}],"messages":[{"role":"user","content":"hi"}]}`)
+	run := func(preDefer []byte) *capture {
+		c := &capture{savings: newSavingsTracker(), accPreDefer: preDefer, accClient: body}
+		c.accMeta = accountant.RequestMeta{RequestID: "r1", Session: "s"}
+		c.accReq = c.savings.begin(c.accMeta, body)
+		c.accEndNow(thread.Result{ID: thread.Primary}, body, nil)
+		return c
+	}
+	if c := run([]byte(`{}`)); c.accNoResult != accDeferralUnplaced {
+		t.Errorf("an unplaced deferral: accNoResult = %q, want %q", c.accNoResult, accDeferralUnplaced)
+	}
+	if c := run(nil); c.accNoResult != "" {
+		t.Errorf("no deferral: accNoResult = %q, want none", c.accNoResult)
 	}
 }

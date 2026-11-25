@@ -8,7 +8,7 @@ import (
 // BenchmarkNoteWaitBodyLargeBody pins issue #424's own requirement: the request path's own
 // cost for issue #424's RECORD half must not depend on body size, because the actual scan
 // (waitcause.Tracker.Observe, benchmarked at ~11ms for a 783 KB body in
-// internal/waitcause's own BenchmarkObserveLargeBody) now runs from finish(), after the
+// waitcause's own BenchmarkObserveLargeBody) now runs from finish(), after the
 // request has already gone upstream — never from here.
 //
 // noteWaitBody is nil-safe and does exactly one thing: store the slice header. This

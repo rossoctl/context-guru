@@ -106,8 +106,9 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		//   ttlRescue:  Saved is the 5m write, Caused the read: a saving.
 		//   markPremium: Saved is the input the client body would have billed, Caused the dearer write the
 		//               host's added mark made the provider bill: value < 0 (a cost).
-		//   markPayback: Saved is the input the client body would have billed, Caused the read the host's
-		//               mark made possible on the next request: value > 0 (a saving).
+		//   markPayback: Saved is the input or the write the client body would have billed (a write when the
+		//               client moved its own mark past the host's, accountant v0.6.0), Caused the read the
+		//               host's mark made possible on the next request: value > 0 (a saving).
 		value := tierUSD(p, ce.Net())
 		switch ce.Kind {
 		case accountant.EffectBreak:
@@ -136,7 +137,8 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			f.TokTTL.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
 			// markPayback is the other half of markPremium: the next request reads the tail the host's mark
-			// wrote, which the client body would have billed as input. Saved is that input, Caused the read:
+			// wrote, which the client body would have billed as input, or written again when the client moved
+			// its own mark past the host's. Saved is that input or write, Caused the read:
 			// value > 0, a saving, owned like the premium it repays (accountant design §4.4, accountant#52).
 			// The write premium of a breakpoint the host added: a cost (value < 0), charged to the
 			// operation whose span covers the mark. With no owner it goes on the tail breakpoint row,
@@ -368,10 +370,10 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// The head-TTL legs (premium and rescue) are a lever's figure like any component's: they go on
 	// the headttl row, inside the baseline delta. Legacy had no figure for them.
 	if fig.TTLUSD != 0 {
-		fig.ByComponent["headttl"] += fig.TTLUSD
+		fig.ByComponent[accwire.OpHeadTTL] += fig.TTLUSD
 		fig.DeltaUSD += fig.TTLUSD
-		if !rows["headttl"] && !inAdded(added, "headttl") {
-			added = append(added, CompRow{Component: "headttl", Kind: KindEnvelope, Acted: true, Mutated: true})
+		if !rows[accwire.OpHeadTTL] && !inAdded(added, accwire.OpHeadTTL) {
+			added = append(added, CompRow{Component: accwire.OpHeadTTL, Kind: KindEnvelope, Acted: true, Mutated: true})
 		}
 	}
 	// The break an ended change left behind is counted and owned by no component: it gets a row

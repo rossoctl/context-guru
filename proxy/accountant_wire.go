@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"log/slog"
-	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
@@ -84,38 +83,23 @@ func (c *capture) accRun(meta accountant.RequestMeta, client []byte, th thread.R
 	c.accEndNow(th, forwarded, ops)
 }
 
-// accEndNow records the thread, the forwarded body and the operations. A thread that continues
-// another by content names it as its parent, but starts with no state of its own: accountant carries
-// Thread.Parent and does not read it (design §4.1).
+// accEndNow records the thread, the forwarded body and the operations (accrec.Recorder.Record holds the rules).
 func (c *capture) accEndNow(th thread.Result, forwarded []byte, ops []accountant.Operation) {
 	if c.accReq == nil {
 		return
 	}
-	t := accountant.Thread{ID: accrec.ThreadID(th.ID)}
-	c.accThread = t.ID
-	if parent, ok := th.InheritsFrom(); ok {
-		t.Parent = accrec.ThreadID(parent)
+	// Set before the record runs, so a panic inside it still leaves the thread named, as it always did.
+	c.accThread = accrec.ThreadID(th.ID)
+	parent, hasParent := th.InheritsFrom()
+	out := c.savings.Record(c.accReq, accrec.RecordIn{
+		Meta: c.accMeta, Client: c.accClient, PreDefer: c.accPreDefer, Forwarded: forwarded, Ops: ops,
+		ThreadID: th.ID, Parent: parent, HasParent: hasParent,
+		Provider: bschemas.ModelProvider(c.provider), Endpoint: c.endpoint, Route: c.route, ReadSets: c.readSets, Pings: c.pings,
+	})
+	c.accThread, c.accPingWindow, c.accFacts = out.Thread, out.Facts.PingWindow, out.Facts
+	if out.NoResult != "" {
+		c.accNoResult = out.NoResult
 	}
-	// The envelope changes report no operation of their own: envelopeOps finds them from the two
-	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
-	// with a message splice.
-	//
-	// The library gets the prompt the provider BILLS (accountant R56, billedBody), not the bytes sent: a tool
-	// deferred with defer_loading is a stub in it. The sent bytes still decide the cache facts below.
-	billed := c.accBilled(forwarded)
-	ops = append(append([]accountant.Operation(nil), ops...), c.envelopeOpsFor(billed)...)
-	facts := entryFacts(bschemas.ModelProvider(c.provider), c.accMeta.Model, forwarded, c.pings, c.accMeta.Session, t)
-	// A read sets the entry's TTL on a route the keeper PROVED does so (the 1-hour-on-wait probe), and on the
-	// return that decides that proof: facts.PingTTL is 1 hour when a 1-hour ping served the gap. The keeper
-	// records the proof after this request is priced, so without the second case the proof return would book
-	// no rescue. Nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not
-	// measured. The rescue is itself evidence (it credits only tokens the return READ), see Keeper.ReadSetsTTL.
-	if c.readSets != nil && c.readSets(bschemas.ModelProvider(c.provider), c.endpoint, c.route, c.accMeta.Model,
-		facts.PingTTL >= time.Hour) {
-		facts.Provider.ReadSetsTTL = true
-	}
-	c.accPingWindow, c.accFacts = facts.PingWindow, facts
-	c.savings.end(c.accReq, t, billed, ops, facts)
 }
 
 // accDeferralUnplaced names why a request books no figure when its deferral cannot be placed. The log line says
@@ -127,17 +111,9 @@ const accDeferralUnplaced = accrec.DeferralUnplaced
 // forwarded body, and sets accNoResult so the event books no figure and the sum check does not turn it into a
 // wrong one. A tool the client deferred itself is left as it is (ownDeferred).
 func (c *capture) accBilled(forwarded []byte) []byte {
-	if c.accPreDefer == nil {
-		return forwarded
-	}
-	own := accrec.OwnDeferred(forwarded, c.accPreDefer)
-	if len(own) == 0 {
-		return forwarded
-	}
-	b, ok := accrec.BilledBody(forwarded, own)
-	if !ok {
-		c.accNoResult = accDeferralUnplaced
-		return forwarded
+	b, noResult := accrec.BilledForwarded(forwarded, c.accPreDefer)
+	if noResult != "" {
+		c.accNoResult = noResult
 	}
 	return b
 }
@@ -168,9 +144,5 @@ func (c *capture) accBilledTTL(u Usage) {
 	if c == nil || c.accReq == nil {
 		return
 	}
-	if accrec.BilledTTL(c.savings.billed1h, accrec.PingKey(c.accMeta.Session, c.accThread), c.accFacts, u.CacheWrite, u.CacheWrite1h) {
-		c.accFacts.TTL = 5 * time.Minute
-		// The library lowers the facts' TTL and the TTL of every 1h breakpoint together, on a copy.
-		c.accReq.LowerTTL(5 * time.Minute)
-	}
+	c.accFacts = c.savings.LowerTTL(c.accReq, c.accMeta.Session, c.accThread, c.accFacts, u.CacheWrite, u.CacheWrite1h)
 }

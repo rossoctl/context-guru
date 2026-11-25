@@ -8,8 +8,8 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 )
 
 // The envelope is the part of a request no pipeline component sees: the tools array, the system
