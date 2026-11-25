@@ -251,15 +251,33 @@ func servingProxy(t *testing.T, dir, port, sentinel string) string {
 // pidfile and fingerprint that live in it.
 func startProxyIn(t *testing.T, state, bin, port string, extra ...string) (string, int) {
 	t.Helper()
+	return startProxyArgs(t, nil, state, bin, port, extra...)
+}
+
+// startProxyArgs is startProxyIn with command-line arguments for the script (for example --bin).
+// A KEY=value in extra replaces any earlier entry for the same key (the helper's or the sandbox's).
+func startProxyArgs(t *testing.T, args []string, state, bin, port string, extra ...string) (string, int) {
+	t.Helper()
 	requireTool(t, "bash")
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd := exec.Command("bash", append([]string{filepath.Join(scriptsDir(t), "start-proxy.sh")}, args...)...)
 	cmd.Env = append(sandboxEnv(t),
 		"CONTEXT_GURU_STATE="+state,
 		"CONTEXT_GURU_BIN="+bin,
 		"CLAUDE_PLUGIN_OPTION_PORT="+port,
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 		"CONTEXT_GURU_HEALTH_BUDGET=10")
-	cmd.Env = append(cmd.Env, extra...)
+	replaced := map[string]bool{}
+	for _, kv := range extra {
+		k, _, _ := strings.Cut(kv, "=")
+		replaced[k] = true
+	}
+	kept := cmd.Env[:0:0]
+	for _, kv := range cmd.Env {
+		if k, _, _ := strings.Cut(kv, "="); !replaced[k] {
+			kept = append(kept, kv)
+		}
+	}
+	cmd.Env = append(kept, extra...)
 	b, err := cmd.CombinedOutput()
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -833,5 +851,331 @@ func TestStrategyFileHasNoToolWaitFloor(t *testing.T) {
 	r := cfg.Cache.Resolved()
 	if r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 {
 		t.Errorf("floors = %d / %d, want 80000 / 20000", r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens)
+	}
+}
+
+// tableProxy is a serving fake proxy that also answers `strategies` with the given table. The table
+// "sleep" makes it hang on `strategies`, so the plugin's time limit really ends the check. It logs
+// the arguments of every launch (not of `strategies`) to <dir>/args.log.
+func tableProxy(t *testing.T, dir, port, table string) string {
+	t.Helper()
+	serve := servingProxy(t, dir, port, filepath.Join(dir, "started"))
+	sub, err := os.MkdirTemp(dir, "bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sub, "fake-table-proxy")
+	body := "#!/usr/bin/env bash\n"
+	switch table {
+	case "":
+	case "sleep":
+		body += "[ \"$1\" = strategies ] && exec sleep 30\n"
+	default:
+		body += "[ \"$1\" = strategies ] && echo '" + table + "' && exit 0\n"
+	}
+	body += "echo \"$*\" >> \"" + filepath.Join(dir, "args.log") + "\"\n"
+	body += "exec \"" + serve + "\" \"$@\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const futureStrategyFile = "# context-guru: strategy=future-x written by /context-guru:cache-strategy-picker\n" +
+	"# Do not hand-edit: the picker refuses to touch a file whose first line is not this one,\n" +
+	"# so an edit that removes the marker also removes your ability to switch back with a name.\n" +
+	"#\n" +
+	"# `preset:` is stated explicitly because --config REPLACES --preset entirely rather than\n" +
+	"# layering over it. A config that omitted it would silently turn compaction off at the\n" +
+	"# moment a cache strategy was armed - the exact opposite of the intent.\n" +
+	"#\n" +
+	"# It is NOT the source of truth for the preset. `strategy sync` re-renders this line from\n" +
+	"# the plugin option every time a proxy starts, because the file owning it meant a user who\n" +
+	"# changed the option saw it stick in the config UI and kept running the preset that was\n" +
+	"# recorded here when the strategy was first armed - indefinitely, and with no way to tell.\n" +
+	"preset: off\n" +
+	"# The proxy fills the cache keys of this strategy (`context-guru-proxy strategies`).\n" +
+	"cache:\n" +
+	"  strategy: future-x\n"
+
+func tableWith(names ...string) string {
+	rows := make([]string, 0, len(names))
+	for _, n := range names {
+		rows = append(rows, `{"name":"`+n+`","providers":["anthropic"],"spends":false,"desc":"d"}`)
+	}
+	return `{"default":"auto","aliases":{},"presets":["off"],"strategies":[` + strings.Join(rows, ",") + `]}`
+}
+
+// unknownStrategyResult is what a session start did after cfg was in place.
+type unknownStrategyResult struct {
+	first, after string // pid before (empty for a cold start) and after
+	out, fp      string // the output and the fingerprint now on disk
+	args         string // the arguments the proxy was launched with, by the second start
+}
+
+// unknownStrategyCase starts a proxy that knows future-x with cfg in place (unless cold), records a
+// staged binary (version v9.9.9), and runs the next session start against a binary built from table.
+func unknownStrategyCase(t *testing.T, cfg, table string, cold bool) unknownStrategyResult {
+	t.Helper()
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, table)
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	limit := "CONTEXT_GURU_STRATEGIES_TIMEOUT=15" // generous: a loaded machine must not turn "known" into "unchecked"
+	if table == "sleep" {
+		limit = "CONTEXT_GURU_STRATEGIES_TIMEOUT=2" // the binary hangs, so the limit ends the check
+	}
+	pidfile := filepath.Join(state, "proxy-"+port+".pid")
+	t.Cleanup(func() { stopByPidfile(pidfile) })
+	var r unknownStrategyResult
+	if !cold {
+		// The first start uses a binary that knows the name, so a proxy is running to be replaced.
+		first0 := tableProxy(t, dir, port, tableWith("future-x"))
+		if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v9.9.8\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if o, code := startProxyIn(t, state, first0, port, "TMPDIR="+dir, limit); code != 0 {
+			t.Fatalf("first start failed: exit %d %s", code, o)
+		}
+		r.first = strings.TrimSpace(readFileString(t, pidfile))
+		_ = os.Remove(filepath.Join(dir, "args.log"))
+	}
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v9.9.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir, limit,
+		"CLAUDE_PLUGIN_OPTION_PRESET=conservative")
+	if code != 0 {
+		t.Fatalf("second start failed: exit %d %s", code, out)
+	}
+	r.out = out
+	r.after = strings.TrimSpace(readFileString(t, pidfile))
+	r.fp = readFileString(t, filepath.Join(state, "proxy-"+port+".fingerprint"))
+	if b, err := os.ReadFile(filepath.Join(dir, "args.log")); err == nil {
+		r.args = string(b)
+	}
+	return r
+}
+
+// The proxy knows a strategy this plugin does not list: restart, keep the file, record the name.
+func TestUnknownToPluginKnownToProxyRestartsWithTheFile(t *testing.T) {
+	r := unknownStrategyCase(t, futureStrategyFile, tableWith("none", "future-x"), false)
+	if r.first == r.after {
+		t.Errorf("no restart for a changed binary:\n%s", r.out)
+	}
+	if !strings.Contains(r.fp, "strategy=future-x") || !strings.Contains(r.fp, "preset=conservative") {
+		t.Errorf("fingerprint %q should record the strategy and the preset", r.fp)
+	}
+	if strings.Contains(r.out, "preset is off") {
+		t.Errorf("said the preset is off although the proxy knows the strategy:\n%s", r.out)
+	}
+}
+
+// Neither knows it: restart with preset off, say so, never refuse to start.
+func TestUnknownToPluginAndProxyStartsWithPresetOff(t *testing.T) {
+	r := unknownStrategyCase(t, futureStrategyFile, tableWith("none", "auto"), false)
+	if r.first == r.after {
+		t.Errorf("no restart; the proxy must still start on the new binary:\n%s", r.out)
+	}
+	if !strings.Contains(r.fp, "preset=off") || !strings.Contains(r.fp, "strategy=none") {
+		t.Errorf("fingerprint %q should say preset off, strategy none", r.fp)
+	}
+	if !strings.Contains(r.out, "does not know") || !strings.Contains(r.out, "future-x") {
+		t.Errorf("missing the note that names the strategy:\n%s", r.out)
+	}
+	if strings.Contains(r.args, "--config") {
+		t.Errorf("the proxy got --config for a file it cannot load: %q", r.args)
+	}
+}
+
+// The check cannot run on a WARM start (the binary hangs until the time limit): leave the running
+// proxy alone, say so, exit 0. Owner decision, 2026-11-25.
+func TestUnknownStrategyCheckThatCannotRunLeavesARunningProxyAlone(t *testing.T) {
+	r := unknownStrategyCase(t, futureStrategyFile, "sleep", false)
+	if r.first != r.after {
+		t.Errorf("restarted a running proxy although the check could not run:\n%s", r.out)
+	}
+	if !strings.Contains(r.fp, "strategy=future-x") {
+		t.Errorf("fingerprint %q changed; the running proxy should be as it was", r.fp)
+	}
+	if !strings.Contains(r.out, "could not check") {
+		t.Errorf("no note that the check could not run:\n%s", r.out)
+	}
+	if strings.Contains(r.out, "preset is off") {
+		t.Errorf("claimed the preset is off although nothing changed:\n%s", r.out)
+	}
+}
+
+// The check cannot run on a COLD start: a proxy with preset off beats no proxy.
+func TestUnknownStrategyCheckThatCannotRunStartsColdWithPresetOff(t *testing.T) {
+	r := unknownStrategyCase(t, futureStrategyFile, "sleep", true)
+	if !strings.Contains(r.fp, "preset=off") || !strings.Contains(r.fp, "strategy=none") {
+		t.Errorf("no fail-over to preset off: fp=%q\n%s", r.fp, r.out)
+	}
+	if !strings.Contains(r.out, "could not check") || strings.Contains(r.out, "does not know") || !strings.Contains(r.out, "starts with preset off") {
+		t.Errorf("the note must say the check could not run, not that the proxy does not know:\n%s", r.out)
+	}
+	if strings.Contains(r.args, "--config") {
+		t.Errorf("the proxy got --config: %q", r.args)
+	}
+}
+
+// A new-form file plus one hand-added line is not byte-identical to the render, but it still names
+// a strategy. The table check must run: an unknown name means preset off and no --config.
+func TestUnknownStrategyInAHandEditedFileStillFailsOver(t *testing.T) {
+	r := unknownStrategyCase(t, futureStrategyFile+"# my note\n", tableWith("none", "auto"), true)
+	if !strings.Contains(r.fp, "preset=off") || !strings.Contains(r.fp, "strategy=none") {
+		t.Errorf("a hand-edited file naming an unknown strategy was passed to the proxy: fp=%q\n%s", r.fp, r.out)
+	}
+	if strings.Contains(r.args, "--config") {
+		t.Errorf("the proxy got --config: %q", r.args)
+	}
+}
+
+// An old-form file (its own cache keys, no strategy key) is `known` without asking the table, and
+// its config is passed.
+func TestOldFormFileWithOwnCacheKeysKeepsItsConfig(t *testing.T) {
+	old := "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+		"preset: off\n" +
+		"cache:\n" +
+		"  keepalive_idle_seconds: 240\n" +
+		"  keepalive_max_pings: 3\n"
+	r := unknownStrategyCase(t, old, tableWith("none", "auto"), true)
+	if strings.Contains(r.out, "preset is off") {
+		t.Errorf("failed over for a file that sets no strategy key:\n%s", r.out)
+	}
+	if !strings.Contains(r.args, "--config") {
+		t.Errorf("the config was not passed: %q\n%s", r.args, r.out)
+	}
+}
+
+// With no proxy-version record, the binary is still asked. (Nobody runs a proxy older than v0.7.1.)
+func TestStrategyKnownWithNoVersionRecordAsksTheBinary(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", bin)
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=known") {
+		t.Errorf("want result=known with no version record, got:\n%s", b)
+	}
+}
+
+// An old-form file with its own cache keys and an extract_llm block that sets `strategy: code` sets
+// no cache strategy key. The nested key must not send the file to the table check.
+func TestOldFormFileWithNestedStrategyKeyStaysKnown(t *testing.T) {
+	old := "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+		"preset: off\n" +
+		"cache:\n" +
+		"  keepalive_idle_seconds: 240\n" +
+		"  keepalive_max_pings: 3\n" +
+		"components:\n" +
+		"  extract_llm:\n" +
+		"    strategy: code\n"
+	r := unknownStrategyCase(t, old, tableWith("none", "auto"), true)
+	if strings.Contains(r.out, "preset is off") || !strings.Contains(r.args, "--config") {
+		t.Errorf("a nested strategy key sent an old-form file to the table check: args=%q\n%s", r.args, r.out)
+	}
+}
+
+// A proxy-version record below v0.7.1 means that binary serves on `strategies` until the time
+// limit: answer `unchecked` without running it.
+func TestStrategyKnownWithAVersionRecordBelowTheMinimumIsUnchecked(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v0.6.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", bin)
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=unchecked") || !strings.Contains(string(b), "reason=proxy_too_old") {
+		t.Errorf("want result=unchecked reason=proxy_too_old, got:\n%s", b)
+	}
+}
+
+// An explicit --bin that cannot be run gets `unchecked`. Another binary (here CONTEXT_GURU_BIN)
+// must not answer in its place.
+func TestStrategyKnownWithAnUnrunnableDashDashBinIsUnchecked(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	other := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", filepath.Join(scriptsDir(t), "settings.py"), "strategy", "known",
+		"--port", port, "--name", "future-x", "--bin", filepath.Join(dir, "no-such-binary"))
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "CONTEXT_GURU_BIN="+other)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	if !strings.Contains(string(b), "result=unchecked") {
+		t.Errorf("another binary answered for an unrunnable --bin:\n%s", b)
+	}
+}
+
+// The check asks the binary the script launches. Here the binary is given ONLY by --bin, and
+// CONTEXT_GURU_BIN points nowhere, so a check that ignored --bin would answer `unchecked`.
+func TestStrategyCheckAsksTheBinaryGivenByDashDashBin(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	bin := tableProxy(t, dir, port, tableWith("none", "future-x"))
+	if err := os.WriteFile(filepath.Join(state, "keepalive-"+port+".yaml"), []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v9.9.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyArgs(t, []string{"--bin", bin}, state, "", port, "TMPDIR="+dir,
+		"CONTEXT_GURU_BIN="+filepath.Join(dir, "no-such-binary"),
+		"CONTEXT_GURU_STRATEGIES_TIMEOUT=15")
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	fp := readFileString(t, filepath.Join(state, "proxy-"+port+".fingerprint"))
+	if !strings.Contains(fp, "strategy=future-x") || strings.Contains(out, "preset is off") {
+		t.Errorf("the check did not ask the --bin binary: fp=%q\n%s", fp, out)
+	}
+}
+
+// The file is never edited by the fail-over.
+func TestUnknownStrategyFailOverKeepsTheFile(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	cfg := filepath.Join(state, "keepalive-"+port+".yaml")
+	if err := os.WriteFile(cfg, []byte(futureStrategyFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := tableProxy(t, dir, port, tableWith("auto"))
+	if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte("v9.9.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir, "CLAUDE_PLUGIN_OPTION_PRESET=off")
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if got := readFileString(t, cfg); !strings.Contains(got, "strategy: future-x") {
+		t.Errorf("the keep-alive file was changed:\n%s", got)
 	}
 }

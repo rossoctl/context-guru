@@ -3993,6 +3993,26 @@ def _names(rows) -> str:
     return ",".join(r["name"] for r in rows)
 
 
+_STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*[^ \t#]")
+
+
+def _file_sets_strategy_key(text: str) -> bool:
+    """Does the file set `strategy:` as a direct child of `cache:`? Other nested keys (such as
+    `components.extract_llm.strategy`) are not a cache strategy name."""
+    in_cache, indent = False, 0
+    for line in text.split("\n")[1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        width = len(line) - len(line.lstrip(" \t"))
+        if width == 0:
+            in_cache, indent = line.split("#")[0].strip() == "cache:", 0
+        elif in_cache:
+            indent = indent or width
+            if width == indent and _STRATEGY_KEY.match(line):
+                return True
+    return False
+
+
 def _is_new_form(text: str, name: str) -> bool:
     """Is `text` the file this version renders for `name`, apart from its preset line?"""
     return _set_preset_line(text, "x") == _render_strategy(name, "x")
@@ -4018,6 +4038,48 @@ def cmd_strategy(args) -> int:
 
     port = args.port
     path = strategy_path(port)
+
+    if args.op == "known":
+        # start-proxy.sh asks this BEFORE it restarts or starts a proxy for a strategy name: does the
+        # proxy binary it is about to run know `--name`? The plugin holds no table (the proxy owns it),
+        # so a name from a newer release reaches an older binary, which exits on it and leaves the
+        # session with no proxy (#1383). `known` is the only answer that keeps the config; anything
+        # else (`unknown`, `unchecked`) makes the caller start without it. Never an error exit.
+        name = args.name.strip()
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            text = ""
+        if text and _strategy_is_ours(text) and not _file_sets_strategy_key(text):
+            # A file written before the proxy owned the table carries its own keys and sets no
+            # `strategy:` key, so there is nothing for the proxy to reject. A file that sets the key
+            # always goes to the table check below, however it was edited.
+            emit(result="known", strategy=name, reason="own_keys")
+            return 0
+        # A record that names a version below the minimum means that binary answers `strategies` by
+        # serving until the time limit: do not run it. NO record is not a reason to refuse (a binary
+        # put in place by hand has none, and nobody runs a proxy older than the minimum): ask the
+        # binary, and let the time limit protect the check.
+        have = _version_tuple(_installed_proxy_version())
+        need = _version_tuple(STRATEGY_MIN_PROXY)
+        if have and need and have < need:
+            emit(result="unchecked", strategy=name, reason="proxy_too_old")
+            return 0
+        explicit = getattr(args, "bin", "") or ""
+        if explicit and not (shutil.which(explicit) or os.access(explicit, os.X_OK)):
+            # The caller named the binary it will launch. Another one must not answer for it.
+            emit(result="unchecked", strategy=name, reason="table_unavailable",
+                 detail=f"{explicit} cannot be run")
+            return 0
+        try:
+            table = load_strategy_table(explicit)
+        except StrategyTableError as exc:
+            emit(result="unchecked", strategy=name, reason="table_unavailable", detail=f"{exc}")
+            return 0
+        names = {r["name"] for r in table["strategies"]} | set(table["aliases"])
+        emit(result="known" if name in names else "unknown", strategy=name,
+             known=_names(table["strategies"]))
+        return 0
 
     if args.op == "show":
         if not os.path.exists(path):
@@ -4818,7 +4880,7 @@ def main() -> int:
                    help="SessionStart: point a status line we installed at the running plugin version")
 
     st = sub.add_parser("strategy")
-    st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
+    st.add_argument("op", choices=("list", "show", "set", "clear", "sync", "known"))
     st.add_argument("--name", default="",
                     help="strategy name for `set`; `strategy list` prints the names the proxy offers")
     st.add_argument("--port", default="",
