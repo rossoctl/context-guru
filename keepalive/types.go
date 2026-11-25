@@ -133,13 +133,13 @@ type Policy struct {
 	// Zero means the shipped default (modelinfo.AnthropicDefaultKeepAliveIdle1h and MaxPings1h).
 	Idle1h     time.Duration
 	MaxPings1h int
-	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
-	// cost is bimodal (p50 $0.0004, p99 $0.2275, max $0.3780) while a per-SESSION budget
-	// truncates exactly the long large-prefix sessions holding the value — capping the
-	// window's pings per session at 20 drops the net from +$164 to $92.34.
+	// MaxUSDPerPing is an opt-in flat dollar cap per ping. Pings read it through PingCap(): 0 means
+	// the operator set none and the value rule alone decides (PingVerdict); a negative value also
+	// means no cap. The summary and sweep substitutes read it through Ceiling(), where 0 means
+	// DefaultMaxUSDPerPing ($0.50): they cost more than a ping and keep that default.
 	//
-	// Read it through Ceiling(), never directly: zero here means UNCONFIGURED, and for a spend
-	// guard that has to resolve to the default rather than to infinity.
+	// It is PER PING and not per session, because ping cost is bimodal (p50 $0.0004, p99 $0.2275,
+	// max $0.3780 before #1407). A manager strategy replaces it only with a value other than 0.
 	MaxUSDPerPing float64
 	// MaxBodyBytes is the largest request body the keeper holds for one thread (a memory guard).
 	// Zero means MaxBodyBytes (32 MiB). Set LegacyMaxBodyBytes (8 MiB) for the old limit. Read it through

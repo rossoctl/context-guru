@@ -178,8 +178,11 @@ type kaEntry struct {
 	// to 2 and the next ping is the 1-hour ping, with no substitute. Guarded by Keeper.mu.
 	oneHourSubstituted bool
 	// pingUSD is the projected cost of one ping on that prefix, from the model's own read
-	// rate. Checked against pol.MaxUSDPerPing before anything is sent.
+	// rate. Checked by Policy.PingVerdict (value rule, then any operator cap) before anything is sent.
 	pingUSD float64
+	// missUSD is the extra cost of a cache miss on this prefix (MissUSD), priced at the same tier. The
+	// value rule weighs the planned ping chain against it (Policy.PingVerdict). Zero when unpriced.
+	missUSD float64
 	// spent is what this session's pings have cost so far. Reported, never a cap — see
 	// Policy.MaxUSDPerPing for why the guard is per ping.
 	spent float64
@@ -368,7 +371,7 @@ func (e *kaEntry) isDone() bool { return waitcause.IsDone(e.toolUseNames, e.term
 // ~$8.8 of avoided misses, and 45 never came back, ~$5.8 of pings. A blanket gate would lose more
 // than it saves there.
 func (e *kaEntry) pingable() bool {
-	if e.turn < 1 || e.prefix < int64(e.pol.WaitMinPrefix(e.wait, IsSubagentThread(e.thread))) || e.pingUSD > e.pol.Ceiling() {
+	if e.turn < 1 || e.prefix < int64(e.pol.WaitMinPrefix(e.wait, IsSubagentThread(e.thread))) || e.verdict() != VerdictOK {
 		return false
 	}
 	// A thread whose last response ended with a terminal tool (StructuredOutput) is finished: no
@@ -1130,6 +1133,7 @@ func (k *Keeper) Record(r Record) {
 		recordedReal: time.Now(),
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
 		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
+		missUSD: k.projectedMissUSD(model, prefix, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID))),
 		hdr:     hdr, tag: r.Tag,
 	}
 	e.refreshedAt = startedAt // the real request refreshed the provider's entry
@@ -1184,8 +1188,8 @@ func (k *Keeper) Record(r Record) {
 	if !pol.On() || !e.pingable() {
 		if !pol.ManualHold {
 			reason := ReasonBelowLimits
-			if e.pingUSD > pol.Ceiling() {
-				reason = ReasonOverBudget
+			if v := e.verdict(); v != VerdictOK {
+				reason = v.Reason()
 			}
 			if pol.On() && e.isDone() {
 				reason = ReasonDone
@@ -1195,15 +1199,16 @@ func (k *Keeper) Record(r Record) {
 			e.clear() // hold no body and no credential for a session we will not ping
 			return
 		}
-		if e.pingUSD > pol.Ceiling() {
-			k.setReasonLocked(r.Key, ReasonOverBudget)
+		// A press is one ping against one miss, whatever the plan was.
+		if v := pol.PingVerdict(e.pingUSD, e.missUSD, 1); v != VerdictOK {
+			k.setReasonLocked(r.Key, v.Reason())
 			k.skipped.Add(1)
 			e.clear()
 			return
 		}
 		e.manualOnly = true
 		e.holdFor = k.holdFor(ttl1h)
-		e.ceiling = pol.Ceiling()
+		e.ceiling = pol.PingCap()
 		e.pol = Policy{ManualHold: true} // off: due, Plans, PendingPings and Sweep all read pol.On()
 	}
 	// The request passed every gate and got a schedule: report that plan (#1198). A refused or
@@ -1277,6 +1282,39 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 		return 0
 	}
 	return float64(prefix)*price.CacheRead + float64(pingOutputBudget(route))*price.Output
+}
+
+// projectedMissUSD is what one cache miss costs over a hit on this prefix, at the tier of the
+// ping's prompt size (MissUSD). oneHour picks the 1-hour write rate: the entry was billed at the
+// 1-hour tier, so its rewrite is too. Zero when the model is not priced (the guard then fails open).
+func (k *Keeper) projectedMissUSD(model string, prefix int64, endpoint string, oneHour bool) float64 {
+	if model == "" || prefix <= 0 {
+		return 0
+	}
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
+	if !ok {
+		return 0
+	}
+	return MissUSD(price, model, prefix, oneHour)
+}
+
+// missAtOneHour says whether a miss on this entry would rewrite at the 1-hour tier though the provider has
+// not billed it so yet: the policy writes at 1 hour (HeadTTL1h; OneHourAlways on a main thread) or plans the 1-hour ping.
+// The dearer rate keeps the guard on the cautious side.
+func missAtOneHour(pol Policy, oneHourPing, subagent bool) bool {
+	// OneHourAlways is the MAIN agent only: a subagent keeps the 5-minute cache, so its miss is a 5-minute rewrite.
+	return pol.HeadTTL1h || (pol.OneHourAlways && !subagent) || oneHourPing
+}
+
+// verdict is the value rule for this entry's own plan: its planned ping count against one miss
+// (Policy.PingVerdict). A manual-only entry carries a zero policy, so it counts one ping and the
+// cap it was admitted under.
+func (e *kaEntry) verdict() Verdict {
+	pol := e.pol
+	if e.manualOnly {
+		pol = Policy{MaxUSDPerPing: e.ceiling}
+	}
+	return pol.PingVerdict(e.pingUSD, e.missUSD, e.pol.MaxPings)
 }
 
 // summaryOutputBudgetGuess is the assumed output size of a keep-alive-substituted summary call,
@@ -2086,7 +2124,11 @@ func (k *Keeper) recordTimedOut(j pingJob, ms float64) {
 
 // pingPrompt is the prompt size of a ping on a cached prefix: the prefix plus the fresh input the
 // ping carries (kvcache.DefaultPingInputTokens). A prefix exactly on a tier line sends a ping above it.
-func pingPrompt(prefix int64) int64 { return prefix + kvcache.DefaultPingInputTokens }
+func pingPrompt(prefix int64) int64 { return PingPrompt(prefix) }
+
+// PingPrompt is the prompt size of a ping on a cached prefix. A host that prices a ping outside the keeper
+// (the proxy's keep-alive control, the dashboard) calls it, so every price is read at the same tier.
+func PingPrompt(prefix int64) int64 { return prefix + kvcache.DefaultPingInputTokens }
 
 // billedPrompt is the prompt size that picks the price tier of a request that has run: what the
 // answer's usage billed (modelinfo.PromptTokens). When the usage has no input, it is the prefix

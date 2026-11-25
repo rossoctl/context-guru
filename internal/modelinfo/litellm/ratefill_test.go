@@ -3,6 +3,7 @@ package litellm
 import (
 	"context"
 	"github.com/rossoctl/context-guru/internal/modelinfo/ratefilltest"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -40,12 +41,10 @@ func TestRateFillLiteLLM(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(d)) }))
 		l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
 		ctx := context.Background()
-		for i := 0; i < 400; i++ {
-			if _, ok := l.Price(ctx, "premium"); ok {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		testutil.WaitFor(t, "premium to be priced", func() bool {
+			_, ok := l.Price(ctx, "premium")
+			return ok
+		})
 		for _, m := range ratefilltest.Models {
 			if m == "" {
 				continue

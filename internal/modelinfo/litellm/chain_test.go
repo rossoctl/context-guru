@@ -26,13 +26,10 @@ const sample = `{
 // against a populated cache.
 func waitReady(t *testing.T, l *LiteLLM, ctx context.Context) {
 	t.Helper()
-	for i := 0; i < 400; i++ {
-		if _, ok := l.Window(ctx, "gpt-4o"); ok {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("litellm map never loaded")
+	testutil.WaitFor(t, "the litellm map to load", func() bool {
+		_, ok := l.Window(ctx, "gpt-4o")
+		return ok
+	})
 }
 
 func TestLiteLLMResolvesAndNormalizes(t *testing.T) {
@@ -98,32 +95,45 @@ func TestLiteLLMResolvesAndNormalizes(t *testing.T) {
 // (slow) upstream — it returns unknown until the background fetch lands.
 func TestLiteLLMConcurrentSingleFlight(t *testing.T) {
 	var hits int64
+	// The handler blocks until the test releases it, so "Window returns before the
+	// upstream answers" is proven by order, not by a time limit. The block is bounded,
+	// so a broken single-flight fails with a message and never hangs.
+	release := make(chan struct{})
+	var once sync.Once
+	releaseUp := func() { once.Do(func() { close(release) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&hits, 1)
-		time.Sleep(150 * time.Millisecond) // slow upstream: a blocking impl would stall callers
+		select {
+		case <-release:
+		case <-time.After(60 * time.Second): //timing:ok backstop only: a broken single-flight must fail, not hang
+		}
 		w.Write([]byte(sample))
 	}))
 	defer srv.Close()
+	defer releaseUp()
 	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
 	ctx := context.Background()
 
-	// 20 concurrent cold lookups must each return PROMPTLY (non-blocking).
+	// 20 concurrent cold lookups must each return while the upstream is still blocked.
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			start := time.Now()
 			l.Window(ctx, "gpt-4o")
-			if testutil.TimingEnabled() && time.Since(start) > 100*time.Millisecond {
-				t.Errorf("Window blocked on the upstream fetch (%v) — must be non-blocking", time.Since(start))
-			}
 		}()
 	}
-	wg.Wait()
+	returned := make(chan struct{})
+	go func() { wg.Wait(); close(returned) }()
+	select {
+	case <-returned: // every caller returned while the upstream was still blocked
+	case <-time.After(30 * time.Second): //timing:ok backstop only: the wait ends on the event, not on this bound
+		t.Fatal("Window calls did not all return while the upstream was blocked: Window blocks on the fetch")
+	}
+	releaseUp()
 	waitReady(t, l, ctx) // let the single background fetch complete
 	if got := atomic.LoadInt64(&hits); got != 1 {
-		t.Fatalf("single-flight violated: expected 1 fetch, got %d", got)
+		t.Fatalf("single-flight violated: upstream got %d calls, want 1", got)
 	}
 }
 
@@ -159,12 +169,10 @@ func TestLiteLLMPrices(t *testing.T) {
 	defer srv.Close()
 	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
 	ctx := context.Background()
-	for i := 0; i < 400; i++ {
-		if _, ok := l.Price(ctx, "aws/claude-sonnet-5"); ok {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "aws/claude-sonnet-5 to be priced", func() bool {
+		_, ok := l.Price(ctx, "aws/claude-sonnet-5")
+		return ok
+	})
 
 	// Prices must resolve, with the four tiers intact.
 	p, ok := l.Price(ctx, "aws/claude-sonnet-5")
@@ -223,13 +231,10 @@ func TestChainPriceSkipsNonPricers(t *testing.T) {
 	// Static resolves windows but cannot price; the Chain must fall through to the
 	// LiteLLM element rather than reporting unknown.
 	c := modelinfo.Chain{modelinfo.DefaultStatic(), l}
-	for i := 0; i < 400; i++ {
-		if _, ok := c.Price(ctx, "aws/claude-sonnet-5"); ok {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("Chain.Price never resolved through a non-Pricer element")
+	testutil.WaitFor(t, "aws/claude-sonnet-5 to be priced", func() bool {
+		_, ok := c.Price(ctx, "aws/claude-sonnet-5")
+		return ok
+	})
 }
 
 // A feed row with no cache_read follows the model's tier (0.05x, 0.025x, else 0.1x).
@@ -240,12 +245,10 @@ func TestLiteLLMBlankCacheReadFollowsTheModelTier(t *testing.T) {
 	defer srv.Close()
 	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
 	ctx := context.Background()
-	for i := 0; i < 400; i++ {
-		if _, ok := l.Price(ctx, "claude-opus-5-5-bare"); ok {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "claude-opus-5-5-bare to be priced", func() bool {
+		_, ok := l.Price(ctx, "claude-opus-5-5-bare")
+		return ok
+	})
 	for model, frac := range map[string]float64{
 		"claude-opus-5-5-bare":  0.05,
 		"claude-fable-5-1-bare": 0.025,
@@ -271,12 +274,10 @@ func TestLiteLLMPriceFindsDatedAndWrappedIDs(t *testing.T) {
 	defer srv.Close()
 	l := NewLiteLLM(srv.URL, srv.Client(), time.Hour)
 	ctx := context.Background()
-	for i := 0; i < 400; i++ {
-		if _, ok := l.Price(ctx, "aws/claude-sonnet-5"); ok {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "aws/claude-sonnet-5 to be priced", func() bool {
+		_, ok := l.Price(ctx, "aws/claude-sonnet-5")
+		return ok
+	})
 	want, _ := l.Price(ctx, "aws/claude-sonnet-5")
 	for _, id := range []string{
 		"claude-sonnet-5-20260101",

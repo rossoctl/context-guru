@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -216,10 +218,7 @@ func TestADecliningSummaryIsNotFollowedByTheSweep(t *testing.T) {
 			registerSweep(t, store.NewMemory(store.Options{MaxEntries: 400}), asker, "claude-sonnet-5", sweepConversation(3))
 			twoPlainPings(t, k, fs, clock, model)
 			k.Sweep(clock.advance(250 * time.Second))
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) && k.Stats().SweepExtraSkipped == 0 {
-				time.Sleep(time.Millisecond)
-			}
+			testutil.WaitFor(t, "the extra slot to be skipped", func() bool { return k.Stats().SweepExtraSkipped >= 1 })
 			for i := 0; i < 3; i++ {
 				k.Sweep(clock.advance(281 * time.Second))
 			}
@@ -354,9 +353,10 @@ var errSummaryDown = errors.New("summary model down")
 func TestAShortIdleExtraIsNotSentWhileTheLastPingIsOut(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
+	var spawned atomic.Int64
 	block := false
 	k, fs, clock := testKeeperWith(t, func(o *Options) {
-		o.Go = func(f func()) { go f() }
+		o.Go = func(f func()) { spawned.Add(1); go f() }
 	})
 	fs.mu.Lock()
 	fs.resp = func(DispatchRequest) (Usage, int, error) {
@@ -380,27 +380,24 @@ func TestAShortIdleExtraIsNotSentWhileTheLastPingIsOut(t *testing.T) {
 	block = true // ping 2 hangs until release
 	mu.Unlock()
 	k.Sweep(clock.advance(21 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && fs.n() < 2 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "ping 2 to be out", func() bool { return fs.n() >= 2 })
+	// Every ping and every extra goes through Options.Go, and Sweep calls it before it returns. So a
+	// count that does not move across this sweep proves the extra was not started.
+	spawnedBefore := spawned.Load()
 	k.Sweep(clock.advance(5 * time.Second)) // past the short-Idle slot (2 ticks), ping 2 still out
-	time.Sleep(50 * time.Millisecond)
+	if got := spawned.Load(); got != spawnedBefore {
+		t.Fatalf("the sweep started %d requests while the last ping was still out", got-spawnedBefore)
+	}
 	if model.calls.Load() != 0 {
 		t.Fatalf("the extra went out %d times while the last ping was still out", model.calls.Load())
 	}
 	close(release)
 	waitPings(t, k, 2)
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, "ping 2 to clear pingRunning", func() bool {
 		k.mu.Lock()
-		running := k.live[sess1.id()] != nil && k.live[sess1.id()].pingRunning
-		k.mu.Unlock()
-		if !running {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer k.mu.Unlock()
+		return k.live[sess1.id()] == nil || !k.live[sess1.id()].pingRunning
+	})
 	k.Sweep(clock.advance(1 * time.Second))
 	waitPings(t, k, 3)
 	if model.calls.Load() != 1 {

@@ -237,3 +237,28 @@ func TestKnownPredictorIDsReturnsACopy(t *testing.T) {
 		t.Fatalf("a caller-supplied set must be honoured: %v", err)
 	}
 }
+
+// A strategy's flat cap replaces the account's only when the strategy sets one (#1420). A strategy at 0
+// sets none, so it must leave a cap the operator set on the account in place.
+func TestApplyStrategyKeepsTheAccountCapWhenTheStrategySetsNone(t *testing.T) {
+	best := allDay("s", 200, 3, t0)
+	best.MaxUSDPerPing = 0
+	pol, _ := ApplyStrategy(Policy{MaxUSDPerPing: 0.25}, &best)
+	if pol.MaxUSDPerPing != 0.25 {
+		t.Errorf("a strategy at 0 changed the account cap 0.25 to %v", pol.MaxUSDPerPing)
+	}
+	best.MaxUSDPerPing = 0.40
+	pol, _ = ApplyStrategy(Policy{MaxUSDPerPing: 0.25}, &best)
+	if pol.MaxUSDPerPing != 0.40 {
+		t.Errorf("a strategy at 0.40 left the cap at %v", pol.MaxUSDPerPing)
+	}
+	best.MaxUSDPerPing = -1
+	pol, _ = ApplyStrategy(Policy{MaxUSDPerPing: 0.25}, &best)
+	if pol.MaxUSDPerPing != -1 {
+		t.Errorf("a strategy at -1 (no cap) left the cap at %v", pol.MaxUSDPerPing)
+	}
+	best.MaxUSDPerPing = 0
+	if pol, _ = ApplyStrategy(Policy{}, &best); pol.MaxUSDPerPing != 0 || pol.PingCap() < 1e300 {
+		t.Errorf("no account cap and no strategy cap must leave no cap: %v", pol.MaxUSDPerPing)
+	}
+}

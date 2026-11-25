@@ -57,8 +57,8 @@ func StrategyTZ(strategies []tenant.Strategy, tenantID string) string {
 // ApplyStrategy writes a strategy onto a policy and returns the strategy's id. A nil strategy
 // leaves the policy as it was and returns "".
 //
-// A strategy forces KeepAlive on and replaces Idle, MaxPings, MinPrefixTokens, MaxUSDPerPing and
-// the predictor. It can only turn the 1-hour-on-wait ping ON, never off (#1243), and the same for
+// A strategy forces KeepAlive on and replaces Idle, MaxPings, MinPrefixTokens and
+// the predictor, and MaxUSDPerPing when it is not 0. It can only turn the 1-hour-on-wait ping ON, never off (#1243), and the same for
 // 1-hour-always (#1261): like KeepAlive and HeadTTL1h there is no "deny" mode. The ping needs the
 // wait plan, which the account policy carries (WaitPlan) and a strategy does not touch.
 func ApplyStrategy(pol Policy, best *tenant.Strategy) (Policy, string) {
@@ -69,7 +69,11 @@ func ApplyStrategy(pol Policy, best *tenant.Strategy) (Policy, string) {
 	pol.Idle = time.Duration(best.IdleSeconds) * time.Second
 	pol.MaxPings = best.MaxPings
 	pol.MinPrefixTokens = best.MinPrefixTokens
-	pol.MaxUSDPerPing = best.MaxUSDPerPing
+	// A strategy's flat cap replaces the account's only when it sets one (> 0, or < 0 for "no cap").
+	// 0 means the strategy sets none: it must not wipe a cap the operator set on the account (#1420).
+	if best.MaxUSDPerPing != 0 {
+		pol.MaxUSDPerPing = best.MaxUSDPerPing
+	}
 	pol.PredictorID = best.PredictorID
 	pol.PredictorThreshold = best.PredictorThreshold
 	pol.OneHourOnWait = pol.OneHourOnWait || best.OneHourOnWait

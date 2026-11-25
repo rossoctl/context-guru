@@ -170,7 +170,7 @@ cache:
 		got.KeepAliveOpenAIIdleSeconds != DefaultKeepAliveOpenAIIdle ||
 		got.KeepAliveMaxPings != DefaultKeepAliveMaxPings ||
 		got.KeepAliveMinPrefixTokens != DefaultKeepAliveMinPrefix ||
-		got.KeepAliveMaxUSDPerPing != DefaultKeepAliveMaxUSDPerPing ||
+		got.KeepAliveMaxUSDPerPing != 0 || // no flat cap by default: the value rule applies
 		got.HeadTTLMinBytes != DefaultHeadTTLMinBytes {
 		t.Errorf("Resolved() defaults = %+v", got)
 	}
@@ -270,8 +270,8 @@ func TestPresetLadderSummarizerModes(t *testing.T) {
 func TestKeepAliveRecommendedDefaults(t *testing.T) {
 	r := CacheConfig{}.Resolved()
 	if r.KeepAliveIdleSeconds != 240 || r.KeepAliveMaxPings != 2 ||
-		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0.50 {
-		t.Errorf("Resolved() = idle %d, K %d, floor %d/%d, ceiling %v; want 240, 2, 80000/20000, 0.50",
+		r.KeepAliveMinPrefixTokens != 80000 || r.KeepAliveToolWaitMinPrefixTokens != 20000 || r.KeepAliveMaxUSDPerPing != 0 {
+		t.Errorf("Resolved() = idle %d, K %d, floor %d/%d, ceiling %v; want 240, 2, 80000/20000, 0 (no flat cap)",
 			r.KeepAliveIdleSeconds, r.KeepAliveMaxPings, r.KeepAliveMinPrefixTokens, r.KeepAliveToolWaitMinPrefixTokens, r.KeepAliveMaxUSDPerPing)
 	}
 }

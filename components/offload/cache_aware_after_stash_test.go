@@ -11,6 +11,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // turnStash models the host's stash the way proxy's sentStash behaves: it holds the message count
@@ -77,18 +78,17 @@ func TestCacheAwareDetachedPrefixAskCommitsAfterTheTurnIsStashed(t *testing.T) {
 	// with an Offload-time start it drains the stale call, which is what this test must catch.)
 	// waitForSummary, not WaitForSummaryForTest: the test needs that short timeout, and the
 	// exported hook has a 30 s floor.
-	waitForSummary(convKey(ctx), time.Second)
+	// A held deferral makes the drain run to its bound, so skip the drain when one is held.
+	if !deferralPending(convKey(ctx)) {
+		waitForSummary(convKey(ctx), 30*time.Second)
+	}
 	asker.put(len(in))
 	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := loadCheckpoint(ctx); ok {
-			break
-		}
-		waitForSummary(ctx.Session, 100*time.Millisecond) // a short poll step, so no 30 s floor
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the detached commission commits a checkpoint", func() bool {
+		_, ok := loadCheckpoint(ctx)
+		return ok
+	})
 	if n := CacheAwareSummarizerStalePrefix() - staleBefore; n != 0 {
 		t.Fatalf("the detached commission ended stale_prefix %d time(s): it read the previous turn's "+
 			"stash instead of this turn's", n)
@@ -123,14 +123,10 @@ func TestAReplacedWarmDeferralIsDispatchedWithoutTheHook(t *testing.T) {
 	turn(in)           // commissions, deferred
 	asker.put(len(in)) // its request ended: the body is stashed (no hook is ever called)
 	turn(append(append([]bschemas.ChatMessage(nil), in...), caMsg(bschemas.ChatMessageRoleUser, "and then?")))
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := loadCheckpoint(ctx); ok {
-			break
-		}
-		waitForSummary(ctx.Session, 100*time.Millisecond) // a short poll step, so no 30 s floor
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the replaced warm deferral is dispatched and commits a checkpoint", func() bool {
+		_, ok := loadCheckpoint(ctx)
+		return ok
+	})
 	if _, ok := loadCheckpoint(ctx); !ok {
 		t.Fatal("no checkpoint: the replaced warm deferral was dropped instead of dispatched")
 	}

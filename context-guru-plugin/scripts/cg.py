@@ -1795,6 +1795,7 @@ PING_REASONS = {
     "not opted in": "Ping isn't enabled for this install yet; it turns on in your next session (or run /context-guru:install)",
     "below limits": "keep-alive is on, but this thread is below its minimum size or limits",
     "over budget": "one ping would cost more than the per-ping limit",
+    "not worth it": "the planned pings would cost more than the cache miss they protect",
     "too large": "context too large to hold for Ping",
     "unsupported": "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
     "pings used": "the planned keep-alive pings have run out",
