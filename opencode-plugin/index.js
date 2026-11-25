@@ -329,7 +329,7 @@ function writeRecoveryFiles(state, pid, managed) {
 // The one line that says how to turn context-guru on again after an uninstall. The status script
 // calls it with "$STATE", so the shell fills in the path.
 function uninstalledNote(state) {
-  return `context-guru is uninstalled for this project; to turn it on again, run: sh ${join(state, "context-guru-install")}, then restart OpenCode`
+  return `context-guru is uninstalled for this project; to turn it on again, run /context-guru-install in this project (or: sh ${join(state, "context-guru-install")}), then restart OpenCode`
 }
 
 // What a command says when its script is gone (an uninstall with --purge, or the installer removed the
@@ -345,7 +345,7 @@ function stopIfUninstalled() {
 fi`
 }
 
-// The uninstall script writes this marker. With it, a new start registers no command and routes nothing.
+// The uninstall script writes this marker. With it, a new start registers only /context-guru-install and routes nothing.
 export function isDisabled(state) {
   return existsSync(join(state, "disabled"))
 }
@@ -586,7 +586,7 @@ else
   printf '%s\\n' "result=uninstalled" "purged=no" "binary_kept=\${binary:-}"
 fi
 printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; only if you set the plugin option fallback: false yourself (it is on by default), restart OpenCode so providers stop routing through the proxy"
-printf '%s\\n' "note=after an OpenCode restart, the /context-guru- commands are gone; to turn context-guru on again, run: sh $STATE/context-guru-install, then restart OpenCode"
+printf '%s\\n' "note=after an OpenCode restart, only /context-guru-install is left; it turns context-guru on again here, or run: sh $STATE/context-guru-install, then restart OpenCode"
 printf '%s\\n' "undo=sh $STATE/context-guru-install, then restart OpenCode"
 `
 }
@@ -842,7 +842,7 @@ const COMMAND_SPECS = [
     description: "Stop the context-guru proxy and disable routing",
     script: "context-guru-uninstall",
     intro: "Uninstall context-guru from this project.",
-    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider. Only if they set the plugin option fallback: false themselves (it is on by default), they must restart OpenCode first. Tell them how to undo it: /context-guru-install in this session, or after an OpenCode restart (when the context-guru commands are gone) run sh " + path.replace(/context-guru-uninstall("?)$/, "context-guru-install$1") + " and restart OpenCode. Never run it with --yes without asking first.",
+    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider. Only if they set the plugin option fallback: false themselves (it is on by default), they must restart OpenCode first. Tell them how to undo it: /context-guru-install, in this session or after an OpenCode restart (then it is the only context-guru command left), or run sh " + path.replace(/context-guru-uninstall("?)$/, "context-guru-install$1") + " and restart OpenCode. Never run it with --yes without asking first.",
   },
   {
     name: "context-guru-preset",
@@ -868,22 +868,33 @@ function commandText(spec, block, path) {
   return spec.intro + "\n\n" + block + "\n\n" + stop + spec.outro(path)
 }
 
+// After an uninstall, the one command left: the way back in this folder (owner decision, 2026-11-25).
+const INSTALL_SPEC = COMMAND_SPECS.find((spec) => spec.name === "context-guru-install")
+const ENABLE_DESCRIPTION = "Turn context-guru on again in this project"
+
+function registerCommand(config, state, spec, description = spec.description) {
+  // A script that is gone prints GONE_OUTPUT, not a shell error.
+  const script = JSON.stringify(join(state, spec.script))
+  const embed = "!`if [ -f " + script + " ]; then sh " + script + "; else printf '%s' " + shQuote(GONE_OUTPUT) + "; fi`"
+  config.command ||= {}
+  config.command[spec.name] = { description, template: commandText(spec, embed, script) }
+}
+
 function registerCommands(config, state, options) {
   mkdirSync(state, { recursive: true, mode: 0o700 })
   writeCommandScripts(state, options)
-  // A script that is gone prints GONE_OUTPUT, not a shell error.
-  const embed = (name) => {
-    const script = JSON.stringify(join(state, name))
-    return "!`if [ -f " + script + " ]; then sh " + script + "; else printf '%s' " + shQuote(GONE_OUTPUT) + "; fi`"
-  }
-  const path = (name) => JSON.stringify(join(state, name))
-  config.command ||= {}
-  for (const spec of COMMAND_SPECS) {
-    config.command[spec.name] = {
-      description: spec.description,
-      template: commandText(spec, embed(spec.script), path(spec.script)),
-    }
-  }
+  for (const spec of COMMAND_SPECS) registerCommand(config, state, spec)
+}
+
+function addV2Command(editor, ctx, state, spec, description = spec.description) {
+  editor.add({
+    name: spec.name,
+    description,
+    execute: async ({ sessionID, prompt, delivery }) => {
+      const output = await runCommandScriptText(state, spec.script)
+      await ctx.session.prompt({ ...prompt, sessionID, text: commandText(spec, output, JSON.stringify(join(state, spec.script))), delivery })
+    },
+  })
 }
 
 // The one way any host runs a command script: the v2 chat path and the native TUI dialogs both
@@ -1315,7 +1326,7 @@ async function recoverProxy(state, record, client, fallback = false) {
   return true
 }
 
-// A start in a project with the disabled marker registers no command. It only refreshes the install
+// A start in a project with the disabled marker registers only /context-guru-install. It refreshes the install
 // script, so the way back that the log line names is there, and logs that line once.
 async function disabledStart(state, log) {
   try {
@@ -1401,6 +1412,11 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
       const state = stateDirectory(directory)
       if (isDisabled(state)) {
         await disabledStart(state, (message) => safeLog(client, "info", message))
+        try {
+          registerCommand(config, state, INSTALL_SPEC, ENABLE_DESCRIPTION)
+        } catch (error) {
+          await safeLog(client, "error", `command registration failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
         return
       }
       try {
@@ -1492,6 +1508,11 @@ async function setupV2(ctx) {
 
   if (isDisabled(state)) {
     await disabledStart(state, (message) => console.log(`opencode-context-guru: ${message}`))
+    try {
+      await ctx.command.transform((editor) => addV2Command(editor, ctx, state, INSTALL_SPEC, ENABLE_DESCRIPTION))
+    } catch (error) {
+      console.error(`opencode-context-guru: command registration failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
     return
   }
 
@@ -1515,16 +1536,7 @@ async function setupV2(ctx) {
     mkdirSync(state, { recursive: true, mode: 0o700 })
     writeCommandScripts(state, options)
     await ctx.command.transform((editor) => {
-      for (const spec of COMMAND_SPECS) {
-        editor.add({
-          name: spec.name,
-          description: spec.description,
-          execute: async ({ sessionID, prompt, delivery }) => {
-            const output = await runCommandScriptText(state, spec.script)
-            await ctx.session.prompt({ ...prompt, sessionID, text: commandText(spec, output, JSON.stringify(join(state, spec.script))), delivery })
-          },
-        })
-      }
+      for (const spec of COMMAND_SPECS) addV2Command(editor, ctx, state, spec)
     })
   } catch (error) {
     console.error(`opencode-context-guru: command registration failed: ${error instanceof Error ? error.message : String(error)}`)

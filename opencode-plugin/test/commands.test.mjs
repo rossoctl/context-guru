@@ -159,8 +159,8 @@ test("disabled marker leaves providers untouched", async () => {
   await hooks.config(config)
 
   assert.equal(config.provider.anthropic.options.baseURL, "https://api.anthropic.com")
-  // Issue #1290: a disabled project registers no command at start.
-  assert.equal(config.command, undefined)
+  // Issue #1290 (owner, 2026-11-25): a disabled project registers only the way back.
+  assert.deepEqual(Object.keys(config.command), ["context-guru-install"])
 })
 
 test("update script checks, then downloads and swaps the binary", async () => {

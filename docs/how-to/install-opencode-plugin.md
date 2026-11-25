@@ -164,8 +164,10 @@ The `disabled` marker keeps routing off.
 
 ### After an uninstall and a restart
 
-- After `/context-guru-uninstall --yes` and an OpenCode restart, context-guru is gone from OpenCode.
-  OpenCode lists no `/context-guru-` command, and the `ctrl+p` palette has no "Context Guru" entry.
+- After `/context-guru-uninstall --yes` and an OpenCode restart, context-guru is off in that project.
+  OpenCode lists only `/context-guru-install` ("Turn context-guru on again in this project"), and the
+  `ctrl+p` palette has no "Context Guru" entry. Other projects are not changed.
+- To remove context-guru from OpenCode completely, for every project, run the installer with `-s uninstall`.
 - Until you restart, the commands stay, because OpenCode cannot remove them from a running session.
   There, `/context-guru-status` prints `enabled=no` and says that context-guru is uninstalled. The other
   commands (`update`, `preset`, `strategy`) change nothing: they only say that context-guru is uninstalled,

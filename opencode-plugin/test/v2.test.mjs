@@ -159,8 +159,8 @@ test("v2 setup respects the disabled marker", async () => {
 
   assert.equal(providers[0].settings.baseURL, "https://api.anthropic.com")
   assert.equal(registered.hooks.length, 0)
-  // Issue #1290: a disabled project registers no command. The install script, the way back, is there.
-  assert.equal(registered.commands.length, 0)
+  // Issue #1290 (owner, 2026-11-25): a disabled project registers only the way back, and its script is there.
+  assert.deepEqual(registered.commands.map((command) => command.name), ["context-guru-install"])
   assert.ok(existsSync(join(state, "context-guru-install")))
 })
 
