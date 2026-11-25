@@ -265,8 +265,7 @@ class Installer:
             self.install_plugin(documents)
             self.save_record()
             self.login()
-            self.finish()
-            return 0
+            return self.finish()
         except Stop as stop:
             self.terminal.say(f"context-guru: {stop}")
             return 1
@@ -410,6 +409,9 @@ class Installer:
         self.terminal.say(
             "   • In every project, OpenCode's Anthropic and OpenAI requests go through a local context-guru proxy\n"
             "     on 127.0.0.1. Your requests and their answers pass through it.\n"
+            + (f"   • OpenCode reaches the models through the gateway at {urlsplit(self.connection.base_url).hostname}.\n"
+               if self.connection.provider else "   • OpenCode reaches Anthropic or OpenAI directly.\n")
+            +
             "   • While you are away, the proxy sends short keep-alive requests with your own credential, to keep\n"
             "     the prompt cache warm. They cost a little. /context-guru-strategy none turns them off.\n"
             + ("   • The preset is off: request bodies go to the provider unchanged." if preset == "off" else
@@ -545,30 +547,38 @@ class Installer:
         return changed
 
     def finish(self):
+        """Exit code 0 only when a real answer came through the proxy, or the user said no to the check."""
         self.step("Check that it works", "One short test prompt through OpenCode starts the proxy and checks it.")
-        if self.yes("Send one test prompt now? It costs one short request.", default=False):
-            with tempfile.TemporaryDirectory(prefix="cg-opencode-check.") as folder:
-                folder = os.path.realpath(folder)
-                out = self.shell.run(["opencode", "run", "Reply with the single word: ok"], cwd=folder)
-                self.terminal.say(f"OpenCode answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
-                state = project_state(folder)
-                status, reset = state / "context-guru-status", state / "context-guru-reset"
-                proxy = facts(self.shell.run(["sh", str(status)]).stdout).get("proxy") if status.exists() else None
-                # The check's own proxy would idle for 24 h (and send keep-alive) for a folder that is gone.
-                if reset.exists():
-                    self.shell.run(["sh", str(reset)])
-                shutil.rmtree(state, ignore_errors=True)
-            # opencode run can print a provider error and still exit 0, so its text counts too.
-            answered = out.returncode == 0 and "Error:" not in out.stdout + out.stderr
-            if proxy == "up" and answered:
-                self.terminal.say("✓ The proxy started, and OpenCode answered through it.")
-            elif proxy == "up":
-                self.terminal.say("The proxy started, but OpenCode could not answer (see above). If OpenCode has "
-                                  "no provider login yet, run: opencode auth login")
-            else:
-                self.terminal.say("The proxy did not answer. If OpenCode has no provider login yet, run: "
-                                  f"opencode auth login. The proxy log is under {state_root()}.")
-        self.terminal.say("Done. Restart any OpenCode that is open now. Then start OpenCode with: opencode")
+        if not self.yes("Send one test prompt now? It costs one short request.", default=True):
+            self.terminal.say("Not checked. Restart any OpenCode that is open now. Then start OpenCode with: opencode")
+            return 0
+        with tempfile.TemporaryDirectory(prefix="cg-opencode-check.") as folder:
+            folder = os.path.realpath(folder)
+            out = self.shell.run(["opencode", "run", "Reply with the single word: ok"], cwd=folder)
+            self.terminal.say(f"OpenCode answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
+            state = project_state(folder)
+            status, reset = state / "context-guru-status", state / "context-guru-reset"
+            found = facts(self.shell.run(["sh", str(status)]).stdout) if status.exists() else {}
+            # The check's own proxy would idle for 24 h (and send keep-alive) for a folder that is gone.
+            if reset.exists():
+                self.shell.run(["sh", str(reset)])
+            shutil.rmtree(state, ignore_errors=True)
+        # opencode run can print a provider error and still exit 0, so its text counts too.
+        answered = out.returncode == 0 and "Error:" not in out.stdout + out.stderr
+        requests = int(float(found.get("stats_requests") or 0))
+        if found.get("proxy") != "up":
+            self.terminal.say(f"The proxy did not start. Its log is under {state_root()}.")
+        elif not answered:
+            self.terminal.say("The proxy started, but OpenCode could not answer (see above). Check the key "
+                              "(opencode auth login), the base URL and the model.")
+        elif requests < 1:
+            self.terminal.say("OpenCode answered, but not through the proxy: the proxy counted 0 requests. The "
+                              "provider of OpenCode's model is not Anthropic or OpenAI.")
+        else:
+            self.terminal.say("✓ The proxy started, and OpenCode answered through it.")
+            self.terminal.say("Done. Restart any OpenCode that is open now. Then start OpenCode with: opencode")
+            return 0
+        return 1
 
     # ----------------------------------------------------------------------------- uninstall
     def uninstall(self):

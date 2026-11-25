@@ -51,6 +51,7 @@ class FakeShell:
         self.has_npm = True
         self.npm_install_error = None
         self.proxy = "up"
+        self.requests = 1  # what the proxy's /stats counted, as the status script prints it
         self.run_fails = False  # "exit": exit 1 with an error; "error-exit-0": the error with exit 0
         self.npm_shadowed = False  # an older opencode comes first on PATH, so npm's new one does not run
         self.opencode_version_text = None
@@ -111,7 +112,8 @@ class FakeShell:
                 return ok("Error: Anthropic API key is missing.\n")
             return ok("ok\n")
         if cmd[0] == "sh" and cmd[1].endswith("context-guru-status"):
-            return ok(f"install=present\nport=8787\nproxy={self.proxy}\n")
+            stats = f"stats_requests={self.requests}\n" if self.proxy == "up" else ""
+            return ok(f"install=present\nport=8787\nproxy={self.proxy}\n{stats}")
         if cmd[0] == "sh" and cmd[1].endswith("context-guru-reset"):
             return ok("context-guru: proxy stopped\n")
         raise AssertionError(f"unexpected command: {cmd}")
@@ -418,6 +420,61 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("OpenCode stays", self.terminal.text())
         self.assertEqual(json.loads(install_opencode.record_path().read_text()), {"opencode_installed": True})
 
+    # ------------------------------------------------------------------------------ the check
+    def test_the_check_is_default_yes(self):
+        self.installer("1", "y", "").install()  # path, consent, test prompt: Enter
+
+        self.assertIn(["opencode", "run", "Reply with the single word: ok"], self.shell.calls)
+
+    def test_the_check_passes_with_one_request_through_the_proxy(self):
+        code = self.installer("1", "y", "y").install()
+
+        self.assertEqual(code, 0)
+        self.assertIn("✓ The proxy started, and OpenCode answered through it.", self.terminal.text())
+
+    def test_zero_requests_fails_with_exit_1(self):
+        self.shell.requests = 0
+
+        code = self.installer("1", "y", "y").install()
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("✓ The proxy started", self.terminal.text())
+        self.assertIn("the proxy counted 0 requests", self.terminal.text())
+
+    def test_no_answer_fails_with_exit_1_and_shows_the_error(self):
+        for failure in ("exit", "error-exit-0"):
+            with self.subTest(failure=failure):
+                self.shell.run_fails = failure
+
+                code = self.installer("1", "y", "y").install()
+
+                self.assertEqual(code, 1)
+                self.assertIn("Anthropic API key is missing", self.terminal.text())
+                self.assertNotIn("✓ The proxy started", self.terminal.text())
+
+    def test_proxy_down_fails_with_exit_1_and_names_the_log(self):
+        self.shell.proxy = "down"
+
+        code = self.installer("1", "y", "y").install()
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"The proxy did not start. Its log is under {install_opencode.state_root()}",
+                      self.terminal.text())
+
+    def test_no_to_the_check_says_not_checked_and_exits_0(self):
+        code = self.installer("1", "y", "n").install()
+
+        self.assertEqual(code, 0)
+        self.assertIn("Not checked.", self.terminal.text())
+        self.assertNotIn(["opencode", "run", "Reply with the single word: ok"], self.shell.calls)
+
+    def test_consent_names_the_connection(self):
+        self.installer(*self.GATEWAY, "y", "n").install()
+        self.assertIn("through the gateway at gw.example", self.terminal.text())
+
+        self.installer("1", "y", "n").install()
+        self.assertIn("OpenCode reaches Anthropic or OpenAI directly", self.terminal.text())
+
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):
         code = self.installer("1", "y", "n").install()
@@ -669,13 +726,6 @@ class InstallerTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("✓ The proxy started, and OpenCode answered", self.terminal.text())
-
-    def test_test_prompt_with_the_proxy_down_names_the_login_command(self):
-        self.shell.proxy = "down"
-
-        self.installer("1", "y", "y").install()
-
-        self.assertIn("opencode auth login", self.terminal.text())
 
     def test_test_prompt_that_fails_is_not_reported_as_working(self):
         for failure in ("exit", "error-exit-0"):
