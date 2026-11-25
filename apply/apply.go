@@ -1360,8 +1360,8 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 	return prev
 }
 
-// touchSeq numbers the real requests that write a clock in this process. A carry holds the number of the request
-// that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
+// touchSeq numbers the real requests that take the clock step in this process (with no store the step writes
+// nothing, but the request still has its number). A carry holds the number of the request that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
 // errs toward the old behavior (a shared confirm), not toward a new failure.
 var touchSeq atomic.Int64
 
