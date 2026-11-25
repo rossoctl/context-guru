@@ -13,27 +13,11 @@ context-guru-plugin/leak_test.go sleep=3
 context-guru-plugin/plugin_test.go sleep=5 poll=5
 context-guru-plugin/signal_test.go sleep=3 poll=1 after=8
 context-guru-plugin/statusline_golden_test.go sleep=1 poll=1 after=4
-dash/bypasscount_test.go sleep=4
-dash/cachecost_test.go sleep=3 poll=3
-dash/capture_test.go after=1
-dash/componentscache_test.go sleep=1 poll=1
 dash/contentgate_test.go sleep=2 poll=2
-dash/dedupetext_test.go sleep=3 poll=2
-dash/inventory_shutdown_test.go after=1
+dash/dedupetext_test.go sleep=2 poll=2
 dash/janitor_checkpoint_test.go after=2
-dash/jsoncache_age_test.go sleep=2 poll=2 after=1
-dash/jsoncache_flight_test.go after=2
-dash/jsoncache_refresh_test.go sleep=1 poll=1 after=1
-dash/meta_test.go sleep=1 poll=1
-dash/prefixcause_test.go sleep=1 poll=1
-dash/projectsinks_test.go sleep=1 poll=1 after=1
 dash/prompttext_test.go sleep=4 poll=3
-dash/restartseed_test.go sleep=1 poll=1
-dash/sse_test.go sleep=3 poll=1 after=4
-dash/tenant_scope_test.go sleep=2 poll=2
-dash/thread_test.go sleep=1 poll=1
-dash/toolinventory_test.go sleep=1 poll=1
-dash/tooluseproject_test.go sleep=1 poll=1
+dash/sse_test.go sleep=2 after=1
 internal/modelinfo/litellm/chain_test.go sleep=6
 internal/modelinfo/litellm/ratefill_test.go sleep=1
 internal/modelinfo/litellm/unresolved_test.go sleep=1

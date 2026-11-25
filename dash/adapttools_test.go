@@ -7,7 +7,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -255,11 +254,15 @@ func TestCarriedSetsStopsWaitingWhenCancelled(t *testing.T) {
 	defer func() { <-carriedSlot }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	start := time.Now()
-	_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
-		map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
-	if !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
-		t.Fatalf("err %v after %v; want context.Canceled within 1 s", err, time.Since(start))
+	// A call that waited on the slot would never return, so the wait has a bound, not a clock check.
+	res := make(chan error, 1)
+	go func() {
+		_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
+			map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
+		res <- err
+	}()
+	if err := awaitSignal(t, "carriedSets to return once cancelled (it must not wait on the slot)", res); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v; want context.Canceled", err)
 	}
 	if len(carriedSlot) != 1 {
 		t.Fatal("the cancelled request took or released the slot")

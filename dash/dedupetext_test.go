@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // legacyRow writes a declaration the OLD way: the text on the row itself, no hash. This is the
@@ -303,15 +305,38 @@ func TestBackfillIsResumableAndIdempotent(t *testing.T) {
 	// produces. Every intermediate state is checked, because the mixed state — some rows
 	// migrated, some not — is the one a single end-to-end run never exercises.
 	var total int64
-	for i := 0; i < 5; i++ {
-		stop := make(chan struct{})
-		// Closed after the pause begins, so exactly one batch runs per iteration.
-		go func() { time.Sleep(20 * time.Millisecond); close(stop) }()
-		n, err := db.dedupeDeclarationText(stop, 3, 50*time.Millisecond)
-		if err != nil {
+	legacy := func() int {
+		var n int
+		if err := db.sql.QueryRow(`SELECT COUNT(*) FROM tool_declarations WHERE text_gz IS NOT NULL`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		total += n
+		return n
+	}
+	// 12 rows in batches of 3 take 4 runs; a fifth would find nothing to move.
+	for i := 0; i < 4; i++ {
+		before := legacy()
+		stop := make(chan struct{})
+		type result struct {
+			n   int64
+			err error
+		}
+		res := make(chan result, 1)
+		// The pause is an hour, so the run stops only when stop closes. Close it once the first
+		// batch has moved rows: exactly one batch runs per iteration, however slow the machine is.
+		go func() {
+			n, err := db.dedupeDeclarationText(stop, 3, time.Hour)
+			res <- result{n, err}
+		}()
+		testutil.WaitFor(t, "the first batch moves rows", func() bool { return legacy() < before })
+		close(stop)
+		r := awaitSignal(t, "the stopped run to return", res)
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if batchRows := int64(min(3, before)); r.n != batchRows {
+			t.Fatalf("run %d migrated %d rows, want one batch of %d", i+1, r.n, batchRows)
+		}
+		total += r.n
 		assertRevealUnchanged(t, db, want, "mid-migration")
 	}
 	if total == 0 || total > 12 {
