@@ -138,6 +138,18 @@ no row in the coverage table.
 - Go 1.26, module `github.com/rossoctl/context-guru`. The build is pure Go — `make build` sets
   `CGO_ENABLED=0`. cgo is needed only for `go test -race` and for `-tags cg_skeleton` (tree-sitter),
   which is why the Makefile still exports `CGO_ENABLED=1` for the test targets.
+- **`go.mod` pins only released tags, never a commit.** A pseudo-version pins a commit. Go writes it in
+  forms such as `v0.0.0-<date>-<sha>`, `vX.Y.Z-0.<date>-<sha>` and `vX.Y.Z-pre.0.<date>-<sha>`. (Owner rule,
+  David Amid, 2026-11-25.)
+  - Our own modules, such as `rossoctl/accountant`, always get a release tag. When a change needs unreleased
+    code from one of them, release it first. Then pin the new tag.
+  - A module in a subfolder, such as `rossoctl/accountant/metrics`, needs its own tag, `<folder>/vX.Y.Z`
+    (for example `metrics/v0.8.0`). The root tag does not cover it.
+  - A third-party module that publishes tags is pinned at a tag. A third-party module that publishes no tags
+    (today `go.starlark.net`, `remyoudompheng/bigfft` and the `google.golang.org/genproto/googleapis/*`
+    modules) keeps a pseudo-version.
+  - The rule applies to the lines a PR adds or changes in `go.mod`. A pin that only comes in with a merge of
+    `main` does not break it. The integrator checks each PR's `go.mod` diff before the merge.
 - Match the surrounding code's style; keep packages small and single-purpose.
 - **Tests wait on a condition, not on time.** In `*_test.go`, use `testutil.WaitFor`,
   `WaitForState` or `(Upstream).WaitForCall` instead of `time.Sleep`, a fixed-deadline poll loop

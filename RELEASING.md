@@ -173,6 +173,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
 - **Write issue numbers in a PR body as `Refs #N` only.** GitHub closes an issue when "close", "fix" or "resolve" (or a form of them) stands before `#N` anywhere in the PR body. A negative sentence such as "Does not close #1303" also closes it. That is how #1303 closed by mistake when #1370 merged.
   - Before each merge, grep the PR body for those words before a `#number`.
   - If one is there, fix the body before the merge. If the issue closed already, reopen it.
+- **Refuse a PR whose `go.mod` diff adds a pseudo-version for one of our modules, or for a module that publishes tags.** A pseudo-version pins a commit, not a released tag. Ask the author to release the dependency and pin the tag. A third-party module with no tags keeps its pseudo-version. See the [`go.mod` rule in CLAUDE.md](CLAUDE.md#conventions).
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
 - **After every merge, tell the PR owner in the same step** (owner rule, David Amid, 2026-11-25: "put the rule into the realsing.md file so other integrators on other machines would know it"). Treat the merge and the message as one step.
   - Send the session that owns the PR one short message with `SendMessage`, as in [Working on a task](CLAUDE.md#working-on-a-task): `merged as <sha>`. Add what the owner can do next: close the issues it said it would close, merge `main` into a PR stacked on this one, and clean up its review and fix worktrees.
