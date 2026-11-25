@@ -131,7 +131,10 @@ type Money struct {
 // searchOutputEstimate is the output tokens one search call costs when usage does not say.
 const searchOutputEstimate = 30
 
-// Price prices one request. ok=false when the model has no known price.
+// Price prices one request. It prices the gross and the cost, each at its own prompt size. It does not
+// re-rate the tokens that stay when the two sizes sit on different sides of a price line. The accountant
+// figure for the deferral (dash deferFig) can include a share of that re-rate, so the two figures differ
+// in scope. ok=false when the model has no known price.
 func Price(r Request, p modelinfo.Price) (Money, bool) {
 	if p.Zero() {
 		return Money{}, false

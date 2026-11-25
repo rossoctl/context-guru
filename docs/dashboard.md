@@ -264,8 +264,12 @@ Limits:
   re-rate (output bills 1.5x above the line, and all output stays). Removed tokens price at the size
   without context-guru, added tokens at the size with it. The re-rate is split over the components in
   proportion to each one's net saved tokens (saved minus caused, only where above 0), so the rows add up
-  to the request total. With no such component it books to the `ended_change` row, whose name is then approximate: that dollar figure is the re-rate, not a break (it has no tokens). A re-rate can be
-  negative, and a component can then show a saving below 0. A request that crosses no line has no
+  to the request total. A component that only causes cost (no net saved tokens) gets no share. With no
+  such component the re-rate books to the `ended_change` row, whose name is then approximate: that dollar
+  figure is the re-rate, not a break (it has no tokens). The re-rate is booked in the first-removal column
+  (`saved_first_usd`), also the re-rate of cache-read tokens that stay. So that column can no longer be
+  derived from the token columns. A re-rate can be negative, and a component that has a net saving can
+  then show a saving below 0. A request that crosses no line has no
   re-rate, and a price with no tiers gives the figures of before.
   Totals that sum tokens by model, with no request size (for example the per-model tier cost split, the
   replay figures of legacy rows, the metrics module's savings counters and the summary and sweep model
