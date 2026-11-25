@@ -22,40 +22,21 @@ func mapOpen(fsys fstest.MapFS, seen *[]string) Open {
 
 func file(s string) *fstest.MapFile { return &fstest.MapFile{Data: []byte(s)} }
 
-func TestClientOf(t *testing.T) {
-	for ua, want := range map[string]Client{
-		"claude-cli/2.1.319 (external, cli)": ClientClaude,
-		"Claude-Code/1.0":                    ClientClaude,
-		"bobshell/1.0.3":                     ClientBob,
-		"codex_cli_rs/0.160.0":               ClientCodex,
-		"codex_exec":                         ClientCodex,
-		"curl/8":                             ClientNone,
-		"bobcat/1.0":                         ClientNone,
-		"my-bob-tool/2":                      ClientNone,
-		"xcodex/1":                           ClientNone,
-		"":                                   ClientNone,
-	} {
-		if got := ClientOf(ua); got != want {
-			t.Errorf("ClientOf(%q) = %q, want %q", ua, got, want)
-		}
-	}
-}
-
 func TestPickChoosesTheRuleOfTheClient(t *testing.T) {
 	s := Settings{Claude: ClaudeCode{EnvWindow: "200k"}, Bob: Bob{Read: true}, Codex: Codex{Limit: "150000"}}
-	if p, ok := s.Pick("claude-cli/2", "claude-opus-5", 1_000_000, nil); !ok || p.Source != Configured || p.Tokens(1_000_000) != 167_000 {
+	if p, ok := s.Pick(ClientClaude, "claude-opus-5", 1_000_000, nil); !ok || p.Source != Configured || p.Tokens(1_000_000) != 167_000 {
 		t.Errorf("claude: %+v %v", p, ok)
 	}
-	if p, ok := s.Pick("bobshell/1", "m", 1_000_000, func(string) int { return 400_000 }); !ok || p.Tokens(1_000_000) != 200_000 {
+	if p, ok := s.Pick(ClientBob, "m", 1_000_000, func(string) int { return 400_000 }); !ok || p.Tokens(1_000_000) != 200_000 {
 		t.Errorf("bob: %+v %v", p, ok)
 	}
-	if p, ok := s.Pick("codex_cli_rs/1", "m", 272_000, nil); !ok || p.Tokens(272_000) != 150_000 {
+	if p, ok := s.Pick(ClientCodex, "m", 272_000, nil); !ok || p.Tokens(272_000) != 150_000 {
 		t.Errorf("codex: %+v %v", p, ok)
 	}
-	if _, ok := s.Pick("curl/8", "m", 1_000_000, nil); ok {
+	if _, ok := s.Pick(ClientNone, "m", 1_000_000, nil); ok {
 		t.Error("another client must get the table")
 	}
-	if _, ok := (Settings{}).Pick("claude-cli/2", "claude-opus-5", 1_000_000, nil); ok {
+	if _, ok := (Settings{}).Pick(ClientClaude, "claude-opus-5", 1_000_000, nil); ok {
 		t.Error("zero settings must change nothing")
 	}
 }

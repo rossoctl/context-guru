@@ -1,11 +1,9 @@
 package proxy
 
 import (
-	"net/http"
-
 	"github.com/rossoctl/accountant"
 
-	agentall "github.com/rossoctl/context-guru/agent/all"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -20,7 +18,7 @@ func compactionVerdict(th thread.Result) accountant.CompactionTrigger {
 	return ""
 }
 
-// isClientCompaction wires the library detector to the request. The logic is in agent/all.
-func isClientCompaction(r *http.Request, body []byte) bool {
-	return agentall.IsClientCompaction(r.Header, body)
+// isClientCompaction wires the library detector to the request's Client. The logic is in agent.
+func isClientCompaction(cl agent.Client, body []byte) bool {
+	return agent.IsClientCompaction(cl, body)
 }

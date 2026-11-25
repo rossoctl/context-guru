@@ -315,6 +315,21 @@ It removes only what context-guru wrote: a `baseUrl` that you changed after setu
 - **A `baseUrl` on one model** (`models.<id>.baseUrl` in `models.json`) wins over the provider's.
   Setup does not read or change it, so that model goes direct, as before.
 
+## How the proxy knows a request is from Pi
+
+Pi calls the model through a provider SDK, so the User-Agent says `anthropic` or `openai`, not Pi. The plugin marks each routed request instead.
+
+- The plugin sends the header `x-context-guru-client: pi`.
+- The proxy never forwards this header. It drops every `x-context-guru-*` header.
+- The proxy reads it in `agent.Identify`. It gives two values:
+  - `Label` is the harness: `pi`. The dashboard shows it.
+  - `SDK` is the old User-Agent family: `anthropic` or `openai`.
+- **A rule that depends on the provider reads the raw User-Agent, `SDK` or the provider field. It never reads `Label`.**
+- A new reader of the label must pick one of the two. Then add a row to the
+  [readers table](../docs/design.md#readers-of-the-client-label).
+
+To turn the Pi label off, remove the line in `extensions/context-guru.ts` that sets `CLIENT_HEADER`. Pi rows then show the SDK name again.
+
 ## Development
 
 ```sh

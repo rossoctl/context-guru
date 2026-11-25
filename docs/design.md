@@ -24,7 +24,8 @@ infrastructure the components sit on.
 | `store/` | `Store` interface + in-memory TTL+LRU backend (rewind + sticky ids) |
 | `session/` | resolve the session key (explicit id, else content hash) |
 | `agent/` | the extension point for a client agent (IBM Bob, and the next ones): one `Agent` interface, a neutral `Base` and a registry by route. Two optional interfaces: `Gateway` (the agent's client calls the host at its root; at most one agent owns the catch-all) and `ControlPlane` (the agent reads or changes the reply to a control-plane call). The shared code asks the request's agent; it never names one |
-| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`); also `IsClientCompaction(h, body)`, the one call that tells a host a request is the client's own compaction |
+| `agent/all/` | blank-imports every built-in agent so its `init()` registers it (like `components/all/`); also `IsClientCompaction(h, body)`, a thin wrapper of `agent.IsClientCompaction` for a host that has headers and no `Client` yet |
+| `agent.Identify` (`agent/identify.go`) and `agent/claudecode`, `agent/opencode`, `agent/pi` | the one library entry point that names the client behind a request, from the headers only (never the path). Per-client header rules are plain functions in those packages and in `agent/codex`; `Identify` calls them. `Client.Compaction` holds the client's own compaction mark from the headers; `agent.IsClientCompaction(client, body)` adds the body marks and the prompt match. See [Identify the client](#identify-the-client) |
 | `agent/bob/` | IBM Bob's agent: its model route, its session id (`X-Task-Id`), its usage reading (the cache writes and their 1-hour part), where its own model calls go (`ModelTarget`: Bob's model path and `Apikey`), and its control plane (`Gateway`, `ControlPlane`): the profile's region strip and the model-info window parse |
 | `dispatch/` | the one way a core package reaches an external service: `Dispatcher` (`Do`/`Release`/`Price`), resolved by an opaque host-issued `Ref`; `dispatch/dispatchtest` is the exported host contract (`Contract`) plus a recording `Fake` and a minimal `HTTPHost` for tests |
 | `keepalive/` | the idle keep-alive, host-agnostic; sends pings through the host's `dispatch.Dispatcher` (cmd/context-guru-proxy's `proxy.Dispatcher`; the Cortex plugin's `cortexDispatcher`) |
@@ -337,6 +338,31 @@ Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.
 
 The one exception is a store that keeps nothing (`store.Keeps` is false: storage switched off, or no store). There is no record to read, so the keeper's index also holds the ping time (`storeOffAt`) and the cache clock and the manual-ping refusal answer from it, as before #1365. With a real store that field is always 0.
 
+## Identify the client
+
+`agent.Identify(h http.Header) agent.Client` names the client behind a request. It reads the User-Agent and each client's own marks. It does not read the route path: Claude Code, Codex, OpenCode and Pi share routes, and a host can mount routes elsewhere. The path registry stays for an agent that owns a route (Bob's gateway).
+
+- **Fields.** `Label` is the dashboard family. `Name` is the narrow identity that rules key on (`claude`, `bob`, `codex`, `opencode`, `pi`, or empty). `SDK` is the User-Agent family: for Pi it is the provider SDK's token, for the others it equals `Label`. `Entrypoint`, `SessionID`, `AgentID`, `AgentIDHeader`, `ParentID` come from headers.
+- **Nil or empty header.** The result is the generic client: `Label` and `SDK` are "unknown", all else is empty. A host that passes no headers gets today's behavior.
+- **Which field to read.** Take `Label` when the harness matters (the dashboard). Take `SDK` when the logic depends on the provider (the prediction model's agent feature).
+- **Proxy.** It calls `agent.Identify(r.Header)` once per request (`identify` in `proxy/clientid.go`) and uses the `Client`. It holds no client rules.
+- **Bifrost adapter.** The transport must pass the request headers to `Identify`. A host that cannot pass them gets the generic client.
+- **Cortex.** Call `agent.Identify(pctx.Headers)`. When `Client.SessionID` is empty, use the host's own session id (`pctx.SessionID`) as the gap filler.
+- **Library code** (`thread`, the compaction point, `waitcause`) takes the `Client` as a parameter, not a raw User-Agent.
+
+### Readers of the client label
+
+| Reader | Reads | Why |
+|---|---|---|
+| Dashboard request rows (`Event.Agent`, filters) | `Label` (`pi`) | the user wants the harness |
+| Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | raw User-Agent, turned into its family by `dash.AgentFor` | unchanged. A Pi ping row keeps the SDK token. |
+| Prediction model, live (`Record.Agent`, `LiveFacts.Agent`, `predictiveDecide`) | raw User-Agent | unchanged: this PR does not change model input |
+| Prediction model, stored rows (`proxy/campaignauto.go`) | `modelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives a token back (`openai`, `anthropic`, or the provider string) |
+| Compaction point (`proxy/compactioncfg.go`) | `Name` | Pi and OpenCode have no setting |
+| Entry point on the row | `Entrypoint` | Pi gets `other` |
+| `dash/kvcache.go` (offline rows) | `Label` | the provider is its own column in the same row |
+
+Rule: logic that depends on the provider reads the raw User-Agent, `SDK` or the provider field, never `Label`. A new reader picks one and adds a row here.
 
 ## Session keying
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/agent/bob"
 	"github.com/rossoctl/context-guru/compactionpoint"
 )
@@ -54,13 +55,13 @@ var hostOpen compactionpoint.Open = func(path string) (fs.File, error) {
 	return f, nil
 }
 
-// compactionPointFor is C for this request: the user's own setting, read at start-up, when it
+// compactionPointFor is C for this request (cl is the request's client, agent.Identify, computed once): the user's own setting, read at start-up, when it
 // changes C for the request's model; else the operator's compaction_point in the price table, else the
 // bootstrap table. A hosted proxy (Options.Tenants)
 // never has a user setting. Fail open: any odd value gives the table.
 //
 // WHICH REQUESTS. Each client's setting applies only to a request whose User-Agent is that client's
-// own (compactionpoint.ClientOf; the client sets it itself). A request of another client on the same local
+// own (agent.Identify, Client.Name, mapped by compactionClient; the client sets it itself). A request of another client on the same local
 // proxy gets the table. Bob also gets its own verified default when the user set nothing (#963).
 // Codex has no default (see compactionpoint.Codex). The limit: the header is the client's own
 // claim, and the Claude Agent SDK sends the same User-Agent, so an SDK program run with the same
@@ -71,11 +72,11 @@ var hostOpen compactionpoint.Open = func(path string) (fs.File, error) {
 // first, the same style as the table in compactionpoint.For. So a key for claude-opus-5 also applies
 // to a newer id that contains it (claude-opus-5-1). That is the client's own rule too: its canonical
 // model name matches dated and variant spellings.
-func (h *Handler) compactionPointFor(r *http.Request, body []byte, window int) compactionpoint.Point {
+func (h *Handler) compactionPointFor(r *http.Request, cl agent.Client, body []byte, window int) compactionpoint.Point {
 	model := gjson.GetBytes(body, "model").String()
 	if h.opts.Tenants == nil && r != nil {
 		set := compactionpoint.Settings{Claude: h.opts.ClaudeCompact, Bob: h.opts.BobCompact, Codex: h.opts.CodexCompact}
-		if p, ok := set.Pick(r.UserAgent(), model, window, h.bobWindow); ok {
+		if p, ok := set.Pick(compactionClient(cl), model, window, h.bobWindow); ok {
 			return p
 		}
 	}
@@ -128,4 +129,18 @@ func ReadBobCompact(getenv func(string) string, home string) compactionpoint.Bob
 // understand (fail open). Same switch as the others.
 func ReadCodexCompact(getenv func(string) string, home string) compactionpoint.Codex {
 	return compactionpoint.ReadCodex(getenv, home, hostOpen)
+}
+
+// compactionClient maps the request's Client to the client the compaction point keys on. A client with no
+// setting (Pi, OpenCode, any other) gives ClientNone: the table applies.
+func compactionClient(cl agent.Client) compactionpoint.Client {
+	switch cl.Name {
+	case agent.ClientClaude:
+		return compactionpoint.ClientClaude
+	case agent.ClientBob:
+		return compactionpoint.ClientBob
+	case agent.ClientCodex:
+		return compactionpoint.ClientCodex
+	}
+	return compactionpoint.ClientNone
 }

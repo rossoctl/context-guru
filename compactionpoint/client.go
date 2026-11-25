@@ -28,7 +28,8 @@ func readOff(getenv func(string) string) bool {
 	return false
 }
 
-// Client names a client for the choice of C.
+// Client names a client for the choice of C. The host maps its own client identity to it (the proxy maps
+// agent.Client.Name), so this package parses no User-Agent.
 type Client string
 
 const (
@@ -38,29 +39,6 @@ const (
 	ClientCodex  Client = "codex"
 )
 
-// ClientOf names the client for the compaction point only. A wrong match would give a stranger's
-// request another client's C, so Bob and Codex are matched by the start of the User-Agent they
-// send: Bob Shell sends `bobshell/<version>`; Codex sends its originator first, `codex_cli_rs/...`
-// by default (and `codex_exec`, `codex-tui` and the like). Claude Code is matched by the substring
-// "claude-code" or "claude-cli" anywhere in the User-Agent (#955). That is the rule of dash.AgentFor
-// for those two names. The dash package imports this one, so the rule is repeated here; a test in
-// this package pins both to the same answers.
-func ClientOf(userAgent string) Client {
-	l := strings.ToLower(strings.TrimSpace(userAgent))
-	switch {
-	case strings.HasPrefix(l, "bobshell/"):
-		return ClientBob
-	case strings.HasPrefix(l, "codex"):
-		return ClientCodex
-	}
-	// dash.AgentFor lowercases the raw User-Agent (no trim) and tests claude-code, then claude-cli.
-	raw := strings.ToLower(userAgent)
-	if strings.Contains(raw, "claude-code") || strings.Contains(raw, "claude-cli") {
-		return ClientClaude
-	}
-	return ClientNone
-}
-
 // Settings holds each client's own settings, read once at start-up in local mode. The zero value
 // changes nothing.
 type Settings struct {
@@ -69,12 +47,12 @@ type Settings struct {
 	Codex  Codex
 }
 
-// Pick is C for a request from this User-Agent, from the user's own setting for that client, when
+// Pick is C for a request from this client, from the user's own setting for that client, when
 // it changes C. ok is false when the caller must use the operator's price table instead. A hosted
 // proxy must not call Pick: it never has a user setting. bobWindow gives Bob's own window for the
 // model (0 = not seen). It runs only for a Bob request.
-func (s Settings) Pick(userAgent, model string, window int, bobWindow func(model string) int) (Point, bool) {
-	switch ClientOf(userAgent) {
+func (s Settings) Pick(client Client, model string, window int, bobWindow func(model string) int) (Point, bool) {
+	switch client {
 	case ClientClaude:
 		return s.Claude.Resolve(model, window)
 	case ClientBob:
