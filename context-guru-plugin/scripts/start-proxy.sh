@@ -729,7 +729,7 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
     RS_DEFER=0
     if [ "$RS_RESULT" = unchecked ]; then
       # The check could not run. A running proxy is evidence the binary works, and a wrong restart
-      # costs more than a stale configuration: leave it alone. (Owner decision, 2026-11-25.)
+      # costs more than a stale configuration: leave it alone.
       note "the running proxy on port ${PORT} is left as it is."
       exit 0
     fi

@@ -3620,7 +3620,7 @@ STRATEGY_MARKER_TAIL = "written by"
 # (5 minutes or 1 hour) from the traffic, so a name that says "5-min" would be wrong for half the
 # sessions it governs. The proxy picks the timing; the strategy picks how many pings.
 #
-# NO FALLBACK for a proxy older than v0.7.1 (owner decision). A binary without the `strategies`
+# NO FALLBACK for a proxy older than v0.7.1. A binary without the `strategies`
 # subcommand is told so, clearly, and the command stops. Do not add a table "just in case".
 STRATEGY_MIN_PROXY = "v0.7.1"
 STRATEGIES_TIMEOUT_ENV = "CONTEXT_GURU_STRATEGIES_TIMEOUT"
