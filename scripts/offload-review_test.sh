@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# offload-review_test.sh: tests for scripts/offload-review/lib.sh (the lock and the per-PR fetch)
+# and for the --cleanup path of scripts/offload-review.sh. A temp repo, a bare origin and a stub
+# gh on PATH: no network.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
+fails=0
+ok()  { echo "ok   $1"; }
+bad() { echo "FAIL $1"; fails=$((fails + 1)); }
+realgit=$(type -P git)
+git() { command git -c core.hooksPath=/dev/null -c user.name=t -c user.email=t@t "$@"; }
+
+# A bare origin with main and 2 PR refs; a clone is the "main checkout".
+git init -q --bare -b main "$d/origin.git"
+git clone -q "$d/origin.git" "$d/main" 2>/dev/null
+( cd "$d/main" && echo 1 > f && git add f && git commit -qm one && git push -q origin main
+  for n in 1 2; do git checkout -q -b pr$n && echo $n > f$n && git add f$n && git commit -qm pr$n \
+    && git push -q origin "pr$n:refs/pull/$n/head" && git checkout -q main; done )
+
+# shellcheck source=offload-review/lib.sh
+. "$here/offload-review/lib.sh"
+lockdir=$d/main/.git/offload-review-worktree.lock
+
+# (a) 2 PRs fetch at the same time, 20 times.
+fail_new=0
+for i in $(seq 20); do
+  fetch_pr_refs "$d/main" 1 main 2>"$d/e1" & p1=$!
+  fetch_pr_refs "$d/main" 2 main 2>"$d/e2" & p2=$!
+  wait $p1 || fail_new=$((fail_new + 1)); wait $p2 || fail_new=$((fail_new + 1))
+done
+[ "$fail_new" -eq 0 ] && ok "(a) 40 parallel per-PR fetches all succeed" || bad "(a) $fail_new per-PR fetches failed"
+for r in pr1/head pr1/base pr2/head pr2/base; do
+  git -C "$d/main" rev-parse -q --verify "refs/offload-review/$r" >/dev/null || bad "(a) ref $r missing"
+done
+# The old command, in parallel. It writes refs/remotes/origin/main, so it can fail on a ref lock.
+# The race is timing: it may not show in 20 loops. The result here is information, not a pass or fail.
+fail_old=0
+for i in $(seq 20); do
+  git -C "$d/main" fetch -q origin "refs/pull/1/head" main 2>/dev/null & p1=$!
+  git -C "$d/main" fetch -q origin "refs/pull/2/head" main 2>/dev/null & p2=$!
+  wait $p1 || fail_old=$((fail_old + 1)); wait $p2 || fail_old=$((fail_old + 1))
+done
+echo "info the old command failed $fail_old of 40 times here (it may be 0: the race is timing)"
+# The retry: a stub git that fails with "cannot lock ref" 2 times, then works.
+mkdir "$d/bin"
+cat > "$d/bin/git" <<STUB
+#!/usr/bin/env bash
+n=\$(cat "$d/count" 2>/dev/null || echo 0)
+if [ "\$n" -lt 2 ]; then echo \$((n + 1)) > "$d/count"; echo "error: cannot lock ref 'refs/remotes/origin/main'" >&2; exit 1; fi
+exec $realgit "\$@"
+STUB
+chmod +x "$d/bin/git"; rm -f "$d/count"
+( PATH=$d/bin:$PATH OFFLOAD_FETCH_RETRY_SLEEP=0 fetch_pr_refs "$d/main" 1 main 2>/dev/null ) \
+  && ok "(a) a 'cannot lock ref' error is tried again" || bad "(a) retry did not work"
+cat > "$d/bin/git" <<'STUB'
+#!/usr/bin/env bash
+echo "fatal: some other error" >&2; exit 128
+STUB
+SECONDS=0
+( PATH=$d/bin:$PATH OFFLOAD_FETCH_RETRY_SLEEP=5 fetch_pr_refs "$d/main" 1 main 2>/dev/null ) \
+  && bad "(a) another error passed" || { [ "$SECONDS" -lt 4 ] && ok "(a) another error is not tried again" || bad "(a) another error was retried"; }
+
+# (b) a stale lock with a dead pid is taken over.
+mkdir "$lockdir"; ( exit 0 ) & dead=$!; wait $dead; echo "$dead" > "$lockdir/pid"
+( lock ) 2>"$d/err" && [ "$(cat "$lockdir/pid")" != "$dead" ] && ok "(b) a dead holder's lock is taken over" || bad "(b) stale lock not taken: $(cat "$d/err")"
+rm -rf "$lockdir"
+# (b2) a lock with no pid file, older than 60 s, is taken over; a young one is waited for.
+mkdir "$lockdir"; touch -t 202001010000 "$lockdir"
+( lock ) 2>/dev/null && ok "(b) an old lock without a pid is taken over" || bad "(b) old pidless lock not taken"
+rm -rf "$lockdir"
+mkdir "$lockdir"
+( OFFLOAD_LOCK_TRIES=5 lock ) 2>"$d/err" && bad "(b) a young pidless lock was taken" || ok "(b) a young pidless lock is waited for"
+rm -rf "$lockdir"
+
+# (c) a live holder is waited for, not stolen. The message names the path and the pid.
+sleep 30 & live=$!
+mkdir "$lockdir"; echo "$live" > "$lockdir/pid"
+( OFFLOAD_LOCK_TRIES=5 lock ) 2>"$d/err" && bad "(c) a live lock was stolen" || {
+  [ "$(cat "$lockdir/pid")" = "$live" ] && grep -q "$lockdir" "$d/err" && grep -q "pid $live" "$d/err" \
+    && ok "(c) a live holder is waited for; the error names the path and the pid" || bad "(c) wrong error: $(cat "$d/err")"; }
+# The holder lets go while a waiter waits: the waiter gets the lock.
+( sleep 1; rm -rf "$lockdir" ) & 
+( OFFLOAD_LOCK_TRIES=100 lock ) 2>/dev/null && ok "(c) a waiter gets the lock when the holder lets go" || bad "(c) waiter did not get the lock"
+wait; kill "$live" 2>/dev/null; rm -rf "$lockdir"
+
+# (e) the EXIT trap removes a lock this process holds, and keeps a lock of another process.
+( trap unlock_if_held EXIT; lock; exit 0 ); [ ! -d "$lockdir" ] && ok "(e) the exit trap removes the lock this process holds" || bad "(e) lock left behind"
+rm -rf "$lockdir"; sleep 30 & other=$!; mkdir "$lockdir"; echo "$other" > "$lockdir/pid"
+( trap unlock_if_held EXIT; exit 0 ); [ -d "$lockdir" ] && ok "(e) the exit trap keeps another process's lock" || bad "(e) another lock removed"
+kill "$other" 2>/dev/null; rm -rf "$lockdir"
+
+# (d) --cleanup removes the per-PR refs, with a stub gh that says the PR is closed.
+cat > "$d/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo o/r ;;
+  "api user") echo me ;;
+  "pr view") echo CLOSED ;;
+esac
+STUB
+chmod +x "$d/bin/gh"; rm -f "$d/bin/git"
+fetch_pr_refs "$d/main" 1 main
+# The script reads backends from the toplevel of the cwd, so the temp repo gets a copy of scripts/.
+mkdir -p "$d/main/scripts" && cp -R "$here/offload-review.sh" "$here/offload-review" "$d/main/scripts/"
+( cd "$d/main" && PATH=$d/bin:$PATH "$d/main/scripts/offload-review.sh" 1 --cleanup >/dev/null 2>"$d/err" ) \
+  || bad "(d) --cleanup failed: $(cat "$d/err")"
+if git -C "$d/main" rev-parse -q --verify refs/offload-review/pr1/head >/dev/null \
+  || git -C "$d/main" rev-parse -q --verify refs/offload-review/pr1/base >/dev/null; then bad "(d) per-PR refs left"
+else ok "(d) --cleanup removes the per-PR refs"; fi
+git -C "$d/main" rev-parse -q --verify refs/offload-review/pr2/head >/dev/null && ok "(d) --cleanup keeps another PR's refs" || bad "(d) pr2 ref removed"
+
+[ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
