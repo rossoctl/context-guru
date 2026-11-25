@@ -61,7 +61,7 @@ function strategyFiles(table, dialects) {
   }
 }
 
-// Content capture is always off for a proxy this plugin starts. The owner decided this on 2026-11-10.
+// Content capture is always off for a proxy this plugin starts.
 // The flag wins over the environment in the proxy, and the environment is set too, so no start path can
 // miss it. Every start path goes through these two helpers: the first start, the recovery spawn
 // (which also fixes an older install.json that was written without the flag), and the start script.

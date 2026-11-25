@@ -51,7 +51,7 @@ test("the TUI module exports id and tui, and no server", () => {
 // also has a string slashName. A command with `slash: { name }` and no namespace registers without error
 // and is invisible. That was the first defect the real-host test found.
 //
-// Owner decision (Option A): the native pickers are palette-only. /context-guru-preset and
+// Rule: the native pickers are palette-only. /context-guru-preset and
 // /context-guru-strategy open ONLY the chat commands of the server plugin, so each slash name shows once.
 function hostVisible(layers) {
   const palette = []
