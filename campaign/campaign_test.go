@@ -209,9 +209,11 @@ func TestPingSpanIsPerThread(t *testing.T) {
 	}
 }
 
-// The adapt replay gives a row the floor of its wait, as the keeper does: 20k for a tool stop or a
-// subagent, the general floor otherwise, and the general floor only for OpenAI (the keeper plans no
-// wait for OpenAI).
+// The adapt replay gives a row the floor of its wait, as the keeper does. It reads the row's stored
+// wait cause and stop reason through keepalive.Policy.FloorFor: 20k for a tool, background or teammate
+// wait and for a subagent, the general floor for a person or an unknown wait, and the general floor only
+// for OpenAI (the keeper plans no wait for OpenAI). A tool stop stored as human, done or retry keeps that
+// cause, so it gets the general floor.
 func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
 	pol := keepalive.Policy{WaitPlan: true, MinPrefixTokens: 80000}
 	for _, c := range []struct {
