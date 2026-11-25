@@ -73,7 +73,7 @@ case $(sed -n 's/^timing-tests //p' "$sum" | head -1) in
   *) timing_line="timing tests: unknown (the summary has no timing-tests line)" ;;
 esac
 
-known=$(grep -vE '^\s*(#|$)' "$here/../release/known-laptop-failures.txt")
+known=$(grep -vE '^\s*(#|$)' "${CG_KNOWN_FAILURES_FILE:-$here/../release/known-laptop-failures.txt}")
 result=pass
 rows=
 # part-a.sh gives rc=1 when any step failed, so rc=1 does not decide: the steps do (a step that

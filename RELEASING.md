@@ -217,6 +217,8 @@ This section is about a stacked PR. For a ready PR that waits only for a merge o
 
 Owner decision (David Amid, 2026-11-24): "we dont need a queue, we can risk main not be 100% if an owner of the PR did run it on the laptop." A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
 
+**Interim rule (2026-11-24, in force until the 3-tier test plan lands):** PR owners do not run the heavy suites on the laptop. The integrator runs them on `main` every few merges and before each cut. See [CLAUDE.md, Interim rule](CLAUDE.md#interim-rule-in-force-until-the-3-tier-test-plan-lands).
+
 The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh --wait` (it runs `gh workflow run ci.yaml --ref main`). Run it:
 - about every 5 merges;
 - after a big refactor or a merge that someone resolved by hand;

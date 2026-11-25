@@ -259,6 +259,10 @@ type Request struct {
 	// not a future one), so a Strategy may read it from Observation with no future leakage.
 	StopReason string `json:"stop_reason"`
 
+	// WaitingFor is the row's stored wait cause ("" on an old row). The keep-alive replay reads it for
+	// the prefix floor of the wait. Not part of the JSON output.
+	WaitingFor string `json:"-"`
+
 	// The derived half. NextTS is the next request IN THE SAME CONVERSATION, chronologically;
 	// HasNext is false on the last request of a conversation and IdleMs is then nil.
 	NextTS   int64  `json:"next_ts,omitempty"`

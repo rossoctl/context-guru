@@ -2,6 +2,7 @@ package dash
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -763,4 +764,39 @@ func TestKVCacheDatasetByThreadLinksWithinTheThread(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Both dataset reads, the single one and the sharded one, carry the row's stored wait cause
+// (requests.waiting_for) to kvcache.Request.WaitingFor. The campaign replay reads it for the prefix floor.
+func TestKVDatasetCarriesTheStoredWaitCause(t *testing.T) {
+	causes := []string{"background", "teammate", "human", ""}
+	var evs []*Event
+	for i, c := range causes {
+		e := kvEvent("t", fmt.Sprintf("s%d", i), "m", kvBase+int64(i)*1000, 1000, 0)
+		e.WaitingFor = c
+		evs = append(evs, e)
+	}
+	db := seedKV(t, evs...)
+	check := func(name string, rows []*kvcache.Request) {
+		t.Helper()
+		got := map[string]string{}
+		for _, r := range rows {
+			got[r.ConversationID] = r.WaitingFor
+		}
+		for i, c := range causes {
+			if got[fmt.Sprintf("s%d", i)] != c {
+				t.Errorf("%s: session s%d WaitingFor %q, want %q", name, i, got[fmt.Sprintf("s%d", i)], c)
+			}
+		}
+	}
+	one, _, err := db.kvCacheDatasetOne(allTenants(), KVCacheOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("single read", one)
+	sh, ok, err := db.kvCacheDatasetSharded(allTenants(), KVCacheOptions{})
+	if err != nil || !ok {
+		t.Fatalf("sharded read: ok=%v err=%v", ok, err)
+	}
+	check("sharded read", sh)
 }

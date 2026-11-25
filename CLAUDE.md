@@ -162,6 +162,25 @@ the person. The team knows who holds the role at any time.
   and branch, as in [Branches, worktrees and force-push](#branches-worktrees-and-force-push).
 - **The main session runs `offload-review`.** See [Review process](#review-process).
 
+### Interim rule (in force until the 3-tier test plan lands)
+
+Owner decisions (David Amid): 2026-11-24 "in the meantime ask everyone to stop their heavy tests and
+u coordinate it once flaky is done. so u run all tests every few prs till we get the process right.
+rn everything is in livelock". 2026-11-25 "yes" (write it into CLAUDE.md, and make `check-ready.sh`
+accept the waiver).
+
+- **Do NOT run `scripts/dev/local-tests.sh` or `scripts/release/part-a.sh` on the shared laptop.**
+- **Run only targeted tests** of the packages your PR changes: `go test ./<pkg>/...`. Do not use
+  `-race` on the big suites `proxy` and `dash`. The node and python suites of a plugin you change
+  are fine.
+- **Hand off with this line** in the PR body or in a PR comment: `Local tests: waived (owner rule)`.
+  `scripts/release/check-ready.sh` accepts it in place of the local-tests marker.
+- **The integrator runs the heavy CI on main** (`scripts/release/heavy-ci.sh`) every few merges and
+  before each cut. The integrator also runs Part A before each cut. A failure goes back to the PR
+  that caused it.
+
+The rest of this section, about `local-tests.sh`, applies after the interim rule ends.
+
 ### Timing tests
 
 - **A timing test asserts a wall-clock bound or races a rate limit.** It starts with
@@ -178,7 +197,8 @@ the person. The team knows who holds the role at any time.
 
 - It has 2 approvals at its final head.
 - CI is green. A PR runs only the fast jobs (lint-build, purego, trivy).
-- The heavy tests passed on the laptop at the head. Run `scripts/dev/local-tests.sh <pr>` in the
+- The heavy tests passed on the laptop at the head (after the interim rule ends; until then, see the
+  interim rule above: `Local tests: waived (owner rule)`). Run `scripts/dev/local-tests.sh <pr>` in the
   PR's worktree. It posts one comment with `<!-- local-tests sha=<head> result=pass -->`. A new
   commit, even comment-only, needs a new run. It takes 70 to 90 minutes: run it detached.
   A laptop failure of a test listed in `scripts/release/pending-timing-fixes.txt` does not block the

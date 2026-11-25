@@ -126,10 +126,21 @@ func (p Policy) LowestMinPrefix() int {
 // stored cause and no stop reason (an old row) gets the general floor, also on a subagent thread: the
 // replay then under-counts those rows, the safe direction.
 func (p Policy) SpanPrefixOK(s SpanFacts, prefix int64) bool {
-	if !p.WaitPlan || s.OpenAI || (s.Cause == "" && s.StopReason == "") {
+	if s.OpenAI {
 		return prefix >= int64(p.MinPrefixTokens)
 	}
-	return prefix >= int64(p.WaitMinPrefix(storedWait(s.Cause, s.StopReason), s.Subagent))
+	return prefix >= int64(p.FloorFor(s.Cause, s.StopReason, s.Subagent))
+}
+
+// FloorFor is the prefix floor of a stored row: the keeper's WaitMinPrefix, with the wait cause read
+// from the row's stored cause and stop reason as storedWait reads it. A row with neither (an old row)
+// gets the general floor, also on a subagent thread. It does not know OpenAI: the caller keeps the
+// general floor for an OpenAI row.
+func (p Policy) FloorFor(cause, stopReason string, subagent bool) int {
+	if !p.WaitPlan || (cause == "" && stopReason == "") {
+		return p.MinPrefixTokens
+	}
+	return p.WaitMinPrefix(storedWait(cause, stopReason), subagent)
 }
 
 func orDefault(v, def int) int {

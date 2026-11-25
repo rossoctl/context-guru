@@ -2,7 +2,6 @@ package campaign
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
@@ -80,25 +79,21 @@ func CurrentPlan(pol keepalive.Policy, se bool, camp *Active, facts []RowFacts) 
 	}, fmt.Sprintf("K%d every %.0f s, prefix >= %d tokens for a main thread that waits for a person (%d otherwise), <= $%.2f a ping", pol.MaxPings, x, pol.MinPrefixTokens, pol.WaitMinPrefix(waitcause.WaitingOwnTool, false), pol.Ceiling()), true
 }
 
-// RowFloor is the prefix floor the keeper would apply to a replayed row (Policy.WaitMinPrefix). A row
-// has the stop reason, not the wait cause or the tool names: a tool stop is read as a tool wait, any
-// other stop as a wait for a person (80k). A row that waited for background work or a teammate gets 80k
-// here, where the keeper gives it 20k, so the replay under-counts those rows. A row carries no stored
-// cause here, so every tool stop reads as a tool wait (20k). Dash's storedWait differs: it keeps a tool
-// stop with a stored human cause as human. So a main-thread tool stop that asks a person reads as a tool
-// wait here, and the replay can admit a few rows the keeper would refuse.
+// RowFloor is the prefix floor the keeper would apply to a replayed row. It asks Policy.FloorFor, the
+// one rule, with the row's stored wait cause and stop reason. A main-thread row with neither (an old row) gets the
+// general floor. A tool stop stored as a human cause stays human, so a tool stop that asks a person reads
+// as a person wait (80k), as the dashboard replay reads it; the keeper can read such a stop as a tool wait.
 // An OpenAI row gets the general floor only: the keeper plans no wait for OpenAI.
-//
-// KNOWN GAP, kept on purpose: this gap is a behaviour change held for a human decision in #1298. Do not fix it here.
 func RowFloor(pol keepalive.Policy, f *RowFacts) int {
 	if f.OpenAI {
 		return pol.MinPrefixTokens
 	}
-	cause := waitcause.WaitingHuman
-	if slices.Contains(keepalive.ToolStopReasons, f.Stop) {
-		cause = waitcause.WaitingOwnTool
+	if f.Cause == "" && f.Subagent {
+		// A row with no stored cause (stored before waiting_for existed), on a subagent thread. A subagent waits on the tool floor
+		// whatever the cause, and RowFloor has always read it so. FloorFor would give the general floor.
+		return pol.WaitMinPrefix(waitcause.WaitingHuman, true)
 	}
-	return pol.WaitMinPrefix(cause, f.Subagent)
+	return pol.FloorFor(f.Cause, f.Stop, f.Subagent)
 }
 
 // ForcePolicy makes an "apply anyway" run the plan the user chose: a non-ship build's spec holds the fleet plan as its policy and the tenant's
