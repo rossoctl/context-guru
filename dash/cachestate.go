@@ -136,7 +136,7 @@ func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, sessio
 	a.kaPlans = fn
 }
 
-// OneHourTouch is the keeper's fact that a thread's last touch was a FREE 1-hour ping: the keep-alive
+// OneHourTouch is the fact (read by the keeper from the store's one record, apply.LiveOneHourPing) that a thread's last touch was a FREE 1-hour ping: the keep-alive
 // ping asked every cache marker at 1 hour and read the prefix without writing. The entry then lives an
 // hour from the ping, so the clock counts an hour from it, until the thread's next real request. Metadata only.
 type OneHourTouch struct {

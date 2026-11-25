@@ -324,6 +324,7 @@ func TestConsentWithdrawalIsOpenToAnyPrincipal(t *testing.T) {
 // Arming is rate-limited, because arming is a spend authorization.
 func TestArmingIsRateLimited(t *testing.T) {
 	f := newMgrFixture(t)
+	f.fixLimiterClocks(midMinute())
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
 	until := time.Now().Add(time.Hour).UnixMilli()
 	var limited bool

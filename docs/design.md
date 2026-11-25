@@ -17,7 +17,7 @@ infrastructure the components sit on.
 | `components/all/` | blank-imports every component so `init()` registrations run |
 | `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
 | `accwire/` | the accountant's reader for each wire (Anthropic Messages and Chat Completions, Responses): hashed body positions, cache-mark breakpoints, envelope operations, slot path to wire position. Chosen once per body by `accwire.For` |
-| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, the rules for which request books no figure, the `Recorder` (`Begin`/`End`/`Price`: the per-thread state and the finish-time pricing), the `PingStore`, and the state-file format (`SnapshotState`/`RestoreState`) |
+| `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, the rules for which request books no figure, the `Recorder` (`Begin`/`End`/`Record`/`LowerTTL`/`Price`: the per-thread state and the finish-time pricing), the `PingStore`, and the state-file format (`SnapshotState`/`RestoreState`) |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
 | `expand/` | reversibility: `<<cg:HASH>>` marker, the `context_guru_expand` tool def, response parsing + continuation |
 | `inband/` | the in-band loop: answers our own tool calls (expand, adjudicate, tool search), the follow-up body, the retry without deferral, and the SSE splicers that hide our call from the client. Its test helpers are in `internal/inbandtest` |
@@ -317,6 +317,26 @@ facts:
   touch moves the entry back (#1258). The cold check reads both (#1350). It counts the lifetime of that
   tier from the touch. Without this, 5 minutes after a free 1-hour ping the check read "cold" on a warm
   entry, and a cold-only cut made the provider write the whole prefix again.
+
+That value is the **only** record of the fact "the last touch of this thread was a free 1-hour ping" (#1365).
+`apply.StandingOneHourPing` and `apply.LiveOneHourPing` read it. The dashboard's cache clock, the manual-ping
+refusal and the probe ask them, and the cold check reads the same value. The keeper keeps only an index of
+thread to alias (and the route that made the ping), so it knows where to look. The index holds no tier and no
+time, so it cannot disagree with the store. Each event writes the store record once:
+
+| Event | Write |
+| --- | --- |
+| a free 1-hour ping | `<ms>:1h:<tag>` (`<tag>` is a hash of the route that made it) |
+| a real request (before the forward) | `<ms>` or, over a standing ping, `<ms>^<pingMs>#<seq>:<tag>` (the carry; `<seq>` numbers the request) |
+| an accepted real request | the carry that request wrote ends: `<ms>` (`apply.ConfirmRealTouch`, by the request's own clock time) |
+| a failed real request | nothing: the carry stays, the ping's hour runs on |
+| a 5-minute touch, a manual press | `<ms>` |
+| a route switch-off | the tier of a ping stamped with that route's tag ends, the time stays (`apply.EndTouchTier`). A later ping of another route stays. |
+| the index's capacity bound | nothing: only the index loses a thread, the record expires by `EntryLifetime` |
+
+Reads do not slide the store's TTL (`store.PeekValue`): asking is not a touch.
+
+The one exception is a store that keeps nothing (`store.Keeps` is false: storage switched off, or no store). There is no record to read, so the keeper's index also holds the ping time (`storeOffAt`) and the cache clock and the manual-ping refusal answer from it, as before #1365. With a real store that field is always 0.
 
 ## Identify the client
 

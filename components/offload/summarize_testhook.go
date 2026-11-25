@@ -5,6 +5,20 @@ import (
 	"time"
 )
 
+// summaryWaitFloorForTest is the shortest time limit the wait hooks use. A caller that passes
+// less gets this. A summary that finishes returns at once, so a passing test does not wait
+// longer. Only a real hang takes this long to report. A heavily loaded machine can need more
+// than the 1 to 5 s that callers pass, and a short limit then fails a test that is correct.
+const summaryWaitFloorForTest = 30 * time.Second
+
+// summaryWaitLimit returns the limit a wait hook uses: the larger of the caller's and the floor.
+func summaryWaitLimit(within time.Duration) time.Duration {
+	if within < summaryWaitFloorForTest {
+		return summaryWaitFloorForTest
+	}
+	return within
+}
+
 // WaitForSummaryForTest blocks until the thread's in-flight summary has landed, or the deadline
 // passes. It reports whether one landed. session is the THREAD key, thread.Key(session, thread)
 // (#430); for the primary thread that is the bare session id.
@@ -21,7 +35,15 @@ import (
 // request-end hook, which can run after the client already has its response, so a caller that
 // waits right after its request returns could otherwise see nothing in flight yet and return
 // before the summary has even started.
+//
+// The limit is at least summaryWaitFloorForTest. A test that must see the wait time out, to prove
+// that something is still pending, calls waitForSummary with its own short limit.
 func WaitForSummaryForTest(session string, within time.Duration) bool {
+	return waitForSummary(session, summaryWaitLimit(within))
+}
+
+// waitForSummary is WaitForSummaryForTest without the floor.
+func waitForSummary(session string, within time.Duration) bool {
 	deadline := time.Now().Add(within)
 	for deferralPending(session) {
 		if time.Now().After(deadline) {
@@ -59,10 +81,10 @@ var ErrSummaryDidNotLand = errors.New("no summary landed within the deadline")
 // cannot wait on it by name.
 //
 // It polls, unlike WaitForSummaryForTest, because "no summaries are running" is a property of the
-// whole registry rather than of one channel. The interval is short and the deadline is the caller's,
-// so a passing test is bounded by the work rather than by the poll.
+// whole registry rather than of one channel. The interval is short and the deadline is the caller's
+// (at least summaryWaitFloorForTest), so a passing test is bounded by the work rather than by the poll.
 func WaitForAllSummariesForTest(within time.Duration) bool {
-	deadline := time.Now().Add(within)
+	deadline := time.Now().Add(summaryWaitLimit(within))
 	for time.Now().Before(deadline) {
 		inFlight.mu.Lock()
 		n := len(inFlight.jobs)

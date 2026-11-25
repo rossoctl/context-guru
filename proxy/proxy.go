@@ -1496,7 +1496,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 					if cp != nil {
 						cp.accPreDefer = preDefer
 					}
-					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps("tooldefer", preDefer, b)...)
+					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps(accwire.OpToolDefer, preDefer, b)...)
 				}
 				return b
 			},
@@ -1523,7 +1523,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias)
+			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
 	}
 }
 
@@ -1714,7 +1714,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string, touchAtMs, touchSeq int64) {
 	wire := schema.WireFor(string(provider), up.path)
 	// The agent that owns the route may correct the shared parser's usage reading
 	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
@@ -1854,7 +1854,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// went upstream on the final round (an expand round rewrites it) and the prefix a ping
 			// would replay is the one the provider just hashed. Costs nothing when no tenant has opted in.
 			Touch: func() {
-				cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
+				cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, touchAtMs, touchSeq, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
 			},
 			Ledger: func() {
 				h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)

@@ -128,15 +128,35 @@ func EnvelopeOpsFor(client, billed, preDefer []byte) []accountant.Operation {
 	out := make([]accountant.Operation, 0, len(ops))
 	for _, o := range ops {
 		switch {
-		case o.Operator == "context-guru.toolschema" && o.At.Section == accountant.SectionTools &&
+		case o.Operator == accwire.Operator("toolschema") && o.At.Section == accountant.SectionTools &&
 			strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-rewritten:") && o.At.Index < len(clientTools) &&
 			own[clientTools[o.At.Index].Get("name").String()] && IsStub(billed, atBilled[clientTools[o.At.Index].Get("name").String()]):
-			o.Operator = "context-guru.tooldefer"
-		case o.Operator == "context-guru.toolschema" && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
+			o.Operator = accwire.Operator(accwire.OpToolDefer)
+		case o.Operator == accwire.Operator("toolschema") && strings.HasPrefix(o.ChangeID, "cg:toolschema:decl-added:") &&
 			gjson.GetBytes(billed, "tools."+strconv.Itoa(o.At.Index)+".name").String() == tooldefer.SearchName:
-			o.Operator = "context-guru.tooldefer"
+			o.Operator = accwire.Operator(accwire.OpToolDefer)
 		}
 		out = append(out, o)
 	}
 	return out
+}
+
+// BilledForwarded is the body the accountant records for a request. A request that tool deferral did not change
+// returns the forwarded body. A deferral whose stub cannot be placed (a stub that would not be smaller than its
+// definition) also returns the forwarded body, and noResult is DeferralUnplaced, so the event books no figure and the
+// sum check does not turn it into a wrong one. A tool the client deferred itself is left as it is (OwnDeferred).
+// preDefer is the body deferral read, nil on a request it did not change.
+func BilledForwarded(forwarded, preDefer []byte) (body []byte, noResult string) {
+	if preDefer == nil {
+		return forwarded, ""
+	}
+	own := OwnDeferred(forwarded, preDefer)
+	if len(own) == 0 {
+		return forwarded, ""
+	}
+	b, ok := BilledBody(forwarded, own)
+	if !ok {
+		return forwarded, DeferralUnplaced
+	}
+	return b, ""
 }

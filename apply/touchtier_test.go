@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,10 +40,10 @@ func runTouches(t *testing.T, provider bschemas.ModelProvider, model string, ste
 	}
 	base := time.Unix(1_700_000_000, 0)
 	run := func(at time.Duration) {
-		BodyOpts(context.Background(), pipe, st, Opts{Provider: provider, Body: body, Tracker: tr,
+		res := BodyOpts(context.Background(), pipe, st, Opts{Provider: provider, Body: body, Tracker: tr,
 			Tenant: "t", Now: base.Add(at)})
-		// The host's Record confirms an accepted request: it ends the carried 1-hour ping.
-		ConfirmRealTouch(st, TouchAliasFor("t", body, provider))
+		// The host's Record confirms an accepted request: it ends the carried 1-hour ping its request wrote.
+		ConfirmRealTouch(st, TouchAliasFor("t", body, provider), res.TouchAtMs, res.TouchSeq)
 	}
 	run(0)
 	cold = nil
@@ -190,16 +191,76 @@ func TestTheTierSuffixFailsOpenForAnOlderReader(t *testing.T) {
 	}
 }
 
-func TestEndTouchTierKeepsTheTimeAndLeavesALaterTouchAlone(t *testing.T) {
+func TestEndTouchTierKeepsTheTimeAndEndsOnlyAPingOfItsOwnRoute(t *testing.T) {
 	st := store.NewMemory(store.Options{})
-	RecordCacheTouchAliasTier(st, "a", 2000, true)
-	EndTouchTier(st, "a", 1000) // another touch: nothing
-	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000:1h" {
-		t.Fatalf("a different touch's end changed the record: %q", b)
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	r1, r2 := RouteTag("route-1"), RouteTag("route-2")
+	RecordCacheTouchAliasRoute(st, "a", 2000, false, r1) // a 5-minute touch: no tier, no tag
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "2000" {
+		t.Fatalf("ending a plain value changed it: %q", got)
 	}
-	EndTouchTier(st, "a", 2000)
-	if b, _ := st.Get(store.SeenPrefix + "a"); string(b) != "2000" {
-		t.Fatalf("record = %q, want a plain 2000", b)
+	RecordCacheTouchAliasRoute(st, "a", 3000, true, r2) // the ping of ANOTHER route
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "3000:1h:"+r2 {
+		t.Fatalf("the switch-off of route 1 changed route 2's ping: %q", got)
+	}
+	EndTouchTier(st, "a", "") // no tag: ends nothing
+	if got := get(); got != "3000:1h:"+r2 {
+		t.Fatalf("an empty tag ended a ping: %q", got)
+	}
+	EndTouchTier(st, "a", r2)
+	if got := get(); got != "3000" {
+		t.Fatalf("record = %q, want a plain 3000", got)
+	}
+	RecordCacheTouchAliasTier(st, "a", 4000, true) // a ping with no tag stays under any switch-off
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "4000:1h" {
+		t.Fatalf("an untagged ping was ended: %q", got)
+	}
+	EndTouchTier(st, "none", r1) // no record: nothing, no panic
+	EndTouchTier(nil, "a", r1)
+}
+
+// The tag rides along when a real request carries the ping, and a carried ping of another route stays too.
+func TestTheRouteTagSurvivesTheCarry(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	r1, r2 := RouteTag("route-1"), RouteTag("route-2")
+	RecordCacheTouchAliasRoute(st, "a", 2000, true, r1)
+	aliasSeenState(st, "a", 3000)
+	_, seq := aliasSeenWrite(st, "a", 4000)
+	carry := "4000^2000" + seqSuffix(seq) + ":" + r1
+	if got := get(); got != carry {
+		t.Fatalf("carry = %q, want %q", got, carry)
+	}
+	if at, ok := StandingOneHourPing(st, "a"); !ok || at != 2000 {
+		t.Fatalf("StandingOneHourPing = %d, %v", at, ok)
+	}
+	EndTouchTier(st, "a", r2)
+	if got := get(); got != carry {
+		t.Fatalf("another route's switch-off ended the carry: %q", got)
+	}
+	EndTouchTier(st, "a", r1)
+	if got := get(); got != "4000" {
+		t.Fatalf("record = %q, want a plain 4000", got)
+	}
+}
+
+// A tagged value is one more shape an older binary cannot read: it reads 0, which is never cold.
+func TestATaggedValueFailsOpenForAnOlderReader(t *testing.T) {
+	for _, v := range []string{"1700000000000:1h:abcd1234", "1700000000000^1699999990000#7:abcd1234"} {
+		if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+			t.Errorf("fixture: %q must not parse as a plain integer", v)
+		}
+		if got := parseSeenState([]byte(v)); got.tag != "abcd1234" || got.at != 1700000000000 {
+			t.Errorf("parse(%q) = %+v", v, got)
+		}
+	}
+	for _, v := range []string{"x:1h:abcd", "5^x:abcd", ":1h:abcd"} {
+		if got := parseSeenState([]byte(v)); got != (seenState{}) {
+			t.Errorf("parse(%q) = %+v, want the zero state", v, got)
+		}
 	}
 }
 
@@ -254,19 +315,23 @@ func TestARealRequestCarriesTheOneHourPingUntilConfirmed(t *testing.T) {
 	st := store.NewMemory(store.Options{})
 	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
 	RecordCacheTouchAliasTier(st, "a", 2000, true)
-	aliasSeenState(st, "a", 3000)
-	if got := get(); got != "3000^2000" {
-		t.Fatalf("record = %q, want 3000^2000", got)
+	_, s1 := aliasSeenWrite(st, "a", 3000)
+	if got, want := get(), "3000^2000"+seqSuffix(s1); got != want {
+		t.Fatalf("record = %q, want %q", got, want)
 	}
-	aliasSeenState(st, "a", 4000)
-	if got := get(); got != "4000^2000" {
-		t.Fatalf("a second unconfirmed request: %q, want 4000^2000", got)
+	_, s2 := aliasSeenWrite(st, "a", 4000)
+	if got, want := get(), "4000^2000"+seqSuffix(s2); got != want {
+		t.Fatalf("a second unconfirmed request: %q, want %q", got, want)
 	}
-	ConfirmRealTouch(st, "a")
+	ConfirmRealTouch(st, "a", 3000, s1) // the FIRST request's confirm: the carry is the second request's, so it stands
+	if got, want := get(), "4000^2000"+seqSuffix(s2); got != want {
+		t.Fatalf("an earlier request's confirm changed the record: %q", got)
+	}
+	ConfirmRealTouch(st, "a", 4000, s2)
 	if got := get(); got != "4000" {
 		t.Fatalf("after the confirm: %q, want a plain 4000", got)
 	}
-	ConfirmRealTouch(st, "a") // nothing carried: nothing changes
+	ConfirmRealTouch(st, "a", 4000, s2) // nothing carried: nothing changes
 	if got := get(); got != "4000" {
 		t.Fatalf("a second confirm changed the record: %q", got)
 	}
@@ -287,18 +352,72 @@ func TestARealRequestCarriesTheOneHourPingUntilConfirmed(t *testing.T) {
 	}
 }
 
-func TestEndTouchTierEndsACarriedPingToo(t *testing.T) {
+// The one record of the fact, read by every host reader. A plain value, an unreadable value and no value all say
+// "no ping": an unreadable record never reads as a tier. The time is the ping's, also under a carry.
+func TestStandingOneHourPingReadsTheOneRecord(t *testing.T) {
 	st := store.NewMemory(store.Options{})
-	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
-	RecordCacheTouchAliasTier(st, "a", 2000, true)
-	aliasSeenState(st, "a", 3000) // a real request: "3000^2000"
-	EndTouchTier(st, "a", 1999)   // another ping: nothing
-	if got := get(); got != "3000^2000" {
-		t.Fatalf("a different ping's end changed the record: %q", got)
+	put := func(v string) { st.Put(store.SeenPrefix+"a", []byte(v)) }
+	for _, tc := range []struct {
+		name, v string
+		at      int64
+		ok      bool
+	}{
+		{"a ping", "2000:1h", 2000, true},
+		{"a carried ping", "3000^2000", 2000, true},
+		{"a plain clock", "2000", 0, false},
+		{"garbage", "x:1h", 0, false},
+		{"a bad carry", "3000^x", 0, false},
+		{"a tagged ping", "2000:1h:abcd", 2000, true},
+		{"a tagged carry", "3000^2000:abcd", 2000, true},
+		{"a numbered carry", "3000^2000#5", 2000, true},
+		{"a bad number", "3000^2000#x", 0, false},
+		{"an empty value", "", 0, false},
+	} {
+		put(tc.v)
+		if at, ok := StandingOneHourPing(st, "a"); at != tc.at || ok != tc.ok {
+			t.Errorf("%s: StandingOneHourPing(%q) = %d, %v, want %d, %v", tc.name, tc.v, at, ok, tc.at, tc.ok)
+		}
 	}
-	EndTouchTier(st, "a", 2000)
-	if got := get(); got != "3000" {
-		t.Fatalf("record = %q, want a plain 3000", got)
+	if _, ok := StandingOneHourPing(st, "other"); ok {
+		t.Error("a missing record read as a ping")
+	}
+	if _, ok := StandingOneHourPing(nil, "a"); ok {
+		t.Error("a nil store read as a ping")
+	}
+	if _, ok := StandingOneHourPing(st, ""); ok {
+		t.Error("an empty alias read as a ping")
+	}
+}
+
+// LiveOneHourPing asks the one lifetime function: an hour on Anthropic, and no longer.
+func TestLiveOneHourPingEndsWithTheHour(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	RecordCacheTouchAliasTier(st, "a", 1_000_000, true)
+	hour := time.Hour.Milliseconds()
+	for _, tc := range []struct {
+		now  int64
+		live bool
+	}{{1_000_000 + 1, true}, {1_000_000 + hour - 1, true}, {1_000_000 + hour, false}, {1_000_000 + 2*hour, false}} {
+		at, live := LiveOneHourPing(st, "a", bschemas.Anthropic, "claude-sonnet-5", tc.now)
+		if live != tc.live || (live && at != 1_000_000) {
+			t.Errorf("at +%d ms: live=%v at=%d, want live=%v", tc.now-1_000_000, live, at, tc.live)
+		}
+	}
+}
+
+// Asking is not touching: the dashboard polls, and a poll must not renew the record's store lifetime. An older
+// clock that outlived its time would be read by the next cold check as a real, old touch.
+func TestStandingOneHourPingDoesNotSlideTheStoreLifetime(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	st := store.NewMemory(store.Options{TTLSeconds: 600})
+	st.SetClock(func() time.Time { return clock })
+	RecordCacheTouchAliasTier(st, "a", 1_000_000, true)
+	for range 5 { // 5 polls, 4 minutes apart: 20 minutes in all
+		clock = clock.Add(4 * time.Minute)
+		StandingOneHourPing(st, "a")
+	}
+	if _, ok := st.Get(store.SeenPrefix + "a"); ok {
+		t.Error("polling kept a record alive past its store lifetime")
 	}
 }
 
@@ -310,15 +429,14 @@ func TestConfirmRealTouchLeavesALaterPingsTier(t *testing.T) {
 	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
 	base := time.Unix(1_700_000_000, 0)
 	alias := TouchAliasFor("t", touchTierBody, bschemas.Anthropic)
-	do := func(at time.Duration) {
-		BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
-			Tenant: "t", Now: base.Add(at)})
+	do := func(at time.Duration) wrote {
+		return wroteOf(BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+			Tenant: "t", Now: base.Add(at)}))
 	}
-	do(0)
-	ConfirmRealTouch(st, alias)
-	do(5 * time.Minute)                                                                                         // a real request starts
+	do(0).confirm(st, alias)
+	at := do(5 * time.Minute)                                                                                   // a real request starts
 	RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(6*time.Minute).UnixMilli(), true) // a later ping
-	ConfirmRealTouch(st, alias)                                                                                 // the request is accepted
+	at.confirm(st, alias)                                                                                       // the request is accepted
 	if b, _ := st.Get(store.SeenPrefix + alias); string(b) != strconv.FormatInt(base.Add(6*time.Minute).UnixMilli(), 10)+":1h" {
 		t.Fatalf("the confirm changed a later ping's tier: %q", b)
 	}
@@ -338,12 +456,11 @@ func TestTheCarriedPingHasTheColdMarginAndTheLatestClockGuard(t *testing.T) {
 		pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
 		st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
 		base := time.Unix(1_700_000_000, 0)
-		do := func(at time.Duration, bypass bool) {
-			BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
-				Tenant: "t", Now: base.Add(at), Bypass: bypass})
+		do := func(at time.Duration, bypass bool) wrote {
+			return wroteOf(BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+				Tenant: "t", Now: base.Add(at), Bypass: bypass}))
 		}
-		do(0, false)
-		ConfirmRealTouch(st, TouchAliasFor("t", touchTierBody, bschemas.Anthropic))
+		do(0, false).confirm(st, TouchAliasFor("t", touchTierBody, bschemas.Anthropic))
 		RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(4*m).UnixMilli(), true)
 		do(6*m, false) // fails: never confirmed, so the ping's hour is carried
 		if bypassAt > 0 {
@@ -361,5 +478,157 @@ func TestTheCarriedPingHasTheColdMarginAndTheLatestClockGuard(t *testing.T) {
 	}
 	if !run(16*m, 8*m) {
 		t.Error("a bypassed request moved the entry to 5 minutes at 8 minutes; the carry still said warm at 16")
+	}
+}
+
+// The 3-way race of #1357 round 4 (#1365). Request A writes its clock. A ping on the same alias writes `:1h`.
+// Request C turns it into a carry. A's response comes first, and its confirm must NOT strip C's carry. C then
+// fails, and the ping's hour must stand: a return 13 minutes after the ping is warm.
+func TestAnEarlierRequestsConfirmLeavesALaterRequestsCarry(t *testing.T) {
+	var cold []bool
+	pipe := components.NewPipeline([]components.Component{coldSpy{&cold}}, nil)
+	st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
+	base := time.Unix(1_700_000_000, 0)
+	alias := TouchAliasFor("t", touchTierBody, bschemas.Anthropic)
+	do := func(at time.Duration) wrote {
+		return wroteOf(BodyOpts(context.Background(), pipe, st, Opts{Provider: bschemas.Anthropic, Body: touchTierBody, Tracker: tr,
+			Tenant: "t", Now: base.Add(at)}))
+	}
+	a := do(0)                                                                                                  // 1. A writes its clock
+	RecordCacheTouchTier(st, "t", touchTierBody, bschemas.Anthropic, base.Add(4*time.Minute).UnixMilli(), true) // 2. the ping
+	do(5 * time.Minute)                                                                                         // 3. C converts it to a carry
+	a.confirm(st, alias)                                                                                        // 4. A is accepted first
+	if b, _ := st.Get(store.SeenPrefix + alias); !strings.Contains(string(b), seenCarrySep) {
+		t.Fatalf("A's confirm stripped C's carry: %q", b)
+	}
+	// 5. C fails: no confirm. 6. The return comes 13 minutes after the start.
+	cold = nil
+	do(13 * time.Minute)
+	if len(cold) != 1 || cold[0] {
+		t.Fatalf("a return 9 minutes after the ping read COLD after C failed: %v", cold)
+	}
+}
+
+// wrote is the clock a request wrote, as a host hands it back to confirm that request.
+type wrote struct{ at, seq int64 }
+
+func wroteOf(r Result) wrote { return wrote{r.TouchAtMs, r.TouchSeq} }
+
+func (w wrote) confirm(st store.Store, alias string) { ConfirmRealTouch(st, alias, w.at, w.seq) }
+
+// Two requests that wrote in the SAME millisecond: the first one's confirm must not end the second one's carry.
+// The time alone cannot tell them apart; the request number can.
+func TestAConfirmInTheSameMillisecondEndsOnlyItsOwnCarry(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	get := func() string { b, _ := st.Get(store.SeenPrefix + "a"); return string(b) }
+	RecordCacheTouchAliasTier(st, "a", 2000, true)
+	_, first := aliasSeenWrite(st, "a", 3000)
+	_, second := aliasSeenWrite(st, "a", 3000) // the same millisecond
+	want := get()
+	ConfirmRealTouch(st, "a", 3000, first)
+	if got := get(); got != want {
+		t.Fatalf("the first request's confirm ended the second's carry: %q, want %q", got, want)
+	}
+	ConfirmRealTouch(st, "a", 3000, second)
+	if got := get(); got != "3000" {
+		t.Fatalf("the second request's own confirm left %q, want 3000", got)
+	}
+}
+
+// previousParseSeenState is a copy of the reader v0.7.8 ships (#1357), pinned so the test does not follow the
+// code under test. It knows 3 shapes: "<ms>", "<ms>:1h" and "<ms>^<pingMs>".
+func previousParseSeenState(b []byte) (at, carriedAt int64, oneHour bool) {
+	str := string(b)
+	if i := strings.Index(str, "^"); i >= 0 {
+		c, err := strconv.ParseInt(str[i+1:], 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		carriedAt, str = c, str[:i]
+	}
+	trimmed := strings.TrimSuffix(str, ":1h")
+	oneHour = len(trimmed) != len(str)
+	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return ms, carriedAt, oneHour
+}
+
+// A downgrade to v0.7.8 must fail open on every shape this version writes. The old reader cannot parse a route tag or
+// a request number, reads "no previous touch" (0), and a 0 is never cold. The shapes it DOES know must read the
+// same in both readers, so an upgrade changes nothing for a value written before it.
+func TestAnOlderReaderReadsEveryNewShapeAsNotCold(t *testing.T) {
+	const tag = "abcd1234"
+	now := int64(1_700_000_000_000)
+	for _, v := range []string{
+		"1699999000000:1h:" + tag, // a ping stamped with its route
+		"1699999000000^1699998000000#7:" + tag,
+		"1699999000000^1699998000000#7",
+		"1699999000000^1699998000000:" + tag,
+	} {
+		at, carried, oneHour := previousParseSeenState([]byte(v))
+		if at != 0 || carried != 0 || oneHour {
+			t.Errorf("the v0.7.8 reader parsed %q as %d, %d, %v: it must read 0", v, at, carried, oneHour)
+		}
+		// The verdict of the old cold check for a 0 touch, at any time and any lifetime.
+		for _, ttl := range []time.Duration{5 * time.Minute, time.Hour} {
+			if cacheIsCold(at, now+int64(48*time.Hour/time.Millisecond), ttl) {
+				t.Errorf("the v0.7.8 reader would read %q cold", v)
+			}
+		}
+		if got := parseSeenState([]byte(v)); got.at != 1699999000000 {
+			t.Errorf("this version cannot read its own value %q: %+v", v, got)
+		}
+	}
+	// And the values this version really writes, not only fixed strings.
+	st := store.NewMemory(store.Options{})
+	RecordCacheTouchAliasRoute(st, "a", now-1000, true, RouteTag("r"))
+	for step := 0; step < 2; step++ {
+		b, _ := st.Get(store.SeenPrefix + "a")
+		if at, carried, oneHour := previousParseSeenState(b); at != 0 || carried != 0 || oneHour {
+			t.Errorf("step %d: the v0.7.8 reader parsed the written value %q as %d, %d, %v", step, b, at, carried, oneHour)
+		}
+		aliasSeenState(st, "a", now+int64(step)) // a real request over the ping: the carry
+	}
+	// The shapes v0.7.8 writes read the same here.
+	for _, v := range []string{"1699999000000", "1699999000000:1h", "1699999000000^1699998000000"} {
+		at, carried, oneHour := previousParseSeenState([]byte(v))
+		got := parseSeenState([]byte(v))
+		if got.at != at || got.carriedAt != carried || got.oneHour != oneHour || got.tag != "" || got.seq != 0 {
+			t.Errorf("%q: this version reads %+v, v0.7.8 reads %d, %d, %v", v, got, at, carried, oneHour)
+		}
+	}
+}
+
+// The 3 shapes v0.7.8 (#1357) writes read the same after the upgrade, field by field: the time, the tier and the
+// carry. No tag and no request number appear for them.
+func TestTheShapesV078WritesReadTheSameAfterTheUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		shape, value string
+		at, carried  int64
+		oneHour      bool
+	}{
+		{"plain", "1699999000000", 1699999000000, 0, false},
+		{"a ping, tier 1 hour", "1699999000000:1h", 1699999000000, 0, true},
+		{"a real request over a ping, carried", "1699999000000^1699998000000", 1699999000000, 1699998000000, false},
+	} {
+		got := parseSeenState([]byte(tc.value))
+		if got != (seenState{at: tc.at, carriedAt: tc.carried, oneHour: tc.oneHour}) {
+			t.Errorf("%s: parseSeenState(%q) = %+v, want at=%d carried=%d oneHour=%v with no tag and no seq",
+				tc.shape, tc.value, got, tc.at, tc.carried, tc.oneHour)
+		}
+		// And the public readers say the same about the ping.
+		st := store.NewMemory(store.Options{})
+		st.Put(store.SeenPrefix+"a", []byte(tc.value))
+		wantPing := tc.oneHour || tc.carried > 0
+		at, ok := StandingOneHourPing(st, "a")
+		wantAt := tc.at
+		if tc.carried > 0 {
+			wantAt = tc.carried
+		}
+		if ok != wantPing || (ok && at != wantAt) {
+			t.Errorf("%s: StandingOneHourPing = %d, %v, want %d, %v", tc.shape, at, ok, wantAt, wantPing)
+		}
 	}
 }

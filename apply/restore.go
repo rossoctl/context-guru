@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/extract"
@@ -157,7 +158,7 @@ func (p restorePlan) ops(at []int, nb []gjson.Result, dryRun bool) ([]accountant
 		}
 		ops = append(ops, accountant.Operation{
 			Kind:          accountant.KindRewrite,
-			Operator:      "context-guru.expand_restore",
+			Operator:      accwire.Operator(accwire.OpExpandRestore),
 			DryRun:        dryRun,
 			At:            accountant.Position{Section: accountant.SectionMessages, Index: pos},
 			SizeBefore:    accountant.Size{Bytes: 0},

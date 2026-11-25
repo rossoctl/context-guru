@@ -556,6 +556,7 @@ func TestAdaptReportReadsTheCallersRowsPastTheFleetCap(t *testing.T) {
 // Reports are bounded per account: adaptReportBurst an hour, then 429.
 func TestAdaptCacheReportsAreRateLimitedPerAccount(t *testing.T) {
 	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	f.fixLimiterClocks(midMinute())
 	jar, tid := f.signUpJar(t, "user@ibm.com")
 	otherJar, _ := f.signUpJar(t, "other@ibm.com")
 	f.record(t, tid, "s1", &dash.Event{TS: time.Now().Add(-time.Hour).UnixMilli(), Model: "m1", Status: 200, CacheRead: 90000, UpstreamMs: 1000, CostUSD: 0.03})
@@ -632,6 +633,7 @@ func TestAdaptOptionsShowLocalHours(t *testing.T) {
 // A busy process answers 503 with Retry-After and spends none of the account's hourly report budget.
 func TestAdaptCacheBusyAnswers503WithoutSpendingTheBudget(t *testing.T) {
 	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	f.fixLimiterClocks(midMinute())
 	jar, tid := f.signUpJar(t, "user@ibm.com")
 	f.record(t, tid, "s1", &dash.Event{TS: time.Now().Add(-time.Hour).UnixMilli(), Model: "m1", Status: 200, CacheRead: 90000, UpstreamMs: 1000, CostUSD: 0.03})
 	adaptCacheMu.Lock()

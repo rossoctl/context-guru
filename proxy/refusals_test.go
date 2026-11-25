@@ -70,7 +70,7 @@ func TestRefusalCountersMoveOncePerPath(t *testing.T) {
 	// Rate limit and concurrency are both 429 and must NOT collapse into one series:
 	// they have different fixes.
 	d := measure(func() {
-		l := NewLimiter(Limits{RequestsPerMinute: 1})
+		l := pinned(NewLimiter(Limits{RequestsPerMinute: 1}))
 		rel, _ := l.Acquire("t-rate")
 		rel()
 		rel, err := l.Acquire("t-rate")
@@ -124,7 +124,7 @@ func TestRefusalCountersMoveOncePerPath(t *testing.T) {
 // also counted, every refusal would be counted twice.
 func TestRefusalNotCountedTwiceWhenWritten(t *testing.T) {
 	d := measure(func() {
-		l := NewLimiter(Limits{RequestsPerMinute: 1})
+		l := pinned(NewLimiter(Limits{RequestsPerMinute: 1}))
 		rel, _ := l.Acquire("t-twice")
 		rel()
 		rel, err := l.Acquire("t-twice")
@@ -138,7 +138,7 @@ func TestRefusalNotCountedTwiceWhenWritten(t *testing.T) {
 // but an IP is attacker-supplied and must never reach a label.
 func TestAnonymousLimiterNeverLabelsItsKey(t *testing.T) {
 	d := measure(func() {
-		l := newAnonLimiter(Limits{RequestsPerMinute: 1})
+		l := pinned(newAnonLimiter(Limits{RequestsPerMinute: 1}))
 		rel, _ := l.Acquire("198.51.100.7")
 		rel()
 		rel, err := l.Acquire("198.51.100.7")
@@ -167,7 +167,7 @@ func TestRefusalExportedOnMetrics(t *testing.T) {
 
 	// A refusal that DOES belong to a tenant, so the per-tenant family is exercised too.
 	tn, tok := f.register(t, "user@ibm.com")
-	f.h.limiter = NewLimiter(Limits{RequestsPerMinute: 1})
+	f.h.limiter = pinned(NewLimiter(Limits{RequestsPerMinute: 1}))
 	f.post("/openai/v1/chat/completions", tok, "")
 	if w := f.post("/openai/v1/chat/completions", tok, ""); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("second POST past a limit of 1 = %d, want 429", w.Code)
@@ -198,7 +198,7 @@ func TestRefusalExportedOnMetrics(t *testing.T) {
 func TestRefusalLabelsCarryNoErrorTextOrEmail(t *testing.T) {
 	f := newHostedFixture(t, "up", "openai")
 	_, tok := f.register(t, "person@ibm.com")
-	f.h.limiter = NewLimiter(Limits{RequestsPerMinute: 1})
+	f.h.limiter = pinned(NewLimiter(Limits{RequestsPerMinute: 1}))
 	f.post("/openai/v1/chat/completions", tok, "")
 	f.post("/openai/v1/chat/completions", tok, "")
 

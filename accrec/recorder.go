@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/thinkcount"
@@ -224,4 +225,74 @@ func (s *Recorder) Price(req *accountant.Request, in PriceIn) PriceOut {
 	// The ping facts were read for this request; now that it is priced they are spent.
 	in.Pings.Drop(PingKey(in.Session, in.Thread), in.PingWindow)
 	return out
+}
+
+// RecordIn is what Record needs of one request, after the pipeline ran.
+type RecordIn struct {
+	Meta accountant.RequestMeta
+	// Client is the body the agent sent. PreDefer is the body tool deferral read, nil on a request it did not change.
+	Client, PreDefer []byte
+	// Forwarded is the body sent upstream. Ops are the pipeline's operations; Record appends the envelope ones.
+	Forwarded []byte
+	Ops       []accountant.Operation
+	// ThreadID is the thread's id. Parent is the thread it continues by content, when HasParent.
+	ThreadID, Parent string
+	HasParent        bool
+	Provider         bschemas.ModelProvider
+	Endpoint, Route  string
+	// ReadSets tells whether a read sets the entry's TTL on this route (the keeper's readSetsTTL). nil: never.
+	ReadSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
+	Pings    *PingStore
+}
+
+// RecordOut is what Record decided. NoResult is set only when the request books no figure (a deferral that
+// could not be placed).
+type RecordOut struct {
+	Thread   string
+	Facts    accountant.EntryFacts
+	NoResult string
+}
+
+// Record records the thread, the forwarded body and the operations of an open request. A thread that continues
+// another by content names it as its parent, but starts with no state of its own: accountant carries Thread.Parent
+// and does not read it (design §4.1).
+func (s *Recorder) Record(req *accountant.Request, in RecordIn) RecordOut {
+	t := ThreadOf(in.ThreadID, in.Parent, in.HasParent)
+	out := RecordOut{Thread: t.ID}
+	// The envelope changes report no operation of their own: EnvelopeOpsFor finds them from the two
+	// bodies. Appended after the pipeline's ops, because the tools and system positions do not move
+	// with a message splice.
+	//
+	// The library gets the prompt the provider BILLS (accountant R56, billedBody), not the bytes sent: a tool
+	// deferred with defer_loading is a stub in it. The sent bytes still decide the cache facts below.
+	billed, noResult := BilledForwarded(in.Forwarded, in.PreDefer)
+	out.NoResult = noResult
+	ops := append(append([]accountant.Operation(nil), in.Ops...), EnvelopeOpsFor(in.Client, billed, in.PreDefer)...)
+	facts := EntryFacts(in.Provider, in.Meta.Model, in.Forwarded, in.Pings, in.Meta.Session, t)
+	// A read sets the entry's TTL on a route the keeper PROVED does so (the 1-hour-on-wait probe), and on the
+	// return that decides that proof: facts.PingTTL is 1 hour when a 1-hour ping served the gap. The keeper
+	// records the proof after this request is priced, so without the second case the proof return would book
+	// no rescue. Nowhere else: Provider.ReadSetsTTL is off by default, as the library asks for a provider not
+	// measured. The rescue is itself evidence (it credits only tokens the return READ), see Keeper.ReadSetsTTL.
+	if in.ReadSets != nil && in.ReadSets(in.Provider, in.Endpoint, in.Route, in.Meta.Model, facts.PingTTL >= OneHourTTL) {
+		facts.Provider.ReadSetsTTL = true
+	}
+	out.Facts = facts
+	s.End(req, t, billed, ops, facts)
+	return out
+}
+
+// LowerTTL sets the entry TTL to the tier the response billed, when a gateway downgraded the tier the request asked
+// for (1h), and returns the facts. It applies BilledTTL, which holds the rule. It runs after the usage arrives and
+// before Compute, which reads the facts' TTL for the verdict and stores it as the entry's TTL. The library lowers the
+// facts' TTL and the TTL of every 1h breakpoint together, on a copy. Nil-safe: a nil request changes nothing.
+func (s *Recorder) LowerTTL(req *accountant.Request, session, thread string, f accountant.EntryFacts, cacheWrite, cacheWrite1h int64) accountant.EntryFacts {
+	if req == nil {
+		return f
+	}
+	if BilledTTL(s.Tiers, PingKey(session, thread), f, cacheWrite, cacheWrite1h) {
+		f.TTL = BaseTTL
+		req.LowerTTL(BaseTTL)
+	}
+	return f
 }
