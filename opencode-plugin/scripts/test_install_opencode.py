@@ -651,36 +651,31 @@ class InstallerTest(unittest.TestCase):
         (state / "disabled").write_text("disabled by context-guru-uninstall\n")
         return state
 
-    def test_install_turns_context_guru_on_again_in_projects_that_were_off(self):
-        one, two = self.turned_off("aaaa", "/Users/me/cg-try"), self.turned_off("bbbb", "/Users/me/work")
+    def test_install_names_the_projects_that_are_off_and_leaves_them_off(self):
+        one, two = Path(self.home.name) / "cg-try", Path(self.home.name) / "work"
+        one.mkdir(); two.mkdir()
+        first, second = self.turned_off("aaaa", str(one)), self.turned_off("bbbb", str(two))
 
         code = self.installer("1", "y", "n").install()
 
         self.assertEqual(code, 0)
-        self.assertFalse((one / "disabled").exists())
-        self.assertFalse((two / "disabled").exists())
-        self.assertIn("context-guru is on again in 2 projects that were turned off:\n  /Users/me/cg-try\n  /Users/me/work",
-                      self.terminal.text())
+        self.assertTrue((first / "disabled").exists())
+        self.assertTrue((second / "disabled").exists())
+        self.assertIn(f"context-guru is off in 2 projects, because you turned it off there:\n  {one}\n  {two}\n"
+                      "To turn it on again, run /context-guru-install in that project.", self.terminal.text())
+
+    def test_a_project_folder_that_is_gone_is_not_named(self):
+        self.turned_off("aaaa", "/no/such/folder")
+
+        self.installer("1", "y", "n").install()
+
+        self.assertNotIn("/no/such/folder", self.terminal.text())
+        self.assertNotIn("context-guru is off in", self.terminal.text())
 
     def test_no_project_turned_off_says_nothing_about_it(self):
         self.installer("1", "y", "n").install()
 
-        self.assertNotIn("on again in", self.terminal.text())
-
-    def test_a_no_to_consent_leaves_projects_off(self):
-        state = self.turned_off("aaaa", "/Users/me/cg-try")
-
-        self.installer("1", "n").install()
-
-        self.assertTrue((state / "disabled").exists())
-
-    def test_undo_turns_those_projects_off_again(self):
-        state = self.turned_off("aaaa", "/Users/me/cg-try")
-        self.shell.logins, self.shell.login_fails = set(), True
-
-        self.installer("1", "y", "y").install()  # path, consent, undo
-
-        self.assertTrue((state / "disabled").exists())
+        self.assertNotIn("context-guru is off in", self.terminal.text())
 
     # ------------------------------------------------------------------------------- install
     def test_install_adds_the_stable_copy_to_both_config_files(self):

@@ -315,7 +315,7 @@ class Installer:
             self.step("The context-guru plugin", f"It goes to {plugin_dir()}, and into OpenCode's config for every "
                                                  "project. Your config files are backed up first.")
             self.install_plugin(documents)
-            self.turn_projects_on()
+            self.name_projects_off()
             self.save_record()
             self.login()
             return self.finish()
@@ -567,23 +567,21 @@ class Installer:
                     self.terminal.say(f"Replaced another copy of the plugin in {name}: {entry_path(entry)}")
         self.terminal.say(f"✓ context-guru plugin installed for every project ({config_dir()}).")
 
-    def turn_projects_on(self):
-        """An install turns context-guru on everywhere: it removes the marker that /context-guru-uninstall left
-        in a project's state folder, as that project's own context-guru-install script does."""
-        markers = sorted(state_root().glob("*/disabled")) if state_root().exists() else []
-        if not markers:
-            return
+    def name_projects_off(self):
+        """/context-guru-uninstall turns context-guru off in one project, and that choice stays (owner decision,
+        2026-11-25). The installer only names those projects, and how to turn each one on again."""
         folders = []
-        for marker in markers:
+        for marker in sorted(state_root().glob("*/disabled")) if state_root().exists() else []:
             try:
-                folders.append(json.loads((marker.parent / "install.json").read_text()).get("directory") or str(marker.parent))
+                folder = json.loads((marker.parent / "install.json").read_text()).get("directory")
             except (OSError, ValueError, AttributeError):
-                folders.append(str(marker.parent))
-            marker.unlink()
-        self.record.setdefault("turned_on", []).extend(str(marker.parent) for marker in markers)
-        count = f"{len(markers)} project{'s' if len(markers) > 1 else ''}"
-        self.terminal.say(f"✓ context-guru is on again in {count} that {'were' if len(markers) > 1 else 'was'} "
-                          "turned off:\n  " + "\n  ".join(folders))
+                continue
+            if isinstance(folder, str) and Path(folder).is_dir():
+                folders.append(folder)
+        if folders:
+            count = f"{len(folders)} project{'s' if len(folders) > 1 else ''}"
+            self.terminal.say(f"context-guru is off in {count}, because you turned it off there:\n  "
+                              + "\n  ".join(folders) + "\nTo turn it on again, run /context-guru-install in that project.")
 
     def logins(self):
         return logged_in(self.shell.run(["opencode", "auth", "list"]).stdout)
@@ -630,9 +628,6 @@ class Installer:
             shutil.rmtree(self.record["plugin"], ignore_errors=True)
         if self.record.get("login_started"):
             self.shell.run(["opencode", "auth", "logout", self.record["login_started"]])
-        for state in self.record.get("turned_on", []):
-            if Path(state).is_dir():
-                (Path(state) / "disabled").write_text("disabled by context-guru-uninstall\n")
         shutil.rmtree(backup_dir(), ignore_errors=True)
         if self.record.get("opencode_installed"):
             self.record = {"opencode_installed": True}
