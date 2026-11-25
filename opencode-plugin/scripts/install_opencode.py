@@ -29,7 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 OPENCODE_NPM = "opencode-ai"
-TESTED_OPENCODE = "1.19.5"  # only named in a note: the installer installs the latest, as the Pi installer does
+TESTED_OPENCODE = "1.19.6"  # only named in a note: the installer installs the latest, as the Pi installer does
 MIN_OPENCODE = (1, 18, 29)  # the first release that calls the plugin's v1 server() export
 PUBLIC_REGISTRY = "https://registry.npmjs.org/"
 INSTALL_PAGE = "https://opencode.ai/docs"

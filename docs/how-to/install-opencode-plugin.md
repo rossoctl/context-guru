@@ -1,6 +1,6 @@
 # Install the OpenCode plugin
 
-> **Experimental.** The plugin is new. It ran in a real OpenCode only once (1.19.5). It needs proxy v0.7.1 or later.
+> **Experimental.** The plugin is new. It ran in a real OpenCode 1.19.5, and 1.19.6 with the one-command installer, on macOS and Linux. It needs proxy v0.7.1 or later.
 
 The OpenCode plugin routes Anthropic and OpenAI model requests through a local context-guru proxy.
 It is project-safe and reversible. On the direct path, the installer never sees your key: OpenCode's own
@@ -9,7 +9,7 @@ file. It never shows, logs or records it anywhere else.
 
 ## You need
 
-- OpenCode 1.19.5. Other versions are not tested.
+- OpenCode 1.19.6 (1.19.5 also ran). Other versions are not tested.
 - Proxy v0.7.1 or later. The plugin downloads v0.7.7, or uses the `context-guru-proxy` on your `PATH`.
 - macOS or Linux.
 
@@ -28,7 +28,7 @@ It asks before each change:
    and changes nothing. See [A company gateway](#a-company-gateway).
 2. **OpenCode:** it installs the latest OpenCode with npm if OpenCode is missing, or updates it if it is
    older than the latest release, as the Pi installer does for Pi. It never uses `sudo`. The plugin is tested
-   on 1.19.5 only; the installer says so for another version.
+   on 1.19.6 only; the installer says so for another version.
 3. **Your consent:** it says what turns on, and asks once.
 4. **The plugin:** it installs the release's plugin, checked by SHA-256, at
    `~/.local/share/context-guru-opencode/plugin/`. It adds it to the global `opencode.json` and `tui.json`,

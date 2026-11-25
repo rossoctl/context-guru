@@ -881,19 +881,26 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("still runs OpenCode 1.19.5", text)
 
     def test_the_tested_opencode_line_has_no_trailing_space(self):
-        self.shell.opencode = self.shell.latest = "1.19.5"
+        self.shell.opencode = self.shell.latest = "1.19.6"
 
         self.installer("1", "n").install()
 
-        self.assertIn("OpenCode 1.19.5 is installed.", self.terminal.shown)
+        self.assertIn("OpenCode 1.19.6 is installed.", self.terminal.shown)
 
-    def test_the_latest_opencode_stays_and_names_the_tested_version(self):
+    def test_the_tested_opencode_gets_no_untested_note(self):
         code = self.installer("1", "y", "n").install()
 
         self.assertEqual(code, 0)
         self.assertEqual(self.npm_installs(), [])
         self.assertIn("OpenCode 1.19.6 is installed", self.terminal.text())
-        self.assertIn("tested on OpenCode 1.19.5", self.terminal.text())
+        self.assertNotIn("tested on OpenCode", self.terminal.text())
+
+    def test_a_newer_opencode_names_the_tested_version(self):
+        self.shell.opencode = self.shell.latest = "1.20.0"
+
+        self.installer("1", "y", "n").install()
+
+        self.assertIn("The plugin is tested on OpenCode 1.19.6 only.", self.terminal.text())
 
     def test_a_newer_pre_release_is_never_downgraded(self):
         self.shell.opencode = "1.20.0-beta.1"
