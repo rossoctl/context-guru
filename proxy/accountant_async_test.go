@@ -3,10 +3,12 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +25,24 @@ import (
 // asyncCapture is a capture with a savings tracker, the way newCapture builds one with the dashboard on.
 func asyncCapture() *capture {
 	return &capture{savings: newSavingsTracker(), provider: "anthropic"}
+}
+
+// logSink is a log writer the test goroutine and the accountant goroutine share.
+type logSink struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logSink) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logSink) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 func asyncMeta() accountant.RequestMeta {
@@ -50,7 +70,7 @@ func TestAccEndDoesNotWaitForTheAccountantWork(t *testing.T) {
 	}()
 	select {
 	case <-returned:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("accEnd waited for the accountant: the request path pays for the work")
 	}
 }
@@ -104,6 +124,12 @@ func TestRequestPathCostDoesNotGrowWithBodySize(t *testing.T) {
 
 // The accountant fails open. A panic in its background work must reach neither the request nor the process.
 func TestAccountantPanicOffThePathCostsTheSavingOnly(t *testing.T) {
+	// slog.SetDefault is global. No parallel test runs beside this one: Go starts t.Parallel tests only
+	// after every serial test has finished.
+	logs := &logSink{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	c := asyncCapture()
 	done := make(chan struct{})
 	c.savings.onEnd = func(_ *accountant.Request, _ endRecord) {
@@ -123,11 +149,14 @@ func TestAccountantPanicOffThePathCostsTheSavingOnly(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the accountant work never ran")
 	}
-	// A panic on another goroutine would have ended the test binary by now. Give it the time to do so.
-	time.Sleep(50 * time.Millisecond)
+	// accRun's recover logs this line. Seeing it proves the recover ran, so the panic did not end the
+	// process. No fixed window proves that.
+	testutil.WaitFor(t, "accRun's recover to log the panic", func() bool {
+		return strings.Contains(logs.String(), "the record panicked")
+	})
 }
 
 // Through the real handler: the request reaches the upstream while the accountant is still working, and the

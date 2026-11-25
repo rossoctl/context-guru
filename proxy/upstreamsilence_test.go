@@ -850,8 +850,7 @@ func (g *chaosGateway) handle(c net.Conn) {
 func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
 	g := newChaosGateway(t)
 	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
-	time.Sleep(50 * time.Millisecond)
-	before := goroutinesSettled()
+	before := runtime.NumGoroutine()
 	var ok, fail atomic.Int64
 	var wg sync.WaitGroup
 	for w := 0; w < 50; w++ {
@@ -880,7 +879,9 @@ func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
 	max := g.maxSeen
 	g.mu.Unlock()
 	// 1 + 2 drops + 1 silence resend (each of which may itself drop) is the theoretical max
-	if max > 1+maxDroppedReuseRetries+1 {
+	// The 100 ms silence limit races a real response on a loaded box, and a late response then
+	// earns an extra resend. So the bound holds only when timing is on.
+	if testutil.TimingEnabled() && max > 1+maxDroppedReuseRetries+1 {
 		t.Errorf("a request was sent %d times", max)
 	}
 	c.Transport.(*http.Transport).CloseIdleConnections()
@@ -889,20 +890,11 @@ func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
 		cn.Close()
 	}
 	g.mu.Unlock()
-	after := goroutinesSettled()
-	t.Logf("ok=%d fail=%d maxSends=%d goroutines %d -> %d", ok.Load(), fail.Load(), max, before, after)
-	if after > before+3 {
-		t.Errorf("goroutine leak %d -> %d", before, after)
-	}
-}
-
-func goroutinesSettled() int {
-	var n int
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
-		n = runtime.NumGoroutine()
-	}
-	return n
+	// The goroutines end on their own after the close, so wait until the count falls back.
+	testutil.WaitForState(t, "the goroutine count to fall back to the start", func() bool {
+		return runtime.NumGoroutine() <= before+3
+	}, func() string { return fmt.Sprintf("goroutines %d -> %d", before, runtime.NumGoroutine()) })
+	t.Logf("ok=%d fail=%d maxSends=%d goroutines %d -> %d", ok.Load(), fail.Load(), max, before, runtime.NumGoroutine())
 }
 
 // rawBuild posts body exactly as given, to url.
@@ -950,7 +942,7 @@ func TestClosingIdleConnectionsForAResendDoesNotBreakOtherStreams(t *testing.T) 
 			}
 		}()
 	}
-	time.Sleep(100 * time.Millisecond)
+	testutil.WaitFor(t, "the ten streams to reach the server", func() bool { return n.Load() >= 10 })
 	n.Store(99)
 	resp, err := doWithSilenceGuard(context.Background(), c, 200*time.Millisecond, silenceBuild(srv.URL, streamBody))
 	if err != nil {

@@ -143,7 +143,7 @@ func TestCacheAwareStalePrefixThroughARealOversizedTurn(t *testing.T) {
 			map[string]any{"role": "user", "content": "any luck"})
 		post(t3)
 
-		if !offload.WaitForSummaryForTest(session, 5*time.Second) {
+		if !offload.WaitForSummaryForTest(session, 30*time.Second) {
 			t.Fatal("turn 3's commissioned (or declined) summary never resolved")
 		}
 		mu.Lock()

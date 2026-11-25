@@ -17,6 +17,7 @@ import (
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -37,6 +38,24 @@ func lastMessage(body []byte) string {
 		return ""
 	}
 	return msgs[len(msgs)-1].Raw
+}
+
+// toolTurnBody is a request that carries tool calls, so the keeper counts it as an agent thread worth a
+// ping. extra grows the request between turns.
+func toolTurnBody(model string, extra int) []byte {
+	msgs := []any{map[string]any{"role": "user", "content": "fix the failing tests"}}
+	for i := 0; i < 3+extra; i++ {
+		id := fmt.Sprintf("tu_%d", i)
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": []any{map[string]any{
+				"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": "go test " + id}}}},
+			map[string]any{"role": "user", "content": []any{map[string]any{
+				"type": "tool_result", "tool_use_id": id, "content": strings.Repeat("plain record "+id+"\n", 60)}}})
+	}
+	body, _ := json.Marshal(map[string]any{"model": model, "max_tokens": 64,
+		"system":   []any{map[string]any{"type": "text", "text": "you are an agent", "cache_control": map[string]any{"type": "ephemeral"}}},
+		"messages": msgs})
+	return body
 }
 
 func TestEveryCallAfterASweepOnlyProxyOnANonClaudeModelCarriesTheRequestsModel(t *testing.T) {
@@ -97,6 +116,8 @@ func TestEveryCallAfterASweepOnlyProxyOnANonClaudeModelCarriesTheRequestsModel(t
 		Cache: CachePolicy{KeepAlive: true, Idle: 10 * time.Second, MaxPings: 2, MaxUSDPerPing: 1, MinPrefixTokens: 0},
 	})
 	t.Cleanup(h.Close)
+	clock := &testClock{at: time.Now()}
+	rebuildKeeper(h, nil, clock) // the test clock and an inline runner; pings still go to `upstream`
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -138,9 +159,14 @@ func TestEveryCallAfterASweepOnlyProxyOnANonClaudeModelCarriesTheRequestsModel(t
 	for i := 0; i < 4; i++ {
 		post(i)
 	}
-	// Let the real keep-alive ticker run: it pings the idle thread, and the sweep's question may stand
-	// in for a ping.
-	time.Sleep(40 * time.Second)
+	// Run the keep-alive sweep on the test clock, past Idle: it pings the idle thread, and the sweep's
+	// question may stand in for a ping. The runner is inline, so the calls are done when Sweep returns.
+	// The keeper records a turn in serve's defer, after the response, so wait until it holds the thread.
+	testutil.WaitForState(t, "the keeper holds the thread", func() bool { return h.keeper.Stats().Live >= 1 },
+		func() string { return fmt.Sprintf("%+v", h.keeper.Stats()) })
+	for i := 0; i < 20; i++ { // the real ticker's 2 s steps, over the 40 s the test used to sleep
+		sweepAfter(h.keeper, clock, 2*time.Second)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -182,9 +208,11 @@ func TestANonClaudeModelOnARelayIsNotPingedUnlessNamed(t *testing.T) {
 	var mu sync.Mutex
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
+		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
-		calls++
+		if strings.Contains(string(b), glmModel) {
+			calls++
+		}
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],` +
@@ -200,14 +228,15 @@ func TestANonClaudeModelOnARelayIsNotPingedUnlessNamed(t *testing.T) {
 	}
 	t.Cleanup(func() { rec.Close() })
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: upstream.URL, Dashboard: rec,
-		Cache: CachePolicy{KeepAlive: true, Idle: 10 * time.Second, MaxPings: 2, MaxUSDPerPing: 1}})
+		Cache: CachePolicy{KeepAlive: true, Idle: 10 * time.Second, MaxPings: 2, MaxUSDPerPing: 1, MinPrefixTokens: 0}})
 	t.Cleanup(h.Close)
+	clock := &testClock{at: time.Now()}
+	rebuildKeeper(h, nil, clock) // the test clock and an inline runner
+	const turns = 3              // a thread is pinged from its second turn on
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
-	for i := 0; i < 2; i++ {
-		body, _ := json.Marshal(map[string]any{"model": glmModel, "max_tokens": 64,
-			"system":   []any{map[string]any{"type": "text", "text": "you are an agent", "cache_control": map[string]any{"type": "ephemeral"}}},
-			"messages": []any{map[string]any{"role": "user", "content": strings.Repeat("hello ", 50+i)}}})
+	for i := 0; i < turns; i++ {
+		body := toolTurnBody(glmModel, i)
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-context-guru-session", "glm-unnamed")
@@ -219,10 +248,31 @@ func TestANonClaudeModelOnARelayIsNotPingedUnlessNamed(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	time.Sleep(5 * time.Second)
+	// The keeper records each turn in serve's defer, after the response. A Claude-named thread is held
+	// from its second turn on, so once the keeper holds it, the glm turns above (sent first) have been
+	// offered to the keeper too. The marker's own pings carry a Claude model, so only glm calls count.
+	for i := 0; i < turns; i++ {
+		body := toolTurnBody("claude-sonnet-5", i)
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-context-guru-session", "claude-marker")
+		req.Header.Set("x-api-key", "sk-test-key")
+		req.Header.Set("anthropic-version", "2023-06-01")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	testutil.WaitForState(t, "the keeper holds the Claude marker thread", func() bool { return h.keeper.Stats().Live >= 1 },
+		func() string { return fmt.Sprintf("%+v", h.keeper.Stats()) })
+	// Sweep past Idle on the test clock. The runner is inline, so every ping is sent when Sweep returns.
+	for i := 0; i < 20; i++ { // the real ticker's 2 s steps, over 40 s
+		sweepAfter(h.keeper, clock, 2*time.Second)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 2 {
-		t.Fatalf("saw %d upstream calls, want only the 2 forwarded requests: an unnamed non-Claude model must not be pinged", calls)
+	if calls != turns {
+		t.Fatalf("saw %d upstream calls, want only the %d forwarded requests: an unnamed non-Claude model must not be pinged", calls, turns)
 	}
 }
