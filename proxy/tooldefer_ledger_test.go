@@ -132,42 +132,21 @@ func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
 	if int64(e.DeferWrongGuesses) != st.WrongGuesses || int64(e.DeferDroppedSearches) != st.DroppedSearches {
 		t.Errorf("row wrong %d dropped %d, ledger %d and %d", e.DeferWrongGuesses, e.DeferDroppedSearches, st.WrongGuesses, st.DroppedSearches)
 	}
-	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
-		t.Errorf("row gross %v, ledger %+v", e.DeferGrossUSD, st.Money)
+	// One figure (#1441): the row and /stats hold the same dollars, taken from the accountant. This request is the
+	// first of its thread: no history, so the library holds it, and a held request books no lever, on the row or in
+	// the ledger. The dollars join the held estimate with every other component's.
+	if !e.EstimateHeld {
+		t.Fatalf("expected a held first request, got fallback %q", e.AccountantFallback())
 	}
-	// The row's net is one figure whichever page reads it. On a request the accountant priced it is the
-	// library's tooldefer row minus the cost of the search and the definition it loaded (the ledger's
-	// SearchCost, exact); on a request it held, or could not price, it is the ledger's net, so the deferral is
-	// not lost from the total (review of #1003).
-	if e.AccountantFallback() != "" || e.EstimateHeld {
-		// This request is the first of its thread: no history, so it is held.
-		if !e.EstimateHeld {
-			t.Errorf("expected a held first request, got fallback %q", e.AccountantFallback())
-		}
-		if math.Abs(e.DeferNetUSD-st.Net) > 1e-12 {
-			t.Errorf("row net %v on a held or unpriced request, want the ledger's net %v", e.DeferNetUSD, st.Net)
-		}
-		return
-	}
-	var lib float64
-	for _, c := range e.Components {
-		if c.Component == "tooldefer" {
-			lib = c.SavedUSD
-		}
-	}
-	if st.SearchCost <= 0 {
-		t.Fatalf("the ledger priced no search cost for a request that ran one search: %+v", st.Money)
-	}
-	if want := lib - st.SearchCost; math.Abs(e.DeferNetUSD-want) > 1e-12 {
-		t.Errorf("row net %v, want the library's %v less the search cost %v = %v", e.DeferNetUSD, lib, st.SearchCost, want)
+	if e.DeferGrossUSD != 0 || e.DeferNetUSD != 0 || st.Gross != 0 || st.Net != 0 || st.Unpriced != 1 {
+		t.Errorf("a held request must book no lever: row gross %v net %v, ledger %+v", e.DeferGrossUSD, e.DeferNetUSD, st)
 	}
 }
 
 // The priced path of the same fact: a second request of the thread has history, so the accountant prices it. Its
-// deferral figure is the library's tooldefer row minus the cost of the search and the definition it loaded, exactly.
-// A held first request keeps the ledger's net instead (the test above). The cost comes from the event the capture
-// priced, because the ledger's totals do not sum it.
-func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
+// deferral figure is the library's tooldefer row, search turns included (#1441): the row, /stats and the component
+// figure show one number. The search turns are three spend operations on the tooldefer operator.
+func TestToolDeferPricedRowIsOneFigureWithTheSearchTurns(t *testing.T) {
 	us := httptest.NewServer(sseUpstream{})
 	defer us.Close()
 	h, rec, tap := accHandlerOpts(t, us.URL, "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n", func(o *Options) {
@@ -190,10 +169,13 @@ func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
 	}
 	waitForRows(t, rec, 2)
 	var priced int
+	var netSum, grossSum float64
 	for i, e := range tap.all() {
 		if e.DeferSearches == 0 {
 			t.Fatalf("request %d ran no search: the test does not exercise the search cost", i)
 		}
+		netSum += e.DeferNetUSD
+		grossSum += e.DeferGrossUSD
 		if e.EstimateHeld || e.AccountantFallback() != "" {
 			continue
 		}
@@ -204,37 +186,38 @@ func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
 				lib = c.SavedUSD
 			}
 		}
-		if lib <= 0 || e.DeferSearchUSD <= 0 {
-			t.Errorf("request %d: library figure %v, search cost %v: want both positive", i, lib, e.DeferSearchUSD)
+		// The panel's net is the component figure, exactly.
+		if lib == 0 || math.Abs(e.DeferNetUSD-lib) > 1e-12 {
+			t.Errorf("request %d: row net %v, component figure %v: want one figure", i, e.DeferNetUSD, lib)
 		}
-		if want := lib - e.DeferSearchUSD; math.Abs(e.DeferNetUSD-want) > 1e-12 {
-			t.Errorf("request %d: net %v, want the library's %v less the search cost %v = %v", i, e.DeferNetUSD, lib, e.DeferSearchUSD, want)
+		if math.Abs(e.DeferGrossUSD-e.DeferNetUSD-e.DeferCostUSD) > 1e-12 || e.DeferCostUSD <= 0 {
+			t.Errorf("request %d: gross %v, cost %v, net %v: cost must be gross less net and positive", i, e.DeferGrossUSD, e.DeferCostUSD, e.DeferNetUSD)
 		}
-		// The cost the Tools page shows is the ledger's own, taken before the net moved onto the library's figure.
-		// The search cost is part of it, so it cannot be less. It can exceed the gross: the ledger's net is gross
-		// less this cost, and the net is negative when the searches cost more than the deferral saved.
-		if e.DeferCostUSD < e.DeferSearchUSD {
-			t.Errorf("request %d: cost %v is less than the search cost %v it contains", i, e.DeferCostUSD, e.DeferSearchUSD)
+		// The search turns are in the figure: dropping the three spend operations raises it by their cost.
+		res, _ := e.AccountantResult()
+		var spends int
+		for _, o := range res.Ops {
+			if o.Call != nil && o.Operator == "context-guru.tooldefer" {
+				spends++
+			}
 		}
-		// On a priced request the stored net is the library's figure less the search cost, so gross less that net is
-		// NOT the ledger's cost: the two must differ, or this test could not tell the old derivation from the new.
-		if math.Abs((e.DeferGrossUSD-e.DeferNetUSD)-e.DeferCostUSD) < 1e-12 {
-			t.Errorf("request %d: gross less net equals the cost %v: the test does not separate the two figures", i, e.DeferCostUSD)
+		if spends != 3 {
+			t.Errorf("request %d: %d tooldefer spend operations, want 3 (output, second pass, next write)", i, spends)
 		}
 	}
 	if priced != 1 {
 		t.Fatalf("priced requests = %d, want 1 (the second of the thread): the test must reach the priced path", priced)
 	}
-	// /api/tool-defer sums the ledger's cost per request, so its total is exactly that sum.
+	// /stats holds the sum of the rows, and /api/tool-defer too.
+	st := ds.ledger.Snapshot()
+	if st.Requests != 2 || math.Abs(st.Net-netSum) > 1e-12 || math.Abs(st.Gross-grossSum) > 1e-12 {
+		t.Errorf("/stats ledger %+v, want net %v gross %v from the rows", st, netSum, grossSum)
+	}
 	rep, err := rec.DB().ToolDeferReportFor(dash.Filter{TenantAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var costSum float64
-	for _, e := range tap.all() {
-		costSum += e.DeferCostUSD
-	}
-	if math.Abs(rep.Total.CostUSD-costSum) > 1e-12 {
-		t.Errorf("/api/tool-defer cost %v, want the sum of the per-request ledger costs %v", rep.Total.CostUSD, costSum)
+	if math.Abs(rep.Total.NetUSD-st.Net) > 1e-12 || math.Abs(rep.Total.GrossUSD-st.Gross) > 1e-12 || math.Abs(rep.Total.CostUSD-st.Cost) > 1e-12 {
+		t.Errorf("/api/tool-defer total %+v differs from /stats %+v", rep.Total, st.Money)
 	}
 }

@@ -160,7 +160,7 @@ reason: the client asked for no context-guru, so its $0 is a measured $0. Overvi
 
 - `fallback_requests` is the count, `fallback` the count by reason, and `fallback_cost_usd` their `cost_usd`
   plus `cg_llm_cost_usd`.
-- A fallback request can still book some saving the library did not price: the deferral ledger's net, the
+- A fallback request can still book some saving the library did not price: tool deferral's figure (none today), the
   measured filter credit, and minus its own model calls. `fallback_saved` gives it by part (`compaction_usd`,
   `defer_usd`, `keepalive_usd`, `reorder_usd`, `filter_usd`).
 - The hero and its part cards leave fallback requests out on both sides. Each part is the server's part less

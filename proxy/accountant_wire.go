@@ -146,3 +146,15 @@ func (c *capture) accBilledTTL(u Usage) {
 	}
 	c.accFacts = c.savings.LowerTTL(c.accReq, c.accMeta.Session, c.accThread, c.accFacts, u.CacheWrite, u.CacheWrite1h)
 }
+
+// accDeferSpend reports the search-turn costs of a deferred request to the accountant as spend operations on the
+// tooldefer operator (#1441), so the one figure for deferral holds them. It runs before Compute. Nil-safe.
+func (c *capture) accDeferSpend() {
+	d := c.deferFacts
+	if c.accReq == nil || d == nil || !d.spendOK {
+		return
+	}
+	for _, op := range accrec.DeferSpendOps(d.model, d.spend) {
+		c.accReq.Add(op)
+	}
+}

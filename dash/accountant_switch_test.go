@@ -528,11 +528,16 @@ func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T
 // figure minus the search cost, and the total is the same as if the figure had stayed in the baseline.
 func deferralEvent(search float64, held bool) *Event {
 	e := switchEvent()
-	e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = 0.0009, 0.0009-search, search
-	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
+	ops := []accountant.PricedOp{
 		{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 1000}},
 		{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 5000}},
-	}})
+	}
+	if search > 0 {
+		// A search turn is a spend operation on the tooldefer operator (#1441). The stated cost is a fact, so it prices as is.
+		ops = append(ops, accountant.PricedOp{Kind: accountant.KindSpend, Operator: "context-guru.tooldefer",
+			Call: &accountant.ModelCall{Usage: accountant.CallUsage{CostUSD: search}}})
+	}
+	e.SetAccountant(accountant.Result{Ops: ops})
 	if held {
 		e.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}
 	}
@@ -570,6 +575,10 @@ func TestPriceMode_TheDeferralFigureMovesFromThePresetToTheLever(t *testing.T) {
 	if !accNear(e.DeferNetUSD, wantDef) {
 		t.Errorf("lever %v, want the library's deferral figure %v", e.DeferNetUSD, wantDef)
 	}
+	// One figure (#1441): gross is the saved side, cost is gross less net, net is the component figure.
+	if !accNear(e.DeferGrossUSD, wantDef) || !accNear(e.DeferCostUSD, 0) {
+		t.Errorf("gross %v cost %v, want %v and 0 with no search", e.DeferGrossUSD, e.DeferCostUSD, wantDef)
+	}
 }
 
 // The total does not change with the split: it is the same figure as when the deferral stayed in the baseline.
@@ -585,7 +594,7 @@ func TestPriceMode_MovingTheDeferralFigureLeavesTheTotalAlone(t *testing.T) {
 	}
 }
 
-// A request deferral did not change has no ledger figure, and the override leaves the lever at 0.
+// A request deferral did not change has no deferral figure, and the override leaves the lever at 0.
 func TestPriceMode_NoDeferralLeavesTheLeverAtZero(t *testing.T) {
 	e := switchEvent()
 	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
@@ -597,9 +606,9 @@ func TestPriceMode_NoDeferralLeavesTheLeverAtZero(t *testing.T) {
 	}
 }
 
-// Loading a deferred tool later is a cost the bodies cannot show (the definition returns inline, in the response
-// path). The ledger prices it as SearchCost and the lever carries it as a cost against the library's figure.
-func TestPriceMode_ALoadedDeferredToolIsACostOnTheLever(t *testing.T) {
+// A search turn is a cost of the deferral figure (#1441): it lowers the lever, the tooldefer row and the cost
+// column, and leaves the preset card alone.
+func TestPriceMode_ASearchTurnIsACostOnTheDeferralFigure(t *testing.T) {
 	none, loaded := deferralEvent(0, false), deferralEvent(0.0004, false)
 	for _, e := range []*Event{none, loaded} {
 		if fb := e.AccountantFallback(); fb != "" {
@@ -613,39 +622,49 @@ func TestPriceMode_ALoadedDeferredToolIsACostOnTheLever(t *testing.T) {
 	if d := none.DeferNetUSD - loaded.DeferNetUSD; !accNear(d, 0.0004) {
 		t.Errorf("levers %v and %v, want them to differ by the search cost 0.0004", none.DeferNetUSD, loaded.DeferNetUSD)
 	}
+	if !accNear(loaded.DeferCostUSD, 0.0004) || !accNear(loaded.DeferGrossUSD, none.DeferGrossUSD) {
+		t.Errorf("cost %v gross %v, want cost 0.0004 and the same gross as with no search (%v)", loaded.DeferCostUSD, loaded.DeferGrossUSD, none.DeferGrossUSD)
+	}
+	var def float64
+	for _, c := range loaded.Components {
+		if c.Component == "tooldefer" {
+			def = c.SavedUSD
+		}
+	}
+	if !accNear(def, loaded.DeferNetUSD) {
+		t.Errorf("tooldefer row %v, lever %v: want one figure", def, loaded.DeferNetUSD)
+	}
 }
 
-// A held request books no break-affected saving: the library's figure goes to EstimatedSavedUSD, outside every
-// total. The ledger's net must stay in the total as it did before, and the deferral must not appear in two places:
-// not in the held estimate as well.
-func TestPriceMode_AHeldRequestKeepsTheLedgersNetAndHoldsNoDeferralTwice(t *testing.T) {
+// A held request books no break-affected saving: every component's figure goes to EstimatedSavedUSD, outside every
+// total, the deferral's with them (#1441). The lever is 0 and the deferral does not appear in two places.
+func TestPriceMode_AHeldRequestHoldsTheDeferralWithTheRest(t *testing.T) {
 	e := deferralEvent(0.0002, true)
 	if !e.EstimateHeld {
 		t.Fatal("the request was not held")
 	}
-	if !accNear(e.DeferNetUSD, 0.0009-0.0002) {
-		t.Errorf("held lever %v, want the ledger's net %v", e.DeferNetUSD, 0.0009-0.0002)
+	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 {
+		t.Errorf("held lever %v gross %v, want 0", e.DeferNetUSD, e.DeferGrossUSD)
 	}
 	if e.BaselineCostUSD != e.CostUSD {
 		t.Errorf("a held request books a baseline delta of %v", e.BaselineCostUSD-e.CostUSD)
 	}
-	// The held estimate is the other components' figure only; the deferral part is the ledger's, in the total.
-	if want := 1000 * 0.3e-6; !accNear(e.EstimatedSavedUSD, want) {
-		t.Errorf("held estimate %v, want the preset's %v without the deferral", e.EstimatedSavedUSD, want)
+	if want := (1000+5000)*0.3e-6 - 0.0002; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("held estimate %v, want the preset's and the deferral's %v", e.EstimatedSavedUSD, want)
 	}
 }
 
-// A request the accountant could not price keeps the ledger's net exactly as before.
-func TestPriceMode_AnUnpricedRequestKeepsTheLedgersNet(t *testing.T) {
+// A request the accountant could not price books no deferral figure: no ledger prices it any more.
+func TestPriceMode_AnUnpricedRequestBooksNoDeferralFigure(t *testing.T) {
 	e := switchEvent()
-	e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = 0.0009, 0.0007, 0.0002
+	e.DeferTokens = 4000
 	e.Model = "" // no price: the library's figure is not applied
 	e.PriceMode(accTestPrice, true)
 	if e.AccountantFallback() == "" {
 		t.Skip("the event was priced; this test needs an unpriced one")
 	}
-	if e.DeferNetUSD != 0.0007 {
-		t.Errorf("lever %v, want the ledger's net 0.0007", e.DeferNetUSD)
+	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 || e.DeferCostUSD != 0 {
+		t.Errorf("lever %v gross %v cost %v, want 0", e.DeferNetUSD, e.DeferGrossUSD, e.DeferCostUSD)
 	}
 }
 
@@ -690,9 +709,9 @@ func TestPriceMode_HeldEstimateIsBoundedByReadAndWrite(t *testing.T) {
 	}
 }
 
-// The deferral's figure is out of the held ceiling, so its tokens are out of the floor: a held request that
-// also deferred tools keeps a floor of the other removed tokens at the read rate, never a negative one.
-func TestPriceMode_HeldFloorLeavesTheDeferralOut(t *testing.T) {
+// The deferral's figure is in the held ceiling with every other component's (#1441), so its tokens are in the floor
+// too, at the read rate.
+func TestPriceMode_HeldFloorHoldsTheDeferralWithTheRest(t *testing.T) {
 	p := modelinfo.Price{Input: 10e-6, CacheRead: 0.2e-6, CacheWrite: 2.5e-6, Output: 2e-6}
 	e := &Event{Model: "m", FreshInput: 5, OutputTokens: 1, TokensBefore: 20000,
 		Components: []CompRow{{Component: "mask", Acted: true, Mutated: true, SavedGross: 4000, SavedUnique: 4000}}}
@@ -705,11 +724,11 @@ func TestPriceMode_HeldFloorLeavesTheDeferralOut(t *testing.T) {
 	if !e.EstimateHeld {
 		t.Fatal("the request was not held")
 	}
-	if want := 4000 * 2.5e-6; !accNear(e.EstimatedSavedUSD, want) {
-		t.Errorf("ceiling %v, want %v without the deferral", e.EstimatedSavedUSD, want)
+	if want := 16000 * 2.5e-6; !accNear(e.EstimatedSavedUSD, want) {
+		t.Errorf("ceiling %v, want %v with the deferral", e.EstimatedSavedUSD, want)
 	}
-	if want := 4000 * 0.2e-6; !accNear(e.EstimatedSavedLowUSD, want) {
-		t.Errorf("floor %v, want %v without the deferral", e.EstimatedSavedLowUSD, want)
+	if want := 16000 * 0.2e-6; !accNear(e.EstimatedSavedLowUSD, want) {
+		t.Errorf("floor %v, want %v with the deferral", e.EstimatedSavedLowUSD, want)
 	}
 }
 

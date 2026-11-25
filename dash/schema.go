@@ -258,7 +258,7 @@ CREATE TABLE IF NOT EXISTS requests (
   defer_wrong_guesses INTEGER NOT NULL DEFAULT 0,
   defer_gross_usd     REAL    NOT NULL DEFAULT 0,
   defer_net_usd       REAL    NOT NULL DEFAULT 0,
-  -- The ledger's own cost of the deferral: the names list and the searches, gross less the ledger's net.
+  -- The deferral's cost: the names list and the search turns, gross less net (the accountant's one figure, #1441).
   -- defer_net_usd is the deferral lever, which on a request the accountant priced is the library's figure less
   -- the search cost, so gross less net no longer says what the deferral cost. Filled by the migration for rows
   -- written before this column existed (see backfillDeferCost).

@@ -323,11 +323,11 @@ type Response struct {
 	SearchDropped int
 }
 
-// Booked is what the ledger booked for one request: the request facts, its price and how many
-// different tools its searches loaded. The host puts the same numbers on its dashboard row (#869).
+// Booked is what the ledger booked for one request: the request facts and how many different tools its
+// searches loaded. The host puts the same numbers on its dashboard row (#869). The dollars come later, from
+// the accountant's figure (Ledger.AddMoney).
 type Booked struct {
 	Request  Request
-	Money    Money
 	Distinct int
 }
 
@@ -349,14 +349,9 @@ func (f Flow) Book(ctx context.Context, di *Info, u Response, usageOK bool, st S
 	r.DroppedSearches = u.SearchDropped + st.Dropped
 	r.LoadedTokens = LoadedWeight(di.Original, loaded)
 	r.WrongGuesses = WrongGuesses(di.Outcome.Deferred, di.Original, loaded)
-	var p modelinfo.Price
-	if f.Prices != nil {
-		p, _ = f.Prices.Price(ctx, di.Model)
-	}
-	f.Parts().Ledger.Add(r, p)
+	f.Parts().Ledger.Add(r)
 	// The dashboard row takes the same r the ledger booked, so /stats and the panel agree (#869).
-	m, _ := Price(r, p)
-	return Booked{Request: r, Money: m, Distinct: distinctLoads(loaded)}, true
+	return Booked{Request: r, Distinct: distinctLoads(loaded)}, true
 }
 
 // distinctLoads is how many different tools the searches of one response loaded.

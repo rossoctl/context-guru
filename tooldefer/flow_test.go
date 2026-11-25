@@ -131,7 +131,7 @@ func TestFlowBook(t *testing.T) {
 		t.Fatal("booked a request with no usage")
 	}
 	b, ok := f.Book(context.Background(), di, Response{CacheRead: 5000}, true, SearchTally{})
-	if !ok || b.Request.DeferredTokens != 1000 || b.Request.Tier != TierRead || b.Money.Net <= 0 {
+	if !ok || b.Request.DeferredTokens != 1000 || b.Request.Tier != TierRead {
 		t.Fatalf("ok=%v %+v", ok, b)
 	}
 	if s := p.Ledger.Snapshot(); s.Requests != 1 || s.DeferredTokens != 1000 {

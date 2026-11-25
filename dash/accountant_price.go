@@ -2,6 +2,7 @@ package dash
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/rossoctl/accountant"
@@ -79,7 +80,8 @@ type AccFigure struct {
 }
 
 // AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
-// never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
+// never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere, except
+// tool deferral's search turns: they are a cost of its figure (bookDeferSpend).
 // Result.Interaction is ignored on purpose: the library attributes it to nobody.
 //
 // p carries the model's prompt-size tiers. A saving compares two requests: the one sent (with
@@ -106,6 +108,10 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	var effCaused accountant.TierTokens // the Caused tokens of the cache effects booked below
 	var shares []reRateShare            // the counted operations with a net saving: they own the re-rate
 	for _, o := range e.accRes.Ops {
+		if o.Call != nil && !o.DryRun && o.Operator == accwire.Operator(DeferComponent) {
+			f.bookDeferSpend(o.Call, p) // a search turn of tool deferral: a cost on the tooldefer figure (#1441)
+			continue
+		}
 		if o.DryRun || o.Call != nil {
 			continue
 		}
@@ -358,6 +364,34 @@ const PricedByAccountant = "accountant"
 // before the switch has it empty.
 const PricedByNone = "none"
 
+// spendUSD prices one spend Call from its own usage, at the prompt size it ran on: the call's own input tiers, or
+// the size the host states (accwire.SpendParamPromptTokens). A price with no tiers gives the base rates. A cost the
+// response stated (CostUSD) wins: it is a fact, not a rate of ours.
+func spendUSD(p modelinfo.Price, c *accountant.ModelCall) float64 {
+	u := c.Usage
+	if u.CostUSD > 0 {
+		return u.CostUSD
+	}
+	n := int64(u.Input) + int64(u.CacheRead) + int64(u.CacheWrite)
+	if v, err := strconv.ParseInt(c.Params[accwire.SpendParamPromptTokens], 10, 64); err == nil && v > 0 {
+		n = v
+	}
+	q := p.At(n)
+	return tierUSD(q, accountant.TierTokens{Input: u.Input, CacheRead: u.CacheRead,
+		CacheWrite5m: max(u.CacheWrite-u.CacheWrite1h, 0), CacheWrite1h: u.CacheWrite1h}) + float64(u.Output)*q.Output
+}
+
+// bookDeferSpend books one search turn of tool deferral as a cost of the tooldefer figure: the search calls'
+// output, the API's second pass over the loaded definitions, and the next request's write of them (#1441). It is a
+// cost, so it lowers the figure and the request total. It has no tokens on the component row: those hold the
+// body change.
+func (f *AccFigure) bookDeferSpend(c *accountant.ModelCall, p modelinfo.Price) {
+	usd := spendUSD(p, c)
+	f.ByComponent[DeferComponent] -= usd
+	f.DeltaUSD -= usd
+	f.Estimated = f.Estimated || c.Params[accwire.SpendParamEstimated] == "true"
+}
+
 // KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
 // the ended-change break, neither of which is a pipeline component.
 const KindEnvelope = "envelope"
@@ -548,21 +582,23 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// counted twice.
 	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, Split: fig.TokSplit, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
-	// Tool deferral is priced here, from the bodies (accountant R56): the definitions it left out as a shrink
-	// of tools positions, the search tool and the names list as growth. The library's figure for it sits on the
-	// tooldefer row and in the baseline delta above, which the Overview shows as the preset's saving. It is the
-	// deferral's saving, so it leaves the baseline and goes to the lever Overview adds beside it (DeferNetUSD),
-	// where the deferral card reads it. The total is the same: the figure is moved, not added. What the bodies
-	// cannot show is the searches and the definitions they loaded, which come back in the response: the ledger
-	// still owns that cost, and the lever takes it off (#908, review of #1003).
+	// Tool deferral has one figure, and the accountant prices it (#1441): the definitions it left out as a shrink of
+	// tools positions, the search tool and the names list as growth (accountant R56), the tier re-rate, and the
+	// search turns as spend operations. The figure sits on the tooldefer row and in the baseline delta above, which
+	// the Overview shows as the preset's saving. It is the deferral's saving, so it leaves the baseline and goes to
+	// the lever Overview adds beside it (DeferNetUSD), where the deferral card and the /stats ledger read it. The
+	// total is the same: the figure is moved, not added. Gross is the saved side of the figure, and cost is gross
+	// less net.
 	//
-	// A request the library held (below) keeps the ledger's net on the lever as before, and the deferral is
-	// left out of the held estimate, so the figure appears in one place and not in two.
+	// A request the library held (below) books no lever: its deferral figure joins the held estimate with every
+	// other component's, so the figure appears in one place and not in two.
 	deferFig := fig.ByComponent[DeferComponent]
-	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 || deferFig != 0 {
+	if e.DeferTokens > 0 || deferFig != 0 {
 		if !estimated {
 			e.BaselineCostUSD -= deferFig
-			e.DeferNetUSD = deferFig - e.DeferSearchUSD
+			e.DeferGrossUSD = fig.ByComponentFirst[DeferComponent] + fig.ByComponentReplay[DeferComponent]
+			e.DeferNetUSD = deferFig
+			e.DeferCostUSD = e.DeferGrossUSD - e.DeferNetUSD
 			if e.DeferNetUSD == 0 {
 				// A guard, not a known case. -0 - +0 is -0 under IEEE 754, but deferFig comes from a map entry that
 				// starts at +0, and +a + -a and +0 + -0 are +0, so deferFig is never -0 and this branch is not
@@ -581,18 +617,17 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
 		// keep-alive tab and the API still agree.
 		//
-		// What is held out: fig.DeltaUSD less the deferral's own figure, which is every other component's
-		// figure, the head-TTL premium and rescue legs (the headttl row), the ended-change break, and the
-		// filter's part. The deferral's figure is not held with them: a held request keeps the ledger's net
-		// on the lever, so it appears once (review of #1003). The figure can
+		// What is held out: fig.DeltaUSD, which is every component's figure (the deferral's too, #1441), the
+		// head-TTL premium and rescue legs (the headttl row), the ended-change break, and the
+		// filter's part. The figure can
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
 		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
 		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
-		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
-		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD-deferFig)
+		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD)
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
@@ -621,8 +656,8 @@ func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
 	_, p = e.accPrices(p) // Saved tokens are the client body's: priced at its size
 	low := delta
 	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil || o.Operator == accwire.Operator(DeferComponent) {
-			continue // the deferral's figure is out of the held ceiling, so its tokens are out of the floor
+		if o.DryRun || o.Call != nil {
+			continue
 		}
 		s := o.Saved
 		low -= tierUSD(p, s) - float64(s.Input+s.CacheRead+s.CacheWrite5m+s.CacheWrite1h)*p.CacheRead
