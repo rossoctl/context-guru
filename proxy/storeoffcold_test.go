@@ -101,13 +101,16 @@ func TestTheProxyGivesTheColdCheckTheKeepersFreePingWhenTheStoreIsOff(t *testing
 			if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 				t.Fatalf("the keeper fired %d pings, want 1", n)
 			}
-			if _, ok := k.StoreOffPing(keepalive.Key{Tenant: tn.ID, Session: sess}); ok != tc.keeperKnows {
+			alias := apply.BodyOpts(context.Background(), components.NewPipeline(nil, nil), store.Nop{}, apply.Opts{Provider: bschemas.Anthropic,
+				Body: []byte(body), Tenant: tn.ID}).TouchAlias
+			if _, ok := k.StoreOffPing(alias); ok != tc.keeperKnows {
 				t.Fatalf("the keeper holds the free 1-hour ping = %v, want %v", ok, tc.keeperKnows)
 			}
 
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("x-context-guru-session", "storeoff-1")
+			// The return carries NO session header: the same conversation under another session id (apply derives
+			// one). The cold check asks by alias, so it still finds the ping.
 			req.Header.Set("x-api-key", "sk-test")
 			req.Header.Set("anthropic-version", "2023-06-01")
 			resp, err := srv.Client().Do(req)

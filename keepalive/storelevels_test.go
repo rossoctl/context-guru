@@ -134,3 +134,57 @@ func TestTheColdCheckFollowsTheSameEventsAtEveryStoreKind(t *testing.T) {
 		}
 	}
 }
+
+// The same conversation arrives under two session ids: the first request carries the client's session header, the
+// return does not (3 of 13 production tenants send both shapes, apply.go). With the store off the cold check must
+// still read the entry warm. It asks by the alias, which the body fixes, not by the session id.
+func TestTheStoreOffPingIsFoundWhateverSessionIdTheReturnCarries(t *testing.T) {
+	for _, st := range []store.Store{store.Nop{}, nil} {
+		r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+		r.st = st
+		r.session = "client-session-S" // request A carries the header
+		proveRoute(r.k)
+		t0 := r.clock.now()
+		r.request(t0)
+		r.session = ""                 // request C, the same conversation without the header: apply derives another session id,
+		r.request(t0.Add(time.Second)) // and this id is the one whose tracker the return B will find
+		r.record(t0, "end_turn", onWaitPolicy())
+		r.clock.advance(240 * time.Second)
+		r.k.Sweep(r.clock.now())
+		waitPings(t, r.k, 1)
+		// Request B, the same conversation, again without the header: its tracker holds C, so only the keeper's
+		// ping keeps it warm. The keeper's thread is keyed by another session id than B's.
+		if cold, _ := r.request(t0.Add(13 * time.Minute)); cold {
+			t.Errorf("%T: a return without the session header read cold inside the free ping's hour", st)
+		}
+	}
+}
+
+// A bypassed request takes no clock step, so with a store it ends nothing (the stored `:1h` stays). With the store
+// off it must not end the keeper's record either, or the two storage levels disagree and a cold-only cut applies.
+func TestABypassedAcceptedRequestDoesNotEndTheStoreOffPing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   store.Store
+	}{{"memory", store.NewMemory(store.Options{})}, {"nop", store.Nop{}}, {"nil", nil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newColdRig(t, Usage{CacheRead: 49500, CacheWrite: 0, Output: 1})
+			r.st = tc.st
+			proveRoute(r.k)
+			t0 := r.clock.now()
+			r.request(t0)
+			r.record(t0, "end_turn", onWaitPolicy())
+			r.clock.advance(240 * time.Second)
+			r.k.Sweep(r.clock.now())
+			waitPings(t, r.k, 1)
+			// The bypassed request: accepted, and apply wrote no clock (TouchAtMs 0).
+			r.k.Record(Record{Key: sess1, StartedAt: t0.Add(6 * time.Minute), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+				Route: "/v1/messages", Status: 200, UsageOK: true, Policy: onWaitPolicy(),
+				Usage: Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}, Header: kaHeader(),
+				Hold: fakeOf(r.k).hold(sess1), Store: tc.st, TouchAlias: r.alias})
+			if cold, _ := r.request(t0.Add(13 * time.Minute)); cold {
+				t.Errorf("%s: a bypassed request ended the ping's hour", tc.name)
+			}
+		})
+	}
+}

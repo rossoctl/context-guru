@@ -639,7 +639,7 @@ func TestTheShapesV078WritesReadTheSameAfterTheUpgrade(t *testing.T) {
 func TestFreePingIsAskedOnlyWhenTheStoreKeepsNothing(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	pingAt := base.Add(4 * time.Minute).UnixMilli()
-	run := func(st store.Store, hook func(session, thread string) (int64, bool), returnAt time.Duration) (cold bool) {
+	run := func(st store.Store, hook func(alias string) (int64, bool), returnAt time.Duration) (cold bool) {
 		var seen []bool
 		pipe := components.NewPipeline([]components.Component{coldSpy{&seen}}, nil)
 		tr := modes.NewTracker(0)
@@ -653,7 +653,14 @@ func TestFreePingIsAskedOnlyWhenTheStoreKeepsNothing(t *testing.T) {
 		return seen[len(seen)-1]
 	}
 	var calls int
-	hook := func(session, thread string) (int64, bool) { calls++; return pingAt, true }
+	wantAlias := TouchAliasFor("t", touchTierBody, bschemas.Anthropic)
+	hook := func(alias string) (int64, bool) {
+		if alias != wantAlias {
+			t.Errorf("the hook was asked for alias %q, want the request's own %q", alias, wantAlias)
+		}
+		calls++
+		return pingAt, true
+	}
 	m := time.Minute
 	// No store: warm 13 minutes after the first request, and cold again past the ping's hour and the margin.
 	for _, st := range []store.Store{store.Nop{}, nil} {
@@ -670,14 +677,14 @@ func TestFreePingIsAskedOnlyWhenTheStoreKeepsNothing(t *testing.T) {
 		if !run(st, nil, 13*m) {
 			t.Errorf("%T: with no hook the verdict must stay cold (the old behavior)", st)
 		}
-		if !run(st, func(string, string) (int64, bool) { panic("hook") }, 13*m) {
+		if !run(st, func(string) (int64, bool) { panic("hook") }, 13*m) {
 			t.Errorf("%T: a panicking hook must read as no ping", st)
 		}
-		if !run(st, func(string, string) (int64, bool) { return 0, false }, 13*m) {
+		if !run(st, func(string) (int64, bool) { return 0, false }, 13*m) {
 			t.Errorf("%T: a hook that says no ping must leave the verdict cold", st)
 		}
 		// A ping from the future of this request is no evidence.
-		if !run(st, func(string, string) (int64, bool) { return base.Add(time.Hour).UnixMilli(), true }, 13*m) {
+		if !run(st, func(string) (int64, bool) { return base.Add(time.Hour).UnixMilli(), true }, 13*m) {
 			t.Errorf("%T: a ping later than the request counted", st)
 		}
 	}

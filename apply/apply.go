@@ -681,7 +681,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				loadSessionState(st, alias)
 			}
 			seen, seq := aliasSeenWrite(st, alias, nowMs)
-			if seq > 0 { // seq is 0 when no clock was written (no store)
+			if seq > 0 { // seq is 0 when the request took no clock step (bypassed)
 				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
 			}
 			aliasAt := seen.at
@@ -691,7 +691,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// to the ping's hour, so it makes a cold verdict warm and never the other way.
 			storeOffPingAt := int64(0)
 			if !store.Keeps(st) {
-				if at, ok := o.freePingFor(sessionID, tr.Thread.ID); ok && at <= nowMs {
+				if at, ok := o.freePingFor(alias); ok && at <= nowMs {
 					storeOffPingAt = at
 				}
 			}
@@ -1365,12 +1365,16 @@ func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) 
 // errs toward the old behavior (a shared confirm), not toward a new failure.
 var touchSeq atomic.Int64
 
-// aliasSeenWrite is aliasSeenState that also returns the number of this request's write (0 when none was made).
+// aliasSeenWrite is aliasSeenState that also returns the number of this request's clock step (0 when the request
+// took none: a bypassed one). With no store the step writes nothing, but the request still has its number.
 func aliasSeenWrite(st store.Store, alias string, nowMs int64) (prev seenState, seq int64) {
-	if st == nil || nowMs <= 0 {
+	if nowMs <= 0 {
 		return seenState{}, 0
 	}
-	seq = touchSeq.Add(1)
+	seq = touchSeq.Add(1) // the request went through the clock step, also when there is no store to write to
+	if st == nil {
+		return seenState{}, seq
+	}
 	k := store.SeenPrefix + alias
 	if b, ok := st.Get(k); ok {
 		prev = parseSeenState(b)
