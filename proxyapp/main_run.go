@@ -920,7 +920,7 @@ func Main(hooks Hooks) {
 		// printed - indistinguishable from keep-alive being off. The startup line says so. A
 		// single-tenant proxy holds only its own user's credential, in memory, and pings without
 		// --dashboard (no ping rows are written then).
-		if !*dashOn && *upstreamsPath != "" {
+		if !*dashOn && tenants != nil {
 			kaAttrs = append(kaAttrs, "keepalive_retention", "IMPOSSIBLE: hosted mode with no recorder (pass --dashboard); "+
 				"entries are retired on arrival, so nothing will be held and no ping will be sent")
 		}

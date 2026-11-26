@@ -21,7 +21,7 @@ import (
 // #1457: "no audit sink, no retention" is a hosted rule. A single-tenant proxy holds only its own
 // user's credential, in memory, and needs no dashboard to ping.
 
-const fakeSecret = "sk-test-SECRET"
+const fakeSingleTenantKey = "sk-test-SECRET"
 
 // bookSink is the tenant's emitter as proxyapp wires it with no dashboard: every ping goes to BookPing.
 type bookSink struct {
@@ -63,7 +63,7 @@ func newNoDashHost(t *testing.T) *noDashHost {
 func (n *noDashHost) hold(session string, ago time.Duration) {
 	at := n.clock.now().Add(-ago)
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-	r.Header.Set("Authorization", "Bearer "+fakeSecret)
+	r.Header.Set("Authorization", "Bearer "+fakeSingleTenantKey)
 	for i := 0; i < 2; i++ {
 		n.h.keeper.record(&Tenancy{ID: "", Cache: kaPolicy(), Pipe: components.NewPipeline(nil, n.sink)}, session, "",
 			at.Add(time.Duration(i-1)*time.Second), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
@@ -105,7 +105,7 @@ func TestSingleTenantWithNoDashboardHoldsAndPings(t *testing.T) {
 	if n.fs.n() != 1 {
 		t.Fatalf("upstream saw %d pings, want 1", n.fs.n())
 	}
-	if got := n.fs.calls[0].hdr.Get("Authorization"); got != "Bearer "+fakeSecret {
+	if got := n.fs.calls[0].hdr.Get("Authorization"); got != "Bearer "+fakeSingleTenantKey {
 		t.Errorf("the ping did not carry the caller's own credential: %q", got)
 	}
 	if n.sink.obs.n != 1 || n.sink.obs.ops != 1 {
@@ -149,7 +149,7 @@ func TestHostedWithNoRecorderHoldsNothing(t *testing.T) {
 		t.Fatal("a hosted proxy with no recorder may hold a credential")
 	}
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-	r.Header.Set("Authorization", "Bearer "+fakeSecret)
+	r.Header.Set("Authorization", "Bearer "+fakeSingleTenantKey)
 	for i := 0; i < 2; i++ {
 		f.h.keeper.record(&Tenancy{ID: a.ID, Cache: kaPolicy()}, a.ID+":s1", "", clock.now().Add(time.Duration(i-60)*time.Second),
 			[]byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r, bschemas.Anthropic, "/v1/messages",
@@ -222,7 +222,7 @@ func TestWarmFactsReportsTheOneHourTier(t *testing.T) {
 	n := newNoDashHost(t)
 	at := n.clock.now()
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-	r.Header.Set("Authorization", "Bearer "+fakeSecret)
+	r.Header.Set("Authorization", "Bearer "+fakeSingleTenantKey)
 	body := strings.ReplaceAll(kaBody, `{"type":"ephemeral"}`, `{"type":"ephemeral","ttl":"1h"}`)
 	for i := 0; i < 2; i++ {
 		n.h.keeper.record(&Tenancy{ID: "", Cache: kaPolicy(), Pipe: components.NewPipeline(nil, n.sink)}, "sess-h", "",
@@ -250,7 +250,7 @@ func TestHeaderHoldWorksWithNoDashboard(t *testing.T) {
 	at := n.clock.now().Add(-40 * time.Second)
 	for i := 0; i < 2; i++ {
 		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
-		r.Header.Set("Authorization", "Bearer "+fakeSecret)
+		r.Header.Set("Authorization", "Bearer "+fakeSingleTenantKey)
 		r.Header.Set(ManualHoldHeader, "1")
 		n.h.keeper.record(&Tenancy{ID: "", Cache: CachePolicy{}, Pipe: components.NewPipeline(nil, n.sink)}, "sess-off", "",
 			at.Add(time.Duration(i)*time.Second), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
