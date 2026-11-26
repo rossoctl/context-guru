@@ -418,8 +418,8 @@ category of their own: they join `total_saved_usd`, and no cache strategy's ledg
 **Before #1460** (rows written then keep this figure): the figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
 `avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
 `saved_usd` in the reply (before #1460) was never below 0, so the two need not match. Since #1460 a new row
-holds no estimate (`manual_saved_usd` is 0), so `saved_usd` here is the pings' cost as a negative number until the rescue is
-credited on the next real request, and the Ping answer says `saving: "pending"`. A press is refused with
+holds no estimate (`manual_saved_usd` is 0), so `saved_usd` here is the pings' cost as a negative number, and it stays so.
+The rescue a ping buys appears in the keep-alive figures, on the thread's next real request. The Ping answer says `saving: "pending"`. A press is refused with
 `409 over budget` when one ping would cost more than the operator's per-ping cap, or more than the miss it protects, and `?tenant=` is ignored:
 it pings only the caller's own account.
 
