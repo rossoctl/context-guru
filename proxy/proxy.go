@@ -638,7 +638,7 @@ func (h *Handler) Mux() *http.ServeMux {
 		"metrics query timed out").ServeHTTP)
 	m.HandleFunc("GET /expand", h.expand)
 	// The dashboard mounts /dashboard/ (embedded UI) and /api/* (JSON + SSE) only
-	// when enabled, so an unconfigured proxy's route table is byte-identical to before.
+	// when enabled. With no dashboard, the one /api route that stays is the Ping button (below, #1457).
 	if h.api != nil {
 		h.api.Mount(m)
 	}
@@ -656,9 +656,11 @@ func (h *Handler) Mux() *http.ServeMux {
 		// save-more tools (#869): tool deferral's per-tool view and its keep / search actions.
 		m.HandleFunc("GET /api/save-more/tools", h.saveMoreToolsReport)
 		m.HandleFunc("POST /api/save-more/tools/apply", h.saveMoreToolsApply)
-		// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
-		h.mountManualPing(m)
 	}
+	// The Ping button (manualping.go): same principal as /api/adapt/*, so a single-tenant proxy has it too.
+	// Mounted with no dashboard as well (#1457): a single-tenant proxy keeps a thread warm without one. A
+	// hosted proxy with no recorder answers it with a 404 (keeper.mayHold).
+	h.mountManualPing(m)
 	// Bob (BobShell) gateway. Bob is OpenAI-compatible but calls Bob-specific
 	// paths: its model call is POST /inference/v1/chat/completions (reduced like
 	// any OpenAI chat), and its control-plane calls (/admin/v1/profile,
@@ -1944,7 +1946,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 					tenantID:  rc.tenantID,
 					provider:  provider,
 					path:      r.URL.Path,
-					headers:   r.Header.Clone(), // a copy: the writer reads it after serve returns
+					headers:   record.AllowedHeaders(r.Header), // a filtered copy: the writer reads it after serve returns
 					status:    status,
 					reqBody:   rc.pristine,
 					respBody:  recBody,

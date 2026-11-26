@@ -493,9 +493,10 @@ func TestWithoutTheHeaderNothingIsHeldAndTheEndpointSaysNotHeld(t *testing.T) {
 	}
 }
 
-// The header is honoured only where retention is already allowed: no dashboard recorder, no hold.
+// The header is honoured only where retention is already allowed: hosted with no dashboard recorder, no hold.
 func TestTheHeaderCannotWidenTheNoAuditSinkRule(t *testing.T) {
 	m := newManualHost(t)
+	m.h.opts.Tenants = &TenantSource{}
 	m.h.rec = nil
 	m.holdOff(t, "sess-x", "1")
 	if st := m.h.keeper.Stats(); st.Live != 0 {

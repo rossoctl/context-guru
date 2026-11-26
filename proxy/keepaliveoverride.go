@@ -130,8 +130,8 @@ func (k *keeper) arm(tenantID, session string, o sessionOverride) error {
 	if keepAliveDisabled() {
 		return fmt.Errorf("the keep-alive is switched off service-wide by the operator")
 	}
-	if k.h == nil || k.h.rec == nil {
-		return fmt.Errorf("this deployment records no audit trail, so nothing may be armed")
+	if !k.mayHold() {
+		return fmt.Errorf("this hosted deployment records no audit trail, so nothing may be armed")
 	}
 	key := kaKey(tenantID, session)
 	prefix := tenantID + "\x00"

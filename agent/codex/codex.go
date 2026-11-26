@@ -16,6 +16,13 @@ import (
 // Name is the client name on the dashboard.
 const Name = "codex"
 
+// The request headers Codex names its ids with.
+const (
+	SessionHeader      = "session-id"
+	ThreadHeader       = "thread-id"
+	ParentThreadHeader = "x-codex-parent-thread-id"
+)
+
 // Fields are the ids one Codex request carries. Each is "" when the header is absent.
 type Fields struct {
 	// SessionID is the `session-id` header. Codex sets it on every model request
@@ -45,9 +52,9 @@ func Identify(h http.Header) (Fields, bool) {
 		return Fields{}, false
 	}
 	return Fields{
-		SessionID: strings.TrimSpace(h.Get("session-id")),
-		AgentID:   strings.TrimSpace(h.Get("thread-id")),
-		ParentID:  strings.TrimSpace(h.Get("x-codex-parent-thread-id")),
+		SessionID: strings.TrimSpace(h.Get(SessionHeader)),
+		AgentID:   strings.TrimSpace(h.Get(ThreadHeader)),
+		ParentID:  strings.TrimSpace(h.Get(ParentThreadHeader)),
 	}, true
 }
 

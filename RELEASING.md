@@ -36,7 +36,7 @@ The integrator and the reviewers can be people or AI agent sessions. The rules a
 2. **Sort the open PRs into features.** Group them by what a user gets, not by author or by date: for example "save-more commands", "status line", "test fixes". Show which PRs depend on which.
 3. **The release owner picks the groups.** The integrator does not add or drop an item without the owner.
 4. **Record what is out**, and why. An item that moves to the next release keeps its issue.
-5. **Scan for new business logic in host packages and for client rules outside `agent.Identify`.** Run `refactor-scan` on the diff since the last tag, in its host-leak and client-rule modes (host-leak: logic in `proxy/` that a library package should hold; client-rule: a rule that names one client, outside `agent.Identify`). Open an issue for each leak. A leak does not block the release unless the owner says so.
+5. **Scan for new business logic in host packages and for client rules outside `agent.Identify`.** Run `refactor-scan` on the diff since the last tag, in its host-leak and client-rule modes (host-leak: logic in a host package (`proxy/`, `proxyapp/`, `cmd/context-guru-proxy`, `dash/`) that a library package should hold; client-rule: a rule that names one client, outside `agent.Identify`). Open an issue for each leak. A leak does not block the release unless the owner says so.
 6. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
 
 ### Measurements before a release
@@ -139,6 +139,8 @@ A review without this block does not count toward the 2.
   9. **A semantic conflict that a file-overlap check cannot see.** A test can read a table that another PR removes. In v0.7.2, the pi-package test read `STRATEGIES` from `settings.py` after #1055 removed it. Only CI catches this. The CI of a clean merge of `main` runs on the push. Do not wait for it only because another PR merged. The watch on `main` after each merge (see [Merge](#3-merge)) catches it.
   10. **A conflict in `docs/data-dependence.md`** is not a hand resolution. That page is generated from the row files in `docs/data-dependence/`. The subagent takes either side and runs `go run ./cmd/gen-datadep`. A row-file conflict (two PRs edited the same row) still goes to the PR owner. The remerge-diff may show the page; check that it equals the generator's output.
 
+**Run main's copy of a release script, never an old checkout's copy.** Run it from a worktree at `origin/main`. A script with no helper of its own, such as `approval-still-valid.sh`, may also run as `git show origin/main:scripts/release/<name>.sh | bash -s -- <args>`. A script that finds its helpers with `dirname "$0"` (today `check-ready.sh`) breaks when piped, so it must run from the worktree. An old copy of `approval-still-valid.sh` once printed `CHANGED` where the copy on `main` printed `LISTS ONLY`.
+
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
@@ -174,6 +176,8 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
 - **Write issue numbers in a PR body as `Refs #N` only.** GitHub closes an issue when "close", "fix" or "resolve" (or a form of them) stands before `#N` anywhere in the PR body. A negative sentence such as "Does not close #1303" also closes it. That is how #1303 closed by mistake when #1370 merged.
   - Before each merge, grep the PR body for those words before a `#number`.
   - If one is there, fix the body before the merge. If the issue closed already, reopen it.
+- **Never put a user's own usage figures in a commit message, PR body or issue.** This means dollars, tokens and counts from a real person's sessions. GitHub keeps the edit history of a PR body, and only the author can delete a revision. Use made-up or rounded figures.
+- **Docs state each process rule plainly.** Do not add a note such as "owner rule, <name>, <date>" to a process doc, a script or a comment. Put who decided and when in the PR body. A data-dependence row keeps its required "Decided by" line.
 - **Refuse a PR whose `go.mod` diff adds a pseudo-version for one of our modules, or for a module that publishes tags.** A pseudo-version pins a commit, not a released tag. Ask the author to release the dependency and pin the tag. A third-party module with no tags keeps its pseudo-version. See the [`go.mod` rule in CLAUDE.md](CLAUDE.md#conventions).
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
 - **After every merge, tell the PR owner in the same step**. Treat the merge and the message as one step.
@@ -191,6 +195,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   - **Why:** a serial re-run costs about one full CI run (about 40 minutes) for each pair of PRs. A break between 2 green PRs is rare: about 1 in 30 merges in the v0.7.4 cycle. A fix PR is cheap.
   - **Exception 1:** a merge of `main` that the integrator resolved by hand in code gets its CI first. In v0.7.4, a hand merge lost a SQL placeholder (#1173).
   - **Exception 2:** the tag. `main` must be green at the tagged commit.
+  - **Exception 3:** `main` moved in the same packages as the PR since its approval. Before the merge, the integrator runs a merged-tree check: build, `go vet ./...`, and the tests of the touched packages. Two green PRs once broke `main` together (#1407 and #1410, fixed by #1426). This check does not wait for a full CI run. It runs on the merged tree.
   - **Note:** GitHub's merge queue does this automatically. It tests each PR on top of the PRs ahead of it. Turning it on is a repo setting for the owner.
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
   - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
@@ -222,6 +227,8 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 - **A `202` is not a merge.** Read the PR state back from GitHub.
 
 **Check that the child's own change is unchanged:** the added and removed lines of `git diff origin/main...<head>` match the approved change.
+
+When the child's base was squash-merged, the integrator merges `main` into the child. Then it checks that the added and removed lines equal the approved diff (the old base head to the PR head). If they are equal, the approvals hold (#1414).
 
 This section is about a stacked PR. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 

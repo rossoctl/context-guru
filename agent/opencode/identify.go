@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// The request headers OpenCode names its sessions with.
+const (
+	SessionHeader       = "x-opencode-session-id"
+	ParentSessionHeader = "x-opencode-parent-session-id"
+)
+
 // Fields are the ids OpenCode sends in headers.
 type Fields struct {
 	// SessionID is x-opencode-session-id.
@@ -19,8 +25,8 @@ type Fields struct {
 // header gives the zero Fields and false.
 func Identify(h http.Header) (f Fields, ok bool) {
 	f = Fields{
-		SessionID:       strings.TrimSpace(h.Get("x-opencode-session-id")),
-		ParentSessionID: strings.TrimSpace(h.Get("x-opencode-parent-session-id")),
+		SessionID:       strings.TrimSpace(h.Get(SessionHeader)),
+		ParentSessionID: strings.TrimSpace(h.Get(ParentSessionHeader)),
 	}
 	return f, f != (Fields{})
 }

@@ -465,10 +465,9 @@ func Main(hooks Hooks) {
 		rec = r
 		defer rec.Close()
 		// Wire the keep-alive sink to the same recorder every other dash write already uses.
-		// Until --dashboard runs this block, kaKeepAlive.rec stays nil and no ping row is written. The
-		// keeper's own "no audit sink, no retention" gate also sends no ping then, so no ping reaches
-		// KeepAlivePing without --dashboard. Its booking path (BookPing) needs no dashboard, and is ready
-		// if that gate ever changes.
+		// Until --dashboard runs this block, kaKeepAlive.rec stays nil and no ping row is written. A
+		// single-tenant proxy still pings without it (#1457), and BookPing books each ping's spend with no
+		// dashboard. Only a hosted proxy with no recorder holds nothing ("no audit sink, no retention").
 		kaKeepAlive.rec = rec
 		// Recover which sessions were live before this restart. Without it every conversation
 		// in flight reports a cold start on its next turn, which mislabels the cache verdict of
@@ -916,17 +915,13 @@ func Main(hooks Hooks) {
 			"keepalive_idle_seconds", ka.KeepAliveIdleSeconds,
 			"keepalive_max_pings", ka.KeepAliveMaxPings)
 		// `keepalive=true` says what the CONFIG asks for and nothing about whether anything can be
-		// held, and the difference is not academic: arrive() retires every entry when there is no
-		// recorder ("NO AUDIT SINK, NO RETENTION", keepalive.go:585), so without --dashboard nothing
-		// is held, nothing pings, no counters move and no message is printed - indistinguishable from
-		// keep-alive being off.
-		//
-		// That cost three review rounds on #274 to resolve, in exactly that way: two sessions ran
-		// proxies without --dashboard, saw no pings, and could not tell "not wired" from "never
-		// fired". So the startup line now reports the precondition rather than only the intent. The
-		// plugin always passes --dashboard, so this is for everyone running the binary directly.
-		if !*dashOn {
-			kaAttrs = append(kaAttrs, "keepalive_retention", "IMPOSSIBLE: no recorder (pass --dashboard); "+
+		// held. A HOSTED proxy with no recorder holds nothing ("no audit sink, no retention", the
+		// hosted rule, #1457): it retires every entry on arrival, so nothing pings and no message is
+		// printed - indistinguishable from keep-alive being off. The startup line says so. A
+		// single-tenant proxy holds only its own user's credential, in memory, and pings without
+		// --dashboard (no ping rows are written then).
+		if !*dashOn && tenants != nil {
+			kaAttrs = append(kaAttrs, "keepalive_retention", "IMPOSSIBLE: hosted mode with no recorder (pass --dashboard); "+
 				"entries are retired on arrival, so nothing will be held and no ping will be sent")
 		}
 	}
@@ -1090,9 +1085,8 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 // Both fields are set after construction (see where kaKeepAlive is built, above) because this
 // value is threaded into `emitter` before its two dependencies — the recorder and the price
 // resolver — exist yet. KeepAlivePing is nil-safe on an unset rec: with no recorder no row is written. The
-// keeper's own retention gate (no audit sink, no retention) holds nothing and so sends no ping until
-// --dashboard has opened one. The savings booking (BookPing) runs before the rec check and needs no
-// dashboard, so it is ready if that gate ever changes.
+// keeper's retention gate (no audit sink, no retention) is a hosted rule only (#1457). A single-tenant
+// proxy pings with no dashboard: the savings booking (BookPing) runs before the rec check and needs none.
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer

@@ -581,7 +581,7 @@ def collect_env(f: Fetcher, rep: Report, stats: object) -> None:
             "configuration, not a measurement"))
 
     # THE ONE FINDING THAT GATES EVERY OTHER. Without --dashboard there is no store, so there are
-    # no tools, no keep-alive ledger and no component rows — and a report that silently omitted
+    # no tools, no keep-alive ledger (a single-tenant proxy still pings, but writes no rows) and no component rows — and a report that silently omitted
     # them would read as "your setup is clean".
     if stats is None:
         rep.unavailable.append("dashboard")
