@@ -844,3 +844,13 @@ func TestWrongGuesses(t *testing.T) {
 		}
 	}
 }
+
+// A stream with CRLF framing and an [DONE] marker reads like one with LF (#1499). The reader kept the
+// "\r" on the last line before, which made the JSON of that line invalid.
+func TestReadSearchesSSEFraming(t *testing.T) {
+	sse := []byte("data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"server_tool_use\",\"name\":\"tool_search_tool_bm25\"}}\r\n\r\n" +
+		"data: [DONE]\r\n\r\n")
+	if r := ReadSearchesSSE(sse); r.Searches != 1 {
+		t.Fatalf("crlf: %+v", r)
+	}
+}

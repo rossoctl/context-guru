@@ -9,6 +9,7 @@ import (
 
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/providerusage"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -167,15 +168,12 @@ func bobMarksOf(contentType string, body []byte) (gjson.Result, bobMarks) {
 			note(doc)
 		}
 	} else {
-		for _, line := range strings.Split(string(body), "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			if doc := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:"))); doc.IsObject() {
+		schema.SSEData(body, func(d []byte) bool {
+			if doc := gjson.ParseBytes(d); doc.IsObject() {
 				note(doc)
 			}
-		}
+			return true
+		})
 	}
 	if usage.Exists() {
 		m.usage = true

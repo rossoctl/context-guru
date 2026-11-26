@@ -78,3 +78,25 @@ func TestAggregateSSEChat(t *testing.T) {
 		t.Fatalf("msg = %s", msg)
 	}
 }
+
+// A Chat stream with CRLF framing, a multi-line data field and a [DONE] marker rebuilds like one
+// with LF (#1499).
+func TestAggregateSSEFraming(t *testing.T) {
+	raw := "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read\",\n" +
+		"data: \"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\r\n\r\ndata: [DONE]\r\n\r\n"
+	msg, ok := AggregateSSE("openai", []byte(raw))
+	if !ok {
+		t.Fatal("not rebuilt")
+	}
+	if got := gjson.GetBytes(msg, "choices.0.message.tool_calls.0.function.name").String(); got != "read" {
+		t.Fatalf("msg = %s", msg)
+	}
+}
+
+// The Responses terminal event is found in a CRLF stream, and a stream with no [DONE] still ends.
+func TestAggregateSSEResponsesFraming(t *testing.T) {
+	raw := "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\r\n\r\n"
+	if msg, ok := AggregateSSE("responses", []byte(raw)); !ok || !gjson.GetBytes(msg, "output").IsArray() {
+		t.Fatalf("msg = %s ok = %v", msg, ok)
+	}
+}

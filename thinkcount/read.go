@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Limits on what one response may hold. Past them the response gives no count, and its blocks keep
@@ -130,8 +132,7 @@ func (c *Collector) keep(p []byte) {
 // event reads one line of the stream. Only data lines of the four event types it needs are parsed; a
 // text_delta line, most of a stream, costs one prefix test and four byte searches.
 func (c *Collector) event(line []byte) {
-	line = bytes.TrimRight(line, "\r")
-	data, ok := bytes.CutPrefix(line, []byte("data:"))
+	data, ok := schema.SSEDataLine(line)
 	if !ok {
 		return
 	}

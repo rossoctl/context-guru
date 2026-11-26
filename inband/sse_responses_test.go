@@ -269,3 +269,17 @@ func TestStatelessResponsesServerHeldHistoryForms(t *testing.T) {
 		}
 	}
 }
+
+// The payload of an event comes from the shared SSE rules: CRLF, several data lines, [DONE] (#1499).
+func TestSSEEventPayloadRules(t *testing.T) {
+	for ev, want := range map[string]string{
+		"event: x\r\ndata: {\"a\":1}\r\n\r\n": `{"a":1}`,
+		"data: {\"a\":\ndata: 1}\n\n":         "{\"a\":\n1}",
+		"data: [DONE]\n\n":                    "",
+		"event: ping\n\n":                     "",
+	} {
+		if got := sseEventPayload([]byte(ev)); got != want {
+			t.Errorf("%q: got %q, want %q", ev, got, want)
+		}
+	}
+}

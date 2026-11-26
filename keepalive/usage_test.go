@@ -40,3 +40,32 @@ func TestPingUsageOfGarbageIsZero(t *testing.T) {
 		t.Fatalf("PingUsage(garbage) = %+v, want zero", u)
 	}
 }
+
+// A ping on an OpenAI wire gives its stop reason too (#1481). It was empty: only Anthropic's
+// stop_reason was read.
+func TestPingUsageReadsTheStopReasonOfEveryWire(t *testing.T) {
+	for _, c := range []struct{ name, body, want string }{
+		{"anthropic", `{"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, "end_turn"},
+		{"chat", `{"choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}`, "tool_calls"},
+		{"responses", `{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5,"output_tokens":1}}`, "max_output_tokens"},
+		{"responses, completed", `{"status":"completed","usage":{"input_tokens":5,"output_tokens":1}}`, ""},
+	} {
+		if got := PingUsage([]byte(c.body)).StopReason; got != c.want {
+			t.Errorf("%s: stop reason %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// keepalive.ToolStopReasons is the one list, and every word in it says "called a tool".
+func TestToolStopReasonsIsTheSchemaList(t *testing.T) {
+	for _, r := range []string{"tool_use", "tool_calls", "function_call"} {
+		if !toolStop(r) {
+			t.Errorf("%q is not a tool stop reason", r)
+		}
+	}
+	for _, r := range []string{"end_turn", "stop", "length", ""} {
+		if toolStop(r) {
+			t.Errorf("%q is a tool stop reason", r)
+		}
+	}
+}

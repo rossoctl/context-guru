@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/thinkcount"
 )
@@ -158,15 +159,16 @@ func (s *sniffer) disjoint() []byte {
 // responseUsage reads a response's usage. The returned Usage carries the stop reason whatever
 // `ok` says, see Usage.StopReason.
 func responseUsage(contentType string, body []byte) (Usage, bool) {
-	u, _, ok := responseUsageWhy(contentType, body, false)
+	u, _, ok := responseUsageWhy(agent.Client{}, contentType, body, false)
 	return u, ok
 }
 
 // responseUsageWhy reads a response through respfacts.Read and lays the facts into a Usage, which
 // adds the fields only this host sets. spliced is the sniffer's own knowledge that body is a
-// head+tail window (sn.spliced()).
-func responseUsageWhy(contentType string, body []byte, spliced bool) (Usage, respfacts.Miss, bool) {
-	f := respfacts.Read(contentType, body, spliced)
+// head+tail window (sn.spliced()). cl is the client that sent the request: its rules say which
+// tool is a subagent call.
+func responseUsageWhy(cl agent.Client, contentType string, body []byte, spliced bool) (Usage, respfacts.Miss, bool) {
+	f := respfacts.Read(cl, contentType, body, spliced)
 	return Usage{
 		FreshInput: f.FreshInput, CacheRead: f.CacheRead, CacheWrite: f.CacheWrite,
 		CacheWrite1h: f.CacheWrite1h, Output: f.Output,

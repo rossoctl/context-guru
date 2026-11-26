@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // TTL is a prompt-cache lifetime tier, spelled the way the provider's usage block spells
@@ -159,10 +160,17 @@ const (
 // stop_reason (a future API addition, a dialect this deployment has not seen yet) falls
 // through to ClusterLooksDoneIsnt — the cluster that is NOT worth pinging on — rather than
 // being guessed into the high-value cluster on a name it has never been measured against.
-var stillWorkingReasons = map[string]bool{
-	"tool_use": true, "stop_sequence": true, "tool_calls": true, "length": true,
-	"content_filter": true,
-}
+//
+// The tool reasons are schema.ToolStopReasons. The rest is this study's own choice, and stays here:
+// stop_sequence, length and content_filter are not tool calls, but the turn did not finish by its
+// own choice, so the study counted them with the turns that go on.
+var stillWorkingReasons = func() map[string]bool {
+	m := map[string]bool{"stop_sequence": true, "length": true, "content_filter": true}
+	for _, r := range schema.ToolStopReasons {
+		m[r] = true
+	}
+	return m
+}()
 var actuallyDoneReasons = map[string]bool{
 	"end_turn": true, "max_tokens": true, "refusal": true,
 }

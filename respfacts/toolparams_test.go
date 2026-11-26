@@ -2,6 +2,8 @@ package respfacts
 
 import (
 	"testing"
+
+	"github.com/rossoctl/context-guru/agent"
 )
 
 // The wait tool's `timeout` and `run_in_background` are read, and nothing else of the input.
@@ -66,10 +68,16 @@ func TestResponseLastToolParamsStreamed(t *testing.T) {
 	if got := LastToolParams(true, []byte(empty)); got != (ToolParams{}) {
 		t.Errorf("empty input: %+v", got)
 	}
-	// An OpenAI stream is not read: a gap, never a guess.
+	// A streamed OpenAI call and a streamed Responses call are read the same way (#1484). They were a
+	// gap before: the value stayed unstated.
 	oa := ev(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"shell","arguments":"{\"timeout\":5}"}}]}}]}`)
-	if got := LastToolParams(true, []byte(oa)); got != (ToolParams{}) {
+	if got := LastToolParams(true, []byte(oa)); got != (ToolParams{TimeoutMs: 5, HasTimeout: true}) {
 		t.Errorf("openai stream: %+v", got)
+	}
+	rs := ev(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"c","name":"shell","arguments":""}}`) +
+		ev(`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"run_in_background\":true}"}`)
+	if got := LastToolParams(true, []byte(rs)); got != (ToolParams{Background: true, HasBackground: true}) {
+		t.Errorf("responses stream: %+v", got)
 	}
 }
 
@@ -86,7 +94,7 @@ func TestResponseSpawns(t *testing.T) {
 		{"type":"tool_use","id":"a","name":"Agent","input":{"subagent_type":"Explore","prompt":"secret text"}},
 		{"type":"tool_use","id":"b","name":"Agent","input":{"subagent_type":"my-reviewer","prompt":"x"}},
 		{"type":"tool_use","id":"c","name":"Bash","input":{"command":"ls"}}]}`)
-	if got := Spawns(false, buf); got != (Spawn{N: 2, Type: "my-reviewer"}) {
+	if got := Spawns(agent.Client{}, false, buf); got != (Spawn{N: 2, Type: "my-reviewer"}) {
 		t.Errorf("buffered: %+v", got)
 	}
 	ev := func(s string) string { return "data: " + s + "\n\n" }
@@ -94,7 +102,32 @@ func TestResponseSpawns(t *testing.T) {
 		ev(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"subagent_type\":\"Pla"}}`) +
 		ev(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"n\",\"prompt\":\"p\"}"}}`) +
 		ev(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"b","name":"Bash","input":{}}}`)
-	if got := Spawns(true, []byte(stream)); got != (Spawn{N: 1, Type: "Plan"}) {
+	if got := Spawns(agent.Client{}, true, []byte(stream)); got != (Spawn{N: 1, Type: "Plan"}) {
 		t.Errorf("streamed: %+v", got)
+	}
+}
+
+// A streamed call whose start event already holds an input, and which then streams pieces, used to
+// give the start input followed by the pieces: invalid JSON, so the type was lost (#1484).
+func TestSpawnsStartInputAndPieces(t *testing.T) {
+	ev := func(s string) string { return "data: " + s + "\n\n" }
+	stream := ev(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"Task","input":{"x":1}}}`) +
+		ev(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"subagent_type\":\"Plan\"}"}}`)
+	if got := Spawns(agent.Client{}, true, []byte(stream)); got != (Spawn{N: 1, Type: "Plan"}) {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// A subagent call on an OpenAI or a Responses stream counts, as it does in a whole body (#1484).
+func TestSpawnsOnOpenAIStreams(t *testing.T) {
+	ev := func(s string) string { return "data: " + s + "\n\n" }
+	chat := ev(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"Task","arguments":""}}]}}]}`) +
+		ev(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"subagent_type\":\"Plan\"}"}}]}}]}`)
+	if got := Spawns(agent.Client{}, true, []byte(chat)); got != (Spawn{N: 1, Type: "Plan"}) {
+		t.Errorf("chat: %+v", got)
+	}
+	rs := ev(`{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"c","name":"Task","arguments":"{\"subagent_type\":\"Explore\"}"}]}}`)
+	if got := Spawns(agent.Client{}, true, []byte(rs)); got != (Spawn{N: 1, Type: "Explore"}) {
+		t.Errorf("responses: %+v", got)
 	}
 }

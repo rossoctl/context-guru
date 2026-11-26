@@ -184,3 +184,13 @@ func TestCountableRefusesZeroAndTooManyBlocks(t *testing.T) {
 		t.Fatalf("%d blocks must be recorded", maxRecord)
 	}
 }
+
+// A stream with CRLF framing is read like one with LF (#1499).
+func TestCollectorReadsCRLFFraming(t *testing.T) {
+	stream := strings.ReplaceAll(string(twoBlockStream("AAA", "BBB")), "\n", "\r\n")
+	var c Collector
+	c.Write([]byte(stream))
+	if r := c.Result(); len(r.Opaques) != 2 || r.Tokens != 300 {
+		t.Fatalf("%d opaques, tokens %d", len(r.Opaques), r.Tokens)
+	}
+}

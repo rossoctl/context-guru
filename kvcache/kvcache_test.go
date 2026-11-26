@@ -354,3 +354,21 @@ func TestStatsFallBackFromUserToModelToGlobal(t *testing.T) {
 		t.Errorf("median idle = %v, want 30s", got)
 	}
 }
+
+// The tool stop reasons of every wire are "still working", from one list (#1481). function_call
+// was missing here. stop_sequence, length and content_filter stay: this study counts them too.
+func TestClusterOfCountsEveryToolStopReason(t *testing.T) {
+	for _, r := range []string{"tool_use", "tool_calls", "function_call", "stop_sequence", "length", "content_filter"} {
+		if got := ClusterOf(r); got != ClusterStillWorking {
+			t.Errorf("ClusterOf(%q) = %v, want still working", r, got)
+		}
+	}
+	for _, r := range []string{"end_turn", "max_tokens", "refusal"} {
+		if got := ClusterOf(r); got != ClusterActuallyDone {
+			t.Errorf("ClusterOf(%q) = %v, want actually done", r, got)
+		}
+	}
+	if got := ClusterOf("stop"); got != ClusterLooksDoneIsnt {
+		t.Errorf("ClusterOf(stop) = %v", got)
+	}
+}
