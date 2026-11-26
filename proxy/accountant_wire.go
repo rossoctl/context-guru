@@ -155,14 +155,14 @@ func (c *capture) accBilledTTL(u Usage) {
 // a lean capture that holds only what the accountant reads, so the accountant runs on every request (#1451). It is
 // nil when the handler has no savings tracker. The lean capture has no recorder: finish sends it to
 // finishAccountant, and no dashboard code runs on it.
-func (h *Handler) accCapture(cp *capture, provider, route string, tn *Tenancy) *capture {
+func (h *Handler) accCapture(cp *capture, start time.Time, provider, route string, tn *Tenancy) *capture {
 	if cp != nil {
 		return cp
 	}
 	if h == nil || h.savings == nil {
 		return nil
 	}
-	return &capture{pricer: h.opts.Prices, route: route, provider: provider, start: time.Now(), savings: h.savings, accMu: new(sync.Mutex),
+	return &capture{pricer: h.opts.Prices, route: route, provider: provider, start: start, savings: h.savings, accMu: new(sync.Mutex),
 		pings: h.opts.Pings, metrics: h.opts.MetricsSink, observe: tn.Mode == components.ModeObserve}
 }
 
@@ -208,7 +208,8 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 // has not (accCompute), so the order of the two does not matter. ok is false when the request books no figure: no
 // billed usage, a rejected or multi-round request, an observe run, a trace that dropped operations, no model price, a
 // result that fails a gate of accountant.Withhold (checks and unpriced; the size gate is the dashboard's), or any
-// panic. It never changes the request. Tool deferral's ledger calls it (#1445).
+// panic. It never changes the request. It is the hook for #1445's deferral ledger. Nothing in production calls it yet in
+// this PR: only the tests do.
 func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig accountant.USDFigure, ok bool) {
 	if c == nil || c.pricer == nil || c.model == "" {
 		return accountant.USDFigure{}, false
@@ -241,7 +242,7 @@ func (c *capture) finishAccountant(usage Usage, usageOK bool) {
 			slog.Error("accountant: finish panicked; the request books no figure", "panic", p)
 		}
 	}()
-	defer c.savings.drop(c.accReq)
+	defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
 	c.accCompute(usage, usageOK)
 	if usageOK && !c.rejected() {
 		c.savings.recordThinking(usage.Thinking)

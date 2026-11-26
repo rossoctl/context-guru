@@ -32,7 +32,7 @@ type figTap struct {
 	oks  []bool
 }
 
-func (f *figTap) hook(h *Handler, p modelinfo.Pricer) {
+func (f *figTap) hook(h *Handler) {
 	h.savings.onFinish = func(c *capture, u Usage, usageOK bool) {
 		fig, ok := c.accFigure(context.Background(), u, usageOK)
 		f.mu.Lock()
@@ -98,7 +98,7 @@ func TestAccountantRunsWithoutTheDashboard(t *testing.T) {
 		t.Fatal("the dashboard is on")
 	}
 	var tap figTap
-	tap.hook(h, fixedPricer{})
+	tap.hook(h)
 	postTwice(t, h, "sess-nodash")
 	tap.wait(t, 2)
 
@@ -124,7 +124,7 @@ func TestAccountantFigureMatchesTheDashboardRow(t *testing.T) {
 	var hh *Handler
 	h, rec, evs := accHandlerOpts(t, up.URL, "preset: codesafe\n", nil)
 	hh = h
-	tap.hook(hh, fixedPricer{})
+	tap.hook(hh)
 	postTwice(t, h, "sess-dash-on")
 	waitForRows(t, rec, 2)
 	got := evs.waitAll(t, 2)
@@ -153,13 +153,13 @@ func TestAccountantFigureIsTheSameWithAndWithoutTheDashboard(t *testing.T) {
 	defer up.Close()
 	off := noDashHandler(t, up.URL, nil)
 	var a figTap
-	a.hook(off, fixedPricer{})
+	a.hook(off)
 	postTwice(t, off, "sess-same")
 	a.wait(t, 2)
 
 	on, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", nil)
 	var b figTap
-	b.hook(on, fixedPricer{})
+	b.hook(on)
 	postTwice(t, on, "sess-same")
 	waitForRows(t, rec, 2)
 	b.wait(t, 2)
@@ -206,7 +206,7 @@ func TestPanickingPricerStillForwardsTheRequestWithoutTheDashboard(t *testing.T)
 	}
 	h := noDashHandler(t, up.URL, func(o *Options) { o.Prices = pp; o.MetricsSink = sink })
 	var tap figTap
-	tap.hook(h, pp)
+	tap.hook(h)
 
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()

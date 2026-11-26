@@ -1339,9 +1339,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		}
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
+		capStart := time.Now()
 		cp := h.newCapture(r, cl, string(provider), up.path, tn)
+		if cp != nil {
+			cp.start = capStart // one moment for the dashboard row and the accountant's At
+		}
 		// ac is what the accountant runs on: cp, or a lean capture when the dashboard is off (#1451).
-		ac := h.accCapture(cp, string(provider), up.path, tn)
+		ac := h.accCapture(cp, capStart, string(provider), up.path, tn)
 		ac.noteModel(gjson.GetBytes(body, "model").String())
 		ac.noteReadSets(up.base, h.keeper.readSetsTTL)
 		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))

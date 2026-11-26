@@ -181,7 +181,7 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
-	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
+	// savings is the handler's accountant tracker (nil only on a handler built without one); accReq is this
 	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
 	// metrics receives each priced request for the push metrics (Options.MetricsSink; nil = off).
