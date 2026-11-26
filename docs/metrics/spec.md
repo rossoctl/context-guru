@@ -305,7 +305,7 @@ Labels in this section:
 | `llm_savings_estimated_total` | counter | 1 | none | Requests whose figure is marked estimated. |
 | `llm_savings_check_failures_total` | counter | 1 | `check` | Failed library checks: `sum`, `order`, `unique_change`, `spans`, `attribution`, `conservation`, `shared_warm`. |
 | `llm_savings_fallback_total` | counter | 1 | `reason` | Requests that booked no saving because the dashboard gate declined. |
-| `llm_savings_withheld_total` | counter | 1 | `reason` | Requests whose figure failed a gate of the library (`accountant.Withhold`, accountant v0.9.0). The push books only the cost of their spends. `reason` is one of `check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`, `size_unknown`, `implausible_size`. Context-guru gives the library no size before the change, so `size_unknown` and `implausible_size` do not occur. |
+| `llm_savings_withheld_total` | counter | 1 | `reason` | Requests whose figure failed a gate of the library (`accountant.Withhold`, accountant v0.10.0). The push books only the cost of their spends. `reason` is one of `check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`, `size_unknown`, `implausible_size`. Context-guru gives the library no size before the change, so `size_unknown` and `implausible_size` do not occur. |
 
 **Saved tokens and added tokens.** Both counters compare the request as it was sent with the request as the client wrote it. They are two sides of one change, and neither one is net.
 - `llm_savings_saved_tokens_total`: tokens the provider billed less, because of a change. Example: `dedup` removes 10,000 tokens from the prompt. Saved: 10,000 at tier `input`, or at tier `cache_read` if those tokens would have been read from the cache.
