@@ -71,7 +71,9 @@ func replayDigests(t *testing.T, dir string) []string {
 func TestReplayBooksTheSameFigures(t *testing.T) {
 	got := strings.Join(replayDigests(t, t.TempDir()), " ")
 	t.Log("digests:", got)
-	const want = "46db83a84bd9642b c2887c4941382b80 ed73a8c7240dabf6 a1ca4676152f8123 1cf6bfca006c491d b158a0f0834f4210"
+	// Accountant v0.10.0 (#121) adds the field Check.Claims to the marshaled Result. Cases 0, 1, 2 and 5 carry a
+	// ratio_range check, so their digests changed. No booked figure changed.
+	const want = "a768dfcc8394d0db ad6f6258f2136947 5a5b01339873476e a1ca4676152f8123 1cf6bfca006c491d f47c376586834631"
 	if got != want {
 		t.Fatalf("booked figures changed:\n got  %s\n want %s", got, want)
 	}
