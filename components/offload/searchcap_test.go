@@ -121,3 +121,17 @@ func TestCapSearchOutputExactlyOneOverCap(t *testing.T) {
 		t.Errorf("got ok=%v\n%s", ok, out)
 	}
 }
+
+func TestCapSearchOutputIgnoresLookAlikeLines(t *testing.T) {
+	var ts, date, prose strings.Builder
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&ts, "2026-11-26T09:15:03Z INFO worker: processed batch %d\n", i)
+		fmt.Fprintf(&date, "2026-11-26 12:33:%02d INFO worker: step %d\n", i, i)
+		fmt.Fprintf(&prose, "word-%d-word is a compound term\n", i)
+	}
+	for name, in := range map[string]string{"timestamp log": ts.String(), "date log": date.String(), "word-NUM-word": prose.String()} {
+		if out, ok := CapSearchOutput(in, 3, 0, true); ok {
+			t.Errorf("%s: capped, want it left alone:\n%s", name, out)
+		}
+	}
+}

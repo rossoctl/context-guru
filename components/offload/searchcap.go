@@ -7,6 +7,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/reformat"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
 )
@@ -122,21 +123,35 @@ func (sc *Searchcap) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 	return keys, nil
 }
 
-// hitRow matches a `path:LINE:text` match row; ctxRow a `path-LINE-text` context row.
-var (
-	hitRow = regexp.MustCompile(`^([^\s:][^:]*):\d+:`)
-	ctxRow = regexp.MustCompile(`^(.+?)-\d+-`)
-)
+// dateLead matches a path that starts like a date (a log line `2026-11-26T09:15:03Z ...`).
+// splitHit accepts it as a path, because folding it is lossless. A cap is lossy, so it needs
+// a stricter test.
+var dateLead = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
 
 // rowPath returns the file a row belongs to and whether it is a match (not context) row.
-func rowPath(l string) (path string, hit, ok bool) {
-	if m := hitRow.FindStringSubmatch(l); m != nil {
-		return m[1], true, true
+// It uses the row parser of searchfold. A date-led path is not a row. A context row counts
+// only when its path is one of the hit paths in the output (hitPaths), so a prose line such
+// as `word-12-word` is not a row.
+func rowPath(l string, hitPaths map[string]bool) (path string, hit, ok bool) {
+	p, hit, ok := reformat.SplitHit(l)
+	if !ok || dateLead.MatchString(p) {
+		return "", false, false
 	}
-	if m := ctxRow.FindStringSubmatch(l); m != nil {
-		return m[1], false, true
+	if !hit && !hitPaths[p] {
+		return "", false, false
 	}
-	return "", false, false
+	return p, hit, true
+}
+
+// hitPathSet collects the paths of the match rows of a listing.
+func hitPathSet(lines []string) map[string]bool {
+	set := map[string]bool{}
+	for _, l := range lines {
+		if p, hit, ok := reformat.SplitHit(l); ok && hit && !dateLead.MatchString(p) {
+			set[p] = true
+		}
+	}
+	return set
 }
 
 // CapSearchOutput keeps the first perFile match rows of every file group (plus the last one
@@ -153,13 +168,14 @@ func CapSearchOutput(s string, perFile, maxFiles int, keepLast bool) (string, bo
 		start, end int // lines[start:end]
 	}
 	var groups []group
+	hitPaths := hitPathSet(lines)
 	rows, nonblank := 0, 0
 	broken := true // a non-row, non-`--` line since the last row ends the group
 	for i, l := range lines {
 		if strings.TrimSpace(l) != "" && l != "--" {
 			nonblank++
 		}
-		p, _, ok := rowPath(l)
+		p, _, ok := rowPath(l, hitPaths)
 		if !ok {
 			broken = broken || l != "--"
 			continue
@@ -185,7 +201,7 @@ func CapSearchOutput(s string, perFile, maxFiles int, keepLast bool) (string, bo
 		if maxFiles > 0 && files >= maxFiles {
 			hiddenFiles++
 			for _, l := range lines[g.start:g.end] {
-				if _, hit, _ := rowPath(l); hit {
+				if _, hit, _ := rowPath(l, hitPaths); hit {
 					hidden++
 				}
 			}
@@ -194,7 +210,7 @@ func CapSearchOutput(s string, perFile, maxFiles int, keepLast bool) (string, bo
 		files++
 		var hits []int
 		for i := g.start; i < g.end; i++ {
-			if _, hit, _ := rowPath(lines[i]); hit {
+			if _, hit, _ := rowPath(lines[i], hitPaths); hit {
 				hits = append(hits, i)
 			}
 		}
@@ -231,7 +247,7 @@ func CapSearchOutput(s string, perFile, maxFiles int, keepLast bool) (string, bo
 func init() {
 	components.RegisterFields("searchcap", searchcapConfig{}, []components.Field{
 		{Key: "per_file", Type: components.FieldInt, Default: defaultSearchcapPerFile,
-			Hint: "Keep the first N match rows of each file in a grep/rg listing; the rest become one '+K more matches' line. 0 disables the per-file cap."},
+			Hint: "Keep the first N match rows of each run of a file in a grep/rg listing; the rest become one '+K more matches' line. With keep_last, N+1 matches survive, because a run with exactly N+1 is not capped. 0 disables the cap."},
 		{Key: "max_files", Type: components.FieldInt, Default: 0,
 			Hint: "Keep only the first N files of a listing, with a '+K more files' line. 0 keeps all files."},
 		{Key: "keep_last", Type: components.FieldBool, Default: true,
