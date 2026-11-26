@@ -164,29 +164,6 @@ func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
 		float64(float64(cacheWrite)*p.CacheWrite) + float64(float64(output)*p.Output)
 }
 
-// CostWithCacheWrite1h is Cost plus the one-hour cache-write premium.
-//
-// Cost knows a single write rate — the 5-minute one, at roughly 1.25x base input — so tokens
-// the provider billed at the 1-hour tier (2.0x) are short by the difference. Derived from the
-// documented multiplier rather than from a second configured rate, because no gateway
-// publishes one: 2.0x input, minus whatever the 5m write rate is, on exactly the tokens the
-// response says were written at 1h.
-//
-// NO production code calls it now. The accountant prices the bill (accountant.RequestCost), and it gives
-// the same bits as this formula. This function stays as the REFERENCE: the bit-check tests in dash, keepalive
-// and modelinfo compare the accountant with it, so a drift in either shows at once. Do not call it from
-// production code.
-// Price.RateAt (rateat.go) reads the same premium (CacheWrite1h), so the accountant's figure prices a 1h write the same way.
-func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheWrite1h int64) float64 {
-	cost := p.Cost(fresh, cacheRead, cacheWrite, output)
-	if cacheWrite1h > 0 {
-		if premium := p.CacheWrite1hPremium(); premium > 0 {
-			cost += float64(float64(cacheWrite1h) * premium) // no FMA; see Cost
-		}
-	}
-	return cost
-}
-
 // CacheWrite1hPremium is what a token written at the 1-hour tier costs on top of the 5-minute
 // write rate: CacheWrite1h minus CacheWrite, never below zero. It is the one place the premium is
 // taken, so every figure that prices a 1-hour write adds the same amount.

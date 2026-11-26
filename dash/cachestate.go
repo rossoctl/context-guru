@@ -518,7 +518,7 @@ func medianNextInput(v []int64) int64 {
 
 // NextRequestUSD prices a cached prefix of `tokens` for the NEXT real request: warm is a cache read, cold
 // is a rewrite at the write rate of the tier the cache was written at (2.0x input on the 1h tier;
-// same derivation as CostWithCacheWrite1h). nextIn is the new input that request adds to the
+// same derivation as accountant.RequestCost). nextIn is the new input that request adds to the
 // prefix (NextInputTokens); it picks the price tier. The dashboard's cache-state view (/api/cachestate)
 // shows both figures, so the "kept warm" figure and the cold figure agree.
 //

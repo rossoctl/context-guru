@@ -8,6 +8,7 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/modelinfotest"
 )
 
 var accTestPrice = modelinfo.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Output: 15e-6}
@@ -286,7 +287,7 @@ func TestFigure_BreakCausedAsOneHourWrite(t *testing.T) {
 // Issue #1076: Event.CostUSD (modelinfo) and the accountant figure (tierUSD) must price the same
 // 1h-written tokens alike, for every price shape: derived, a flat 1h rate (cache_write_1h_frac:
 // 1.0, as prices.example.yaml ships) and a stated 5m rate above the derived 1h one.
-func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
+func TestTierUSDAgreesWithStoredBill(t *testing.T) {
 	for name, p := range map[string]modelinfo.Price{
 		"derived":     accTestPrice,
 		"flat 1h":     {Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Write1hFrac: 1.0},
@@ -294,9 +295,9 @@ func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
 	} {
 		const n = 1000
 		got := tierUSD(p, accountant.TierTokens{CacheWrite1h: n})
-		want := p.CostWithCacheWrite1h(0, 0, n, 0, n)
+		want := modelinfotest.StoredBill(p, 0, 0, n, 0, n)
 		if !accNear(got, want) {
-			t.Errorf("%s: tierUSD = %v, CostWithCacheWrite1h = %v", name, got, want)
+			t.Errorf("%s: tierUSD = %v, StoredBill = %v", name, got, want)
 		}
 	}
 }

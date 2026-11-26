@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/modelinfotest"
 	"github.com/rossoctl/context-guru/kvcache"
 )
 
@@ -68,7 +69,7 @@ func TestProjectedPingAndMissUSDMatchesTheSeparateFunctions(t *testing.T) {
 }
 
 // A ping's bill comes from the accountant now, with the exact bits of the formula that priced it before
-// (modelinfo.Price.CostWithCacheWrite1h): the keeper's cost, the substitute's cost and the sweep answer's cost.
+// (modelinfo.Price.StoredBill): the keeper's cost, the substitute's cost and the sweep answer's cost.
 func TestKeeperBillIsTheSameBitsAsTheOldFormula(t *testing.T) {
 	prices := []struct {
 		model string
@@ -90,13 +91,13 @@ func TestKeeperBillIsTheSameBitsAsTheOldFormula(t *testing.T) {
 		fd.setPrices(proxyPricer{fixedPrice{c.p}})
 		for _, u := range usages {
 			size := modelinfo.PromptTokens(int64(u.FreshInput), int64(u.CacheRead), int64(u.CacheWrite))
-			want := c.p.At(size).CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
+			want := modelinfotest.StoredBill(c.p.At(size), u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
 			got, ok := k.pingCost("", c.model, 50_000, u)
 			if !ok || got != want {
 				t.Errorf("%s %+v: pingCost %v ok %v, old formula %v", c.model, u, got, ok, want)
 			}
 			// The sweep answer's bill leaves the read out and keeps the tier of the whole call.
-			wantAns := c.p.At(size).CostWithCacheWrite1h(u.FreshInput, 0, u.CacheWrite, u.Output, u.CacheWrite1h)
+			wantAns := modelinfotest.StoredBill(c.p.At(size), u.FreshInput, 0, u.CacheWrite, u.Output, u.CacheWrite1h)
 			ans := u
 			ans.CacheRead = 0
 			if got := billedUSD(c.p, c.model, billedPrompt(u, 50_000), ans); got != wantAns {

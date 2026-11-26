@@ -12,7 +12,7 @@ import (
 // The four table/*/claude-sonnet-5 rows were re-baselined by #334, which
 // makes a bare id resolve to the qualified entry it is the tail of; every other row is unchanged.
 //
-// It also guards the FMA fix in Price.Cost and CostWithCacheWrite1h (#1128): without the explicit
+// It also guards the FMA fix in Price.Cost and storedBill (#1128): without the explicit
 // float64 rounding of each product, the price/1h rows fail on arm64 only. CI runs on amd64, where
 // they pass either way, so run this test on an arm64 machine after a change to those functions.
 
@@ -48,7 +48,7 @@ func TestRateFillTableAndPrice(t *testing.T) {
 	for _, in := range []float64{0, 1e-6, 3e-6, 5e-6} {
 		p := Price{Input: in, CacheWrite: in * 1.3}
 		got["price/1h/"+ratefilltest.F(in)] = ratefilltest.F(p.CacheWrite1h(),
-			p.CostWithCacheWrite1h(10, 20, 30, 40, 50), p.CostWithCacheWrite1h(10, 20, 30, 40, 0))
+			storedBill(p, 10, 20, 30, 40, 50), storedBill(p, 10, 20, 30, 40, 0))
 	}
 	ratefilltest.Check(t, got)
 }

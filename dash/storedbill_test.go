@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/modelinfotest"
 )
 
 // The stored bill (Event.CostUSD) comes from the accountant now. It must give the exact bits of the formula
-// that stored it before: the price at the tier of the prompt size, then modelinfo.Price.CostWithCacheWrite1h
+// that stored it before: the price at the tier of the prompt size, then modelinfo.Price.StoredBill
 // (each product rounded on its own, every write at the 5-minute rate, the 1-hour premium after).
 func TestStoredBillIsTheSameBitsAsTheOldFormula(t *testing.T) {
 	prices := map[string]modelinfo.Price{
@@ -31,7 +32,7 @@ func TestStoredBillIsTheSameBitsAsTheOldFormula(t *testing.T) {
 			e := &Event{Model: model, FreshInput: c[0], CacheRead: c[1], CacheWrite: c[2], OutputTokens: c[3], CacheWrite1h: c[4]}
 			e.Price(p, true)
 			size := modelinfo.PromptTokens(c[0], c[1], c[2])
-			want := p.At(size).CostWithCacheWrite1h(c[0], c[1], c[2], c[3], c[4])
+			want := modelinfotest.StoredBill(p.At(size), c[0], c[1], c[2], c[3], c[4])
 			if e.CostUSD != want {
 				t.Errorf("%s %v: stored bill %v, old formula %v (diff %g)", model, c, e.CostUSD, want, e.CostUSD-want)
 			}
