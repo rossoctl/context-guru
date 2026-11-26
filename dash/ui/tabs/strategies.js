@@ -167,7 +167,7 @@ function buildStrategyForm(form) {
   form.appendChild(el('div', { class: 'field' },
     el('label', { for: 'sf-prefix' }, term('Min prefix tokens', 'Only sessions whose cached prompt is at least this many tokens are pinged. Small prompts are cheap to rewrite, so pinging them rarely pays.')), prefix));
   form.appendChild(el('div', { class: 'field' },
-    el('label', { for: 'sf-usd' }, 'Max $/ping (0 = default)'), usdCap, el('p', { class: 'hint' }, 'Skips a ping that would cost more than this.')));
+    el('label', { for: 'sf-usd' }, 'Max $/ping (0 = no flat cap)'), usdCap, el('p', { class: 'hint' }, 'Skips a ping that would cost more than this. 0 sets no flat cap: a ping is sent when the planned pings cost less than the cache miss they protect, and the account\'s own cap, if any, stays.')));
   form.appendChild(el('div', { class: 'field' }, el('label', {}, active, ' Active')));
   form.appendChild(el('fieldset', { class: 'field' },
     el('legend', {}, term('Predictor gate', 'An extra check that only pings when the session looks likely to come back soon. Optional, and applied on top of the time windows.'), ' (optional, in addition to the windows below)'),

@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/extract"
@@ -38,7 +39,7 @@ func planRestore(pipe *components.Pipeline, st store.Store, session, wire string
 	if !pipe.FixedRestore() || session == "" || len(msgs) == 0 {
 		return nil
 	}
-	if schema.IsResponses(wire) && gjson.GetBytes(body, "previous_response_id").String() != "" {
+	if schema.IsResponses(wire) && schema.ServerHeldHistory(body) {
 		return nil // the visible input is a delta, not the transcript an anchor is stated in
 	}
 	// The repair path: the client received our tool_use and answered it, so the call is in its
@@ -157,7 +158,7 @@ func (p restorePlan) ops(at []int, nb []gjson.Result, dryRun bool) ([]accountant
 		}
 		ops = append(ops, accountant.Operation{
 			Kind:          accountant.KindRewrite,
-			Operator:      "context-guru.expand_restore",
+			Operator:      accwire.Operator(accwire.OpExpandRestore),
 			DryRun:        dryRun,
 			At:            accountant.Position{Section: accountant.SectionMessages, Index: pos},
 			SizeBefore:    accountant.Size{Bytes: 0},

@@ -8,7 +8,7 @@ import (
 // ProjectPath is the trust boundary for the project dimension.
 //
 // A launch directory is a value the CLIENT chose, so it is attacker-influenced in exactly the way
-// Meta.redact() already documents: a request whose working directory is named after a token would
+// redactMeta already documents: a request whose working directory is named after a token would
 // otherwise write that token to the requests table and to the SSE feed, permanently. The existing
 // metaEnum() guard cannot be reused directly — it demands a short identifier, and a filesystem
 // path is neither short nor an identifier — so this is the same composition (credential scan plus

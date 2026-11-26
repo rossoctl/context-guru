@@ -63,11 +63,7 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 		}
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Record blocked on a full queue; capture must never block a request")
-	}
+	awaitSignal(t, "500 Record calls to return (Record must not block on a full queue; capture must never block a request)", done)
 
 	// Release the writer before reading Stats. The read itself would not wait (WAL), but Stats can
 	// take a new connection from the pool, and a new connection first runs the DSN's

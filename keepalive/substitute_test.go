@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -86,10 +87,7 @@ func TestKeepAliveSubstitutesCacheAwareSummarizerForAPing(t *testing.T) {
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the summary substitute to take the ping", func() bool { return k.summarySubstituted.Load() >= 1 })
 	if k.summarySubstituted.Load() != 1 {
 		t.Fatalf("summarySubstituted = %d, want 1", k.summarySubstituted.Load())
 	}
@@ -290,10 +288,7 @@ func TestKeepAliveRefreshAboveBreakEvenRefreshes(t *testing.T) {
 
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the summary substitute to take the ping", func() bool { return k.summarySubstituted.Load() >= 1 })
 	if k.summarySubstituted.Load() != 1 {
 		t.Fatalf("summarySubstituted = %d, want 1 once the refresh clears break-even",
 			k.summarySubstituted.Load())
@@ -327,10 +322,7 @@ func TestKeepAliveSubstituteFiresOncePreExpiryPhaseIsLive(t *testing.T) {
 	// left, which is inside the default 60s pre-expiry window.
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the summary substitute to take the ping", func() bool { return k.summarySubstituted.Load() >= 1 })
 	if k.summarySubstituted.Load() != 1 {
 		t.Fatalf("summarySubstituted = %d, want 1 once the ping lands inside the pre-expiry window",
 			k.summarySubstituted.Load())
@@ -484,7 +476,7 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 	// The review's race: the subagent's request starts, the main thread registers, then the
 	// subagent's request ends and clears stale candidates for ITS thread.
 	subStart := time.Now()
-	time.Sleep(2 * time.Millisecond)
+	testutil.WaitFor(t, "the clock to pass subStart", func() bool { return time.Now().After(subStart) })
 	register("", mainModel)
 	offload.ClearStaleKeepAliveCandidate(thread.Key(sess, "a:S"), subStart)
 	if !has("") {
@@ -509,10 +501,7 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 	if n := k.Sweep(t0.Add(-60*time.Second + 282*time.Second)); n != 1 {
 		t.Fatalf("first sweep fired %d pings, want 1 (the subagent's)", n)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load()+int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the subagent's ping", func() bool { return k.summarySubstituted.Load()+int64(fs.n()) >= 1 })
 	if subModel.calls.Load() != 1 || mainModel.calls.Load() != 0 {
 		t.Fatalf("subagent's ping: subagent calls %d, main calls %d; want 1 and 0",
 			subModel.calls.Load(), mainModel.calls.Load())
@@ -523,10 +512,7 @@ func TestKeepAliveSubstituteIsPerThread(t *testing.T) {
 	if n := k.Sweep(t0.Add(282 * time.Second)); n != 1 {
 		t.Fatalf("second sweep fired %d pings, want 1 (the main thread's)", n)
 	}
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load()+int64(fs.n()) < 2 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the main thread's ping", func() bool { return k.summarySubstituted.Load()+int64(fs.n()) >= 2 })
 	if subModel.calls.Load() != 1 {
 		t.Errorf("the main thread's ping ran the subagent's summary call (subagent calls %d)", subModel.calls.Load())
 	}
@@ -585,10 +571,7 @@ func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("the due ping did not fire (%d)", n)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the summary substitute to take the ping", func() bool { return k.summarySubstituted.Load() >= 1 })
 	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 || fs.n() != 0 {
 		t.Fatalf("substituted=%d calls=%d ordinary=%d, want 1, 1, 0 — the path under test never ran",
 			k.summarySubstituted.Load(), model.calls.Load(), fs.n())
@@ -628,10 +611,7 @@ func TestKeepAliveSummaryCallThatDoesNotCommitIsDeferred(t *testing.T) {
 	kaCandidate(t, "sess-1", st, model)
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && fs.n() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the ordinary ping", func() bool { return fs.n() > 0 })
 	if model.calls.Load() != 1 || k.summarySubstituted.Load() != 0 || fs.n() != 1 {
 		t.Fatalf("calls=%d substituted=%d ordinary=%d, want 1, 0, 1 — the path under test never ran",
 			model.calls.Load(), k.summarySubstituted.Load(), fs.n())
@@ -654,10 +634,7 @@ func TestSubstitutePingCarriesTheGapWindow(t *testing.T) {
 	if n := k.Sweep(clock.advance(281 * time.Second)); n != 1 {
 		t.Fatalf("fired %d", n)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(sink.all()) == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "the ping report", func() bool { return len(sink.all()) > 0 })
 	reps := sink.all()
 	if len(reps) != 1 || !reps[0].Window.Equal(at) {
 		t.Fatalf("reports %+v, want one with Window %v", reps, at)

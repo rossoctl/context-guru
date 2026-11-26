@@ -295,7 +295,7 @@ Labels in this section:
 |---|---|---|---|---|
 | `llm_savings_saved_tokens_total` | counter | 1 | `kind`, `tier`, `component` | Tokens the provider did not bill, by tier. |
 | `llm_savings_added_tokens_total` | counter | 1 | `kind`, `tier`, `component` | Tokens the provider billed because of a change. |
-| `llm_savings_saved_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. |
+| `llm_savings_saved_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. When the host's `Pricer` also has `PriceAt`, each side is priced at its own prompt size: the full bill difference, with the tokens that stay and the output re-rated. Context-guru has `PriceAt`. It uses the same tier rule as the dashboard (`Price.At`). |
 | `llm_savings_added_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_added` priced the same way. |
 | `llm_savings_cache_effect_usd_total` | counter | none | `effect`, `cause`, `direction` | Cache effects: `effect` is `break`, `rescue`, `split`, `ttl_premium`, `ttl_rescue`. `direction` is `saved` or `added`. `cause` is `model_changed`, `ended_change` or `none`. |
 | `llm_savings_baseline_usd_total` | counter | none | `model` | What the traffic would have cost with no change. |
@@ -344,8 +344,37 @@ Net keep-alive value is `rescue_usd - cost_usd`.
 
 | Metric | Type | Unit | Labels | Meaning |
 |---|---|---|---|---|
-| `llm_cache_misses_total` | counter | 1 | `model`, `cause` | Misses by cause from `cache_miss_cause`: `ttl_expiry`, `prefix_change`, `model_changed`, `compaction_after_rewrite`, `bypass_flip`, `cold_start`, `other`. |
-| `llm_cache_miss_cost_usd_total` | counter | none | `model`, `cause` | Extra cost of those misses. |
+| `llm_cache_misses_total` | counter | 1 | `model`, `cause` | Misses by cause from `cache_miss_cause`: `ttl_expiry`, `prefix_change`, `model_changed`, `compaction_after_rewrite`, `bypass_flip`, `concurrent`, `unexplained`, `cold_start`, `other`. |
+| `llm_cache_miss_cost_usd_total` | counter | none | `model`, `cause` | Extra cost of those misses: the write premium (see below). Not the price of the request. |
+
+**What counts as a miss.** A request is a miss when the proxy's cache verdict for it is not a hit. Keep-alive pings are never misses. Each proxy uses its own verdict. context-guru uses `cache_miss_reason`, so a partial read that re-wrote most of the prompt is a miss (#496). A proxy that has no such verdict counts a request with no cache-read tokens.
+
+**One cause for each miss, in this order.** The first rule that applies gives the `cause`:
+
+1. `cold_start`: the first request of the thread, or the first on its model.
+2. `ttl_expiry`: the time since the previous request is longer than the cache TTL.
+3. `model_changed`: the thread switched model.
+4. `compaction_after_rewrite`: a bypass request after the proxy rewrote earlier turns.
+5. `bypass_flip`: bypass turned on or off with no earlier rewrite.
+6. `prefix_change`: the tools, the system prompt, or the effort or thinking settings changed.
+7. `concurrent`: nothing measured changed, and the previous request of the thread started less than a short gap ago. The provider can read a cache entry only after the first response starts, so parallel requests (for example, sub-agents) miss.
+8. `unexplained`: the proxy compared the request with the previous one and found no difference, but the request missed and wrote cache tokens. A partial read that re-wrote most of the prompt with no measured change is here too.
+9. `other`: anything else. For example, a miss that wrote nothing, a miss with no earlier request to compare with (the first request of a live thread after a proxy restart), or a cause value that this list does not name.
+
+Rules 3 to 6 and 8 apply only when the request wrote cache tokens. Rule 7 applies with or without a write; with no write, its miss cost is zero. A miss that wrote nothing re-created no prefix, so it is `other`, and its miss cost is zero. A proxy that cannot see a cause (for example, it does not compare request bodies) uses `other` for it, not `unexplained`. It does not guess. Data written before `concurrent` and `unexplained` existed stays `other`.
+
+**The miss cost is the write premium.** It is what the written prefix cost above a read of the same tokens, which is what a hit would have charged:
+
+```
+miss_cost_usd = (cache_write - cache_write_1h) x (cache_write_5m_rate - cache_read_rate)
+              +  cache_write_1h                x (cache_write_1h_rate - cache_read_rate)
+```
+
+- `cache_write` is all written tokens. `cache_write_1h` is the part of them billed at the 1-hour tier, never more than `cache_write`.
+- Each term is never below zero.
+- Output and fresh input are not in it, because a hit pays them too.
+- **Rates.** A rate the price states is used as it is. A tier rate the price leaves blank is the model's standard multiple of its input rate, as `internal/modelinfo` resolves it (`Price.Resolved`, #1248). No gateway states `cache_write_1h_rate`, so it is always derived (`Price.CacheWrite1hFor`): when the operator sets `Write1hFrac`, it is that multiple of the input rate and never below `cache_write_5m_rate`; else it is 2.0x the input rate (`AnthropicCacheWrite1hFrac`).
+- A model with no price counts the miss in `llm_cache_misses_total` and books no money here.
 
 ### 5.5 Proxy health
 
@@ -382,7 +411,7 @@ Estimate series per machine. A histogram has 12 buckets, plus a sum and a count:
 | `ttfb_seconds` | 10 x 14 | 140 |
 | `added_seconds` | 10 x 14 | 140 |
 | `component_duration_seconds` | 30 x 14 | 420 |
-| Keep-alive and cache health | about 10 models x 4 outcomes + 7 causes x 2 | about 150 |
+| Keep-alive and cache health | about 10 models x 4 outcomes + 9 causes x 2 | about 150 |
 | Proxy health and failures | about 100 | about 100 |
 | **Total** | | **about 1,700** (the 40 for bytes is inside the rounding) |
 
@@ -454,18 +483,15 @@ The left column ranks components. The table at the bottom right is the one to re
 
 Question: does the cache pay, and do pings pay?
 
-The **Shared-warm tokens** panel stays empty until #853 is built (rule 8).
-
 | Panel | Type | Query idea |
 |---|---|---|
 | Cache read ratio | time series | by `model` |
 | Misses by cause | stacked bars | `llm_cache_misses_total` by `cause` |
 | Miss cost by cause | bar | `llm_cache_miss_cost_usd_total` |
-| Ping outcomes | stacked bars | by `outcome` |
+| Ping failure ratio | stat | `failed` and `timeout` over `ok`, `failed` and `timeout` pings. A `skipped` ping is not sent, so it is in neither. 0 % with no failure, no data with no ping |
 | Ping cost vs rescue | time series | cost, rescue and net |
 | Estimated ping cost | stat | `llm_keepalive_estimated_cost_usd_total / llm_keepalive_cost_usd_total` (rule 6) |
 | Pings that paid | stat | `rescue_usd / cost_usd` |
-| Shared-warm tokens | time series | credit not given (#853) |
 
 ### 6.4 Inference
 
@@ -636,4 +662,4 @@ Version one: items 1 to 3, and the savings dashboard (6.2). Tokens and money bot
 - The OTel SDK aggregates in memory and keeps no queue of points, so a failed push loses no count.
 - Counters restart at 0 when a process restarts. Use `rate()` and `increase()`, which handle this.
 - Do not use the Pushgateway.
-- Related existing code: `proxy/promexport.go` (pull exporter, to retire), `dash/metrics_export.go` (to retire), `deploy/grafana/` (to move or delete), `proxy/accountant_*.go` (the accountant wiring), `dash/accountant_price.go` (pricing).
+- Related existing code: `proxy/promexport.go` (pull exporter, to retire), `dash/metrics_export.go` (to retire), `deploy/grafana/` (to move or delete), `proxy/accountant_*.go`, `accwire/` and `accrec/` (the accountant wiring), `dash/accountant_price.go` (pricing).

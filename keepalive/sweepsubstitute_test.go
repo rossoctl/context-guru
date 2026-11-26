@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -90,11 +91,9 @@ func registerSweep(t *testing.T, st store.Store, asker components.PrefixAsker, m
 
 func waitSweepOutcome(t *testing.T, k *Keeper, fs *fakeDispatcher) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.sweepSubstituted.Load()+k.sweepAskFailed.Load()+k.sweepOverBudget.Load()+
-		int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a sweep outcome", func() bool {
+		return k.sweepSubstituted.Load()+k.sweepAskFailed.Load()+k.sweepOverBudget.Load()+int64(fs.n()) >= 1
+	})
 }
 
 // ⭐ POINT 1 (A1): the question takes the place of the ping. It is counted once as THE ping for the
@@ -281,10 +280,9 @@ func TestKeepAliveSummaryTakesThePingBeforeTheSweep(t *testing.T) {
 
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a substitute or a plain ping", func() bool {
+		return k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) >= 1
+	})
 	if k.summarySubstituted.Load() != 1 || k.sweepSubstituted.Load() != 0 || asker.calls.Load() != 0 {
 		t.Errorf("summary %d, sweep %d, sweep asks %d: the summary must take the ping",
 			k.summarySubstituted.Load(), k.sweepSubstituted.Load(), asker.calls.Load())
@@ -310,7 +308,6 @@ func TestNoKeepAliveNoQuestion(t *testing.T) {
 			if n := k.Sweep(clock.advance(281 * time.Second)); n != 0 {
 				t.Fatalf("a ping fired (%d) where the keeper should track nothing", n)
 			}
-			time.Sleep(20 * time.Millisecond)
 			if asker.calls.Load() != 0 || fs.n() != 0 {
 				t.Fatalf("question asks %d, pings %d, want none", asker.calls.Load(), fs.n())
 			}
@@ -422,10 +419,9 @@ func TestWhenTheSummarizerTriggerFiresTheSummaryTakesThePingAndTheSweepDoesNotAs
 
 	recordOne(t, k, kaPolicy(), kaToolBody, clock.now())
 	k.Sweep(clock.advance(281 * time.Second))
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) < 1 {
-		time.Sleep(time.Millisecond)
-	}
+	testutil.WaitFor(t, "a substitute or a plain ping", func() bool {
+		return k.summarySubstituted.Load()+k.sweepSubstituted.Load()+int64(fs.n()) >= 1
+	})
 	if k.summarySubstituted.Load() != 1 || model.calls.Load() != 1 {
 		t.Errorf("summary substituted %d, summary calls %d, want 1 and 1", k.summarySubstituted.Load(), model.calls.Load())
 	}
@@ -481,10 +477,7 @@ func TestOnePingNeverRunsBothCallsWithTwoThreadsDue(t *testing.T) {
 	if n := k.Sweep(clock.advance(283 * time.Second)); n != 2 {
 		t.Fatalf("fired %d pings, want 2 (both threads due at once)", n)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && k.pings.Load() < 2 {
-		time.Sleep(time.Millisecond)
-	}
+	waitPings(t, k, 2)
 	if got := k.pings.Load(); got != 2 {
 		t.Fatalf("pings = %d, want 2: one per thread, never 2 on one thread", got)
 	}
@@ -861,7 +854,7 @@ func TestAffordableSweepBatchesIsTheLargestCountTheCeilingAdmits(t *testing.T) {
 		planned int
 		want    int
 	}{{0.5 * one, 4, 0}, {one, 4, 1}, {2.5 * one, 4, 2}, {4 * one, 4, 4}, {100, 4, 4}, {100, 1, 1}, {100, 0, 1}} {
-		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, tc.planned, tc.ceiling); got != tc.want {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, tc.planned, tc.ceiling, 0); got != tc.want {
 			t.Errorf("ceiling %.4f planned %d: %d batches, want %d", tc.ceiling, tc.planned, got, tc.want)
 		}
 	}
@@ -875,7 +868,7 @@ func TestAnUnpricedModelKeepsThePlannedSweepBatches(t *testing.T) {
 	if got := k.projectedSweepBatchesUSD("unpriced-model", "", 20000, 4); got != 0 {
 		t.Fatalf("an unpriced model projected %.6f, want 0", got)
 	}
-	if got := k.affordableSweepBatches("unpriced-model", "", 20000, 4, 0.0001); got != 4 {
+	if got := k.affordableSweepBatches("unpriced-model", "", 20000, 4, 0.0001, 0); got != 4 {
 		t.Errorf("an unpriced model was lowered to %d batches, want the planned 4", got)
 	}
 }
@@ -926,7 +919,7 @@ func TestAnInfiniteCeilingAdmitsEveryPlannedBatch(t *testing.T) {
 	k, _, _ := testKeeper(t)
 	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
 	for _, planned := range []int{1, 2, 4, 8} {
-		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, planned, math.Inf(1)); got != planned {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, planned, math.Inf(1), 0); got != planned {
 			t.Errorf("a ceiling of +Inf admits %d of %d planned batches, want all of them", got, planned)
 		}
 	}
@@ -935,7 +928,7 @@ func TestAnInfiniteCeilingAdmitsEveryPlannedBatch(t *testing.T) {
 	if !math.IsInf(pol.Ceiling(), 1) {
 		t.Fatalf("fixture: Policy{-1}.Ceiling() = %v, want +Inf", pol.Ceiling())
 	}
-	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, pol.Ceiling()); got != 4 {
+	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, pol.Ceiling(), 0); got != 4 {
 		t.Errorf("the no-cap policy admits %d of 4 batches", got)
 	}
 }
@@ -946,7 +939,7 @@ func TestAZeroOrNegativeOrNaNCeilingAdmitsNothing(t *testing.T) {
 	k, _, _ := testKeeper(t)
 	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
 	for _, ceiling := range []float64{0, -1, math.Inf(-1), math.NaN()} {
-		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, ceiling); got != 0 {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, ceiling, 0); got != 0 {
 			t.Errorf("a ceiling of %v admits %d batches, want 0", ceiling, got)
 		}
 	}

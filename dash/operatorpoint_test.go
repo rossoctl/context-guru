@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 

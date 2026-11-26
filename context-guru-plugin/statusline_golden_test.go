@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // cgStub answers the three reads the redesigned status line makes. cache is the /api/cachestate
@@ -119,7 +121,7 @@ func TestStatuslineGoldenOutput(t *testing.T) {
 			if got := strings.TrimRight(out, "\n"); got != c.want {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
-			if elapsed > limit {
+			if testutil.TimingEnabled() && elapsed > limit {
 				t.Errorf("render took %v; the limit is the runner's floor %v plus %v",
 					elapsed, floor, statuslineAllowance)
 			}
@@ -539,6 +541,10 @@ func TestStatuslineBudgetPrivateCacheDirAndTTL(t *testing.T) {
 	xdg, tmp := t.TempDir(), t.TempDir()
 	env := routedEnv(port)
 	env["XDG_CACHE_HOME"], env["TMPDIR"] = xdg, tmp
+	// The script's cache clock is pinned: files written by the renders are never older than it, so
+	// no render can outlive a TTL, and the age of the backdated files below is exact.
+	pin := time.Now()
+	env["CG_TEST_NOW"] = fmt.Sprint(pin.Unix())
 	stdin := `{"session_id":"sess-b","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
 	for i := 0; i < 3; i++ {
 		runStatusline(t, env, stdin, "--layout=balanced")
@@ -557,7 +563,7 @@ func TestStatuslineBudgetPrivateCacheDirAndTTL(t *testing.T) {
 		t.Errorf("cache files leaked into the shared temp dir: %v", m)
 	}
 	// 12 s later the cachestate copy (10 s) is stale and refetched; the stats copy (30 s) is not.
-	old := time.Now().Add(-12 * time.Second)
+	old := time.Unix(pin.Unix()-12, 0)
 	files, _ := filepath.Glob(filepath.Join(xdg, "context-guru", "context-guru-statusline-*-cs-sess-b.json"))
 	if len(files) != 1 {
 		t.Fatalf("cachestate cache file not found in the private dir: %v", files)
@@ -586,9 +592,12 @@ func TestStatuslineBudgetBacksOffAfterFailure(t *testing.T) {
 	xdg := t.TempDir()
 	env := routedEnv(port)
 	env["XDG_CACHE_HOME"] = xdg
+	// The script's cache clock is pinned, so the back-off window cannot run out between renders.
+	pin := time.Now()
+	env["CG_TEST_NOW"] = fmt.Sprint(pin.Unix())
 	stdin := `{"session_id":"sess-f","cost":{"total_cost_usd":0.41},"context_window":{"total_input_tokens":52000,"context_window_size":200000}}`
 	runStatusline(t, env, stdin, "--layout=balanced")
-	old := time.Now().Add(-time.Hour)
+	old := time.Unix(pin.Unix()-3600, 0)
 	filepath.WalkDir(filepath.Join(xdg, "context-guru"), func(p string, d os.DirEntry, err error) error { //nolint:errcheck
 		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".json") {
 			os.Chtimes(p, old, old) //nolint:errcheck
@@ -798,7 +807,7 @@ func TestStatuslineGoldenMoney(t *testing.T) {
 			if got := strings.TrimRight(out, "\n"); got != c.want {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
-			if elapsed > limit {
+			if testutil.TimingEnabled() && elapsed > limit {
 				t.Errorf("render took %v; the limit is the runner's floor %v plus %v",
 					elapsed, floor, statuslineAllowance)
 			}
@@ -857,7 +866,7 @@ func TestStatuslineAgentNamesAreBounded(t *testing.T) {
 	if !strings.Contains(out, want) {
 		t.Errorf("got %q, want it to contain %q (the 2 MB file's agent unlabelled, counted in +N more)", out, want)
 	}
-	if elapsed > floor+statuslineAllowance {
+	if testutil.TimingEnabled() && elapsed > floor+statuslineAllowance {
 		t.Errorf("render took %v with 5,000 agent files; the limit is the runner's floor %v plus %v",
 			elapsed, floor, statuslineAllowance)
 	}
@@ -1090,6 +1099,7 @@ func statuslineFloor(t *testing.T, env map[string]string, stdin string, args ...
 // stub that answers at once. A status line that really waits on the proxy pays its full 5 s
 // sleep and clears the allowance many times over.
 func TestStatuslineFinishesWithinItsBudgetOnASlowProxy(t *testing.T) {
+	testutil.RequireTiming(t)
 	fast := routedEnv(cgStub(t, `{"total_saved_usd":1}`)) // answers at once: the runner's floor
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1119,7 +1129,7 @@ func TestStatuslineFinishesWithinItsBudgetOnASlowProxy(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("exit %d", code)
 				}
-				if elapsed > limit {
+				if testutil.TimingEnabled() && elapsed > limit {
 					t.Errorf("run %d took %v against a proxy that sleeps 5 s (floor %v + allowance %v): %q",
 						i, elapsed, floor, statuslineAllowance, out)
 				}
@@ -1350,7 +1360,7 @@ func TestStatuslineGoldenWeeklyTip(t *testing.T) {
 			if got := strings.TrimRight(string(b), "\n"); got != c.want {
 				t.Errorf("got\n  %q\nwant\n  %q", got, c.want)
 			}
-			if d := time.Since(start); d > limit {
+			if d := time.Since(start); testutil.TimingEnabled() && d > limit {
 				t.Errorf("render took %v; the limit is the runner's floor %v plus %v",
 					d, floor, statuslineAllowance)
 			}
@@ -1478,7 +1488,7 @@ func TestStatuslineMoneyShowsWhenCachestateIsSlowerThanTheRender(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("exit %d", code)
 		}
-		if elapsed > limit {
+		if testutil.TimingEnabled() && elapsed > limit {
 			t.Errorf("render took %v; the limit is the runner's floor %v plus %v",
 				elapsed, floor, statuslineAllowance)
 		}

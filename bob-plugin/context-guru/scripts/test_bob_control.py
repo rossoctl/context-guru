@@ -22,9 +22,10 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# TIMING is True only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md).
 from test_bob_plugin import (  # noqa: E402
     FAKE_STRATEGIES, HOOKS, PLUGIN, PLUGIN_ROOT, ROUTE, FakeProxy, TempHome, dead_port, fake_binary,
-    block_network)
+    block_network, TIMING)
 
 
 def setUpModule():
@@ -366,7 +367,8 @@ class StrategyTableTest(unittest.TestCase):
         with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1), \
              self.assertRaisesRegex(RuntimeError, "update the proxy to v0.7.1 or later"):
             PLUGIN.load_strategy_table(binary)
-        self.assertLess(time.monotonic() - start, 5)
+        if TIMING:
+            self.assertLess(time.monotonic() - start, 5)
 
     def test_bad_output_is_the_update_error(self):
         bodies = {

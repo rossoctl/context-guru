@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func TestOpenUsesProductionSettings(t *testing.T) {
@@ -61,7 +63,7 @@ func TestOpenFailsWithTheRealErrorOnALockedFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("open succeeded on a locked file")
 	}
-	if d := time.Since(start); d > openBound+2*time.Second {
+	if d := time.Since(start); testutil.TimingEnabled() && d > openBound+2*time.Second {
 		t.Fatalf("open took %v, want at most %v", d, openBound+2*time.Second)
 	}
 	if !strings.Contains(err.Error(), "locked") && !strings.Contains(err.Error(), "busy") {

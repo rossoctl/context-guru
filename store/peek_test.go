@@ -62,3 +62,43 @@ func TestPeekAgreesWithGetOnPresence(t *testing.T) {
 		t.Error("Peek REMOVED an expired entry; a probe must not mutate the store's accounting")
 	}
 }
+
+// PeekValue is Peek with the payload: the same answer, the same lack of side effects. A store without the
+// capability falls back to Get.
+func TestPeekValueReturnsThePayloadWithoutRenewingIt(t *testing.T) {
+	now := time.Unix(0, 0)
+	m := NewMemory(Options{TTLSeconds: 100})
+	m.SetClock(func() time.Time { return now })
+	m.Put(SeenPrefix+"a", []byte("2000:1h"))
+	if v, ok := m.PeekValue(SeenPrefix + "a"); !ok || string(v) != "2000:1h" {
+		t.Fatalf("PeekValue = %q, %v", v, ok)
+	}
+	if _, ok := PeekValue(m, "missing"); ok {
+		t.Error("a missing key was present")
+	}
+	for i := 0; i < 10; i++ {
+		now = now.Add(60 * time.Second)
+		PeekValue(m, SeenPrefix+"a")
+	}
+	if _, ok := m.PeekValue(SeenPrefix + "a"); ok {
+		t.Fatal("PeekValue kept the entry alive past its TTL")
+	}
+	if _, ok := PeekValue(Nop{}, "x"); ok {
+		t.Error("a store with no capability and no data returned a value")
+	}
+}
+
+// Keeps tells a store that holds nothing (nil, Nop) from one that does, by type, not by a missed Get.
+func TestKeepsIsTrueOnlyForAStoreThatCanHoldAValue(t *testing.T) {
+	var nilStore Store
+	var nilNop *Nop
+	for name, tc := range map[string]struct {
+		s    Store
+		want bool
+	}{"nil": {nilStore, false}, "Nop": {Nop{}, false}, "*Nop": {&Nop{}, false}, "typed nil *Nop": {nilNop, false},
+		"Memory": {NewMemory(Options{}), true}} {
+		if got := Keeps(tc.s); got != tc.want {
+			t.Errorf("%s: Keeps = %v, want %v", name, got, tc.want)
+		}
+	}
+}

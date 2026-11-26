@@ -226,8 +226,8 @@ func TestNoFunctionIsDefinedTwiceInTheDashboardSource(t *testing.T) {
 	}
 }
 
-// TestEveryRemovableRowCarriesItsOwnCommand: the owner asked for the exact command "for each MCP
-// tool and each skill", and the group-level command is not that.
+// TestEveryRemovableRowCarriesItsOwnCommand: the UI must show the exact command for each MCP
+// tool and each skill, and the group-level command is not that.
 //
 // A group of one already showed it. A group of MANY showed the SERVER-level `claude mcp remove
 // <server>` once at the top — the right answer to "drop this whole server" and no answer at all

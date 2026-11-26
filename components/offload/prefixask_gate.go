@@ -11,7 +11,7 @@ const (
 	prefixAskWriteCapMax = 2000
 )
 
-// prefixAskWriteCapEnabled switches the write cap. The owner chose the read rule only on 2026-10-26
+// prefixAskWriteCapEnabled switches the write cap. The rule checks the read only
 // (#721), so the cap ships OFF. The code and its constants stay: set this true to turn it on.
 //
 // If turned on, the cap assumes the question's breakpoints sit on the turn's last message and on

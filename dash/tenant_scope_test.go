@@ -3,11 +3,14 @@ package dash
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // scopeFixture is a recorder holding two tenants' rows plus one pre-tenancy row.
@@ -47,23 +50,15 @@ func newScopeFixture(t *testing.T, principal func(*http.Request) (Principal, boo
 		defer rec.hub.mu.Unlock()
 		return len(rec.hub.ring)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(p.Requests) == 3 && hubEvents() == 3 {
-			for _, e := range p.Requests {
-				f.ids[e.TenantID] = e.ID
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist 3 rows and publish them (got %d rows, %d hub events)",
-				len(p.Requests), hubEvents())
-		}
-		time.Sleep(10 * time.Millisecond)
+	testutil.WaitForState(t, "the writer stores 3 rows and publishes them",
+		func() bool { return rec.Stats().Written == 3 && hubEvents() == 3 },
+		func() string { return fmt.Sprintf("%d rows written, %d hub events", rec.Stats().Written, hubEvents()) })
+	p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
+	if err != nil || len(p.Requests) != 3 {
+		t.Fatalf("stored rows = %v, err %v, want 3", p, err)
+	}
+	for _, e := range p.Requests {
+		f.ids[e.TenantID] = e.ID
 	}
 
 	f.api = NewAPI(rec)
@@ -641,20 +636,7 @@ func TestWideScopeSingleSessionViewDoesNotInterleaveTwoAccounts(t *testing.T) {
 			Content: []ContentRow{{Path: "0", Before: "SECRET-OF-" + tid, After: "x"}},
 		})
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(p.Requests) == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist 2 rows (got %d)", len(p.Requests))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the writer stores 2 rows", func() bool { return rec.Stats().Written == 2 })
 	// The DB layer really does return both, so the pinning above it is what protects this.
 	both, err := rec.DB().SessionEvents(Filter{TenantAll: true}, "shared-id", true)
 	if err != nil || len(both) != 2 {

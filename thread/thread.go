@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -535,7 +536,7 @@ func (t *Tracker) pruneLocked(now time.Time) {
 // Fingerprint returns the cumulative fingerprint of a request's message list: element i is the
 // hash of messages[0..i]. ok is false when the body carries no message list to match on — no
 // `messages` or `input` array, or a Responses request that continues server-held history
-// (`previous_response_id`), whose `input` is only the newest turn.
+// (`schema.ServerHeldHistory`: previous_response_id, conversation, item_reference), whose `input` is only the newest turn.
 //
 // The fingerprint covers what decides whether the agent CONTINUED a conversation, and leaves out
 // what the agent rewrites in place without starting a new one:
@@ -568,7 +569,7 @@ func Fingerprint(body []byte) ([]uint64, bool) {
 // request is an old conversation — is about content, and a tool result's content is most of it.
 func fingerprint(body []byte) ([]uint64, []int, bool) {
 	root := gjson.ParseBytes(body)
-	if !root.IsObject() || root.Get("previous_response_id").String() != "" {
+	if !root.IsObject() || schema.ServerHeldHistory(body) {
 		return nil, nil, false
 	}
 	items := root.Get("messages")

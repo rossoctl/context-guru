@@ -20,7 +20,7 @@ func (e *Event) AccountantResult() (accountant.Result, bool) {
 	return *e.accRes, true
 }
 
-// SetAccountantServerHeldHistory marks an OpenAI Responses request that carries previous_response_id: the
+// SetAccountantServerHeldHistory marks an OpenAI Responses request with server-held history (previous_response_id, conversation or item_reference): the
 // provider holds the earlier turns, so the body is only this turn and the proxy cannot see the prefix the
 // provider reads. PriceMode then books no saving and says why (fallback server_held_history), where it would
 // have said no_result, which reads as a request that was merely skipped (context-guru#899).

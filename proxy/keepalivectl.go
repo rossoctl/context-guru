@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"fmt"
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"math"
 	"net/http"
 	"time"
 
@@ -153,11 +155,11 @@ func (h *Handler) ctlKeepAliveArm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.armedView(t, in.Session, o))
 }
 
-// The shipped policy's defaults, for a body that omits them. Named here rather than reaching
-// into config so this file states what it applies.
+// The shipped policy's defaults, for a body that omits them. They are config's own constants
+// (240 s and 2 pings), so the arm dialog and the account policy cannot drift apart.
 const (
-	recIdleSecondsDefault = 240
-	recMaxPingsDefault    = 2
+	recIdleSecondsDefault = config.DefaultKeepAliveIdle
+	recMaxPingsDefault    = config.DefaultKeepAliveMaxPings
 )
 
 // armedView is the POST answer: the resolved policy plus the two numbers being authorized.
@@ -171,18 +173,30 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 		"durable":           false,
 		"min_prefix_tokens": o.pol.MinPrefixTokens,
 	}
-	// The per-ping guard that will actually be ENFORCED, reported because the body's value is
-	// ignored. Through CachePolicy.Ceiling(), so the number shown is the number enforced: the
-	// account's document stores 0 for "unconfigured", and reporting that raw told the operator
-	// the ceiling was $0.00 on exactly the accounts — keep-alive off, one session armed by hand
-	// — where the guard resolves to the default instead.
-	ceiling := CachePolicy{}.Ceiling()
+	// The flat per-ping cap that is enforced, reported because the body's value is ignored. It is opt-in
+	// (#1420): none by default, and then the key is absent and the value rule alone decides. The cap is the
+	// effective one: the account's, as a matching manager strategy leaves or replaces it (ApplyStrategy).
+	capUSD := CachePolicy{}.PingCap()
 	if h.opts.Tenants != nil {
 		if tn, err := h.opts.Tenants.ForTenant(t); err == nil {
-			ceiling = CachePolicy{MaxUSDPerPing: tn.Cache.MaxUSDPerPing}.Ceiling()
+			pol := tn.Cache
+			if h.keeper != nil {
+				// The provider of the session's own last request, so the strategy layer applies in the report
+				// exactly when it applies in enforcement (Resolve skips strategies for OpenAI). No row: Anthropic.
+				provider := bschemas.Anthropic
+				if h.rec != nil {
+					if p, err := h.rec.DB().LastBilledProvider(dash.Filter{Tenant: t.ID}, session); err == nil && p != "" {
+						provider = bschemas.ModelProvider(p)
+					}
+				}
+				pol, _ = h.keeper.resolvePolicy(tn, session, provider, tn.Cache, predDecision{}, false)
+			}
+			capUSD = pol.PingCap()
 		}
 	}
-	out["max_usd_per_ping"] = ceiling
+	if !math.IsInf(capUSD, 1) {
+		out["max_usd_per_ping"] = capUSD
+	}
 	// The worst case, priced from THIS SESSION's own last billed prefix at its own model's
 	// cache-read rate — never a service-wide average, because per-ping cost is bimodal. Absent
 	// rather than zero when the model has no rate on the operator's list.
@@ -190,7 +204,8 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 	out["last_prefix_tokens"], out["model"], out["worst_case_pings"] = prefix, model, spans
 	if p := h.opts.Prices; p != nil && model != "" && prefix > 0 {
 		if price, ok := p.Price(context.Background(), model); ok && !price.Zero() {
-			each := float64(prefix)*price.CacheRead + price.Output
+			price = price.At(keepalive.PingPrompt(int64(prefix))) // the ping reads this prefix: the rates of that prompt size
+			each := keepalive.PingUSD(prefix, price.CacheRead, price.Output)
 			out["ping_usd_each"] = each
 			out["worst_case_usd"] = each * float64(spans)
 			out["priced"] = true
@@ -215,12 +230,9 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 // Deliberately a CEILING and not an estimate: a session that goes quiet sends none of them, and
 // the honest thing to show somebody authorizing a spend is the most it can be.
 func (h *Handler) worstCase(tenantID, session string, o sessionOverride) (prefix int64, model string, pings int64) {
-	if o.pol.Idle <= 0 {
+	pings = o.lib().WorstCasePings(time.Now())
+	if pings == 0 {
 		return 0, "", 0
-	}
-	pings = int64(time.Until(o.until).Seconds() / o.pol.Idle.Seconds())
-	if pings < 1 {
-		pings = 1
 	}
 	if h.rec == nil {
 		return 0, "", pings

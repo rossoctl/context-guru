@@ -41,8 +41,8 @@ func wantsManualHold(r *http.Request) bool {
 	return r != nil && strings.TrimSpace(r.Header.Get(ManualHoldHeader)) == "1"
 }
 
-// manualPingMinGap is the least time between two manual pings of the same thread.
-const manualPingMinGap = 30 * time.Second
+// manualPingMinGap is keepalive.ManualPingMinGap.
+const manualPingMinGap = keepalive.ManualPingMinGap
 
 func (h *Handler) mountManualPing(m *http.ServeMux) {
 	m.HandleFunc("POST /api/me/cache/ping", h.manualPing)
@@ -106,14 +106,15 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		ctlErr(w, http.StatusNotFound, "unknown session")
 		return
 	}
-	// A live free 1-hour ping comes first: the billed tier below is 5 minutes, so the cold gate would give a press
-	// 5 to 60 minutes after the ping the wrong reason ("cold") for an entry that is still warm (#1259).
-	if h.keeper.Keeper.OneHourTouchLive(keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread}) {
+	// The cold gate and the 1-hour touch conflict are keepalive.ManualPingBlock.
+	switch keepalive.ManualPingBlock(
+		h.keeper.Keeper.OneHourTouchLive(keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread}),
+		time.UnixMilli(th.EndTS), time.Duration(th.TTLSeconds)*time.Second, now) {
+	case keepalive.ManualBlockAtOneHour:
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "at one hour",
 			"detail": "the cache entry is at 1 hour after a free 1-hour ping; a manual ping would move it back to 5 minutes"})
 		return
-	}
-	if !now.Before(time.UnixMilli(th.EndTS).Add(time.Duration(th.TTLSeconds) * time.Second)) {
+	case keepalive.ManualBlockCold:
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "cold"})
 		return
 	}
@@ -155,7 +156,7 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, keepalive.ErrTooCostly):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "over budget",
-			"detail": "one ping on this thread would cost more than the per-ping ceiling"})
+			"detail": "one ping on this thread would cost more than the operator's per-ping cap, or more than the miss it protects"})
 		return
 	case errors.Is(err, keepalive.ErrAtOneHour):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "at one hour",
@@ -172,10 +173,7 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "upstream"})
 		return
 	}
-	saved := rewrite - res.CostUSD
-	if saved < 0 || res.AvoidedUSD == 0 {
-		saved = 0 // a ping that read nothing, or cost more than the write, kept nothing warm
-	}
+	saved := keepalive.ManualSavedUSD(rewrite, res)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sent":          true,
 		"cache_read":    res.Usage.CacheRead,

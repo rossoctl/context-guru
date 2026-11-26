@@ -4,8 +4,9 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The per-wait ping plan (#858). The ping count is chosen when a turn ends, from what the thread
@@ -126,10 +127,21 @@ func (p Policy) LowestMinPrefix() int {
 // stored cause and no stop reason (an old row) gets the general floor, also on a subagent thread: the
 // replay then under-counts those rows, the safe direction.
 func (p Policy) SpanPrefixOK(s SpanFacts, prefix int64) bool {
-	if !p.WaitPlan || s.OpenAI || (s.Cause == "" && s.StopReason == "") {
+	if s.OpenAI {
 		return prefix >= int64(p.MinPrefixTokens)
 	}
-	return prefix >= int64(p.WaitMinPrefix(storedWait(s.Cause, s.StopReason), s.Subagent))
+	return prefix >= int64(p.FloorFor(s.Cause, s.StopReason, s.Subagent))
+}
+
+// FloorFor is the prefix floor of a stored row: the keeper's WaitMinPrefix, with the wait cause read
+// from the row's stored cause and stop reason as storedWait reads it. A row with neither (an old row)
+// gets the general floor, also on a subagent thread. It does not know OpenAI: the caller keeps the
+// general floor for an OpenAI row.
+func (p Policy) FloorFor(cause, stopReason string, subagent bool) int {
+	if !p.WaitPlan || (cause == "" && stopReason == "") {
+		return p.MinPrefixTokens
+	}
+	return p.WaitMinPrefix(storedWait(cause, stopReason), subagent)
 }
 
 func orDefault(v, def int) int {
@@ -145,7 +157,8 @@ func orDefault(v, def int) int {
 type TaskCounts struct{ Background, Teammate int }
 
 // WaitingFor is the wait cause of a response, from its tool names and stop reason and the thread's
-// open-task counts. The background count is the larger of two readings: the host's tracker
+// open-task counts. cl is the client (agent.Identify; the zero Client names none): it decides what an end_turn with nothing open reads
+// (waitcause.HumanFallback). The background count is the larger of two readings: the host's tracker
 // (Options.OpenTasks), which is as of the request before and carries tasks whose start has left a
 // compacted body, and the count the host read from this turn's own body (open; nil: the host had no
 // result in time). A stale tracker count alone reads a turn that starts background work as "a person",
@@ -156,7 +169,7 @@ type TaskCounts struct{ Background, Teammate int }
 // fewer. With the background count merged, the cause moves only from "a person" or "a teammate" to
 // "background", which gets at least those pings and a floor no higher. Record also takes the larger
 // count of the two causes, so no configuration of the extra pings can lower it.
-func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason string, usageOK bool, open *TaskCounts) string {
+func (k *Keeper) WaitingFor(key Key, cl agent.Client, names []string, incomplete bool, stopReason string, usageOK bool, open *TaskCounts) string {
 	if k == nil {
 		return waitcause.WaitingUnknown
 	}
@@ -167,7 +180,7 @@ func (k *Keeper) WaitingFor(key Key, names []string, incomplete bool, stopReason
 	if open != nil {
 		bg = max(bg, open.Background)
 	}
-	w, _ := waitcause.ClassifyWaitingForTerminal(terminalFor(k.o.TerminalTools, incomplete),
+	w, _ := waitcause.ClassifyWaitingForClient(cl, terminalFor(k.o.TerminalTools, incomplete),
 		names, stopReason, false, usageOK, bg, tm)
 	// A response that stopped for a tool call waits for that tool, even when the name list missed
 	// the call (a spliced sniff window): the classifier reads such a response as a wait for a person.
@@ -254,7 +267,7 @@ func (p Policy) SpanPings(s SpanFacts) (pings int, idle time.Duration) {
 		q := p.ForOneHour()
 		return q.MaxPings, q.Idle
 	}
-	if p.Idle >= 300*time.Second {
+	if p.Idle >= OneHourIdleFloor {
 		return p.MaxPings, p.Idle
 	}
 	return p.WaitPings(w, s.Subagent), p.Idle

@@ -1,0 +1,15 @@
+cache:
+  keepalive: true
+components:
+  extract:
+    min_tokens: 400
+  toolfilter:
+    defer: auto
+    keep:
+      - WebFetch
+    remove:
+      - mcp__ops
+pipeline:
+  - extract
+  - format
+  - cachesplit

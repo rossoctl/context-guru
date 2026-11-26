@@ -20,19 +20,26 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -228,6 +235,12 @@ type Trace struct {
 	// body that goes upstream gives another key when the host edits the head (tool deferral).
 	// "" when apply derived none.
 	TouchAlias string
+	// TouchAtMs is the time this request wrote under TouchAlias (the cold clock, before the forward). The host
+	// hands it back to ConfirmRealTouch, so a confirm ends only the carry its OWN request wrote. 0 when this
+	// request wrote no clock (a bypassed one).
+	TouchAtMs int64
+	// TouchSeq numbers that write (the carry it makes holds it). The host hands it back with TouchAtMs.
+	TouchSeq int64
 	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
 	Thread         thread.Result
 	ThreadResolved bool
@@ -361,6 +374,51 @@ func ExplicitSession(header string, body []byte, host ...string) string {
 		r := md.Get(k)
 		return r.Str, r.Type == gjson.String
 	}, host...)
+}
+
+// SessionHeader is the header a client or its plugin names the session with. It wins over every other id.
+const SessionHeader = "x-context-guru-session"
+
+// ExplicitSessionFor is the explicit session id for one request, for a host that has the request headers.
+// The order is fixed here, so every host gets the same answer:
+//
+//  1. the SessionHeader header;
+//  2. the body's own ids (session.Explicit), when the header is empty;
+//  3. the id of the agent that owns the route (route.SessionID(h), for example Bob's X-Task-Id);
+//  4. the client's own id from its headers (cl.SessionID: Codex session-id, OpenCode x-opencode-session-id).
+//
+// 3 and 4 come after every other id. A route with no agent id and a client with no id give the header
+// unchanged. cl is agent.Identify(h), computed once per request by the host.
+//
+// route may be nil (a host that has no route agent). A panic in route.SessionID gives no id for it:
+// the request keeps the session it has without one (fail open). In Cortex there is no route agent:
+// pass nil, and pass the host's own session id (pctx.SessionID) as the header value when it is set.
+func ExplicitSessionFor(h http.Header, route agent.Agent, cl agent.Client, body []byte) string {
+	sess := h.Get(SessionHeader)
+	id := routeSessionID(h, route)
+	if id == "" {
+		id = cl.SessionID
+	}
+	if id == "" {
+		return sess
+	}
+	return ExplicitSession(sess, body, id)
+}
+
+// routeSessionID is route.SessionID(h), fail open.
+func routeSessionID(h http.Header, route agent.Agent) (id string) {
+	if route == nil {
+		return ""
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			slog.Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", route), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return route.SessionID(h)
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
@@ -617,7 +675,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// Read ONCE, used twice: the restart grace the boundary consults and the cold
 			// decision below are one fact — this request's cache lifetime — and must not be
 			// derived twice (see ttlTier for the last time two readers disagreed).
-			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
+			model := gjson.GetBytes(body, "model").String()
+			ttl, lifetimeKind := CacheLifetime(provider, model, body)
 			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			// The alias session id: the same conversation reaches us under it when the explicit
 			// session header comes and goes (see the clock note below). The restart grace asks
@@ -631,7 +690,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// The Bob IDE's X-Task-Id header is an explicit id, like the session header. So the
 			// grace alias of a Bob IDE session is the content hash.
 			// alias (above) is always the bare content hash. It keys the cold decision's own
-			// clocks (aliasSeen, sessionTTL, RecordCacheTouch).
+			// clocks (aliasSeenState, sessionTTL, RecordCacheTouch).
 			graceAlias := graceAliasID(o.Tenant, body, norm)
 			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
 			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
@@ -661,15 +720,46 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// timestamp sitting unread in the store. Four turns, header present on 2 and 3:
 			// ColdCache came out [false false false TRUE] with the entry 60 s old.
 			//
-			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
+			// Reading a key we also write is safe: aliasSeenState reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
 			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
-			// so load them before aliasSeen reads. alias and sessionID are declared above,
+			// so load them before aliasSeenState reads. alias and sessionID are declared above,
 			// beside the grace keys — the merge keeps #770's call on the bare-hash alias.
 			if alias != sessionID {
 				loadSessionState(st, alias)
 			}
-			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 { // seq is 0 when the request took no clock step (bypassed)
+				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
+			aliasAt := seen.at
+			// A store that keeps nothing never held the ping's clock (#1350). The host's own record of the ping
+			// stands in for it, asked only then: with a real store the stored clock is the one record. It joins
+			// the clocks the way the carried ping does: it can only move prevAt later and only extend the lifetime
+			// to the ping's hour, so it makes a cold verdict warm and never the other way.
+			storeOffPingAt := int64(0)
+			if !store.Keeps(st) {
+				if at, ok := o.freePingFor(alias); ok && at <= nowMs {
+					storeOffPingAt = at
+				}
+			}
+			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
+			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
+			// request that wrote no alias clock (a bypassed one) has moved the entry since.
+			carriedAt := int64(0)
+			if seen.carriedAt > 0 && seen.at >= prevAt {
+				carriedAt = seen.carriedAt
+			}
+			if storeOffPingAt > 0 {
+				// Counted as a carried ping: a failed request after it touched nothing, so its hour runs on.
+				if carriedAt == 0 || storeOffPingAt > carriedAt {
+					carriedAt = storeOffPingAt
+				}
+				if storeOffPingAt > prevAt {
+					prevAt = storeOffPingAt
+				}
+			}
+			if aliasAt > prevAt {
 				prevAt = aliasAt
 			}
 			// The TTL record is read under BOTH ids too, and the two guards have to compose or
@@ -693,7 +783,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				if a := sessionTTL(st, alias, ttl); a > ttl {
 					ttl = a
 				}
-				coldCache = cacheIsCold(prevAt, nowMs, ttl)
+				// A free 1-hour ping was the last touch: the provider holds the entry for the 1-hour
+				// lifetime from it, whatever tier this thread's own request asks (#1350). The guards above
+				// are the floor; the lifetime and the verdict come from the one function.
+				facts := CacheFacts{Provider: provider, Model: model,
+					LastOneHour: touchOneHour, Floor: ttl}
+				// A free 1-hour ping stands under a real request the host has not confirmed (it failed, or
+				// nobody told us): the failed request touched nothing, so the ping's hour still runs.
+				// The same margin as the verdict (coldMargin): the carry ends where a plain tier would.
+				if carriedAt > 0 && time.Duration(nowMs-carriedAt)*time.Millisecond < EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true})+coldMargin {
+					facts.LastOneHour = true
+				}
+				ttl = EntryLifetime(facts)
+				coldCache = IsCold(facts, prevAt, nowMs)
 			}
 			// A minimum only proves warmth before its boundary; past it the
 			// entry may still exist. Never lift TailOnlyCold on that guess.
@@ -918,7 +1020,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
 		}
-		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0
+		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 		if ok {
 			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
@@ -927,7 +1029,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 
 	// The envelope rewrites (tail split, tool-schema strip) already rewrote `body`, so
 	// the result must be forwarded even if no component changes a message.
-	changed := systemSplit || toolSchema || filteredDecls > 0
+	changed := systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 	// Each changed message's new bytes, keyed by its index in the body's messages array,
 	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
 	// sjson.SetBytes into the whole body per changed message, which copies the entire
@@ -1252,29 +1354,164 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 	return time.Duration(nowMs-prevAtMs)*time.Millisecond >= ttl+coldMargin
 }
 
-// aliasSeen records activity against a content-derived session id and returns when that id
-// was last seen, or 0 if never. It is the second clock the cold decision consults.
+// seenState is what a cg:seen: value says about the last touch.
+type seenState struct {
+	at      int64 // the time of the last touch
+	oneHour bool  // that touch left the entry at the 1-hour tier
+	// carriedAt is the time of a free 1-hour ping that still stands under a real request nobody has confirmed
+	// (ConfirmRealTouch). 0 = none.
+	carriedAt int64
+	// tag names the route that made the 1-hour ping ("" = not named). A route switch-off ends only a ping that
+	// carries its own tag (EndTouchTier), so it can never end a later ping another route made.
+	tag string
+	// seq names the request that wrote a carry (touchSeq, one per request of this process). A confirm ends only a
+	// carry with its own time AND its own seq, so two requests that wrote in the same millisecond cannot end
+	// each other's carry. 0 = none.
+	seq int64
+}
+
+// aliasSeenState records activity against a content-derived session id and returns the last touch of that id (zero
+// if never seen). It is the second clock the cold decision consults. It is deliberately NOT the Tracker: TurnAt runs
+// the transcript length through modes.Boundary, which counts a compaction reset, so recording a second key per
+// request double-counted that metric. The state is pinned against LRU (store.SeenPrefix) because losing it makes a
+// warm prefix read cold. On a store that cannot persist it degrades to zero.
 //
-// Deliberately NOT the Tracker: TurnAt runs the transcript length through modes.Boundary,
-// which counts a compaction reset, so recording a second key per request double-counted that
-// metric. This needs only a timestamp, and the store already holds per-session state.
+// The tier lives exactly until the next real request, as the clock does: a REAL request writes the plain clock,
+// with no tier, so one record carries the time and the tier of the last touch.
 //
-// Pinned against LRU (store.SeenPrefix) because losing it makes a warm prefix read cold.
-//
-// ponytail: degrades to 0 on a store that cannot persist, which just restores the old
-// single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
-// clock ever needs the boundary too.
-func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
-	if st == nil || nowMs <= 0 {
-		return 0
+// It reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
+// that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
+// provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
+// accepted (ConfirmRealTouch, the keeper's Record). The store value is the ONE record of the fact: the keeper
+// keeps no tier and no time of its own, so no failure path can leave two records apart (#1350, #1365).
+func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
+	prev, _ = aliasSeenWrite(st, alias, nowMs)
+	return prev
+}
+
+// touchSeq numbers the real requests that take the clock step in this process (with no store the step writes
+// nothing, but the request still has its number). A carry holds the number of the request that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
+// errs toward the old behavior (a shared confirm), not toward a new failure.
+var touchSeq atomic.Int64
+
+// aliasSeenWrite is aliasSeenState that also returns the number of this request's clock step (0 when the request
+// took none: a bypassed one). With no store the step writes nothing, but the request still has its number.
+func aliasSeenWrite(st store.Store, alias string, nowMs int64) (prev seenState, seq int64) {
+	if nowMs <= 0 {
+		return seenState{}, 0
+	}
+	seq = touchSeq.Add(1) // the request went through the clock step, also when there is no store to write to
+	if st == nil {
+		return seenState{}, seq
 	}
 	k := store.SeenPrefix + alias
-	var prev int64
 	if b, ok := st.Get(k); ok {
-		prev, _ = strconv.ParseInt(string(b), 10, 64)
+		prev = parseSeenState(b)
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
-	return prev
+	v := strconv.FormatInt(nowMs, 10)
+	switch {
+	case prev.oneHour:
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
+	case prev.carriedAt > 0:
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
+	}
+	st.Put(k, []byte(v))
+	return prev, seq
+}
+
+// seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
+const seenCarrySep = "^"
+
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that the real request
+// that wrote the clock at atMs was accepted, so the entry's tier is now that request's own. The time stays.
+//
+// It ends only the carry that request wrote (the value's own time is atMs). Another request on the same alias may
+// have written its clock since, over a ping that came after this request's clock: that carry is not this
+// request's to end, and if that request then fails, the ping's hour must stand (#1365). The value's request number
+// (seq) makes the match exact: two requests that wrote in one millisecond cannot end each other's carry. atMs 0
+// (this request wrote no clock) ends nothing. The keeper calls it where it ends its own index entry.
+func ConfirmRealTouch(st store.Store, alias string, atMs, seq int64) {
+	if st == nil || alias == "" || atMs <= 0 || seq <= 0 {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
+		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
+		// clock, so its `:1h` stays) errs warm only: no cut.
+		if v := parseSeenState(b); v.carriedAt > 0 && v.at == atMs && v.seq == seq {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
+}
+
+// seenOneHourSuffix marks a clock value whose last touch left the entry at the 1-hour tier. Written by
+// RecordCacheTouchAliasTier only.
+const seenOneHourSuffix = ":1h"
+
+// parseSeen reads a cg:seen: value: milliseconds, and the tier suffix. A value it cannot read is 0.
+func parseSeen(b []byte) (ms int64, oneHour bool) {
+	v := parseSeenState(b)
+	return v.at, v.oneHour
+}
+
+// parseSeenState reads all the shapes of a value: "<ms>", "<ms>:1h", "<ms>:1h:<tag>", "<ms>^<pingMs>" and
+// "<ms>^<pingMs>:<tag>". One it cannot read is the zero state, which is never cold. An older reader fails to
+// parse any suffixed shape and reads 0, which is never cold either.
+func parseSeenState(b []byte) (v seenState) {
+	str := string(b)
+	if i := strings.Index(str, seenCarrySep); i >= 0 {
+		rest := str[i+1:]
+		if j := strings.Index(rest, ":"); j >= 0 {
+			v.tag, rest = rest[j+1:], rest[:j]
+		}
+		if j := strings.Index(rest, seenSeqSep); j >= 0 {
+			q, err := strconv.ParseInt(rest[j+1:], 10, 64)
+			if err != nil {
+				return seenState{}
+			}
+			v.seq, rest = q, rest[:j]
+		}
+		c, err := strconv.ParseInt(rest, 10, 64)
+		if err != nil {
+			return seenState{}
+		}
+		v.carriedAt, str = c, str[:i]
+	} else if i := strings.Index(str, seenOneHourSuffix); i >= 0 {
+		v.oneHour, v.tag = true, strings.TrimPrefix(str[i+len(seenOneHourSuffix):], ":")
+		str = str[:i]
+	}
+	ms, err := strconv.ParseInt(str, 10, 64)
+	if err != nil {
+		return seenState{}
+	}
+	v.at = ms
+	return v
+}
+
+// seenSeqSep marks the number of the request that wrote a carry: "<ms>^<pingMs>#<seq>".
+const seenSeqSep = "#"
+
+func seqSuffix(seq int64) string {
+	if seq <= 0 {
+		return ""
+	}
+	return seenSeqSep + strconv.FormatInt(seq, 10)
+}
+
+// tagSuffix is the written form of a route tag: ":<tag>", or nothing when there is none.
+func tagSuffix(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return ":" + tag
+}
+
+// RouteTag is the short name of a route a 1-hour ping is stamped with. It is a hash, so the store value holds no
+// provider, endpoint or model text.
+func RouteTag(route string) string {
+	h := sha256.Sum256([]byte(route))
+	return hex.EncodeToString(h[:4])
 }
 
 // RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
@@ -1318,7 +1555,7 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 // # Why the alias and not the session id
 //
 // Because the provider's entry is keyed on CONTENT, and this must land on the key apply's own
-// aliasSeen will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
+// aliasSeenState will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
 // is what makes the two impossible to drift apart — a second derivation of a cache key is how the
 // cold decision and the dashboard came to disagree once already.
 //
@@ -1329,20 +1566,113 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 // path hashed. A body the host changed after apply ran (tool deferral appends the names list to the
 // head) gives another alias, so such a host passes the one apply derived to RecordCacheTouchAlias.
 func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64) {
-	if st == nil || nowMs <= 0 || len(body) == 0 {
-		return
-	}
-	norm := normalizeSessionMessages(provider, body)
-	if len(norm) == 0 {
-		return
-	}
-	sys, firstUser := schema.SessionHead(norm)
-	RecordCacheTouchAlias(st, session.Scoped(tenant, "", sys, firstUser), nowMs)
+	RecordCacheTouchTier(st, tenant, body, provider, nowMs, false)
 }
 
 // RecordCacheTouchAlias is RecordCacheTouch for a caller that holds the alias already: Trace.TouchAlias,
-// derived from the request as it arrived. It writes the same clock under the given key, monotone.
+// derived from the request as it arrived. It writes the same clock under the given key, monotone. The touch
+// carries no tier: it ends any 1-hour tier an earlier touch left.
 func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
+	RecordCacheTouchAliasTier(st, alias, nowMs, false)
+}
+
+// TouchAliasFor is the alias (the cold clock's key) a request body derives, "" when it derives none. It is
+// the same derivation RecordCacheTouch uses, so a caller that must find the clock again later (the keeper
+// ending a 1-hour tier) cannot drift from it.
+func TouchAliasFor(tenant string, body []byte, provider bschemas.ModelProvider) string {
+	if len(body) == 0 {
+		return ""
+	}
+	norm := normalizeSessionMessages(provider, body)
+	if len(norm) == 0 {
+		return ""
+	}
+	sys, firstUser := schema.SessionHead(norm)
+	return session.Scoped(tenant, "", sys, firstUser)
+}
+
+// RecordCacheTouchTier is RecordCacheTouch that also says the tier the touch left the entry at.
+func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
+	if st == nil || nowMs <= 0 {
+		return
+	}
+	RecordCacheTouchAliasTier(st, TouchAliasFor(tenant, body, provider), nowMs, oneHour)
+}
+
+// EndTouchTier ends the free 1-hour ping that stands under the alias's clock, keeping the clock's time: the plain
+// value stays. It ends a plain `:1h` and a carried ping alike, and only one stamped with tag, the route that made
+// it (RouteTag). A later ping of another route, a ping with no tag and a plain value stay. The keeper calls it
+// when the route that gave the tier is switched off, so the cold check never keeps an hour for a tier
+// no route granted, and never loses one a different route granted. It is the only way the keeper ends a tier: the store record is the one record of the fact.
+func EndTouchTier(st store.Store, alias, tag string) {
+	if st == nil || alias == "" || tag == "" {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		if v := parseSeenState(b); (v.oneHour || v.carriedAt > 0) && v.tag == tag {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
+}
+
+// StandingOneHourPing reads the one record of the fact "the last touch of this entry was a free 1-hour ping":
+// the time that ping started, and whether one stands. It is the `:1h` value (the ping is the last touch) or the
+// carry under a real request nobody has confirmed (the request touched nothing yet). A plain value, a value it
+// cannot read and a missing value all say no: an unreadable record never reads as a tier. It does not slide the
+// store's TTL (store.PeekValue): asking is not a touch.
+//
+// Every reader asks this, not a copy of the fact: the dashboard's cache clock, the manual-ping refusal and the
+// probe. The cold check reads the same value through aliasSeenState, where it also writes its own clock.
+func StandingOneHourPing(st store.Store, alias string) (atMs int64, ok bool) {
+	if st == nil || alias == "" {
+		return 0, false
+	}
+	b, got := store.PeekValue(st, store.SeenPrefix+alias)
+	if !got {
+		return 0, false
+	}
+	v := parseSeenState(b)
+	switch {
+	case v.carriedAt > 0:
+		return v.carriedAt, true
+	case v.oneHour && v.at > 0:
+		return v.at, true
+	}
+	return 0, false
+}
+
+// LiveOneHourPing is StandingOneHourPing that also asks the one lifetime function: the ping counts until
+// EntryLifetime of the 1-hour tier for this provider and model has passed since it started.
+func LiveOneHourPing(st store.Store, alias string, provider bschemas.ModelProvider, model string, nowMs int64) (atMs int64, live bool) {
+	at, ok := StandingOneHourPing(st, alias)
+	if !ok {
+		return 0, false
+	}
+	if nowMs >= at+EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true}).Milliseconds() {
+		return 0, false
+	}
+	return at, true
+}
+
+// RecordCacheTouchAliasTier is RecordCacheTouchAlias with the tier of the touch.
+//
+// oneHour says the touch left the provider's entry at the 1-hour tier: a free 1-hour keep-alive ping
+// (1-hour-on-wait) read the prefix and moved the entry from 5 minutes to 1 hour. A request that carries
+// 1-hour markers does not need it: it states its own tier, and sessionTTL keeps it. Until the next touch
+// the cold decision then counts the entry's lifetime from this touch at the 1-hour lifetime
+// (lastTouchOneHour), not at the 5 minutes the thread's own requests ask for.
+//
+// A touch with oneHour false is the new LAST touch and ends the tier: a manual 5-minute ping moves a
+// 1-hour entry back to 5 minutes (#1258). The clock stays monotone: an older touch changes nothing.
+func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHour bool) {
+	RecordCacheTouchAliasRoute(st, alias, nowMs, oneHour, "")
+}
+
+// RecordCacheTouchAliasRoute is RecordCacheTouchAliasTier that also stamps a 1-hour touch with the tag of the
+// route that made it (RouteTag), so a switch-off of that route can end it and no other. The tag is ignored for
+// a 5-minute touch. tag must come from RouteTag (hex): a tag with "^", "#" or ":" would break the value's shape.
+func RecordCacheTouchAliasRoute(st store.Store, alias string, nowMs int64, oneHour bool, tag string) {
 	if st == nil || nowMs <= 0 || alias == "" {
 		return
 	}
@@ -1351,11 +1681,22 @@ func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
 	// record is that later is warmer.
 	k := store.SeenPrefix + alias
 	if b, got := st.Get(k); got {
-		if prev, err := strconv.ParseInt(string(b), 10, 64); err == nil && prev >= nowMs {
+		if prev, _ := parseSeen(b); prev >= nowMs {
 			return
 		}
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+	v := strconv.FormatInt(nowMs, 10)
+	if oneHour {
+		v += seenOneHourSuffix + tagSuffix(tag)
+	}
+	st.Put(k, []byte(v))
+}
+
+// lastTouchOneHour reports whether the LAST touch of this prefix's entry (a real request counts) left it at
+// the 1-hour tier: the clock's own record says so, and no other clock (the thread's tracker) is later.
+// prevAt is the latest clock the caller read, before the alias's clock joined it.
+func lastTouchOneHour(aliasAt int64, aliasOneHour bool, prevAt int64) bool {
+	return aliasOneHour && aliasAt > 0 && aliasAt >= prevAt
 }
 
 // sessionTTL is cacheTTL widened to the LONGEST lifetime this PREFIX has ever asked for.
@@ -2346,7 +2687,7 @@ func rawTotal(msgs []gjson.Result) int {
 func wireGroups(slots []slot) []int {
 	groups := make([]int, len(slots))
 	for i, s := range slots {
-		bi, _, ok := splitSlotPath(s.path)
+		bi, ok := accwire.Messages.WireIndex(s.path)
 		if !ok {
 			return nil
 		}

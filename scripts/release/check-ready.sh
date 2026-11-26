@@ -6,7 +6,15 @@
 #   - the last offload-review round has an approving marker from reviewer 1 AND reviewer 2,
 #     both naming this exact head (an approval of an older head does not count; see
 #     approval-still-valid.sh for a head that moved);
-#   - every check run on the head has finished with success (or skipped / neutral);
+#   - every check run on the head has finished with success (or skipped / neutral). The heavy CI jobs
+#     do not run on a PR (lean process), so the next point replaces them;
+#   - the PR body or a PR comment holds the line "Local tests: waived (owner rule)" (any case): the
+#     interim rule in CLAUDE.md, "Working on a task". It replaces the next point. Or:
+#   - a comment from scripts/dev/local-tests.sh names this exact head with result=pass and tier=2:
+#     <!-- local-tests sha=S result=pass tier=2 scope=none|changed|full -->. A later commit, even
+#     comment-only, needs a new run. scope=none must match the PR's files (no Go file, go.mod, go.sum,
+#     testdata, embedded file or scripts/ file): scripts/dev/tier2-steps.sh --classify decides.
+#     An old marker with no tier counts until OLD_MARKER_VALID_UNTIL (below);
 #   - the head has a "CodeQL" check run from the code-scanning app that passed. GitHub's
 #     code-scanning rule on main reads this run ("No new alerts in code changed by this pull
 #     request"). A PR opened before the CodeQL workflow existed (#945) has none; it needs a new
@@ -23,6 +31,12 @@
 # Exit 0: ready. Exit 1: not ready (each reason is printed). Exit 2: wrong input, or a gh call
 # failed (the message names it).
 set -euo pipefail
+# Last day (YYYY-MM-DD, inclusive) on which a local-tests marker with no "tier=" (the old format, a
+# full Part A run) still counts. It stops a mass re-run of the open PRs on the day tier 2 lands. To
+# change the cut-off, change this one line. CG_TODAY overrides today's date (for the tests).
+OLD_MARKER_VALID_UNTIL=2026-12-02
+today=${CG_TODAY:-$(date +%F)}
+here=$(cd "$(dirname "$0")" && pwd)
 pr=${1:?usage: check-ready.sh <pr> [<repo>]}
 repo=${2:-rossoctl/context-guru}
 fail=0
@@ -32,7 +46,7 @@ no() { echo "NOT READY: $*"; fail=1; }
 # network or login error never reads as "not ready" or as "no reviews".
 api() { local what=$1; shift; gh "$@" || { echo "ERROR: could not read $what from GitHub (gh $1 failed)" >&2; exit 2; }; }
 
-pj=$(api "the PR" pr view "$pr" --repo "$repo" --json state,isDraft,mergeable,headRefOid,title)
+pj=$(api "the PR" pr view "$pr" --repo "$repo" --json state,isDraft,mergeable,headRefOid,title,body)
 sha=$(jq -r .headRefOid <<<"$pj")
 echo "PR #$pr: $(jq -r .title <<<"$pj")"
 echo "head: $sha"
@@ -74,6 +88,43 @@ while IFS=$'\t' read -r status concl name _app; do
     *) no "check $name: still $status" ;;
   esac
 done <<<"$runs"
+
+# Local tests: the heavy suites run on the PR owner's laptop (scripts/dev/local-tests.sh), which posts
+# a marker comment. The last marker decides. It must name the current head and say pass. A green heavy
+# CI run on this head (workflow_dispatch on the PR branch) is accepted instead.
+cbodies=$(api "the comments" api --paginate "repos/$repo/issues/$pr/comments" --jq '.[].body')
+waiver=$(printf '%s\n%s\n' "$(jq -r '.body // ""' <<<"$pj")" "$cbodies" | grep -ciE '^[[:space:]]*Local tests: waived \(owner rule\)[[:space:]]*$' || true)
+lt=$(printf '%s\n' "$cbodies" | grep -oE '<!-- local-tests sha=[0-9a-f]+ result=[a-z]+( tier=[0-9]+)?( scope=[a-z]+)? -->' | tail -1 || true)
+lsha=; [ -z "$lt" ] || lsha=$(sed -E 's/.*sha=([0-9a-f]+).*/\1/' <<<"$lt")
+# A marker at the current head decides, also when it says fail. The waiver applies only when there
+# is no marker, or the marker names an older head.
+if [ "${waiver:-0}" -gt 0 ] && [ "$lsha" != "$sha" ]; then
+  echo "local tests: waived (owner rule)"
+elif [ -z "$lt" ]; then
+  heavy=$(printf '%s\n' "$runs" | awk -F'\t' '$3=="build-test" && $1=="completed" && $2=="success"{print "ok"; exit}')
+  if [ "$heavy" = ok ]; then echo "local tests: none, but the heavy CI job passed on the head"
+  else no "no local-tests comment (run scripts/dev/local-tests.sh $pr in the PR worktree)"; fi
+else
+  lres=$(sed -E 's/.*result=([a-z]+).*/\1/' <<<"$lt")
+  ltier=; grep -q ' tier=' <<<"$lt" && ltier=$(sed -E 's/.* tier=([0-9]+).*/\1/' <<<"$lt")
+  lscope=; grep -q ' scope=' <<<"$lt" && lscope=$(sed -E 's/.* scope=([a-z]+).*/\1/' <<<"$lt")
+  if [ "$lsha" != "$sha" ]; then no "the last local-tests comment is for ${lsha:0:12}, not the head (run scripts/dev/local-tests.sh $pr again)"
+  elif [ "$lres" != pass ]; then no "local tests at the head: result=$lres"
+  elif [ -z "$ltier" ]; then
+    # The old format: a full Part A run. It counts until the cut-off.
+    if [[ "$today" > "$OLD_MARKER_VALID_UNTIL" ]]; then
+      no "the local-tests marker is the old format (no tier=2), and it stopped counting after $OLD_MARKER_VALID_UNTIL (run scripts/dev/local-tests.sh $pr again)"
+    else echo "local tests: pass at the head (old marker, no tier; counts until $OLD_MARKER_VALID_UNTIL)"; fi
+  elif [ "$ltier" != 2 ]; then no "the local-tests marker says tier=$ltier; tier=2 is needed"
+  elif [ -z "$lscope" ]; then no "the tier-2 local-tests marker has no scope= (run scripts/dev/local-tests.sh $pr again)"
+  elif [ "$lscope" = none ]; then
+    # scope=none claims the PR has no Go file. Check it against the PR's files (renames: both names).
+    pfiles=$(api "the PR files" api --paginate "repos/$repo/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)')
+    real=$(cd "$here" && ./../dev/tier2-steps.sh --classify <<<"$pfiles")
+    if [ "$real" = none ]; then echo "local tests: pass at the head (tier 2, scope none)"
+    else no "the local-tests marker says scope=none, but the PR changes files of scope $real (run scripts/dev/local-tests.sh $pr again)"; fi
+  else echo "local tests: pass at the head (tier 2, scope $lscope)"; fi
+fi
 
 # Code scanning: the "CodeQL" check run, posted by GitHub's code-scanning app
 # (github-advanced-security), not the "analyze" job of the workflow and not any other job with that

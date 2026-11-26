@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rossoctl/context-guru/agent"
-	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/providerusage"
 	"github.com/tidwall/gjson"
 )
 

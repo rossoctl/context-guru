@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // fakeKeyShaped builds a string with the SHAPE of a credential without being one. Built
@@ -86,20 +88,15 @@ func TestMetaEnumKeepsLegitimateValues(t *testing.T) {
 // waitRow drains the writer and returns the single stored row.
 func waitRow(t *testing.T, rec *Recorder) *Event {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(p.Requests) == 1 {
-			return p.Requests[0]
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist the row (got %d)", len(p.Requests))
-		}
-		time.Sleep(5 * time.Millisecond)
+	testutil.WaitFor(t, "the writer stores the row", func() bool { return rec.Stats().Written == 1 })
+	p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(p.Requests) != 1 {
+		t.Fatalf("writer stored %d rows, want 1", len(p.Requests))
+	}
+	return p.Requests[0]
 }
 
 // Every metadata field has to survive the round trip through SQLite unchanged — and

@@ -10,6 +10,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func scriptsDir(t *testing.T) string {
@@ -1051,6 +1053,7 @@ func runCheck(t *testing.T, port, binBody string) (out string, code int, elapsed
 // check that fails on a loaded CI runner, and a flaky test here would get muted, which is how the
 // property would be lost a second time.
 func TestCheckHookFinishesInsideItsOwnTimeout(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -1203,6 +1206,7 @@ func TestCheckHookRecoversSilently(t *testing.T) {
 // port is one of the likeliest reasons to need that block, and it was the one case that never
 // produced it.
 func TestStartHookBudgetsOnWallClockNotIterations(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -2317,7 +2321,7 @@ func TestStatuslineReportsLoadingNotDownOnATimeout(t *testing.T) {
 		t.Errorf("got %q, want the loading indicator %q (NOT the down indicator — the proxy may be "+
 			"perfectly healthy and merely slow)", strings.TrimSpace(out), "cg: stats loading…")
 	}
-	if elapsed > 2*time.Second {
+	if testutil.TimingEnabled() && elapsed > 2*time.Second {
 		t.Errorf("took %v against a stalling port; the HTTP fetch carries its own ~0.6s timeout, "+
 			"so this should return in well under the script's own 2s backstop", elapsed)
 	}
@@ -2574,9 +2578,13 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 		{"clock skew: far in the past", -100000, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			expiresAt := time.Now().Add(time.Duration(c.remainingSec * float64(time.Second))).Unix()
+			// The script's clock is pinned to now, so the render is exact however long python takes to start.
+			now := time.Now().Unix()
+			expiresAt := now + int64(c.remainingSec)
 			stdin := fmt.Sprintf(`{"prompt_cache": {"warm": true, "expires_at": %d}}`, expiresAt)
-			out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
+			env := routedEnv(port)
+			env["CG_TEST_NOW"] = fmt.Sprint(now)
+			out, code, _ := runStatusline(t, env, stdin, "--cache")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
@@ -2591,17 +2599,15 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
-			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
-			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
-			// value, never ahead of it.
-			// Minutes are shown whole above EXPIRING_SECONDS (a calm, non-ticking figure), so the
-			// tolerance there is a whole minute, rounded down.
-			tol := 2
+			// The clock is pinned, so the figure is exact. Minutes are shown whole above
+			// EXPIRING_SECONDS (a calm, non-ticking figure), so the tolerance there is a whole
+			// minute, rounded down.
+			tol := 0
 			if c.remainingSec > 60 {
 				tol = 60
 			}
 			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-tol {
-				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
+				t.Errorf("remaining=%.0fs: got %q (%ds), want within %ds below that", c.remainingSec, got, gotSec, tol)
 			}
 		})
 	}
@@ -2954,11 +2960,13 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	// isolation between different tests), so this test drives the script directly instead.
 	py := requireTool(t, "python3")
 	tmp := t.TempDir()
+	pinned := fmt.Sprint(time.Now().Unix())
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
+		// The script's clock is pinned, so no render can outlive the 30 s TTL however slow python starts.
 		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
-			"CLAUDE_PLUGIN_OPTION_PORT="+port)
+			"CLAUDE_PLUGIN_OPTION_PORT="+port, "CG_TEST_NOW="+pinned)
 		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
@@ -10670,19 +10678,18 @@ func projectPortOption(t *testing.T, file string) string {
 	return fmt.Sprint(opts["port"])
 }
 
-// waitPortClosed is the negative of waitForHealthz: nothing accepts a connection there any more.
+// waitPortClosed is the negative of waitForHealthz: the port refuses connections. Only a refused
+// connection counts: a dial that timed out under load says nothing about the listener.
 func waitPortClosed(t *testing.T, port string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
-		if err != nil {
-			return
+	testutil.WaitFor(t, "port "+port+" to refuse connections", func() bool {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+		if err == nil {
+			_ = c.Close()
+			return false
 		}
-		_ = c.Close()
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Errorf("something is still listening on port %s", port)
+		return errors.Is(err, syscall.ECONNREFUSED)
+	})
 }
 
 // TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo.
@@ -11307,13 +11314,7 @@ func TestResettingAProjectFallsBackToTheMachineWideInstall(t *testing.T) {
 	// "declined silently" and "already healthy, nothing to do" are the same observation, and the
 	// first version of this test could not tell them apart.
 	stopFakeProxy(t, state, port2)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := net.DialTimeout("tcp", "127.0.0.1:"+port2, 200*time.Millisecond); err != nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitPortClosed(t, port2)
 	logs := t.TempDir()
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Dir = proj

@@ -233,4 +233,4 @@ Status:
 
 Step 4 measured p50 at 12 to 35 microseconds. p99 is not measured, because the noise is too large, so R46 is not proven. No separate process is built for now. Keep that option open until a p99 is measured against a chosen budget.
 
-Not built: request and response byte counters, `source=client` on errors, ping outcomes `timeout` and `skipped`, shared-warm tokens (#853).
+Not built: request and response byte counters, `source=client` on errors, ping outcome `skipped`, shared-warm tokens (#853).

@@ -306,7 +306,7 @@ def load_strategy_table(binary):
 
 
 def offered_strategies(table):
-    # Exactly openai or any: a row that also lists anthropic is not offered (owner decision, #1062).
+    # Exactly openai or any: a row that also lists anthropic is not offered (#1062).
     return [row for row in table["strategies"]
             if row["providers"] and all(p in PROVIDERS for p in row["providers"])]
 

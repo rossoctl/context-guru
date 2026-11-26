@@ -16,3 +16,22 @@ func TestWireFor(t *testing.T) {
 		}
 	}
 }
+
+func TestServerHeldHistory(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		want bool
+	}{
+		{`{"input":"x"}`, false},
+		{`{"previous_response_id":"r1","input":"x"}`, true},
+		{`{"conversation":"c1","input":"x"}`, true},
+		{`{"conversation":{"id":"c1"},"input":"x"}`, true},
+		{`{"conversation":"","input":"x"}`, false},
+		{`{"input":[{"type":"item_reference","id":"i"}]}`, true},
+		{`{"input":[{"type":"message"}]}`, false},
+	} {
+		if got := ServerHeldHistory([]byte(c.body)); got != c.want {
+			t.Errorf("%s: %v want %v", c.body, got, c.want)
+		}
+	}
+}

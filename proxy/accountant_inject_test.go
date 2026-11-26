@@ -8,15 +8,15 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/tidwall/gjson"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // M4: the savings record ends with the body that goes upstream, AFTER expand.Inject and
@@ -59,13 +59,8 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 		t.Fatalf("precondition: both tools must be injected: %s", gjson.GetBytes(sent, "tools"))
 	}
 	// The record ends in the background job, after the response is back.
-	for i := 0; i < 1000 && got.Load() == nil; i++ {
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the savings record to end", func() bool { return got.Load() != nil })
 	r := got.Load()
-	if r == nil {
-		t.Fatal("the savings record never ended")
-	}
 	if want := accBodies(sent); fmt.Sprint(r.Forwarded) != fmt.Sprint(want) {
 		t.Fatalf("Forwarded given to the library differs from the body sent upstream:\n got %+v\nwant %+v", r.Forwarded, want)
 	}
@@ -80,9 +75,7 @@ func TestSavingsRecordEndsWithTheInjectedForwardedBody(t *testing.T) {
 	// each injection is a cost on a row of its own.
 	waitForRows(t, rec, 1)
 	// The recorder counts a row just before it calls the tap, so wait for the tap too.
-	for i := 0; i < 400 && len(tap.all()) < 1; i++ {
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the tap to see the row", func() bool { return len(tap.all()) >= 1 })
 	e := tap.all()[0]
 	res, _ := e.AccountantResult()
 	for _, c := range res.Checks {

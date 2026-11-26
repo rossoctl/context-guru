@@ -17,6 +17,10 @@
 # bill in dollars (Bob's file says `currency: Bobcoins`). Unset means USD. 1 to 16 ASCII letters;
 # any other value stops the proxy at startup. The dashboard shows costs in this unit.
 #
+# `flat: true` (optional, per entry) turns the built-in prompt-size tiers off for that entry. Set
+# it when this gateway bills one flat rate at every prompt size. Unset, a model that has a tier
+# (gpt-5.4 and later above 272k tokens, Claude Haiku 5.5 above 100k) is priced higher above it.
+#
 # `in`/`out` are required. `cache_read` defaults to a per-model multiple of `in`: 0.1x,
 # except 0.05x on Claude Opus 5.5 and Sonnet 5.5, and 0.025x on Claude Fable 5.1 and
 # Mythos 5.1 (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02).

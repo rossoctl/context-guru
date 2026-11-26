@@ -1,0 +1,15 @@
+# Timing tests with a fix pending: time in the test is a side effect of its design (a fixed sleep or a
+# short time window that waits for a start, an exit, a log line, a port or an async call). Each one
+# gets fixed to wait on the condition itself. A test where time IS the behavior is gated with
+# testutil.RequireTiming instead, and is not listed here.
+#
+# Rule: on the laptop, a failure of a test listed here does not block a PR, as long
+# as the PR does not change that test's package. local-tests.sh does not read this file: check it by
+# hand. A PR that fixes a listed test removes its line in the same PR.
+#
+# Format: <package> <TestName>, one per line. Node tests use the test title. Source: the timing audit
+# on origin/main 1d20435f.
+components/offload TestAWarmQuestionAndAPingQuestionNeverRunTogetherOnAThread
+components/offload TestTheWarmQuestionIsJudgedByTheSharedCacheReadRule
+components/offload TestTheWarmSweepOuterTimeoutFitsSeveralBatches
+opencode-plugin v2: setup waits for the host transform callback before judging providers

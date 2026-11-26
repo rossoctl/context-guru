@@ -75,6 +75,10 @@ esac
 exit 0
 """
 
+# A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+# CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+TIMING = os.environ.get("CG_TIMING_TESTS") == "1"
+
 
 class FakeProxy:
     """A local HTTP server in a thread: /healthz, /api/requests, /signal, and /stats and
@@ -1574,7 +1578,8 @@ class BinaryCheckTest(TempHome):
         reasons, start = [], time.monotonic()
         with mock.patch.object(PLUGIN, "STRATEGIES_TIMEOUT", 1):
             self.assertIsNone(PLUGIN.find_binary(reasons))
-        self.assertLess(time.monotonic() - start, 5)
+        if TIMING:
+            self.assertLess(time.monotonic() - start, 5)
         self.assertIn("cannot list cache strategies", reasons[0])
 
     def test_the_managed_binary_is_still_used_and_probed_once(self):
@@ -1902,7 +1907,8 @@ class SecondReviewTest(TempHome):
         os.environ["CG_TEST_SLOW_KICKSTART"] = "30"
         start = time.monotonic()
         self.assertEqual(self.run_main("ensure"), (0, "", ""))
-        self.assertLess(time.monotonic() - start, 4.5)
+        if TIMING:
+            self.assertLess(time.monotonic() - start, 4.5)
 
     def test_bootstrap_waits_until_launchd_lets_the_label_go(self):
         loaded = self.root / "loaded"

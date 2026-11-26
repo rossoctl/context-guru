@@ -3,7 +3,6 @@ package dash
 import (
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // SHUTDOWN MUST NOT LOSE INVENTORY. Recorder.Close closes the database after waiting for its goroutines; the
@@ -61,11 +60,7 @@ func TestRecordingInventoryAfterCloseStartsNothingAndDoesNotBlock(t *testing.T) 
 	inv := ScanInventory("anthropic", ccBody(t, []string{tool("Bash", "b")}, skillsReminder, nil))
 	done := make(chan struct{})
 	go func() { rec.RecordInventory("t1", "s1", 1000, inv, true, "/p"); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RecordInventory after Close blocked")
-	}
+	awaitSignal(t, "RecordInventory after Close to return (it must not block)", done)
 	if _, ok := invWriters.Load(rec); ok {
 		t.Error("a writer was left registered for a closed recorder")
 	}

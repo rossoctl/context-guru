@@ -125,6 +125,7 @@ func scanPost(t *testing.T, srv *httptest.Server) {
 // as background work (the 20k floor, 5 pings) at once, and the 5 pings are SENT before the retention timer
 // ((5+1) x Idle) retires the entry. No late call, no pending hold.
 func TestEarlyScanPlansABackgroundTurnAtResponseTime(t *testing.T) {
+	testutil.RequireTiming(t)
 	var hits atomic.Int64
 	scanned := make(chan struct{}, 16)
 	up := scanUpstream(t, &hits, scanned)
@@ -282,7 +283,7 @@ func TestEarlyScanCountsIgnoreTheWindowForBackgroundWork(t *testing.T) {
 				if i == 1 {
 					use = Usage{CacheRead: 48576, CacheWrite: 1200, StopReason: "end_turn"}
 				}
-				k.recordTouch("", tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
+				k.recordTouch("", 0, 0, tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
 					bschemas.Anthropic, "/v1/messages", http.StatusOK, use, true, tc.open)
 			}
 			v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
@@ -344,7 +345,7 @@ func TestEarlyScanCountsDoNotMoveTheWindowOfThe1HourTierOrOpenAI(t *testing.T) {
 				if i == 0 {
 					use.StopReason, use.ToolUseNames = "tool_use", []string{"Bash"}
 				}
-				k.recordTouch("", tn, "sess-1", "", ts, []byte(tc.body), upstream{base: "http://up", path: route}, r,
+				k.recordTouch("", 0, 0, tn, "sess-1", "", ts, []byte(tc.body), upstream{base: "http://up", path: route}, r,
 					tc.provider, route, http.StatusOK, use, true, &keepalive.TaskCounts{Background: 1})
 			}
 			v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
@@ -392,7 +393,7 @@ func TestEarlyScanCountsNeverRefuseAHoldTodayMakes(t *testing.T) {
 				if i == 0 {
 					use.StopReason, use.ToolUseNames = "tool_use", []string{"Bash"}
 				}
-				k.recordTouch("", tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
+				k.recordTouch("", 0, 0, tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
 					bschemas.Anthropic, "/v1/messages", http.StatusOK, use, true, &keepalive.TaskCounts{Background: 1})
 			}
 			v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})
@@ -436,7 +437,7 @@ func TestEarlyScanCountsKeepATodayHoldOfAPolicyOutsideThePlan(t *testing.T) {
 		if i == 0 {
 			use.StopReason, use.ToolUseNames = "tool_use", []string{"Bash"}
 		}
-		k.recordTouch("", tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
+		k.recordTouch("", 0, 0, tn, "sess-1", "", ts, []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"}, r,
 			bschemas.Anthropic, "/v1/messages", http.StatusOK, use, true, &keepalive.TaskCounts{Background: 1})
 	}
 	v, held := k.Keeper.Entry(keepalive.Key{Tenant: "t1", Session: "sess-1"})

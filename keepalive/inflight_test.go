@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // A real request arriving while that thread's ping is in flight releases the held credential;
@@ -39,11 +41,14 @@ func TestArriveDuringAnInFlightPing(t *testing.T) {
 		t.Fatalf("balance %d after Arrive, want 0", n)
 	}
 	close(finish)
-	select {
-	case <-fired:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the fire goroutine did not finish")
-	}
+	testutil.WaitFor(t, "the fire goroutine to finish", func() bool {
+		select {
+		case <-fired:
+			return true
+		default:
+			return false
+		}
+	})
 	if p := k.Stats().Pings; p != 1 {
 		t.Fatalf("Pings = %d after the fire returned, want 1", p)
 	}

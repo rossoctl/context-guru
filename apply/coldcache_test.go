@@ -293,9 +293,9 @@ func TestAliasSessionClockKeepsAWarmPrefixWarm(t *testing.T) {
 	base := int64(1_700_000_000_000)
 	// Turn 1 under the explicit id.
 	tr.TurnAt(explicit, 10, base, 0)
-	aliasSeen(st, alias, base)
+	aliasSeenState(st, alias, base)
 	// Turn 2, three minutes later, under the ALIAS — this is what keeps the provider warm.
-	aliasSeen(st, alias, base+ms(3*time.Minute))
+	aliasSeenState(st, alias, base+ms(3*time.Minute))
 	// Turn 3, seven minutes after turn 1, back under the explicit id. Its own clock says
 	// seven minutes idle, which is past 5m + the margin: the old code read COLD here.
 	now := base + ms(7*time.Minute)
@@ -304,7 +304,7 @@ func TestAliasSessionClockKeepsAWarmPrefixWarm(t *testing.T) {
 		t.Fatal("fixture broken: the un-aliased clock must read cold, or this proves nothing")
 	}
 	// With the alias's clock folded in, the later of the two wins and the turn reads WARM.
-	aliasAt := aliasSeen(st, alias, now)
+	aliasAt := aliasSeenState(st, alias, now).at
 	if aliasAt > prevAt {
 		prevAt = aliasAt
 	}
@@ -314,7 +314,7 @@ func TestAliasSessionClockKeepsAWarmPrefixWarm(t *testing.T) {
 }
 
 // Path 2 through the REAL call site, which is where the previous version of this guard was
-// wrong: TestAliasSessionClockKeepsAWarmPrefixWarm calls aliasSeen directly and so never
+// wrong: TestAliasSessionClockKeepsAWarmPrefixWarm calls aliasSeenState directly and so never
 // exercised the `alias != sessionID` condition that skipped it on header-less turns.
 //
 // Four turns over one stable prefix, the session header present on turns 2 and 3 only — the

@@ -153,8 +153,8 @@ taken on your machine, set `GRAFANA_PORT`.
 
 - The request and response byte counters. The proxies do not count them on every path.
 - `source=client` on errors. The proxies do not record a client that hung up.
-- Ping outcomes `timeout` and `skipped`. Those pings leave no record.
+- Ping outcome `skipped`. A skipped ping leaves no record.
 - The exact baseline counter (`llm_savings_baseline_usd_total`). The saving rate tiles use spend plus net saved instead.
 - Authentication (rossoctl/context-guru#1130).
-- Shared-warm tokens (#853).
+- The counter `llm_keepalive_shared_warm_tokens_total` (#853). No proxy sends it yet, so no panel shows it.
 - Retiring the old pull path and the local Grafana (R22). That waits until these dashboards are in use.

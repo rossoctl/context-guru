@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // The early wait-cause scan (#1225, #1227).
@@ -44,7 +44,7 @@ type scanStats struct {
 // gate, when non-nil, is called first on the goroutine (a test hook that holds the scan). after, when
 // non-nil, is called last, once done is closed (a test hook that tells the scan has finished). Neither
 // changes what the scan does.
-func startEarlyScan(parent context.Context, provider bschemas.ModelProvider, body []byte, gate func(context.Context), after func()) *earlyScan {
+func startEarlyScan(parent context.Context, provider bschemas.ModelProvider, body []byte, gate func(context.Context), after func(), opts ...waitcause.Option) *earlyScan {
 	ctx, cancel := context.WithCancel(parent)
 	s := &earlyScan{done: make(chan struct{}), cancel: cancel}
 	go func() {
@@ -58,7 +58,7 @@ func startEarlyScan(parent context.Context, provider bschemas.ModelProvider, bod
 		if gate != nil {
 			gate(ctx)
 		}
-		s.res = waitcause.ScanBody(func() bool { return ctx.Err() != nil }, provider, body)
+		s.res = waitcause.ScanBody(func() bool { return ctx.Err() != nil }, provider, body, opts...)
 	}()
 	return s
 }

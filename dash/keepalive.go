@@ -1276,6 +1276,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				// identical (#706), but the reply is one token and output is billed as generated.
 				// max_tokens 0 is accepted by this gateway and bills none, but the figure has to
 				// match what is sent, not the cheapest shape available.
+				p = p.At(r.Prefix + kvcache.DefaultPingInputTokens) // the ping reads this prefix: the rates of that prompt size
 				r.PingUSDEach = float64(r.Prefix)*p.CacheRead + p.Output
 				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
 				if r.PingUSDEach > 0 {
@@ -1536,7 +1537,8 @@ func DefaultWaitPolicy(base int) keepalive.Policy {
 // What this buys is therefore not a different headline: it is a column that models the policy it
 // names, so it MOVES when the gate or K moves instead of silently ignoring both.
 //
-// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It
+// The gate is the request path's, in the same order: proxy/keepalive.go's kaEntry.pingable(). It models neither
+// the value rule (#1420) nor an operator's flat per-ping cap; those need the entry's prices. It
 // gates at the shipped floors by wait cause (80k for a main thread that waits for a person or for an unknown cause, 20k otherwise): the host hands this package the plan settings and both floors (SetWaitPolicy);
 // a floor it leaves at zero is the shipped one. A strategy's own floor is not replayed.
 //
@@ -1687,7 +1689,7 @@ func planReaches(pol keepalive.Policy, e expiry) bool {
 	n, idle := pol.SpanPings(e.facts)
 	ttl := e.ttl
 	if e.facts.OneHour {
-		ttl = time.Hour
+		ttl = modelinfo.AnthropicCacheTTL1h
 	}
 	return covers(idle.Seconds(), n, e.gap, ttl)
 }
@@ -1784,7 +1786,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 	// Known gap: this also turns the per-cause floor off (one general floor), while the keeper at 300 s or
 	// more keeps the per-cause floor and only the base count. So at 300 s or more the replay can
 	// under-count pings on 20k-80k tool waits and subagent spans.
-	if idleSeconds >= 300 {
+	if idleSeconds >= modelinfo.AnthropicCacheTTL5m.Seconds() {
 		wait.WaitPlan = false
 	}
 	wait.MaxPings, wait.Idle = k, time.Duration(idleSeconds*float64(time.Second))
@@ -1836,6 +1838,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.AddressableUSD += e.usd
 	}
 	if out.Priced {
+		p = p.At(prefix + kvcache.DefaultPingInputTokens) // a ping reads this prefix: the rates of that prompt size
 		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
 		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
 	}
@@ -1953,6 +1956,20 @@ func (d *DB) LastBilledPrefix(f Filter, session string) (int64, string, error) {
 		return 0, "", nil
 	}
 	return prefix.Int64, model.String, err
+}
+
+// LastBilledProvider is the provider of the session's most recent request, as the request path stored it
+// ("anthropic", "openai", ...). Empty when the session has no row.
+func (d *DB) LastBilledProvider(f Filter, session string) (string, error) {
+	cond, args := f.where()
+	var provider sql.NullString
+	err := d.sql.QueryRowContext(d.readCtx(), `SELECT r.provider FROM requests r
+		WHERE `+cond+` AND r.session_id = ? ORDER BY r.ts DESC, r.id DESC LIMIT 1`,
+		append(append([]any(nil), args...), session)...).Scan(&provider)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return provider.String, err
 }
 
 // The recommendation's admission rule. All three must hold, and condition 3 does the work.
@@ -2188,7 +2205,7 @@ func (d *DB) keepAliveRecommend(f Filter, wait keepalive.Policy, fit *FiveHourFi
 		var v float64
 		for _, m := range bySession[s] {
 			save := sc.Save5m
-			if m.ttl >= time.Hour || m.facts.OneHour {
+			if m.ttl >= modelinfo.AnthropicCacheTTL1h || m.facts.OneHour {
 				save = sc.Save1h
 			}
 			if planned {

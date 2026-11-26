@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The Sessions tab in tokens (#1023): each session's figure is the accountant's, split into the
@@ -64,13 +66,11 @@ func TestSessionTokens_SplitTheKeepAliveAndKeepThePingsApart(t *testing.T) {
 	}
 }
 
-// The token read must not change the cost of the Sessions tab: it reads only the page's sessions,
-// through a session index, whatever the window. Measured here against the list's own aggregate,
-// which scans the window.
-func TestSessionTokens_StaysCheapOnALargeWindow(t *testing.T) {
-	db := openTestDB(t)
+// seedTokenWindow fills the database with a large window of sessions, 40 requests each.
+func seedTokenWindow(t *testing.T, db *DB) (Filter, []string) {
+	t.Helper()
 	// Measured at 20,000 rows without -race: the list 103 ms, the token read 2.5 ms of it.
-	// The test runs at 8,000 so the suite stays quick under -race.
+	// The tests run at 8,000 so the suite stays quick under -race.
 	const n = 8_000
 	batch := make([]*Event, 0, 1000)
 	for i := 0; i < n; i++ {
@@ -84,11 +84,18 @@ func TestSessionTokens_StaysCheapOnALargeWindow(t *testing.T) {
 			batch = batch[:0]
 		}
 	}
-	f := Filter{Tenant: "t1"}
 	ids := make([]string, 25)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("s%d", i)
 	}
+	return Filter{Tenant: "t1"}, ids
+}
+
+// The token read must use a session index, whatever the window. This is a query plan, not a time,
+// so it runs in every run.
+func TestSessionTokens_UsesTheIndexOnALargeWindow(t *testing.T) {
+	db := openTestDB(t)
+	f, ids := seedTokenWindow(t, db)
 	q, args := sessionTokensQuery(f, ids)
 	rows, err := db.sql.Query("EXPLAIN QUERY PLAN "+q, args...)
 	if err != nil {
@@ -107,6 +114,16 @@ func TestSessionTokens_StaysCheapOnALargeWindow(t *testing.T) {
 	if !strings.Contains(plan, "idx_requests_session") && !strings.Contains(plan, "idx_requests_tenant_session") {
 		t.Errorf("the session token read does not use a session index:\n%s", plan)
 	}
+}
+
+// The token read must not change the cost of the Sessions tab: it reads only the page's sessions,
+// through a session index, whatever the window. Measured here against the list's own aggregate,
+// which scans the window.
+func TestSessionTokens_StaysCheapOnALargeWindow(t *testing.T) {
+	testutil.RequireTiming(t)
+	db := openTestDB(t)
+	f, ids := seedTokenWindow(t, db)
+	n := 8_000
 	best := func(fn func()) time.Duration {
 		var m time.Duration
 		for i := 0; i < 5; i++ {

@@ -11,8 +11,8 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
-	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/providerusage"
+	"github.com/rossoctl/context-guru/adjudicate"
+	"github.com/rossoctl/context-guru/providerusage"
 )
 
 // CompletePrefixedResponses asks the incoming Responses model one question over

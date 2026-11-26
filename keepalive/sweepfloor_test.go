@@ -1,6 +1,7 @@
 package keepalive
 
 import (
+	"github.com/rossoctl/context-guru/agent"
 	"net/http"
 	"testing"
 	"time"
@@ -8,9 +9,9 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/waitcause"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // floorRun describes one thread for the test below.
@@ -76,7 +77,7 @@ func TestSweepQuestionAtThePingFollowsTheWaitFloor(t *testing.T) {
 			recordFloorSeq(k, key, clock.now(), tc.run)
 			// The wait the keeper stores comes from WaitingFor with these inputs (keeper.go, Record).
 			// Check the row really has the cause it names: the unknown row once held "human".
-			if got := k.WaitingFor(key, tc.run.last.names, false, tc.run.last.stop, !tc.run.noUsage, nil); got != tc.wantWait {
+			if got := k.WaitingFor(key, agent.Identify(http.Header{"User-Agent": {"claude-cli/2.1"}}), tc.run.last.names, false, tc.run.last.stop, !tc.run.noUsage, nil); got != tc.wantWait {
 				t.Fatalf("wait cause = %q, want %q", got, tc.wantWait)
 			}
 

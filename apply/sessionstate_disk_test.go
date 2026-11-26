@@ -26,7 +26,7 @@ func TestBodyOptsLoadsSessionStateFromDisk(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { db.Close() })
-		d, err := store.OpenDisk(db, store.DiskOptions{})
+		d, err := store.OpenDisk(db, store.DiskOptions{LoadTimeout: time.Minute})
 		if err != nil {
 			t.Fatal(err)
 		}

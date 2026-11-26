@@ -52,4 +52,4 @@ if [ -n "${CONTEXT_GURU_PIPELINE:-}" ]; then
 	printf 'pipeline: [%s]\n' "${CONTEXT_GURU_PIPELINE}" > /tmp/cg-config.yaml
 	exec /opt/gateway/main --config /tmp/cg-config.yaml
 fi
-exec /opt/gateway/main --preset "${CONTEXT_GURU_PRESET:-balanced}"
+exec /opt/gateway/main --preset "${CONTEXT_GURU_PRESET:-conservative}"

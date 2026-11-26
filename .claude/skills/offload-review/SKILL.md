@@ -9,6 +9,10 @@ Two reviewers review the PR in parallel, on this machine, with the user's own lo
 reviewer tool. Each one posts its review on the PR. You fix the findings, push, and run this
 skill again for round 2. Reviewer N in round 2 resumes its own round-1 session.
 
+Runs for different PRs are safe at the same time. Each run fetches into its own refs
+(`refs/offload-review/pr<N>/*`) and does not update `refs/remotes/origin/*`. Runs take turns on
+one worktree lock, and a lock left by a dead run is removed.
+
 The reviewer tool is a backend in `scripts/offload-review/backends/<name>.sh`:
 
 - `glm` (the default): GLM through Claude Code, pointed at an internal gateway.
@@ -88,12 +92,13 @@ The next round starts that reviewer fresh, and does not resume the session that 
    run or tests on the eval box, ask the user with AskUserQuestion. Say why. Do not ask when
    reading is enough.
    - If the user approves: copy the "Eval boxes" rules from the user's global `CLAUDE.md` into
-     `/tmp/offload-review-pr<N>-rules.md`. Those rules are not in this repo; never commit them.
+     `/tmp/offload-review-pr<N>-rules.md`. (The folder is `$OFFLOAD_RULES_DIR`, default `/tmp`. Use
+     it in every path below that names this file.) Those rules are not in this repo; never commit them.
 2. **Start the round** with Bash, `run_in_background: true`. Make no other tool calls until it
    ends:
    ```
    scripts/offload-review.sh <pr>
-   scripts/offload-review.sh <pr> --live-tests /tmp/offload-review-pr<N>-rules.md
+   scripts/offload-review.sh <pr> --live-tests ${OFFLOAD_RULES_DIR:-/tmp}/offload-review-pr<N>-rules.md
    ```
 3. **Read the result.** Each reviewer has 3 files in its worktree,
    `.claude/worktrees/review-pr<N>-<backend>-r<1|2>/`:
@@ -124,7 +129,7 @@ The next round starts that reviewer fresh, and does not resume the session that 
 
 ## Comments after the approval
 
-Owner rule (David Amid, 2026-11-08): "doc comments don't change the approval." A commit made after
+Doc comments do not change the approval. A commit made after
 both approvals that changes **only comments** keeps both approvals. Do not run a new round for it.
 
 - **Comments are:** Go `//` and `/* */` lines, and `#` lines in shell scripts.
@@ -146,7 +151,7 @@ Run a round on a head that already has both reviews only when the user asks for 
 Before the round, post on the PR what is new: the replies and any test results. Then run:
 
 ```
-scripts/offload-review.sh <pr> --same-head [--live-tests /tmp/offload-review-pr<N>-rules.md]
+scripts/offload-review.sh <pr> --same-head [--live-tests ${OFFLOAD_RULES_DIR:-/tmp}/offload-review-pr<N>-rules.md]
 ```
 
 Each reviewer resumes its own session and is told that the head did not move. The round counts
@@ -182,7 +187,7 @@ It removes:
 - every reviewer worktree, `.claude/worktrees/review-pr<N>-<backend>-r<1|2>`, with their files.
   With fallback, a reviewer can have one worktree per backend it tried;
 - the backend's sessions for those worktrees (for `glm`: the `.glm-cc/` folder in each worktree; for `bob`: `~/.bob/tmp/<hash of the worktree path>`; for `claude`: the session that `.claude-review-session` names);
-- the live-test rules file, `/tmp/offload-review-pr<N>-rules.md`.
+- the live-test rules file, `offload-review-pr<N>-rules.md` in `$OFFLOAD_RULES_DIR` (default `/tmp`).
 
 It refuses while the PR is still open. To clean up an open PR you gave up on, ask the user
 first, then run it with `OFFLOAD_FORCE=1`.

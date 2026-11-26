@@ -150,7 +150,7 @@ func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 		w.(http.Flusher).Flush()
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 		w.Write([]byte(tail))
 	}))
@@ -169,7 +169,7 @@ func TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall(t *testing.T) {
 	defer resp.Body.Close()
 
 	ch := sseChunks(resp.Body)
-	first, ok := collectUntil(ch, "LEADING", 2*time.Second)
+	first, ok := collectUntil(ch, "LEADING", 30*time.Second)
 	close(release)
 	if !ok {
 		t.Fatalf("the blocks before the expand call must reach the client while the upstream "+

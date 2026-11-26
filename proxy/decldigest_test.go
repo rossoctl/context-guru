@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // A captured request records the declaration set it carried, so /api/adapt/tools prices a
@@ -39,15 +39,12 @@ func TestCapturedRequestRecordsItsDeclarationDigest(t *testing.T) {
 
 	// The inventory has its own writer and flush cadence, so wait for it too.
 	var doc *dash.AdaptToolsDoc
-	for i := 0; i < 100; i++ {
+	testutil.WaitFor(t, "the inventory to capture the session", func() bool {
 		if doc, err = rec.DB().AdaptTools(dash.Filter{TenantAll: true}, nil, dash.ToolFilterState{}); err != nil {
 			t.Fatal(err)
 		}
-		if doc.Coverage.SessionsCaptured > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return doc.Coverage.SessionsCaptured > 0
+	})
 	if doc.Coverage.RequestsExact != 1 {
 		t.Fatalf("coverage %+v: the request did not record its declaration digest", doc.Coverage)
 	}

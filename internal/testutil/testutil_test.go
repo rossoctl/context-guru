@@ -84,7 +84,7 @@ func TestWaitForGivesUpBeforeTheTestDeadlineWithItsOwnMessage(t *testing.T) {
 		}()
 		WaitFor(d, "never", func() bool { return false })
 	}()
-	if el := time.Since(start); el > 3*time.Second {
+	if el := time.Since(start); TimingEnabled() && el > 3*time.Second {
 		t.Fatalf("WaitFor waited %v; it must stop before the test deadline", el)
 	}
 	if !strings.Contains(d.msg, "waiting for never") {
@@ -247,5 +247,35 @@ func TestNoProductionPackageImportsTestutil(t *testing.T) {
 	}
 	if seen < 50 {
 		t.Fatalf("scanned only %d non-test files; the walk is broken", seen)
+	}
+}
+
+func TestTimingEnabledFollowsTheVariable(t *testing.T) {
+	for val, want := range map[string]bool{"": false, "0": false, "true": false, "1": true} {
+		t.Setenv("CG_TIMING_TESTS", val)
+		if got := TimingEnabled(); got != want {
+			t.Errorf("CG_TIMING_TESTS=%q: TimingEnabled() = %v, want %v", val, got, want)
+		}
+	}
+}
+
+func TestRequireTimingSkipsUnlessSwitchedOn(t *testing.T) {
+	t.Setenv("CG_TIMING_TESTS", "")
+	ran := true
+	t.Run("off", func(t *testing.T) {
+		RequireTiming(t)
+		ran = false // not reached when the test skips
+	})
+	if !ran {
+		t.Error("RequireTiming did not skip with the switch off")
+	}
+	t.Setenv("CG_TIMING_TESTS", "1")
+	ran = false
+	t.Run("on", func(t *testing.T) {
+		RequireTiming(t)
+		ran = true
+	})
+	if !ran {
+		t.Error("RequireTiming skipped with the switch on")
 	}
 }

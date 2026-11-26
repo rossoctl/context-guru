@@ -705,7 +705,7 @@ func TestRecordMarksIncompleteOnEachPath(t *testing.T) {
 			name: "multi-round continuation keeps only the last round",
 			mutate: func(e *recEvent) {
 				e.rounds = 3
-				e.incomplete = joinIncomplete(record.IncompleteNone, record.IncompleteTruncated)
+				e.incomplete = record.JoinIncomplete(record.IncompleteNone, record.IncompleteTruncated)
 			},
 			wantAny: []string{record.IncompleteTruncated},
 		},
@@ -748,25 +748,6 @@ func TestRecordMarksIncompleteOnEachPath(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// joinIncomplete must not duplicate a reason it already carries, or a long multi-round
-// response would accumulate "tee_cap_reached,tee_cap_reached,...".
-func TestJoinIncompleteComposesWithoutDuplicating(t *testing.T) {
-	got := joinIncomplete(record.IncompleteNone, record.IncompleteRetainCap)
-	if got != record.IncompleteRetainCap {
-		t.Errorf("first reason = %q, want %q", got, record.IncompleteRetainCap)
-	}
-	got = joinIncomplete(got, record.IncompleteTruncated)
-	if got != record.IncompleteRetainCap+","+record.IncompleteTruncated {
-		t.Errorf("second reason did not append: %q", got)
-	}
-	if again := joinIncomplete(got, record.IncompleteRetainCap); again != got {
-		t.Errorf("a repeated reason must not be appended twice: %q", again)
-	}
-	if none := joinIncomplete(got, record.IncompleteNone); none != got {
-		t.Errorf("IncompleteNone must be a no-op, got %q", none)
 	}
 }
 

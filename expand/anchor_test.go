@@ -68,6 +68,15 @@ func TestAnAnchorIsUsableOnlyWhereItWasRecorded(t *testing.T) {
 	if _, _, ok := AnchorPoint("responses", []byte(`{"previous_response_id":"r","input":[{"role":"user","content":"x"}]}`)); ok {
 		t.Fatal("an anchor was stated in a Responses delta whose history the server holds")
 	}
+	for _, b := range []string{
+		`{"conversation":"conv_1","input":[{"role":"user","content":"x"}]}`,
+		`{"conversation":{"id":"conv_1"},"input":[{"role":"user","content":"x"}]}`,
+		`{"input":[{"type":"item_reference","id":"i1"},{"role":"user","content":"x"}]}`,
+	} {
+		if _, _, ok := AnchorPoint("responses", []byte(b)); ok {
+			t.Fatalf("an anchor was stated in a Responses delta whose history the server holds: %s", b)
+		}
+	}
 }
 
 // Inserting must leave every other message's bytes exactly as they were — the whole point is

@@ -70,14 +70,14 @@ CREATE TABLE IF NOT EXISTS requests (
   -- Nullable with NO default, unlike every other column above: a row written before this
   -- feature existed has nothing to read here, and NULL says so, rather than '' or 0 (which
   -- waitcause's own enums deliberately keep distinct from "never computed" by producing
-  -- "unknown"/0 themselves on a row this DID run on but found nothing — see internal/waitcause).
+  -- "unknown"/0 themselves on a row this DID run on but found nothing — see waitcause).
   waiting_for        TEXT,
   wait_tool          TEXT,
   wake_cause         TEXT,
   open_background    INTEGER,
   open_teammate      INTEGER,
   monitor_expiry_ms  INTEGER,
-  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (thread.IsAgentCompaction); 0 on rows written before it
+  agent_compaction   INTEGER NOT NULL DEFAULT 0, -- the agent's own compaction request (agent/all.IsClientCompaction); 0 on rows written before it
   model              TEXT    NOT NULL DEFAULT '',
   provider           TEXT    NOT NULL DEFAULT '',
   agent              TEXT    NOT NULL DEFAULT '', -- client user-agent family (claude-code, codex, …)

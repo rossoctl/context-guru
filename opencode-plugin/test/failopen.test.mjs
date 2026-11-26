@@ -10,7 +10,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-failop
 process.env.CONTEXT_GURU_PORT_START = "9200"
 
 import plugin, { routeProviders, stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, waitUntilUnhealthy, timingOnly, timingEnabled, waitFor } from "./helpers.mjs"
 
 // Ports only this file uses. 9263 stays closed: nothing listens there.
 const UPSTREAM_PORT = 9260
@@ -336,7 +336,7 @@ async function failingRestart(directory, script, options) {
 
 const timed = async (fn) => { const started = Date.now(); await fn(); return Date.now() - started }
 
-test("a restart that never gets healthy waits about 5 s once, then goes direct; no wait again while it runs; no new restart for 30 s", { timeout: 60000 }, async () => {
+test("a restart that never gets healthy waits about 5 s once, then goes direct; no wait again while it runs; no new restart for 30 s", { ...timingOnly, timeout: 60000 }, async () => {
   // The binary stays alive and never serves, so only the health poll can end the restart.
   const project = await failingRestart("/tmp/context-guru-failopen-restart", "exec sleep 60")
   try {
@@ -367,7 +367,7 @@ test("a restart that never gets healthy waits about 5 s once, then goes direct; 
   }
 })
 
-test("a restarted binary that exits at once fails the restart at once and starts the 30 s window", async () => {
+test("a restarted binary that exits at once fails the restart at once and starts the 30 s window", timingOnly, async () => {
   const project = await failingRestart("/tmp/context-guru-failopen-exits", "exit 1")
   try {
     const waited = await timed(project.ask)
@@ -387,7 +387,7 @@ test("a restarted binary that exits at once fails the restart at once and starts
 
 // fallback: false keeps the old restart: it polls /healthz and does not stop when the started process exits.
 // A wrapper that starts the proxy in the background and exits 0 still gives a working restart.
-test("with fallback: false, a restart whose binary exits while the proxy comes up still succeeds", { timeout: 60000 }, async () => {
+test("with fallback: false, a restart whose binary exits while the proxy comes up still succeeds", { ...timingOnly, timeout: 60000 }, async () => {
   const stub = stubProxyBinary()
   const project = await failingRestart("/tmp/context-guru-failopen-wrapper", `(sleep 1; exec ${JSON.stringify(stub)} "$@") >/dev/null 2>&1 &\nexit 0`, { fallback: false })
   try {
@@ -410,7 +410,7 @@ test("with fallback: false, a restart whose binary is missing returns at once", 
   try {
     const waited = await timed(project.ask)
 
-    assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
+    if (timingEnabled) assert.ok(waited < 1000, `chat.headers waited ${waited} ms for a binary that cannot start`)
   } finally {
     await project.cleanup()
   }
@@ -432,14 +432,6 @@ async function routedProject(directory) {
     record,
     ask: () => hooks["chat.headers"]({ sessionID: "session-back", provider: { info: { id: "anthropic" } } }, { headers: {} }),
     send: () => config.provider.anthropic.options.fetch(`${baseURL}/messages`, requestInit()),
-  }
-}
-
-async function waitFor(condition, what, timeoutMs = 25000) {
-  const deadline = Date.now() + timeoutMs
-  while (!(await condition())) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
-    await new Promise((resolve) => setTimeout(resolve, 100))
   }
 }
 
@@ -476,7 +468,7 @@ test("after a fallback, routing returns to the proxy once chat.headers sees it h
   }
 })
 
-test("a restart that is healthy before the 5 s cap sends the next request to the proxy", async () => {
+test("a restart that is healthy before the 5 s cap sends the next request to the proxy", timingOnly, async () => {
   const upstream = await recorder(UPSTREAM_PORT)
   process.env.CONTEXT_GURU_BIN = stubProxyBinary()
   let project
@@ -500,7 +492,7 @@ test("a restart that is healthy before the 5 s cap sends the next request to the
   }
 })
 
-test("a restart that succeeds after the capped wait sends the next request to the proxy", { timeout: 60000 }, async () => {
+test("a restart that succeeds after the capped wait sends the next request to the proxy", { ...timingOnly, timeout: 60000 }, async () => {
   const upstream = await recorder(UPSTREAM_PORT)
   process.env.CONTEXT_GURU_BIN = stubProxyBinary()
   let project
@@ -538,7 +530,11 @@ setTimeout(() => require("node:http").createServer((request, response) => {
 // Runs last: node:test runs the top-level tests of a file in order. Each test above sent the key.
 test("no log line of any test in this file holds the key, including the down and recovered lines", () => {
   const messages = allLines.map((line) => line.message)
-  for (const pattern of [/refused the connection/, /not healthy after 5 s/, /proxy recovery failed/, /proxy recovered/, /healthy again/]) {
+  // The timing tests write the "not healthy", "recovery failed" and "recovered" lines. They are skipped without CG_TIMING_TESTS=1.
+  const expected = process.env.CG_TIMING_TESTS === "1"
+    ? [/refused the connection/, /not healthy after 5 s/, /proxy recovery failed/, /proxy recovered/, /healthy again/]
+    : [/refused the connection/]
+  for (const pattern of expected) {
     assert.ok(messages.some((message) => pattern.test(message)), `no line matched ${pattern}`)
   }
   for (const line of allLines) assert.ok(!JSON.stringify(line).includes(CANARY), `a log line holds the key: ${line.message}`)

@@ -3,16 +3,16 @@ package thread
 import (
 	"fmt"
 	"strings"
+
+	"github.com/rossoctl/context-guru/agent/claudecode"
 )
 
-// AgentHeader is the request header Claude Code names a subagent's thread with. Seen on the wire
-// with Claude Code 2.1.294 through a custom ANTHROPIC_BASE_URL: present on every subagent request,
-// absent on the main thread. The sibling headers its code also names
-// (x-claude-code-parent-agent-id, -agent-type, -request-class) were NOT sent in that capture, so
-// nothing here depends on them.
-const AgentHeader = "x-claude-code-agent-id"
+// AgentHeader is the request header Claude Code names a subagent's thread with. The rule lives
+// in agent/claudecode (its AgentID function); the name stays here for existing callers.
+const AgentHeader = claudecode.AgentHeader
 
-// HeaderAgentID turns a raw AgentHeader value into the agentID that Resolve and ResolveSession
+// HeaderAgentID is the one parser of an agent id's form. agent.Identify calls it with the Claude Code
+// header value (claudecode.AgentID), so the Client's AgentID is already checked. It turns a raw AgentHeader value into the agentID that Resolve and ResolveSession
 // take. It trims the value. It gives "" when the header is absent, and also when ValidHeaderID
 // refuses it: a header that is present but unusable falls back to prefix continuity. It must not
 // become a key, and it must not merge the request into another thread. ok is false only for that
@@ -39,7 +39,7 @@ func HeaderAgentID(v string) (id string, ok bool) {
 //     host can log it. The result is always usable; err never means "drop the request".
 //
 // agentID is HeaderAgentID's result. body and agentCompaction are as for Resolve: pass the
-// request as the agent sent it, and IsAgentCompaction of that same body.
+// request as the agent sent it, and agent.IsClientCompaction of that same Client and body (the mark, then the prompt match).
 func (t *Tracker) ResolveSession(tenant, session, agentID string, body []byte, agentCompaction bool) (res Result, err error) {
 	if session == "" {
 		return Result{ID: Primary, Source: SourceSession}, nil

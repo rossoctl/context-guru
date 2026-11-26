@@ -53,6 +53,11 @@ const listen = process.argv.indexOf("--listen")
 const port = Number(process.argv[listen + 1].split(":")[1])
 createServer((request, response) => {
   if (request.url === "/healthz") response.end("ok")
+  else if (request.url === "/signal" && request.method === "POST") {
+    let body = ""
+    request.on("data", (chunk) => { body += chunk })
+    request.on("end", () => { if (process.env.CG_TEST_RECORD) require("node:fs").appendFileSync(process.env.CG_TEST_RECORD, JSON.stringify({ label: "signal", contentType: request.headers["content-type"], body }) + String.fromCharCode(10)); response.statusCode = 204; response.end() })
+  }
   else { response.statusCode = 404; response.end() }
 }).listen(port, "127.0.0.1")
 `)
@@ -102,4 +107,21 @@ createServer((request, response) => {
 `)
   chmodSync(path, 0o755)
   return path
+}
+
+// Timing tests assert a wall-clock bound. They fail on a busy machine with nothing wrong in the code.
+// They run only with CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). Pass this to
+// test() as an option, or guard one bound with `if (timingEnabled)`: test(name, timingOnly, fn) or test(name, { ...timingOnly, timeout: 60000 }, fn).
+export const timingEnabled = process.env.CG_TIMING_TESTS === "1"
+export const timingOnly = {
+  skip: !timingEnabled && "timing test: set CG_TIMING_TESTS=1 to run it",
+}
+
+// Polls until the condition is true, or fails with a message that names what it waited for.
+export async function waitFor(condition, what, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await condition())) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }

@@ -6,7 +6,7 @@ The process was first used for v0.5.1 and v0.5.2.
 
 ## Where context-guru runs
 
-Owner decision, 2026-11-18.
+Laptops are production.
 
 - **Production is the personal laptop.** Each user runs context-guru on their own laptop, as the owner does. A release reaches every user at once through `releases/latest`.
 - **One difference from a plain local install:** a copy of the savings metrics and metadata also goes to a central store for analysis. The data stays in the local SQLite database too.
@@ -36,7 +36,8 @@ The integrator and the reviewers can be people or AI agent sessions. The rules a
 2. **Sort the open PRs into features.** Group them by what a user gets, not by author or by date: for example "save-more commands", "status line", "test fixes". Show which PRs depend on which.
 3. **The release owner picks the groups.** The integrator does not add or drop an item without the owner.
 4. **Record what is out**, and why. An item that moves to the next release keeps its issue.
-5. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
+5. **Scan for new business logic in host packages and for client rules outside `agent.Identify`.** Run `refactor-scan` on the diff since the last tag, in its host-leak and client-rule modes (host-leak: logic in `proxy/` that a library package should hold; client-rule: a rule that names one client, outside `agent.Identify`). Open an issue for each leak. A leak does not block the release unless the owner says so.
+6. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
 
 ### Measurements before a release
 
@@ -71,7 +72,7 @@ A PR must not change behavior unless a human developer allows it. This holds mos
   - Put all the pending behavior changes in one table (PR, who it affects, old, new, how to turn it off), so the owner can answer them in one message.
   - Quote the yes, with its date, in the squash-merge body.
   - The owner may type in another keyboard layout by mistake. Say how you read such an answer, and wait if you are not sure.
-- **The central copy must match the local data** (owner rule, David Amid, 2026-11-18: "anything that is added to the data dependence needs to then update the event going to the central store, once we have that functionality"). Once the central store is live, a PR that adds or changes data in a row of [docs/data-dependence.md](docs/data-dependence.md) also updates the event sent to the central store. Then the central copy matches the local data. Until the central store is live, this rule does not apply.
+- **The central copy must match the local data.** Once the central store is live, a PR that adds or changes data in a row of [docs/data-dependence.md](docs/data-dependence.md) also updates the event sent to the central store. Then the central copy matches the local data. Until the central store is live, this rule does not apply.
 - **A change found after the merge** goes to the release owner at once. The owner keeps it or has it reverted.
 - **To revert a merged PR during a release** (as with #768):
   1. Try `git revert <merge-commit>` on a throwaway branch from `main`. Run vet, the build and the test suites there.
@@ -126,7 +127,7 @@ A review without this block does not count toward the 2.
 **The session that says a PR is ready owns it until it is ready:** the rebase on `main`, the 2 approvals at the final head, and green CI. The integrator checks; it does not rebase, review or fix. If something is missing, tell the owning session exactly what. There are two exceptions:
 
 - **A flaky CI test.** The integrator may re-run once a flaky CI test that the PR does not touch.
-- **A merge of `main`** (owner rule, David Amid, 2026-11-11: "typically if the holding pattern is a merge of main, this should be under your responsibility"). This holds when a ready PR waits for nothing else. `main` moved after the approvals, often because of the integrator's own merge order. The integrator does the merge. It does not ask the PR owner and wait.
+- **A merge of `main`.** This holds when a ready PR waits for nothing else. `main` moved after the approvals, often because of the integrator's own merge order. The integrator does the merge. It does not ask the PR owner and wait.
   1. The integrator starts a subagent with its own worktree.
   2. The subagent merges `origin/main` with `git merge --signoff`, and tests the packages where `main` and the PR overlap (on a machine with Go and cgo).
   3. The subagent pushes without force.
@@ -141,18 +142,22 @@ A review without this block does not count toward the 2.
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
+- the last `local-tests` comment (from `scripts/dev/local-tests.sh`) names this head and says `result=pass tier=2`. If it says `scope=none`, the script checks that the PR has no Go, `go.mod`, `go.sum`, `testdata`, embedded or `scripts/` file. An old marker with no `tier=` counts until `OLD_MARKER_VALID_UNTIL` in the script. The line `Local tests: waived (owner rule)` also counts (interim rule). A green heavy CI run on this head also counts. The heavy suites do not run on a PR;
 - every CI check run passed (a check that reports only through the older commit-status API does not show; the script checks the DCO rule itself);
 - the head has a passing `CodeQL` check run from GitHub's code-scanning app, which the code-scanning rule reads. **A PR opened before the CodeQL workflow (#945) has none.** It needs a new push, or a close and reopen, before it can merge;
 - every commit has a `Signed-off-by:` line.
 
 It does not check for a behavior change. Read the diff for that yourself.
 
+A PR owner sends a ready PR to the integrator as [CLAUDE.md](CLAUDE.md#working-on-a-task) says.
+
 ### When the head moves after an approval
 
 An approval counts only for the head it names. If the head moves (a rebase, a fix, a conflict resolution):
 
 - **A rebase with no other change:** run `scripts/release/approval-still-valid.sh <pr> <approved-sha>`. It compares the patch of the approved head with the patch of the new head, each against its own base, and prints `git range-diff`. The same patch means only the base moved, so both approvals still count. Post its output on the PR.
-- **A commit that changes only comments** (owner rule, David Amid, 2026-11-08: "doc comments don't change the approval"): both approvals stay valid. No new review round. The script prints `COMMENTS ONLY` when the new head descends from the approved head, has the same merge base, and every changed file is `.go` or `.sh` with only blank or whole-line comment changes (`//`, `/* */`, `#`). These are not comments: code, a line with code and a trailing comment, string literals, struct tags, `//go:` directives, `// +build`, `#!`, `# shellcheck`, `.md` pages, config. Those need a re-check of the delta. The PR owner posts the script output on the PR.
+- **A commit that changes only comments**: both approvals stay valid. No new review round. The script prints `COMMENTS ONLY` when the new head descends from the approved head, has the same merge base, and every changed file is `.go` or `.sh` with only blank or whole-line comment changes (`//`, `/* */`, `#`). These are not comments: code, a line with code and a trailing comment, string literals, struct tags, `//go:` directives, `// +build`, `#!`, `# shellcheck`, `.md` pages, config. Those need a re-check of the delta. The PR owner posts the script output on the PR.
+- **A merge of the base that resolves conflicts only in the 2 timing lists**: both approvals stay valid. No new review round. Every timing-fix PR edits `scripts/release/pending-timing-fixes.txt` and `internal/timingguard/baseline.txt`, so each merge made the next PR conflict. The script prints `LISTS ONLY` and exits 0 when both hold. (1) Without those 2 files, the PR's change has the same patch-id at the approved head and at the new head. (2) In those 2 files, the PR has the same list change as at the approved head: the set of removed lines and the set of added lines are both equal (each compared with its own merge base). A lowered baseline count is one removed and one added line. Any other hand-resolved conflict needs a re-check of the delta. The PR owner posts the script output on the PR.
 - **Any new code, or a conflict resolution:** each reviewer whose approval should still count re-checks the delta. The integrator can instead start a new independent reviewer for the delta.
 
 **A docs-only PR** needs only the release owner's review, by hand, unless the owner asks for the 2 reviews.
@@ -166,8 +171,21 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   ```
   Write the body to a file first. A shell can change text that is passed inline. If `gh pr merge` fails with a GraphQL error, use `gh api -X PUT repos/<org>/<repo>/pulls/<n>/merge` with `sha`, `merge_method=squash`, `commit_title` and `commit_message`.
 - **Never merge past a failed DCO check.** Only the author can sign off a commit. If a merge past it seems needed, stop and ask the release owner for that PR.
+- **Write issue numbers in a PR body as `Refs #N` only.** GitHub closes an issue when "close", "fix" or "resolve" (or a form of them) stands before `#N` anywhere in the PR body. A negative sentence such as "Does not close #1303" also closes it. That is how #1303 closed by mistake when #1370 merged.
+  - Before each merge, grep the PR body for those words before a `#number`.
+  - If one is there, fix the body before the merge. If the issue closed already, reopen it.
+- **Refuse a PR whose `go.mod` diff adds a pseudo-version for one of our modules, or for a module that publishes tags.** A pseudo-version pins a commit, not a released tag. Ask the author to release the dependency and pin the tag. A third-party module with no tags keeps its pseudo-version. See the [`go.mod` rule in CLAUDE.md](CLAUDE.md#conventions).
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
-- **Merge each PR on its own green CI, then watch `main`** (owner rule, David Amid, 2026-11-16: "what is the benefit of waiting for each to be green, and wasting wallclock instead of just merging one and then waiting to see if the other one remains green. if it isn't we fix it?").
+- **After every merge, tell the PR owner in the same step**. Treat the merge and the message as one step.
+  - Send the session that owns the PR one short message with `SendMessage`, as in [Working on a task](CLAUDE.md#working-on-a-task): `merged as <sha>`. Add what the owner can do next: close the issues it said it would close, merge `main` into a PR stacked on this one, and clean up its review and fix worktrees.
+  - For a PR by a person with no session, post the same text as a PR comment.
+  - When several PRs of one owner merge in a batch, send one message per owner.
+  - **Why:** #1394 merged and its owner session was not told. The session kept waiting to close #1388.
+- **A PR stuck in a merge-of-`main` loop gets a FULL merge freeze until it lands.** Freeze every merge, not a list of files. A file-list freeze missed `campaign/replay.go`, and #1331 needed a 7th merge of `main`.
+  1. Tell the other sessions about the freeze.
+  2. Merge the stuck PR first.
+  3. End the freeze.
+- **Merge each PR on its own green CI, then watch `main`.** Waiting for each PR to be green wastes wall-clock time. If `main` turns red after a merge, we fix it.
   - Merge a PR when it has its 2 approvals at its head, green CI at its head, and git can merge it cleanly. Do not re-run a PR's CI only because another PR merged first.
   - After each merge, watch the CI of `main`. If it turns red, fix forward with a fix PR. Do not revert a good PR, unless the fix is not clear.
   - **Why:** a serial re-run costs about one full CI run (about 40 minutes) for each pair of PRs. A break between 2 green PRs is rare: about 1 in 30 merges in the v0.7.4 cycle. A fix PR is cheap.
@@ -177,7 +195,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
   - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
   - **Any other failed rule needs the owner's yes for that PR.** Before a bypass, read which rules fail: `gh api repos/<org>/<repo>/rulesets/rule-suites?ref=refs/heads/main` lists recent merges, and `.../rule-suites/<id>` shows each rule's result.
-  - **The code-scanning rule (CodeQL).** The `main` ruleset also needs CodeQL results with no errors and no high or critical security alerts. Until 2026-11-08 the repo had no CodeQL workflow, so this rule failed on every PR, and every merge from v0.6.1 to v0.6.7 went past it with `--admin` without anyone seeing it. The owner decided on 2026-11-08: add the CodeQL workflow and fix what it finds, and **merges wait until the rule passes**. After that, the standing rule holds as written, and a code-scanning failure needs the owner's yes for that PR.
+  - **The code-scanning rule (CodeQL).** The `main` ruleset also needs CodeQL results with no errors and no high or critical security alerts. Until 2026-11-08 the repo had no CodeQL workflow, so this rule failed on every PR, and every merge from v0.6.1 to v0.6.7 went past it with `--admin` without anyone seeing it. The fix is to add the CodeQL workflow and fix what it finds. **Merges wait until the rule passes.** After that, the standing rule holds as written, and a code-scanning failure needs the owner's yes for that PR.
   - **`--admin` does not say which rules it bypasses.** Before an `--admin` merge, run `check-ready.sh`: it fails when the head has no passing `CodeQL` check run. After the merge, read the merge's rule results (`.../rule-suites/<id>`). If a rule other than the review rule failed, tell the owner. On 2026-11-08, #943, #937 and #944 merged past the code-scanning rule this way: they were opened before #945, so CodeQL never scanned them. The scans of `main` afterwards found no new alert.
   - **Only alerts in changed lines block a PR.** A PR's CodeQL result covers only the code that PR changes. To see every open alert, read `main`: `gh api "repos/<org>/<repo>/code-scanning/alerts?ref=refs/heads/main&state=open"`. A false positive is dismissed only with the owner's yes, with the reason in the dismissal comment.
 - Read the result back from the server after each merge or edit. Do not trust a tool's "success" line alone.
@@ -209,6 +227,32 @@ This section is about a stacked PR. For a ready PR that waits only for a merge o
 
 ### Defects found on the way
 
+### Heavy CI on main
+
+There is no merge queue. `main` may be less than 100% green, because the PR owner runs the heavy suites on the laptop. A PR runs only the fast jobs. The PR owner runs the heavy suites on the laptop. We start lean, and we add checks where failures show up.
+
+**Interim rule (2026-11-24, in force until the 3-tier test plan lands):** PR owners do not run the heavy suites on the laptop. The integrator runs them on `main` every few merges and before each cut. See [CLAUDE.md, Interim rule](CLAUDE.md#interim-rule-in-force-until-the-3-tier-test-plan-lands).
+
+The integrator runs the heavy jobs on `main` with `scripts/release/heavy-ci.sh --wait` (it runs `gh workflow run ci.yaml --ref main`). Run it:
+- about every 5 merges;
+- after a big refactor or a merge that someone resolved by hand;
+- before a merge of a PR that waits on a fix of `main`;
+- always before a cut.
+
+**Tier 3 runs on a schedule.** Tier 3 is the heavy suites on `main`: the CI jobs `build-test` and `record`, and Part A.
+- **Schedule:** the cron `17 */3 * * *` runs the heavy jobs every 3 hours. GitHub runs a cron only from the default branch, so it starts when this change is on `main`.
+- **Only when `main` moved:** the first job, `changed-since-green`, compares `main` with the last green heavy run. If they match, the heavy jobs do not run. `scripts/release/changed-since-green.sh` holds the rule.
+- **Before each cut:** run `scripts/release/heavy-ci.sh --wait` (it always runs the heavy jobs) and Part A (step 5). A `v*` tag also runs them.
+- **Where the result shows:** the run summary lists both jobs. A red scheduled run opens the issue "Heavy CI failed on main", or adds a comment to it when it is open. A green run closes it. Look for that issue first.
+- **Slowest tests:** a scheduled run writes the 30 slowest tests to its run summary. For a manual run, set the input `per_test_times`.
+- **Part A cost:** `part-a.sh` adds a `time <step> user=.. sys=.. maxrss_kb=..` line per step to `summary.txt`.
+
+**The heavy jobs run the timing tests.** The jobs `build-test` and `record` set `CG_TIMING_TESTS=1`. `build-test` also runs the OpenCode plugin's node tests with it. A timing test asserts a wall-clock bound or races a rate limit. It fails on a busy machine with nothing wrong in the code, so a PR owner does not run it by default. `local-tests.sh` does not run them. Only the integrator runs them. A PR that adds a timing test runs the timing tests too.
+
+**Tier 2 (the PR owner's run).** A PR owner runs `scripts/dev/local-tests.sh`, which runs `scripts/dev/tier2-steps.sh`: the static steps, non-race tests of the packages that the CI job `purego` does not run, `-race` on the changed packages only, and a rerun of only the failed packages. The load is limited (`-p 2`, `GOMAXPROCS=4`). It is weaker than a full run. **Tier 3 is the integrator's heavy CI and Part A, and it catches what tier 2 skips** (a race in a package the PR did not change, the heavy tests of unchanged packages, the `-race` build of `proxy` with `cg_record` when no tagged file changed). Tier 3 has its own rules in a separate change. The tier-2 marker replaces the interim rule above once the owner says so.
+
+A release is cut only on a commit with a green heavy run **and** a passing Part A (step 5). A failure on `main` is fixed forward: a new PR with the fix. Nobody reverts to make it green.
+
 A defect in `main` that the PR under review did not cause gets its own issue, its own branch from `main` and its own PR. It never rides on another PR's branch. The release owner decides whether it goes into the release.
 
 ## 4. Freeze
@@ -232,11 +276,13 @@ Run it once, on the exact commit you plan to tag (or the commit before the versi
 **Part A: the full test suites.** Run `scripts/release/part-a.sh <out-dir>` in a clean copy of the commit, on a machine with Go and cgo. The owner's laptop is one such machine. A test machine is not required. It runs:
 - `go vet ./...`, and `go build ./...` with `CGO_ENABLED=0`, with and without `-tags cg_record`;
 - the check that the default build links no OpenTelemetry, gRPC or protobuf;
-- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 25m, plugin 30m, rest 20m, record 40m;
+- `go test -race` on every package set, one set per run: `./proxy/...`, `./dash/...`, `./context-guru-plugin`, then all the rest. The limits are: proxy 20m, dash 40m, plugin 30m, rest 20m, record 40m;
 - the `-tags cg_record` race tests, as CI runs them.
 
 Notes:
-- **Part A skips `TestBobReleasePythonSuite` (in `race-rest`).** The owner put the Bob plugin on hold on 2026-11-18. The summary names the skip. Remove the skip in `scripts/release/part-a.sh` when the owner resumes the plugin ([#1221](https://github.com/rossoctl/context-guru/issues/1221)).
+- **Part A runs the timing tests.** `part-a.sh` sets `CG_TIMING_TESTS=1` unless the caller sets it, and its step `node-timing` runs the OpenCode node tests with it (node 22 is needed). `scripts/dev/local-tests.sh` sets it itself (see CLAUDE.md, "Timing tests").
+- **Part A is tier 3.** It writes `time` lines (CPU seconds and peak memory) per step to `summary.txt`, from `/usr/bin/time`.
+- **Part A skips `TestBobReleasePythonSuite` (in `race-rest`).** The Bob plugin is on hold. The summary names the skip. Remove the skip in `scripts/release/part-a.sh` when the owner resumes the plugin ([#1221](https://github.com/rossoctl/context-guru/issues/1221)).
 - **The run takes about 70 to 90 minutes on a laptop, so run it detached.** Its summary file always ends with `DONE rc=<n>`, also on a failure. Wait for that line; a marker written only on success makes a failure look like a hang.
 - **Copy the code into an empty directory.** A copy tool that only adds files leaves a deleted test in place, and it keeps running.
 - **Do not copy new code into that directory while a run is in progress.**

@@ -107,7 +107,7 @@ function confirmRestart(api, state, kind, name) {
 // { namespace: "palette", name, title, desc, category, slashName, run }. A command without
 // namespace "palette" registers without an error and never shows in the palette.
 //
-// The native pickers have NO slash name (owner decision, option A). /context-guru-preset and
+// The native pickers have NO slash name. /context-guru-preset and
 // /context-guru-strategy open only the chat commands of the server plugin, so each slash name
 // shows once. The native dialogs are reached from the ctrl+p palette, under "Context Guru".
 export function registerPickerCommands(api, directory) {

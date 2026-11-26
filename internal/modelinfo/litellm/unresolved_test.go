@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // THE DEFECT THESE EXIST TO CATCH: a fetch that failed was silent. The error was assigned and then
@@ -148,14 +148,10 @@ func TestTheBackgroundRefreshRecordsItsFailure(t *testing.T) {
 	if _, ok := l.Window(context.Background(), "claude-sonnet-5"); ok {
 		t.Fatal("an unreachable document resolved a window")
 	}
-	for i := 0; i < 400; i++ {
-		if err, n := l.Unresolved(); err != nil && n > 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	err, n := l.Unresolved()
-	t.Fatalf("the background refresh failed silently: Unresolved() = (%v, %d) after two seconds", err, n)
+	testutil.WaitFor(t, "the background refresh failure to be recorded", func() bool {
+		err, n := l.Unresolved()
+		return err != nil && n > 0
+	})
 }
 
 // THE PROXY HOLDS A CHAIN, not a *LiteLLM, so the question has to be answerable through the Chain or

@@ -7,7 +7,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -255,11 +254,15 @@ func TestCarriedSetsStopsWaitingWhenCancelled(t *testing.T) {
 	defer func() { <-carriedSlot }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	start := time.Now()
-	_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
-		map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
-	if !errors.Is(err, context.Canceled) || time.Since(start) > time.Second {
-		t.Fatalf("err %v after %v; want context.Canceled within 1 s", err, time.Since(start))
+	// A call that waited on the slot would never return, so the wait has a bound, not a clock check.
+	res := make(chan error, 1)
+	go func() {
+		_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
+			map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
+		res <- err
+	}()
+	if err := awaitSignal(t, "carriedSets to return once cancelled (it must not wait on the slot)", res); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v; want context.Canceled", err)
 	}
 	if len(carriedSlot) != 1 {
 		t.Fatal("the cancelled request took or released the slot")
@@ -402,7 +405,7 @@ func TestAdaptToolsEstimatesAClientSideRemovalPerRequest(t *testing.T) {
 // input), and when the filter's own token count differs from the items', the difference is a row
 // of its own instead of a silent gap.
 func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
-	seed := func(filtered int) *AdaptToolsDoc {
+	seedAt := func(filtered int, price func(string) (modelinfo.Price, bool)) *AdaptToolsDoc {
 		db := openTestDB(t)
 		read := mkEvent(day(0), "s", "opus", 100, 100)
 		read.TenantID, read.Tools, read.CacheRead, read.CacheWrite, read.DeclDigest, read.FilteredDeclTokens = "t1", 2, 1000, 0, "d", filtered
@@ -417,11 +420,33 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 			Decls: []Decl{{Kind: KindTool, Name: "Read", Tokens: 50}, {Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
 			t.Fatal(err)
 		}
-		doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
+		doc, err := db.AdaptTools(Filter{Tenant: "t1"}, price, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return doc
+	}
+	seed := func(filtered int) *AdaptToolsDoc { return seedAt(filtered, adaptPrice) }
+	// A tiered price: above 5,050 tokens every rate is 2x (the one-hour request is 5,010 sent, with FreshInput 10 from mkEvent: base without the removed tokens). The read request is 1,000 + 100 removed: base.
+	// The one-hour request is 5,000 + 100 removed: 2x. Items, total and unattributed still agree.
+	tiered := func(m string) (modelinfo.Price, bool) {
+		p, ok := adaptPrice(m)
+		p.Tiers[0] = modelinfo.PriceTier{AbovePromptTokens: 5050, InputMult: 2, ReadMult: 2, WriteMult: 2}
+		return p, ok
+	}
+	tw := 100*0.1 + 100*2.0*2
+	for _, f := range []int{100, 150} {
+		part := seedAt(f, tiered).SavedSoFar.Filter
+		sum := 0.0
+		for _, it := range part.Items {
+			sum += it.USD
+		}
+		if math.Abs(sum-part.USD) > 1e-9 {
+			t.Fatalf("tiered, filtered %d: rows sum to $%v, total $%v", f, sum, part.USD)
+		}
+		if f == 100 && (math.Abs(part.USD-tw) > 1e-9 || len(part.Items) != 1) {
+			t.Fatalf("tiered filter %+v, want total and the one item both $%v", part, tw)
+		}
 	}
 	// 100 tokens read at 0.1, plus 100 tokens in a one-hour write at 2x input.
 	want := 100*0.1 + 100*2.0

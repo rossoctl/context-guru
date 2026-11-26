@@ -12,10 +12,10 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/internal/extract"
 )
 
