@@ -221,7 +221,7 @@ func kaSavedGate(alias, pingFloor string) string {
 	// subquery (alias bw: dash/cachestate_test.go bans a `w` plan line, meant for a per-thread subquery) sits inside the EXISTS, behind the `> 0` guard, so it never runs for an uncredited row.
 	billedHour := "(" + alias + "cache_ttl = '" + apply.TTLEphemeral1h + "' AND CASE" +
 		" WHEN " + alias + "cache_write > 0 THEN " + keepalive.BilledOneHourWriteSQL(alias) +
-		" ELSE COALESCE((SELECT bw.cache_write_1h >= bw.cache_write FROM requests bw" +
+		" ELSE COALESCE((SELECT " + keepalive.BilledOneHourWriteSQL("bw.") + " FROM requests bw" +
 		" WHERE bw.tenant_id = " + alias + "tenant_id AND bw.session_id = " + alias + "session_id" +
 		" AND bw.thread_id = " + alias + "thread_id AND bw.keepalive = 0 AND bw.cache_write > 0" +
 		" AND bw.ts < " + alias + "ts" +
@@ -1225,23 +1225,27 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		SoonSeconds: keepAliveSoon.Seconds(), Rows: []KeepAliveLiveRow{}}
 	cond, args := f.where()
 	// One pass. The partition is (tenant, session) exactly as everywhere else on this tab, and
-	// the three window MAXes answer "which tier is in force" without a query per row: the entry's
+	// the window functions answer "which tier is in force" without a query per row: the entry's
 	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
-	// tell is whether this session's most recent write was a one-hour write.
-	rows, err := d.sql.QueryContext(d.readCtx(), `WITH t AS (
+	// tell is whether this session's most recent write (latest ts, then id: two writes in one
+	// millisecond do not tie) was billed at 1 hour (keepalive.BilledOneHour).
+	rows, err := d.sql.QueryContext(d.readCtx(), `WITH u AS (
 		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model, r.provider AS provider,
 		       r.cache_read + r.cache_write AS prefix,
 		       ROW_NUMBER() OVER w AS rn,
 		       COUNT(*) OVER w2 AS turns,
 		       MAX(r.ts) OVER w2 AS last_ts,
-		       MAX(CASE WHEN r.cache_write > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_write_ts,
-		       MAX(CASE WHEN `+keepalive.BilledOneHourWriteSQL("r.")+` THEN r.ts ELSE 0 END) OVER w2 AS last_1h_ts
+		       CASE WHEN r.cache_write > 0 THEN ROW_NUMBER() OVER ww END AS wrn,
+		       CASE WHEN `+keepalive.BilledOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
-		       w2 AS (PARTITION BY r.tenant_id, r.session_id))
-		SELECT session_id, tenant_id, model, turns, ts, prefix, provider,
-		       CASE WHEN last_1h_ts > 0 AND last_1h_ts = last_write_ts THEN 1 ELSE 0 END
+		       ww AS (PARTITION BY r.tenant_id, r.session_id, r.cache_write > 0 ORDER BY r.ts DESC, r.id DESC),
+		       w2 AS (PARTITION BY r.tenant_id, r.session_id)),
+	t AS (
+		SELECT *, MAX(CASE WHEN wrn = 1 THEN billed_1h ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS last_write_billed_1h
+		FROM u)
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h
 		FROM t WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
 		// The window is computed only for sessions with a request inside the hour (the subquery),

@@ -463,7 +463,7 @@ func TestCacheStateShowsAnHourForAThreadThatWritesAtOneHour(t *testing.T) {
 	}
 }
 
-// The thread's tier follows where its LATEST WRITE was billed (cache_write_1h > 0 is the 1-hour tier). A turn of
+// The thread's tier follows where its LATEST WRITE was billed (the 1-hour tier is keepalive.BilledOneHour: every written token at 1 hour; a mixed write is 5 minutes). A turn of
 // a 1-hour thread (mode D or C) that writes a few new tokens bills them at 1 hour too, so the band keeps 3600.
 // Only a write billed at 5 minutes puts the thread back on 5 minutes (a real downgrade or a 5-minute request).
 func TestCacheStateTierFollowsWhereTheLatestWriteWasBilled(t *testing.T) {
