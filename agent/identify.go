@@ -223,8 +223,9 @@ func (c Client) SubagentID() string {
 }
 
 // TaskIDHeader is the header the Bob IDE sends its task id in. It is here, not in package bob,
-// because package bob imports this package. Readers: agent/bob (SessionID), apply (the host id of
-// a route) and proxy/recctx.go (the recorder's session key).
+// because package bob imports this package. Its direct reader is agent/bob (SessionID). apply (the
+// host id of a route, through ExplicitSessionFor) and proxy/recctx.go (the recorder's session key)
+// read it through bob.SessionID.
 const TaskIDHeader = "x-task-id"
 
 // CorrelationHeaders lists the request headers that only carry a client's session, thread or task
