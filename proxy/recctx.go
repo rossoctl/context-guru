@@ -25,7 +25,7 @@ type recEvent struct {
 	tenantID string // "" single-tenant; otherwise the file goes under <dir>/<tenantID>/
 	provider bschemas.ModelProvider
 	path     string      // the API path, as the client called it; selects the wire dialect
-	headers  http.Header // the client's request headers; credentials are removed when written
+	headers  http.Header // the client's request headers, already filtered to the allowlist (record.AllowedHeaders)
 	status   int         // the HTTP status the client received
 
 	reqBody   []byte // PRISTINE inbound body (pre-pipeline)
