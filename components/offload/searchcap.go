@@ -126,7 +126,16 @@ func (sc *Searchcap) Offload(req *schemas.BifrostChatRequest, rep *components.Re
 // dateLead matches a path that starts like a date (a log line `2026-11-26T09:15:03Z ...`).
 // splitHit accepts it as a path, because folding it is lossless. A cap is lossy, so it needs
 // a stricter test.
-var dateLead = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
+var dateLead = regexp.MustCompile(`^\d{4}[-/]\d{2}[-/]\d{2}`)
+
+// plausiblePath says whether p can be the file of a search row. A log line splits at its
+// first colon pair too: syslog gives `Nov 26 12`, Apache gives `[26/Nov/2026`, a slash date
+// gives `2026/11/26 12`. So a path with a space, or one that starts with `[`, or one that
+// starts with a date, is not a path. A real path with a space is missed, and then the
+// listing stays as it is.
+func plausiblePath(p string) bool {
+	return !strings.ContainsAny(p, " \t") && !strings.HasPrefix(p, "[") && !dateLead.MatchString(p)
+}
 
 // rowPath returns the file a row belongs to and whether it is a match (not context) row.
 // It uses the row parser of searchfold. A date-led path is not a row. A context row counts
@@ -134,7 +143,7 @@ var dateLead = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
 // as `word-12-word` is not a row.
 func rowPath(l string, hitPaths map[string]bool) (path string, hit, ok bool) {
 	p, hit, ok := reformat.SplitHit(l)
-	if !ok || dateLead.MatchString(p) {
+	if !ok || !plausiblePath(p) {
 		return "", false, false
 	}
 	if !hit && !hitPaths[p] {
@@ -147,7 +156,7 @@ func rowPath(l string, hitPaths map[string]bool) (path string, hit, ok bool) {
 func hitPathSet(lines []string) map[string]bool {
 	set := map[string]bool{}
 	for _, l := range lines {
-		if p, hit, ok := reformat.SplitHit(l); ok && hit && !dateLead.MatchString(p) {
+		if p, hit, ok := reformat.SplitHit(l); ok && hit && plausiblePath(p) {
 			set[p] = true
 		}
 	}

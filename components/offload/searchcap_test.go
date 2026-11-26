@@ -123,14 +123,26 @@ func TestCapSearchOutputExactlyOneOverCap(t *testing.T) {
 }
 
 func TestCapSearchOutputIgnoresLookAlikeLines(t *testing.T) {
-	var ts, date, prose strings.Builder
-	for i := 0; i < 20; i++ {
-		fmt.Fprintf(&ts, "2026-11-26T09:15:03Z INFO worker: processed batch %d\n", i)
-		fmt.Fprintf(&date, "2026-11-26 12:33:%02d INFO worker: step %d\n", i, i)
-		fmt.Fprintf(&prose, "word-%d-word is a compound term\n", i)
+	cases := map[string]string{
+		"timestamp log": "2026-11-26T09:15:03Z INFO worker: processed batch %d\n",
+		"date log":      "2026-11-26 12:33:%02d INFO worker: step %d\n",
+		"word-NUM-word": "word-%d-word is a compound term\n",
+		"syslog":        "Nov 26 12:33:%02d host app[1234]: step %d\n",
+		"apache":        "[26/Nov/2026:12:33:%02d +0000] GET /x %d\n",
+		"slash date":    "2026/11/26 12:33:%02d INFO step %d\n",
 	}
-	for name, in := range map[string]string{"timestamp log": ts.String(), "date log": date.String(), "word-NUM-word": prose.String()} {
-		if out, ok := CapSearchOutput(in, 3, 0, true); ok {
+	for name, f := range cases {
+		var b strings.Builder
+		for i := 0; i < 20; i++ {
+			switch strings.Count(f, "%") {
+			case 2:
+				fmt.Fprintf(&b, f, i, i)
+			default:
+				fmt.Fprintf(&b, f, i)
+			}
+		}
+		in := b.String()
+		if out, ok := CapSearchOutput(in, 3, 0, true); ok || out != in {
 			t.Errorf("%s: capped, want it left alone:\n%s", name, out)
 		}
 	}

@@ -295,7 +295,7 @@ Output under `min_size`, output with no over-long or repeated lines, marker-bear
 ## searchcap
 
 !!! info "Offload — lossy, reversible (deterministic). Off by default, in no preset."
-    It caps the matches of each run of a file in a `grep -n` or `rg` listing. A run is the rows of one file with nothing else between them. It keeps the first
+    It caps the matches of each run of a file in a `grep -n` or `rg` listing. A run is the rows of one file with nothing else between them. A `--` separator line does not break a run. It keeps the first
     `per_file` matches (15) of each run and, with `keep_last` (true), the last one. A run with exactly `per_file`+1 matches stays whole, so `per_file`+1 matches can survive. It replaces the rest with
     `path: +K more matches`. Context rows after the kept last match are cut and not counted.
     `max_files` (0, off) also keeps only the first N files. The agent gets the original back
