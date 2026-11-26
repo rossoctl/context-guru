@@ -867,18 +867,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc()
 	failOpenAccountant("finished", func() { c.savings.finished(c, usage, usageOK) })
 	c.runDeferBook() // recovers its own panic and books the request as unpriced
-	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
-	if c.accServerHeldHistory {
-		e.SetAccountantServerHeldHistory()
-	}
-	e.PriceMode(price, usageOK && priced)
-	if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
-		e.RecordAccountantFallback()
-		logFallback(e, c.noResultWhy(usageOK))
-	}
-	e.CGModel = cgModel
-	e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
-	e.PriceCG(c.pricer, price, priced)
+	// Fail open (#1510): a panic in the price steps costs the row's figures only; the row is still recorded.
+	failOpenAccountant("price", func() {
+		e.SetAccountantContext(c.trace.OpsDropped, c.observe)
+		if c.accServerHeldHistory {
+			e.SetAccountantServerHeldHistory()
+		}
+		e.PriceMode(price, usageOK && priced)
+		if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
+			e.RecordAccountantFallback()
+			logFallback(e, c.noResultWhy(usageOK))
+		}
+		e.CGModel = cgModel
+		e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
+		e.PriceCG(c.pricer, price, priced)
+
+	})
 
 	if !captureContent {
 		e.Content = nil
@@ -923,9 +927,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// e.Project rides along: invocations are recorded per folder, because one session works in
 	// several and a per-session folder cannot scope a per-project report.
 	// After the response, on the handler's defer: counter adds only (R46). A panic costs the metric.
-	c.inference.Observe(e, time.Since(c.start))
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
-	c.rec.Record(e)
+	c.inference.Observe(e, time.Since(c.start)) // recovers its own panic
+	failOpenAccountant("inventory", func() { c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project) })
+	failOpenAccountant("record", func() { c.rec.Record(e) })
 }
 
 // entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold

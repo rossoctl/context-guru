@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/metrics"
@@ -377,15 +379,25 @@ func TestFinishFailsOpenWhenTheAccountantPanics(t *testing.T) {
 // tokenizer weight) must not reach the handler. The test panics noteDefer through a capture whose timed hook panics
 // after the ledger counts are booked; the request then books as unpriced. The later steps of lifecycle.Finish run.
 func TestDeferLedgerFailsOpenOnAPanic(t *testing.T) {
-	for _, dash := range []bool{true, false} {
-		name := map[bool]string{true: "dashboard on", false: "dashboard off"}[dash]
+	for _, dashOn := range []bool{true, false} {
+		name := map[bool]string{true: "dashboard on", false: "dashboard off"}[dashOn]
 		t.Run(name, func(t *testing.T) {
 			h := tdHandler(t, "ultrahigh", "http://x")
 			defer h.Close()
 			// With the dashboard off the capture is lean: the accountant's savings tracker and no recorder (#1451).
 			c := asyncCapture()
-			if dash {
-				c.rec = h.rec
+			var tap *accTap
+			if dashOn {
+				// A real recorder, as accHandlerOpts builds it: the dashboard path, where finish records a row.
+				tap = &accTap{}
+				rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"),
+					BatchSize: 1, FlushInterval: time.Millisecond, Tap: tap.add})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rec.Close()
+				c.rec = rec
+				c.model, c.tenant, c.start = "claude-sonnet-5-5", "t", time.Now()
 			}
 			// The seam: the timing hook panics when noteDefer ends, after the counts are booked.
 			hook := func(call string, _ time.Duration) {
@@ -413,9 +425,58 @@ func TestDeferLedgerFailsOpenOnAPanic(t *testing.T) {
 			if !later {
 				t.Fatal("the step after the ledger did not run")
 			}
+			if dashOn {
+				// The handler's next step: finish records the row. It must not book the request a second time.
+				c.finish(Usage{CacheRead: 5000, Output: 5}, true, false, 0, 0)
+				tap.waitAll(t, 1)
+			}
 			if st := h.toolDefer().ledger.Snapshot(); st.Requests != 1 || st.Unpriced != 1 || st.Net != 0 {
 				t.Fatalf("ledger = %+v, want 1 request booked as unpriced", st)
 			}
 		})
 	}
+}
+
+// nthPanicPricer prices the first call and panics on every later one.
+type nthPanicPricer struct {
+	tdPrices
+	calls *int
+}
+
+func (p nthPanicPricer) Price(ctx context.Context, m string) (modelinfo.Price, bool) {
+	*p.calls++
+	if *p.calls > 1 {
+		panic("pricer boom")
+	}
+	return p.tdPrices.Price(ctx, m)
+}
+
+// #1510: a panic in the tail of capture.finish (PriceMode, PriceCG) must not escape into the handler, and the row is
+// still recorded.
+func TestFinishTailFailsOpenOnAPanic(t *testing.T) {
+	tap := &accTap{}
+	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"),
+		BatchSize: 1, FlushInterval: time.Millisecond, Tap: tap.add})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	calls := 0
+	// Our own spend at another model: PriceCG then asks the pricer a second time, in the tail of finish.
+	ctx, sink := cheapmodel.WithDetachedSink(context.Background())
+	cheapmodel.ReplayUsage(ctx, "claude-haiku-5-5", 100, 10, 0, 0)
+	c := &capture{rec: rec, pricer: nthPanicPricer{calls: &calls}, model: "claude-sonnet-5-5", provider: "anthropic",
+		route: "/v1/messages", tenant: "t", start: time.Now(), llm: sink}
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("a panic in the tail of finish escaped into the handler: %v", p)
+			}
+		}()
+		c.finish(Usage{FreshInput: 5, CacheRead: 100, Output: 5}, true, false, 0, 0)
+	}()
+	if calls < 2 {
+		t.Fatalf("the pricer was called %d times: the test never reached the tail", calls)
+	}
+	tap.waitAll(t, 1)
 }
