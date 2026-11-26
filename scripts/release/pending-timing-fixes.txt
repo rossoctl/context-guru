@@ -9,4 +9,3 @@
 #
 # Format: <package> <TestName>, one per line. Node tests use the test title. Source: the timing audit
 # on origin/main 1d20435f.
-opencode-plugin v2: setup waits for the host transform callback before judging providers

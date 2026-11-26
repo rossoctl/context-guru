@@ -9,7 +9,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-v2-tes
 process.env.CONTEXT_GURU_PORT_START = "9500"
 
 import plugin, { stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, waitFor, waitUntilUnhealthy } from "./helpers.mjs"
 
 // A mock of the OpenCode 2 plugin context, matching the domain shapes the v2 host
 // provides: provider.transform editor (list/get/update), command.transform editor
@@ -266,8 +266,12 @@ test("v2: hooks work when the provider callback runs after transform() has resol
     const originalLog = console.log
     console.log = (...args) => { logs.push(args.join(" ")) }
     const done = plugin.setup(ctx)
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    console.log = originalLog
+    try {
+      // Setup logs this line after transform() has resolved and the hooks are awaited. It is the verdict point.
+      await waitFor(() => logs.some((line) => /no Anthropic or OpenAI provider routed so far/.test(line)), "setup to finish its pass after transform() resolved")
+    } finally {
+      console.log = originalLog
+    }
     assert.ok(!logs.some((line) => /no Anthropic or OpenAI provider is configured/.test(line)), `wrong verdict logged: ${logs.join("|")}`)
     await run()
     await done
