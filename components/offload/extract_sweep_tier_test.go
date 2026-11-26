@@ -2,6 +2,7 @@ package offload
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -18,7 +19,17 @@ func tierRates(model string, p modelinfo.Price, flat bool) components.TokenRates
 	if !flat {
 		p = p.WithTiers(model)
 	}
-	return components.RatesOf(p)
+	// The same conversion as lifecycle.RatesOf (offload cannot import lifecycle): each tier through Price.At.
+	out := components.TokenRates{Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite}
+	n := 0
+	for _, tr := range p.Tiers {
+		if tr.AbovePromptTokens > 0 {
+			q := p.At(tr.AbovePromptTokens + 1)
+			out.Tiers[n] = components.RateTier{AbovePromptTokens: tr.AbovePromptTokens, Input: q.Input, Output: q.Output, CacheRead: q.CacheRead, CacheWrite: q.CacheWrite}
+			n++
+		}
+	}
+	return out
 }
 
 func gptRates(flat bool) components.TokenRates {
@@ -161,5 +172,99 @@ func TestTierRefusesACutThatEndsInsideTheMargin(t *testing.T) {
 	req, n := tierRun(r, 360000)
 	if n != 0 || len(dropped(req)) != 0 || r.refused("tier_line_not_reached") == 0 {
 		t.Fatalf("events %d refused %v", n, v3Counters().Refused)
+	}
+}
+
+const tierJudge = v3Base + "selector: judge\nprotect_last_n: 2\n" + tierOn
+
+// The judge selector: above the line, below the sweet spot. The question is asked, the answer is applied, and
+// the cut reaches the goal.
+func TestTierJudgeSelectorAsksThenCutsBelowTheGoal(t *testing.T) {
+	r := gptRig(t, "tier-judge", tierJudge, false)
+	asker := pingAsker()
+	r.asker = asker
+	r.request(0)
+	for i := 0; i < 2; i++ {
+		r.request(300_000)
+	}
+	r.forward()
+	if atomic.LoadInt64(&asker.calls) == 0 {
+		t.Fatalf("the judge was not asked; refused %v", v3Counters().Refused)
+	}
+	req, rep := r.request(300_000)
+	if rep.Events[eventAppliedWarm] == 0 || len(dropped(req)) == 0 {
+		d, _ := lastWarmDecision()
+		t.Fatalf("the answer was not applied: %v refused %v last %+v", rep.Events, v3Counters().Refused, d)
+	}
+	v := v3Counters()
+	if len(v.Recent) != 1 || 300_000-v.Recent[0].D > 272_000-tierMargin(272_000, 0) || v.JudgeDrops == 0 {
+		t.Fatalf("cut %+v", v)
+	}
+}
+
+// A held answer is not applied when, at apply time, the prompt has fallen below every line.
+func TestTierHeldAnswerIsNotAppliedBelowEveryLine(t *testing.T) {
+	r := gptRig(t, "tier-held", tierJudge, false)
+	r.asker = pingAsker()
+	r.request(0)
+	for i := 0; i < 2; i++ {
+		r.request(300_000)
+	}
+	r.forward()
+	req, rep := r.request(250_000)
+	if rep.Events[eventAppliedWarm] != 0 || len(dropped(req)) != 0 {
+		t.Fatalf("events %v refused %v", rep.Events, v3Counters().Refused)
+	}
+}
+
+// With tier_target on and v3 off (warm only), nothing changes: tier_target does not switch v3 on.
+func TestTierTargetWithoutV3DoesNothing(t *testing.T) {
+	e := shippedSweep(t, "warm: true\n"+tierOn)
+	if e.v3 {
+		t.Fatal("tier_target switched v3 on")
+	}
+	r := gptRig(t, "tier-nov3", "warm: true\nwarm_every_n: 3\nwarm_min_age_turns: 5\nwarm_max_turns: 200\nwarm_expected_turns: 200\n"+tierOn, false)
+	req, n := tierRun(r, 300_000)
+	if n != 0 || len(dropped(req)) != 0 {
+		t.Fatalf("events %d", n)
+	}
+}
+
+// The diagnostic warm_gate_price_model prices the gate with another card: the tier target stays off.
+func TestTierTargetIsOffWithAGatePriceModel(t *testing.T) {
+	r := gptRig(t, "tier-gpm", v3Rule+tierOn+"warm_gate_price_model: gpt-5.6\n", false)
+	req, n := tierRun(r, 300_000)
+	if n != 0 || len(dropped(req)) != 0 || r.refused("not_in_sweet_spot") == 0 {
+		t.Fatalf("events %d refused %v", n, v3Counters().Refused)
+	}
+}
+
+// After a tier cut the growth wait (min_drop_frac x C) does not hold the thread: the tier gate decides.
+func TestTierCutIsNotHeldByTheGrowthWait(t *testing.T) {
+	r := gptRig(t, "tier-wait", v3Rule+tierOn, false)
+	if _, n := tierRun(r, 300_000); n == 0 {
+		t.Fatalf("fixture: no first cut; refused %v", v3Counters().Refused)
+	}
+	for i := 0; i < 3; i++ {
+		r.request(300_000)
+	}
+	if r.refused("waiting_for_growth") != 0 {
+		t.Fatalf("the growth wait held a tier cut: %v", v3Counters().Refused)
+	}
+}
+
+// The question's own cost is priced at the tier rates of its prompt size (gpt-5.6, 300k prompt: 2x).
+func TestTierCardPricesACallAtItsPromptSize(t *testing.T) {
+	g := gptRates(false)
+	above := g.Cost(0, 1000, 0, 300_000)
+	want := 300_000*1e-6 + 1000*45e-6 // read 2x of 0.5e-6, output 1.5x of 30e-6
+	if d := above - want; d > 1e-9 || d < -1e-9 {
+		t.Fatalf("cost = %v, want %v", above, want)
+	}
+	if below, w := g.Cost(0, 1000, 0, 250_000), 250_000*0.5e-6+1000*30e-6; below-w > 1e-9 || w-below > 1e-9 {
+		t.Fatalf("below the line: %v, want %v", below, w)
+	}
+	if got, want := ratesPricing(g.At(300_000)).Cost(0, 1000, 0, 300_000), above; got-want > 1e-9 || want-got > 1e-9 {
+		t.Fatalf("sweep leg pricing %v differs from the card %v", got, want)
 	}
 }

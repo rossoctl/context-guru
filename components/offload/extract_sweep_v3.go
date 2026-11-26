@@ -691,7 +691,11 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 	var tier *tierPlan
 	if float64(P) < v3Fill(C, e.fillSmall, e.fillLarge)*float64(C) {
 		// Below the sweet spot. A request above a price-tier line may still be cut, to just below the line.
-		if tier = e.tierGoal(c, P, in.growthFrom, in.growthTurns); tier == nil {
+		// The tier payback gate decides when the next cut may happen, so the growth wait (min_drop_frac x C,
+		// 150k at C = 1M) does not hold a thread above the line.
+		if tier = e.tierGoal(c, P, in.growthFrom, in.growthTurns); tier != nil {
+			waiting = false
+		} else {
 			if paced {
 				noteV3Refuse("not_in_sweet_spot")
 				noteV3Refusal(tkey, "not_in_sweet_spot", P, C, cSource)
@@ -881,7 +885,7 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 				return false, "drop_too_small"
 			}
 		}
-		if wa.tier != nil && (!measured || float64(P-dBilled) > float64(wa.tier.goal)) {
+		if wa.tier != nil && measured && float64(P-dBilled) > float64(wa.tier.goal) {
 			// The cut does not reach the goal below the tier line: today's target stands, which is no cut here.
 			noteV3Refuse("tier_line_not_reached")
 			noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "tier_line_not_reached", Weight: 1,

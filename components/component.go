@@ -1014,7 +1014,6 @@ type TokenRates struct {
 }
 
 // MaxRateTiers is how many tiers TokenRates holds. It matches modelinfo.MaxTiers.
-const MaxRateTiers = 3
 
 // RateTier is one price tier as absolute per-token rates. AbovePromptTokens 0 means the entry is unused.
 type RateTier struct {
@@ -1056,8 +1055,10 @@ func (r TokenRates) Zero() bool {
 	return r.Input == 0 && r.Output == 0 && r.CacheRead == 0 && r.CacheWrite == 0
 }
 
-// Cost prices one call's four token tiers.
+// Cost prices one call's four token tiers. A card with tiers prices the whole call at the rates of its
+// prompt size (fresh + cache write + cache read), as the provider bills it.
 func (r TokenRates) Cost(fresh, output, cacheWrite, cacheRead int64) float64 {
+	r = r.At(fresh + cacheWrite + cacheRead)
 	return float64(fresh)*r.Input + float64(output)*r.Output +
 		float64(cacheWrite)*r.CacheWrite + float64(cacheRead)*r.CacheRead
 }

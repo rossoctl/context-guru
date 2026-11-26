@@ -814,8 +814,10 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// the same model the prefix ask addresses (c.Model.For("incoming")), so one rate card is right
 	// for both.
 	pricing := cheapmodel.PricingFromEnv()
-	if !c.SelfRates.Zero() {
-		pricing = ratesPricing(c.SelfRates)
+	// The request's card keeps its tiers: a leg is priced at the rates of ITS OWN prompt size (see recordLeg).
+	card := c.SelfRates
+	if !card.Zero() {
+		pricing = ratesPricing(card)
 	}
 	var (
 		reply string
@@ -841,7 +843,12 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// itself. This is the same defect class as #176, in the component this PR re-scoped.
 	recordLeg := func(ms float64, u components.PrefixUsage) float64 {
 		metrics.RecordExtractionCall(rep.Component, ms)
-		cost := pricing.Cost(int64(u.Fresh), int64(u.Output),
+		legPricing := pricing
+		if !card.Zero() {
+			// Above a price-tier line the whole call bills at the tier's rates (#1329).
+			legPricing = ratesPricing(card.At(int64(u.Fresh) + int64(u.CacheWrite) + int64(u.CacheRead)))
+		}
+		cost := legPricing.Cost(int64(u.Fresh), int64(u.Output),
 			int64(u.CacheWrite), int64(u.CacheRead))
 		metrics.RecordExtractionSpend(rep.Component, cost)
 		return cost

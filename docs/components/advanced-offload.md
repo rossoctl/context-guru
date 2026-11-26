@@ -744,6 +744,9 @@ switch v3 on. The lines and rates come from the price table (`Price.Tiers`), not
 - **Gates.** The cut must reach the goal (`tier_line_not_reached` otherwise). Then the warm gate runs with tier rates: the
   saving is the step down in the per-turn read cost, counted for the turns until the prompt grows back to the line, at most.
   The rewrite is the cache write after the cut. Output is not counted. A request in the sweet spot keeps today's gate.
+- **No growth wait.** A request above a line, below the sweet spot, is not held by the growth wait (`min_drop_frac x C`,
+  150K at C = 1M). The tier gates decide when the next cut may happen. In the sweet spot the wait stays.
+- **Cost.** A question the sweep asks is priced at the tier rates of its own prompt size (`TokenRates.Cost`).
 - **Same cut.** The marker and the stash are the same as for every other cut.
 
 **Dry run (`dry_run`, an experiment, off by default).** For a paired test of Context Guru in the path with no cut ever. With
