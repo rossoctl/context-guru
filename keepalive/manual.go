@@ -59,12 +59,6 @@ type ManualRequest struct {
 	Key Key
 	// MinGap is the least time between two manual pings of this thread; zero is no limit.
 	MinGap time.Duration
-	// RewriteUSD is what writing the thread's current context into a cold cache would cost: the
-	// host's estimate of what this ping keeps warm. The host prices it (it knows the TTL tier the
-	// cache was written at). It is for the answer to the press only (ManualResult.AvoidedUSD,
-	// ManualSavedUSD) and is never booked: the accountant credits the rescue on the thread's next
-	// real request (#1460).
-	RewriteUSD float64
 }
 
 // ManualResult is what one manual ping did.
@@ -75,8 +69,6 @@ type ManualResult struct {
 	// CostUSD is the ping's own cost; Priced is false when the model has no rate.
 	CostUSD float64
 	Priced  bool
-	// AvoidedUSD is the rewrite the ping saved: ManualRequest.RewriteUSD if it read the cache, else 0.
-	AvoidedUSD float64
 }
 
 // PingNow sends one ping on r.Key's thread now. It fails open in the sense that matters here: any
@@ -179,9 +171,6 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		return res, &UpstreamError{Status: resp.Status}
 	}
 	res.CostUSD, res.Priced = k.pingCost(endpoint, job.model, prefix, u)
-	if u.CacheRead > 0 {
-		res.AvoidedUSD = r.RewriteUSD
-	}
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		// A ping that read the entry refreshed it; one that wrote re-created it and started a fresh
 		// lifetime (#580). The same rule record1 applies, and the same two clocks it moves. The
@@ -276,15 +265,4 @@ func ManualPingBlock(oneHourLive bool, lastTouch time.Time, ttl time.Duration, n
 		return ManualBlockCold
 	}
 	return ""
-}
-
-// ManualSavedUSD is the host's estimate of the money one manual ping kept. It answers the press and feeds the
-// status line. It is not booked (#1460). It is the rewrite it avoided less its own cost. A ping
-// that read nothing (AvoidedUSD is 0), or cost more than the write, kept nothing warm, so it saved 0.
-func ManualSavedUSD(rewriteUSD float64, res ManualResult) float64 {
-	saved := rewriteUSD - res.CostUSD
-	if saved < 0 || res.AvoidedUSD == 0 {
-		return 0
-	}
-	return saved
 }

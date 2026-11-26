@@ -131,17 +131,15 @@ func TestManualPingSendsOnePingAndAnswersWithTheCosts(t *testing.T) {
 			t.Errorf("%s differs from the recorded request (would miss the cache):\n%s\n%s", path, a, b)
 		}
 	}
-	// fixedPricer: write 2.5e-6, read 2e-7. The prefix is 48576+1200 tokens.
-	wantRewrite := 49776 * 2.5e-6
 	if out["sent"] != true || out["cache_read"].(float64) != 48576 {
 		t.Errorf("body = %v", out)
 	}
-	ping, rewrite, saved := out["ping_usd"].(float64), out["rewrite_usd"].(float64), out["saved_usd"].(float64)
-	if d := rewrite - wantRewrite; d > 1e-9 || d < -1e-9 {
-		t.Errorf("rewrite_usd = %v, want %v (prefix x cache-write price)", rewrite, wantRewrite)
+	if ping, _ := out["ping_usd"].(float64); ping <= 0 {
+		t.Errorf("ping_usd = %v, want the ping's cost", out["ping_usd"])
 	}
-	if ping <= 0 || saved != rewrite-ping {
-		t.Errorf("ping_usd %v saved_usd %v rewrite_usd %v: saved must be rewrite - ping", ping, saved, rewrite)
+	// The saving is credited on the next real request: the answer says pending and carries no estimate.
+	if out["saving"] != "pending" || out["saved_usd"] != nil || out["rewrite_usd"] != nil {
+		t.Errorf("the answer carries an estimate or no pending mark: %v", out)
 	}
 	if got, want := int64(out["warm_until_ms"].(float64)), m.clock.now().Add(300*time.Second).UnixMilli(); got != want {
 		t.Errorf("warm_until_ms = %d, want ping start + ttl %d", got, want)

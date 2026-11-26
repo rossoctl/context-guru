@@ -442,7 +442,7 @@ func TestPingSavingsRecoversFromALibraryPanic(t *testing.T) {
 	}
 }
 
-// context-guru#913: a manual ping stores no facts. The next real request then has no LastPing, and the gap
+// context-guru#913 (history; since #1460 a manual ping stores its facts, as a scheduled one does): the next real request then has no LastPing, and the gap
 // from the request before the ping is longer than the TTL. The issue feared a cold phase, with the request priced
 // at the write tier although the usage shows a cache read. The library takes a billed read as proof that the
 // entry was alive (design §5.2, R45), so the request is hot. The arithmetic: request at t0 writes 100,000

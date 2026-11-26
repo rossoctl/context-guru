@@ -303,12 +303,12 @@ func TestManualPingOnAOneHourThreadWorksPastFiveMinutes(t *testing.T) {
 	start := clock.now()
 	recTier(k, offPolicyHold(), sess1, start, ttlBody1h, bill1h)
 	clock.advance(30 * time.Minute)
-	res, err := k.PingNow(ManualRequest{Key: sess1, RewriteUSD: 0.75})
+	res, err := k.PingNow(ManualRequest{Key: sess1})
 	if err != nil {
 		t.Fatalf("a press at 30 min on a 1h thread was refused: %v", err)
 	}
-	if res.AvoidedUSD != 0.75 || fd.n() != 1 {
-		t.Fatalf("the press avoided $%.2f over %d pings, want $0.75 over 1", res.AvoidedUSD, fd.n())
+	if res.CostUSD < 0 || fd.n() != 1 {
+		t.Fatalf("the press cost $%.2f over %d pings, want 1 ping", res.CostUSD, fd.n())
 	}
 	k.Sweep(start.Add(ManualHoldMax1h + time.Second))
 	if _, err := k.PingNow(ManualRequest{Key: sess1}); err == nil {

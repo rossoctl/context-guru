@@ -11,8 +11,8 @@ import (
 	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
-// A manual ping is written as a keepalive row flagged ManualPing, with the write it avoided beside
-// the cost it paid, so the dashboard counts it as its own category and no strategy ledger does.
+// A manual ping is written as a keepalive row flagged ManualPing, with the cost it paid and no
+// saving (the accountant credits it on the next request), so the dashboard counts it as its own category and no strategy ledger does.
 func TestDashEmitterWritesAManualPingRow(t *testing.T) {
 	rec, err := dash.NewRecorder(dash.Options{
 		DBPath: filepath.Join(t.TempDir(), "dash.db"), BatchSize: 1, FlushInterval: time.Millisecond,

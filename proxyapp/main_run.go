@@ -465,9 +465,10 @@ func Main(hooks Hooks) {
 		rec = r
 		defer rec.Close()
 		// Wire the keep-alive sink to the same recorder every other dash write already uses.
-		// Until --dashboard runs this block, kaKeepAlive.rec stays nil and KeepAlivePing is a
-		// no-op — matching the keeper's own "no audit sink, no retention" gate, which already
-		// means no ping ever reaches this far without --dashboard on.
+		// Until --dashboard runs this block, kaKeepAlive.rec stays nil and no ping row is written. The
+		// keeper's own "no audit sink, no retention" gate also sends no ping then, so no ping reaches
+		// KeepAlivePing without --dashboard. Its booking path (BookPing) needs no dashboard, and is ready
+		// if that gate ever changes.
 		kaKeepAlive.rec = rec
 		// Recover which sessions were live before this restart. Without it every conversation
 		// in flight reports a cold start on its next turn, which mislabels the cache verdict of
@@ -1088,9 +1089,10 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 //
 // Both fields are set after construction (see where kaKeepAlive is built, above) because this
 // value is threaded into `emitter` before its two dependencies — the recorder and the price
-// resolver — exist yet. KeepAlivePing is nil-safe on an unset rec, so nothing can observe the
-// gap: the keeper's own retention gate already refuses to hold anything (and so never pings)
-// until --dashboard has opened one.
+// resolver — exist yet. KeepAlivePing is nil-safe on an unset rec: with no recorder no row is written. The
+// keeper's own retention gate (no audit sink, no retention) holds nothing and so sends no ping until
+// --dashboard has opened one. The savings booking (BookPing) runs before the rec check and needs no
+// dashboard, so it is ready if that gate ever changes.
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer

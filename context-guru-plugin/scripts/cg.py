@@ -1822,7 +1822,11 @@ def ping_lines(code: int, doc: dict | None, reason: str = "") -> list[str]:
     ping_reason, which says WHY a 409 "not held" happened."""
     doc = doc or {}
     if code == 200 and doc.get("sent"):
-        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {dollars(doc.get('ping_usd', 0))})."]
+        cost = dollars(doc.get('ping_usd', 0))
+        if "saved_usd" not in doc:
+            # A server since #1460 credits the saving on the thread's next real request, so it sends no estimate.
+            return [f"Kept warm: ping cost {cost}. Saving pending: it is counted on the next request."]
+        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {cost})."]  # an older server
     err = doc.get("error")
     if code == 409 and err == "not held" and reason:
         return [f"Can't ping: {PING_REASONS.get(reason, PING_REASON_OTHER)}."]

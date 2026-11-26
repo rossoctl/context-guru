@@ -99,10 +99,10 @@ func TestManualPingOnAOneHourThreadIsPricedAndHeldAtTheHourTier(t *testing.T) {
 	if w.Code != http.StatusOK || out["sent"] != true {
 		t.Fatalf("press = %d %v, want 200 sent", w.Code, out)
 	}
-	// fixedPricer: input 2e-6 (x2.0 on the 1h tier = 4e-6), write 2.5e-6 (the 5-minute rate).
-	want := 49776 * 2e-6 * 2.0
-	if got := out["rewrite_usd"].(float64); got < want*0.999 || got > want*1.001 {
-		t.Errorf("rewrite_usd = %v, want %v (prefix x 2.0 x input)", got, want)
+	// The saving is credited on the next real request, so the answer carries no rewrite estimate (#1460). The
+	// 1-hour price of the next request is next_cold_usd of /api/cachestate.
+	if out["saving"] != "pending" || out["rewrite_usd"] != nil {
+		t.Errorf("answer = %v, want a pending saving and no rewrite estimate", out)
 	}
 	if got, want := int64(out["warm_until_ms"].(float64)), m.clock.now().Add(time.Hour).UnixMilli(); got != want {
 		t.Errorf("warm_until_ms = %d, want ping start + 1 h %d", got, want)
