@@ -75,11 +75,7 @@ func toolName(wire string, t gjson.Result) (string, bool) {
 	if t.Get("type").String() != "function" {
 		return "", false
 	}
-	if cgschema.IsResponses(wire) {
-		n := t.Get("name").String()
-		return n, n != ""
-	}
-	n := t.Get("function.name").String()
+	n := cgschema.ToolFnNameOn(wire, t)
 	return n, n != ""
 }
 
@@ -651,46 +647,22 @@ func repairSearchResults(wire string, body []byte, deferred map[string]bool, kno
 		answers[id] = SearchAnswer(ns, deferred)
 		asked = append(asked, ns...)
 	}
+	for _, c := range cgschema.RequestCalls(wire, body) {
+		if c.Name == ClientSearchName {
+			note(c.ID, c.Args())
+		}
+	}
 	out := body
+	key := "content"
 	if cgschema.IsResponses(wire) {
-		items := gjson.GetBytes(body, "input").Array()
-		for _, it := range items {
-			if it.Get("type").String() == "function_call" && it.Get("name").String() == ClientSearchName {
-				note(it.Get("call_id").String(), it.Get("arguments").String())
-			}
-		}
-		for i, it := range items {
-			if it.Get("type").String() != "function_call_output" {
-				continue
-			}
-			a, ok := answers[it.Get("call_id").String()]
-			if !ok || it.Get("output").String() == a {
-				continue
-			}
-			if b, err := sjson.SetBytes(out, "input."+itoa(i)+".output", a); err == nil {
-				out = b
-			}
-		}
-		return out, asked
+		key = "output"
 	}
-	msgs := gjson.GetBytes(body, "messages").Array()
-	for _, m := range msgs {
-		m.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
-			if tc.Get("function.name").String() == ClientSearchName {
-				note(tc.Get("id").String(), tc.Get("function.arguments").String())
-			}
-			return true
-		})
-	}
-	for i, m := range msgs {
-		if m.Get("role").String() != "tool" {
+	for _, r := range cgschema.RequestResults(wire, body) {
+		a, ok := answers[r.CallID]
+		if !ok || r.Raw.Get(key).String() == a {
 			continue
 		}
-		a, ok := answers[m.Get("tool_call_id").String()]
-		if !ok || m.Get("content").String() == a {
-			continue
-		}
-		if b, err := sjson.SetBytes(out, "messages."+itoa(i)+".content", a); err == nil {
+		if b, err := sjson.SetBytes(out, r.Path(wire)+"."+key, a); err == nil {
 			out = b
 		}
 	}

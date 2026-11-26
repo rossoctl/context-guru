@@ -81,45 +81,22 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		Unsized: w <= 0, // no billed usage: no size, so every token prices at the base rate
 	}, modelinfo.OneModel(e.Model, p))
 	f.Fig = fig
-	// A zero-token op of a name with NO row in e.Components gets no envelope row: its key is in the library's
-	// maps with 0. A name with a row keeps its key at $0: a component that acted can have counted ops of 0
-	// tokens (the byte ratio truncates), and without its key accOverride would drop the whole request's saving.
-	hasRow := map[string]bool{}
+	rows := make([]accrec.GateRow, 0, len(e.Components))
 	for _, c := range e.Components {
-		hasRow[c.Component] = true
+		rows = append(rows, accrec.GateRow{Name: c.Component, Acted: c.Acted})
 	}
-	zero := map[string]bool{}
-	for _, o := range e.accRes.Ops {
-		if !o.DryRun && o.Call == nil {
-			if n := strings.TrimPrefix(o.Operator, accwire.OperatorPrefix); !hasRow[n] {
-				zero[n] = true
-			}
-		}
-	}
-	for _, o := range e.accRes.Ops {
-		if !o.DryRun && o.Call == nil && !(o.Saved.IsZero() && o.Caused.IsZero()) {
-			delete(zero, strings.TrimPrefix(o.Operator, accwire.OperatorPrefix))
-		}
-	}
-	cut := func(m map[string]float64, to map[string]float64) {
-		for k, v := range m {
-			if zero[strings.TrimPrefix(k, accwire.OperatorPrefix)] && v == 0 {
-				continue
-			}
-			to[strings.TrimPrefix(k, accwire.OperatorPrefix)] += v
-		}
-	}
-	cut(fig.ByComponent, f.ByComponent)
-	cut(fig.ByComponentFirst, f.ByComponentFirst)
-	cut(fig.ByComponentReplay, f.ByComponentReplay)
+	f.ByComponent, f.ByComponentFirst, f.ByComponentReplay = accrec.ComponentFigure(*e.accRes, fig, rows)
 	f.DeltaUSD = fig.DeltaUSD
 	f.KeepAliveSavedUSD, f.SplitUSD, f.TTLUSD = fig.KeepAliveSavedUSD, fig.SplitUSD, fig.TTLUSD
 	f.EndedBreakUSD = fig.EndedBreakUSD + fig.UnownedReRateUSD
 	f.UnattributedBreakUSD = fig.UnattributedBreakUSD
-	if fig.UnownedMarkUSD != 0 {
-		f.ByComponent[accwire.OpTailBreakpoint] += fig.UnownedMarkUSD
-	}
 	f.Unpriced, f.Estimated = fig.Unpriced, fig.Estimated
+	// The search turns of tool deferral are spend calls, a separate bill in the library's figure. They are a cost of
+	// the deferral figure (#1441), so they come off its row and the request total. The same sum as /stats reads.
+	if spend := accrec.DeferSpendUSD(fig); spend != 0 {
+		f.ByComponent[DeferComponent] -= spend
+		f.DeltaUSD -= spend
+	}
 
 	// The tokens of each row (#998). They are the Result's own tokens, not dollars: each operation's, then
 	// each counted effect's, on the row that the figure charged it to.
@@ -171,20 +148,20 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 // Fallback reasons: why PriceMode booked no saving on an event. AccountantFallback
 // returns one of them ("" when the override applied).
 const (
-	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
-	FallbackOpsDropped         = "ops_dropped"          // a change could not be placed as an operation
-	FallbackObserve            = "observe"              // the run was observe mode
-	FallbackUnpriced           = "unpriced"             // no usage or no price for the model, or an operation or effect is unpriced
-	FallbackCheckSum           = "check_sum"            // the library's sum check failed
-	FallbackCheckUniqueChange  = "check_unique_change"  // two operations share a ChangeID
-	FallbackCheckSpans         = "check_spans"          // an operation's spans do not add up to its sizes
-	FallbackCheckOther         = "check_other"          // a fatal library check this host has no name for
-	FallbackSizeUnknown        = "size_unknown"         // TokensBefore is 0: the plausibility bound cannot be checked
-	FallbackImplausibleSize    = "implausible_size"     // the library saved more tokens than the request had
-	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
-	FallbackDuplicateName      = "duplicate_name"       // two rows share a component name
-	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
-	FallbackServerHeldHistory  = "server_held_history"  // an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider holds the history
+	FallbackNoResult           = "no_result"                   // no Result attached (no usage, skipped, expand rounds)
+	FallbackOpsDropped         = accrec.GateOpsDropped         // a change could not be placed as an operation
+	FallbackObserve            = accrec.GateObserve            // the run was observe mode
+	FallbackUnpriced           = accrec.GateUnpriced           // no usage or no price for the model, or an operation or effect is unpriced
+	FallbackCheckSum           = accrec.GateCheckSum           // the library's sum check failed
+	FallbackCheckUniqueChange  = accrec.GateCheckUniqueChange  // two operations share a ChangeID
+	FallbackCheckSpans         = accrec.GateCheckSpans         // an operation's spans do not add up to its sizes
+	FallbackCheckOther         = accrec.GateCheckOther         // a fatal library check this host has no name for
+	FallbackSizeUnknown        = accrec.GateSizeUnknown        // TokensBefore is 0: the plausibility bound cannot be checked
+	FallbackImplausibleSize    = accrec.GateImplausibleSize    // the library saved more tokens than the request had
+	FallbackFigureWithoutRow   = accrec.GateFigureWithoutRow   // a library figure for a component with no row
+	FallbackDuplicateName      = accrec.GateDuplicateName      // two rows share a component name
+	FallbackActedWithoutFigure = accrec.GateActedWithoutFigure // a component acted and the library has no figure for it
+	FallbackServerHeldHistory  = "server_held_history"         // an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider holds the history
 )
 
 // FallbackUnrecorded is requests.acc_fallback on a row written before the column existed whose components say
@@ -207,22 +184,6 @@ func (e *Event) RecordAccountantFallback() {
 	e.AccFallback = e.accFallback
 }
 
-// fatalCheckFallback is the fallback reason of a fatal library check (accountant CheckFailure.Fatal):
-// one that means the operation list or its attribution is wrong. The library decides which checks are
-// fatal; this only names them. A fatal check this switch does not know gates all the same, as
-// FallbackCheckOther, so a check the library adds later never passes silently.
-func fatalCheckFallback(check string) string {
-	switch check {
-	case accountant.CheckSum:
-		return FallbackCheckSum
-	case accountant.CheckUniqueChange:
-		return FallbackCheckUniqueChange
-	case accountant.CheckSpans:
-		return FallbackCheckSpans
-	}
-	return FallbackCheckOther
-}
-
 // PricedByAccountant is CompRow.PricedBy on a row the accountant library priced.
 const PricedByAccountant = "accountant"
 
@@ -237,26 +198,15 @@ const PricedByNone = "none"
 const KindEnvelope = "envelope"
 
 // EndedChangeComponent is the row that carries the break an ended change left behind.
-const EndedChangeComponent = "ended_change"
+const EndedChangeComponent = accrec.EndedChangeComponent
 
 // InteractionComponent is the row that carries the interaction on a rescued request
 // (AccFigure.InteractionUSD): counted, and owned by no component.
-const InteractionComponent = "interaction"
+const InteractionComponent = accrec.InteractionComponent
 
 // DeferComponent is the library's component name for tool deferral: the operator context-guru.tooldefer, which the
 // proxy reports from the bodies (accountant R56). Its figure is the deferral's saving.
 const DeferComponent = accwire.OpToolDefer
-
-// envelopeComponents are the operators that change the request envelope (tools, system, cache
-// marks) and may have no pipeline row: the proxy reports them from a body diff
-// (accwire/envelope.go). expand, adjudicate and expand_restore (the copy fixed_restore
-// inserts, #481) are never pipeline components; headttl is a host option; toolschema, toolfilter and cachesplit are components whose row can be absent when
-// the rewrite ran from an equivalent gate (cacheinject runs the split too).
-var envelopeComponents = map[string]bool{
-	accwire.OpExpand: true, accwire.OpAdjudicate: true, accwire.OpHeadTTL: true, accwire.OpExpandRestore: true,
-	"toolschema": true, "toolfilter": true, "cachesplit": true,
-	accwire.OpTailBreakpoint: true, accwire.OpToolDefer: true,
-}
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
 // out a break (penalty_unknown, accountant design §6.4). It is false when the override did not apply.
@@ -322,56 +272,32 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		return FallbackServerHeldHistory // before no_result: say the real reason, not that nothing was attached
 	case e.accRes == nil:
 		return FallbackNoResult
-	case e.accOpsDropped != 0:
-		return FallbackOpsDropped
-	case e.accObserve:
-		return FallbackObserve
-	}
-	for _, c := range e.accRes.Checks {
-		if c.Fatal() {
-			return fatalCheckFallback(c.Check)
-		}
 	}
 	fig := e.AccountantFigure(p)
+	// One decision for the row and the /stats ledger (accrec.Gate): a request the row refuses is unpriced there too.
+	rows := make([]accrec.GateRow, 0, len(e.Components))
+	for _, c := range e.Components {
+		rows = append(rows, accrec.GateRow{Name: c.Component, Acted: c.Acted})
+	}
+	if reason, detail := accrec.Gate(*e.accRes, fig.Fig, accrec.GateIn{Observe: e.accObserve, OpsDropped: e.accOpsDropped,
+		TokensBefore: e.TokensBefore, Rows: rows}); reason != "" {
+		e.accUnpricedWhy = detail
+		return reason
+	}
 	// penalty_unknown is not a missing price: the library priced every operation and could not
 	// rule out a break, because the thread has no history or a setting has no position. The design
 	// says to show such a figure and mark it estimated (accountant design §6.4), so it does not gate.
-	// Any other unpriced reason means an operation has no price, and it does.
-	estimated := false
-	for _, u := range fig.Unpriced {
-		if !strings.HasSuffix(u, ":"+accountant.ReasonPenaltyUnknown) {
-			// "opID:reason". A request-level refusal has no operation, so its id is empty: drop the colon.
-			e.accUnpricedWhy = strings.TrimPrefix(u, ":")
-			return FallbackUnpriced
-		}
-		estimated = true
-	}
-	// Plausibility bound on the library's INPUT: a request cannot remove more tokens than it had.
-	// The library converts removed bytes to tokens with the request's own billed-token ratio, so a
-	// usage that does not match the forwarded body (a wrong bytes-to-tokens ratio) would otherwise
-	// publish an inflated figure. Over the bound, or with TokensBefore unknown (0), the bound cannot
-	// be met or checked and the event books no saving. This is a gate, never a rescale of the figure.
-	if e.TokensBefore <= 0 {
-		return FallbackSizeUnknown
-	}
-	if e.countedSavedTokens() > e.TokensBefore {
-		return FallbackImplausibleSize
-	}
-	// A library figure for a component the event has no row for would leave the rows short of
-	// the baseline: the sum invariant would break. An envelope operator (envelopeComponents) gets
-	// its own row; for any other name the event books no saving.
-	rows := map[string]bool{}
+	estimated := accrec.Held(*e.accRes)
+	// An envelope operator (EnvelopeComponents) with no pipeline row gets a row of its own, so the rows still sum to
+	// the baseline delta. The gate has refused any other name.
+	has := map[string]bool{}
 	for _, c := range e.Components {
-		rows[c.Component] = true
+		has[c.Component] = true
 	}
 	var added []CompRow
 	for name := range fig.ByComponent {
-		switch {
-		case rows[name]:
-		case envelopeComponents[name]:
+		if !has[name] {
 			added = append(added, CompRow{Component: name, Kind: KindEnvelope, Acted: true, Mutated: true})
-		default:
-			return FallbackFigureWithoutRow
 		}
 	}
 	// The head-TTL legs (premium and rescue) are a lever's figure like any component's: they go on
@@ -379,45 +305,25 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	if fig.TTLUSD != 0 {
 		fig.ByComponent[accwire.OpHeadTTL] += fig.TTLUSD
 		fig.DeltaUSD += fig.TTLUSD
-		if !rows[accwire.OpHeadTTL] && !inAdded(added, accwire.OpHeadTTL) {
+		if !has[accwire.OpHeadTTL] && !inAdded(added, accwire.OpHeadTTL) {
 			added = append(added, CompRow{Component: accwire.OpHeadTTL, Kind: KindEnvelope, Acted: true, Mutated: true})
 		}
 	}
 	// The break an ended change left behind is counted and owned by no component: it gets a row
 	// of its own, so the rows still sum to the baseline delta.
 	if fig.EndedBreakUSD != 0 {
-		if rows[EndedChangeComponent] {
-			return FallbackDuplicateName
-		}
 		added = append(added, CompRow{Component: EndedChangeComponent, Kind: KindEnvelope, Acted: true})
 		fig.ByComponent[EndedChangeComponent] = fig.EndedBreakUSD
 	}
 	// The interaction is counted and owned by no component too: a row of its own, like the ended change.
 	if fig.InteractionUSD != 0 {
-		if rows[InteractionComponent] {
-			return FallbackDuplicateName
-		}
 		added = append(added, CompRow{Component: InteractionComponent, Kind: KindEnvelope, Acted: true})
 		fig.ByComponent[InteractionComponent] = fig.InteractionUSD
 	}
 	sort.Slice(added, func(i, j int) bool { return added[i].Component < added[j].Component })
-	// Two rows with one name would each take the full figure and break the sum invariant.
-	seen := map[string]bool{}
-	for _, c := range e.Components {
-		if _, ok := fig.ByComponent[c.Component]; ok {
-			if seen[c.Component] {
-				return FallbackDuplicateName
-			}
-			seen[c.Component] = true
-		}
-	}
 	saved := make([]float64, len(e.Components))
 	for i, c := range e.Components {
-		v, ok := fig.ByComponent[c.Component]
-		if !ok && c.Acted {
-			return FallbackActedWithoutFigure
-		}
-		saved[i] = v
+		saved[i] = fig.ByComponent[c.Component]
 	}
 	for _, r := range added {
 		e.Components = append(e.Components, r)
@@ -434,25 +340,24 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// counted twice.
 	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, Split: fig.TokSplit, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
-	// Tool deferral is priced here, from the bodies (accountant R56): the definitions it left out as a shrink
-	// of tools positions, the search tool and the names list as growth. The library's figure for it sits on the
-	// tooldefer row and in the baseline delta above, which the Overview shows as the preset's saving. It is the
-	// deferral's saving, so it leaves the baseline and goes to the lever Overview adds beside it (DeferNetUSD),
-	// where the deferral card reads it. The total is the same: the figure is moved, not added. What the bodies
-	// cannot show is the searches and the definitions they loaded, which come back in the response: the ledger
-	// still owns that cost, and the lever takes it off (#908, review of #1003).
+	// Tool deferral has one figure, the accountant's (#1441): the definitions it left out as a shrink of tools
+	// positions, the search tool and the names list as growth (accountant R56), the tier re-rate, and the search
+	// turns as spend calls. It sits on the tooldefer row and in the baseline delta above, which the Overview shows as
+	// the preset's saving. It is the deferral's saving, so it leaves the baseline and goes to the lever Overview adds
+	// beside it (DeferNetUSD), where the deferral card and the /stats ledger read it. The total is the same: the
+	// figure is moved, not added. Gross is the saved side of the figure, and cost is gross less net.
 	//
-	// A request the library held (below) keeps the ledger's net on the lever as before, and the deferral is
-	// left out of the held estimate, so the figure appears in one place and not in two.
+	// A request the library held (below) books no lever: its deferral figure joins the held estimate with every
+	// other component's, so the figure appears in one place and not in two.
 	deferFig := fig.ByComponent[DeferComponent]
-	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 || deferFig != 0 {
+	if e.DeferTokens > 0 || deferFig != 0 {
 		if !estimated {
 			e.BaselineCostUSD -= deferFig
-			e.DeferNetUSD = deferFig - e.DeferSearchUSD
+			e.DeferGrossUSD = fig.ByComponentFirst[DeferComponent] + fig.ByComponentReplay[DeferComponent]
+			e.DeferNetUSD = deferFig
+			e.DeferCostUSD = e.DeferGrossUSD - e.DeferNetUSD
 			if e.DeferNetUSD == 0 {
-				// A guard, not a known case. -0 - +0 is -0 under IEEE 754, but deferFig comes from a map entry that
-				// starts at +0, and +a + -a and +0 + -0 are +0, so deferFig is never -0 and this branch is not
-				// reached today. If it ever were, a plain zero is what the field should serialize.
+				// A guard, not a known case: -0 should serialize as a plain zero.
 				e.DeferNetUSD = 0
 			}
 		}
@@ -467,18 +372,17 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// EstimatedSavedUSD, outside every total, so the Overview, the components table, the
 		// keep-alive tab and the API still agree.
 		//
-		// What is held out: fig.DeltaUSD less the deferral's own figure, which is every other component's
-		// figure, the head-TTL premium and rescue legs (the headttl row), the ended-change break, the
-		// interaction (the interaction row), and the filter's part. The deferral's figure is not held with them: a held request keeps the ledger's net
-		// on the lever, so it appears once (review of #1003). The figure can
+		// What is held out: fig.DeltaUSD, which is every component's figure (the deferral's too, #1441), the
+		// head-TTL premium and rescue legs (the headttl row), the ended-change break, the
+		// interaction (the interaction row), and the filter's part. The figure can
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
 		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
 		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
-		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
-		e.EstimatedSavedLowUSD = accrec.HeldFloorUSD(fig.Fig, fig.DeltaUSD-deferFig, accwire.Operator(DeferComponent))
+		e.EstimatedSavedUSD = fig.DeltaUSD
+		e.EstimatedSavedLowUSD = accrec.HeldFloorUSD(fig.Fig, fig.DeltaUSD)
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
@@ -504,32 +408,4 @@ func inAdded(rows []CompRow, name string) bool {
 		}
 	}
 	return false
-}
-
-// toolSectionOperators are the operators whose operations act on the tools section, not on messages:
-// the declaration filter and the schema rewrite (accwire/envelope.go reports them from a body
-// diff), the two declarations the proxy injects, and tool deferral, whose deferred definitions are a
-// shrink of tools positions (accountant R56, #908). Their tokens are not in TokensBefore, which counts
-// message text only. Deferral's names list is a growth in messages and saves nothing, so it adds
-// no saved tokens to the bound.
-var toolSectionOperators = map[string]bool{
-	accwire.Operator("toolfilter"): true, accwire.Operator("toolschema"): true,
-	accwire.Operator(accwire.OpExpand): true, accwire.Operator(accwire.OpAdjudicate): true,
-	accwire.Operator(accwire.OpToolDefer): true,
-}
-
-// countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
-// AccountantFigure.ByComponent: not DryRun, not a spend, and not an operation on the tools section.
-// TokensBefore is the size of the messages. A tool declaration is not in it, so 2,188 removed
-// declaration tokens would look larger than a 121-token conversation and drop the whole result (#907).
-// The bound stays for every operation on messages.
-func (e *Event) countedSavedTokens() int {
-	n := 0
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil || toolSectionOperators[o.Operator] {
-			continue
-		}
-		n += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
-	}
-	return n
 }

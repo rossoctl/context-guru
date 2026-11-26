@@ -27,7 +27,6 @@ import (
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/rossoctl/context-guru/waitcause"
-	"github.com/tidwall/gjson"
 )
 
 // The dashboard's capture point. It is a plain struct built from values the
@@ -93,6 +92,10 @@ type capture struct {
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
+	// deferBook books the request's dollars in the /stats ledger from the accountant's figure (deferLedger sets it).
+	// It joins the accountant job, so it runs off the handler path: finishAccountant runs it after the join (no
+	// dashboard), finish runs it once the result is in (dashboard). Nil when deferral did not change the request.
+	deferBook func()
 	// sweepFalseExpWarm is the part of sweepFalseExp whose drop was applied on a warm request.
 	sweepFalseExpWarm int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
@@ -517,22 +520,26 @@ func addSweepExpandEvents(e *dash.Event, rules map[string]int) {
 	}
 }
 
-// deferFacts is what tool deferral did on one request, for the dashboard row (#869).
+// deferFacts is what tool deferral did on one request, for the dashboard row (#869). Its dollars are not here: the
+// accountant prices them (dash.Event.PriceMode). spend is the search-turn cost, which finish reports to the
+// accountant as spend operations before it prices the request.
 type deferFacts struct {
 	tokens, list, searches, dropped, loaded, wrong int
-	gross, net, search                             float64
+	spend                                          tooldefer.SearchSpend
+	spendOK                                        bool
+	model                                          string
 }
 
 // noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
-// booked them (r.WrongGuesses and r.DroppedSearches included), its price (zero when the model has
-// none) and how many different tools its searches loaded.
-func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) {
+// booked them (r.WrongGuesses and r.DroppedSearches included) and how many different tools its searches loaded.
+func (c *capture) noteDefer(r tooldefer.Request, loaded int) {
 	defer c.timed("noteDefer")()
 	if c == nil {
 		return
 	}
 	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
-		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net, search: m.SearchCost}
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, model: r.Model}
+	c.deferFacts.spend, c.deferFacts.spendOK = r.SearchSpend()
 }
 
 // finish builds the event and hands it off. Called once, after the response has
@@ -684,26 +691,24 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		if waitingFor != waitcause.WaitingUnknown {
 			res.WaitPrompt = waitcause.PromptNone
 			if waitingFor == waitcause.WaitingHuman {
-				res.WaitPrompt = waitcause.PromptOf(toolUseNames)
+				res.WaitPrompt = waitcause.PromptOfClient(c.agent, toolUseNames)
 			}
 		}
 		// The person's id, raw, for the writer to hash. Read here, on the writer goroutine.
 		res.Fanout, res.SpawnType = spawn.N, spawn.Type
-		res.UserKey = session.UserKey(gjson.GetBytes(waitBody, "metadata.user_id").String())
+		res.UserKey = session.UserKey(c.agent.UserID(waitBody))
 		return res
 	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
-	addSweepExpandEvents(e, c.sweepExpandRules)
+	failOpenAccountant("sweep expand events", func() { addSweepExpandEvents(e, c.sweepExpandRules) })
 	if d := c.deferFacts; d != nil {
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
 		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
-		e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = d.gross, d.net, d.search
-		// The ledger's own cost, taken here, before PriceMode can move the net onto the library's figure.
-		e.DeferCostUSD = d.gross - d.net
+		// The dollars are the accountant's: PriceMode sets them from its figure for the tooldefer component.
 	}
 	e.SweepFalseExpandsWarm = c.sweepFalseExpWarm
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
@@ -797,38 +802,42 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// The gap for the TTL test is measured from the last request on the SAME model: a cache entry
 	// belongs to one model, so a request on another model between two requests on this one does
 	// not refresh it. SinceLastMs below keeps the per-thread gap.
-	cause, modelGap, known, lastWasSame, prevPromptTokens, prevOneHour := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
-		dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
-	//
-	// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
-	// measured from the last real request, so without this a 297 s gap with a ping at 289 s
-	// reads as an expiry on a turn that came 8 s after the refresh.
-	age := sinceMs
-	if known {
-		age = modelGap
-		// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
-		// when that was this model. This holds after a failed request too, when the gap since
-		// the last good request differs from sinceMs.
-		if lastWasSame {
-			age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+	// Fail open (#1510): a panic here costs the row its cache attribution only.
+	failOpenAccountant("cache attribution", func() {
+		cause, modelGap, known, lastWasSame, prevPromptTokens, prevOneHour := c.rec.ObservePrefix(e.SessionID, e.ThreadID, c.inherits, c.hasInherit,
+			dash.FactsOf(e), e.Status >= 200 && e.Status < 300)
+		//
+		// A keep-alive ping that READ the cache moved the provider's clock. The idle gap is
+		// measured from the last real request, so without this a 297 s gap with a ping at 289 s
+		// reads as an expiry on a turn that came 8 s after the refresh.
+		age := sinceMs
+		if known {
+			age = modelGap
+			// A ping refreshed the entry of the model that last ran in the thread. Cut the age only
+			// when that was this model. This holds after a failed request too, when the gap since
+			// the last good request differs from sinceMs.
+			if lastWasSame {
+				age = entryAgeMs(modelGap, e.TS, c.kaRefreshedAt)
+			}
+		} else {
+			age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 		}
-	} else {
-		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
-	}
-	e.PrefixCompared = known
-	e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
+		e.PrefixCompared = known
+		e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
+	})
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
 	// saving is the accountant library's rescue, not computed from these.
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
-	c.fillStrategyMeta(e)
+	failOpenAccountant("strategy meta", func() { c.fillStrategyMeta(e) })
 
 	var price modelinfo.Price
 	priced := false
 	if c.pricer != nil && c.model != "" {
-		price, priced = c.pricer.Price(context.Background(), c.model)
+		// Fail open (#1510): on a panic price stays zero and priced false, so the row books unpriced.
+		failOpenAccountant("price main", func() { price, priced = c.pricer.Price(context.Background(), c.model) })
 	}
 	// Run the accountant BEFORE the event is priced. Only with usage: without it the thread
 	// state stays untouched and the event carries no result. Not after several upstream rounds
@@ -845,29 +854,38 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	// The rules for which request books no figure are accrec.Recorder.Price's (see accCompute). A request with no
 	// figure leaves the event with no Result, so PriceMode books no dollars either (acc_fallback no_result).
-	if res, ok := c.accCompute(usage, usageOK); ok {
-		e.SetAccountant(res)
-	}
-	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
-	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
-	// the client keeps.
-	if usageOK && !c.rejected() {
-		c.savings.recordThinking(usage.Thinking)
-	}
+	// Fail open (#1504): this runs in the handler's terminal defer, so a panic in the accountant must cost the figure
+	// only. The row, stopEarlyScan and the log line still run after it, and the row books as no_result.
+	failOpenAccountant("finish", func() {
+		if res, ok := c.accCompute(usage, usageOK); ok {
+			e.SetAccountant(res)
+		}
+		// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
+		// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
+		// the client keeps.
+		if usageOK && !c.rejected() {
+			c.savings.recordThinking(usage.Thinking)
+		}
+	})
 	endAcc()
-	c.savings.finished(c, usage, usageOK)
-	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
-	if c.accServerHeldHistory {
-		e.SetAccountantServerHeldHistory()
-	}
-	e.PriceMode(price, usageOK && priced)
-	if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
-		e.RecordAccountantFallback()
-		logFallback(e, c.noResultWhy(usageOK))
-	}
-	e.CGModel = cgModel
-	e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
-	e.PriceCG(c.pricer, price, priced)
+	failOpenAccountant("finished", func() { c.savings.finished(c, usage, usageOK) })
+	c.runDeferBook() // recovers its own panic and books the request as unpriced
+	// Fail open (#1510): a panic in the price steps costs the row's figures only; the row is still recorded.
+	failOpenAccountant("price", func() {
+		e.SetAccountantContext(c.trace.OpsDropped, c.observe)
+		if c.accServerHeldHistory {
+			e.SetAccountantServerHeldHistory()
+		}
+		e.PriceMode(price, usageOK && priced)
+		if (c.accReq != nil || c.accServerHeldHistory) && e.AccountantFallback() != "" {
+			e.RecordAccountantFallback()
+			logFallback(e, c.noResultWhy(usageOK))
+		}
+		e.CGModel = cgModel
+		e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput = cgIn, cgCacheRead, cgCacheWrite, cgOut
+		e.PriceCG(c.pricer, price, priced)
+
+	})
 
 	if !captureContent {
 		e.Content = nil
@@ -912,9 +930,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// e.Project rides along: invocations are recorded per folder, because one session works in
 	// several and a per-session folder cannot scope a per-project report.
 	// After the response, on the handler's defer: counter adds only (R46). A panic costs the metric.
-	c.inference.Observe(e, time.Since(c.start))
-	c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project)
-	c.rec.Record(e)
+	c.inference.Observe(e, time.Since(c.start)) // recovers its own panic
+	failOpenAccountant("inventory", func() { c.rec.RecordInventory(e.TenantID, e.SessionID, e.TS, c.inv, captureContent, e.Project) })
+	failOpenAccountant("record", func() { c.rec.Record(e) })
 }
 
 // entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold

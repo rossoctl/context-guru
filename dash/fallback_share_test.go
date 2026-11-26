@@ -174,7 +174,7 @@ func TestBypassedRequestIsNotAFallback(t *testing.T) {
 	}
 }
 
-// Review of #1173: a fallback row is not always a $0 saving. It keeps the deferral ledger's net and the measured
+// Review of #1173: a fallback row is not always a $0 saving. It can keep a deferral figure and the measured
 // filter credit, and its own model calls make its compaction net negative. Left in the numerator, these moved
 // the share either way, up to 100%. The reads return them by part, so the share is the priced requests' share.
 func TestFallbackSavingIsLeftOutToo(t *testing.T) {
@@ -183,7 +183,7 @@ func TestFallbackSavingIsLeftOutToo(t *testing.T) {
 	fell := fbEvents("f", 100, 10, true, false)
 	for _, e := range fell {
 		e.CGLLMCostUSD = 0.002
-		e.DeferNetUSD = 0.004 // the ledger net, set before PriceMode, which a fallback leaves alone
+		e.DeferNetUSD = 0.004 // a figure set before PriceMode, which a fallback leaves alone
 		e.FilteredDeclTokens = 2000
 		e.RecordAccountantFallback()
 	}

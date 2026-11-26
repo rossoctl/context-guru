@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/context-guru/internal/tokens"
+	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
@@ -334,10 +335,7 @@ func (r *SearchRead) add(b gjson.Result) {
 		}
 	case "tool_search_tool_result":
 		r.Results++
-		b.Get("content.tool_references").ForEach(func(_, t gjson.Result) bool {
-			r.Loaded = append(r.Loaded, t.Get("tool_name").String())
-			return true
-		})
+		cgschema.SearchResultLoads(b, func(name string) { r.Loaded = append(r.Loaded, name) })
 	}
 }
 

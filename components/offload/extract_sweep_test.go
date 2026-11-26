@@ -212,8 +212,8 @@ func preExpiryCtx(session string, asker components.PrefixAsker, st store.Store) 
 		ColdCache: false, IdleMs: 4 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000,
 		PrefixAsk: asker,
 		// The host's keep-alive can ping this thread. A test about a thread it cannot ping clears this.
-		CanKeepAlive: func() bool { return true },
-		Model:        components.ModelSpec{Incoming: fallbackModel, Static: fallbackModel},
+		CanSweepAtPing: func() bool { return true },
+		Model:          components.ModelSpec{Incoming: fallbackModel, Static: fallbackModel},
 	}
 }
 

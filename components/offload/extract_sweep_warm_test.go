@@ -864,7 +864,7 @@ func TestAWarmThreadTheKeepAliveCannotPingStillAsks(t *testing.T) {
 			r := newWarmRig(t, "w-nokeep", warmCfg, payingTail(), 1.0)
 			for i := 0; i < 3; i++ {
 				c := warmCtx(r.session, r.st)
-				c.CanKeepAlive = tc.hook
+				c.CanSweepAtPing = tc.hook
 				r.request(c)
 			}
 			r.forward()
@@ -911,7 +911,7 @@ func TestAHeldWarmAnswerOnAnUnknownPhaseGoesThroughTheWarmGate(t *testing.T) {
 func TestAnUnpingableWarmCopyLivesOnlyForItsQuestion(t *testing.T) {
 	noPing := func(r *warmRig) *components.Ctx {
 		c := warmCtx(r.session, r.st)
-		c.CanKeepAlive = func() bool { return false }
+		c.CanSweepAtPing = func() bool { return false }
 		return c
 	}
 	held := func(r *warmRig) bool {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/tidwall/gjson"
@@ -423,4 +424,37 @@ func TestAPressOnAStoppedThreadChecksTheRouteAndTheCredential(t *testing.T) {
 			t.Errorf("state = %+v, want pingable", st)
 		}
 	})
+}
+
+// A ping row names the client agent.Identify found for the request, not the first token of its
+// User-Agent. A Pi request carries an OpenAI SDK User-Agent, and its ping row says "pi".
+// A host that sets no Identity gets the generic label.
+func TestPingReportCarriesTheIdentifiedClient(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   agent.Client
+		want string
+	}{
+		{"pi", agent.Identify(http.Header{"User-Agent": {"OpenAI/JS 5.0"}, "X-Context-Guru-Client": {"pi"}}), "pi"},
+		{"codex", agent.Identify(http.Header{"Originator": {"codex_cli_rs"}}), "codex"},
+		{"no identity", agent.Client{}, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, fd, clock := testKeeper(t)
+			fd.setPrices(proxyPricer{fixedPrice{modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}}})
+			sink := &reportSink{}
+			for _, d := range []time.Duration{-time.Second, 0} {
+				k.Record(Record{Key: sess1, StartedAt: clock.now().Add(d), Body: []byte(kaBody), Provider: "anthropic",
+					Route: "/v1/messages", Status: http.StatusOK, Usage: Usage{CacheRead: 48576, CacheWrite: 1200},
+					UsageOK: true, Policy: kaPolicy(), Header: kaHeader(), Emitter: sink, Identity: tc.id, Hold: fakeOf(k).hold(sess1)})
+			}
+			if _, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second}); err != nil {
+				t.Fatal(err)
+			}
+			reps := sink.all()
+			if len(reps) != 1 || reps[0].Agent != tc.want {
+				t.Fatalf("reports = %+v, want one with Agent %q", reps, tc.want)
+			}
+		})
+	}
 }

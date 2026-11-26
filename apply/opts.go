@@ -134,15 +134,22 @@ type Opts struct {
 	// that wants one gets none and decides for itself; today's behaviour for every caller that does
 	// not set it.
 	PrefixAsk components.PrefixAsker
-	// CanKeepAlive, when set, tells a component whether the host's keep-alive can ping the thread of
-	// the session this request belongs to. See components.Ctx.CanKeepAlive. nil => it cannot.
+	// CanSweepAtPing, when set, tells a component whether the sweep can ask its question at a keep-alive
+	// ping of the thread of the session this request belongs to. It is NOT "the keeper pings this
+	// thread": the sweep's question is Anthropic only, so it is false for every OpenAI thread, which the
+	// keeper does ping. See components.Ctx.CanSweepAtPing. nil => it cannot.
+	CanSweepAtPing func(session, thread string) bool
+	// CanKeepAlive is the old name of CanSweepAtPing, with the same meaning. It is used only when
+	// CanSweepAtPing is nil.
+	//
+	// Deprecated: use CanSweepAtPing.
 	CanKeepAlive func(session, thread string) bool
 	// FreePing asks the host for the free 1-hour ping that was the last touch of a conversation: its start time in
 	// milliseconds, and whether one stands. It is the host's fact for ONE case: the store keeps nothing
 	// (store.Keeps is false: storage off, or no store), so the ping's clock was never written and the cold check
 	// has nothing to read (#1350). apply asks it ONLY then. With a real store the stored clock stays the one record
 	// and this is never called. It can only make a cold verdict warm, and only inside the entry lifetime of the
-	// ping (EntryLifetime). nil asks for nothing, and so does a panic (fail open, as CanKeepAlive).
+	// ping (EntryLifetime). nil asks for nothing, and so does a panic (fail open, as CanSweepAtPing).
 	//
 	// It is asked by the cold clock's ALIAS (Trace.TouchAlias, from the body), not by session id and thread: the
 	// stored clock is keyed by the alias, and the same conversation may arrive under two session ids (with and
@@ -179,10 +186,18 @@ func (o Opts) nowMs() int64 {
 	return o.Now.UnixMilli()
 }
 
-// canKeepAliveFor binds the host's keep-alive check to one request's session and thread. nil in, nil
+// sweepAtPingOf is the host's check: CanSweepAtPing, else the deprecated CanKeepAlive.
+func sweepAtPingOf(o Opts) func(session, thread string) bool {
+	if o.CanSweepAtPing != nil {
+		return o.CanSweepAtPing
+	}
+	return o.CanKeepAlive
+}
+
+// canSweepAtPingFor binds the host's check to one request's session and thread. nil in, nil
 // out: a component then reads "cannot". A panic in the hook reads "cannot" as well (fail open: the
 // thread keeps nothing extra and is pinged as before).
-func canKeepAliveFor(f func(session, thread string) bool, session, thread string) func() bool {
+func canSweepAtPingFor(f func(session, thread string) bool, session, thread string) func() bool {
 	if f == nil {
 		return nil
 	}

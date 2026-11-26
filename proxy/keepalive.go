@@ -438,7 +438,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Identity: cl, Preset: tn.Preset,
+		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Identity: cl, Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}
@@ -472,13 +472,16 @@ func (k *keeper) readSetsTTL(provider bschemas.ModelProvider, endpoint, route, m
 	return k != nil && k.Keeper != nil && k.Keeper.ReadSetsTTL(provider, endpoint, route, model, pinged)
 }
 
-// canPing reports whether the keep-alive can ping a thread of this session on this tenancy: the kill
-// switch is off, the host may hold a credential (mayHold: an audit sink exists, or the proxy is single-tenant), the provider is not OpenAI (the sweep's question is Anthropic
-// only), and the resolved policy (account, manager strategy, session override) is on. It is the
+// canSweepAtPing reports whether the sweep can ask its question at a keep-alive ping of a thread of this
+// session on this tenancy. It is not the keeper's own "can ping" answer: the keeper also pings OpenAI
+// (the Responses route, GPT-5.6+), and this is false for OpenAI because the sweep's question is
+// Anthropic only. It is true when the kill switch is off, the host may hold a credential (mayHold: an
+// audit sink exists, or the proxy is single-tenant), the provider is not OpenAI, and the resolved
+// policy (account, manager strategy, session override) is on. It is the
 // record-time gate, evaluated before the request goes out and without a campaign decision (that one
 // needs the response), so a thread a learned campaign would turn on later gets a plain ping. That is
 // the safe direction: nothing extra is kept for it.
-func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschemas.ModelProvider) bool {
+func (k *keeper) canSweepAtPing(tn *Tenancy, session, threadID string, provider bschemas.ModelProvider) bool {
 	if k == nil || tn == nil || !k.mayHold() || keepAliveDisabled() ||
 		provider == bschemas.OpenAI || session == "" {
 		return false

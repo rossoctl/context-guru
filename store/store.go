@@ -414,6 +414,12 @@ type Memory struct {
 	loadedOrder []string // insertion order of loadedAt, oldest first
 	// loadFailedAt is when a session's disk read last failed; it backs off the retry.
 	loadFailedAt map[string]time.Time
+	// eraseGen counts erases (EraseSession, EraseAll). A disk read that started before an erase
+	// and ends after it keeps none of its rows: they may be the erased ones.
+	eraseGen uint64
+	// afterLoadRead, when set, runs in LoadSession after the disk read and before the rows go to
+	// memory. Tests only: it puts an erase in that window.
+	afterLoadRead func()
 }
 
 // Options configures a Memory store; the zero value yields sane defaults.

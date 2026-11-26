@@ -245,7 +245,7 @@ type sweepPingCandidate struct {
 	// asked is set once a question has been sent for this conversation, so a second ping in the same
 	// idle span sends a plain ping instead of paying for the same answer twice.
 	asked atomic.Bool
-	// warmOnly marks a copy kept for a thread the keep-alive cannot ping (CanKeepAlive said no at
+	// warmOnly marks a copy kept for a thread the keep-alive cannot ping (CanSweepAtPing said no at
 	// registration). It belongs to the warm question alone: no ping, ping claim or extra request sees it
 	// (#1193). The zero value is an ordinary registration.
 	warmOnly bool
@@ -270,7 +270,12 @@ func (e *ExtractSweep) keepsCopy(c *components.Ctx) bool {
 	return e.warm || pingable(c)
 }
 
-func pingable(c *components.Ctx) bool { return c.CanKeepAlive != nil && c.CanKeepAlive() }
+func pingable(c *components.Ctx) bool {
+	if c.CanSweepAtPing != nil {
+		return c.CanSweepAtPing()
+	}
+	return c.CanKeepAlive != nil && c.CanKeepAlive() // the deprecated name
+}
 
 // dropWarmOnly removes reg when it is the warm question's own copy (warmOnly) and still the thread's
 // registration. Such a copy has no other reader, so it goes when its question ends.
@@ -302,8 +307,8 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 	// is due (#1191): no ping ever reads it, and no keeper would clear it, so it lives only as long as
 	// that question (dropWarmOnly).
 	key := thread.Key(c.Session, c.Thread)
-	canPing := pingable(c)
-	if !canPing && !(e.warm && warmDue(key)) {
+	canSweepAtPing := pingable(c)
+	if !canSweepAtPing && !(e.warm && warmDue(key)) {
 		clearSweepPing(key)
 		sweepPingNotRegistered.Add(1)
 		return
@@ -318,7 +323,7 @@ func (e *ExtractSweep) registerPing(c *components.Ctx, req *bschemas.BifrostChat
 		return
 	}
 	cand := e.snapshotCandidate(c, req)
-	cand.warmOnly = !canPing
+	cand.warmOnly = !canSweepAtPing
 	sweepPingMu.Lock()
 	defer sweepPingMu.Unlock()
 	// Pruned on EVERY registration, not only at the cap: an idle thread's copy goes after

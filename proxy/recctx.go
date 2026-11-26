@@ -8,6 +8,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/record"
 )
@@ -23,6 +24,7 @@ import (
 type recEvent struct {
 	traceID  string
 	tenantID string // "" single-tenant; otherwise the file goes under <dir>/<tenantID>/
+	client   string // agent.Client.Label from agent.Identify; "" gives the generic label (record.ClientLabel)
 	provider bschemas.ModelProvider
 	path     string      // the API path, as the client called it; selects the wire dialect
 	headers  http.Header // the client's request headers, already filtered to the allowlist (record.AllowedHeaders)
@@ -55,6 +57,7 @@ type recCtx struct {
 	pristine []byte // the inbound body as the client sent it, pre-pipeline
 	traceID  string // Claude Code's own session UUID where available -- see newRecCtx
 	tenantID string // the consenting tenant in hosted mode, "" single-tenant
+	client   string // agent.Client.Label of the request's client; "" gives record's generic label
 }
 
 // recordFor decides whether THIS request may be recorded. The same two gates as
@@ -81,7 +84,7 @@ func (h *Handler) recordFor(tn *Tenancy) bool {
 // The trace id is record.TraceID: it must not come from tr.Session, which is empty in observe
 // mode. explicitSess is the chat handler's explicit id (explicitSessionOf), so a Bob IDE file is
 // keyed on its X-Task-Id, like the pipeline's session.
-func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Tenancy, explicitSess string) recCtx {
+func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Tenancy, explicitSess string, cl agent.Client) recCtx {
 	if !h.recordFor(tn) {
 		return recCtx{}
 	}
@@ -97,7 +100,7 @@ func (h *Handler) newRecCtx(provider bschemas.ModelProvider, orig []byte, tn *Te
 	if h.opts.Tenants != nil {
 		tenantID = tn.ID // recordFor guarantees tn != nil here
 	}
-	return recCtx{pristine: bytes.Clone(orig), traceID: id, tenantID: tenantID}
+	return recCtx{pristine: bytes.Clone(orig), traceID: id, tenantID: tenantID, client: cl.Label}
 }
 
 // teeBody reads the tee out for the recorder.

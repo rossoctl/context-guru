@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/dash"
@@ -275,7 +276,7 @@ func (h *Handler) deferParts(tn *Tenancy) tooldefer.Parts {
 
 // deferFlow is the library's flow of tool deferral for one request of tn.
 func (h *Handler) deferFlow(tn *Tenancy) tooldefer.Flow {
-	f := tooldefer.Flow{Parts: func() tooldefer.Parts { return h.deferParts(tn) }, Prices: h.opts.Prices, ProjectFor: apply.ProjectFor}
+	f := tooldefer.Flow{Parts: func() tooldefer.Parts { return h.deferParts(tn) }, ProjectFor: apply.ProjectFor}
 	if tn != nil {
 		f.Tenant, f.Pipe = tn.ID, tn.Pipe
 	}
@@ -410,11 +411,57 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 	if di == nil || !usageOK {
 		return
 	}
+	// Fail open (#1510): this runs in the handler's terminal defer. A panic in the synchronous part (Book, noteDefer,
+	// the tokenizer weight) costs the figure only. When the counts were booked, the request books as unpriced when
+	// no dollars are pending; otherwise nothing is booked.
+	var tenant string
+	booked := false
+	defer func() {
+		if p := recover(); p != nil && booked {
+			bookUnpricedAfterPanic(h.deferFlow(nil).Parts().Ledger, tenant, p)
+		} else if p != nil {
+			slog.Error("tool deferral: the ledger step panicked before the counts were booked; nothing is booked", "panic", p)
+		}
+	}()
 	b, ok := h.deferFlow(nil).Book(ctx, di, tooldefer.Response{FreshInput: u.FreshInput, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 		CacheWrite1h: u.CacheWrite1h, Searches: u.Searches, SearchLoaded: u.SearchLoaded, SearchDropped: u.SearchDropped}, usageOK, st)
-	if ok {
-		cp.noteDefer(b.Request, b.Money, b.Distinct)
+	if !ok {
+		return
 	}
+	// cp is the capture the accountant runs on: the dashboard's, or a lean one with the dashboard off (#1451). The
+	// dollars are the accountant's one figure for tooldefer, on both paths (#1441). The facts go first and stay
+	// synchronous: the search turns are spend operations that the accountant reads when it prices the request. The
+	// dollars wait for the accountant, so they are booked off the handler path (capture.runDeferBook).
+	tenant, booked = b.Request.Tenant, true
+	cp.noteDefer(b.Request, b.Distinct)
+	ledger := h.deferFlow(nil).Parts().Ledger
+	if cp == nil {
+		ledger.AddMoney(tenant, tooldefer.Money{}, false)
+		return
+	}
+	cp.deferBook = func() {
+		// Fail open: finish runs this in the handler's defer on the dashboard path, and accCompute is outside
+		// accFigure's own recover. A panic costs the figure only: the request books as unpriced.
+		defer func() {
+			if p := recover(); p != nil {
+				bookUnpricedAfterPanic(ledger, tenant, p)
+			}
+		}()
+		fig, priced := cp.accFigure(context.Background(), u, usageOK)
+		if res, have := cp.accCompute(u, usageOK); !priced || !have || accrec.Held(res) {
+			ledger.AddMoney(tenant, tooldefer.Money{}, false)
+			return
+		}
+		ledger.AddMoney(tenant, accrec.DeferMoney(fig), true)
+	}
+}
+
+// bookUnpricedAfterPanic is the one rule for a ledger step that panicked: the request books as unpriced (its counts
+// are in the ledger, its dollars read 0, not free). It never panics. It stays in proxy because the recover that calls
+// it must span the host's own noteDefer step, which the library cannot see.
+func bookUnpricedAfterPanic(ledger *tooldefer.Ledger, tenant string, p any) {
+	slog.Error("tool deferral: the ledger step panicked; the request books as unpriced", "panic", p)
+	failOpenAccountant("ledger unpriced", func() { ledger.AddMoney(tenant, tooldefer.Money{}, false) })
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.

@@ -28,6 +28,8 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+
+	"github.com/rossoctl/context-guru/agent"
 )
 
 // OTLP and OpenInference attribute keys added on the exported spans.
@@ -183,3 +185,16 @@ func OTLPMessages(corpus string) string {
 	}
 	return string(b)
 }
+
+// ClientLabel is the client name a span carries as service.name and cg.client.name. label is
+// agent.Client.Label from agent.Identify. A caller that has no client (label "") gets the generic
+// label of Identify with no headers, which is "unknown". It never names Claude Code by default.
+func ClientLabel(label string) string {
+	if label != "" {
+		return label
+	}
+	return genericClientLabel
+}
+
+// genericClientLabel is the label of agent.Identify with no headers, computed once.
+var genericClientLabel = agent.Identify(nil).Label

@@ -40,12 +40,19 @@ def write_script(path, body):
 
 
 class CodexPluginTest(unittest.TestCase):
-    def test_proxy_lifecycle_does_not_depend_on_a_sandboxed_session_hook(self):
-        hooks_path = MODULE_PATH.parent.parent / "hooks.json"
-        hooks = json.loads(hooks_path.read_text())["hooks"]
+    def test_session_start_hook_is_advisory_and_the_lifecycle_hooks_only_signal(self):
+        hooks = json.loads((MODULE_PATH.parent.parent / "hooks.json").read_text())["hooks"]
         self.assertEqual(sorted(hooks), ["SessionEnd", "SessionStart"])
-        commands = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
-        self.assertTrue(all(c.endswith("codex_plugin.py\" signal") for c in commands), commands)
+        advisory = hooks["SessionStart"][0]["hooks"][0]["command"]
+        self.assertIn("session-start-hook", advisory)
+        signals = [h["command"] for g in hooks["SessionStart"][1:] + hooks["SessionEnd"] for h in g["hooks"]]
+        self.assertTrue(signals and all(c.endswith("codex_plugin.py\" signal") for c in signals), signals)
+
+    def test_plugin_wires_onboarding_and_doctor_skills(self):
+        root = MODULE_PATH.parent.parent
+        manifest = json.loads((root / ".codex-plugin/plugin.json").read_text())
+        self.assertTrue((root / manifest["onboardingSkill"]).is_file())
+        self.assertTrue((root / "skills/doctor/SKILL.md").is_file())
 
     def test_signal_hook_sends_only_the_closed_fields(self):
         PLUGIN.state_dir().mkdir(parents=True)
@@ -124,10 +131,10 @@ class CodexPluginTest(unittest.TestCase):
                                         'requires_openai_auth = false\n'
                                         'experimental_bearer_token = "test-token"\n')
         PLUGIN.install_default_route(PLUGIN.main_config(), PLUGIN.routing_state(), 8791, provider)
-        text = PLUGIN.main_config().read_text()
+        text = PLUGIN.profile().read_text()
         self.assertIn('experimental_bearer_token = "test-token"', text)
         self.assertIn("requires_openai_auth = false", text)
-        self.assertEqual(PLUGIN.main_config().stat().st_mode & 0o777, 0o600)
+        self.assertEqual(PLUGIN.profile().stat().st_mode & 0o777, 0o600)
         command = PLUGIN.proxy_command("/proxy", 8791, provider["base_url"])
         self.assertEqual(command[3:5], ["--config", str(PLUGIN.proxy_config())])
         self.assertEqual(command[-2:], ["--openai-upstream", "https://gateway.example.test"])
@@ -216,7 +223,7 @@ screen_reader_detection_done = true
         })
 
     def test_setup_bootstraps_release_when_binary_is_missing(self):
-        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        args = type("Args", (), {"plan": False, "port": 0, "i_consent_to_traffic_interception": True})()
         process = mock.Mock(pid=4321)
         with mock.patch.object(PLUGIN, "find_binary", return_value=None), \
              mock.patch.object(PLUGIN, "install_release_binary",
@@ -258,10 +265,14 @@ screen_reader_detection_done = true
         binary.write_bytes(b"proxy")
         PLUGIN.state_dir().joinpath("install.json").write_text("{}")
         args = type("Args", (), {"dry_run": False})()
+        PLUGIN.install_escape_hatch()
+        launcher = PLUGIN.state_dir() / "context-guru-codex"
+        self.assertTrue(launcher.exists())
         with mock.patch.object(PLUGIN, "stop_owned", return_value="gone"):
             self.assertEqual(PLUGIN.uninstall(args), 0)
         self.assertFalse(binary.exists())
         self.assertFalse(binary.parent.exists())
+        self.assertFalse(launcher.exists())
 
     def test_uninstall_preserves_managed_binary_when_process_is_not_owned(self):
         binary = PLUGIN.managed_binary()
@@ -322,6 +333,9 @@ screen_reader_detection_done = true
         target = PLUGIN.install_escape_hatch()
         self.assertEqual(target, PLUGIN.state_dir() / "context-guru-reset")
         self.assertTrue(os.access(target, os.X_OK))
+        launcher = PLUGIN.state_dir() / "context-guru-codex"
+        self.assertTrue(launcher.is_file() and os.access(launcher, os.X_OK))
+        self.assertIn('codex_plugin.py" launch -- "$@"', launcher.read_text())
         self.assertIn("Managed by the context-guru Codex plugin", target.read_text())
         self.assertTrue((PLUGIN.state_dir() / "config_route.py").is_file())
         self.assertTrue(os.access(PLUGIN.state_dir() / "context-guru-update", os.X_OK))
@@ -336,24 +350,171 @@ screen_reader_detection_done = true
         provider = {"base_url": "https://gateway.test/v1", "requires_openai_auth": False}
         PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, provider)
         routed = path.read_text()
-        self.assertIn('model_provider = "context-guru"', routed)
-        self.assertIn('base_url = "http://127.0.0.1:8791/openai/v1"', routed)
-        self.assertIn('[model_providers.gateway]', routed)
+        self.assertEqual(routed, original)  # config.toml is not touched at all
+        profile = PLUGIN.profile().read_text()
+        self.assertIn('model_provider = "context-guru"', profile)
+        self.assertFalse(PLUGIN.is_default_routed(path))
+        self.assertIn('base_url = "http://127.0.0.1:8791/openai/v1"', profile)
         self.assertTrue(PLUGIN.is_routed(path))
         self.assertEqual(PLUGIN.restore_default_route(PLUGIN.routing_state()), "restored")
         self.assertEqual(path.read_text(), original)
+        self.assertFalse(PLUGIN.profile().exists())
 
-    def test_restore_does_not_overwrite_a_later_provider_choice(self):
+    def test_install_migrates_a_legacy_default_provider_lock_in(self):
         path = PLUGIN.main_config()
         path.parent.mkdir(parents=True)
-        path.write_text('model_provider = "gateway"\n')
+        original = 'model_provider = "gateway"\n'
+        path.write_text(original)
+        state = PLUGIN.routing_state()
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"config": str(path), "existed": True,
+                                     "original_model_provider_line": 'model_provider = "gateway"'}))
+        path.write_text('model_provider = "context-guru"\n' + "# context-guru: begin managed provider" + "\n"
+                        "[model_providers.context-guru]\nbase_url = \"http://127.0.0.1:1/openai/v1\"\n"
+                        + "# context-guru: end managed provider" + "\n")
+        self.assertTrue(PLUGIN.is_default_routed(path))
+        PLUGIN.install_default_route(path, state, 8791, {})
+        self.assertFalse(PLUGIN.is_default_routed(path))
+        self.assertIn('model_provider = "gateway"', path.read_text())
+        self.assertTrue(PLUGIN.is_routed(path))
+
+    def test_launch_falls_back_to_plain_codex_when_proxy_cannot_start(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True)
         PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, {})
-        path.write_text(path.read_text().replace('model_provider = "context-guru"',
-                                                 'model_provider = "new-choice"'))
-        self.assertEqual(PLUGIN.restore_default_route(PLUGIN.routing_state()),
-                         "routing_already_changed")
-        self.assertIn('model_provider = "new-choice"', path.read_text())
-        self.assertNotIn(PLUGIN.CONFIG_MARKER, path.read_text())
+        args = type("Args", (), {"codex_args": ["--", "resume"]})()
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=False), \
+             mock.patch.object(PLUGIN.os, "execv") as execv, \
+             mock.patch("sys.stderr", io.StringIO()) as err:
+            PLUGIN.launch(args)
+        execv.assert_called_once_with("/bin/codex", ["/bin/codex", "resume"])
+        self.assertIn("NOT routed", err.getvalue())
+
+    def test_launch_routes_through_profile_when_proxy_is_up(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True)
+        PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, {})
+        args = type("Args", (), {"codex_args": ["--", "hi"]})()
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=True), \
+             mock.patch.object(PLUGIN.os, "execv") as execv:
+            PLUGIN.launch(args)
+        execv.assert_called_once_with("/bin/codex", ["/bin/codex", "--profile", "context-guru", "hi"])
+
+    def _route(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        PLUGIN.install_default_route(path, PLUGIN.routing_state(), 8791, {})
+        PLUGIN.state_dir().joinpath("install.json").write_text('{"port": 8791, "binary": "/p"}')
+        return path
+
+    def test_session_hook_warns_only_for_an_unrouted_session_and_never_checks_the_proxy(self):
+        self._route()
+        with mock.patch.dict(os.environ, {"CONTEXT_GURU_ROUTED": "1"}), \
+             mock.patch.object(PLUGIN, "revive") as revive, \
+             mock.patch.object(PLUGIN, "healthy", return_value=False), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(PLUGIN.session_start_hook(None), 0)
+        self.assertEqual(out.getvalue(), "")  # an unreachable health check is unverified, not down
+        revive.assert_not_called()
+        env = {key: value for key, value in os.environ.items() if key != "CONTEXT_GURU_ROUTED"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            PLUGIN.session_start_hook(None)
+        self.assertIn("not routed", json.loads(out.getvalue())["systemMessage"])
+
+    def test_session_hook_never_fails(self):
+        with mock.patch.object(PLUGIN, "read_record", side_effect=PermissionError("sandbox")):
+            self.assertEqual(PLUGIN.session_start_hook(None), 0)
+
+    def test_launch_does_not_replace_the_context_guru_profile_with_the_users_own(self):
+        self._route()
+        args = type("Args", (), {"codex_args": ["--", "--profile", "mine"]})()
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex"}), \
+             mock.patch.object(PLUGIN, "revive", return_value=True), \
+             mock.patch.object(PLUGIN.os, "execv") as execv, \
+             mock.patch("sys.stderr", io.StringIO()) as err:
+            PLUGIN.launch(args)
+        execv.assert_called_once_with("/bin/codex", ["/bin/codex", "--profile", "mine"])
+        self.assertIn("own --profile", err.getvalue())
+
+    def test_launch_names_a_missing_profile_apart_from_a_dead_proxy(self):
+        args = type("Args", (), {"codex_args": []})()
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex"}), \
+             mock.patch.object(PLUGIN.os, "execv"), \
+             mock.patch("sys.stderr", io.StringIO()) as err:
+            PLUGIN.launch(args)
+        self.assertIn("profile file is missing", err.getvalue())
+        self.assertNotIn("not reachable", err.getvalue())
+
+    def test_setup_refuses_to_overwrite_an_unmanaged_profile(self):
+        PLUGIN.profile().parent.mkdir(parents=True)
+        PLUGIN.profile().write_text("model = 'mine'\n")
+        args = type("Args", (), {"plan": False, "i_consent_to_traffic_interception": True})()
+        with mock.patch.object(PLUGIN, "install_release_binary") as install, \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(PLUGIN.setup(args), 2)
+        self.assertIn("result=config_conflict", out.getvalue())
+        self.assertIn("unmanaged profile", out.getvalue())
+        self.assertIn(f"config={PLUGIN.profile()}", out.getvalue())
+        install.assert_not_called()
+        self.assertEqual(PLUGIN.profile().read_text(), "model = 'mine'\n")
+        with self.assertRaises(RuntimeError):
+            PLUGIN.install_default_route(PLUGIN.main_config(), PLUGIN.routing_state(), 8791, {})
+        self.assertEqual(PLUGIN.profile().read_text(), "model = 'mine'\n")
+
+    def test_the_install_record_is_written_private_even_over_an_open_file(self):
+        PLUGIN.state_dir().mkdir(parents=True)
+        record = PLUGIN.state_dir() / "install.json"
+        record.write_text("{}")
+        record.chmod(0o644)
+        PLUGIN.write_record({"port": 8791, "provider": {"experimental_bearer_token": "t"}})
+        self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(record.read_text())["port"], 8791)
+        self.assertFalse((PLUGIN.state_dir() / "install.json.tmp").exists())
+
+    def _doctor(self, **env):
+        with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex", **env}), \
+             mock.patch("sys.stdout", io.StringIO()) as out:
+            code = PLUGIN.doctor(None)
+        return code, dict(line.split("=", 1) for line in out.getvalue().splitlines())
+
+    def test_doctor_reports_each_check_and_the_exit_code(self):
+        code, lines = self._doctor()
+        self.assertEqual(code, 1)
+        self.assertTrue(lines["installed"].startswith("FAIL fix=run $context-guru-setup"))
+        self.assertTrue(lines["profile_present"].startswith("FAIL"))
+        self.assertEqual(lines["codex_on_path"], "ok")
+        self._route()
+        binary = PLUGIN.state_dir() / "bin"
+        binary.write_text("x")
+        PLUGIN.state_dir().joinpath("install.json").write_text(
+            json.dumps({"port": 8791, "binary": str(binary)}))
+        PLUGIN.install_escape_hatch()
+        with mock.patch.object(PLUGIN, "healthy", return_value=True):
+            code, lines = self._doctor(CONTEXT_GURU_ROUTED="1")
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(all(value == "ok" for value in lines.values()), lines)
+        # a session that was not started by the launcher is a warning only: exit code 0
+        env = {key: value for key, value in os.environ.items() if key != "CONTEXT_GURU_ROUTED"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(PLUGIN, "healthy", return_value=True):
+            code, lines = self._doctor()
+        self.assertEqual(code, 0)
+        self.assertTrue(lines["session_routed"].startswith("FAIL"))
+        with mock.patch.object(PLUGIN, "healthy", return_value=False):
+            code, lines = self._doctor(CONTEXT_GURU_ROUTED="1")
+        self.assertEqual(code, 1)
+        self.assertTrue(lines["proxy_healthy"].startswith("FAIL"))
+
+    def test_doctor_points_a_legacy_lock_in_to_the_reset_command(self):
+        path = PLUGIN.main_config()
+        path.parent.mkdir(parents=True)
+        path.write_text('model_provider = "context-guru"\n\n# context-guru: begin managed provider\n'
+                        '[model_providers.context-guru]\n# context-guru: end managed provider\n')
+        _, lines = self._doctor()
+        self.assertIn("context-guru-reset --yes", lines["default_provider_untouched"])
 
     def test_release_binary_is_checksum_verified_and_installed_privately(self):
         payload = b"released proxy"
@@ -441,8 +602,8 @@ screen_reader_detection_done = true
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         backups = list((PLUGIN.state_dir() / "recovery").iterdir())
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(backups), 2)  # the profile (holds the bearer token) and config.toml
+        self.assertTrue(all(b.stat().st_mode & 0o777 == 0o600 for b in backups))
         self.assertFalse(PLUGIN.is_routed(PLUGIN.main_config()))
         self.assertFalse(PLUGIN.proxy_config().exists())
 

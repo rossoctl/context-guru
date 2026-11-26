@@ -7,6 +7,8 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/rossoctl/context-guru/agent"
 )
 
 func anthropicBody(msgs string) []byte {
@@ -744,8 +746,8 @@ func TestPromptOf(t *testing.T) {
 		{[]string{"AskUserQuestion", "Bash"}, PromptQuestion},
 		{[]string{"ExitPlanMode", "Bash"}, PromptOther},
 	} {
-		if got := PromptOf(tc.names); got != tc.want {
-			t.Errorf("PromptOf(%v) = %q, want %q", tc.names, got, tc.want)
+		if got := PromptOfClient(agent.Client{}, tc.names); got != tc.want {
+			t.Errorf("PromptOfClient(%v) = %q, want %q", tc.names, got, tc.want)
 		}
 	}
 }

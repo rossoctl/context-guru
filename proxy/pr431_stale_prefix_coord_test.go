@@ -153,7 +153,7 @@ func runSweepGuardTurn2(t *testing.T, pipelineYAML string, upstreamURL string, s
 		IdleMs: 4 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000,
 		PrefixAsk: sweepGuardAsker{stash: stash, cli: cli},
 		// The test's keeper can ping this thread, so the sweep registers its conversation for the ping.
-		CanKeepAlive: func() bool { return true },
+		CanSweepAtPing: func() bool { return true },
 		// RawInput is what apply.BodyOpts would have set, as a shallow copy taken before this
 		// turn's own pipeline runs — exactly what the fix reads instead of req.Input at the
 		// guarded component's own position.

@@ -2,7 +2,6 @@ package dash
 
 import (
 	"context"
-	"github.com/rossoctl/context-guru/agent"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
@@ -502,9 +501,10 @@ type Event struct {
 	// client drops a search sent beside another tool call, and the model searches again),
 	// DeferLoaded the distinct tools they loaded, and DeferWrongGuesses the wrong guesses as
 	// tooldefer.WrongGuesses counts them: a tool this request deferred that a search loaded and no
-	// earlier message had loaded. DeferGrossUSD and DeferNetUSD are the ledger's
-	// prices (tooldefer.Price): gross is what the deferred definitions would have cost, net takes
-	// off the names list and the search costs. Both 0 when the model has no price.
+	// earlier message had loaded. DeferGrossUSD, DeferCostUSD and DeferNetUSD are the accountant's
+	// figure for the tooldefer component (#1441), set by PriceMode: net is the figure (the definitions left out, the
+	// tier re-rate, less the names list and the search turns), gross is its saved side, cost is gross less net. All 0
+	// when the request has no accountant figure (an unpriced model, a held estimate).
 	DeferTokens          int `json:"defer_tokens,omitempty"`
 	DeferListTokens      int `json:"defer_list_tokens,omitempty"`
 	DeferSearches        int `json:"defer_searches,omitempty"`
@@ -518,16 +518,8 @@ type Event struct {
 	DeferLoaded           int     `json:"defer_loaded,omitempty"`
 	DeferWrongGuesses     int     `json:"defer_wrong_guesses,omitempty"`
 	DeferGrossUSD         float64 `json:"defer_gross_usd,omitempty"`
-	// DeferCostUSD is the ledger's own cost of the deferral, gross less the ledger's net: the names list and the
-	// searches. It is set from the ledger before PriceMode can move the net, and the Tools page reads it, because
-	// gross less the stored net is not a cost on a request the accountant priced.
-	DeferCostUSD float64 `json:"defer_cost_usd,omitempty"`
-	DeferNetUSD  float64 `json:"defer_net_usd,omitempty"`
-	// DeferSearchUSD is the part of the ledger's cost that no body shows: the searches and the loaded
-	// definitions (tooldefer.Money.SearchCost). The accountant prices the deferral itself from the bodies (R56),
-	// so on a priced request PriceMode sets DeferNetUSD to the library's tooldefer row minus this cost, and takes
-	// that row out of the baseline. Not stored.
-	DeferSearchUSD float64 `json:"-"`
+	DeferCostUSD          float64 `json:"defer_cost_usd,omitempty"`
+	DeferNetUSD           float64 `json:"defer_net_usd,omitempty"`
 	// Backend is which of Bob's backends answered: "A", "B", "other" (the reply's marks match
 	// neither) or "" (not Bob's model route, or no id and no usage). A short label made from the
 	// reply's id shape and usage fields. The id itself is never stored.
@@ -1203,7 +1195,3 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 
 // CachePrefixChangeReason marks the miss as caused by a changed prefix.
 func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChange }
-
-// AgentFor classifies a client User-Agent into an agent family so the dashboard
-// can filter by application.
-func AgentFor(ua string) string { return agent.IdentifyUserAgent(ua).Label }

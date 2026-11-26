@@ -1,7 +1,7 @@
 package dash
 
 // The requests the accountant library could not price (requests.acc_fallback, #1004). Each books its cost, and
-// it can still book some saving that the library did not price: the deferral ledger's net, the measured filter
+// it can still book some saving that the library did not price: tool deferral's figure (none today), the measured filter
 // credit, and minus its own model-call cost (savingsArithmetic's net is baseline - cost - cg_llm, and a
 // fallback row has baseline = cost). The Overview share leaves these requests out on both sides. So the reads
 // return their cost and their saving, part by part, and the UI takes both off.
@@ -10,7 +10,7 @@ package dash
 // part is a read-time credit; SetDeclCredit (full read) and OverviewLean fill it.
 type FallbackSaving struct {
 	CompactionUSD float64 `json:"compaction_usd"` // baseline - cost - cg_llm: the net_saved_usd part
-	DeferUSD      float64 `json:"defer_usd"`      // the deferral ledger's net: the defer_net_usd part
+	DeferUSD      float64 `json:"defer_usd"`      // tool deferral's figure: the defer_net_usd part
 	KeepAliveUSD  float64 `json:"keepalive_usd"`  // the keep-alive credit: the keepalive_saved_usd part
 	ReorderUSD    float64 `json:"reorder_usd"`    // cachesplit_saved_usd: the cache reorder part
 	FilterUSD     float64 `json:"filter_usd"`     // the measured filter credit: the decl_filter_usd part

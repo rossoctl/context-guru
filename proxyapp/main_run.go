@@ -1147,7 +1147,7 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// The sweep's answer cost, on the ping row its question replaced (#404 point 9).
 	ev.SweepAnswerUSD = r.SweepAnswerUSD
 	ev.Lifecycle = d.rec.PingLifecycle(r.Pings)
-	ev.Agent = dash.AgentFor(r.Agent)
+	ev.Agent = r.Agent
 	ev.FreshInput, ev.CacheRead = r.FreshInput, r.CacheRead
 	ev.CacheWrite, ev.OutputTokens = r.CacheWrite, r.Output
 	ev.CacheWrite1h = r.CacheWrite1h

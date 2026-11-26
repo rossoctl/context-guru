@@ -74,7 +74,7 @@ import (
 type Options struct {
 	// ClaudeCompact is the user's own Claude Code auto-compact setting, read ONCE at start-up in
 	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
-	// is set. It applies only to requests whose User-Agent is Claude Code (dash.AgentFor gives
+	// is set. It applies only to requests whose User-Agent is Claude Code (agent.Identify gives
 	// "claude-code" or "claude-cli"). All other requests use the table.
 	ClaudeCompact compactionpoint.ClaudeCode
 	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
@@ -1530,7 +1530,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, ac, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
+			h.newRecCtx(provider, orig, tn, explicitSess, cl), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
 	}
 }
 
@@ -1845,11 +1845,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 		if sse && !sseBuffered {
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
-		usage.Live = cp.liveFacts(ttfb)
+		// Fail open (#1510): each step of this defer costs its own figure only, so the steps after it still run.
+		failOpenAccountant("liveFacts", func() { usage.Live = cp.liveFacts(ttfb) })
 		// The rounds are final here. The accountant reads them when it prices, and the deferral ledger below can ask
 		// for the figure before finish runs.
-		ac.noteRounds(rounds)
-		usage.PrefixRewritten = cp.prefixRewritten()
+		failOpenAccountant("noteRounds", func() { ac.noteRounds(rounds) })
+		failOpenAccountant("prefixRewritten", func() { usage.PrefixRewritten = cp.prefixRewritten() })
 		billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
 		// lifecycle.Finish runs the steps after the response in their order: the keep-alive touch, the
 		// deferral ledger, the release of a deferred cache-aware summary, the warm sweep's question,
@@ -1895,7 +1896,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			},
 		})
 		ac.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
-		cp.stopEarlyScan() // the request is over: the scan's work in progress ends (a finished result stays)
+		failOpenAccountant("stopEarlyScan", cp.stopEarlyScan) // the request is over: the scan's work in progress ends (a finished result stays)
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
 		// (which also logged its own WARN with the reason).
@@ -1944,6 +1945,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 				h.recorder.Record(&recEvent{
 					traceID:   rc.traceID,
 					tenantID:  rc.tenantID,
+					client:    rc.client,
 					provider:  provider,
 					path:      r.URL.Path,
 					headers:   record.AllowedHeaders(r.Header), // a filtered copy: the writer reads it after serve returns

@@ -183,7 +183,7 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 		c.accDone = true
 		out := c.savings.Price(c.accReq, accrec.PriceIn{
 			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
-			BeforeCompute: func() { c.accBilledTTL(usage) },
+			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend() },
 			// The metrics are booked before the rescue counter and the ping-facts drop, as they always were.
 			AfterCompute: func(res accountant.Result) {
 				c.observeMetrics(res, usage.accrec().Accountant(), int(usage.Output))
@@ -206,10 +206,8 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 // prompt size of each side (PriceAt, Price.At). ByComponent is keyed by operator. It works with or without the
 // dashboard, and it can be called at any time after the response: it joins the job and prices the request if finish
 // has not (accCompute), so the order of the two does not matter. ok is false when the request books no figure: no
-// billed usage, a rejected or multi-round request, an observe run, a trace that dropped operations, no model price, a
-// result that fails a gate of accountant.Withhold (checks and unpriced; the size gate is the dashboard's), or any
-// panic. It never changes the request. It is the hook for #1445's deferral ledger. Nothing in production calls it yet in
-// this PR: only the tests do.
+// billed usage, a rejected or multi-round request, an observe run, no model price, a request that accrec.Gate
+// refuses (the same gate as the dashboard row: dropped operations, checks, unpriced, size, rows), or any panic. It never changes the request. It is the hook for the deferral ledger (deferLedger).
 func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig accountant.USDFigure, ok bool) {
 	if c == nil || c.pricer == nil || c.model == "" {
 		return accountant.USDFigure{}, false
@@ -221,30 +219,76 @@ func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig
 		}
 	}()
 	res, have := c.accCompute(usage, usageOK)
-	if !have || c.observe || c.trace.OpsDropped != 0 || accountant.Withhold(res, accountant.SizeNotGiven) != "" {
+	if !have {
 		return accountant.USDFigure{}, false
 	}
 	if _, priced := c.pricer.Price(ctx, c.model); !priced {
 		return accountant.USDFigure{}, false
 	}
-	return accountant.Figure(accountant.FigureInput{
+	fig = accountant.Figure(accountant.FigureInput{
 		Model: c.model, At: c.start, Output: int(usage.Output), Result: res,
 		Billed: usage.accrec().Accountant(),
-	}, modelinfo.ChainRates(c.pricer)), true
+	}, modelinfo.ChainRates(c.pricer))
+	// The dashboard row's gate, so a request the row refuses books no figure here either (accrec.Gate).
+	in := accrec.GateIn{Observe: c.observe, OpsDropped: c.trace.OpsDropped, Rows: accrec.GateRowsOf(c.trace.Run)}
+	if c.trace.Run != nil {
+		in.TokensBefore = c.trace.Run.TokensBefore
+	}
+	if reason, _ := accrec.Gate(res, fig, in); reason != "" {
+		return accountant.USDFigure{}, false
+	}
+	return fig, true
 }
 
 // finishAccountant ends a request that has no dashboard. It runs on its own goroutine, off the client's path. It prices the request (which books the metrics), drops the
 // record and keeps the thinking counts. Fail open: a panic here costs the figure only.
 func (c *capture) finishAccountant(usage Usage, usageOK bool) {
+	failOpenAccountant("finish", func() {
+		defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
+		c.accCompute(usage, usageOK)
+		c.runDeferBook()
+		if usageOK && !c.rejected() {
+			c.savings.recordThinking(usage.Thinking)
+		}
+		c.savings.finished(c, usage, usageOK)
+	})
+}
+
+// failOpenAccountant runs one accountant step and, on a panic, logs it and drops the step: the request books no figure
+// for it, and what runs after the step still runs (#1504). The steps that run in the handler's terminal defer use it,
+// so a panic does not cost the dashboard row, stopEarlyScan or the request's log line.
+func failOpenAccountant(what string, step func()) {
 	defer func() {
 		if p := recover(); p != nil {
-			slog.Error("accountant: finish panicked; the request books no figure", "panic", p)
+			slog.Error("accountant: "+what+" panicked; the request books no figure for it", "panic", p)
 		}
 	}()
-	defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
-	c.accCompute(usage, usageOK)
-	if usageOK && !c.rejected() {
-		c.savings.recordThinking(usage.Thinking)
+	step()
+}
+
+// accDeferSpend reports the search-turn costs of a deferred request to the accountant as spend operations on the
+// tooldefer operator (#1441), so the one figure for deferral holds them. It runs before Compute. Nil-safe.
+func (c *capture) accDeferSpend() {
+	d := c.deferFacts
+	if c.accReq == nil || d == nil || !d.spendOK {
+		return
 	}
-	c.savings.finished(c, usage, usageOK)
+	for _, op := range accrec.DeferSpendOps(d.spend) {
+		c.accReq.Add(op)
+	}
+}
+
+// runDeferBook books the deferral ledger's dollars, once, after the accountant has priced the request. Nil-safe.
+func (c *capture) runDeferBook() {
+	if c == nil || c.deferBook == nil {
+		return
+	}
+	f := c.deferBook
+	c.deferBook = nil
+	defer func() { // fail open: the closure recovers its own panic; this guards the call itself
+		if p := recover(); p != nil {
+			slog.Error("tool deferral: the ledger hook panicked; the request books no figure", "panic", p)
+		}
+	}()
+	f()
 }

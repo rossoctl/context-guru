@@ -286,13 +286,9 @@ func declsSize(decls []Decl) int {
 // that is what the request pays for and what removing it would give back — measured
 // with the repo's own BPE tokenizer, not a chars/4 estimate.
 func declsFrom(wire string, tools gjson.Result) []Decl {
-	nameField := "function.name"
-	if isAnthropicWire(wire) || schema.IsResponses(wire) {
-		nameField = "name"
-	}
 	var out []Decl
 	for _, t := range tools.Array() {
-		name := t.Get(nameField).String()
+		name := schema.ToolFnNameOn(declWire(wire), t)
 		kind := KindTool
 		switch {
 		case isClientToolType(wire, t.Get("type").String()):
@@ -307,13 +303,7 @@ func declsFrom(wire string, tools gjson.Result) []Decl {
 			// server in one element and names it here rather than per tool.
 			kind = KindServerTool
 			if name == "" {
-				name = t.Get("mcp_server_name").String()
-			}
-			if name == "" {
-				name = t.Get("server_label").String() // a Responses `mcp` tool
-			}
-			if name == "" {
-				name = t.Get("type").String()
+				name = schema.ToolDeclName(t) // mcp_server_name, server_label, then type
 			}
 		case name == "":
 			continue // malformed element: no name to attribute anything to
@@ -686,28 +676,18 @@ func usedFrom(wire string, body []byte) ([]Used, uint64) {
 func searchLoads(turn, after gjson.Result) []string {
 	var out []string
 	seen := map[string]bool{}
-	add := func(r gjson.Result) bool {
-		if n := r.Get("tool_name").String(); deferred.ValidName(n) && !seen[n] {
-			seen[n] = true
-			out = append(out, n)
+	add := func(name string) {
+		if deferred.ValidName(name) && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
 		}
-		return true
 	}
 	turn.Get("content").ForEach(func(_, b gjson.Result) bool {
-		if b.Get("type").String() == "tool_search_tool_result" {
-			b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool { return add(r) })
-		}
+		schema.SearchResultLoads(b, add)
 		return true
 	})
 	after.Get("content").ForEach(func(_, b gjson.Result) bool {
-		if b.Get("type").String() == "tool_result" {
-			b.Get("content").ForEach(func(_, r gjson.Result) bool {
-				if r.Get("type").String() == "tool_reference" {
-					add(r)
-				}
-				return true
-			})
-		}
+		schema.ResultReferenceLoads(b, add)
 		return true
 	})
 	return out
@@ -770,6 +750,14 @@ func usedList(byKey map[Used]int) []Used {
 		out = append(out, u)
 	}
 	return out
+}
+
+// declWire is the wire the inventory reads names on. An empty wire is Anthropic here (isAnthropicWire).
+func declWire(wire string) string {
+	if isAnthropicWire(wire) {
+		return schema.WireAnthropic
+	}
+	return wire
 }
 
 func isAnthropicWire(wire string) bool { return wire == schema.WireAnthropic || wire == "" }
@@ -837,14 +825,6 @@ type invWriter struct {
 	// seen dedupes at the writer, where it is single-threaded and needs no lock:
 	// session -> the digests already written and the last usage turn already counted.
 	seen map[string]*invSession
-	// storedText is the content hashes already committed to declaration_text. Without it every
-	// session that declares Bash re-issues an INSERT carrying the whole schema for the
-	// conflict to discard — 45 per session, ~87k over the measured corpus, each binding a
-	// kilobyte or two. Only hashes from a COMMITTED transaction go in (see write), because a
-	// memo that remembers a rolled-back insert would point later rows at bytes that are not
-	// there. Safe because nothing deletes from declaration_text; a future GC there would have
-	// to invalidate this.
-	storedText map[string]bool
 }
 
 type invSession struct {
@@ -862,13 +842,9 @@ type invSession struct {
 }
 
 const (
-	invQueue   = 512
-	invMaxSeen = 4096
-	// invMaxStoredText bounds invWriter.storedText. The measured deployment has 225 distinct
-	// declaration texts across every session it has ever seen, so this is not a cap anything
-	// real reaches; it exists because the key is derived from client-supplied text.
-	invMaxStoredText = 4096
-	invFlushGap      = 2 * time.Second
+	invQueue    = 512
+	invMaxSeen  = 4096
+	invFlushGap = 2 * time.Second
 )
 
 // invWriters holds one writer per Recorder, created on first use. A package-level map
@@ -983,19 +959,20 @@ func (w *invWriter) write(batch []invMsg) error {
 	// NULL key when consent withheld the text. Ordered blob-first inside the transaction, so
 	// no committed state ever names a hash whose bytes are not there.
 	//
-	// fresh collects what THIS transaction inserted and is folded into the writer's memo only
-	// after the commit below.
-	fresh := map[string]bool{}
+	// done is what THIS transaction already inserted. There is no memo across transactions: the
+	// purge trigger can delete a text row at any time, so a memo of "already stored" would point
+	// new declaration rows at bytes that are gone (#689). The INSERT is a no-op on conflict.
+	done := map[string]bool{}
 	storeText := func(text string, allowed bool, ts int64) (sql.NullString, error) {
 		h, gz := declText(text, allowed)
 		if h == "" {
 			return sql.NullString{}, nil
 		}
-		if !w.storedText[h] && !fresh[h] {
+		if !done[h] {
 			if _, err := textStmt.Exec(h, gz, ts); err != nil {
 				return sql.NullString{}, err
 			}
-			fresh[h] = true
+			done[h] = true
 		}
 		return sql.NullString{String: h, Valid: true}, nil
 	}
@@ -1061,20 +1038,7 @@ func (w *invWriter) write(batch []invMsg) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	for h := range fresh {
-		w.rememberText(h)
-	}
 	return nil
-}
-
-// rememberText records that a blob is on disk. Bounded and cleared wholesale exactly like
-// invWriter.seen: a re-warm costs one conflicting INSERT per distinct text, and an LRU costs
-// bookkeeping forever. Handles a nil map so every construction site of invWriter is unchanged.
-func (w *invWriter) rememberText(hash string) {
-	if w.storedText == nil || len(w.storedText) >= invMaxStoredText {
-		w.storedText = map[string]bool{}
-	}
-	w.storedText[hash] = true
 }
 
 // maxSessionSystemRows bounds how many system-prompt rows one session may record, across every

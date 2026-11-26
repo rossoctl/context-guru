@@ -1,28 +1,23 @@
 package tooldefer
 
 import (
+	"math"
 	"sync"
 
 	"github.com/rossoctl/accountant"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
-// Net saving, not gross.
+// The ledger counts deferral's requests, searches and tokens, and adds up its dollars.
 //
-// Gross is what the deferred definitions would have cost: their weight, on every request, at the
-// tier that request was billed at (a cache read, a cache write, or fresh input).
-//
-// Net subtracts everything deferral itself causes:
-//   - the names list, at the same tier (it sits in the cached prefix);
-//   - each search turn: the model's output for the search call, and the second pass inside the API,
-//     which reads the search result and the loaded definitions once WITHOUT the cache;
-//   - each loaded definition: it now rides in the transcript, so the next request writes it to the
-//     cache once (at the write price), and later requests pay it at the tier they are billed at
-//     (counted by keeping it in the request weight: see Request).
+// It does not price anything. One figure prices tool deferral: the accountant's component figure
+// (dash AccountantFigure). That figure holds the gross (the definitions left out), the names list,
+// the tier re-rate, and the search-turn costs (SearchSpend, booked as spend operations). The proxy
+// copies that figure into the ledger when the request is priced (Ledger.AddMoney).
 //
 // The token weights come from our own tokenizer (o200k), which under-counts Claude's. They are
-// scaled by tokens.BilledDeltaFactor, the measured ratio for a removed span, before pricing.
+// scaled by tokens.BilledDeltaFactor, the measured ratio for a removed span, before they go to the
+// accountant as a spend.
 
 // Tier is how a request was billed for the bytes at the head of its prefix.
 type Tier int
@@ -34,8 +29,8 @@ const (
 	TierWrite1h
 )
 
-// TierOf is the tier the head of the prefix was billed at, from the response usage. The same rule
-// as the dashboard's declaration-filter saving: any cache read means the head was read.
+// TierOf is the tier the head of the prefix was billed at, from the response usage. It is
+// accountant.HeadTier, the rule the dashboard's declaration-filter saving uses.
 func TierOf(cacheRead, cacheWrite, cacheWrite1h int64) Tier {
 	switch accountant.HeadTier(accountant.Usage{CacheRead: int(cacheRead), CacheWrite: int(cacheWrite), CacheWrite1h: int(cacheWrite1h)}) {
 	case accountant.TierCacheRead:
@@ -46,31 +41,6 @@ func TierOf(cacheRead, cacheWrite, cacheWrite1h int64) Tier {
 		return TierWrite
 	}
 	return TierFresh
-}
-
-// accountant is the tier in the library's type.
-func (t Tier) accountant() accountant.Tier {
-	switch t {
-	case TierRead:
-		return accountant.TierCacheRead
-	case TierWrite:
-		return accountant.TierCacheWrite5m
-	case TierWrite1h:
-		return accountant.TierCacheWrite1h
-	}
-	return accountant.TierInput
-}
-
-func rate(p modelinfo.Price, t Tier) float64 {
-	switch t {
-	case TierRead:
-		return p.CacheRead
-	case TierWrite:
-		return p.CacheWrite
-	case TierWrite1h:
-		return p.CacheWrite1h()
-	}
-	return p.Input
 }
 
 // Request is one request's deferral facts, in OUR tokenizer's units.
@@ -97,8 +67,9 @@ type Request struct {
 	WrongGuesses, DroppedSearches int
 	// Tier is how this request was billed.
 	Tier Tier
-	// PromptTokens is the billed prompt size of the request sent (modelinfo.PromptTokens): it picks
-	// the price tier. 0 is unknown and prices at the base rates.
+	// PromptTokens is the billed prompt size of the request sent.
+	//
+	// Deprecated: nothing reads it. The accountant prices deferral (#1441). Kept so a library user's code still builds.
 	PromptTokens int64
 }
 
@@ -129,59 +100,47 @@ func WrongGuesses(deferred []string, original []byte, loaded []string) int {
 	return n
 }
 
-// Money is one request's (or a total's) deferral figures in USD.
+// Money is one request's (or a total's) deferral figures in USD, mapped from the accountant's figure for the
+// tooldefer component: Net is the figure, Gross is its saved side (the definitions left out, with their share of
+// the tier re-rate), Cost is Gross less Net (the names list, the search turns, and any break deferral caused).
 type Money struct {
 	Gross float64 `json:"gross_usd"`
 	Cost  float64 `json:"cost_usd"`
 	Net   float64 `json:"net_usd"`
-	// SearchCost is the part of Cost that the request body does not show: the search calls' output, the
-	// second pass over the loaded definitions, and their write to the cache. The accountant prices a
-	// request from its bodies, and the names list is in them, so it sees the rest of Cost on its own
-	// (accountant R56). SearchCost is what a host must still subtract from the accountant's figure.
-	SearchCost float64 `json:"-"`
 }
 
 // searchOutputEstimate is the output tokens one search call costs when usage does not say.
 const searchOutputEstimate = 30
 
-// Price prices one request. It prices the gross and the cost, each at its own prompt size. It does not
-// re-rate the tokens that stay when the two sizes sit on different sides of a price line. The accountant
-// figure for the deferral (dash deferFig) can include a share of that re-rate, so the two figures differ
-// in scope. ok=false when the model has no known price.
-func Price(r Request, p modelinfo.Price) (Money, bool) {
-	if p.Zero() {
-		return Money{}, false
+// SearchSpend is what the search turns of one request cost, as token counts. The host books each part as an
+// accountant spend operation on the tooldefer operator. A request that ran no search has none.
+type SearchSpend struct {
+	// Output is the output tokens of the search calls. OutputEstimated is true when usage did not say.
+	Output          int64
+	OutputEstimated bool
+	// Loaded is the billed weight of the definitions the searches loaded. The API's second pass reads them once
+	// WITHOUT the cache (Input, an estimate), and the next request writes them to the cache once (Write, an
+	// estimate: that request has not happened yet).
+	Loaded int64
+	// Write1h is true when the next request's write is at the 1-hour price.
+	Write1h bool
+}
+
+// SearchSpend returns the search-turn costs of r. ok is false when no search ran.
+func (r Request) SearchSpend() (s SearchSpend, ok bool) {
+	if r.Searches <= 0 {
+		return SearchSpend{}, false
 	}
 	f, _ := tokens.BilledDeltaFactor(r.Model)
-	billed := func(n int) float64 { return float64(n) * f }
-	// The accountant prices the removal (R1). The gross is what the client's request would have billed:
-	// a bigger prompt, which can sit in a dearer tier. The cost of the names list is what the request sent
-	// billed, at its own tier. The accountant rounds the size without the change up, so a token at a tier
-	// line is never put in the cheaper side. PromptTokens 0 is unknown and prices at the base rates.
-	fig := accountant.RemovalSaving(accountant.RemovalInput{
-		Model: r.Model, Tier: r.Tier.accountant(), Prompt: r.PromptTokens,
-		Removed: r.DeferredTokens, Added: r.ListTokens, Factor: f, Unsized: r.PromptTokens <= 0,
-	}, modelinfo.OneModel(r.Model, p))
-	gross, cost := fig.SavedUSD, fig.AddedUSD
-	p = p.At(max(r.PromptTokens, 0))
-	var search float64 // the cost the bodies do not show; exactly 0 when no search ran
-	if r.Searches > 0 {
-		out := r.SearchOutput
-		if out == 0 {
-			out = int64(r.Searches * searchOutputEstimate)
-		}
-		search += float64(out) * p.Output
-		search += billed(r.LoadedTokens) * p.Input
-		// The next request carries the loaded definitions in its transcript and writes them to
-		// the cache, once per load (#866, N7). The later reads are in that request's own weight.
-		w := TierWrite
-		if r.Tier == TierWrite1h {
-			w = TierWrite1h
-		}
-		search += billed(r.LoadedTokens) * rate(p, w)
-		cost += search
+	s.Output = r.SearchOutput
+	if s.Output == 0 {
+		s.Output, s.OutputEstimated = int64(r.Searches*searchOutputEstimate), true
 	}
-	return Money{Gross: gross, Cost: cost, Net: gross - cost, SearchCost: search}, true
+	s.Loaded = int64(math.Round(float64(r.LoadedTokens) * f))
+	// The next request carries the loaded definitions in its transcript and writes them to the cache, once per
+	// load (#866, N7). The later reads are in that request's own weight.
+	s.Write1h = r.Tier == TierWrite1h
+	return s, true
 }
 
 // Ledger adds requests up for /stats, in total and per account. Safe for concurrent use.
@@ -194,9 +153,8 @@ type Ledger struct {
 // maxLedgerAccounts bounds the per-account totals. Past it, a new account counts in the total only.
 const maxLedgerAccounts = 10000
 
-// Add folds one request in.
-func (l *Ledger) Add(r Request, p modelinfo.Price) {
-	m, ok := Price(r, p)
+// Add folds one request's counts in. Its dollars follow with AddMoney, once the accountant has priced it.
+func (l *Ledger) Add(r Request) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.accounts[r.Tenant]
@@ -207,9 +165,21 @@ func (l *Ledger) Add(r Request, p modelinfo.Price) {
 		a = &Stats{}
 		l.accounts[r.Tenant] = a
 	}
-	l.total.add(r, m, ok)
+	l.total.add(r)
 	if a != nil {
-		a.add(r, m, ok)
+		a.add(r)
+	}
+}
+
+// AddMoney folds one request's dollars in: the accountant's figure for it. priced is false when the request has
+// no figure (an unpriced model, or a request the accountant did not price): its dollars read 0, not free, and it
+// counts in Unpriced.
+func (l *Ledger) AddMoney(tenant string, m Money, priced bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.total.addMoney(m, priced)
+	if a := l.accounts[tenant]; a != nil {
+		a.addMoney(m, priced)
 	}
 }
 
@@ -224,12 +194,15 @@ type Stats struct {
 	DroppedSearches int64 `json:"dropped_searches"`
 }
 
-func (s *Stats) add(r Request, m Money, priced bool) {
+func (s *Stats) add(r Request) {
 	s.Requests++
 	s.Searches += int64(r.Searches)
 	s.DeferredTokens += int64(r.DeferredTokens)
 	s.WrongGuesses += int64(r.WrongGuesses)
 	s.DroppedSearches += int64(r.DroppedSearches)
+}
+
+func (s *Stats) addMoney(m Money, priced bool) {
 	if !priced {
 		s.Unpriced++
 		return

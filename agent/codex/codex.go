@@ -98,3 +98,11 @@ func BodyMarksCompaction(body []byte) bool {
 func marksCompaction(meta string) bool {
 	return meta != "" && gjson.Get(meta, "request_kind").String() == "compaction"
 }
+
+// AskHumanTools are the tools whose call waits on a person, not on the tool itself.
+// "request_user_input" is Codex's question tool (openai/codex f64f003,
+// codex-rs/core/src/tools/handlers/request_user_input_spec.rs, REQUEST_USER_INPUT_TOOL_NAME).
+var AskHumanTools = []string{"request_user_input"}
+
+// QuestionTools are the AskHumanTools that ask a question. Codex has no other kind.
+var QuestionTools = []string{"request_user_input"}

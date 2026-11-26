@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
-
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -24,6 +22,8 @@ type ProxiedCall struct {
 	SpanID   string // the host makes it, it is not a rule
 	ParentID string
 	Provider string // the provider the call went to, such as "anthropic"
+	// Client is agent.Client.Label from agent.Identify. "" gives the generic label (ClientLabel).
+	Client string
 
 	ReqBody   []byte // the PRISTINE inbound body, before the pipeline
 	RespBody  []byte // the SSE event stream, a JSON body, or nil
@@ -54,6 +54,7 @@ func TurnFromCall(c ProxiedCall) Turn {
 		SpanID:    c.SpanID,
 		ParentID:  c.ParentID,
 		System:    c.Provider,
+		Client:    c.Client,
 		Start:     c.Start,
 		End:       c.End,
 		// int64 -> int: a token count that overflowed int32 would be a 2-billion-token request.
@@ -163,7 +164,7 @@ func JoinIncomplete(existing, reason string) string {
 // The result is never empty: an empty id yields a hidden ".wire.jsonl" file and merges every
 // unkeyed session into one trace.
 func TraceID(body []byte, derived func() string) string {
-	if id := session.ExplicitID(gjson.GetBytes(body, "metadata.user_id").String()); id != "" {
+	if id := session.ExplicitID(transcriptClient.UserID(body)); id != "" {
 		return id
 	}
 	if derived != nil {
