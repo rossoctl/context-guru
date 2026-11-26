@@ -220,7 +220,7 @@ and at 10 to $54.04. The guard that works is the per-*ping* cost budget above.
 
 ## Where the money shows up
 
-Every ping is a dashboard row marked `keepalive`, with its own tokens, its own cost, and
+With the dashboard on, every ping is a dashboard row marked `keepalive`, with its own tokens, its own cost, and
 its own session — so an account can audit what was spent on its behalf while nobody was at
 the keyboard. The Overview ledger carries both halves:
 

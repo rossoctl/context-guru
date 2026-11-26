@@ -539,7 +539,8 @@ func TestRetainedMaterialReachesNoOutputSurface(t *testing.T) {
 // is no per-ping record, so nothing is retained at all.
 func TestNoAuditSinkMeansNoRetention(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
-	k.h.rec = nil // as a deployment without --dashboard has it
+	k.h.opts.Tenants = &TenantSource{} // hosted: the rule applies there only
+	k.h.rec = nil                      // as a hosted deployment without --dashboard has it
 
 	recordOne(t, k, kaPolicy(), kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
 	if got := k.Stats().Live; got != 0 {
@@ -658,7 +659,11 @@ func TestCanPingFollowsTheKeepAlivePolicy(t *testing.T) {
 		t.Error("nil tenancy: canPing = true")
 	}
 	k.h.rec = nil
+	if !k.canPing(on, "sess-1", "", bschemas.Anthropic) {
+		t.Error("single-tenant, no dashboard: canPing = false (#1457)")
+	}
+	k.h.opts.Tenants = &TenantSource{} // hosted: the no-audit-sink rule applies
 	if k.canPing(on, "sess-1", "", bschemas.Anthropic) {
-		t.Error("no audit sink: canPing = true, but the keeper holds nothing without one")
+		t.Error("hosted, no audit sink: canPing = true, but the keeper holds nothing without one")
 	}
 }

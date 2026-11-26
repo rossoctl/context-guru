@@ -280,9 +280,10 @@ func TestArmingIsRefusedWithoutAnAuditSinkOrWithTheKillSwitchOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No audit sink.
+	// No audit sink, hosted (single-tenant needs none, #1457).
 	k := newKeeperWith(&Handler{opts: Options{}, limiter: NewLimiter(Limits{})},
 		keepalive.Options{Now: func() time.Time { return now }})
+	k.h.opts.Tenants = &TenantSource{} // set after construction: a zero source is hosted for the rule only
 	if err := k.arm("t1", "s", o); err == nil {
 		t.Error("a deployment with no audit sink accepted an arm; the whole credential " +
 			"arrangement rests on being reviewable")

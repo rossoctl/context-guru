@@ -356,7 +356,9 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 		}
 	}()
 	cl := agent.Identify(r.Header)
-	// NO AUDIT SINK, NO RETENTION. An audit control that --dashboard silently removes is not a
+	// NO AUDIT SINK, NO RETENTION, in hosted mode only (#1457; mayHold). In single-tenant mode the
+	// proxy holds only the user's own credential, in its own memory, with no sink needed. The rest
+	// of this note describes the hosted rule. An audit control that --dashboard silently removes is not a
 	// control, and this is the one that makes the whole credential arrangement reviewable. Given
 	// the choice between an unconditional second sink and refusing to hold anything we cannot
 	// account for, this takes the second: it is three lines instead of a parallel writer, and it
@@ -382,7 +384,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 		(client != "" && k.endedAfter(tn.ID, client, startedAt)))
 	pol := tn.Cache
 	applied := ""
-	if ended || k.h == nil || k.h.rec == nil {
+	if ended || !k.mayHold() {
 		pol = keepalive.Policy{}
 	} else {
 		// A learned campaign (predictive.go) scores every finished response of its tenant, in
@@ -471,13 +473,13 @@ func (k *keeper) readSetsTTL(provider bschemas.ModelProvider, endpoint, route, m
 }
 
 // canPing reports whether the keep-alive can ping a thread of this session on this tenancy: the kill
-// switch is off, an audit sink exists, the provider is not OpenAI (the sweep's question is Anthropic
+// switch is off, the host may hold a credential (mayHold: an audit sink exists, or the proxy is single-tenant), the provider is not OpenAI (the sweep's question is Anthropic
 // only), and the resolved policy (account, manager strategy, session override) is on. It is the
 // record-time gate, evaluated before the request goes out and without a campaign decision (that one
 // needs the response), so a thread a learned campaign would turn on later gets a plain ping. That is
 // the safe direction: nothing extra is kept for it.
 func (k *keeper) canPing(tn *Tenancy, session, threadID string, provider bschemas.ModelProvider) bool {
-	if k == nil || tn == nil || k.h == nil || k.h.rec == nil || keepAliveDisabled() ||
+	if k == nil || tn == nil || !k.mayHold() || keepAliveDisabled() ||
 		provider == bschemas.OpenAI || session == "" {
 		return false
 	}
@@ -653,4 +655,15 @@ func (h *Handler) DashWaitPolicy() func(tenantID string) keepalive.Policy {
 		}
 		return keepalive.EffectiveWaitPlan(c, strategies, tn.ID, now, campaignOn)
 	}
+}
+
+// mayHold reports whether this proxy may keep a caller's credential in memory for pings. The rule
+// is keepalive.MayHoldCredentials: hosted (multi-tenant) mode needs an audit sink, which is a
+// recorder here; a single-tenant proxy does not. The hosted signal is the tenant source, the same
+// one the rest of the proxy reads (Options.Tenants). A nil host holds nothing.
+func (k *keeper) mayHold() bool {
+	if k == nil || k.h == nil {
+		return false
+	}
+	return keepalive.MayHoldCredentials(func() bool { return k.h.opts.Tenants != nil }, k.h.rec != nil)
 }
