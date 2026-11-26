@@ -638,7 +638,7 @@ func (h *Handler) Mux() *http.ServeMux {
 		"metrics query timed out").ServeHTTP)
 	m.HandleFunc("GET /expand", h.expand)
 	// The dashboard mounts /dashboard/ (embedded UI) and /api/* (JSON + SSE) only
-	// when enabled, so an unconfigured proxy's route table is byte-identical to before.
+	// when enabled. With no dashboard, the one /api route that stays is the Ping button (below, #1457).
 	if h.api != nil {
 		h.api.Mount(m)
 	}

@@ -288,5 +288,5 @@ func (k *Keeper) WarmFacts(key Key) (lastTouch time.Time, ttl time.Duration, ok 
 	if last.IsZero() {
 		last = e.startedAt
 	}
-	return last, cacheLifetime(e.provider, e.model, e.ttl1h), true
+	return last, e.cacheTTL(), true
 }

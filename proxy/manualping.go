@@ -28,7 +28,8 @@ import (
 //
 // It does not widen what the keeper may hold. The keeper keeps a thread's body and credential
 // only while keep-alive is on for the account, and pinging needs both, so with it off the answer
-// is a distinct 409 "not held" rather than a ping that cannot be sent.
+// is a distinct 409 "not held" rather than a ping that cannot be sent. A thread the keeper does not hold at
+// all answers 404 "unknown session" with no dashboard, and a hosted proxy with no recorder answers 404 too.
 
 // ManualHoldHeader is how a client opts a request in to being held for the Ping button. Claude
 // Code sends it from ANTHROPIC_CUSTOM_HEADERS (the plugin writes it into settings env); it is an

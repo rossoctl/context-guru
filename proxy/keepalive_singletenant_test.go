@@ -198,7 +198,7 @@ func TestHostedWithARecorderStillHolds(t *testing.T) {
 // Fail open: when the hosted signal cannot be read, the answer is the old rule (a sink is needed).
 func TestMayHoldCredentialsFailsToTheOldRule(t *testing.T) {
 	boom := func() bool { panic("signal unreadable") }
-	if keepalive.MayHoldCredentials(boom, false) {
+	if keepalive.MayHoldCredentials(boom, false) { // the panic case: no sink, so the old rule says no
 		t.Error("an unreadable hosted signal with no sink may hold")
 	}
 	if !keepalive.MayHoldCredentials(boom, true) {
@@ -214,5 +214,53 @@ func TestMayHoldCredentialsFailsToTheOldRule(t *testing.T) {
 	var nilK *keeper
 	if nilK.mayHold() {
 		t.Error("a nil keeper may hold")
+	}
+}
+
+// A 1-hour-tier entry reports a 59-minute-class lifetime from the keeper, with no dashboard.
+func TestWarmFactsReportsTheOneHourTier(t *testing.T) {
+	n := newNoDashHost(t)
+	at := n.clock.now()
+	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+	r.Header.Set("Authorization", "Bearer "+fakeSecret)
+	body := strings.ReplaceAll(kaBody, `{"type":"ephemeral"}`, `{"type":"ephemeral","ttl":"1h"}`)
+	for i := 0; i < 2; i++ {
+		n.h.keeper.record(&Tenancy{ID: "", Cache: kaPolicy(), Pipe: components.NewPipeline(nil, n.sink)}, "sess-h", "",
+			at.Add(time.Duration(i-1)*time.Second), []byte(body), upstream{base: "http://up", path: "/v1/messages"},
+			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200, CacheWrite1h: 1200}, true)
+	}
+	_, ttl, ok := n.h.keeper.Keeper.WarmFacts(keepalive.Key{Tenant: "", Session: "sess-h"})
+	if !ok || ttl != time.Hour {
+		t.Fatalf("WarmFacts = ttl %v ok %v, want 1h true", ttl, ok)
+	}
+	// 30 minutes after the last touch the press is not cold on a 1-hour entry.
+	n.clock.advance(30 * time.Minute)
+	if w := n.post(`{"session":"sess-h"}`); w.Code == http.StatusConflict && strings.Contains(w.Body.String(), "cold") {
+		t.Errorf("a 1-hour entry 30 minutes old was called cold: %s", w.Body)
+	}
+}
+
+// Keep-alive off, header on, single-tenant, no dashboard: the thread is held for the button only.
+func TestHeaderHoldWorksWithNoDashboard(t *testing.T) {
+	n := newNoDashHost(t)
+	at := n.clock.now().Add(-40 * time.Second)
+	for i := 0; i < 2; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(""))
+		r.Header.Set("Authorization", "Bearer "+fakeSecret)
+		r.Header.Set(ManualHoldHeader, "1")
+		n.h.keeper.record(&Tenancy{ID: "", Cache: CachePolicy{}, Pipe: components.NewPipeline(nil, n.sink)}, "sess-off", "",
+			at.Add(time.Duration(i)*time.Second), []byte(kaBody), upstream{base: "http://up", path: "/v1/messages"},
+			r, bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576, CacheWrite: 1200}, true)
+	}
+	if got := n.h.keeper.Stats().Live; got != 1 {
+		t.Fatalf("held %d threads, want 1", got)
+	}
+	if w := n.post(`{"session":"sess-off"}`); w.Code != http.StatusOK {
+		t.Fatalf("press = %d %s, want 200", w.Code, w.Body)
+	}
+	n.clock.advance(10 * time.Minute)
+	n.h.keeper.Sweep(n.clock.now())
+	if n.fs.n() != 1 {
+		t.Errorf("upstream saw %d requests, want only the press", n.fs.n())
 	}
 }
