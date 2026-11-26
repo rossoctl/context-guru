@@ -279,7 +279,7 @@ const CACHE_FEATURES = ['keepalive', 'cachesplit', 'ttl'];
 //   cachesplit, ttl
 //   cache       the three above together: the Cache card
 //   filter      toolfilter;   defer  tooldefer
-//   compaction  every other entry (the preset's components and ended_change)
+//   compaction  every other entry (the preset's components, ended_change and interaction)
 // The cards add up to the total (totalTokens), tier by tier.
 function featureTokens(o) {
   const bf = (o && o.tokens && o.tokens.by_feature) || {};

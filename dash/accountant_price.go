@@ -49,8 +49,8 @@ type AccFigure struct {
 	// and input tiers (content the provider had not cached: a first removal) and the read tier (a
 	// replay of content in the cached prefix). ByComponent minus both is its costs (Caused, breaks).
 	ByComponentFirst, ByComponentReplay map[string]float64
-	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD. It excludes UnattributedBreakUSD,
-	// KeepAliveSavedUSD, SplitUSD and TTLUSD.
+	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD and InteractionUSD. It excludes
+	// UnattributedBreakUSD, KeepAliveSavedUSD, SplitUSD and TTLUSD.
 	DeltaUSD          float64
 	KeepAliveSavedUSD float64 // rescue effects
 	SplitUSD          float64 // cachesplit effects (Saved - Caused): CachesplitSavedUSD
@@ -59,6 +59,13 @@ type AccFigure struct {
 	// Q12): it has no ChangeID, so no component owns it, but the client body would have read that
 	// prefix, so it is part of the bill difference. Negative: a cost.
 	EndedBreakUSD float64
+	// InteractionUSD is the value of the tokens no operation owns on a rescued request (accountant
+	// design §6.2): Result.Interaction minus Result.InteractionCaused, both at the size without
+	// context-guru. A ping kept the cache warm and an operation changed the body, so the client body
+	// would have written these tokens cold and the request read them. Neither the keeper nor the
+	// operation owns them. Counted, owned by no component: the interaction row (InteractionComponent).
+	// The metrics book the same figure as llm.savings.interaction.usd. Signed: positive saves.
+	InteractionUSD float64
 	// UnattributedBreakUSD is the breaks the client body has too (InBaseline: client edits, expired
 	// caches, entries lost early): shown, never counted, never charged to a component.
 	UnattributedBreakUSD float64
@@ -80,7 +87,7 @@ type AccFigure struct {
 
 // AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
 // never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
-// Result.Interaction is ignored on purpose: the library attributes it to nobody.
+// Result.Interaction is attributed to nobody: it goes to InteractionUSD, the interaction row.
 //
 // p carries the model's prompt-size tiers. A saving compares two requests: the one sent (with
 // context-guru) and the one the client built (without it). They can sit in different tiers, so
@@ -197,6 +204,14 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		f.Estimated = f.Estimated || ce.Estimated
 	}
 	f.bookReRate(e.reRateUSD(pw, pb, effCaused), shares)
+	// The interaction. Both sides are client-side figures (the client body's cold write, and the read
+	// the operations already book as saved), so the whole net takes the size without, as the library's
+	// Figure prices it. It moves tokens between tiers, so it changes neither size nor the re-rate.
+	if ia, ic := e.accRes.Interaction, e.accRes.InteractionCaused; ia != (accountant.TierTokens{}) || ic != (accountant.TierTokens{}) {
+		f.InteractionUSD = tierUSD(pb, ia) - tierUSD(pb, ic)
+		f.DeltaUSD += f.InteractionUSD
+		f.addTok(InteractionComponent, ia, ic)
+	}
 	for _, u := range e.accRes.Unpriced {
 		f.Unpriced = append(f.Unpriced, u.OpID+":"+u.Reason)
 	}
@@ -358,12 +373,16 @@ const PricedByAccountant = "accountant"
 // before the switch has it empty.
 const PricedByNone = "none"
 
-// KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
-// the ended-change break, neither of which is a pipeline component.
+// KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator, the
+// ended-change break or the interaction, none of which is a pipeline component.
 const KindEnvelope = "envelope"
 
 // EndedChangeComponent is the row that carries the break an ended change left behind.
 const EndedChangeComponent = "ended_change"
+
+// InteractionComponent is the row that carries the interaction on a rescued request
+// (AccFigure.InteractionUSD): counted, and owned by no component.
+const InteractionComponent = "interaction"
 
 // DeferComponent is the library's component name for tool deferral: the operator context-guru.tooldefer, which the
 // proxy reports from the bodies (accountant R56). Its figure is the deferral's saving.
@@ -514,6 +533,14 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		added = append(added, CompRow{Component: EndedChangeComponent, Kind: KindEnvelope, Acted: true})
 		fig.ByComponent[EndedChangeComponent] = fig.EndedBreakUSD
 	}
+	// The interaction is counted and owned by no component too: a row of its own, like the ended change.
+	if fig.InteractionUSD != 0 {
+		if rows[InteractionComponent] {
+			return FallbackDuplicateName
+		}
+		added = append(added, CompRow{Component: InteractionComponent, Kind: KindEnvelope, Acted: true})
+		fig.ByComponent[InteractionComponent] = fig.InteractionUSD
+	}
 	sort.Slice(added, func(i, j int) bool { return added[i].Component < added[j].Component })
 	// Two rows with one name would each take the full figure and break the sum invariant.
 	seen := map[string]bool{}
@@ -582,8 +609,8 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// keep-alive tab and the API still agree.
 		//
 		// What is held out: fig.DeltaUSD less the deferral's own figure, which is every other component's
-		// figure, the head-TTL premium and rescue legs (the headttl row), the ended-change break, and the
-		// filter's part. The deferral's figure is not held with them: a held request keeps the ledger's net
+		// figure, the head-TTL premium and rescue legs (the headttl row), the ended-change break, the
+		// interaction (the interaction row), and the filter's part. The deferral's figure is not held with them: a held request keeps the ledger's net
 		// on the lever, so it appears once (review of #1003). The figure can
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
