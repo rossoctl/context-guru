@@ -11,6 +11,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dispatch"
+	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -248,10 +249,7 @@ func ProbeVerdict(resp []byte, nonce string) Verdict {
 	gjson.GetBytes(resp, "content").ForEach(func(_, b gjson.Result) bool {
 		switch b.Get("type").String() {
 		case "tool_search_tool_result":
-			b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
-				loaded = loaded || r.Get("tool_name").String() == tool
-				return true
-			})
+			cgschema.SearchResultLoads(b, func(name string) { loaded = loaded || name == tool })
 		case "tool_use":
 			if loaded && b.Get("name").String() == tool {
 				pass = true

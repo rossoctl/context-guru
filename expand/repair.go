@@ -69,51 +69,17 @@ func RepairToolResults(provider string, body []byte, resolve func(id string) (st
 	// Only OUR tool's calls, mapped from the id the answer will carry to the marker id the
 	// model asked for. Reading the tool_use out of the transcript rather than trusting the
 	// tool_result is what makes this safe: a client's tool_result is only rewritten when the
-	// assistant turn it answers called context_guru_expand.
-	ours := map[string]string{}
-	for _, m := range msgs.Array() {
-		if provider == schema.WireAnthropic {
-			for _, blk := range m.Get("content").Array() {
-				// An id-less tool_use would make "" a live key, and then a tool_result that
-				// carries no tool_use_id — someone else's block — matches it and is
-				// overwritten. Both halves of the pair must name an id.
-				if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
-					if id := blk.Get("id").String(); id != "" {
-						ours[id] = blk.Get("input.id").String()
-					}
-				}
-			}
-			continue
-		}
-		for _, tc := range m.Get("tool_calls").Array() {
-			if tc.Get("function.name").String() == ToolName {
-				if id := tc.Get("id").String(); id != "" {
-					ours[id] = gjson.Get(tc.Get("function.arguments").String(), "id").String()
-				}
-			}
-		}
-	}
+	// assistant turn it answers called context_guru_expand. The reader drops a call with no id: an
+	// empty id would be a live key, and a tool_result that names no call, someone else's block,
+	// would match it and be overwritten.
+	ours := ourCalls(provider, body)
 	if len(ours) == 0 {
 		return body, nil
 	}
 	out = body
-	for mi, m := range msgs.Array() {
-		if provider != schema.WireAnthropic {
-			if m.Get("role").String() != "tool" {
-				continue
-			}
-			out, restored = repairOne(out, restored, ours, m.Get("tool_call_id").String(),
-				"messages."+strconv.Itoa(mi), false, resolve)
-			continue
-		}
-		for bi, blk := range m.Get("content").Array() {
-			if blk.Get("type").String() != "tool_result" {
-				continue
-			}
-			out, restored = repairOne(out, restored, ours, blk.Get("tool_use_id").String(),
-				"messages."+strconv.Itoa(mi)+".content."+strconv.Itoa(bi),
-				blk.Get("is_error").Exists(), resolve)
-		}
+	for _, r := range schema.RequestResults(provider, body) {
+		out, restored = repairOne(out, restored, ours, r.CallID, r.Path(provider),
+			r.Block >= 0 && r.Raw.Get("is_error").Exists(), resolve)
 	}
 	return out, restored
 }
@@ -124,36 +90,18 @@ func repairResponsesToolResults(body []byte, resolve func(id string) (string, bo
 
 func repairResponsesToolResultsWithSet(body []byte, resolve func(id string) (string, bool),
 	set func([]byte, string, interface{}) ([]byte, error)) ([]byte, []string) {
-	items := gjson.GetBytes(body, "input")
-	if !items.IsArray() {
+	if !gjson.GetBytes(body, "input").IsArray() {
 		return body, nil
 	}
-	ours := map[string]string{}
-	for _, item := range items.Array() {
-		typ := item.Get("type").String()
-		if typ != "function_call" && typ != "custom_tool_call" || item.Get("name").String() != ToolName {
-			continue
-		}
-		id := item.Get("call_id").String()
-		args := item.Get("arguments").String()
-		if typ == "custom_tool_call" {
-			args = item.Get("input").String()
-		}
-		if id != "" {
-			ours[id] = gjson.Get(args, "id").String()
-		}
-	}
+	ours := ourCalls(schema.WireResponses, body)
 	if len(ours) == 0 {
 		return body, nil
 	}
 	out := body
 	var restored []string
-	for i, item := range items.Array() {
-		typ := item.Get("type").String()
-		if typ != "function_call_output" && typ != "custom_tool_call_output" {
-			continue
-		}
-		hash, ok := ours[item.Get("call_id").String()]
+	for _, r := range schema.RequestResults(schema.WireResponses, body) {
+		i := r.At
+		hash, ok := ours[r.CallID]
 		if !ok {
 			continue
 		}
@@ -176,6 +124,17 @@ func repairResponsesToolResultsWithSet(body []byte, resolve func(id string) (str
 		}
 	}
 	return out, restored
+}
+
+// ourCalls maps the id of each call to our tool in the transcript to the marker id the model asked for.
+func ourCalls(wire string, body []byte) map[string]string {
+	ours := map[string]string{}
+	for _, c := range schema.RequestCalls(wire, body) {
+		if c.Name == ToolName {
+			ours[c.ID] = gjson.Get(c.Args(), "id").String()
+		}
+	}
+	return ours
 }
 
 // A Responses result may point at a copy already present in the input, but

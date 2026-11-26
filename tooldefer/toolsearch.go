@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 
+	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -277,28 +278,24 @@ func ReadCalls(body []byte, deferred map[string]bool) (broke bool, direct []stri
 	loaded := Loaded(body)
 	called := map[string]string{} // tool_use id -> deferred tool name
 	var order []string
-	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
-		m.Get("content").ForEach(func(_, b gjson.Result) bool {
-			switch b.Get("type").String() {
-			case "tool_use":
-				if n := b.Get("name").String(); deferred[n] {
-					called[b.Get("id").String()] = n
-					order = append(order, b.Get("id").String())
-				}
-			case "tool_result":
-				id := b.Get("tool_use_id").String()
-				if _, ok := called[id]; ok && b.Get("is_error").Bool() {
-					t := strings.ToLower(b.Get("content").Raw)
-					if strings.Contains(t, "not loaded") || strings.Contains(t, "no such tool") ||
-						strings.Contains(t, "does not exist") {
-						broke = true
-						delete(called, id)
-					}
-				}
+	cgschema.EachRequestCall(cgschema.WireAnthropic, body, func(c cgschema.RequestCall) {
+		if deferred[c.Name] {
+			called[c.ID] = c.Name
+			order = append(order, c.ID)
+		}
+	})
+	if len(called) == 0 {
+		return false, nil
+	}
+	cgschema.EachRequestResult(cgschema.WireAnthropic, body, func(r cgschema.RequestResult) {
+		if _, ok := called[r.CallID]; ok && r.Raw.Get("is_error").Bool() {
+			t := strings.ToLower(r.Raw.Get("content").Raw)
+			if strings.Contains(t, "not loaded") || strings.Contains(t, "no such tool") ||
+				strings.Contains(t, "does not exist") {
+				broke = true
+				delete(called, r.CallID)
 			}
-			return true
-		})
-		return true
+		}
 	})
 	seen := map[string]bool{}
 	for _, id := range order {

@@ -286,13 +286,9 @@ func declsSize(decls []Decl) int {
 // that is what the request pays for and what removing it would give back — measured
 // with the repo's own BPE tokenizer, not a chars/4 estimate.
 func declsFrom(wire string, tools gjson.Result) []Decl {
-	nameField := "function.name"
-	if isAnthropicWire(wire) || schema.IsResponses(wire) {
-		nameField = "name"
-	}
 	var out []Decl
 	for _, t := range tools.Array() {
-		name := t.Get(nameField).String()
+		name := schema.ToolFnNameOn(wire, t)
 		kind := KindTool
 		switch {
 		case isClientToolType(wire, t.Get("type").String()):
@@ -307,13 +303,7 @@ func declsFrom(wire string, tools gjson.Result) []Decl {
 			// server in one element and names it here rather than per tool.
 			kind = KindServerTool
 			if name == "" {
-				name = t.Get("mcp_server_name").String()
-			}
-			if name == "" {
-				name = t.Get("server_label").String() // a Responses `mcp` tool
-			}
-			if name == "" {
-				name = t.Get("type").String()
+				name = schema.ToolDeclName(t) // mcp_server_name, server_label, then type
 			}
 		case name == "":
 			continue // malformed element: no name to attribute anything to
@@ -686,28 +676,18 @@ func usedFrom(wire string, body []byte) ([]Used, uint64) {
 func searchLoads(turn, after gjson.Result) []string {
 	var out []string
 	seen := map[string]bool{}
-	add := func(r gjson.Result) bool {
-		if n := r.Get("tool_name").String(); deferred.ValidName(n) && !seen[n] {
-			seen[n] = true
-			out = append(out, n)
+	add := func(name string) {
+		if deferred.ValidName(name) && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
 		}
-		return true
 	}
 	turn.Get("content").ForEach(func(_, b gjson.Result) bool {
-		if b.Get("type").String() == "tool_search_tool_result" {
-			b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool { return add(r) })
-		}
+		schema.SearchResultLoads(b, add)
 		return true
 	})
 	after.Get("content").ForEach(func(_, b gjson.Result) bool {
-		if b.Get("type").String() == "tool_result" {
-			b.Get("content").ForEach(func(_, r gjson.Result) bool {
-				if r.Get("type").String() == "tool_reference" {
-					add(r)
-				}
-				return true
-			})
-		}
+		schema.ResultReferenceLoads(b, add)
 		return true
 	})
 	return out

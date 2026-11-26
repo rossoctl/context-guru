@@ -53,6 +53,7 @@
 package tooldefer
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -60,6 +61,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/context-guru/internal/tokens"
+	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
@@ -288,25 +290,13 @@ func calledIn(body []byte) map[string]bool {
 // tool_search_tool_result blocks, and the tool_reference blocks of Claude Code's own search.
 func Loaded(body []byte) map[string]bool {
 	out := map[string]bool{}
-	if !strings.Contains(string(body), "tool_reference") {
+	if !bytes.Contains(body, []byte("tool_reference")) {
 		return out
 	}
+	mark := func(name string) { out[name] = true }
 	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
 		m.Get("content").ForEach(func(_, b gjson.Result) bool {
-			switch b.Get("type").String() {
-			case "tool_search_tool_result":
-				b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
-					out[r.Get("tool_name").String()] = true
-					return true
-				})
-			case "tool_result":
-				b.Get("content").ForEach(func(_, r gjson.Result) bool {
-					if r.Get("type").String() == "tool_reference" {
-						out[r.Get("tool_name").String()] = true
-					}
-					return true
-				})
-			}
+			cgschema.BlockLoads(b, mark)
 			return true
 		})
 		return true
@@ -447,14 +437,10 @@ func provenDeferred(body []byte) map[string]bool {
 		return out
 	}
 	loaded := map[string]bool{}
+	mark := func(name string) { loaded[name] = true }
 	gjson.GetBytes(body, "messages").ForEach(func(_, m gjson.Result) bool {
 		m.Get("content").ForEach(func(_, b gjson.Result) bool {
-			if b.Get("type").String() == "tool_search_tool_result" {
-				b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
-					loaded[r.Get("tool_name").String()] = true
-					return true
-				})
-			}
+			cgschema.SearchResultLoads(b, mark) // our search only: Claude Code deferred the other loads
 			return true
 		})
 		return true
