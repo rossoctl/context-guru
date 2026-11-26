@@ -247,8 +247,9 @@ func TestKeepAlivePingSurvivesAPanickingSink(t *testing.T) {
 	rec := pingRecorder(t)
 	em := &dashEmitter{rec: rec}
 	em.metrics.Store(&metricsSinks{savings: panicObserver{}})
+	// A Window makes the ping convertible, so the savings sink really runs (and panics).
 	em.KeepAlivePing(components.KeepAliveReport{Tenant: "t1", Session: "s1", Model: "m", Provider: "anthropic",
-		Pings: 1, CacheRead: 100, Status: 200, TS: time.Now().UnixMilli()})
+		Pings: 1, CacheRead: 100, Status: 200, TS: time.Now().UnixMilli(), Window: time.Now().Add(-4 * time.Minute)})
 	if page, err := waitForRow(t, rec); err != nil || len(page.Requests) != 1 {
 		t.Fatalf("the ping row was lost to a panic in the sink: %v", err)
 	}

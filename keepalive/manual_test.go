@@ -62,7 +62,7 @@ func TestPingNowSendsOneOrdinaryPingAndReportsItAsManual(t *testing.T) {
 	k, sink, clock := manualKeeper(t)
 	fd := fakeOf(k)
 
-	res, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second, RewriteUSD: 0.18})
+	res, err := k.PingNow(ManualRequest{Key: sess1, MinGap: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("PingNow: %v", err)
 	}
@@ -84,8 +84,8 @@ func TestPingNowSendsOneOrdinaryPingAndReportsItAsManual(t *testing.T) {
 		t.Fatalf("reports = %d, want 1", len(reps))
 	}
 	r := reps[0]
-	if !r.Manual || r.Strategy != "manual" || r.RewriteUSD != 0.18 || r.CostUSD != res.CostUSD {
-		t.Errorf("report = %+v, want Manual, strategy \"manual\", the avoided rewrite and the ping's cost", r)
+	if !r.Manual || r.Strategy != "manual" || r.CostUSD != res.CostUSD {
+		t.Errorf("report = %+v, want Manual, strategy \"manual\", and the ping's cost; the answer says pending; the report holds no estimate", r)
 	}
 }
 
@@ -207,15 +207,15 @@ func TestPingNowCreditsNothingWhenThePingMissed(t *testing.T) {
 	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) {
 		return Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, nil
 	})
-	res, err := k.PingNow(ManualRequest{Key: sess1, RewriteUSD: 0.18})
+	res, err := k.PingNow(ManualRequest{Key: sess1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Usage.CacheRead != 0 {
 		t.Fatalf("usage = %+v", res.Usage)
 	}
-	if r := sink.all()[0]; r.RewriteUSD != 0 {
-		t.Errorf("a ping that wrote credited a rewrite of %v", r.RewriteUSD)
+	if r := sink.all()[0]; r.CacheWrite == 0 || r.CacheRead != 0 {
+		t.Errorf("report = %+v, want a ping that wrote", r)
 	}
 }
 
@@ -230,7 +230,7 @@ func TestPingNowMovesTheRefreshClockWhenThePingReWrote(t *testing.T) {
 		return Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, nil
 	})
 	at := clock.advance(20 * time.Second)
-	if _, err := k.PingNow(ManualRequest{Key: sess1, RewriteUSD: 0.18}); err != nil {
+	if _, err := k.PingNow(ManualRequest{Key: sess1}); err != nil {
 		t.Fatal(err)
 	}
 	k.mu.Lock()

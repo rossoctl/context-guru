@@ -27,7 +27,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
@@ -466,9 +465,10 @@ func Main(hooks Hooks) {
 		rec = r
 		defer rec.Close()
 		// Wire the keep-alive sink to the same recorder every other dash write already uses.
-		// Until --dashboard runs this block, kaKeepAlive.rec stays nil and KeepAlivePing is a
-		// no-op — matching the keeper's own "no audit sink, no retention" gate, which already
-		// means no ping ever reaches this far without --dashboard on.
+		// Until --dashboard runs this block, kaKeepAlive.rec stays nil and no ping row is written. The
+		// keeper's own "no audit sink, no retention" gate also sends no ping then, so no ping reaches
+		// KeepAlivePing without --dashboard. Its booking path (BookPing) needs no dashboard, and is ready
+		// if that gate ever changes.
 		kaKeepAlive.rec = rec
 		// Recover which sessions were live before this restart. Without it every conversation
 		// in flight reports a cold start on its next turn, which mislabels the cache verdict of
@@ -1089,9 +1089,10 @@ func spendChecker(rec *dash.Recorder) proxy.SpendChecker {
 //
 // Both fields are set after construction (see where kaKeepAlive is built, above) because this
 // value is threaded into `emitter` before its two dependencies — the recorder and the price
-// resolver — exist yet. KeepAlivePing is nil-safe on an unset rec, so nothing can observe the
-// gap: the keeper's own retention gate already refuses to hold anything (and so never pings)
-// until --dashboard has opened one.
+// resolver — exist yet. KeepAlivePing is nil-safe on an unset rec: with no recorder no row is written. The
+// keeper's own retention gate (no audit sink, no retention) holds nothing and so sends no ping until
+// --dashboard has opened one. The savings booking (BookPing) runs before the rec check and needs no
+// dashboard, so it is ready if that gate ever changes.
 type dashEmitter struct {
 	rec    *dash.Recorder
 	prices modelinfo.Pricer
@@ -1112,9 +1113,6 @@ func (d *dashEmitter) Component(components.Report) {}
 func (d *dashEmitter) Run(components.RunReport)    {}
 
 func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
-	if d.rec == nil {
-		return
-	}
 	// The keeper calls this from its own goroutine. A panic here (a price lookup, the row build) would end the
 	// whole process, so log it and carry on without this row (issue #918).
 	defer func() {
@@ -1122,6 +1120,18 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 			slog.Error("context-guru: keep-alive ping row panicked; the row is dropped", "panic", p)
 		}
 	}()
+	// The ping's accountant figure is booked with or without the dashboard (#1457): the ping's facts go to the
+	// store for the thread's next request, and its spend goes to the savings counters. The dashboard below only
+	// stores and shows it.
+	var obs acmetrics.Observer
+	sinks := d.metrics.Load()
+	if sinks != nil {
+		obs = sinks.savings
+	}
+	res, converted := proxy.BookPing(r, d.pings, obs)
+	if d.rec == nil {
+		return
+	}
 	var price modelinfo.Price
 	priced := false
 	if d.prices != nil && r.Model != "" {
@@ -1137,8 +1147,9 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	}
 	ev.SessionID, ev.ThreadID = r.Session, r.Thread
 	// A ping the user asked for stays a keepalive row (real spend, a real refresh) but is flagged,
-	// so no strategy ledger counts it; the write it avoided is stored beside its cost.
-	ev.ManualPing, ev.ManualSavedUSD = r.Manual, r.RewriteUSD
+	// so no strategy ledger counts it. It stores no saving: the accountant credits the rescue on the thread's
+	// next real request (#1460). ManualSavedUSD stays 0 for a new row; an older row holds its estimate.
+	ev.ManualPing = r.Manual
 	// The sweep's answer cost, on the ping row its question replaced (#404 point 9).
 	ev.SweepAnswerUSD = r.SweepAnswerUSD
 	ev.Lifecycle = d.rec.PingLifecycle(r.Pings)
@@ -1167,41 +1178,24 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// derivation of the same number from the same inputs to agree by construction.
 	ev.Price(price, priced && (r.CacheRead > 0 || r.CacheWrite > 0 || r.Output > 0))
 	ev.CostUSD = r.CostUSD
-	var pingRes accountant.Result
-	pingPriced := false
-	if res, ok := proxy.PingSavings(r, d.pings); ok {
+	if converted {
 		ev.SetAccountant(res)
-		pingRes, pingPriced = res, true
 	}
-	d.observeMetrics(ev, r, pingRes, pingPriced)
+	if sinks != nil && sinks.inference != nil {
+		observeInference(sinks.inference, ev)
+	}
 	d.rec.Record(ev)
 }
 
-// observeMetrics books a finished ping row into the push metrics. The ping does not pass through the
-// handler's finish, so this is the only place that sees it. A panic costs the metric only: the row
-// is recorded either way.
-func (d *dashEmitter) observeMetrics(ev *dash.Event, r components.KeepAliveReport, res accountant.Result, priced bool) {
-	sinks := d.metrics.Load()
-	if sinks == nil {
-		return
-	}
+// observeInference books a ping row into the inference metrics. A panic costs the metric only: the row is
+// recorded either way.
+func observeInference(im *proxy.InferenceMetrics, ev *dash.Event) {
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("context-guru: ping metrics panicked; the ping books no metric", "panic", p)
 		}
 	}()
-	sinks.inference.Observe(ev, 0)
-	if priced && sinks.savings != nil {
-		// Output stays unset on purpose. A ping row books only a spend op. Its output is priced through the
-		// spend Call, and output is not the same across a rescue.
-		sinks.savings.Observe(acmetrics.Observation{
-			Meta: accountant.RequestMeta{RequestID: "", Session: r.Session, Model: r.Model,
-				At: time.UnixMilli(r.TS), Billing: accountant.Billing{Mode: accountant.BillingAPI}},
-			Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
-				CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)},
-			Result: res,
-		})
-	}
+	im.Observe(ev, 0)
 }
 
 // tenantMetrics adapts the recorder's per-tenant rollup for the Prometheus exporter.

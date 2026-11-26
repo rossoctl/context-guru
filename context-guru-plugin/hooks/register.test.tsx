@@ -72,7 +72,7 @@ function lines(n: any): string[] {
 }
 const dump = async (ui: any): Promise<string> => lines(await ui.drawn()).join('\n')
 
-async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 }, mainExtra: object = {}) {
+async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saving: 'pending', ping_usd: 0.04 }, mainExtra: object = {}) {
   registered = []
   on('command.register', (_: any, e: any) => {
     registered.push(e.name)
@@ -101,7 +101,7 @@ async function boot($: any, on: any, warm: boolean, calls: string[][] = [], ping
     const ret = (o: object) => ({ value: { exitCode: 0, stdout: JSON.stringify(o) + '\n', stderr: '' } })
     if (e.argv.includes('tip')) return ret({ stale: tipStale, days: 7 })
     if (e.argv.includes('panedata')) return ret(paneDoc)
-    if (e.argv.includes('ping')) return ret(pingOut ?? { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 })
+    if (e.argv.includes('ping')) return ret(pingOut ?? { status: 200, sent: true, saving: 'pending', ping_usd: 0.04 })
     if (docOverride) {
       const o: any = docOverride(doc(warm))
       return { value: { exitCode: o.error ? 1 : 0, stdout: JSON.stringify(o) + '\n', stderr: '' } }
@@ -690,6 +690,15 @@ test('pressing Ping runs the helper with the session id and toasts the saving', 
   const ping = calls.find(c => c.includes('ping'))
   expect(ping).toBeDefined()
   expect(ping).toContain('sess-1')
+  expect(toasts.join('\n')).toMatch(/kept warm .* ping cost \$0\.04\. Saving pending: counted on the next request/)
+  expect(toasts.join('\n')).not.toMatch(/saved \$/)
+  await ui.unmount()
+})
+
+test('the Ping toast keeps the old text for an older server that sends saved_usd', async ($, on) => {
+  await boot($, on, true, [], { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
   expect(toasts.join('\n')).toMatch(/kept warm .* saved \$0\.46 net \(ping cost \$0\.04\)/)
   await ui.unmount()
 })
@@ -895,7 +904,7 @@ test('the pane Ping button works and the last ping result shows', async ($, on) 
   expect(await ui.find({ key: 'ping' })).toBeDefined()
   await ui.press({ key: 'ping' })
   expect(toasts.join('\n')).toMatch(/kept warm/)
-  expect(await dump(ui)).toMatch(/last ping: kept warm — saved \$0\.46 net/)
+  expect(await dump(ui)).toMatch(/last ping: kept warm — ping cost \$0\.04\. Saving pending/)
   await ui.unmount()
 })
 
