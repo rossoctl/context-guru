@@ -97,8 +97,8 @@ func TestSingleTenantWithNoDashboardHoldsAndPings(t *testing.T) {
 	if got := n.h.keeper.Stats().Live; got != 1 {
 		t.Fatalf("held %d threads with no dashboard in single-tenant mode, want 1", got)
 	}
-	if !n.h.keeper.canPing(&Tenancy{ID: "", Cache: kaPolicy()}, "sess-a", "", bschemas.Anthropic) {
-		t.Error("canPing is false for a single-tenant proxy with no dashboard")
+	if !n.h.keeper.canSweepAtPing(&Tenancy{ID: "", Cache: kaPolicy()}, "sess-a", "", bschemas.Anthropic) {
+		t.Error("canSweepAtPing is false for a single-tenant proxy with no dashboard")
 	}
 	n.h.keeper.Sweep(n.clock.advance(281 * time.Second))
 	waitPings(t, n.h.keeper, 1)
@@ -158,8 +158,8 @@ func TestHostedWithNoRecorderHoldsNothing(t *testing.T) {
 	if got := f.h.keeper.Stats().Live; got != 0 {
 		t.Fatalf("held %d threads in hosted mode with no recorder, want 0", got)
 	}
-	if f.h.keeper.canPing(&Tenancy{ID: a.ID, Cache: kaPolicy()}, a.ID+":s1", "", bschemas.Anthropic) {
-		t.Error("canPing is true for a hosted proxy with no recorder")
+	if f.h.keeper.canSweepAtPing(&Tenancy{ID: a.ID, Cache: kaPolicy()}, a.ID+":s1", "", bschemas.Anthropic) {
+		t.Error("canSweepAtPing is true for a hosted proxy with no recorder")
 	}
 	f.h.keeper.Sweep(clock.advance(281 * time.Second))
 	if fs.n() != 0 {

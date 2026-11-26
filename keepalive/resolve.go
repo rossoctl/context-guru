@@ -29,7 +29,7 @@ type ResolveInput struct {
 	// Strategies is the manager strategy list (a snapshot the host swaps wholesale under its lock).
 	Strategies []tenant.Strategy
 	// Campaign is the response's campaign decision, or the zero value when there is none (a
-	// record-time gate such as canPing has no response yet).
+	// record-time gate such as canSweepAtPing has no response yet).
 	Campaign CampaignDecision
 	// IgnoreWindows ignores a strategy's time windows (#858). Windows describe when a person
 	// answers, so they gate only a wait for a person.
