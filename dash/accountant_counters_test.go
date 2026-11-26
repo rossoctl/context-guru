@@ -33,6 +33,8 @@ func TestAccountantFigureEqualsTheSavingsCountersAcrossALine(t *testing.T) {
 			{Kind: accountant.EffectBreak, ChangeID: "c1", Saved: accountant.TierTokens{CacheRead: 20_000}, Caused: accountant.TierTokens{CacheWrite5m: 20_000}},
 			{Kind: accountant.EffectRescue, ChangeID: "ka:1", Saved: accountant.TierTokens{CacheWrite5m: 1_000}, Caused: accountant.TierTokens{CacheRead: 1_000}},
 		},
+		Interaction:       accountant.TierTokens{CacheWrite5m: 300},
+		InteractionCaused: accountant.TierTokens{CacheRead: 300},
 	}
 	e.SetAccountant(res)
 	f := e.AccountantFigure(p)
@@ -78,8 +80,8 @@ func TestAccountantFigureEqualsTheSavingsCountersAcrossALine(t *testing.T) {
 	for _, v := range f.ByComponent {
 		rows += v
 	}
-	if math.Abs(rows+f.EndedBreakUSD-f.DeltaUSD) > 1e-9 {
-		t.Fatalf("rows %v + ended %v do not add up to delta %v", rows, f.EndedBreakUSD, f.DeltaUSD)
+	if math.Abs(rows+f.EndedBreakUSD+f.InteractionUSD-f.DeltaUSD) > 1e-9 {
+		t.Fatalf("rows %v + ended %v + interaction %v do not add up to delta %v", rows, f.EndedBreakUSD, f.InteractionUSD, f.DeltaUSD)
 	}
 }
 
