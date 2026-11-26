@@ -1176,9 +1176,8 @@ function renderRealized(host) {
  * renderDeferNet is tool deferral's net saving (#485, #869): per account and per UTC day, what the
  * deferred definitions did not cost, the searches that loaded them back, the wrong guesses (a
  * deferred tool the model then needed), and the net saving. The net is the deferral lever the Overview
- * card shows: on a request the accountant priced it is the library's figure less the search cost, and
- * otherwise the ledger's net. Gross and cost are the proxy's own ledger, stored per request, so on a
- * priced request net is NOT gross less cost, and the tile does not say it is. Nothing is
+ * card shows: the accountant's one figure for deferral (#1441). Gross is its saved side and cost is gross
+ * less net, stored per request. A request with no figure books none. Nothing is
  * drawn when deferral never changed a request in the window: it is off unless the ultrahigh preset
  * is on, and an empty panel would read as "deferral saved nothing".
  */
@@ -1189,11 +1188,11 @@ function renderDeferNet(host) {
   const priced = t.requests > t.unpriced_requests;
   const panel = el('div', { class: 'panel', 'data-testid': 'inv-defer-net' },
     el('div', { class: 'section' }, el('h2', {}, 'What did tool deferral save?'),
-      el('span', { class: 'section-note' }, 'the same figure as the Overview card; gross and cost are the proxy ledger')));
+      el('span', { class: 'section-note' }, 'the same figure as the Overview card and /stats')));
   host.appendChild(panel);
   panel.appendChild(el('div', { class: 'tiles' },
     tile('inv-defer-net-usd', 'Net saving', priced ? usd(t.net_usd) : compact(t.tokens_deferred) + ' tok',
-      priced ? 'ledger: ' + usd(t.gross_usd) + ' of definitions kept out; ' + usd(t.cost_usd) + ' for the names list and searches' : 'unpriced model; tokens only',
+      priced ? 'gross: ' + usd(t.gross_usd) + ' of definitions kept out; ' + usd(t.cost_usd) + ' for the names list and searches' : 'unpriced model; tokens only',
       t.net_usd > 0 ? 'good' : ''),
     tile('inv-defer-tokens', 'Tokens not carried', compact(t.tokens_deferred),
       num(t.requests) + ' requests with deferred tools'),

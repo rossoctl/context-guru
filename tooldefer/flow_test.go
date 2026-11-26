@@ -117,7 +117,7 @@ func testFlow(t *testing.T, doc string) (Flow, Parts) {
 	}
 	p := Parts{Env: Env{Gate: NewGate(), Prober: NewProber()}, Hist: NewMem(nil), Ledger: &Ledger{}}
 	return Flow{Tenant: "t", Pipe: pipe, Provider: bschemas.Anthropic, Wire: cgschema.WireAnthropic,
-		Upstream: "u", Route: "/v1/messages", Parts: func() Parts { return p }, Prices: onePrice{ok: true}}, p
+		Upstream: "u", Route: "/v1/messages", Parts: func() Parts { return p }}, p
 }
 
 // The ledger books a finished request once, and not at all without usage or without a changed request.
@@ -131,7 +131,7 @@ func TestFlowBook(t *testing.T) {
 		t.Fatal("booked a request with no usage")
 	}
 	b, ok := f.Book(context.Background(), di, Response{CacheRead: 5000}, true, SearchTally{})
-	if !ok || b.Request.DeferredTokens != 1000 || b.Request.Tier != TierRead || b.Money.Net <= 0 {
+	if !ok || b.Request.DeferredTokens != 1000 || b.Request.Tier != TierRead {
 		t.Fatalf("ok=%v %+v", ok, b)
 	}
 	if s := p.Ledger.Snapshot(); s.Requests != 1 || s.DeferredTokens != 1000 {

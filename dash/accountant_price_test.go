@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -332,12 +333,8 @@ func TestTierTokensCarryEveryLibraryTier(t *testing.T) {
 	}
 }
 
-// A fatal library check this host has no name for still gates the figure (issue #1077). The library
-// decides which checks are fatal; a non-fatal one does not gate.
-func TestAnUnnamedFatalCheckStillGates(t *testing.T) {
-	if got := fatalCheckFallback("some_future_check"); got != FallbackCheckOther {
-		t.Errorf("fatalCheckFallback = %q, want %q", got, FallbackCheckOther)
-	}
+// A non-fatal library check does not gate the figure. The library decides which checks are fatal (accountant.Withhold).
+func TestANonFatalCheckDoesNotGate(t *testing.T) {
 	e := switchEvent()
 	e.accRes.Checks = []accountant.CheckFailure{{Check: accountant.CheckConservation}}
 	e.PriceMode(accTestPrice, true)
@@ -369,5 +366,34 @@ func TestFigure_InteractionCountsAndIsUnowned(t *testing.T) {
 	}
 	if g := figOf(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask", Saved: accountant.TierTokens{Input: 1}}}}); g.InteractionUSD != 0 {
 		t.Fatalf("no interaction, figure %v", g.InteractionUSD)
+	}
+}
+
+// #1465: the dashboard row, /stats and the metrics push all gate with accountant.Withhold. A sum failure that no
+// operation claims (Check.Claims 0) books on the row, and a claimed one is withheld. The row and the gate that /stats
+// uses (accrec.Gate) agree with Withhold, which the push calls.
+func TestSumFailureGateIsWithholdOnTheRowAndTheLedgerAndThePush(t *testing.T) {
+	zero, one := 0, 1
+	for name, tc := range map[string]struct {
+		claims *int
+		want   string
+	}{"unclaimed": {&zero, ""}, "claimed": {&one, FallbackCheckSum}} {
+		t.Run(name, func(t *testing.T) {
+			e := switchEvent()
+			e.accRes.Checks = []accountant.CheckFailure{{Check: accountant.CheckSum, Section: accountant.SectionMessages, Claims: tc.claims}}
+			e.PriceMode(accTestPrice, true)
+			if got := e.AccountantFallback(); got != tc.want {
+				t.Errorf("row fallback %q, want %q", got, tc.want)
+			}
+			reason, _ := accrec.Gate(*e.accRes, accountant.USDFigure{}, accrec.GateIn{TokensBefore: e.TokensBefore,
+				Rows: []accrec.GateRow{{Name: "mask", Acted: true}, {Name: "idle"}}})
+			// The gate also refuses a figure with no component entry; the library's reasons are what must agree.
+			if tc.want == "" && reason == FallbackCheckSum || tc.want != "" && reason != tc.want {
+				t.Errorf("accrec.Gate (the /stats gate) reason %q, want %q", reason, tc.want)
+			}
+			if got := accountant.Withhold(*e.accRes, accountant.SizeNotGiven); got != tc.want {
+				t.Errorf("the push's Withhold %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

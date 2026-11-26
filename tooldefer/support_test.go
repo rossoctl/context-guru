@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dispatch"
-	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -134,62 +133,50 @@ func TestProberCachesPerKeyAndForgets(t *testing.T) {
 
 // ── ledger ───────────────────────────────────────────────────────────────
 
-func TestLedgerNetSaving(t *testing.T) {
-	p := modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6}
+// SearchSpend is the search-turn cost as token counts: the output, the second pass and the next write.
+func TestSearchSpend(t *testing.T) {
 	model := "claude-sonnet-5-5"
 	f, _ := tokens.BilledDeltaFactor(model)
-	// A warm request with no search: gross at the read rate, minus the names list at the same rate.
-	m, ok := Price(Request{Model: model, DeferredTokens: 10000, ListTokens: 100, Tier: TierRead}, p)
-	if !ok {
-		t.Fatal("not priced")
+	if _, ok := (Request{Model: model, DeferredTokens: 10000}).SearchSpend(); ok {
+		t.Fatal("a request with no search has a search spend")
 	}
-	wantGross := 10000 * f * p.CacheRead
-	wantCost := 100 * f * p.CacheRead
-	if !near(m.Gross, wantGross) || !near(m.Cost, wantCost) || !near(m.Net, wantGross-wantCost) {
-		t.Fatalf("warm: %+v want gross %v cost %v", m, wantGross, wantCost)
+	// Usage did not say the output: 30 per search, marked as an estimate.
+	s, ok := Request{Model: model, Searches: 2, LoadedTokens: 1500, Tier: TierRead}.SearchSpend()
+	if !ok || s.Output != 60 || !s.OutputEstimated || s.Write1h || s.Loaded != int64(math.Round(1500*f)) {
+		t.Fatalf("estimate: ok=%v %+v", ok, s)
 	}
-	// A cold write prices at the write rate; a 1h write at 2x input.
-	m, _ = Price(Request{Model: model, DeferredTokens: 1000, Tier: TierWrite}, p)
-	if !near(m.Gross, 1000*f*p.CacheWrite) {
-		t.Fatalf("write tier: %+v", m)
+	// The output is stated, and the thread is on the 1-hour tier.
+	s, _ = Request{Model: model, Searches: 1, SearchOutput: 40, LoadedTokens: 1500, Tier: TierWrite1h}.SearchSpend()
+	if s.Output != 40 || s.OutputEstimated || !s.Write1h {
+		t.Fatalf("stated: %+v", s)
 	}
-	m, _ = Price(Request{Model: model, DeferredTokens: 1000, Tier: TierWrite1h}, p)
-	if !near(m.Gross, 1000*f*p.CacheWrite1h()) {
-		t.Fatalf("1h tier: %+v", m)
-	}
-	// A search turn: its output, plus the loaded definition read uncached once.
-	m, _ = Price(Request{Model: model, DeferredTokens: 10000, ListTokens: 100, Searches: 1,
-		SearchOutput: 40, LoadedTokens: 1500, Tier: TierRead}, p)
-	// N7: and the cache write of that definition on the next request, once.
-	wantCost = 100*f*p.CacheRead + 40*p.Output + 1500*f*p.Input + 1500*f*p.CacheWrite
-	if !near(m.Cost, wantCost) {
-		t.Fatalf("search turn cost %v, want %v", m.Cost, wantCost)
-	}
-	// On a thread on the 1-hour tier, the next request writes it at the 1-hour price.
-	m, _ = Price(Request{Model: model, Searches: 1, SearchOutput: 40, LoadedTokens: 1500, Tier: TierWrite1h}, p)
-	if want := 40*p.Output + 1500*f*p.Input + 1500*f*p.CacheWrite1h(); !near(m.Cost, want) {
-		t.Fatalf("1h search turn cost %v, want %v", m.Cost, want)
-	}
-	// Usage adds up across requests.
+}
+
+// The ledger counts in Add and adds dollars in AddMoney: an unpriced request counts in Unpriced.
+func TestLedgerCountsAndMoney(t *testing.T) {
 	var l Ledger
-	l.Add(Request{Model: model, DeferredTokens: 10000, ListTokens: 100, Tier: TierRead}, p)
-	l.Add(Request{Model: model, DeferredTokens: 10000, ListTokens: 100, Searches: 1, LoadedTokens: 1500, Tier: TierRead}, p)
-	l.Add(Request{Model: "unknown", DeferredTokens: 5}, modelinfo.Price{})
+	l.Add(Request{DeferredTokens: 10000, ListTokens: 100})
+	l.AddMoney("", Money{Gross: 3, Cost: 1, Net: 2}, true)
+	l.Add(Request{DeferredTokens: 10000, ListTokens: 100, Searches: 1, LoadedTokens: 1500})
+	l.AddMoney("", Money{Gross: 3, Cost: 2, Net: 1}, true)
+	l.Add(Request{Model: "unknown", DeferredTokens: 5})
+	l.AddMoney("", Money{}, false)
 	s := l.Snapshot()
-	if s.Requests != 3 || s.Searches != 1 || s.Unpriced != 1 || s.Net >= s.Gross || !near(s.Net, s.Gross-s.Cost) {
+	if s.Requests != 3 || s.Searches != 1 || s.Unpriced != 1 || s.Gross != 6 || s.Cost != 3 || s.Net != 3 {
 		t.Fatalf("ledger: %+v", s)
 	}
 	// N8: per account, with the wrong guesses and the dropped searches.
-	l.Add(Request{Tenant: "acct", Model: model, Searches: 2, WrongGuesses: 1, DroppedSearches: 1, Tier: TierRead}, p)
+	l.Add(Request{Tenant: "acct", Model: "m", Searches: 2, WrongGuesses: 1, DroppedSearches: 1, Tier: TierRead})
+	l.AddMoney("acct", Money{Gross: 1, Cost: 0, Net: 1}, true)
 	s = l.Snapshot()
 	acc := l.Accounts()
-	if s.WrongGuesses != 1 || s.DroppedSearches != 1 || s.Requests != 4 {
+	if s.WrongGuesses != 1 || s.DroppedSearches != 1 || s.Requests != 4 || s.Net != 4 {
 		t.Fatalf("total: %+v", s)
 	}
-	if a := acc["acct"]; a.Requests != 1 || a.Searches != 2 || a.WrongGuesses != 1 || a.DroppedSearches != 1 {
+	if a := acc["acct"]; a.Requests != 1 || a.Searches != 2 || a.WrongGuesses != 1 || a.DroppedSearches != 1 || a.Net != 1 {
 		t.Fatalf("account acct: %+v", a)
 	}
-	if a := acc[""]; a.Requests != 3 || a.WrongGuesses != 0 || a.Unpriced != 1 {
+	if a := acc[""]; a.Requests != 3 || a.WrongGuesses != 0 || a.Unpriced != 1 || a.Net != 3 {
 		t.Fatalf("account \"\": %+v", a)
 	}
 	if TierOf(5, 5, 0) != TierRead || TierOf(0, 5, 0) != TierWrite || TierOf(0, 5, 5) != TierWrite1h || TierOf(0, 0, 0) != TierFresh {

@@ -96,12 +96,12 @@ func TestToolDeferIsPricedByTheLibraryFromAStubSizedBody(t *testing.T) {
 		}
 		// A priced row: the library's deferral figure left the baseline for the lever, and the tooldefer row keeps
 		// it, so the rows add up to the baseline delta plus the lever. The first request of the thread has no
-		// history and is held (estimate_held): it books no component figure, and its lever is the ledger's net,
-		// so the deferral does not vanish from the total.
+		// history and is held (estimate_held): it books no component figure and no lever. Its deferral figure
+		// joins the held estimate with every other component's (#1441).
 		if e.EstimateHeld {
-			if e.DeferNetUSD <= 0 || e.BaselineCostUSD != e.CostUSD {
-				t.Errorf("request %d is held: lever %v, baseline delta %v, want the ledger's net and no delta",
-					i, e.DeferNetUSD, e.BaselineCostUSD-e.CostUSD)
+			if e.DeferNetUSD != 0 || e.BaselineCostUSD != e.CostUSD || e.EstimatedSavedUSD <= 0 {
+				t.Errorf("request %d is held: lever %v, baseline delta %v, held estimate %v, want no lever, no delta and the figure in the estimate",
+					i, e.DeferNetUSD, e.BaselineCostUSD-e.CostUSD, e.EstimatedSavedUSD)
 			}
 		} else {
 			if got, want := e.BaselineCostUSD-e.CostUSD+e.DeferNetUSD, rowSavedSum(e); math.Abs(got-want) > 1e-12 {
@@ -123,8 +123,8 @@ func TestToolDeferIsPricedByTheLibraryFromAStubSizedBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(o.DeferNetUSD-leverSum) > 1e-12 || o.DeferNetUSD <= defSum {
-		t.Errorf("deferral lever %v, want the stored %v: the library's %v on the priced requests plus the ledger's net on the held one",
+	if math.Abs(o.DeferNetUSD-leverSum) > 1e-12 || math.Abs(o.DeferNetUSD-defSum) > 1e-12 {
+		t.Errorf("deferral lever %v, want the stored %v and the library's %v on the priced requests alone (a held one books none)",
 			o.DeferNetUSD, leverSum, defSum)
 	}
 	if math.Abs(o.NetSavedUSD-rowSum) > 1e-12 || math.Abs(o.TotalSavedUSD-(o.NetSavedUSD+o.DeferNetUSD)) > 1e-12 {

@@ -53,7 +53,9 @@ type Flow struct {
 	// Upstream and Route name the endpoint the request goes to. They key the probe verdicts.
 	Upstream, Route string
 	Parts           func() Parts
-	// Prices prices a model for the ledger. nil means no price table.
+	// Prices prices a model.
+	//
+	// Deprecated: nothing reads it. The accountant prices deferral (#1441). Kept so a library user's code still builds.
 	Prices modelinfo.Pricer
 	// ProjectFor reads the project directory off the client's pristine body: the host passes
 	// apply.ProjectFor. A field, not an import, because apply's own test imports this package.
@@ -323,11 +325,11 @@ type Response struct {
 	SearchDropped int
 }
 
-// Booked is what the ledger booked for one request: the request facts, its price and how many
-// different tools its searches loaded. The host puts the same numbers on its dashboard row (#869).
+// Booked is what the ledger booked for one request: the request facts and how many different tools its
+// searches loaded. The host puts the same numbers on its dashboard row (#869). The dollars come later, from
+// the accountant's figure (Ledger.AddMoney).
 type Booked struct {
 	Request  Request
-	Money    Money
 	Distinct int
 }
 
@@ -340,8 +342,7 @@ func (f Flow) Book(ctx context.Context, di *Info, u Response, usageOK bool, st S
 		return Booked{}, false
 	}
 	r := Request{Tenant: di.Tenant, Model: di.Model, DeferredTokens: di.Outcome.DeferredTokens,
-		ListTokens: di.Outcome.ListTokens, Tier: TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h),
-		PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}
+		ListTokens: di.Outcome.ListTokens, Tier: TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
 	n := u.Searches + st.N
 	loaded := append(append([]string(nil), u.SearchLoaded...), st.Loaded...)
 	loaded = append(loaded, di.Outcome.Loads...) // client-search mode (#898): answers written on this request
@@ -349,14 +350,9 @@ func (f Flow) Book(ctx context.Context, di *Info, u Response, usageOK bool, st S
 	r.DroppedSearches = u.SearchDropped + st.Dropped
 	r.LoadedTokens = LoadedWeight(di.Original, loaded)
 	r.WrongGuesses = WrongGuesses(di.Outcome.Deferred, di.Original, loaded)
-	var p modelinfo.Price
-	if f.Prices != nil {
-		p, _ = f.Prices.Price(ctx, di.Model)
-	}
-	f.Parts().Ledger.Add(r, p)
+	f.Parts().Ledger.Add(r)
 	// The dashboard row takes the same r the ledger booked, so /stats and the panel agree (#869).
-	m, _ := Price(r, p)
-	return Booked{Request: r, Money: m, Distinct: distinctLoads(loaded)}, true
+	return Booked{Request: r, Distinct: distinctLoads(loaded)}, true
 }
 
 // distinctLoads is how many different tools the searches of one response loaded.

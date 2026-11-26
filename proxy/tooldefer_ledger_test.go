@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -9,13 +10,18 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -75,13 +81,22 @@ func TestToolDeferLedgerCountsSearchesOnEveryPath(t *testing.T) {
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 			b := bytes.Replace(tdBody(), []byte(`"max_tokens":64,`), []byte(`"max_tokens":64,"stream":true,`), 1)
-			resp, out := tdPost(t, srv, b)
-			if resp.StatusCode != http.StatusOK || !strings.Contains(out, "tool_search_tool_result") {
-				t.Fatalf("status %d: %s", resp.StatusCode, out)
+			// Two requests of one thread. The first has no history, so the accountant holds it: unpriced, no dollars. The
+			// second is priced, and /stats shows its figure with the dashboard off (#1451, #1441).
+			for i := 0; i < 2; i++ {
+				resp, out := tdPost(t, srv, b)
+				if resp.StatusCode != http.StatusOK || !strings.Contains(out, "tool_search_tool_result") {
+					t.Fatalf("status %d: %s", resp.StatusCode, out)
+				}
 			}
+			// The dollars are booked off the handler path, after the accountant job: wait for the condition, not a snapshot.
+			waitLedger(t, ds, func(st tooldefer.Stats) bool { return st.Unpriced >= 1 && st.Net != 0 })
 			st := ds.ledger.Snapshot()
-			if st.Requests != 1 || st.Searches != 1 {
-				t.Fatalf("ledger = %+v, want 1 request with 1 search", st)
+			if st.Requests != 2 || st.Searches != 2 {
+				t.Fatalf("ledger = %+v, want 2 requests with 1 search each", st)
+			}
+			if st.Unpriced != 1 || st.Net == 0 || st.Gross <= 0 || math.Abs(st.Gross-st.Cost-st.Net) > 1e-12 {
+				t.Fatalf("ledger = %+v, want 1 held (unpriced) request and the second one's figure, with the dashboard off", st)
 			}
 		})
 	}
@@ -132,42 +147,21 @@ func TestToolDeferFactsReachTheDashboardRow(t *testing.T) {
 	if int64(e.DeferWrongGuesses) != st.WrongGuesses || int64(e.DeferDroppedSearches) != st.DroppedSearches {
 		t.Errorf("row wrong %d dropped %d, ledger %d and %d", e.DeferWrongGuesses, e.DeferDroppedSearches, st.WrongGuesses, st.DroppedSearches)
 	}
-	if e.DeferGrossUSD <= 0 || math.Abs(e.DeferGrossUSD-st.Gross) > 1e-12 {
-		t.Errorf("row gross %v, ledger %+v", e.DeferGrossUSD, st.Money)
+	// One figure (#1441): the row and /stats hold the same dollars, taken from the accountant. This request is the
+	// first of its thread: no history, so the library holds it, and a held request books no lever, on the row or in
+	// the ledger. The dollars join the held estimate with every other component's.
+	if !e.EstimateHeld {
+		t.Fatalf("expected a held first request, got fallback %q", e.AccountantFallback())
 	}
-	// The row's net is one figure whichever page reads it. On a request the accountant priced it is the
-	// library's tooldefer row minus the cost of the search and the definition it loaded (the ledger's
-	// SearchCost, exact); on a request it held, or could not price, it is the ledger's net, so the deferral is
-	// not lost from the total (review of #1003).
-	if e.AccountantFallback() != "" || e.EstimateHeld {
-		// This request is the first of its thread: no history, so it is held.
-		if !e.EstimateHeld {
-			t.Errorf("expected a held first request, got fallback %q", e.AccountantFallback())
-		}
-		if math.Abs(e.DeferNetUSD-st.Net) > 1e-12 {
-			t.Errorf("row net %v on a held or unpriced request, want the ledger's net %v", e.DeferNetUSD, st.Net)
-		}
-		return
-	}
-	var lib float64
-	for _, c := range e.Components {
-		if c.Component == "tooldefer" {
-			lib = c.SavedUSD
-		}
-	}
-	if st.SearchCost <= 0 {
-		t.Fatalf("the ledger priced no search cost for a request that ran one search: %+v", st.Money)
-	}
-	if want := lib - st.SearchCost; math.Abs(e.DeferNetUSD-want) > 1e-12 {
-		t.Errorf("row net %v, want the library's %v less the search cost %v = %v", e.DeferNetUSD, lib, st.SearchCost, want)
+	if e.DeferGrossUSD != 0 || e.DeferNetUSD != 0 || st.Gross != 0 || st.Net != 0 || st.Unpriced != 1 {
+		t.Errorf("a held request must book no lever: row gross %v net %v, ledger %+v", e.DeferGrossUSD, e.DeferNetUSD, st)
 	}
 }
 
 // The priced path of the same fact: a second request of the thread has history, so the accountant prices it. Its
-// deferral figure is the library's tooldefer row minus the cost of the search and the definition it loaded, exactly.
-// A held first request keeps the ledger's net instead (the test above). The cost comes from the event the capture
-// priced, because the ledger's totals do not sum it.
-func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
+// deferral figure is the library's tooldefer row, search turns included (#1441): the row, /stats and the component
+// figure show one number. The search turns are three spend operations on the tooldefer operator.
+func TestToolDeferPricedRowIsOneFigureWithTheSearchTurns(t *testing.T) {
 	us := httptest.NewServer(sseUpstream{})
 	defer us.Close()
 	h, rec, tap := accHandlerOpts(t, us.URL, "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n", func(o *Options) {
@@ -190,10 +184,13 @@ func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
 	}
 	waitForRows(t, rec, 2)
 	var priced int
+	var netSum, grossSum float64
 	for i, e := range tap.all() {
 		if e.DeferSearches == 0 {
 			t.Fatalf("request %d ran no search: the test does not exercise the search cost", i)
 		}
+		netSum += e.DeferNetUSD
+		grossSum += e.DeferGrossUSD
 		if e.EstimateHeld || e.AccountantFallback() != "" {
 			continue
 		}
@@ -204,37 +201,173 @@ func TestToolDeferPricedRowIsTheLibrarysFigureLessTheSearchCost(t *testing.T) {
 				lib = c.SavedUSD
 			}
 		}
-		if lib <= 0 || e.DeferSearchUSD <= 0 {
-			t.Errorf("request %d: library figure %v, search cost %v: want both positive", i, lib, e.DeferSearchUSD)
+		// The panel's net is the component figure, exactly.
+		if lib == 0 || math.Abs(e.DeferNetUSD-lib) > 1e-12 {
+			t.Errorf("request %d: row net %v, component figure %v: want one figure", i, e.DeferNetUSD, lib)
 		}
-		if want := lib - e.DeferSearchUSD; math.Abs(e.DeferNetUSD-want) > 1e-12 {
-			t.Errorf("request %d: net %v, want the library's %v less the search cost %v = %v", i, e.DeferNetUSD, lib, e.DeferSearchUSD, want)
+		if math.Abs(e.DeferGrossUSD-e.DeferNetUSD-e.DeferCostUSD) > 1e-12 || e.DeferCostUSD <= 0 {
+			t.Errorf("request %d: gross %v, cost %v, net %v: cost must be gross less net and positive", i, e.DeferGrossUSD, e.DeferCostUSD, e.DeferNetUSD)
 		}
-		// The cost the Tools page shows is the ledger's own, taken before the net moved onto the library's figure.
-		// The search cost is part of it, so it cannot be less. It can exceed the gross: the ledger's net is gross
-		// less this cost, and the net is negative when the searches cost more than the deferral saved.
-		if e.DeferCostUSD < e.DeferSearchUSD {
-			t.Errorf("request %d: cost %v is less than the search cost %v it contains", i, e.DeferCostUSD, e.DeferSearchUSD)
+		// The search turns are in the figure: dropping the three spend operations raises it by their cost.
+		res, _ := e.AccountantResult()
+		var spends int
+		for _, o := range res.Ops {
+			if o.Call != nil && o.Operator == "context-guru.tooldefer" {
+				spends++
+			}
 		}
-		// On a priced request the stored net is the library's figure less the search cost, so gross less that net is
-		// NOT the ledger's cost: the two must differ, or this test could not tell the old derivation from the new.
-		if math.Abs((e.DeferGrossUSD-e.DeferNetUSD)-e.DeferCostUSD) < 1e-12 {
-			t.Errorf("request %d: gross less net equals the cost %v: the test does not separate the two figures", i, e.DeferCostUSD)
+		if spends != 3 {
+			t.Errorf("request %d: %d tooldefer spend operations, want 3 (output, second pass, next write)", i, spends)
 		}
 	}
 	if priced != 1 {
 		t.Fatalf("priced requests = %d, want 1 (the second of the thread): the test must reach the priced path", priced)
 	}
-	// /api/tool-defer sums the ledger's cost per request, so its total is exactly that sum.
+	// /stats holds the sum of the rows, and /api/tool-defer too.
+	st := ds.ledger.Snapshot()
+	if st.Requests != 2 || math.Abs(st.Net-netSum) > 1e-12 || math.Abs(st.Gross-grossSum) > 1e-12 {
+		t.Errorf("/stats ledger %+v, want net %v gross %v from the rows", st, netSum, grossSum)
+	}
 	rep, err := rec.DB().ToolDeferReportFor(dash.Filter{TenantAll: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var costSum float64
-	for _, e := range tap.all() {
-		costSum += e.DeferCostUSD
+	if math.Abs(rep.Total.NetUSD-st.Net) > 1e-12 || math.Abs(rep.Total.GrossUSD-st.Gross) > 1e-12 || math.Abs(rep.Total.CostUSD-st.Cost) > 1e-12 {
+		t.Errorf("/api/tool-defer total %+v differs from /stats %+v", rep.Total, st.Money)
 	}
-	if math.Abs(rep.Total.CostUSD-costSum) > 1e-12 {
-		t.Errorf("/api/tool-defer cost %v, want the sum of the per-request ledger costs %v", rep.Total.CostUSD, costSum)
+}
+
+// waitLedger waits until cond holds for the ledger's total. The dollars are booked after the accountant job, off the
+// handler path (#1441), so a snapshot right after the response may come first.
+func waitLedger(t *testing.T, ds *deferState, cond func(tooldefer.Stats) bool) {
+	t.Helper()
+	testutil.WaitFor(t, "the ledger to reach the wanted state", func() bool { return cond(ds.ledger.Snapshot()) })
+}
+
+// The ledger's dollars join the accountant, so they are booked off the handler path: deferLedger runs in serve's
+// terminal defer and must not wait on the accountant job (#1059, #1456). The facts are booked at once. The dollars
+// follow when finishAccountant runs, after the job.
+func TestDeferLedgerDoesNotWaitForTheAccountantJob(t *testing.T) {
+	h := tdHandler(t, "ultrahigh", "http://x")
+	defer h.Close()
+	c := asyncCapture()
+	c.model, c.pricer = "claude-sonnet-5-5", tdPrices{}
+	release := make(chan struct{})
+	rel := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(rel) // a failed wait must not leak the blocked job
+	c.savings.onEnd = func(_ *accountant.Request, _ endRecord) { <-release }
+	body := manyToolResultsRequest("claude-sonnet-5", 4)
+	c.accBegin(asyncMeta(), body)
+	c.accEnd(thread.Result{ID: thread.Primary}, body, nil)
+
+	di := &tooldefer.Info{Tenant: "t", Model: "claude-sonnet-5-5", Outcome: tooldefer.Outcome{DeferredTokens: 1000, ListTokens: 100}}
+	returned := make(chan struct{})
+	go func() {
+		h.deferLedger(context.Background(), c, di, Usage{CacheRead: 5000, Output: 5}, true, searchTally{})
+		close(returned)
+	}()
+	testutil.WaitFor(t, "deferLedger to return without the accountant job (it must not wait on it)", func() bool {
+		select {
+		case <-returned:
+			return true
+		default:
+			return false
+		}
+	})
+	st := h.toolDefer().ledger.Snapshot()
+	if st.Requests != 1 || st.Unpriced != 0 || st.Net != 0 {
+		rel()
+		t.Fatalf("ledger after deferLedger = %+v, want the counts only: the dollars wait for the job", st)
+	}
+	rel()
+	c.finishAccountant(Usage{CacheRead: 5000, Output: 5}, true) // the job's own goroutine, after the join
+	if st = h.toolDefer().ledger.Snapshot(); st.Unpriced+boolInt(st.Net != 0) != 1 {
+		t.Fatalf("ledger after the job = %+v, want the request booked once, priced or unpriced", st)
+	}
+}
+
+func boolInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// #1465: /stats gates with accountant.Withhold, like the dashboard row and the metrics push. A sum failure that no
+// operation claims (Check.Claims 0) still books a figure, and a claimed one is withheld.
+func TestAccFigureGatesSumFailuresWithWithhold(t *testing.T) {
+	zero, one := 0, 1
+	op := accountant.PricedOp{OpID: "r", Kind: accountant.KindRewrite, Operator: "context-guru.tooldefer", ChangeID: "c",
+		Saved: accountant.TierTokens{CacheRead: 5000}}
+	for name, tc := range map[string]struct {
+		claims *int
+		want   bool
+	}{"unclaimed": {&zero, true}, "claimed": {&one, false}} {
+		t.Run(name, func(t *testing.T) {
+			res := accountant.Result{Ops: []accountant.PricedOp{op},
+				Checks: []accountant.CheckFailure{{Check: accountant.CheckSum, Section: accountant.SectionMessages, Claims: tc.claims}}}
+			c := &capture{model: "claude-sonnet-5-5", pricer: tdPrices{}, accRes: &res}
+			c.trace.Run = &components.RunReport{TokensBefore: 1000}
+			_, ok := c.accFigure(context.Background(), Usage{CacheRead: 5000}, true)
+			if ok != tc.want {
+				t.Fatalf("accFigure ok = %v, want %v", ok, tc.want)
+			}
+		})
+	}
+}
+
+// Fail open: on the dashboard path finish runs the ledger hook in the handler's defer, and accCompute inside it is
+// outside accFigure's recover. A panic there must cost the figure only: the handler does not panic and the request
+// books as unpriced.
+func TestDeferBookPanicIsRecoveredAndBooksUnpriced(t *testing.T) {
+	h := tdHandler(t, "ultrahigh", "http://x")
+	defer h.Close()
+	c := asyncCapture()
+	// No model: accFigure returns before it prices, so the hook's own accCompute is the first one, outside any recover.
+	c.pricer = tdPrices{}
+	c.accReq = &accountant.Request{} // an open record with no tracker behind it: pricing it panics
+	c.savings = nil
+	di := &tooldefer.Info{Tenant: "t", Model: "claude-sonnet-5-5", Outcome: tooldefer.Outcome{DeferredTokens: 1000, ListTokens: 100}}
+	h.deferLedger(context.Background(), c, di, Usage{CacheRead: 5000, Output: 5}, true, searchTally{})
+	c.runDeferBook() // the handler's defer: must not panic
+	if st := h.toolDefer().ledger.Snapshot(); st.Requests != 1 || st.Unpriced != 1 || st.Net != 0 {
+		t.Fatalf("ledger = %+v, want 1 request booked as unpriced", st)
+	}
+}
+
+// #1504: on the dashboard path finish runs the accountant in the handler's terminal defer. A panic there must cost the
+// figure only: finish returns (so stopEarlyScan and the log line after it run), and the dashboard row is written as
+// no_result.
+func TestFinishFailsOpenWhenTheAccountantPanics(t *testing.T) {
+	up := httptest.NewServer(sseUpstream{})
+	defer up.Close()
+	h, rec, tap := accHandlerOpts(t, up.URL, "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n", nil)
+	_ = h
+	c := &capture{rec: rec, pricer: tdPrices{}, model: "claude-sonnet-5-5", provider: "anthropic", route: "/v1/messages",
+		tenant: "t", start: time.Now()}
+	c.accReq = &accountant.Request{} // an open record with no tracker behind it: pricing it panics
+	c.savings = nil
+	returned := false
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("finish let the accountant's panic escape into the handler: %v", p)
+			}
+		}()
+		c.finish(Usage{FreshInput: 5, CacheRead: 100, Output: 5}, true, false, 0, 0)
+		returned = true
+	}()
+	if !returned {
+		t.Fatal("finish did not return")
+	}
+	waitForRows(t, rec, 1)
+	evs := tap.all()
+	if len(evs) != 1 || evs[0].AccFallback != dash.FallbackNoResult {
+		t.Fatalf("rows = %d, fallback %q: want one row booked as %q", len(evs), func() string {
+			if len(evs) > 0 {
+				return evs[0].AccFallback
+			}
+			return ""
+		}(), dash.FallbackNoResult)
 	}
 }
