@@ -136,8 +136,8 @@ no row in the coverage table.
 ## Conventions
 
 - Go 1.26, module `github.com/rossoctl/context-guru`. The build is pure Go — `make build` sets
-  `CGO_ENABLED=0`. cgo is needed only for `go test -race`,
-  which is why the Makefile still exports `CGO_ENABLED=1` for the test targets.
+  `CGO_ENABLED=0`. cgo is needed only for `go test -race`, which
+  is why the Makefile still exports `CGO_ENABLED=1` for the test targets.
 - **`go.mod` pins only released tags, never a commit.** A pseudo-version pins a commit. Go writes it in
   forms such as `v0.0.0-<date>-<sha>`, `vX.Y.Z-0.<date>-<sha>` and `vX.Y.Z-pre.0.<date>-<sha>`.
   - Our own modules, such as `rossoctl/accountant`, always get a release tag. When a change needs unreleased
