@@ -59,6 +59,10 @@ type ManualRequest struct {
 	Key Key
 	// MinGap is the least time between two manual pings of this thread; zero is no limit.
 	MinGap time.Duration
+	// RewriteUSD is the host's estimate of the write a manual ping avoids.
+	//
+	// Deprecated: the keeper ignores it (#1460). The accountant credits the rescue on the thread's next real request.
+	RewriteUSD float64
 }
 
 // ManualResult is what one manual ping did.
@@ -69,6 +73,10 @@ type ManualResult struct {
 	// CostUSD is the ping's own cost; Priced is false when the model has no rate.
 	CostUSD float64
 	Priced  bool
+	// AvoidedUSD was the rewrite the ping saved.
+	//
+	// Deprecated: the keeper no longer sets it, so it is always 0 (#1460). The accountant credits the rescue on the thread's next real request.
+	AvoidedUSD float64
 }
 
 // PingNow sends one ping on r.Key's thread now. It fails open in the sense that matters here: any
@@ -265,4 +273,16 @@ func ManualPingBlock(oneHourLive bool, lastTouch time.Time, ttl time.Duration, n
 		return ManualBlockCold
 	}
 	return ""
+}
+
+// ManualSavedUSD is the money one manual ping kept by an estimate: the rewrite it avoided less its own cost.
+//
+// Deprecated: nothing books or shows it any more (#1460). The accountant credits the rescue on the thread's next
+// real request. It stays so that importers still build.
+func ManualSavedUSD(rewriteUSD float64, res ManualResult) float64 {
+	saved := rewriteUSD - res.CostUSD
+	if saved < 0 || res.AvoidedUSD == 0 {
+		return 0
+	}
+	return saved
 }

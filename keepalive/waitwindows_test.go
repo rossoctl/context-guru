@@ -213,6 +213,18 @@ func TestManualPingBlock(t *testing.T) {
 	}
 }
 
+func TestManualSavedUSD(t *testing.T) {
+	if got := ManualSavedUSD(1.0, ManualResult{CostUSD: 0.1, AvoidedUSD: 1.0}); got != 0.9 {
+		t.Fatalf("got %v, want 0.9", got)
+	}
+	if got := ManualSavedUSD(1.0, ManualResult{CostUSD: 0.1}); got != 0 {
+		t.Fatalf("a ping that read nothing saved nothing, got %v", got)
+	}
+	if got := ManualSavedUSD(0.05, ManualResult{CostUSD: 0.1, AvoidedUSD: 0.05}); got != 0 {
+		t.Fatalf("a ping that cost more than the write saved nothing, got %v", got)
+	}
+}
+
 func TestOverrideWorstCasePingsIsAPingPerIdleNotPerSpan(t *testing.T) {
 	o := Override{Pol: Policy{Idle: 240 * time.Second, MaxPings: 2}, Until: t0.Add(time.Hour)}
 	if got := o.WorstCasePings(t0); got != 15 { // 3600 / 240, not (K+1)-span counting
