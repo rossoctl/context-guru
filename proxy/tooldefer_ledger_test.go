@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/testutil"
@@ -290,4 +291,27 @@ func boolInt(b bool) int64 {
 		return 1
 	}
 	return 0
+}
+
+// #1465: /stats gates with accountant.Withhold, like the dashboard row and the metrics push. A sum failure that no
+// operation claims (Check.Claims 0) still books a figure, and a claimed one is withheld.
+func TestAccFigureGatesSumFailuresWithWithhold(t *testing.T) {
+	zero, one := 0, 1
+	op := accountant.PricedOp{OpID: "r", Kind: accountant.KindRewrite, Operator: "context-guru.tooldefer", ChangeID: "c",
+		Saved: accountant.TierTokens{CacheRead: 5000}}
+	for name, tc := range map[string]struct {
+		claims *int
+		want   bool
+	}{"unclaimed": {&zero, true}, "claimed": {&one, false}} {
+		t.Run(name, func(t *testing.T) {
+			res := accountant.Result{Ops: []accountant.PricedOp{op},
+				Checks: []accountant.CheckFailure{{Check: accountant.CheckSum, Section: accountant.SectionMessages, Claims: tc.claims}}}
+			c := &capture{model: "claude-sonnet-5-5", pricer: tdPrices{}, accRes: &res}
+			c.trace.Run = &components.RunReport{TokensBefore: 1000}
+			_, ok := c.accFigure(context.Background(), Usage{CacheRead: 5000}, true)
+			if ok != tc.want {
+				t.Fatalf("accFigure ok = %v, want %v", ok, tc.want)
+			}
+		})
+	}
 }

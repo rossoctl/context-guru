@@ -31,7 +31,7 @@ func TestGate(t *testing.T) {
 		"no row":      {res, fig, GateIn{TokensBefore: 1000}, GateFigureWithoutRow},
 		"duplicate":   {res, fig, GateIn{TokensBefore: 1000, Rows: append(rows[:1:1], rows[0])}, GateDuplicateName},
 		"acted":       {res, accountant.USDFigure{ByComponent: map[string]float64{}}, GateIn{TokensBefore: 1000, Rows: rows}, GateActedWithoutFigure},
-		"unpriced":    {res, accountant.USDFigure{ByComponent: fig.ByComponent, Unpriced: []string{"o1:no_price"}}, ok, GateUnpriced},
+		"unpriced":    {accountant.Result{Ops: res.Ops, Unpriced: []accountant.Unpriced{{OpID: "o1", Reason: "no_price"}}}, accountant.USDFigure{ByComponent: fig.ByComponent, Unpriced: []string{"o1:no_price"}}, ok, GateUnpriced},
 		"fatal check": {accountant.Result{Ops: res.Ops, Checks: []accountant.CheckFailure{{Check: accountant.CheckSum}}}, fig, ok, GateCheckSum},
 	} {
 		if r, _ := Gate(tc.res, tc.fig, tc.in); r != tc.want {
@@ -39,12 +39,22 @@ func TestGate(t *testing.T) {
 		}
 	}
 	// penalty_unknown does not gate: the figure is held, not refused.
-	held := accountant.USDFigure{ByComponent: fig.ByComponent, Unpriced: []string{"o1:" + accountant.ReasonPenaltyUnknown}}
-	if r, _ := Gate(res, held, ok); r != "" {
+	held := accountant.Result{Ops: res.Ops, Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}}
+	if r, _ := Gate(held, fig, ok); r != "" {
 		t.Errorf("penalty_unknown gated: %q", r)
 	}
-	// A fatal check this host has no name for still gates.
-	if got := fatalCheckReason("some_future_check"); got != GateCheckOther {
-		t.Errorf("unnamed fatal check = %q", got)
+	// A sum failure that no operation claims does not gate (#1465): the library decides, with Withhold. A claimed one does.
+	zero, one := 0, 1
+	unclaimed := accountant.Result{Ops: res.Ops, Checks: []accountant.CheckFailure{{Check: accountant.CheckSum, Section: accountant.SectionMessages, Claims: &zero}}}
+	claimed := accountant.Result{Ops: res.Ops, Checks: []accountant.CheckFailure{{Check: accountant.CheckSum, Section: accountant.SectionMessages, Claims: &one}}}
+	if r, _ := Gate(unclaimed, fig, ok); r != "" {
+		t.Errorf("an unclaimed sum failure gated: %q", r)
+	}
+	if r, _ := Gate(claimed, fig, ok); r != GateCheckSum {
+		t.Errorf("a claimed sum failure gives %q, want %q", r, GateCheckSum)
+	}
+	// The same rule as the metrics push, which calls Withhold with no size.
+	if accountant.Withhold(unclaimed, accountant.SizeNotGiven) != "" || accountant.Withhold(claimed, accountant.SizeNotGiven) != GateCheckSum {
+		t.Error("the gate and accountant.Withhold disagree")
 	}
 }

@@ -9,21 +9,27 @@ import (
 )
 
 // The reasons a request books no accountant figure (Gate). The dashboard stores them as requests.acc_fallback, and
-// the /stats ledger counts the same requests as unpriced (#1441). One decision, so a request the row refuses is
+// the /stats ledger counts the same requests as unpriced (#1441, #1465). One decision, so a request the row refuses is
 // unpriced on /stats too.
+//
+// The library's reasons are the ones accountant.Withhold returns, so the dashboard row, /stats and the metrics push
+// gate with one rule, and the accountant decides alone: checks, unpriced operations and the size bound.
 const (
-	GateOpsDropped         = "ops_dropped"          // a change could not be placed as an operation
-	GateObserve            = "observe"              // the run was observe mode
-	GateUnpriced           = "unpriced"             // an operation or effect is unpriced
-	GateCheckSum           = "check_sum"            // the library's sum check failed
-	GateCheckUniqueChange  = "check_unique_change"  // two operations share a ChangeID
-	GateCheckSpans         = "check_spans"          // an operation's spans do not add up to its sizes
-	GateCheckOther         = "check_other"          // a fatal library check this host has no name for
-	GateSizeUnknown        = "size_unknown"         // TokensBefore is 0: the plausibility bound cannot be checked
-	GateImplausibleSize    = "implausible_size"     // the library saved more tokens than the request had
-	GateFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
-	GateDuplicateName      = "duplicate_name"       // two rows share a component name
-	GateActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
+	GateCheckSum          = accountant.WithheldCheckSum          // library: the sum check failed (not one that no operation claims)
+	GateCheckUniqueChange = accountant.WithheldCheckUniqueChange // library: two operations share a ChangeID
+	GateCheckSpans        = accountant.WithheldCheckSpans        // library: an operation's spans do not add up to its sizes
+	GateCheckOther        = accountant.WithheldCheckOther        // library: a fatal check with no reason of its own
+	GateUnpriced          = accountant.WithheldUnpriced          // library: an operation or effect is unpriced
+	// The size bound is the host's. Withhold's bound adds the tokens of every operation, tool declarations included,
+	// and the host's measure (TokensBefore) counts message text only (#907). The push gives no measure, so it skips it.
+	GateSizeUnknown     = "size_unknown"     // host: TokensBefore is 0, so the plausibility bound cannot be checked
+	GateImplausibleSize = "implausible_size" // host: the library saved more message tokens than the request had
+	// The other host gates: what only the host knows, the change list, the run mode and its own rows.
+	GateOpsDropped         = "ops_dropped"          // host: a change could not be placed as an operation
+	GateObserve            = "observe"              // host: the run was observe mode
+	GateFigureWithoutRow   = "figure_without_row"   // host: a library figure for a component with no row
+	GateDuplicateName      = "duplicate_name"       // host: two rows share a component name
+	GateActedWithoutFigure = "acted_without_figure" // host: a component acted and the library has no figure for it
 )
 
 // The rows a host adds for a figure that no pipeline component owns.
@@ -135,8 +141,9 @@ func ComponentFigure(res accountant.Result, fig accountant.USDFigure, rows []Gat
 }
 
 // Gate says why a request books no accountant figure, or "" when it does. detail is the library's "opID:reason" for
-// GateUnpriced. fig is the library's own figure for res. The gates, in order: a change dropped, an observe run, a fatal
-// library check, an unpriced operation or effect (penalty_unknown does not gate: see Held), the size bound
+// GateUnpriced. fig is the library's own figure for res. The gates, in order: a change dropped, an observe run, the
+// library's (accountant.Withhold: a fatal check, an unpriced operation or effect; penalty_unknown does not gate: see
+// Held), the host's size bound
 // (TokensBefore unknown, or more tokens saved than the request had), then the rows: a figure for a component with no
 // row, a row that the host adds for the ended change or the interaction when a component has that name already, two
 // rows with one name, and a component that acted with no figure.
@@ -149,16 +156,19 @@ func Gate(res accountant.Result, fig accountant.USDFigure, in GateIn) (reason, d
 	case in.Observe:
 		return GateObserve, ""
 	}
-	for _, c := range res.Checks {
-		if c.Fatal() {
-			return fatalCheckReason(c.Check), ""
+	// The library's gates: Withhold decides alone (checks, unpriced operations and effects). A sum failure that no
+	// operation claims does not gate (#1465). The size gate is the host's, below.
+	if r := accountant.Withhold(res, accountant.SizeNotGiven); r != "" {
+		detail := ""
+		if r == accountant.WithheldUnpriced {
+			for _, u := range fig.Unpriced {
+				if !strings.HasSuffix(u, ":"+accountant.ReasonPenaltyUnknown) {
+					detail = strings.TrimPrefix(u, ":") // "opID:reason"; a request-level refusal has no operation
+					break
+				}
+			}
 		}
-	}
-	for _, u := range fig.Unpriced {
-		if !strings.HasSuffix(u, ":"+accountant.ReasonPenaltyUnknown) {
-			// "opID:reason". A request-level refusal has no operation, so its id is empty: drop the colon.
-			return GateUnpriced, strings.TrimPrefix(u, ":")
-		}
+		return r, detail
 	}
 	if in.TokensBefore <= 0 {
 		return GateSizeUnknown, ""
@@ -206,18 +216,4 @@ func Gate(res accountant.Result, fig accountant.USDFigure, in GateIn) (reason, d
 		}
 	}
 	return "", ""
-}
-
-// fatalCheckReason names a fatal library check. The library decides which checks are fatal. A fatal check this switch
-// does not know gates all the same, as GateCheckOther, so a check the library adds later never passes silently.
-func fatalCheckReason(check string) string {
-	switch check {
-	case accountant.CheckSum:
-		return GateCheckSum
-	case accountant.CheckUniqueChange:
-		return GateCheckUniqueChange
-	case accountant.CheckSpans:
-		return GateCheckSpans
-	}
-	return GateCheckOther
 }
