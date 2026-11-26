@@ -24,6 +24,26 @@ duplicate again.
 | 12 | Per-message digests outside the canonical form | #799, PR #800 (comments only) |
 | - | Bifrost session id ignored metadata | #804, PR #805 |
 
+## 2026-11-24 host-leak audit (tracking #1309)
+
+Rows are leaks of business logic out of the host packages. All issues are closed, except #1441.
+
+| # | Concern | Result |
+|---|---|---|
+| 1 | Two proxy and library results that differ (server-held history, replay prefix floor) | #1298, a decision |
+| 2 | Tool-deferral flow in the proxy | #1299, PR #1325 |
+| 3 | Compaction-point choice in the proxy | #1300, PR #1320 |
+| 4 | Keep-alive policy resolution in the proxy | #1301, PRs #1328, #1338 |
+| 5 | Campaign, replay and fidelity math in the proxy | #1302, PRs #1332, #1333, #1334 |
+| 6 | The rest of the accountant glue in the proxy | #1303, PRs #1337, #1370, #1382 |
+| 7 | Config-document editors in proxy and dash | #1304, PR #1336 |
+| 8 | The steps around each request (Prepare and Finish) | #1305, PRs #1358, #1359 |
+| 9 | In-band tool loop and SSE splicing | #1306, PR #1360 |
+| 10 | Request and response fact parsing | #1307, PRs #1352, #1353 |
+| 11 | Internal packages that Cortex needs | #1308, PR #1369 |
+| 12 | Dashboard savings math in dash | #1440, PR #1462 |
+| 13 | Tool-deferral savings figure, not from the accountant | #1441, open |
+
 ## How to add a run
 
 After each run, add its findings below the table above, with the date of the run. Use the same

@@ -27,6 +27,11 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
 - **A compatibility fallback for stored values must cover every form the new rule merges.** Find
   out if stored keys or hashes change, and if there is a version field.
 
+- **Fail open covers moved code too.** Accountant or booking code on the request path, or in a
+  handler's defer, runs under a `recover` that logs and drops. #1445 had a gap here.
+- **A cost or saving formula belongs in the accountant.** Move it there, release a tag, and call it.
+  Do not leave a second formula in a host or a library package.
+
 ### Cost
 
 - **The hot path must not get slower.** PR #813's prefilter passed every body with `\u`. Go's
@@ -41,8 +46,10 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   with the fix disabled, and report the failure. PR #822's first-block test passed under the old
   rule until its fixture was changed.
 - **A test that checks source text is not a test.** Drive a real request through the test harness.
-- **Run the full suite of each touched package**, and of its direct dependents if an exported API
-  changed. Run `go vet` and `gofmt -l` at the final head, with no output filter.
+- **Run the full non-race suite of each touched package**, and of its direct dependents if an
+  exported API changed. Use `-race` only where [CLAUDE.md, Working on a task](../../../CLAUDE.md#working-on-a-task)
+  allows it: not on `proxy` or `dash` while the interim rule holds. Run `go vet` and `gofmt -l` at
+  the final head, with no output filter.
 - **Find the name of a failing test before you call it flaky.** Keep the full output in a file. Then
   run the same test on an unmodified origin/main.
 

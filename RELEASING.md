@@ -139,6 +139,8 @@ A review without this block does not count toward the 2.
   9. **A semantic conflict that a file-overlap check cannot see.** A test can read a table that another PR removes. In v0.7.2, the pi-package test read `STRATEGIES` from `settings.py` after #1055 removed it. Only CI catches this. The CI of a clean merge of `main` runs on the push. Do not wait for it only because another PR merged. The watch on `main` after each merge (see [Merge](#3-merge)) catches it.
   10. **A conflict in `docs/data-dependence.md`** is not a hand resolution. That page is generated from the row files in `docs/data-dependence/`. The subagent takes either side and runs `go run ./cmd/gen-datadep`. A row-file conflict (two PRs edited the same row) still goes to the PR owner. The remerge-diff may show the page; check that it equals the generator's output.
 
+**Run main's copy of a release script, never an old checkout's copy.** Use `git show origin/main:scripts/release/<name>.sh | bash -s -- <args>`, or run the script from a worktree at `origin/main`. An old copy of `approval-still-valid.sh` once printed `CHANGED` where the copy on `main` printed `LISTS ONLY`.
+
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
 - the last review round has an `approve` from reviewer 1 and from reviewer 2, both at this head. Each review carries a marker line, `<!-- offload-review reviewer= round= sha= backend= verdict= -->`;
@@ -190,6 +192,7 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   - After each merge, watch the CI of `main`. If it turns red, fix forward with a fix PR. Do not revert a good PR, unless the fix is not clear.
   - **Why:** a serial re-run costs about one full CI run (about 40 minutes) for each pair of PRs. A break between 2 green PRs is rare: about 1 in 30 merges in the v0.7.4 cycle. A fix PR is cheap.
   - **Exception 1:** a merge of `main` that the integrator resolved by hand in code gets its CI first. In v0.7.4, a hand merge lost a SQL placeholder (#1173).
+  - **Exception 3:** `main` moved in the same packages as the PR since its approval. Before the merge, the integrator runs a merged-tree check: build, `go vet ./...`, and the tests of the touched packages. Two green PRs once broke `main` together (#1407 and #1410, fixed by #1426). This check does not wait for a full CI run. It runs on the merged tree.
   - **Exception 2:** the tag. `main` must be green at the tagged commit.
   - **Note:** GitHub's merge queue does this automatically. It tests each PR on top of the PRs ahead of it. Turning it on is a repo setting for the owner.
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
@@ -222,6 +225,8 @@ A stacked PR targets another PR's branch, not `main`. After the parent is squash
 - **A `202` is not a merge.** Read the PR state back from GitHub.
 
 **Check that the child's own change is unchanged:** the added and removed lines of `git diff origin/main...<head>` match the approved change.
+
+When the child's base was squash-merged, the integrator merges `main` into the child. Then it checks that the added and removed lines equal the approved diff (the old base head to the PR head). If they are equal, the approvals hold (#1414).
 
 This section is about a stacked PR. For a ready PR that waits only for a merge of `main`, the integrator does the merge (see [Check that a PR is ready](#check-that-a-pr-is-ready)). A semantic conflict there still goes to the PR owner.
 
