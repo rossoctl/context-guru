@@ -40,7 +40,8 @@ The launcher checks the proxy, restarts its user service if it is down, and runs
 `codex --profile context-guru`. If the proxy cannot be brought up it prints a warning and starts
 plain `codex` instead, so you are never locked out. Plain `codex` is never routed. The first run
 also asks you to trust the plugin's `SessionStart` hook (`/hooks`); the hook only prints a
-warning when a session is unrouted or its proxy has died, it cannot change transport.
+warning when the launcher did not start the session. It does not check the proxy: run
+`$context-guru-doctor` for proxy health. The hook cannot change transport.
 
 `$context-guru-onboarding` walks a new user through this, and `$context-guru-doctor` checks each
 link (Codex on PATH, profile, default provider untouched, binary, launcher, proxy health, whether

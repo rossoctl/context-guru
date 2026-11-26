@@ -457,11 +457,22 @@ screen_reader_detection_done = true
             self.assertEqual(PLUGIN.setup(args), 2)
         self.assertIn("result=config_conflict", out.getvalue())
         self.assertIn("unmanaged profile", out.getvalue())
+        self.assertIn(f"config={PLUGIN.profile()}", out.getvalue())
         install.assert_not_called()
         self.assertEqual(PLUGIN.profile().read_text(), "model = 'mine'\n")
         with self.assertRaises(RuntimeError):
             PLUGIN.install_default_route(PLUGIN.main_config(), PLUGIN.routing_state(), 8791, {})
         self.assertEqual(PLUGIN.profile().read_text(), "model = 'mine'\n")
+
+    def test_the_install_record_is_written_private_even_over_an_open_file(self):
+        PLUGIN.state_dir().mkdir(parents=True)
+        record = PLUGIN.state_dir() / "install.json"
+        record.write_text("{}")
+        record.chmod(0o644)
+        PLUGIN.write_record({"port": 8791, "provider": {"experimental_bearer_token": "t"}})
+        self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(record.read_text())["port"], 8791)
+        self.assertFalse((PLUGIN.state_dir() / "install.json.tmp").exists())
 
     def _doctor(self, **env):
         with mock.patch.dict(os.environ, {"CODEX_BIN": "/bin/codex", **env}), \

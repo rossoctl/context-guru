@@ -119,6 +119,17 @@ def first_free_port():
     raise RuntimeError("no free port in 8787..8887")
 
 
+def write_record(record, directory=None):
+    """Write install.json at mode 0600 (it holds the provider's bearer token)."""
+    path = (directory or state_dir()) / "install.json"
+    temporary = path.with_name("install.json.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(json.dumps(record, indent=2) + "\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
 def read_record():
     try:
         return json.loads((state_dir() / "install.json").read_text())
@@ -400,7 +411,7 @@ def restart_proxy(record):
         return False
     record["pid"] = process.pid
     record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     return True
 
 
@@ -611,9 +622,13 @@ def setup(args):
         return 2
     try:
         check_proxy_config_writable()
-        check_profile_writable(main_config())
     except Exception as error:
         facts(result="config_conflict", config=proxy_config(), detail=error)
+        return 2
+    try:
+        check_profile_writable(main_config())
+    except Exception as error:
+        facts(result="config_conflict", config=profile(), detail=error)
         return 2
     executable = find_binary()
     if not executable:
@@ -641,7 +656,7 @@ def setup(args):
             load_strategy_table(executable)
             if existing.get("binary") and existing["binary"] != executable:
                 existing["binary"] = executable
-                (state_dir() / "install.json").write_text(json.dumps(existing, indent=2) + "\n")
+                write_record(existing, state_dir())
             write_proxy_config(executable)
     except RuntimeError as error:
         facts(result="strategies_unavailable", detail=error)
@@ -661,7 +676,7 @@ def setup(args):
             return 1
         existing.update(config=str(main_config()), provider=provider,
                         upstream=provider.get("base_url"))
-        (state_dir() / "install.json").write_text(json.dumps(existing, indent=2) + "\n")
+        write_record(existing, state_dir())
         facts(result="already_running", port=port, config=main_config(), reset=reset,
               launch=state_dir() / "context-guru-codex")
         return 0
@@ -684,7 +699,7 @@ def setup(args):
     record = {"port": port, "pid": process.pid, "binary": executable,
               "config": str(main_config()), "upstream": upstream, "provider": provider,
               "service": "systemd" if platform.system() == "Linux" else "launchd"}
-    (root / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, root)
     facts(result="installed", port=port, config=main_config(), reset=reset, launch=state_dir() / "context-guru-codex")
     return 0
 
@@ -701,7 +716,7 @@ def revive(record):
         return False
     record["pid"] = process.pid
     record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     return True
 
 
@@ -796,7 +811,7 @@ def serve(_args):
     if not port or not executable or not is_routed(main_config()) or healthy(port):
         return 0
     record["pid"] = os.getpid()
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     log_fd = os.open(state_dir() / "proxy.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(log_fd, 1)
     os.dup2(log_fd, 2)
@@ -961,7 +976,7 @@ def update(args):
         return 1
     record.update(pid=process.pid, binary=executable)
     record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     facts(result="updated", version=version, restart="completed", port=port)
     return 0
 
