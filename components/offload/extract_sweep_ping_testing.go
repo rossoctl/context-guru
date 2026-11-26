@@ -25,7 +25,7 @@ func RegisterSweepPingForTest(session, threadID string, st store.Store, asker co
 	}
 	c := &components.Ctx{Ctx: context.Background(), Session: session, Thread: threadID, Store: st,
 		PrefixAsk: asker, ModelName: model, CtxWindow: 1_000_000, MaxCachedIdx: -1,
-		CanKeepAlive: func() bool { return true }} // the keeper under test can ping this thread
+		CanSweepAtPing: func() bool { return true }} // the keeper under test can ping this thread
 	_, err = built.(*ExtractSweep).Offload(&bschemas.BifrostChatRequest{Input: msgs},
 		&components.Report{Component: "extract_llm_sweep"}, c)
 	return err

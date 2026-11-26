@@ -565,8 +565,8 @@ func TestNoAskerOrObserveModeRegistersNothing(t *testing.T) {
 		{"observe mode", func(c *components.Ctx) { c.Mode = components.ModeObserve }},
 		{"bypass", func(c *components.Ctx) { c.Bypass = true }},
 		// Review round 1: a thread the keep-alive will never ping keeps no conversation copy.
-		{"keep-alive off for the thread", func(c *components.Ctx) { c.CanKeepAlive = func() bool { return false } }},
-		{"no keep-alive hook at all", func(c *components.Ctx) { c.CanKeepAlive = nil }},
+		{"keep-alive off for the thread", func(c *components.Ctx) { c.CanSweepAtPing = func() bool { return false } }},
+		{"no keep-alive hook at all", func(c *components.Ctx) { c.CanSweepAtPing = nil }},
 	} {
 		c := preExpiryCtx("noreg-"+tc.name, pingAsker(), newMemStore())
 		tc.mod(c)
@@ -846,7 +846,7 @@ func TestTheConcurrencyBoundIsCheckedBeforeCollection(t *testing.T) {
 func TestWithKeepAliveOffNothingIsRegistered(t *testing.T) {
 	e := shippedSweep(t, "")
 	c := preExpiryCtx("ka-off", pingAsker(), newMemStore())
-	c.CanKeepAlive = func() bool { return false }
+	c.CanSweepAtPing = func() bool { return false }
 	before := SweepPingCounters().NotRegistered
 	if _, err := e.Offload(deepCandidates(3), &components.Report{}, c); err != nil {
 		t.Fatal(err)

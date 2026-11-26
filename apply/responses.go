@@ -617,9 +617,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		CtxWindow: o.Window, CtxWindowExact: o.WindowExact, CompactionPoint: o.CompactionPoint,
 		CompactionPointSource: o.CompactionPointSource, ModelName: gjson.GetBytes(o.Body, "model").String(),
 		Mode: mode, CacheAware: cacheAware, MaxCachedIdx: maxCachedIdx, IdleMs: idleMs,
-		PrefixAsk:    o.PrefixAsk,
-		CanKeepAlive: canKeepAliveFor(o.CanKeepAlive, res.Session, res.Thread.ID),
-		CacheTTLMs:   ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
+		PrefixAsk:      o.PrefixAsk,
+		CanSweepAtPing: canSweepAtPingFor(sweepAtPingOf(o), res.Session, res.Thread.ID),
+		CacheTTLMs:     ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
 		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	res.Run = pipe.Run(chat, c)

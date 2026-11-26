@@ -118,7 +118,7 @@ func (r *v3Rig) request(p int) (*bschemas.BifrostChatRequest, *components.Report
 		c.SelfRates, c.ModelName = r.rates, r.model
 	}
 	if r.noKA {
-		c.CanKeepAlive = func() bool { return false }
+		c.CanSweepAtPing = func() bool { return false }
 	}
 	if r.unknown {
 		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3
@@ -878,7 +878,7 @@ func TestV3AColdApplyThatChangesNothingStillClearsTheHybridQuestion(t *testing.T
 	warmHold(tkey, heldAnswer{V: heldVersion, Thread: tkey, AskedAtMs: time.Now().UnixMilli(), Judged: 3,
 		Outputs: []heldOutput{{ToolUseID: "gone", Hash: "x", Tokens: 100, Saves: 90, Drop: true}}})
 	c := coldCtx("v3-cold-clear", newMemStore())
-	c.CanKeepAlive = nil
+	c.CanSweepAtPing = nil
 	req := refConversation(3)
 	_, changed := e.v3Dispatch(req, &components.Report{Component: "extract_llm_sweep"}, c, tkey,
 		v3In{cold: true, hasHeld: true})

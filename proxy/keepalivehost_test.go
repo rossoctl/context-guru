@@ -635,35 +635,65 @@ func TestOpenAIKeepAliveIgnoresAnthropicIntervalControls(t *testing.T) {
 	}
 }
 
-// canPing is the gate for the sweep's conversation copies (#404 review): a thread the keep-alive cannot
+// canSweepAtPing is the gate for the sweep's conversation copies (#404 review): a thread the keep-alive cannot
 // ping keeps nothing extra. It follows the resolved policy, the kill switch and the audit-sink rule.
-func TestCanPingFollowsTheKeepAlivePolicy(t *testing.T) {
+func TestCanSweepAtPingFollowsTheKeepAlivePolicy(t *testing.T) {
 	on := &Tenancy{ID: "t1", Cache: kaPolicy()}
 	offPol := kaPolicy()
 	offPol.KeepAlive = false
 	off := &Tenancy{ID: "t1", Cache: offPol}
 	k, _, _ := testKeeper(t, Limits{})
-	if !k.canPing(on, "sess-1", "", bschemas.Anthropic) {
-		t.Error("keep-alive on: canPing = false")
+	if !k.canSweepAtPing(on, "sess-1", "", bschemas.Anthropic) {
+		t.Error("keep-alive on: canSweepAtPing = false")
 	}
-	if k.canPing(off, "sess-1", "", bschemas.Anthropic) {
-		t.Error("keep-alive off: canPing = true, so a conversation copy would be kept for nothing")
+	if k.canSweepAtPing(off, "sess-1", "", bschemas.Anthropic) {
+		t.Error("keep-alive off: canSweepAtPing = true, so a conversation copy would be kept for nothing")
 	}
-	if k.canPing(on, "", "", bschemas.Anthropic) {
-		t.Error("no session: canPing = true")
+	if k.canSweepAtPing(on, "", "", bschemas.Anthropic) {
+		t.Error("no session: canSweepAtPing = true")
 	}
-	if k.canPing(on, "sess-1", "", bschemas.OpenAI) {
+	if k.canSweepAtPing(on, "sess-1", "", bschemas.OpenAI) {
 		t.Error("OpenAI: the sweep's question is Anthropic only")
 	}
-	if k.canPing(nil, "sess-1", "", bschemas.Anthropic) {
-		t.Error("nil tenancy: canPing = true")
+	if k.canSweepAtPing(nil, "sess-1", "", bschemas.Anthropic) {
+		t.Error("nil tenancy: canSweepAtPing = true")
 	}
 	k.h.rec = nil
-	if !k.canPing(on, "sess-1", "", bschemas.Anthropic) {
-		t.Error("single-tenant, no dashboard: canPing = false (#1457)")
+	if !k.canSweepAtPing(on, "sess-1", "", bschemas.Anthropic) {
+		t.Error("single-tenant, no dashboard: canSweepAtPing = false (#1457)")
 	}
 	k.h.opts.Tenants = &TenantSource{} // hosted: the no-audit-sink rule applies
-	if k.canPing(on, "sess-1", "", bschemas.Anthropic) {
-		t.Error("hosted, no audit sink: canPing = true, but the keeper holds nothing without one")
+	if k.canSweepAtPing(on, "sess-1", "", bschemas.Anthropic) {
+		t.Error("hosted, no audit sink: canSweepAtPing = true, but the keeper holds nothing without one")
+	}
+}
+
+// #1459: the rename from CanKeepAlive to CanSweepAtPing changed no answer. Anthropic with a recorder is
+// true, OpenAI is false (the sweep's question is Anthropic only, though the keeper pings OpenAI), and a
+// hosted proxy with no recorder is false.
+func TestCanSweepAtPingKeepsItsAnswers(t *testing.T) {
+	on := &Tenancy{ID: "t1", Cache: kaPolicy()}
+	k, _, _ := testKeeper(t, Limits{})
+	for _, tc := range []struct {
+		name     string
+		hosted   bool
+		noRec    bool
+		provider bschemas.ModelProvider
+		want     bool
+	}{
+		{"anthropic, with a recorder", false, false, bschemas.Anthropic, true},
+		{"openai, with a recorder", false, false, bschemas.OpenAI, false},
+		{"anthropic, hosted, no recorder", true, true, bschemas.Anthropic, false},
+		{"openai, hosted, no recorder", true, true, bschemas.OpenAI, false},
+	} {
+		if tc.noRec {
+			k.h.rec = nil
+		}
+		if tc.hosted {
+			k.h.opts.Tenants = &TenantSource{}
+		}
+		if got := k.canSweepAtPing(on, "sess-1", "", tc.provider); got != tc.want {
+			t.Errorf("%s: canSweepAtPing = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
