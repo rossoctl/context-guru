@@ -790,6 +790,10 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		in := warmEconIn{Removed: removed, Rewritten: rewritten,
 			RatioContent: content, RatioFull: full, Read: read, Write: write, Turns: turns}
 		saving, rewrite := warmEcon(in)
+		if wa.tier != nil {
+			// A cut aimed below a price-tier line: the saving is the step down in the read rate (extract_sweep_tier.go).
+			saving, rewrite, in.Turns = e.tierEcon(c, wa.tier, in, c.PrevBilledInputThread)
+		}
 		d.TurnsModel, d.TurnsRaw, d.Cut, d.GrowthPerTurn, d.TurnsWhy = te.Model, te.Raw, te.Cut, te.GrowthPerTurn, te.Why
 		d.RemovedLocal, d.RemovedBilled = removed, int(float64(removed)*content)
 		d.RewrittenLocal, d.RewrittenBilled = rewritten, int(float64(rewritten)*full)

@@ -378,3 +378,17 @@ func TestFinishOrderPinsCountersBeforeBilledInput(t *testing.T) {
 		t.Errorf("the counters run after the ledger and before the billed-input writes: %s", got)
 	}
 }
+
+func TestRatesCarryTheTiers(t *testing.T) {
+	p := modelinfo.Price{Input: 5, Output: 30, CacheRead: 0.5, CacheWrite: 6.25}.WithTiers("gpt-5.6")
+	got := components.RatesOf(p)
+	if line, ok := got.LineBelow(300_000); !ok || line != 272_000 {
+		t.Fatalf("line = %d %v", line, ok)
+	}
+	if r := got.At(300_000); r.Input != 10 || r.CacheRead != 1 || r.Output != 45 {
+		t.Fatalf("rates above the line = %+v", r)
+	}
+	if _, ok := components.RatesOf(modelinfo.Price{Input: 5, Output: 30}).LineBelow(900_000); ok {
+		t.Fatal("a flat price has no line")
+	}
+}

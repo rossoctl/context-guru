@@ -735,6 +735,17 @@ expanded in this session.
 
 `not_in_sweet_spot`, `cut_point_unknown`, and in rule mode `drop_too_small` and `no_rule_drops`, are counted once per `warm_every_n` warm requests. Each leaves a `cg.sweep.warm_decision` line with D, D/P, C, `c_source` and `rule_d` (D by rule, for example `rule_d=build_rerun:567,unreferenced:8901`). `rule_d` is on every apply-stage decision line, accepted or refused, `does_not_pay` included.
 
+**Tier target (`tier_target`, off by default).** Some prices bill the whole request at higher rates above a prompt size
+(OpenAI GPT-5.4 and later above 272K, Haiku 5.5 above 100K). Below the sweet spot the sweep does nothing. With
+`tier_target: true`, a request above such a line may be cut to just below it. It does nothing without v3 and does not
+switch v3 on. The lines and rates come from the price table (`Price.Tiers`), not from constants. A flat price has no line.
+- **Goal.** `line - margin`. The margin is 8 turns of the session's billed growth, at least 4% and at most 10% of the line
+  (10.9K to 27.2K at 272K). It keeps the next turns from crossing back at once.
+- **Gates.** The cut must reach the goal (`tier_line_not_reached` otherwise). Then the warm gate runs with tier rates: the
+  saving is the step down in the per-turn read cost, counted for the turns until the prompt grows back to the line, at most.
+  The rewrite is the cache write after the cut. Output is not counted. A request in the sweet spot keeps today's gate.
+- **Same cut.** The marker and the stash are the same as for every other cut.
+
 **Dry run (`dry_run`, an experiment, off by default).** For a paired test of Context Guru in the path with no cut ever. With
 `dry_run: true` everything runs as a normal v3 run, but no drop is applied on any path: warm, cold (a Store or a memory
 answer), changed-prefix and the v3 cold branch. The gates run and their decision lines are written. Each cut the gate

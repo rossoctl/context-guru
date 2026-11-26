@@ -18,9 +18,7 @@ func SelfRates(ctx context.Context, p modelinfo.Pricer, model string) components
 	if !ok || pr.Zero() {
 		return components.TokenRates{}
 	}
-	return components.TokenRates{
-		Input: pr.Input, Output: pr.Output, CacheRead: pr.CacheRead, CacheWrite: pr.CacheWrite,
-	}
+	return components.RatesOf(pr)
 }
 
 // RatesFor hands the pipeline the operator's rate card as a lookup by model name, so a component

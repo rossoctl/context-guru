@@ -1008,6 +1008,47 @@ type TokenRates struct {
 	Output     float64
 	CacheRead  float64
 	CacheWrite float64
+	// Tiers are the rates a request bills above a prompt size (the price table's tiers, resolved to
+	// absolute rates). All zero means a flat price. Read them with At and LineBelow.
+	Tiers [MaxRateTiers]RateTier
+}
+
+// MaxRateTiers is how many tiers TokenRates holds. It matches modelinfo.MaxTiers.
+const MaxRateTiers = 3
+
+// RateTier is one price tier as absolute per-token rates. AbovePromptTokens 0 means the entry is unused.
+type RateTier struct {
+	AbovePromptTokens                    int64
+	Input, Output, CacheRead, CacheWrite float64
+}
+
+// At returns the rates for a request with promptTokens prompt tokens. Above a tier's line the tier's
+// rates apply to every token. With several tiers, the highest line below the prompt size wins. The result
+// has no tiers.
+func (r TokenRates) At(promptTokens int64) TokenRates {
+	var t *RateTier
+	for i := range r.Tiers {
+		c := &r.Tiers[i]
+		if c.AbovePromptTokens > 0 && promptTokens > c.AbovePromptTokens && (t == nil || c.AbovePromptTokens > t.AbovePromptTokens) {
+			t = c
+		}
+	}
+	q := TokenRates{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
+	if t != nil {
+		q = TokenRates{Input: t.Input, Output: t.Output, CacheRead: t.CacheRead, CacheWrite: t.CacheWrite}
+	}
+	return q
+}
+
+// LineBelow returns the highest tier line that promptTokens is above. ok is false when the price is flat
+// or the prompt is at or below every line.
+func (r TokenRates) LineBelow(promptTokens int64) (line int64, ok bool) {
+	for i := range r.Tiers {
+		if c := r.Tiers[i].AbovePromptTokens; c > 0 && promptTokens > c && c > line {
+			line, ok = c, true
+		}
+	}
+	return line, ok
 }
 
 // Zero reports whether no rate is known.

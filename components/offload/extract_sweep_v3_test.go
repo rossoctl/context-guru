@@ -85,6 +85,9 @@ type v3Rig struct {
 	noKA    bool
 	// unknown makes the cache phase unknown, as on IBM Bob's route (#1191).
 	unknown bool
+	// rates and model are the request's price card and model id (tier target tests). Zero = the rig's default.
+	rates components.TokenRates
+	model string
 }
 
 func newV3Rig(t *testing.T, session, cfg string) *v3Rig {
@@ -111,6 +114,9 @@ func (r *v3Rig) request(p int) (*bschemas.BifrostChatRequest, *components.Report
 	c.CtxWindow, c.CtxWindowExact, c.CompactionPoint = r.window, true, r.c
 	c.CompactionPointSource, c.CutFrac = r.cSource, r.cutFrac
 	c.PrevBilledInput, c.PrevBilledInputThread = p, p
+	if !r.rates.Zero() {
+		c.SelfRates, c.ModelName = r.rates, r.model
+	}
 	if r.noKA {
 		c.CanKeepAlive = func() bool { return false }
 	}
