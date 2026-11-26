@@ -2,6 +2,7 @@ package record
 
 import (
 	"encoding/json"
+	"github.com/rossoctl/context-guru/agent"
 	"net/http"
 	"strings"
 	"testing"
@@ -77,22 +78,23 @@ func TestWireRedactsBothBodies(t *testing.T) {
 	}
 }
 
-// The client's headers are recorded as sent, except any that carries a credential. A credential
-// in a header nobody expected is still caught, by redacting every value.
+// Only allowlisted headers are recorded, and their values are redacted too. A header nobody
+// listed is dropped, whatever its name or value. A credential pasted into a listed header's value
+// is caught by the redaction.
 func TestWireHeadersDropCredentials(t *testing.T) {
 	key := "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-BBBB"
 	h := http.Header{
-		"Authorization":            {"Bearer " + key},
-		"X-Api-Key":                {key},
-		"Cookie":                   {"session=abc"},
-		"X-Context-Guru-Token":     {"cg_live_abcdefghijklmnopqrstuvwxyz"},
-		"X-Some-Access-Token":      {"opaque"},
-		"Anthropic-Version":        {"2023-06-01"},
-		"X-Claude-Code-Session-Id": {"6d1f2a44-9e3b-4c7a-8f21-0b5d7c9e1a33"},
-		"X-Debug-Note":             {"pasted " + key},
-		"X-Passwd":                 {"sk-test-SECRET-123"},
-		"X-Signature":              {"sk-test-SECRET-123"},
-		"X-Stainless-Lang":         {"js"},
+		"Authorization":          {"Bearer " + key},
+		"X-Api-Key":              {key},
+		"Cookie":                 {"session=abc"},
+		"X-Context-Guru-Token":   {"cg_live_abcdefghijklmnopqrstuvwxyz"},
+		"X-Some-Access-Token":    {"opaque"},
+		"Anthropic-Version":      {"2023-06-01"},
+		"X-Claude-Code-Agent-Id": {"6d1f2a44-9e3b-4c7a-8f21-0b5d7c9e1a33"},
+		"X-Debug-Note":           {"pasted " + key},
+		"X-Passwd":               {"sk-test-SECRET-123"},
+		"X-Signature":            {"sk-test-SECRET-123"},
+		"X-Stainless-Lang":       {"js"},
 	}
 	b, _ := Wire(WireCall{Path: "/v1/messages", Headers: h, Request: []byte(`{}`),
 		Response: []byte(`{}`), Status: 200, Start: time.Now(), End: time.Now()}, 0)
@@ -102,7 +104,7 @@ func TestWireHeadersDropCredentials(t *testing.T) {
 			t.Errorf("credential header %q was written", gone)
 		}
 	}
-	if got["anthropic-version"] != "2023-06-01" || got["x-claude-code-session-id"] == nil {
+	if got["anthropic-version"] != "2023-06-01" || got["x-claude-code-agent-id"] == nil {
 		t.Errorf("ordinary headers missing: %v", got)
 	}
 	for _, gone := range []string{"x-passwd", "x-signature", "x-debug-note"} {
@@ -141,5 +143,19 @@ func TestAllowedHeadersCopiesOnlyListedNames(t *testing.T) {
 	out["Anthropic-Beta"][0] = "changed"
 	if in["Anthropic-Beta"][0] != "a" {
 		t.Error("the copy shares memory with the input")
+	}
+}
+
+// The record allowlist holds every correlation header the agent package names, so the two lists
+// cannot drift, and none of them is a credential name.
+func TestAllowlistHoldsEveryAgentCorrelationHeader(t *testing.T) {
+	names := agent.CorrelationHeaders()
+	if len(names) == 0 {
+		t.Fatal("agent.CorrelationHeaders is empty")
+	}
+	for _, n := range names {
+		if !headerAllowed(n) {
+			t.Errorf("agent header %q is not in the record allowlist", n)
+		}
 	}
 }

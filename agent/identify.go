@@ -221,3 +221,22 @@ func (c Client) SubagentID() string {
 	}
 	return ""
 }
+
+// TaskIDHeader is the header the Bob IDE sends its task id in. It is here, not in package bob,
+// because package bob imports this package. Readers: agent/bob (SessionID), apply (the host id of
+// a route) and proxy/recctx.go (the recorder's session key).
+const TaskIDHeader = "x-task-id"
+
+// CorrelationHeaders lists the request headers that only carry a client's session, thread or task
+// id, read by Identify and by the agents' SessionID. They are random ids, not credentials, so a
+// recorder may write them. It is built from the same constants the parsers use, so a new id
+// header added to a parser is added here in one place. Claude Code names its session in the body
+// (see Identify), so no session header of it is listed.
+func CorrelationHeaders() []string {
+	return []string{
+		claudecode.AgentHeader,
+		codex.SessionHeader, codex.ThreadHeader, codex.ParentThreadHeader,
+		opencode.SessionHeader, opencode.ParentSessionHeader,
+		TaskIDHeader,
+	}
+}

@@ -43,12 +43,14 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+
+	"github.com/rossoctl/context-guru/agent"
 )
 
 // WireCall is one proxied call, as the proxy hands it over. Bodies are RAW; Wire redacts them.
 type WireCall struct {
 	Path        string
-	Headers     http.Header // as the client sent them; Wire removes credentials
+	Headers     http.Header // as the client sent them; Wire keeps allowlisted names only
 	Request     []byte
 	Response    []byte
 	ResponseSSE bool
@@ -78,36 +80,37 @@ type wireLine struct {
 //   - content negotiation and client identity: content-type, accept, accept-encoding, user-agent;
 //   - API version and feature flags, which are fixed strings: anthropic-version, anthropic-beta,
 //     openai-beta;
-//   - x-stainless-*: the SDK's own telemetry (language, OS, arch, package version, runtime
-//     version, retry count, timeout). It is matched by prefix (see headerAllowed);
-//   - correlation ids that package agent reads to find a session, a subagent or a parent:
-//     random ids, not credentials.
+//   - x-stainless-*: the SDK's own telemetry. It is matched by prefix (see stainlessPrefix);
+//   - correlation ids: the names come from agent.CorrelationHeaders, so no client's header name
+//     is copied here. They are random ids, not credentials.
 //
 // Not here, on purpose: authorization, proxy-authorization, cookie, x-api-key, x-goog-api-key,
 // every x-context-guru-* header (they carry the CG token), and any unknown name.
-var allowedHeaders = map[string]bool{
-	"content-type":      true,
-	"accept":            true,
-	"accept-encoding":   true,
-	"user-agent":        true,
-	"anthropic-version": true,
-	"anthropic-beta":    true,
-	"openai-beta":       true,
-	// Correlation ids read by package agent.
-	"x-claude-code-session-id":     true,
-	"x-claude-code-agent-id":       true,
-	"session-id":                   true,
-	"thread-id":                    true,
-	"x-codex-parent-thread-id":     true,
-	"x-opencode-session-id":        true,
-	"x-opencode-parent-session-id": true,
-	"x-task-id":                    true,
-}
+var allowedHeaders = func() map[string]bool {
+	m := map[string]bool{
+		"content-type":      true,
+		"accept":            true,
+		"accept-encoding":   true,
+		"user-agent":        true,
+		"anthropic-version": true,
+		"anthropic-beta":    true,
+		"openai-beta":       true,
+	}
+	for _, n := range agent.CorrelationHeaders() {
+		m[strings.ToLower(n)] = true
+	}
+	return m
+}()
+
+// stainlessPrefix is trusted as a prefix because the Stainless SDKs send fixed-shape telemetry
+// under it (language, OS, arch, package and runtime version, retry count, timeout). A credential
+// is not part of that shape.
+const stainlessPrefix = "x-stainless-"
 
 // headerAllowed reports whether a request header may be written.
 func headerAllowed(name string) bool {
 	n := strings.ToLower(name)
-	return allowedHeaders[n] || strings.HasPrefix(n, "x-stainless-")
+	return allowedHeaders[n] || strings.HasPrefix(n, stainlessPrefix)
 }
 
 // AllowedHeaders returns a copy of h with only the headers the recorder may write. The proxy
