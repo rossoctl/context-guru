@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -139,19 +140,19 @@ func (r *warmRig) request(c *components.Ctx) (*bschemas.BifrostChatRequest, *com
 func (r *warmRig) forward() {
 	r.t.Helper()
 	ResolveWarmQuestion(r.session, "", true, 0)
-	// k batches in sequence, each a question over a large prefix, and a slow -race build: 60 s.
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
+	r.waitIdle()
+}
+
+// waitIdle waits until the thread has no warm question asking or pending.
+func (r *warmRig) waitIdle() {
+	r.t.Helper()
+	busy := func() bool {
 		warmMu.Lock()
+		defer warmMu.Unlock()
 		t := warmThreads[r.key()]
-		busy := t != nil && (t.asking || t.warmPending())
-		warmMu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+		return t != nil && (t.asking || t.warmPending())
 	}
-	r.t.Fatal("the warm question did not finish")
+	testutil.WaitFor(r.t, "the warm question finishes", func() bool { return !busy() })
 }
 
 func (r *warmRig) held() bool {
@@ -604,25 +605,27 @@ func TestAWarmQuestionAndAPingQuestionNeverRunTogetherOnAThread(t *testing.T) {
 			}
 		}
 		ResolveWarmQuestion(r.session, "", true, 0)
-		select {
-		case <-blk.in:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the warm question never reached the model")
-		}
+		testutil.WaitFor(t, "the warm question reaches the model", func() bool {
+			select {
+			case <-blk.in:
+				return true
+			default:
+				return false
+			}
+		})
 		if claim := ClaimPing(r.key()); claim.Choice != PingPlain {
 			claim.Release()
 			t.Fatalf("a ping claim during a warm question chose %q, want plain", claim.Choice)
 		}
 		close(blk.out)
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if claim := ClaimPing(r.key()); claim.Choice != PingPlain {
+		testutil.WaitFor(t, "the thread is released after the warm question", func() bool {
+			claim := ClaimPing(r.key())
+			if claim.Choice != PingPlain {
 				claim.Release()
-				return
+				return true
 			}
-			time.Sleep(5 * time.Millisecond)
-		}
-		t.Fatal("the thread was never released after the warm question")
+			return false
+		})
 	})
 }
 
@@ -1238,17 +1241,7 @@ func TestTheWarmQuestionIsJudgedByTheSharedCacheReadRule(t *testing.T) {
 			r.request(nil)
 		}
 		ResolveWarmQuestion(r.session, "", true, turnRead)
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			warmMu.Lock()
-			th := warmThreads[r.key()]
-			busy := th != nil && (th.asking || th.warmPending())
-			warmMu.Unlock()
-			if !busy {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		r.waitIdle()
 		return r.held(), copyWarmGates()
 	}
 	if held, _ := run(1000); !held {
@@ -2109,21 +2102,38 @@ func TestTheWarmAskHonoursMaxAskBatches(t *testing.T) {
 // The warm sweep's OUTER bound is the keeper's (300 s), as at the ping, not the 90 s of one question: a
 // sweep of k batches would otherwise end after the first one. A timeout of 0 falls back to llmCallTimeout.
 func TestTheWarmSweepOuterTimeoutFitsSeveralBatches(t *testing.T) {
-	prev := llmCallTimeout
-	llmCallTimeout = 40 * time.Millisecond // one question's bound, tiny
-	defer func() { llmCallTimeout = prev }()
-	slow := &batchAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
-		time.Sleep(30 * time.Millisecond) // each batch is under one question's bound; three together are over it
-		return dropAll(ask), components.PrefixUsage{CacheRead: 19595, Fresh: 40, Output: 90}, nil
-	}}
-	r := bigWarmRig(t, "w-outer", 30, slow)
-	for i := 0; i < 3; i++ {
-		r.request(nil)
-	}
-	r.forward()
-	if got := slow.count(); got != 3 {
-		t.Fatalf("the warm sweep asked %d of 3 batches: the OUTER bound must be the keeper's, not one question's", got)
-	}
+	// Logic, always on: with the real bounds and no delay, the warm sweep asks all 3 batches.
+	t.Run("all batches are asked", func(t *testing.T) {
+		fast := &batchAsker{}
+		r := bigWarmRig(t, "w-outer-logic", 30, fast)
+		for i := 0; i < 3; i++ {
+			r.request(nil)
+		}
+		r.forward()
+		if got := fast.count(); got != 3 {
+			t.Fatalf("the warm sweep asked %d of 3 batches", got)
+		}
+	})
+	// Timing: the bound IS the behavior. Each batch is well under one question's bound; three together
+	// are over it. Only the timing pool runs this.
+	t.Run("three batches together pass one question's bound", func(t *testing.T) {
+		testutil.RequireTiming(t)
+		prev := llmCallTimeout
+		llmCallTimeout = 250 * time.Millisecond // one question's bound
+		defer func() { llmCallTimeout = prev }()
+		slow := &batchAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
+			time.Sleep(100 * time.Millisecond) // each batch is under the bound; three together are over it
+			return dropAll(ask), components.PrefixUsage{CacheRead: 19595, Fresh: 40, Output: 90}, nil
+		}}
+		r := bigWarmRig(t, "w-outer", 30, slow)
+		for i := 0; i < 3; i++ {
+			r.request(nil)
+		}
+		r.forward()
+		if got := slow.count(); got != 3 {
+			t.Fatalf("the warm sweep asked %d of 3 batches: the OUTER bound must be the keeper's, not one question's", got)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------------------------------

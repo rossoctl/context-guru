@@ -4,7 +4,7 @@ components/offload/common_test.go after=1
 components/offload/extract_econ_test.go after=1
 components/offload/extract_sweep_apply_test.go sleep=4 after=1
 components/offload/extract_sweep_ping_test.go sleep=1
-components/offload/extract_sweep_warm_test.go sleep=5 poll=3 after=1
+components/offload/extract_sweep_warm_test.go sleep=2
 context-guru-plugin/beep_test.go sleep=1 poll=1
 context-guru-plugin/leak_test.go sleep=1
 context-guru-plugin/plugin_test.go sleep=3 poll=3
