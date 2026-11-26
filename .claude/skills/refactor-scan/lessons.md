@@ -28,7 +28,9 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   out if stored keys or hashes change, and if there is a version field.
 
 - **Fail open covers moved code too.** Accountant or booking code on the request path, or in a
-  handler's defer, runs under a `recover` that logs and drops. #1445 had a gap here.
+  handler's defer, runs under a `recover` that logs and drops. On `main`, the dashboard path in `capture.finish`
+  (`proxy/dashcapture.go`) calls `accCompute` with no recover of its own. `accRun`, `accFigure`
+  and `finishAccountant` have one.
 - **A cost or saving formula belongs in the accountant.** Move it there, release a tag, and call it.
   Do not leave a second formula in a host or a library package.
 

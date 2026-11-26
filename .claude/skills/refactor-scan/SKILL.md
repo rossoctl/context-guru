@@ -114,7 +114,8 @@ A rule that names one client belongs in `agent.Identify`. Use the test in `CLAUD
 and client-rule patterns before each release. This path has no pick step and no fixes.
 
 1. The integrator runs it, on the diff since the last tag (see the patterns above).
-2. Report each leak as in phase 1, step 4. Check each location yourself.
+2. Check the location yourself. Report each leak with: the logic, its `file:line`, the library
+   package it belongs in, and whether the library already has a copy that differs.
 3. Open one issue per leak. Write `Refs #N` only in issue and PR text.
 4. Link each issue on the release list.
 5. Do not fix anything. A leak does not block the release, unless the owner says so.
@@ -159,9 +160,11 @@ A full run (all 3 patterns, the user picks) follows phase 1 and phase 2.
      `WaitForCall`), never on a sleep. `internal/timingguard` fails CI on a new one;
    - the PR text rules: `Refs #N` only, with no "close", "fix" or "resolve" before a `#N`, not
      even in a negative sentence ([RELEASING.md, Merge](../../../RELEASING.md#3-merge)); no usage
-     figures of a real user (dollars, tokens of their sessions) in a commit message, PR body or
-     issue, because GitHub keeps the edit history of a PR body;
-   - the repo docs rule: state each rule plainly, with no "owner rule, name, date" note;
+     figures of a real user in a commit message, PR body or issue
+     ([RELEASING.md, Merge](../../../RELEASING.md#3-merge));
+   - the repo docs rule: state each process rule plainly, with no "owner rule, name, date" note
+     ([RELEASING.md, Merge](../../../RELEASING.md#3-merge)). A data-dependence row keeps its
+     "Decided by" line;
    - the writing style from `CLAUDE.md`;
    - the test-machine rules from the user's global `CLAUDE.md`. Never commit those rules to this
      repo;

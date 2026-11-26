@@ -139,7 +139,7 @@ A review without this block does not count toward the 2.
   9. **A semantic conflict that a file-overlap check cannot see.** A test can read a table that another PR removes. In v0.7.2, the pi-package test read `STRATEGIES` from `settings.py` after #1055 removed it. Only CI catches this. The CI of a clean merge of `main` runs on the push. Do not wait for it only because another PR merged. The watch on `main` after each merge (see [Merge](#3-merge)) catches it.
   10. **A conflict in `docs/data-dependence.md`** is not a hand resolution. That page is generated from the row files in `docs/data-dependence/`. The subagent takes either side and runs `go run ./cmd/gen-datadep`. A row-file conflict (two PRs edited the same row) still goes to the PR owner. The remerge-diff may show the page; check that it equals the generator's output.
 
-**Run main's copy of a release script, never an old checkout's copy.** Use `git show origin/main:scripts/release/<name>.sh | bash -s -- <args>`, or run the script from a worktree at `origin/main`. An old copy of `approval-still-valid.sh` once printed `CHANGED` where the copy on `main` printed `LISTS ONLY`.
+**Run main's copy of a release script, never an old checkout's copy.** Run it from a worktree at `origin/main`. A script with no helper of its own, such as `approval-still-valid.sh`, may also run as `git show origin/main:scripts/release/<name>.sh | bash -s -- <args>`. A script that finds its helpers with `dirname "$0"` (today `check-ready.sh`) breaks when piped, so it must run from the worktree. An old copy of `approval-still-valid.sh` once printed `CHANGED` where the copy on `main` printed `LISTS ONLY`.
 
 Run `scripts/release/check-ready.sh <pr>`. It reads GitHub and checks, at the current head:
 - the PR is open, not a draft, and has no conflict;
@@ -176,6 +176,8 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
 - **Write issue numbers in a PR body as `Refs #N` only.** GitHub closes an issue when "close", "fix" or "resolve" (or a form of them) stands before `#N` anywhere in the PR body. A negative sentence such as "Does not close #1303" also closes it. That is how #1303 closed by mistake when #1370 merged.
   - Before each merge, grep the PR body for those words before a `#number`.
   - If one is there, fix the body before the merge. If the issue closed already, reopen it.
+- **Never put a user's own usage figures in a commit message, PR body or issue.** This means dollars, tokens and counts from a real person's sessions. GitHub keeps the edit history of a PR body, and only the author can delete a revision. Use made-up or rounded figures.
+- **Docs state each process rule plainly.** Do not add a note such as "owner rule, <name>, <date>" to a process doc, a script or a comment. Put who decided and when in the PR body. A data-dependence row keeps its required "Decided by" line.
 - **Refuse a PR whose `go.mod` diff adds a pseudo-version for one of our modules, or for a module that publishes tags.** A pseudo-version pins a commit, not a released tag. Ask the author to release the dependency and pin the tag. A third-party module with no tags keeps its pseudo-version. See the [`go.mod` rule in CLAUDE.md](CLAUDE.md#conventions).
 - Merge **one PR at a time**. After each merge, check that the next PR still merges cleanly before you merge it.
 - **After every merge, tell the PR owner in the same step**. Treat the merge and the message as one step.
