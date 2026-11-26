@@ -775,3 +775,42 @@ func TestPriceMode_HeldFloorKeepsBreaksAndAddedTokensAndCanBeACost(t *testing.T)
 		t.Errorf("floor %v, want a cost (< 0): the added tokens cost more than the removed ones save at the read rate", e.EstimatedSavedLowUSD)
 	}
 }
+
+// The interaction is counted on a row of its own, inside the baseline delta, like the ended change.
+func TestPriceMode_InteractionHasARow(t *testing.T) {
+	e := switchEvent()
+	e.accRes.Interaction = accountant.TierTokens{CacheWrite5m: 100}
+	e.accRes.InteractionCaused = accountant.TierTokens{CacheRead: 100}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	ia := 100*3.75e-6 - 100*0.3e-6
+	var row *CompRow
+	for i := range e.Components {
+		if e.Components[i].Component == InteractionComponent {
+			row = &e.Components[i]
+		}
+	}
+	if row == nil || !accNear(row.SavedUSD, ia) || row.Kind != KindEnvelope || row.PricedBy != PricedByAccountant {
+		t.Fatalf("interaction row %+v, want SavedUSD %v", row, ia)
+	}
+	if row.Tokens.Saved.CacheWrite5m != 100 || row.Tokens.Caused.CacheRead != 100 {
+		t.Fatalf("interaction row tokens %+v", row.Tokens)
+	}
+	if !accNear(e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6+ia) {
+		t.Fatalf("baseline delta %v, want %v", e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6+ia)
+	}
+}
+
+// A pipeline component named like the interaction row would take its figure twice: no saving.
+func TestPriceMode_InteractionNameCollisionFallsBack(t *testing.T) {
+	e := switchEvent()
+	e.Components = append(e.Components, CompRow{Component: InteractionComponent})
+	e.accRes.Interaction = accountant.TierTokens{CacheWrite5m: 100}
+	e.accRes.InteractionCaused = accountant.TierTokens{CacheRead: 100}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != FallbackDuplicateName {
+		t.Fatalf("fallback %q, want %q", fb, FallbackDuplicateName)
+	}
+}
