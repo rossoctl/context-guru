@@ -211,9 +211,12 @@ func observedTTL(recorded string, write1h, cached int64) (kvcache.TTL, string) {
 // TestTheTierFilterAgreesWithTheTierReconstruction asserts they agree over every combination
 // rather than leaving the reader to compare them by eye.
 //
-// The `cache_write_1h > 0` below is NOT the billed-tier rule (keepalive.BilledOneHour, which needs every
-// written token at 1 hour). This filter asks if the provider billed ANY of the write at 1 hour, as
-// evidence of a 1-hour policy for a row that recorded no tier. A mixed write counts here on purpose.
+// The `cache_write_1h > 0` below is NOT the whole-entry rule (keepalive.BilledOneHour, which needs
+// every written token at 1 hour). It asks the same question as the head rule
+// (keepalive.HeadLifetimeOneHour): did the provider bill ANY of the write at 1 hour? Here it is
+// evidence of a 1-hour policy for a row that recorded no tier, so it keeps its own form, without
+// the cache_write > 0 guard (cache_write_1h > 0 implies it, as cache_write_1h <= cache_write).
+// A mixed write counts here on purpose.
 func ttlPredicate(tier string) string {
 	const notRecorded = `r.cache_ttl <> 'ephemeral_5m' AND r.cache_ttl <> 'ephemeral_1h'`
 	switch tier {

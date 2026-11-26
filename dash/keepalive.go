@@ -1136,7 +1136,8 @@ type KeepAliveLiveRow struct {
 	// runs a median 3.38x low.
 	Prefix int64 `json:"prefix_tokens"`
 	// TTLSeconds is the lifetime IN FORCE: 1800 on OpenAI GPT-5.6+, else 3600 when this session's
-	// most recent write landed in the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
+	// most recent write landed in the one-hour tier, 300 otherwise. It follows the head rule
+	// (keepalive.HeadLifetimeOneHour), so a mixed write counts as 1 hour. Read off cache_write_1h rather than off configuration,
 	// because a `ttl: "1h"` request that the model does not support is granted as a 5-minute
 	// entry with a perfectly normal 200 — the tier billed is the only honest source.
 	TTLSeconds int64 `json:"ttl_seconds"`
