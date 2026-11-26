@@ -235,8 +235,12 @@ func TestWarmFactsReportsTheOneHourTier(t *testing.T) {
 	}
 	// 30 minutes after the last touch the press is not cold on a 1-hour entry.
 	n.clock.advance(30 * time.Minute)
-	if w := n.post(`{"session":"sess-h"}`); w.Code == http.StatusConflict && strings.Contains(w.Body.String(), "cold") {
-		t.Errorf("a 1-hour entry 30 minutes old was called cold: %s", w.Body)
+	// The press must succeed: a 404, a 409 "not held" or a 409 "cold" all fail here.
+	if w := n.post(`{"session":"sess-h"}`); w.Code != http.StatusOK {
+		t.Fatalf("press on a 1-hour entry 30 minutes old = %d %s, want 200", w.Code, w.Body)
+	}
+	if n.fs.n() != 1 {
+		t.Errorf("upstream saw %d requests, want the one press", n.fs.n())
 	}
 }
 
