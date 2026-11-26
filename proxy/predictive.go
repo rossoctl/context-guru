@@ -16,6 +16,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -335,13 +336,20 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 		return predDecision{}, false
 	}
 	model := gjson.GetBytes(body, "model").String()
-	// The same economics as the replay (campaign.PriceDecision): the rates of the request's own prompt
-	// size, and a ping priced at its own. A tiered model decides on the tiers that replay saw.
+	// The decision (Choose, the segment test, the pending stake and ping) runs on the same economics as
+	// the replay (campaign.PriceDecision): the rates of the request's own prompt size, and a ping priced
+	// at its own. A tiered model decides on the tiers that replay saw.
+	//
+	// The MODEL INPUTS keep the rates that the model was trained on. The training data (scripts/campaign/dpbuild.py)
+	// reads each model's base rates (p_in, p_out, p_read, p_write5m), so the Response carries the base
+	// rates (the price at size 0), and its CostUSD is the stored bill of the request (below).
+	price := k.h.autoPrice()
 	var dp campaign.DecisionPrices
+	var pIn, pOut, pRead, pWrite float64
 	if k.h.opts.Prices != nil && model != "" {
-		dp, _ = campaign.PriceDecision(k.h.autoPrice(), model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
+		dp, _ = campaign.PriceDecision(price, model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
+		pIn, pOut, pRead, pWrite, _ = price(model, 0)
 	}
-	pIn, pOut, pRead, pWrite := dp.PIn, dp.POut, dp.PRead, dp.PWrite
 	now := k.now()
 	pc.mu.Lock()
 	pc.calls++
@@ -364,7 +372,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: cl.ModelAgent(provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
 	}
 	nowMs := now.UnixMilli()
-	cost := float64(u.FreshInput)*pIn + float64(u.CacheRead)*pRead + float64(u.CacheWrite)*pWrite + float64(u.Output)*pOut
+	cost := k.billedCost(model, startedAt, u)
 	resp := &predictive.Response{
 		Request: predictive.Request{Tenant: tenantID, Session: session, Thread: thread, Model: model, TsMs: startedAt.UnixMilli()},
 		EndMs:   nowMs, DecMs: nowMs, Provider: provider, CacheTTL: lf.CacheTTL, Effort: lf.Effort, MaxTokens: lf.MaxTokens, SystemBlocks: lf.SystemBlocks,
@@ -386,7 +394,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	} else {
 		pc.tr.Release(a, resp) // plan-only campaign: no features, and no history to accumulate
 	}
-	kk, idle := campaign.Choose(spec, pc.model, row, &facts, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: pWrite, PRead: pRead, PingCost: pingCost})
+	kk, idle := campaign.Choose(spec, pc.model, row, &facts, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: dp.PWrite, PRead: dp.PRead, PingCost: pingCost})
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.stats.Decisions++
@@ -404,6 +412,16 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: dp.Stake, ping: pingCost})
 	}
 	return predDecision{campaign: pc, k: kk, idleS: idle, active: pc.meta.Mode == campaignModeActive && !optedOut}, true
+}
+
+// billedCost is the bill of one request, as the dashboard stores it (cost_usd) and as the model was
+// trained on: the rates of the request's own prompt size, and the 1-hour part of the write at the
+// 1-hour rate. The accountant prices it (accountant.RequestCost). It is 0 for a model with no price.
+func (k *keeper) billedCost(model string, at time.Time, u Usage) float64 {
+	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: model, At: at,
+		Billed: accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead), CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)},
+		Output: int(u.Output), PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}, modelinfo.ChainRates(k.h.opts.Prices))
+	return usd
 }
 
 // campaignStrategyID tags the pings a campaign bought on their dash rows.

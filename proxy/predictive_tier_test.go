@@ -7,7 +7,10 @@ import (
 
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/campaign"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
+	"github.com/rossoctl/context-guru/predictive"
 )
 
 // The live campaign prices a decision on the same economics as the replay. On a tiered model a request
@@ -46,5 +49,63 @@ func TestLiveCampaignPricesAtThePromptTierLikeTheReplay(t *testing.T) {
 	}
 	if math.Abs(facts[0].Stake-pend[0].stake) > 1e-9 || math.Abs(facts[0].Ping-pend[0].ping) > 1e-9 {
 		t.Errorf("replay stake %v ping %v differs from live %v %v", facts[0].Stake, facts[0].Ping, pend[0].stake, pend[0].ping)
+	}
+}
+
+// The model inputs keep what the model was trained on (scripts/campaign/dpbuild.py): the ping-cost
+// feature is read at the model's BASE rates, though the decision economics are at the prompt tier.
+func TestLiveModelInputsKeepTheBaseRates(t *testing.T) {
+	k, _, _ := testKeeper(t, Limits{})
+	k.h.opts.Prices = tieredPricer{gpt56Price()}
+	var got *predictive.Row
+	rt, _ := campaignRuntime(t, modelSpec, rowModel{&got}, campaignModeShadow)
+	k.pred = rt
+	t0 := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	arr := rt.arrive("t1", "s", "", t0)
+	body := []byte(`{"model":"gpt-5.6","messages":[]}`)
+	u := Usage{CacheRead: 300_000, FreshInput: 100, StopReason: "end_turn"}
+	if _, ok := k.predictiveDecide(arr, false, "t1", "s", "", "openai", t0, body, agent.IdentifyUserAgent("codex_cli_rs/0.50.0"), u); !ok {
+		t.Fatal("decision refused")
+	}
+	if got == nil {
+		t.Fatal("the model was never asked")
+	}
+	idx := -1
+	for i, n := range predictive.FeatureNames {
+		if n == "l_ping" {
+			idx = i
+		}
+	}
+	base := 300_000*0.5e-6 + 7*5e-6 + 30e-6 // base rates: read 0.5, input 5, output 30 per million
+	if want := math.Log1p(base * 1000); math.Abs(got.F[idx]-want) > 1e-9 {
+		t.Errorf("l_ping %v, want %v (the base-rate ping cost %v)", got.F[idx], want, base)
+	}
+}
+
+// The CostUSD the live model reads is the bill the dashboard stores (cost_usd), which is what the model
+// was trained on: tier rates, and the 1-hour part of a write at the 1-hour rate.
+func TestLiveBilledCostEqualsTheStoredBill(t *testing.T) {
+	cases := []struct {
+		name  string
+		model string
+		price modelinfo.Price
+		u     Usage
+	}{
+		{"above the line", "gpt-5.6", gpt56Price(), Usage{FreshInput: 100, CacheRead: 300_000, Output: 500}},
+		{"below the line", "gpt-5.6", gpt56Price(), Usage{FreshInput: 100, CacheRead: 10_000, CacheWrite: 2000, Output: 50}},
+		{"one-hour write", "claude-haiku-5-5", haiku55Price(), Usage{FreshInput: 10, CacheRead: 20_000, CacheWrite: 5000, CacheWrite1h: 3000, Output: 200}},
+		{"haiku above its line", "claude-haiku-5-5", haiku55Price(), Usage{FreshInput: 10, CacheRead: 120_000, CacheWrite: 5000, CacheWrite1h: 5000, Output: 200}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			k, _, _ := testKeeper(t, Limits{})
+			k.h.opts.Prices = tieredPricer{c.price}
+			e := &dash.Event{Model: c.model, FreshInput: c.u.FreshInput, CacheRead: c.u.CacheRead, CacheWrite: c.u.CacheWrite,
+				CacheWrite1h: c.u.CacheWrite1h, OutputTokens: c.u.Output}
+			e.Price(c.price, true)
+			if got := k.billedCost(c.model, time.Now(), c.u); math.Abs(got-e.CostUSD) > 1e-12 || e.CostUSD == 0 {
+				t.Errorf("live cost %v, stored cost %v", got, e.CostUSD)
+			}
+		})
 	}
 }
