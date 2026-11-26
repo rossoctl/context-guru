@@ -5,6 +5,7 @@ import (
 	"github.com/rossoctl/context-guru/agent"
 	"maps"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -199,6 +200,8 @@ type capture struct {
 	accReq   *accountant.Request
 	// accRes is the accountant's Result for this request, set once by accCompute (nil when the request books no figure).
 	accRes *accountant.Result
+	// accMu guards accCompute on a lean capture, where the ledger's hook and the finish goroutine can both call it. nil otherwise.
+	accMu *sync.Mutex
 	// accServerHeldHistory is set for an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider
 	// holds its history, so the accountant has no record of it.
 	accServerHeldHistory bool
@@ -559,7 +562,9 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		return
 	}
 	if c.rec == nil {
-		c.finishAccountant(usage, usageOK) // no dashboard: the accountant still runs (#1451)
+		// No dashboard: the accountant still runs (#1451), after the handler returns. finish runs in the handler's
+		// defer, so a synchronous wait would hold the next request on a keep-alive connection. No row waits for it.
+		go c.finishAccountant(usage, usageOK)
 		return
 	}
 	e := &dash.Event{

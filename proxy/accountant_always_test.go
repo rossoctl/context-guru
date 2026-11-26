@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
@@ -273,8 +274,10 @@ func BenchmarkRequestWithoutDashboard(b *testing.B) {
 				defer srv.Close()
 				body := bodies[size]
 				b.ReportAllocs()
+				var headers time.Duration
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
+					t0 := time.Now()
 					req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(body)))
 					req.Header.Set("Content-Type", "application/json")
 					req.Header.Set("x-context-guru-session", "bench")
@@ -282,9 +285,11 @@ func BenchmarkRequestWithoutDashboard(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
+					headers += time.Since(t0) // the client has the response head: what it sees as latency
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 				}
+				b.ReportMetric(float64(headers.Nanoseconds())/float64(b.N), "headers-ns/op")
 			})
 		}
 	}

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -161,7 +162,7 @@ func (h *Handler) accCapture(cp *capture, provider, route string, tn *Tenancy) *
 	if h == nil || h.savings == nil {
 		return nil
 	}
-	return &capture{pricer: h.opts.Prices, route: route, provider: provider, start: time.Now(), savings: h.savings,
+	return &capture{pricer: h.opts.Prices, route: route, provider: provider, start: time.Now(), savings: h.savings, accMu: new(sync.Mutex),
 		pings: h.opts.Pings, metrics: h.opts.MetricsSink, observe: tn.Mode == components.ModeObserve}
 }
 
@@ -171,6 +172,10 @@ func (h *Handler) accCapture(cp *capture, provider, route string, tn *Tenancy) *
 func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool) {
 	if c == nil {
 		return accountant.Result{}, false
+	}
+	if c.accMu != nil {
+		c.accMu.Lock() // the ledger's hook and the finish goroutine can both ask
+		defer c.accMu.Unlock()
 	}
 	c.accWait()
 	if c.accReq != nil && usageOK && !c.accDone {
@@ -228,7 +233,7 @@ func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig
 	}, metricsPricer{prices: c.pricer}), true
 }
 
-// finishAccountant ends a request that has no dashboard: it prices the request (which books the metrics), drops the
+// finishAccountant ends a request that has no dashboard. It runs on its own goroutine, off the client's path. It prices the request (which books the metrics), drops the
 // record and keeps the thinking counts. Fail open: a panic here costs the figure only.
 func (c *capture) finishAccountant(usage Usage, usageOK bool) {
 	defer func() {
