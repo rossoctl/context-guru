@@ -66,9 +66,6 @@ type Request struct {
 	WrongGuesses, DroppedSearches int
 	// Tier is how this request was billed.
 	Tier Tier
-	// PromptTokens is the billed prompt size of the request sent (modelinfo.PromptTokens): it picks
-	// the price tier. 0 is unknown and prices at the base rates.
-	PromptTokens int64
 }
 
 // WrongGuesses is how many wrong guesses one response shows (#866, N8): tools that are in this

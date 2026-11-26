@@ -117,7 +117,7 @@ func testFlow(t *testing.T, doc string) (Flow, Parts) {
 	}
 	p := Parts{Env: Env{Gate: NewGate(), Prober: NewProber()}, Hist: NewMem(nil), Ledger: &Ledger{}}
 	return Flow{Tenant: "t", Pipe: pipe, Provider: bschemas.Anthropic, Wire: cgschema.WireAnthropic,
-		Upstream: "u", Route: "/v1/messages", Parts: func() Parts { return p }, Prices: onePrice{ok: true}}, p
+		Upstream: "u", Route: "/v1/messages", Parts: func() Parts { return p }}, p
 }
 
 // The ledger books a finished request once, and not at all without usage or without a changed request.

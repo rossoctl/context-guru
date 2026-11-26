@@ -53,8 +53,6 @@ type Flow struct {
 	// Upstream and Route name the endpoint the request goes to. They key the probe verdicts.
 	Upstream, Route string
 	Parts           func() Parts
-	// Prices prices a model. The ledger no longer reads it: the accountant prices deferral (#1441).
-	Prices modelinfo.Pricer
 	// ProjectFor reads the project directory off the client's pristine body: the host passes
 	// apply.ProjectFor. A field, not an import, because apply's own test imports this package.
 	ProjectFor func(provider bschemas.ModelProvider, body []byte) string
@@ -340,8 +338,7 @@ func (f Flow) Book(ctx context.Context, di *Info, u Response, usageOK bool, st S
 		return Booked{}, false
 	}
 	r := Request{Tenant: di.Tenant, Model: di.Model, DeferredTokens: di.Outcome.DeferredTokens,
-		ListTokens: di.Outcome.ListTokens, Tier: TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h),
-		PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}
+		ListTokens: di.Outcome.ListTokens, Tier: TierOf(u.CacheRead, u.CacheWrite, u.CacheWrite1h)}
 	n := u.Searches + st.N
 	loaded := append(append([]string(nil), u.SearchLoaded...), st.Loaded...)
 	loaded = append(loaded, di.Outcome.Loads...) // client-search mode (#898): answers written on this request

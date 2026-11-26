@@ -2,20 +2,24 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/tidwall/gjson"
 )
@@ -83,6 +87,8 @@ func TestToolDeferLedgerCountsSearchesOnEveryPath(t *testing.T) {
 					t.Fatalf("status %d: %s", resp.StatusCode, out)
 				}
 			}
+			// The dollars are booked off the handler path, after the accountant job: wait for the condition, not a snapshot.
+			waitLedger(t, ds, func(st tooldefer.Stats) bool { return st.Unpriced >= 1 && st.Net != 0 })
 			st := ds.ledger.Snapshot()
 			if st.Requests != 2 || st.Searches != 2 {
 				t.Fatalf("ledger = %+v, want 2 requests with 1 search each", st)
@@ -227,4 +233,62 @@ func TestToolDeferPricedRowIsOneFigureWithTheSearchTurns(t *testing.T) {
 	if math.Abs(rep.Total.NetUSD-st.Net) > 1e-12 || math.Abs(rep.Total.GrossUSD-st.Gross) > 1e-12 || math.Abs(rep.Total.CostUSD-st.Cost) > 1e-12 {
 		t.Errorf("/api/tool-defer total %+v differs from /stats %+v", rep.Total, st.Money)
 	}
+}
+
+// waitLedger waits until cond holds for the ledger's total. The dollars are booked after the accountant job, off the
+// handler path (#1441), so a snapshot right after the response may come first.
+func waitLedger(t *testing.T, ds *deferState, cond func(tooldefer.Stats) bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !cond(ds.ledger.Snapshot()) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the ledger never reached the wanted state: %+v", ds.ledger.Snapshot())
+		}
+		runtime.Gosched()
+	}
+}
+
+// The ledger's dollars join the accountant, so they are booked off the handler path: deferLedger runs in serve's
+// terminal defer and must not wait on the accountant job (#1059, #1456). The facts are booked at once. The dollars
+// follow when finishAccountant runs, after the job.
+func TestDeferLedgerDoesNotWaitForTheAccountantJob(t *testing.T) {
+	h := tdHandler(t, "ultrahigh", "http://x")
+	defer h.Close()
+	c := asyncCapture()
+	c.model, c.pricer = "claude-sonnet-5-5", tdPrices{}
+	release := make(chan struct{})
+	c.savings.onEnd = func(_ *accountant.Request, _ endRecord) { <-release }
+	body := manyToolResultsRequest("claude-sonnet-5", 4)
+	c.accBegin(asyncMeta(), body)
+	c.accEnd(thread.Result{ID: thread.Primary}, body, nil)
+
+	di := &tooldefer.Info{Tenant: "t", Model: "claude-sonnet-5-5", Outcome: tooldefer.Outcome{DeferredTokens: 1000, ListTokens: 100}}
+	returned := make(chan struct{})
+	go func() {
+		h.deferLedger(context.Background(), c, di, Usage{CacheRead: 5000, Output: 5}, true, searchTally{})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(30 * time.Second):
+		close(release)
+		t.Fatal("deferLedger waited for the accountant job: the next request on a keep-alive connection would wait too")
+	}
+	st := h.toolDefer().ledger.Snapshot()
+	if st.Requests != 1 || st.Unpriced != 0 || st.Net != 0 {
+		close(release)
+		t.Fatalf("ledger after deferLedger = %+v, want the counts only: the dollars wait for the job", st)
+	}
+	close(release)
+	c.finishAccountant(Usage{CacheRead: 5000, Output: 5}, true) // the job's own goroutine, after the join
+	if st = h.toolDefer().ledger.Snapshot(); st.Unpriced+boolInt(st.Net != 0) != 1 {
+		t.Fatalf("ledger after the job = %+v, want the request booked once, priced or unpriced", st)
+	}
+}
+
+func boolInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }

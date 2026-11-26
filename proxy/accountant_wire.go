@@ -243,6 +243,7 @@ func (c *capture) finishAccountant(usage Usage, usageOK bool) {
 	}()
 	defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
 	c.accCompute(usage, usageOK)
+	c.runDeferBook()
 	if usageOK && !c.rejected() {
 		c.savings.recordThinking(usage.Thinking)
 	}
@@ -259,4 +260,14 @@ func (c *capture) accDeferSpend() {
 	for _, op := range accrec.DeferSpendOps(d.model, d.spend) {
 		c.accReq.Add(op)
 	}
+}
+
+// runDeferBook books the deferral ledger's dollars, once, after the accountant has priced the request. Nil-safe.
+func (c *capture) runDeferBook() {
+	if c == nil || c.deferBook == nil {
+		return
+	}
+	f := c.deferBook
+	c.deferBook = nil
+	f()
 }

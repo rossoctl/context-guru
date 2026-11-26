@@ -276,7 +276,7 @@ func (h *Handler) deferParts(tn *Tenancy) tooldefer.Parts {
 
 // deferFlow is the library's flow of tool deferral for one request of tn.
 func (h *Handler) deferFlow(tn *Tenancy) tooldefer.Flow {
-	f := tooldefer.Flow{Parts: func() tooldefer.Parts { return h.deferParts(tn) }, Prices: h.opts.Prices, ProjectFor: apply.ProjectFor}
+	f := tooldefer.Flow{Parts: func() tooldefer.Parts { return h.deferParts(tn) }, ProjectFor: apply.ProjectFor}
 	if tn != nil {
 		f.Tenant, f.Pipe = tn.ID, tn.Pipe
 	}
@@ -417,16 +417,24 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 		return
 	}
 	// cp is the capture the accountant runs on: the dashboard's, or a lean one with the dashboard off (#1451). The
-	// dollars are the accountant's one figure for tooldefer, on both paths (#1441). The facts go first: the search
-	// turns are spend operations that the accountant reads when it prices the request.
+	// dollars are the accountant's one figure for tooldefer, on both paths (#1441). The facts go first and stay
+	// synchronous: the search turns are spend operations that the accountant reads when it prices the request. The
+	// dollars wait for the accountant, so they are booked off the handler path (capture.runDeferBook).
 	cp.noteDefer(b.Request, b.Distinct)
 	ledger := h.deferFlow(nil).Parts().Ledger
-	fig, priced := cp.accFigure(ctx, u, usageOK)
-	if res, have := cp.accCompute(u, usageOK); !priced || !have || accrec.Held(res) {
-		ledger.AddMoney(b.Request.Tenant, tooldefer.Money{}, false)
+	tenant := b.Request.Tenant
+	if cp == nil {
+		ledger.AddMoney(tenant, tooldefer.Money{}, false)
 		return
 	}
-	ledger.AddMoney(b.Request.Tenant, accrec.DeferMoney(fig), true)
+	cp.deferBook = func() {
+		fig, priced := cp.accFigure(context.Background(), u, usageOK)
+		if res, have := cp.accCompute(u, usageOK); !priced || !have || accrec.Held(res) {
+			ledger.AddMoney(tenant, tooldefer.Money{}, false)
+			return
+		}
+		ledger.AddMoney(tenant, accrec.DeferMoney(fig), true)
+	}
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.

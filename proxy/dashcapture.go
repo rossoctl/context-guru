@@ -93,6 +93,10 @@ type capture struct {
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
+	// deferBook books the request's dollars in the /stats ledger from the accountant's figure (deferLedger sets it).
+	// It joins the accountant job, so it runs off the handler path: finishAccountant runs it after the join (no
+	// dashboard), finish runs it once the result is in (dashboard). Nil when deferral did not change the request.
+	deferBook func()
 	// sweepFalseExpWarm is the part of sweepFalseExp whose drop was applied on a warm request.
 	sweepFalseExpWarm int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
@@ -858,6 +862,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	}
 	endAcc()
 	c.savings.finished(c, usage, usageOK)
+	c.runDeferBook()
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accServerHeldHistory {
 		e.SetAccountantServerHeldHistory()
