@@ -1098,7 +1098,7 @@ func (e *Event) sweepWarmRewriteUSD(p modelinfo.Price, component string) float64
 		return 0
 	}
 	// The accountant owns the miss formula: the write rate minus the read rate, never below zero.
-	usd, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, Prefix: n, PromptTokens: modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)}, p.Pricer())
+	usd, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, Prefix: n, PromptTokens: modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)}, modelinfo.OnePrice{Model: e.Model, Price: p})
 	return usd
 }
 

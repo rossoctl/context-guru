@@ -528,9 +528,9 @@ func medianNextInput(v []int64) int64 {
 // tier is the entry's own, by its lifetime (ttlS), as the keeper's miss uses the entry's tier.
 func NextRequestUSD(p modelinfo.Price, model string, tokens, nextIn, ttlS int64) (warm, cold float64) {
 	size := tokens + nextIn // the next request sends this prefix plus new input: its tier's rates
-	warm, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: tokens, PromptTokens: size}, p.Pricer())
+	warm, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: tokens, PromptTokens: size}, modelinfo.OnePrice{Model: model, Price: p})
 	miss, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: tokens, PromptTokens: size,
-		OneHour: ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second)}, p.Pricer())
+		OneHour: ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second)}, modelinfo.OnePrice{Model: model, Price: p})
 	return warm, warm + miss
 }
 

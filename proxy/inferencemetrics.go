@@ -264,8 +264,8 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 	w1h := min(max(e.CacheWrite1h, 0), e.CacheWrite)
 	// The accountant prices each part at its own write tier (MissCost): never below zero, at the rates
 	// of the request's own prompt size.
-	m5, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, At: time.UnixMilli(e.TS), Prefix: e.CacheWrite - w1h, PromptTokens: size}, p.Pricer())
-	m1h, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, At: time.UnixMilli(e.TS), Prefix: w1h, PromptTokens: size, OneHour: true}, p.Pricer())
+	m5, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, At: time.UnixMilli(e.TS), Prefix: e.CacheWrite - w1h, PromptTokens: size}, modelinfo.OnePrice{Model: e.Model, Price: p})
+	m1h, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, At: time.UnixMilli(e.TS), Prefix: w1h, PromptTokens: size, OneHour: true}, modelinfo.OnePrice{Model: e.Model, Price: p})
 	return m5 + m1h
 }
 

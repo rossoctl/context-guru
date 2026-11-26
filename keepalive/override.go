@@ -205,7 +205,13 @@ func (o Override) WorstCasePings(now time.Time) int64 {
 // (kvcache.Pricing.PingInputTokens) is a what-if of the savings simulator and is not read here: the
 // ping that goes out always carries the same body, so the override would misprice it.
 func PingUSD(price Price, model string, prefix, outputTokens int64) float64 {
+	return pingUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, outputTokens)
+}
+
+// pingUSDWith is PingUSD for a rate table that the caller built once, so that a caller who prices a
+// ping and a miss on one price boxes the price once.
+func pingUSDWith(rates accountant.SizedPricer, model string, prefix, outputTokens int64) float64 {
 	usd, _ := accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, FreshInput: kvcache.DefaultPingInputTokens,
-		Output: outputTokens, PromptTokens: PingPrompt(prefix)}, price.Pricer())
+		Output: outputTokens, PromptTokens: PingPrompt(prefix)}, rates)
 	return usd
 }

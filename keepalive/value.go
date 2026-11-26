@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // The ping value rule (#1420).
@@ -67,7 +68,12 @@ func (p Policy) PingCap() float64 {
 // write rate. Zero when the price is unknown. The accountant owns the formula (accountant.MissCost):
 // it floors a miss at 0, and a miss never has a negative value.
 func MissUSD(price Price, model string, prefix int64, oneHour bool) float64 {
-	usd, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, PromptTokens: PingPrompt(prefix), OneHour: oneHour}, price.Pricer())
+	return missUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, oneHour)
+}
+
+// missUSDWith is MissUSD for a rate table that the caller built once (see pingUSDWith).
+func missUSDWith(rates accountant.SizedPricer, model string, prefix int64, oneHour bool) float64 {
+	usd, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, PromptTokens: PingPrompt(prefix), OneHour: oneHour}, rates)
 	return usd
 }
 

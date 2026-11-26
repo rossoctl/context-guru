@@ -392,8 +392,8 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			if w1h < 0 {
 				w1h = 0
 			}
-			m5, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: int64(r.write) - w1h, PromptTokens: int64(ctx)}, p.Pricer())
-			m1h, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: w1h, PromptTokens: int64(ctx), OneHour: true}, p.Pricer())
+			m5, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: int64(r.write) - w1h, PromptTokens: int64(ctx)}, modelinfo.OnePrice{Model: r.model, Price: p})
+			m1h, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: w1h, PromptTokens: int64(ctx), OneHour: true}, modelinfo.OnePrice{Model: r.model, Price: p})
 			excess := m5 + m1h
 			rc := out.Rewrites[cause]
 			if rc == nil {

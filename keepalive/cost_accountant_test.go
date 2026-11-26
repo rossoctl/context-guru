@@ -47,3 +47,22 @@ func TestProjectedSummaryUSDHasNoPingBody(t *testing.T) {
 		t.Errorf("got %v want %v", got, want)
 	}
 }
+
+// The record path prices the ping and the miss on one lookup. It gives the same two figures as the
+// separate functions, for a 5-minute and a 1-hour entry.
+func TestProjectedPingAndMissUSDMatchesTheSeparateFunctions(t *testing.T) {
+	k, fd, _ := testKeeper(t)
+	fd.setPrices(proxyPricer{fixedPrice{tieredGPT56()}})
+	for _, oneHour := range []bool{false, true} {
+		ping, miss := k.projectedPingAndMissUSD("gpt-5.6", 300_000, "/v1/messages", "", oneHour)
+		if want := k.projectedPingUSD("gpt-5.6", 300_000, "/v1/messages", ""); !near(ping, want) {
+			t.Errorf("ping %v want %v", ping, want)
+		}
+		if want := k.projectedMissUSD("gpt-5.6", 300_000, "", oneHour); !near(miss, want) {
+			t.Errorf("miss %v want %v", miss, want)
+		}
+	}
+	if p, m := k.projectedPingAndMissUSD("", 300_000, "/v1/messages", "", false); p != 0 || m != 0 {
+		t.Errorf("no model: %v %v", p, m)
+	}
+}

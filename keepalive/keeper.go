@@ -1120,6 +1120,7 @@ func (k *Keeper) Record(r Record) {
 	if emitter == nil {
 		emitter = components.NopEmitter{}
 	}
+	pingUSD, missUSD := k.projectedPingAndMissUSD(model, prefix, route, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID)))
 	e := &kaEntry{
 		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt, gapStart: startedAt,
 		cred: r.Cred, touchAlias: r.TouchAlias,
@@ -1133,8 +1134,8 @@ func (k *Keeper) Record(r Record) {
 		planPings:    planPings,
 		recordedReal: time.Now(),
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
-		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
-		missUSD: k.projectedMissUSD(model, prefix, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID))),
+		pingUSD: pingUSD,
+		missUSD: missUSD,
 		hdr:     hdr, tag: r.Tag,
 	}
 	e.refreshedAt = startedAt // the real request refreshed the provider's entry
@@ -1285,6 +1286,23 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 	return PingUSD(price, model, prefix, int64(pingOutputBudget(route)))
 }
 
+// projectedPingAndMissUSD is projectedPingUSD and projectedMissUSD on one price lookup: the record path
+// needs both for each response, so the price is read and boxed once.
+func (k *Keeper) projectedPingAndMissUSD(model string, prefix int64, route, endpoint string, oneHour bool) (ping, miss float64) {
+	if model == "" || prefix <= 0 {
+		return 0, 0
+	}
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
+	if !ok {
+		return 0, 0
+	}
+	var rates accountant.SizedPricer = modelinfo.OnePrice{Model: model, Price: price} // boxed once
+	if !price.Zero() {
+		ping = pingUSDWith(rates, model, prefix, int64(pingOutputBudget(route)))
+	}
+	return ping, missUSDWith(rates, model, prefix, oneHour)
+}
+
 // projectedMissUSD is what one cache miss costs over a hit on this prefix, at the tier of the
 // ping's prompt size (MissUSD). oneHour picks the 1-hour write rate: the entry was billed at the
 // 1-hour tier, so its rewrite is too. Zero when the model is not priced (the guard then fails open).
@@ -1336,7 +1354,7 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	if !ok || price.Zero() {
 		return 0
 	}
-	usd, _ := accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, Output: summaryOutputBudgetGuess, PromptTokens: pingPrompt(prefix)}, price.Pricer())
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, Output: summaryOutputBudgetGuess, PromptTokens: pingPrompt(prefix)}, modelinfo.OnePrice{Model: model, Price: price})
 	return usd
 }
 
