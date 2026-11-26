@@ -1013,8 +1013,6 @@ type TokenRates struct {
 	Tiers [MaxRateTiers]RateTier
 }
 
-// MaxRateTiers is how many tiers TokenRates holds. It matches modelinfo.MaxTiers.
-
 // RateTier is one price tier as absolute per-token rates. AbovePromptTokens 0 means the entry is unused.
 type RateTier struct {
 	AbovePromptTokens                    int64

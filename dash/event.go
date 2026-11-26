@@ -995,6 +995,8 @@ func (e *Event) PriceCG(prices modelinfo.Pricer, main modelinfo.Price, mainPrice
 		e.CGLLMCostUSD, e.CGCostUnpriced = 0, true
 		return
 	}
+	// The calls bill at the rates of THEIR prompt size, as priceCost does for the request.
+	p = p.At(modelinfo.PromptTokens(e.CGFresh, e.CGCacheRead, e.CGCacheWrite))
 	e.CGLLMCostUSD = p.Cost(e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput)
 	e.CGCostUnpriced = false
 }
