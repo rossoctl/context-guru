@@ -291,6 +291,11 @@ func (d *DB) dedupeOneBatch(batch []declBlob) (int64, error) {
 // backgroundMigrations (capture.go), not given its own goroutine — see that function's
 // comment for why every one-time migration shares one.
 func (r *Recorder) dedupeLoop() {
+	if n, err := r.db.sweepOrphanDeclarationText(); err != nil {
+		slog.Warn("dash: could not sweep orphaned declaration text", "err", err)
+	} else if n > 0 {
+		slog.Info("dash: removed stored prompt text that no declaration names", "rows", n)
+	}
 	moved, err := r.db.dedupeDeclarationText(r.done, dedupeBatch, dedupePause)
 	if err != nil {
 		// A partial migration is readable and resumable, so this is a warning, not a fatal:
@@ -344,4 +349,19 @@ func (r *Recorder) dedupeLoop() {
 	_ = r.db.sql.QueryRow(`PRAGMA freelist_count`).Scan(&free)
 	slog.Info("dash: reclaimed what the duplicated prompt text held",
 		"before_bytes", before, "after_bytes", after, "free_pages_kept_for_reuse", free)
+}
+
+// sweepOrphanDeclarationText deletes every declaration_text row that no declaration row names.
+// The purge trigger (trg_tool_inventory_gc) removes text as a session's declarations go, but it
+// cannot reach rows that were orphaned before it existed (#689). Run once at start, before the
+// dedupe backfill. Safe against the writer: it inserts a text row and the declaration rows that
+// name it in one transaction, so no committed state has a live row without its users.
+func (d *DB) sweepOrphanDeclarationText() (int64, error) {
+	res, err := d.sql.Exec(`DELETE FROM declaration_text WHERE NOT EXISTS (
+		SELECT 1 FROM tool_declarations d WHERE d.text_hash = declaration_text.hash)`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

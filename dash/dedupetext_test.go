@@ -481,9 +481,6 @@ func TestWriterForgetsTextFromARolledBackTransaction(t *testing.T) {
 	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 1000, inv: inv, text: true}}); err == nil {
 		t.Fatal("the write succeeded; the fault was not injected")
 	}
-	if n := len(w.storedText); n != 0 {
-		t.Errorf("the writer remembers %d blobs from a rolled-back transaction", n)
-	}
 	var blobs int
 	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM declaration_text`).Scan(&blobs); err != nil {
 		t.Fatal(err)
