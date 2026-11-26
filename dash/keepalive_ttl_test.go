@@ -54,8 +54,8 @@ func TestHeldUntilFollowsAOneHourTTL(t *testing.T) {
 // The next-request cost and the manual ping's credit use the tier's write rate: 2.0x input on the
 // 1-hour tier, the 5-minute write rate otherwise.
 func TestNextRequestUSDUsesTheTiersWriteRate(t *testing.T) {
-	_, cold5 := NextRequestUSD(ibmSonnet, 1000, 300)
-	_, cold1 := NextRequestUSD(ibmSonnet, 1000, 3600)
+	_, cold5 := NextRequestUSD(ibmSonnet, 1000, 0, 300)
+	_, cold1 := NextRequestUSD(ibmSonnet, 1000, 0, 3600)
 	if want := 1000 * ibmSonnet.CacheWrite; cold5 != want {
 		t.Errorf("5m cold = %v, want %v", cold5, want)
 	}

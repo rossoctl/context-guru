@@ -124,7 +124,7 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 	var rewrite float64
 	if p := h.opts.Prices; p != nil && th.Model != "" {
 		if price, ok := p.Price(r.Context(), th.Model); ok && !price.Zero() {
-			_, rewrite = dash.NextRequestUSD(price, th.PrefixTokens, th.TTLSeconds)
+			_, rewrite = dash.NextRequestUSD(price, th.PrefixTokens, h.rec.DB().NextInputTokens(f), th.TTLSeconds)
 		}
 	}
 
