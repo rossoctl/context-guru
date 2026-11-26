@@ -85,7 +85,7 @@ func TestPingNowSendsOneOrdinaryPingAndReportsItAsManual(t *testing.T) {
 	}
 	r := reps[0]
 	if !r.Manual || r.Strategy != "manual" || r.CostUSD != res.CostUSD {
-		t.Errorf("report = %+v, want Manual, strategy \"manual\", and the ping's cost; the answer holds the estimate, the report none", r)
+		t.Errorf("report = %+v, want Manual, strategy \"manual\", and the ping's cost; the answer says pending; the report holds no estimate", r)
 	}
 }
 

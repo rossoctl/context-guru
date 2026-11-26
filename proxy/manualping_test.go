@@ -146,9 +146,9 @@ func TestManualPingSendsOnePingAndAnswersWithTheCosts(t *testing.T) {
 	}
 }
 
-// The ping is reported through the tenant's emitter as a MANUAL ping carrying the write it avoided;
+// The ping is reported through the tenant's emitter as a MANUAL ping with its cost and no estimate;
 // the dashboard's emitter (cmd/context-guru-proxy) turns that into the keepalive row.
-func TestManualPingIsReportedAsManualWithTheAvoidedWrite(t *testing.T) {
+func TestManualPingIsReportedAsManual(t *testing.T) {
 	m := newManualHost(t)
 	m.hold(t, "", "sess-a", "", 100*time.Second)
 	w, out := m.post(`{"session":"sess-a"}`)

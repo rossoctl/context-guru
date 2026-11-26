@@ -472,9 +472,13 @@ export function pingReason(snap: Snapshot | null): string | undefined {
 }
 
 export const pingToast = (
-  r: { status?: number; error?: string; saved_usd?: number; ping_usd?: number; retry_after_s?: number },
+  r: { status?: number; error?: string; saved_usd?: number; saving?: string; ping_usd?: number; retry_after_s?: number },
   reason?: string,
 ): string => {
+  // A server since #1460 credits the saving on the next real request, so it sends `saving: "pending"` and no estimate.
+  if (r.status === 200 && r.saving === 'pending') {
+    return `kept warm — ping cost ${usd(r.ping_usd ?? 0)}. Saving pending: counted on the next request`
+  }
   if (r.status === 200) return `kept warm — saved ${usd(r.saved_usd ?? 0)} net (ping cost ${usd(r.ping_usd ?? 0)})`
   if (r.status === 409 && r.error === 'not held' && reason) return `can't ping: ${reasonWords(reason)}`
   if (r.status === 409 && r.error === 'not held') return 'keep-alive is off for this account — turn it on in the dashboard to ping'

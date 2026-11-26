@@ -374,8 +374,10 @@ the same number as `rewrite_usd`). Both are left out when the model has no price
 
 `POST /api/me/cache/ping` with `{"session": "<id>", "thread": "<id, optional>"}` is the Ping
 button. It sends **one** keep-alive ping on that thread now, with the same request and the same
-price as a scheduled ping. It answers `200` with `cache_read`, `cache_write`, `ping_usd`,
-`rewrite_usd`, `saved_usd` (the write it avoided minus the ping) and `warm_until_ms`. Other answers:
+price as a scheduled ping. It answers `200` with `cache_read`, `cache_write`, `ping_usd`, `warm_until_ms`
+and `saving: "pending"`: the accountant credits the saving on the thread's next real request, so the
+answer carries no estimate. (Before #1460 it also carried `rewrite_usd` and `saved_usd`, the write it
+avoided minus the ping. A client must read a missing `saved_usd` as "no figure yet".) Other answers:
 `409 cold` (nothing left to keep warm), `409 not held` (keep-alive is off, so the proxy keeps no
 body or key to ping with), `404 unknown session`, and `429 too soon` (one press per thread every
 30 seconds). It reaches only the caller's own sessions. The caller is the same as for
@@ -413,9 +415,11 @@ per line when there are several headers). The proxy never forwards it upstream.
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
 `manual_pings` (`count`, `ping_usd`, `saved_usd` net of the pings' cost, and `writes_avoided`: the pings that found the cache warm). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
-The figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
+**Before #1460** (rows written then keep this figure): the figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
 `avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
-`saved_usd` in the reply is never below 0, so the two need not match. A press is refused with
+`saved_usd` in the reply (before #1460) was never below 0, so the two need not match. Since #1460 a new row
+holds no estimate (`manual_saved_usd` is 0), so `saved_usd` here is the pings' cost as a negative number until the rescue is
+credited on the next real request, and the Ping answer says `saving: "pending"`. A press is refused with
 `409 over budget` when one ping would cost more than the operator's per-ping cap, or more than the miss it protects, and `?tenant=` is ignored:
 it pings only the caller's own account.
 

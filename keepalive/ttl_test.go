@@ -307,8 +307,8 @@ func TestManualPingOnAOneHourThreadWorksPastFiveMinutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a press at 30 min on a 1h thread was refused: %v", err)
 	}
-	if res.CostUSD < 0 || fd.n() != 1 {
-		t.Fatalf("the press cost $%.2f over %d pings, want 1 ping", res.CostUSD, fd.n())
+	if res.Status != http.StatusOK || fd.n() != 1 {
+		t.Fatalf("the press answered %d over %d pings, want 200 over 1", res.Status, fd.n())
 	}
 	k.Sweep(start.Add(ManualHoldMax1h + time.Second))
 	if _, err := k.PingNow(ManualRequest{Key: sess1}); err == nil {
