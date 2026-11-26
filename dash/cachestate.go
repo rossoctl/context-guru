@@ -454,28 +454,49 @@ const (
 	DefaultNextInputTokens = 1000
 )
 
-// NextInputTokens is the new input to expect on the session's next real request: the median of
-// fresh_input + cache_write (the tokens not read from the cache; on Anthropic a new turn is billed
-// as cache write) of its last NextInputWindow billed requests (pings excluded), or
-// DefaultNextInputTokens when it has none. It reads token counts only.
-func (d *DB) NextInputTokens(f Filter) int64 {
+// NextInputTokens is the new input to expect on the next real request of a model in the session:
+// the median of fresh_input + cache_write (the tokens not read from the cache; on Anthropic a new
+// turn is billed as cache write) of the last NextInputWindow billed requests of that model (pings
+// and non-2xx rows excluded). With none, the same median over the whole session. With none either,
+// or on a read error, DefaultNextInputTokens. It reads token counts only. DefaultNextInputTokens
+// lives here because only the dashboard's own database can measure it.
+func (d *DB) NextInputTokens(f Filter, model string) int64 {
 	f.WithKeepAlive = false
+	if model != "" {
+		f.Model = model
+		if v, ok := d.nextInputSizes(f); !ok {
+			return DefaultNextInputTokens
+		} else if len(v) > 0 {
+			return medianNextInput(v)
+		}
+		f.Model = ""
+	}
+	v, _ := d.nextInputSizes(f)
+	return medianNextInput(v)
+}
+
+// nextInputSizes reads the sizes of the last NextInputWindow billed requests of f. ok is false on
+// any read error: a partial list is never returned.
+func (d *DB) nextInputSizes(f Filter) (v []int64, ok bool) {
 	cond, args := f.where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.fresh_input + r.cache_write FROM requests r WHERE `+cond+
 		` AND r.status BETWEEN 200 AND 299 AND r.cache_read + r.cache_write + r.fresh_input > 0
 		ORDER BY r.ts DESC LIMIT ?`, append(args, NextInputWindow)...)
 	if err != nil {
-		return DefaultNextInputTokens
+		return nil, false
 	}
 	defer rows.Close()
-	var v []int64
 	for rows.Next() {
 		var n int64
-		if rows.Scan(&n) == nil {
-			v = append(v, n)
+		if err := rows.Scan(&n); err != nil {
+			return nil, false
 		}
+		v = append(v, n)
 	}
-	return medianNextInput(v)
+	if rows.Err() != nil {
+		return nil, false
+	}
+	return v, true
 }
 
 // medianNextInput is the median of v (the mean of the two middle values for an even count), or
@@ -551,7 +572,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 	pf := a.priceFn(r)
 	// next prices a cached prefix of `tokens` for the NEXT request: cold is the rewrite (the cache
 	// write rate, 2.0x input on the 1h tier), warm is the cache-read rate.
-	nextIn := a.db(r).NextInputTokens(f) // once per request: every thread shares the session's size
+	sizes := map[string]int64{} // the next-request size of each model, read once
 	next := func(model string, tokens, ttl int64) (warm, cold float64, ok bool) {
 		if pf == nil {
 			return 0, 0, false
@@ -559,6 +580,11 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		p, ok := pf(model)
 		if !ok {
 			return 0, 0, false
+		}
+		nextIn, seen := sizes[model]
+		if !seen { // only a priced model reads the database
+			nextIn = a.db(r).NextInputTokens(f, model)
+			sizes[model] = nextIn
 		}
 		warm, cold = NextRequestUSD(p, tokens, nextIn, ttl)
 		return warm, cold, true
