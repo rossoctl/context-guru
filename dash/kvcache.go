@@ -210,6 +210,10 @@ func observedTTL(recorded string, write1h, cached int64) (kvcache.TTL, string) {
 // It sits directly beneath observedTTL because the two are one definition in two languages, and
 // TestTheTierFilterAgreesWithTheTierReconstruction asserts they agree over every combination
 // rather than leaving the reader to compare them by eye.
+//
+// The `cache_write_1h > 0` below is NOT the billed-tier rule (keepalive.BilledOneHour, which needs every
+// written token at 1 hour). This filter asks if the provider billed ANY of the write at 1 hour, as
+// evidence of a 1-hour policy for a row that recorded no tier. A mixed write counts here on purpose.
 func ttlPredicate(tier string) string {
 	const notRecorded = `r.cache_ttl <> 'ephemeral_5m' AND r.cache_ttl <> 'ephemeral_1h'`
 	switch tier {
