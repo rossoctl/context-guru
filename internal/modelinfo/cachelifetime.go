@@ -26,7 +26,7 @@ func FixedCacheLifetime(provider, model string) (time.Duration, bool) {
 //
 // oneHour is the tier, and the CALLER chooses which fact it stands for: the tier the request
 // ASKED for (from the body or the row's cache_ttl), or the tier the provider BILLED
-// (cache_write_1h > 0). They differ when a one-hour request is billed at five minutes. A caller
+// (every written token at 1 hour: keepalive.BilledOneHour). They differ when a one-hour request is billed at five minutes. A caller
 // that acts on the entry (the keeper, a "cold after" display) should pass the billed tier; a
 // caller that has only the request should pass the requested one. oneHour is ignored for a
 // provider with a fixed lifetime. The model is a parameter so that no caller can apply the

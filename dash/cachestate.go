@@ -9,6 +9,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // CacheState is the SERVER's view of one session's prompt cache: what the provider last billed us
@@ -317,11 +318,12 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// billedTierSQL is 1 when the write on row alias was billed at the 1h tier, else 0. SQL cannot
+// billedTierSQL is 1 when the write on row alias was billed entirely at the 1h tier, else 0. A mixed
+// write is 0. The rule is keepalive.BilledOneHour, through keepalive.BilledOneHourWriteSQL. SQL cannot
 // parse a model name, so it gives only the BILLED tier; the Go side finishes the lifetime with
 // modelinfo.CacheLifetime from the row's provider and model (billedTTL).
 func billedTierSQL(alias string) string {
-	return "CASE WHEN " + alias + "cache_write_1h > 0 THEN 1 ELSE 0 END"
+	return "CASE WHEN " + keepalive.BilledOneHourWriteSQL(alias) + " THEN 1 ELSE 0 END"
 }
 
 // billedTTL is the lifetime in seconds of an entry written at the billed tier.

@@ -220,7 +220,7 @@ func kaSavedGate(alias, pingFloor string) string {
 	// billedHour is the BILLED tier of the entry r read (see the comment above kaSavedGate). The
 	// subquery (alias bw: dash/cachestate_test.go bans a `w` plan line, meant for a per-thread subquery) sits inside the EXISTS, behind the `> 0` guard, so it never runs for an uncredited row.
 	billedHour := "(" + alias + "cache_ttl = '" + apply.TTLEphemeral1h + "' AND CASE" +
-		" WHEN " + alias + "cache_write > 0 THEN " + alias + "cache_write_1h >= " + alias + "cache_write" +
+		" WHEN " + alias + "cache_write > 0 THEN " + keepalive.BilledOneHourWriteSQL(alias) +
 		" ELSE COALESCE((SELECT bw.cache_write_1h >= bw.cache_write FROM requests bw" +
 		" WHERE bw.tenant_id = " + alias + "tenant_id AND bw.session_id = " + alias + "session_id" +
 		" AND bw.thread_id = " + alias + "thread_id AND bw.keepalive = 0 AND bw.cache_write > 0" +
@@ -1235,7 +1235,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		       COUNT(*) OVER w2 AS turns,
 		       MAX(r.ts) OVER w2 AS last_ts,
 		       MAX(CASE WHEN r.cache_write > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_write_ts,
-		       MAX(CASE WHEN r.cache_write_1h > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_1h_ts
+		       MAX(CASE WHEN `+keepalive.BilledOneHourWriteSQL("r.")+` THEN r.ts ELSE 0 END) OVER w2 AS last_1h_ts
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
@@ -1494,7 +1494,7 @@ func factsCTE(cond string) string {
 		       CASE WHEN r.stop_reason IN (` + toolStopList() + `) OR r.waiting_for = 'own_tool' THEN 1 ELSE 0 END AS tool,
 		       CASE WHEN r.cache_write > 0 THEN
 		              ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id, r.thread_id ORDER BY r.ts, r.id) * 2
-		              + CASE WHEN r.cache_ttl = '` + apply.TTLEphemeral1h + `' AND r.cache_write_1h >= r.cache_write
+		              + CASE WHEN r.cache_ttl = '` + apply.TTLEphemeral1h + `' AND ` + keepalive.BilledOneHourWriteSQL("r.") + `
 		                     THEN 1 ELSE 0 END
 		            END AS wcode
 		FROM requests r WHERE ` + cond + `),
