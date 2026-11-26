@@ -36,3 +36,15 @@ func TestFilterRemovesAResponsesMCPToolByItsType(t *testing.T) {
 		t.Fatalf("removed %d, want both mcp tools: %s", n, out)
 	}
 }
+
+// An empty entry in the remove list marks nothing. A forced tool keeps the catalogue from emptying, so an
+// unguarded empty entry would remove the other tools and show here.
+func TestFilterEmptyEntryMarksNothing(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","tool_choice":{"name":"Read"},"messages":[{"role":"user","content":"hi"}],"tools":[` +
+		`{"type":"function","name":"Read","description":"read a file","parameters":{"type":"object"}},` +
+		`{"type":"function","name":"Write","description":"write a file","parameters":{"type":"object"}},` +
+		`{"server_label":"deepwiki","server_url":"https://mcp.example/mcp"}]}`)
+	if out, _, n := filterDeclarations(body, []string{""}); n != 0 || string(out) != string(body) {
+		t.Fatalf("removed %d for an empty entry: %s", n, out)
+	}
+}

@@ -653,16 +653,16 @@ func repairSearchResults(wire string, body []byte, deferred map[string]bool, kno
 		}
 	}
 	out := body
-	field := ".content"
+	key := "content"
 	if cgschema.IsResponses(wire) {
-		field = ".output"
+		key = "output"
 	}
 	for _, r := range cgschema.RequestResults(wire, body) {
 		a, ok := answers[r.CallID]
-		if !ok || r.Raw.Get(field[1:]).String() == a {
+		if !ok || r.Raw.Get(key).String() == a {
 			continue
 		}
-		if b, err := sjson.SetBytes(out, r.Path(wire)+field, a); err == nil {
+		if b, err := sjson.SetBytes(out, r.Path(wire)+"."+key, a); err == nil {
 			out = b
 		}
 	}

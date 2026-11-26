@@ -288,7 +288,7 @@ func declsSize(decls []Decl) int {
 func declsFrom(wire string, tools gjson.Result) []Decl {
 	var out []Decl
 	for _, t := range tools.Array() {
-		name := schema.ToolFnNameOn(wire, t)
+		name := schema.ToolFnNameOn(declWire(wire), t)
 		kind := KindTool
 		switch {
 		case isClientToolType(wire, t.Get("type").String()):
@@ -750,6 +750,14 @@ func usedList(byKey map[Used]int) []Used {
 		out = append(out, u)
 	}
 	return out
+}
+
+// declWire is the wire the inventory reads names on: an empty wire is Anthropic here.
+func declWire(wire string) string {
+	if wire == "" {
+		return schema.WireAnthropic
+	}
+	return wire
 }
 
 func isAnthropicWire(wire string) bool { return wire == schema.WireAnthropic || wire == "" }

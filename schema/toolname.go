@@ -32,10 +32,10 @@ func ToolDeclName(t gjson.Result) string {
 }
 
 // ToolFnNameOn is ToolFnName for a host that knows its wire: it reads the one place the wire writes
-// the name, so a body of another shape is not read. Anthropic (and an empty wire, which is Anthropic)
-// and Responses write a top-level `name`; Chat Completions nests it under `function`.
+// the name, so a body of another shape is not read. Anthropic and Responses write a top-level `name`.
+// Every other wire, an empty one too, is read as Chat Completions, which nests it under `function`.
 func ToolFnNameOn(wire string, t gjson.Result) string {
-	if wire == WireAnthropic || wire == "" || IsResponses(wire) {
+	if wire == WireAnthropic || IsResponses(wire) {
 		return t.Get("name").String()
 	}
 	return t.Get("function.name").String()

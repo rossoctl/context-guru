@@ -51,12 +51,7 @@ func anchorKey(session string) string { return store.RestorePrefix + session }
 
 // MessagesField is the body field where a dialect keeps its transcript: Responses `input`,
 // every other dialect `messages`. The one definition the anchor code and apply share.
-func MessagesField(wire string) string {
-	if schema.IsResponses(wire) {
-		return "input"
-	}
-	return "messages"
-}
+func MessagesField(wire string) string { return schema.TranscriptField(wire) }
 
 // Fingerprint identifies one wire message independently of what a client changes on an old
 // message without changing what the model reads: the hash of its canonical form

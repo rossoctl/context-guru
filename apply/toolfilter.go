@@ -145,7 +145,8 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 		if n == "" {
 			continue
 		}
-		if names[n] || (servers[mcpServer(n)] && mcpServer(n) != "") || names[labelledMCPType(t)] {
+		lt := labelledMCPType(t)
+		if names[n] || (servers[mcpServer(n)] && mcpServer(n) != "") || (lt != "" && names[lt]) {
 			cand[i], any = true, true
 		}
 	}

@@ -30,7 +30,7 @@ func TestToolFnNameOnReadsOnePlace(t *testing.T) {
 		t    gjson.Result
 		want string
 	}{
-		{WireAnthropic, flat, "A"}, {"", flat, "A"}, {WireResponses, flat, "A"}, {WireOpenAI, flat, ""},
+		{WireAnthropic, flat, "A"}, {"", flat, ""}, {"", nested, "A"}, {WireResponses, flat, "A"}, {WireOpenAI, flat, ""},
 		{WireAnthropic, nested, ""}, {WireResponses, nested, ""}, {WireOpenAI, nested, "A"},
 	} {
 		if got := ToolFnNameOn(c.wire, c.t); got != c.want {
