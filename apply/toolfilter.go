@@ -145,7 +145,7 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 		if n == "" {
 			continue
 		}
-		if names[n] || (servers[mcpServer(n)] && mcpServer(n) != "") {
+		if names[n] || (servers[mcpServer(n)] && mcpServer(n) != "") || names[labelledMCPType(t)] {
 			cand[i], any = true, true
 		}
 	}
@@ -199,6 +199,16 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 		return body, 0, 0
 	}
 	return next, removedTokens, removed
+}
+
+// labelledMCPType is the type of a Responses `mcp` tool that names itself by `server_label`, or "".
+// Before the label was the name, such a tool was matched by its type, so a configured entry "mcp"
+// removed every one of them. That entry keeps working.
+func labelledMCPType(t gjson.Result) string {
+	if schema.ToolFnName(t) != "" || t.Get("mcp_server_name").String() != "" || t.Get("server_label").String() == "" {
+		return ""
+	}
+	return t.Get("type").String()
 }
 
 // removeSets splits the configured list into exact names and whole-server entries, and drops the

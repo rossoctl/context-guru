@@ -74,36 +74,7 @@ func RequestCalls(wire string, body []byte) []RequestCall {
 
 // EachRequestCall is RequestCalls without the slice, for a caller on the request path.
 func EachRequestCall(wire string, body []byte, fn func(RequestCall)) {
-	emit := func(c RequestCall) {
-		if c.ID != "" {
-			fn(c)
-		}
-	}
-	gjson.GetBytes(body, TranscriptField(wire)).ForEach(func(k, m gjson.Result) bool {
-		at := int(k.Int())
-		switch {
-		case wire == WireAnthropic:
-			m.Get("content").ForEach(func(_, b gjson.Result) bool {
-				if b.Get("type").String() == "tool_use" {
-					emit(RequestCall{ID: b.Get("id").String(), Name: b.Get("name").String(), At: at, Raw: b, wire: wire})
-				}
-				return true
-			})
-		case IsResponses(wire):
-			switch m.Get("type").String() {
-			case "function_call":
-				emit(RequestCall{ID: m.Get("call_id").String(), Name: m.Get("name").String(), At: at, Raw: m, wire: wire})
-			case "custom_tool_call":
-				emit(RequestCall{ID: m.Get("call_id").String(), Name: m.Get("name").String(), Custom: true, At: at, Raw: m, wire: wire})
-			}
-		default:
-			m.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
-				emit(RequestCall{ID: tc.Get("id").String(), Name: tc.Get("function.name").String(), At: at, Raw: tc, wire: wire})
-				return true
-			})
-		}
-		return true
-	})
+	EachRequestPart(wire, body, fn, nil)
 }
 
 // RequestResults reads the tool results of a request transcript, in order: Anthropic tool_result
@@ -118,9 +89,20 @@ func RequestResults(wire string, body []byte) []RequestResult {
 
 // EachRequestResult is RequestResults without the slice, for a caller on the request path.
 func EachRequestResult(wire string, body []byte, fn func(RequestResult)) {
-	emit := func(r RequestResult) {
-		if r.CallID != "" {
-			fn(r)
+	EachRequestPart(wire, body, nil, fn)
+}
+
+// EachRequestPart reads the calls and the results of a request transcript in ONE walk, in transcript
+// order. Either callback may be nil. A call or result with no id is left out (see RequestCalls).
+func EachRequestPart(wire string, body []byte, onCall func(RequestCall), onResult func(RequestResult)) {
+	call := func(c RequestCall) {
+		if onCall != nil && c.ID != "" {
+			onCall(c)
+		}
+	}
+	result := func(r RequestResult) {
+		if onResult != nil && r.CallID != "" {
+			onResult(r)
 		}
 	}
 	gjson.GetBytes(body, TranscriptField(wire)).ForEach(func(k, m gjson.Result) bool {
@@ -129,21 +111,32 @@ func EachRequestResult(wire string, body []byte, fn func(RequestResult)) {
 		case wire == WireAnthropic:
 			bi := 0
 			m.Get("content").ForEach(func(_, b gjson.Result) bool {
-				if b.Get("type").String() == "tool_result" {
-					emit(RequestResult{CallID: b.Get("tool_use_id").String(), At: at, Block: bi, Raw: b})
+				switch b.Get("type").String() {
+				case "tool_use":
+					call(RequestCall{ID: b.Get("id").String(), Name: b.Get("name").String(), At: at, Raw: b, wire: wire})
+				case "tool_result":
+					result(RequestResult{CallID: b.Get("tool_use_id").String(), At: at, Block: bi, Raw: b})
 				}
 				bi++
 				return true
 			})
 		case IsResponses(wire):
 			switch m.Get("type").String() {
+			case "function_call":
+				call(RequestCall{ID: m.Get("call_id").String(), Name: m.Get("name").String(), At: at, Raw: m, wire: wire})
+			case "custom_tool_call":
+				call(RequestCall{ID: m.Get("call_id").String(), Name: m.Get("name").String(), Custom: true, At: at, Raw: m, wire: wire})
 			case "function_call_output", "custom_tool_call_output":
-				emit(RequestResult{CallID: m.Get("call_id").String(), At: at, Block: -1, Raw: m})
+				result(RequestResult{CallID: m.Get("call_id").String(), At: at, Block: -1, Raw: m})
 			}
 		default:
 			if m.Get("role").String() == "tool" {
-				emit(RequestResult{CallID: m.Get("tool_call_id").String(), At: at, Block: -1, Raw: m})
+				result(RequestResult{CallID: m.Get("tool_call_id").String(), At: at, Block: -1, Raw: m})
 			}
+			m.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
+				call(RequestCall{ID: tc.Get("id").String(), Name: tc.Get("function.name").String(), At: at, Raw: tc, wire: wire})
+				return true
+			})
 		}
 		return true
 	})

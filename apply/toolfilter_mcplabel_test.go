@@ -24,3 +24,15 @@ func TestFilterRemovesAResponsesMCPToolByServerLabel(t *testing.T) {
 		t.Errorf("tools left = %d, want 1", got)
 	}
 }
+
+// The entry "mcp", which removed every Responses mcp tool before the label was the name, still does.
+func TestFilterRemovesAResponsesMCPToolByItsType(t *testing.T) {
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"tools":[` +
+		`{"type":"function","name":"Read","description":"read a file","parameters":{"type":"object"}},` +
+		`{"type":"mcp","server_label":"deepwiki","server_url":"https://mcp.example/mcp"},` +
+		`{"type":"mcp","server_label":"other","server_url":"https://mcp.example/2"}]}`)
+	out, _, n := filterDeclarations(body, []string{"mcp"})
+	if n != 2 || strings.Contains(string(out), "server_label") {
+		t.Fatalf("removed %d, want both mcp tools: %s", n, out)
+	}
+}

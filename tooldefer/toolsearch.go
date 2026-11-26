@@ -278,16 +278,13 @@ func ReadCalls(body []byte, deferred map[string]bool) (broke bool, direct []stri
 	loaded := Loaded(body)
 	called := map[string]string{} // tool_use id -> deferred tool name
 	var order []string
-	cgschema.EachRequestCall(cgschema.WireAnthropic, body, func(c cgschema.RequestCall) {
+	// One walk. A result is read only for a call seen before it, which a valid transcript always has.
+	cgschema.EachRequestPart(cgschema.WireAnthropic, body, func(c cgschema.RequestCall) {
 		if deferred[c.Name] {
 			called[c.ID] = c.Name
 			order = append(order, c.ID)
 		}
-	})
-	if len(called) == 0 {
-		return false, nil
-	}
-	cgschema.EachRequestResult(cgschema.WireAnthropic, body, func(r cgschema.RequestResult) {
+	}, func(r cgschema.RequestResult) {
 		if _, ok := called[r.CallID]; ok && r.Raw.Get("is_error").Bool() {
 			t := strings.ToLower(r.Raw.Get("content").Raw)
 			if strings.Contains(t, "not loaded") || strings.Contains(t, "no such tool") ||
