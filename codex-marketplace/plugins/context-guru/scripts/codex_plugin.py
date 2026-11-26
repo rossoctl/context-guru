@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config_route import install as install_default_route
-from config_route import is_default_routed, is_routed, restore as restore_default_route
+from config_route import check_profile_writable, is_default_routed, is_routed, restore as restore_default_route
 
 MARKER = "# Managed by the context-guru Codex plugin."
 CONFIG_MARKER = "# Managed by the context-guru Codex plugin."
@@ -611,6 +611,7 @@ def setup(args):
         return 2
     try:
         check_proxy_config_writable()
+        check_profile_writable(main_config())
     except Exception as error:
         facts(result="config_conflict", config=proxy_config(), detail=error)
         return 2
@@ -726,31 +727,39 @@ def launch(args):
         print("context-guru-codex: `codex` not found on PATH", file=sys.stderr)
         return 127
     rest = args.codex_args[1:] if args.codex_args[:1] == ["--"] else args.codex_args
-    if is_routed(main_config()) and revive(read_record()):
+    own_profile = any(a in ("-p", "--profile") or a.startswith("--profile=") for a in rest)
+    if own_profile:
+        reason = "you passed your own --profile, which would replace the context-guru profile"
+    elif not is_routed(main_config()):
+        reason = f"the context-guru profile file is missing ({profile()}); run $context-guru-setup"
+    elif not revive(read_record()):
+        reason = f"the proxy is not reachable and could not be restarted (log: {state_dir() / 'proxy.log'})"
+    else:
+        reason = None
+    if reason is None:
         os.environ["CONTEXT_GURU_ROUTED"] = "1"
         argv = [codex, "--profile", "context-guru", *rest]
     else:
-        print("context-guru-codex: the proxy is not reachable and could not be restarted; "
-              "starting Codex directly. This session is NOT routed through context-guru "
-              f"(log: {state_dir() / 'proxy.log'}).", file=sys.stderr)
+        print(f"context-guru-codex: {reason}; starting Codex directly. "
+              "This session is NOT routed through context-guru.", file=sys.stderr)
         argv = [codex, *rest]
     os.execv(codex, argv)
 
 
 def session_start_hook(_args):
-    """Advisory only: a hook runs after provider selection, so it cannot change transport."""
-    record = read_record()
-    if not int(record.get("port", 0)) or not is_routed(main_config()):
-        return 0
-    message = None
-    if os.environ.get("CONTEXT_GURU_ROUTED") != "1":
-        message = ("context-guru is installed but this session is not routed through it. "
-                   f"Start Codex with {state_dir() / 'context-guru-codex'} to route it.")
-    elif not revive(record):
-        message = ("context-guru proxy is down and could not be restarted: requests from this "
-                   "session will fail. Quit and start plain `codex`, or run $context-guru-doctor.")
-    if message:
-        print(json.dumps({"systemMessage": message}))
+    """Advisory only, and never fails. A hook runs after provider selection, so it cannot change
+    transport. It does not check the proxy: a sandboxed hook may not reach loopback, so a failed
+    check would prove nothing. The launcher restarts the proxy; `doctor` checks its health."""
+    try:
+        record = read_record()
+        if not int(record.get("port", 0)) or not is_routed(main_config()):
+            return 0
+        if os.environ.get("CONTEXT_GURU_ROUTED") != "1":
+            print(json.dumps({"systemMessage": (
+                "context-guru is installed but this session is not routed through it. "
+                f"Start Codex with {state_dir() / 'context-guru-codex'} to route it.")}))
+    except Exception:
+        pass
     return 0
 
 
@@ -765,7 +774,7 @@ def doctor(_args):
         ("installed", bool(port), "run $context-guru-setup"),
         ("profile_present", is_routed(main_config()), "run $context-guru-setup"),
         ("default_provider_untouched", not is_default_routed(main_config()),
-         f"run $context-guru-setup again (it migrates the legacy install)"),
+         f"run {state_dir() / 'context-guru-reset'} --yes"),
         ("binary_present", bool(record.get("binary")) and Path(record["binary"]).is_file(),
          "run $context-guru-setup"),
         ("launcher_present", launcher.is_file(), "run $context-guru-setup"),
@@ -972,6 +981,9 @@ def uninstall(args):
     path = profile()
     if path.exists() and path.read_text().startswith(MARKER):
         path.unlink()
+    launcher = state_dir() / "context-guru-codex"
+    if launcher.exists() and MARKER in launcher.read_text():
+        launcher.unlink()
     config = proxy_config()
     if config.exists() and config.read_text().startswith(CONFIG_MARKER):
         config.unlink()

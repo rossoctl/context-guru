@@ -9,8 +9,8 @@ First run `python3 ../../scripts/codex_plugin.py setup --plan` from this skill d
 nothing. Read and relay its `consent_question=` as one explicit yes/no question. A missing or
 ambiguous answer is no.
 
-Explain that setup adds a `context-guru` provider and profile to `$CODEX_HOME/config.toml` and
-never changes the default provider, so plain `codex` keeps working even if the proxy is down.
+Explain that setup adds a `context-guru` provider and profile file (`$CODEX_HOME/context-guru.config.toml`). It
+never edits `$CODEX_HOME/config.toml` and never changes the default provider, so plain `codex` keeps working even if the proxy is down.
 Routed sessions start through the `launch=` launcher printed by the plan. The current session
 cannot change transport. Name the standalone reset path printed by setup. Only after explicit consent, run
 `python3 ../../scripts/codex_plugin.py setup --i-consent-to-traffic-interception` with

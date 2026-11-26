@@ -50,8 +50,15 @@ def profile_path(config_path):
     return Path(config_path).with_name("context-guru.config.toml")
 
 
+def check_profile_writable(config_path):
+    path = profile_path(config_path)
+    if path.exists() and not path.read_text().startswith(MARKER):
+        raise RuntimeError(f"refusing to overwrite unmanaged profile: {path}")
+
+
 def install(config_path, state_path, port, provider):
     config_path, state_path = Path(config_path), Path(state_path)
+    check_profile_writable(config_path)
     if state_path.exists() and is_default_routed(config_path):
         restore(state_path)  # migrate a legacy install that locked the default provider
     lines = [MARKER + "\n", 'model_provider = "context-guru"\n\n',
