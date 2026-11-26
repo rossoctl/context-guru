@@ -11,7 +11,37 @@ It is project-safe, reversible, and does not add an API key.
 - Proxy v0.7.1 or later. The plugin downloads v0.7.9, or uses the `context-guru-proxy` on your `PATH`.
 - macOS or Linux.
 
-## Install
+## Install with one command (recommended)
+
+Run this in a terminal, on macOS or Linux:
+
+```sh
+curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash
+```
+
+It asks before each change:
+
+1. **OpenCode:** it installs the latest OpenCode with npm if OpenCode is missing, or updates it if it is
+   older than the latest release, as the Pi installer does for Pi. It never uses `sudo`. The plugin is tested
+   on 1.19.5 only; the installer says so for another version.
+2. **Your consent:** it says what turns on, and asks once.
+3. **The plugin:** it installs the release's plugin, checked by SHA-256, at
+   `~/.local/share/context-guru-opencode/plugin/`. It adds it to the global `opencode.json` and `tui.json`,
+   and removes another copy of the plugin there first. Your other entries stay. Old plugin options stay.
+4. **A check:** one test prompt if you want it. It checks that the proxy started.
+
+It asks for no key. The plugin uses OpenCode's own login (`opencode auth login`).
+It does not change an `opencode.jsonc` or a config file with comments. It prints the entries to add by hand.
+
+To remove it, run the command below. It stops the proxies, removes every entry of this plugin (also one you added by hand), the plugin copy, and OpenCode if it installed OpenCode. Your other entries stay.
+
+```sh
+curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash -s uninstall
+```
+
+npm installs OpenCode from `https://registry.npmjs.org/`. Set `CG_OC_NPM_REGISTRY` to use another registry.
+
+## Install by hand
 
 Clone this repository:
 

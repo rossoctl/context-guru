@@ -93,6 +93,11 @@ jobs:
       - name: Build the Pi installer package
         run: sh pi-package/release/package.sh "$(git describe --tags --always)" pi-dist
 
+      # The OpenCode one-command installer: the plugin and its installer as one tarball and its SHA-256, which
+      # opencode-plugin/release/install-opencode.sh downloads. Built like the Pi tarball, into opencode-dist/.
+      - name: Build the OpenCode installer package
+        run: sh opencode-plugin/release/package.sh "$(git describe --tags --always)" opencode-dist
+
       - name: Release
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -120,6 +125,15 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" pi-dist/context-guru-pi-*.tar.gz
           pi-dist/context-guru-pi-SHA256SUMS pi-package/release/install-pi.sh
 
+      - name: Attach the OpenCode installer to the release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # install-opencode.sh keeps its name, so releases/latest/download/install-opencode.sh always works.
+        run: >-
+          gh release upload "$GITHUB_REF_NAME" opencode-dist/context-guru-opencode-*.tar.gz
+          opencode-dist/context-guru-opencode-SHA256SUMS opencode-plugin/release/install-opencode.sh
+
       - name: Upload snapshot artifacts
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
@@ -134,4 +148,7 @@ jobs:
             pi-dist/context-guru-pi-*.tar.gz
             pi-dist/context-guru-pi-SHA256SUMS
             pi-package/release/install-pi.sh
+            opencode-dist/context-guru-opencode-*.tar.gz
+            opencode-dist/context-guru-opencode-SHA256SUMS
+            opencode-plugin/release/install-opencode.sh
           retention-days: 7

@@ -30,7 +30,17 @@ v1 `server()` export (`config` and `chat.headers` hooks), and OpenCode 2 calls t
 export (provider, command, and session-hook domains). Older OpenCode 1.x releases that only
 accept a function default export are not supported.
 
-Install the local plugin in `~/.config/opencode/opencode.json` for all projects:
+The easy way, on macOS or Linux: run this in a terminal.
+
+```sh
+curl -fsSL https://github.com/rossoctl/context-guru/releases/latest/download/install-opencode.sh | bash
+```
+
+It installs OpenCode if it is missing, asks for your consent, and adds the plugin to the global
+`opencode.json` and `tui.json`. Add `-s uninstall` after `bash` to remove it. See
+[docs/how-to/install-opencode-plugin.md](../docs/how-to/install-opencode-plugin.md).
+
+To install by hand, add the local plugin to `~/.config/opencode/opencode.json` for all projects:
 
 ```json
 {
