@@ -269,3 +269,24 @@ func (k *Keeper) holdFor(ttl1h bool) time.Duration {
 	}
 	return k.holdMax()
 }
+
+// WarmFacts is what the keeper itself knows of one held thread's cache: the last moment its entry was
+// known refreshed, and the lifetime it was written with. A host with no dashboard reads it for the cold
+// gate of the Ping button (ManualPingBlock), where a host with a dashboard reads its thread table. ok is
+// false when the thread is not held. It returns times only: no body and no credential. Nil-safe.
+func (k *Keeper) WarmFacts(key Key) (lastTouch time.Time, ttl time.Duration, ok bool) {
+	if k == nil || key.Session == "" {
+		return time.Time{}, 0, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e, held := k.live[key.id()]
+	if !held {
+		return time.Time{}, 0, false
+	}
+	last := e.refreshedAt
+	if last.IsZero() {
+		last = e.startedAt
+	}
+	return last, cacheLifetime(e.provider, e.model, e.ttl1h), true
+}

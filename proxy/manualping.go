@@ -75,7 +75,9 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 	if thread == "main" {
 		thread = ""
 	}
-	if h.rec == nil || h.keeper == nil {
+	// A hosted proxy with no audit sink holds nothing, so there is nothing to ping (#1457). A
+	// single-tenant proxy needs no dashboard: the keeper's own facts stand in for the thread table.
+	if h.keeper == nil || !h.keeper.mayHold() {
 		ctlErr(w, http.StatusNotFound, "unknown session")
 		return
 	}
@@ -88,28 +90,41 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 	scoped := scopedSession(tenantID, in.Session)
 
 	// What the dashboard knows about that thread's cache: when it last was touched, the tier it
-	// was written at, how big the prefix is. A thread with no cache touch is unknown.
+	// was written at, how big the prefix is. A thread with no cache touch is unknown. With no
+	// dashboard (single-tenant only) the keeper's own facts give the same two numbers.
 	now := h.keeper.now()
-	f := dash.Filter{Tenant: tenantID, Session: scoped}
-	ths, _, err := h.rec.DB().ThreadsFor(f, now.Add(-2*time.Hour).UnixMilli())
-	if err != nil {
-		ctlErr(w, http.StatusInternalServerError, "could not read the session's cache state")
-		return
-	}
-	var th *dash.ThreadCache
-	for i := range ths {
-		if ths[i].ID == thread {
-			th = &ths[i]
+	var lastTouch time.Time
+	var ttl time.Duration
+	if h.rec != nil {
+		f := dash.Filter{Tenant: tenantID, Session: scoped}
+		ths, _, err := h.rec.DB().ThreadsFor(f, now.Add(-2*time.Hour).UnixMilli())
+		if err != nil {
+			ctlErr(w, http.StatusInternalServerError, "could not read the session's cache state")
+			return
 		}
-	}
-	if th == nil {
-		ctlErr(w, http.StatusNotFound, "unknown session")
-		return
+		var th *dash.ThreadCache
+		for i := range ths {
+			if ths[i].ID == thread {
+				th = &ths[i]
+			}
+		}
+		if th == nil {
+			ctlErr(w, http.StatusNotFound, "unknown session")
+			return
+		}
+		lastTouch, ttl = time.UnixMilli(th.EndTS), time.Duration(th.TTLSeconds)*time.Second
+	} else {
+		var ok bool
+		lastTouch, ttl, ok = h.keeper.Keeper.WarmFacts(keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread})
+		if !ok {
+			ctlErr(w, http.StatusNotFound, "unknown session")
+			return
+		}
 	}
 	// The cold gate and the 1-hour touch conflict are keepalive.ManualPingBlock.
 	switch keepalive.ManualPingBlock(
 		h.keeper.Keeper.OneHourTouchLive(keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread}),
-		time.UnixMilli(th.EndTS), time.Duration(th.TTLSeconds)*time.Second, now) {
+		lastTouch, ttl, now) {
 	case keepalive.ManualBlockAtOneHour:
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "at one hour",
 			"detail": "the cache entry is at 1 hour after a free 1-hour ping; a manual ping would move it back to 5 minutes"})
@@ -171,7 +186,7 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		// The saving is credited by the accountant on the thread's next real request, so the answer says it is
 		// pending and carries no estimate (#1460). An older plugin reads a missing saved_usd as no saving.
 		"saving":        "pending",
-		"warm_until_ms": res.StartedAt.Add(time.Duration(th.TTLSeconds) * time.Second).UnixMilli(),
+		"warm_until_ms": res.StartedAt.Add(ttl).UnixMilli(),
 	})
 }
 
