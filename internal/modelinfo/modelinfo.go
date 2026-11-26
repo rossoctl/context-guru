@@ -172,10 +172,10 @@ func (p Price) Cost(fresh, cacheRead, cacheWrite, output int64) float64 {
 // publishes one: 2.0x input, minus whatever the 5m write rate is, on exactly the tokens the
 // response says were written at 1h.
 //
-// Hoisted here so dash's Event.Price and the host-level keep-alive mechanism's own cost
-// bookkeeping (proxy/keepalive.go's record1) price the SAME request shape identically instead
-// of each inlining this formula — the two had drifted apart once already (see issue #382's
-// review) when the keep-alive mechanism was decoupled from dash's event type.
+// NO production code calls it now. The accountant prices the bill (accountant.RequestCost), and it gives
+// the same bits as this formula. This function stays as the REFERENCE: the bit-check tests in dash, keepalive
+// and modelinfo compare the accountant with it, so a drift in either shows at once. Do not call it from
+// production code.
 // Price.RateAt (rateat.go) reads the same premium (CacheWrite1h), so the accountant's figure prices a 1h write the same way.
 func (p Price) CostWithCacheWrite1h(fresh, cacheRead, cacheWrite, output, cacheWrite1h int64) float64 {
 	cost := p.Cost(fresh, cacheRead, cacheWrite, output)

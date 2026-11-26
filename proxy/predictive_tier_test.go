@@ -103,7 +103,7 @@ func TestLiveBilledCostEqualsTheStoredBill(t *testing.T) {
 			e := &dash.Event{Model: c.model, FreshInput: c.u.FreshInput, CacheRead: c.u.CacheRead, CacheWrite: c.u.CacheWrite,
 				CacheWrite1h: c.u.CacheWrite1h, OutputTokens: c.u.Output}
 			e.Price(c.price, true)
-			if got := k.billedCost(c.model, time.Now(), c.u); math.Abs(got-e.CostUSD) > 1e-12 || e.CostUSD == 0 {
+			if got := k.billedCost(c.model, time.Now(), c.u); got != e.CostUSD || e.CostUSD == 0 {
 				t.Errorf("live cost %v, stored cost %v", got, e.CostUSD)
 			}
 		})

@@ -2165,6 +2165,16 @@ func billedPrompt(u Usage, prefix int64) int64 {
 	return prefix
 }
 
+// billedUSD is the bill of one request's usage: accountant.RequestCost, at the prompt size prompt that picks its
+// price tier (billedPrompt of the whole usage). It gives the same bits as the bill that dash.Event.Price stores, with the one-hour part of
+// a write at the one-hour rate. Zero for a price with no rates.
+func billedUSD(price Price, model string, prompt int64, u Usage) float64 {
+	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: model,
+		Billed: accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead), CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)},
+		Output: int(u.Output), PromptTokens: prompt}, modelinfo.OnePrice{Model: model, Price: price})
+	return usd
+}
+
 // pingCost prices one ping's usage. The same gate dash.Event.Price used to apply before pricing
 // anything: no cost without a usable rate, and no cost claimed for a ping whose usage reported
 // nothing at all. priced is false when the model has no rate.
@@ -2177,9 +2187,9 @@ func (k *Keeper) pingCost(endpoint, model string, prefix int64, u Usage) (cost f
 		return 0, false
 	}
 	if u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0 {
-		// See modelinfo.Price.CostWithCacheWrite1h for the one-hour write premium this folds
-		// in — the same helper dash.Event.Price uses, so the two cannot drift apart again.
-		cost = price.CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
+		// The accountant prices the bill, with the one-hour write premium folded in — the same function
+		// dash.Event.Price uses, so the two cannot drift apart again.
+		cost = billedUSD(price, model, billedPrompt(u, prefix), u)
 	}
 	return cost, true
 }
