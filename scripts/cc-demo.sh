@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real Claude Code integration demo: route `claude` through context-guru and read /stats.
-# Requires: proxy built (CGO_ENABLED=1 go build -o bin/context-guru-proxy ./cmd/context-guru-proxy),
+# Requires: proxy built (go build -o bin/context-guru-proxy ./cmd/context-guru-proxy),
 # and ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN in the env (an Anthropic-compatible endpoint).
 #
 # Usage: ANTHROPIC_BASE_URL=... ANTHROPIC_AUTH_TOKEN=... scripts/cc-demo.sh
@@ -16,7 +16,7 @@ demo=$(mktemp -d)
 printf 'package main\nimport "fmt"\nfunc main(){ fmt.Println(greet("world")) }\nfunc greet(n string) string { return "hello "+n }\n' > "$demo/main.go"
 printf '# cc-demo\nTiny repo for the context-guru Claude Code integration demo.\n' > "$demo/README.md"
 
-# agent preset: mask/dedup/failed_run/extract — the levers for long Claude Code sessions.
+# agent preset: dedup/extract/extract_llm — the levers for long Claude Code sessions.
 # Upstream + cheap model (for extract) both point at the same Anthropic-compatible endpoint.
 LISTEN_ADDR="127.0.0.1:$PORT" \
 ANTHROPIC_UPSTREAM="$ANTHROPIC_BASE_URL" \
