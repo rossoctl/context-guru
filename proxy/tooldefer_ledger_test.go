@@ -315,3 +315,59 @@ func TestAccFigureGatesSumFailuresWithWithhold(t *testing.T) {
 		})
 	}
 }
+
+// Fail open: on the dashboard path finish runs the ledger hook in the handler's defer, and accCompute inside it is
+// outside accFigure's recover. A panic there must cost the figure only: the handler does not panic and the request
+// books as unpriced.
+func TestDeferBookPanicIsRecoveredAndBooksUnpriced(t *testing.T) {
+	h := tdHandler(t, "ultrahigh", "http://x")
+	defer h.Close()
+	c := asyncCapture()
+	// No model: accFigure returns before it prices, so the hook's own accCompute is the first one, outside any recover.
+	c.pricer = tdPrices{}
+	c.accReq = &accountant.Request{} // an open record with no tracker behind it: pricing it panics
+	c.savings = nil
+	di := &tooldefer.Info{Tenant: "t", Model: "claude-sonnet-5-5", Outcome: tooldefer.Outcome{DeferredTokens: 1000, ListTokens: 100}}
+	h.deferLedger(context.Background(), c, di, Usage{CacheRead: 5000, Output: 5}, true, searchTally{})
+	c.runDeferBook() // the handler's defer: must not panic
+	if st := h.toolDefer().ledger.Snapshot(); st.Requests != 1 || st.Unpriced != 1 || st.Net != 0 {
+		t.Fatalf("ledger = %+v, want 1 request booked as unpriced", st)
+	}
+}
+
+// #1504: on the dashboard path finish runs the accountant in the handler's terminal defer. A panic there must cost the
+// figure only: finish returns (so stopEarlyScan and the log line after it run), and the dashboard row is written as
+// no_result.
+func TestFinishFailsOpenWhenTheAccountantPanics(t *testing.T) {
+	up := httptest.NewServer(sseUpstream{})
+	defer up.Close()
+	h, rec, tap := accHandlerOpts(t, up.URL, "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n", nil)
+	_ = h
+	c := &capture{rec: rec, pricer: tdPrices{}, model: "claude-sonnet-5-5", provider: "anthropic", route: "/v1/messages",
+		tenant: "t", start: time.Now()}
+	c.accReq = &accountant.Request{} // an open record with no tracker behind it: pricing it panics
+	c.savings = nil
+	returned := false
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("finish let the accountant's panic escape into the handler: %v", p)
+			}
+		}()
+		c.finish(Usage{FreshInput: 5, CacheRead: 100, Output: 5}, true, false, 0, 0)
+		returned = true
+	}()
+	if !returned {
+		t.Fatal("finish did not return")
+	}
+	waitForRows(t, rec, 1)
+	evs := tap.all()
+	if len(evs) != 1 || evs[0].AccFallback != dash.FallbackNoResult {
+		t.Fatalf("rows = %d, fallback %q: want one row booked as %q", len(evs), func() string {
+			if len(evs) > 0 {
+				return evs[0].AccFallback
+			}
+			return ""
+		}(), dash.FallbackNoResult)
+	}
+}

@@ -428,6 +428,14 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 		return
 	}
 	cp.deferBook = func() {
+		// Fail open: finish runs this in the handler's defer on the dashboard path, and accCompute is outside
+		// accFigure's own recover. A panic costs the figure only: the request books as unpriced.
+		defer func() {
+			if p := recover(); p != nil {
+				slog.Error("tool deferral: booking the ledger panicked; the request books no figure", "panic", p)
+				ledger.AddMoney(tenant, tooldefer.Money{}, false)
+			}
+		}()
 		fig, priced := cp.accFigure(context.Background(), u, usageOK)
 		if res, have := cp.accCompute(u, usageOK); !priced || !have || accrec.Held(res) {
 			ledger.AddMoney(tenant, tooldefer.Money{}, false)

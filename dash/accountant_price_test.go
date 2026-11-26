@@ -334,7 +334,7 @@ func TestTierTokensCarryEveryLibraryTier(t *testing.T) {
 }
 
 // A non-fatal library check does not gate the figure. The library decides which checks are fatal (accountant.Withhold).
-func TestAnUnnamedFatalCheckStillGates(t *testing.T) {
+func TestANonFatalCheckDoesNotGate(t *testing.T) {
 	e := switchEvent()
 	e.accRes.Checks = []accountant.CheckFailure{{Check: accountant.CheckConservation}}
 	e.PriceMode(accTestPrice, true)

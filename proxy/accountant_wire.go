@@ -244,18 +244,27 @@ func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig
 // finishAccountant ends a request that has no dashboard. It runs on its own goroutine, off the client's path. It prices the request (which books the metrics), drops the
 // record and keeps the thinking counts. Fail open: a panic here costs the figure only.
 func (c *capture) finishAccountant(usage Usage, usageOK bool) {
+	failOpenAccountant("finish", func() {
+		defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
+		c.accCompute(usage, usageOK)
+		c.runDeferBook()
+		if usageOK && !c.rejected() {
+			c.savings.recordThinking(usage.Thinking)
+		}
+		c.savings.finished(c, usage, usageOK)
+	})
+}
+
+// failOpenAccountant runs one accountant step and, on a panic, logs it and drops the step: the request books no figure
+// for it, and what runs after the step still runs (#1504). The steps that run in the handler's terminal defer use it,
+// so a panic does not cost the dashboard row, stopEarlyScan or the request's log line.
+func failOpenAccountant(what string, step func()) {
 	defer func() {
 		if p := recover(); p != nil {
-			slog.Error("accountant: finish panicked; the request books no figure", "panic", p)
+			slog.Error("accountant: "+what+" panicked; the request books no figure for it", "panic", p)
 		}
 	}()
-	defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
-	c.accCompute(usage, usageOK)
-	c.runDeferBook()
-	if usageOK && !c.rejected() {
-		c.savings.recordThinking(usage.Thinking)
-	}
-	c.savings.finished(c, usage, usageOK)
+	step()
 }
 
 // accDeferSpend reports the search-turn costs of a deferred request to the accountant as spend operations on the
@@ -277,5 +286,10 @@ func (c *capture) runDeferBook() {
 	}
 	f := c.deferBook
 	c.deferBook = nil
+	defer func() { // fail open: the closure recovers its own panic; this guards the call itself
+		if p := recover(); p != nil {
+			slog.Error("tool deferral: the ledger hook panicked; the request books no figure", "panic", p)
+		}
+	}()
 	f()
 }

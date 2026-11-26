@@ -851,18 +851,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	// The rules for which request books no figure are accrec.Recorder.Price's (see accCompute). A request with no
 	// figure leaves the event with no Result, so PriceMode books no dollars either (acc_fallback no_result).
-	if res, ok := c.accCompute(usage, usageOK); ok {
-		e.SetAccountant(res)
-	}
-	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
-	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
-	// the client keeps.
-	if usageOK && !c.rejected() {
-		c.savings.recordThinking(usage.Thinking)
-	}
+	// Fail open (#1504): this runs in the handler's terminal defer, so a panic in the accountant must cost the figure
+	// only. The row, stopEarlyScan and the log line still run after it, and the row books as no_result.
+	failOpenAccountant("finish", func() {
+		if res, ok := c.accCompute(usage, usageOK); ok {
+			e.SetAccountant(res)
+		}
+		// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
+		// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
+		// the client keeps.
+		if usageOK && !c.rejected() {
+			c.savings.recordThinking(usage.Thinking)
+		}
+	})
 	endAcc()
-	c.savings.finished(c, usage, usageOK)
-	c.runDeferBook()
+	failOpenAccountant("finished", func() { c.savings.finished(c, usage, usageOK) })
+	c.runDeferBook() // recovers its own panic and books the request as unpriced
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accServerHeldHistory {
 		e.SetAccountantServerHeldHistory()
