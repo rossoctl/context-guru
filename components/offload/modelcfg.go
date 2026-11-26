@@ -33,7 +33,7 @@ var retiredModelKeys = []string{"base_url", "api_key", "provider", "auth"}
 // decodeWithModelHint is components.Decode, except that it first drops any of retiredModelKeys
 // from the top-level `model:` block, and logs ONE WARN for the component naming each dropped key
 // and where that setting lives now. Every component with a model: block (extract_llm, summarize,
-// cache_aware_summarizer, agentdiet) calls this instead of components.Decode directly.
+// cache_aware_summarizer) calls this instead of components.Decode directly.
 //
 // Dropping, not refusing, because a removed setting must not stop the proxy: on main these keys
 // were valid, so a document written before the removal has to keep loading. Every other decode

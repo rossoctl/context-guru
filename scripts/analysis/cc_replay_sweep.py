@@ -9,20 +9,10 @@ cannot show how the agent would have behaved. Expand round-trips (the agent aski
 import argparse, collections, glob, json, os, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 
-# Components that never call a model. The ones left out call one (agentdiet, summarize, cache_aware_summarizer,
-# extract_llm, extract_llm_sweep), need a build tag (skeleton), or act only on `system`/`tools`, which a transcript
+# Components that never call a model. The ones left out call one (summarize, cache_aware_summarizer,
+# extract_llm, extract_llm_sweep), or act only on `system`/`tools`, which a transcript
 # does not carry (cachesplit, cacheinject, toolschema, toolfilter).
-FREE = ["format", "textclean", "searchfold", "dedup", "toon", "cmdfilter", "failed_run", "extract", "linecap",
-        "smartcrush", "collapse", "mask", "coref", "readlifecycle"]
-# Non-default settings worth pricing: the knobs whose default is off on cache grounds, and the size threshold of the
-# one lossy component that touches whole files. Reported next to the single components; not used in the search.
-VARIANTS = {
-    "readlifecycle stale_at_depth": "pipeline: [readlifecycle]\ncomponents:\n  readlifecycle:\n    stale_at_depth: true\n",
-    "readlifecycle bash_edits": "pipeline: [readlifecycle]\ncomponents:\n  readlifecycle:\n    bash_edits: true\n",
-    "mask cold_cache off": "pipeline: [mask]\ncomponents:\n  mask:\n    cold_cache: false\n",
-    "collapse max_tokens 4000": "pipeline: [collapse]\ncomponents:\n  collapse:\n    max_tokens: 4000\n",
-    "collapse max_tokens 8000": "pipeline: [collapse]\ncomponents:\n  collapse:\n    max_tokens: 8000\n",
-}
+FREE = ["format", "textclean", "searchfold", "dedup", "toon", "cmdfilter", "extract"]
 PRESETS = ["conservative", "safe", "balanced", "coding", "codesafe"]
 # The order components run in when combined: lossless repacking first, then noise removal, then the age and
 # relevance offloaders, as the shipped presets order them.
@@ -109,13 +99,6 @@ def main():
         res["presets"][p] = run(args, "preset-" + p, "-preset", p)
     for c in FREE:
         res["single"][c] = run(args, "single-" + c, "-pipeline", c)
-    res["variants"] = {}
-    for name, doc in VARIANTS.items():
-        label = "variant-" + name.replace(" ", "-")
-        path = os.path.join(args.work, label + ".yaml")
-        with open(path, "w") as f:
-            f.write(doc)
-        res["variants"][name] = run(args, label, "-config", path)
     # Greedy forward search: keep adding the component that raises the saving most; stop when none adds
     # at least 0.01 percentage point. A component that breaks the cache shows up as a lower saving here.
     def greedy(pool, ok):
@@ -149,7 +132,6 @@ def main():
                                   f"edited-later {r['total']['edited_later_pct']:5.1f}%")
     print("== shipped presets"); [show(p, r) for p, r in res["presets"].items()]
     print("== one component alone"); [show(c, r) for c, r in sorted(res["single"].items(), key=lambda kv: -kv[1]["total"]["saving_pct"])]
-    print("== non-default settings"); [show(n, r) for n, r in res["variants"].items()]
     print("== greedy search"); [show("+ " + g["add"], g["result"]) for g in res["greedy"]]
     for key, title in (("best", "best custom pipeline"), ("best_low_risk", "best low-risk pipeline (0 breaks, <0.05% of removed tokens edited later)")):
         b = res[key]

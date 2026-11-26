@@ -33,7 +33,8 @@ says what each one does at three storage levels: off, metadata only, and everyth
 
 - **Content**: text from the user or the agent, or text made from it. Examples: transcript text,
   tool output, request bodies, system prompts, tool declarations. A summary and a shortened tool
-  output are content too.- **Metadata**: values that do not let you read the content back. Examples: hashes, counts,
+  output are content too.
+- **Metadata**: values that do not let you read the content back. Examples: hashes, counts,
   sizes, ids, token numbers, timestamps, flags. **A short hash of content is metadata.** A
   shortened copy, a sample, or the first characters of content are content.
 - **Kept**: held after the request ends, in memory or on disk. Text held only while one request

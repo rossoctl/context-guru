@@ -502,9 +502,10 @@ var removedComponents = map[string]bool{
 	"readlifecycle": true, "coref": true, "agentdiet": true, "skeleton": true,
 }
 
-// dropRemoved removes removedComponents from the pipeline and their config blocks.
-func (c *Config) dropRemoved() {
-	kept := c.Pipeline[:0:0]
+// withoutRemoved returns the pipeline without removedComponents, and warns for each one dropped. It
+// does not write to c, so it is safe on a Config whose Components map is shared.
+func (c *Config) withoutRemoved() []string {
+	kept := make([]string, 0, len(c.Pipeline))
 	for _, n := range c.Pipeline {
 		if removedComponents[n] {
 			slog.Warn("config: component was removed and is ignored", "component", n)
@@ -512,9 +513,13 @@ func (c *Config) dropRemoved() {
 		}
 		kept = append(kept, n)
 	}
-	if len(kept) != len(c.Pipeline) {
-		c.Pipeline = kept
-	}
+	return kept
+}
+
+// dropRemoved removes removedComponents from the pipeline and their config blocks. Only LoadBytes
+// calls it, on a Config it has just decoded and owns.
+func (c *Config) dropRemoved() {
+	c.Pipeline = c.withoutRemoved()
 	for n := range c.Components {
 		if removedComponents[n] {
 			delete(c.Components, n)
@@ -1050,8 +1055,8 @@ components:
 
 // PresetPipeline returns the default pipeline (ordered component names) for a
 // named preset. It's the safe way to resolve a caller-supplied preset name (e.g.
-// a /compact ?preset= query param) — a plain map lookup, no YAML parsing of
-// untrusted input.
+// a /compact ?preset= query param) — a map lookup, no YAML parsing of
+// untrusted input. The retired `agentdiet` preset resolves to an empty pipeline and logs a warning.
 func PresetPipeline(name string) ([]string, bool) {
 	if name == "agentdiet" { // removed; same as the config path: warn, run no components
 		slog.Warn("config: preset was removed and is ignored", "preset", name)
@@ -1064,10 +1069,12 @@ func PresetPipeline(name string) ([]string, bool) {
 // Build constructs the ordered pipeline from the config, wiring each named
 // component with its raw config block.
 func (c *Config) Build(e components.Emitter) (*components.Pipeline, error) {
-	c.dropRemoved()
-	comps := make([]components.Component, 0, len(c.Pipeline))
-	seen := make(map[string]bool, len(c.Pipeline))
-	for _, name := range c.Pipeline {
+	// Read-only: Build never writes to c. A removed name is skipped here, so a library caller that
+	// built a Config by hand is covered too.
+	names := c.withoutRemoved()
+	comps := make([]components.Component, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
 		if seen[name] {
 			return nil, fmt.Errorf("config: duplicate pipeline component %q", name)
 		}

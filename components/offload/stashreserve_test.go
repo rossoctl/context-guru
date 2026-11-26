@@ -12,7 +12,7 @@ import (
 	"github.com/rossoctl/context-guru/store"
 )
 
-// wideOutput is a tool output linecap will certainly rewrite: one very long line.
+// wideOutput is a tool output extract will certainly rewrite: one very long line.
 func wideOutput(tag string) string {
 	return "line " + tag + ": " + strings.Repeat(tag+"x", 900)
 }

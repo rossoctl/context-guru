@@ -19,7 +19,7 @@ import (
 // compacted by extract, which re-derives every turn and stops at skipReduce, and extract_llm,
 // which checks kept-verbatim before its replay. Both still flipped with the switch on. The fix
 // now lives in isKeptVerbatim, which every one of them consults, so this table covers one offloader
-// per route into it: skipReduce (extract), and extract_llm's own
+// per route into it: skipReduce (extract), reapplyFrozen (cmdfilter), and extract_llm's own
 // check.
 //
 // Each row asserts its own control FIRST: without Ctx.Restored, the same expand flips the message
@@ -46,6 +46,16 @@ func TestFixedRestoreKeepsTheCompactionAtTheOriginalPosition(t *testing.T) {
 					t.Fatal(err)
 				}
 				return c.(components.Offload), plainCtx
+			}},
+		{name: "cmdfilter (reapplyFrozen)", idx: 1,
+			body: "debug1: Reading configuration data /etc/ssh/ssh_config\n" +
+				strings.Repeat("debug1: Connecting to host port 22 with some verbose banner text\n", 40) +
+				"Welcome to Ubuntu 22.04.3 LTS\n",
+			req: func(b string) []bschemas.ChatMessage {
+				return []bschemas.ChatMessage{userMsg("go"), cmdToolMsg(b), cmdToolMsg("tail")}
+			},
+			make: func(t *testing.T) (components.Offload, func(store.Store, bool) *components.Ctx) {
+				return newFilterComp(t, ""), plainCtx
 			}},
 		{name: "extract_llm (its own replay check)", idx: 1,
 			body: strings.Repeat("2026-08-31T10:00:00Z INFO worker: processed batch\n", 400),

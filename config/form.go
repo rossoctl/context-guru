@@ -62,8 +62,8 @@ type Form struct {
 	// whatever Pipeline says — so removing a component is an act a client has to CLAIM, and a
 	// client that cannot see one cannot take it out.
 	//
-	// It exists because a save silently reverted an operator's pipeline: `linecap` was
-	// dropped and `toon` re-added. The server never knew either name — the pipeline is a
+	// It exists because a save silently reverted an operator's pipeline: a removed
+	// component was dropped and `toon` re-added. The server never knew either name — the pipeline is a
 	// wholesale write of whatever the browser rebuilt out of its checkbox grid — so a stale
 	// render or a cached bundle whose /api/options predated a component produces exactly that
 	// diff, and the server had no way to tell it from a deliberate removal. Now it does.
@@ -532,8 +532,8 @@ func ApplyForm(doc string, f Form) (string, error) {
 // document that has since changed. `known` disambiguates — it is what the client says it drew —
 // and absence from `known` resolves the ambiguity in favour of the stored document.
 //
-// Position is preserved, not appended: a pipeline is an ORDER, and `linecap` reappearing at the
-// end is a different configuration from `linecap` where the operator put it. Each survivor goes
+// Position is preserved, not appended: a pipeline is an ORDER, and a component reappearing at the
+// end is a different configuration from the same component where the operator put it. Each survivor goes
 // back at the index it held in `was`, which for the common case of one unmodelled component in
 // the middle restores the document exactly.
 //

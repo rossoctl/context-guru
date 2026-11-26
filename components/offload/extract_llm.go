@@ -123,7 +123,8 @@ type ExtractLLM struct {
 	minTokens   int
 	strategy    string
 	modelSource string
-	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	// modelClient is a test-injection seam only: production never sets it (the model: block
+	// names a source, never a credential, since the host owns both). nil => c.Model.For(modelSource).
 	modelClient   components.Model
 	trigger       components.Trigger
 	mode          markerMode

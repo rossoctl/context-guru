@@ -73,7 +73,7 @@ func ValidateShape(msgs []schemas.ChatMessage) []ShapeViolation {
 //     string writes `""` straight onto the wire. `summarize` itself is NOT one of them — it
 //     refuses a blank summary (components/offload/summarize.go:201), confirmed by mutation:
 //     making its model return "" makes it decline rather than emit empty content. So this rule
-//     guards the OTHER rewriters (cmdfilter, dedup, skeleton, textclean and the rest), which
+//     guards the OTHER rewriters (cmdfilter, dedup, textclean and the rest), which
 //     have no such guard. Gated to Anthropic because an Anthropic rejection is what is on
 //     record; widen it when another provider's 400 is.
 //

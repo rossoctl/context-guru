@@ -346,11 +346,16 @@ func TestRemovedComponentsAreIgnoredNotFatal(t *testing.T) {
 	}
 	// Built straight from a struct (no LoadBytes), as library callers do.
 	c := &Config{Pipeline: []string{"format", "failed_run", "extract"}}
-	if _, err := c.Build(nil); err != nil {
+	pipe, err := c.Build(nil)
+	if err != nil {
 		t.Fatalf("struct build: %v", err)
 	}
-	if got := strings.Join(c.Pipeline, ","); got != "format,extract" {
-		t.Errorf("pipeline = %s, want format,extract", got)
+	if got := strings.Join(pipe.Names(), ","); got != "format,extract" {
+		t.Errorf("built pipeline = %s, want format,extract", got)
+	}
+	// Build is read-only: the caller's Config is unchanged.
+	if got := strings.Join(c.Pipeline, ","); got != "format,failed_run,extract" {
+		t.Errorf("Build wrote to the Config: pipeline = %s", got)
 	}
 }
 

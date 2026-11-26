@@ -1160,7 +1160,7 @@ func (h *Handler) authenticate(r *http.Request) (*Tenancy, error) {
 //
 // It exists because TENANT_RPM and TENANT_CONCURRENT used to be enforced in chat() and
 // nowhere else, while two other authenticated routes ran the same box for free —
-// /compact drives the whole pipeline (tokenisation, tree-sitter, several passes) over a
+// /compact drives the whole pipeline (tokenisation, several passes) over a
 // body up to 32 MiB, and the Bob catch-all forwards arbitrary methods and paths. With the
 // limiter at one request a minute, chat refused the second call while /compact served
 // twenty of twenty. One guard, three call sites, smaller than three copies of it.

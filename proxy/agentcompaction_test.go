@@ -288,7 +288,7 @@ func compactionTurnPair(t *testing.T, header http.Header) (fwdN, fwdC, sentN, se
 			`"usage":{"input_tokens":5,"output_tokens":1}}`))
 	}))
 	defer upstream.Close()
-	h, _ := buildHandler(t, "pipeline: [dedup, linecap]\ncomponents:\n  dedup: {min_tokens: 20}\n", upstream.URL)
+	h, _ := buildHandler(t, "pipeline: [dedup]\ncomponents:\n  dedup: {min_tokens: 20}\n", upstream.URL)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -462,7 +462,7 @@ func TestExpandToolAdvertisedOnEveryTurnIncludingACompaction(t *testing.T) {
 			// A pipeline that CAN offload: advertising is gated on that, because a pipeline
 			// which mints no markers would advertise a tool whose every call must fail. The
 			// premise of this test is that an offload happened (hence the store seed below),
-			// so the fixture has to be a pipeline where that is possible. `linecap` does not
+			// so the fixture has to be a pipeline where that is possible. `extract` does not
 			// act on these short bodies, so the forwarded bytes are unchanged.
 			h, st := buildHandler(t, "pipeline: [extract]\n", upstream.URL)
 			st.Put("HASH", []byte("THE ORIGINAL CONTENT"))

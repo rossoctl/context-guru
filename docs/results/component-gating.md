@@ -9,6 +9,12 @@ no agent, no task, no reward. Total spend **~$3**.
 
 Reproduce: `deploy/harbor/replay2.py <capture> --configs ...`, with `CACHE_MODE` set per run.
 
+!!! note "Removed components"
+    `mask`, `failed_run`, `collapse`, `linecap`, `smartcrush`, `readlifecycle`, `coref`, `agentdiet` and
+    `skeleton` were removed in #474 (see [Compaction cleanup](https://github.com/rossoctl/context-guru/issues/471)).
+    The figures below are history. `replay2.py` no longer offers them as arms, and a current build
+    cannot reproduce them.
+
 ## 1. The tail gate costs more than the docs imply — **measured**
 
 `replay2.py` inherits `CACHE_MODE`, so the same configs can be replayed with cache-awareness on and
