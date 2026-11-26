@@ -286,8 +286,8 @@ Labels in this section:
 | `cause` | `model_changed`, `ended_change`, `none` | Why the effect happened. `model_changed`: the model changed. `ended_change`: a change that was active before stopped. `none`: no single cause. |
 | `direction` | `saved`, `added` | Whether the cache effect lowered or raised the bill. |
 | `model` | As in 5.1 | The model of the baseline cost. |
-| `result` | `priced`, `unpriced`, `skipped` | What the `accountant` did with the request. |
-| `reason` | For `unpriced`: `penalty_unknown`, `unknown_kind`, `operator_not_allowed` and others from the library. For `fallback`: the gate that declined. | Why the request was not priced, or why no saving was booked. |
+| `result` | `priced`, `unpriced`, `withheld`, `skipped` | What the `accountant` did with the request. |
+| `reason` | For `unpriced`: `penalty_unknown`, `unknown_kind`, `operator_not_allowed` and others from the library. For `fallback`: the gate that declined. For `withheld`: the library gate that failed (`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`, `size_unknown`, `implausible_size`). | Why the request was not priced, or why no saving was booked. |
 | `check` | `sum`, `order`, `unique_change`, `spans`, `attribution`, `conservation`, `shared_warm` | The library check that failed. |
 
 
