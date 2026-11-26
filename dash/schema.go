@@ -773,12 +773,15 @@ CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts D
 -- only through a declaration row the reader is already scoped to (see declTextJoin), and two
 -- accounts that share a row share bytes that are equal by construction — nothing about either
 -- account is inferable from it, and no count or hash is served. It does mean a shared row must
--- outlive one account's purge, which is the trap any future reference counting would fall into.
+-- outlive one account's purge, which is why the delete below counts the other users first.
 --
--- Nothing deletes from here. A row is at most 12.7 KB and the table is bounded by the number
--- of distinct declaration texts the deployment has ever seen (225 in 5.3 days), not by
--- traffic — so the GC trigger that removes a session's declarations may orphan a row, and
--- reference counting to reclaim 0.2 MB would be a second eviction path to get wrong.
+-- A row goes when the last declaration row that names it goes. The trigger trg_tool_inventory_gc
+-- (additiveDDL2) does it, in the same transaction that deletes the session's declarations, so
+-- retention, a size trim, an archive move and a tenant purge all remove the text with no path of
+-- their own. A row that another session or account still names stays: that is the shared case the
+-- paragraph above describes. Rows orphaned before this rule are swept once at start
+-- (sweepOrphanDeclarationText). Stored prompt text is customer data, so it must not outlive the
+-- requests it came from (#689).
 CREATE TABLE IF NOT EXISTS declaration_text (
   hash    TEXT PRIMARY KEY,
   text_gz BLOB    NOT NULL,
@@ -834,10 +837,30 @@ CREATE INDEX IF NOT EXISTS idx_requests_limits_tenant
   ON requests(tenant_id, ts DESC) WHERE limit_seen = 1;
 CREATE INDEX IF NOT EXISTS idx_requests_limits_ts
   ON requests(ts DESC) WHERE limit_seen = 1;
+-- Which declaration_text rows still have a user (#689). The purge below looks a row up by its
+-- hash across every tenant and session, so without this index each lookup scans the widest table
+-- in the schema. Partial: a row with no stored text costs nothing here.
+CREATE INDEX IF NOT EXISTS idx_tooldecl_text_hash
+  ON tool_declarations(text_hash) WHERE text_hash IS NOT NULL;
+-- DROP then CREATE IF NOT EXISTS: a plain IF NOT EXISTS alone would keep an old trigger, and a plain
+-- CREATE after the DROP fails when two opens race. A database opened by an older build already has the
+-- trigger without the declaration_text step, and IF NOT EXISTS would keep that one for ever.
+DROP TRIGGER IF EXISTS trg_tool_inventory_gc;
 CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
 BEGIN
+  -- The stored prompt text goes first, while this session's declaration rows still name it.
+  -- A text row goes only when no OTHER (tenant, session) declaration row names the same hash:
+  -- the key is the content, so two accounts or two sessions can share one row, and one
+  -- account's purge must not remove the bytes another still reads.
+  DELETE FROM declaration_text
+    WHERE hash IN (SELECT text_hash FROM tool_declarations
+                    WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id
+                      AND text_hash IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM tool_declarations o
+                       WHERE o.text_hash = declaration_text.hash
+                         AND NOT (o.session_id = OLD.session_id AND o.tenant_id = OLD.tenant_id));
   DELETE FROM tool_declarations
     WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id;
   DELETE FROM tool_uses
