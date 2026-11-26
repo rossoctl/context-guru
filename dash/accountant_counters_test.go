@@ -40,7 +40,7 @@ func TestAccountantFigureEqualsTheSavingsCountersAcrossALine(t *testing.T) {
 	f := e.AccountantFigure(p)
 
 	r := sdk.NewManualReader()
-	sink, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("t"), sinkPricer{hostPricer{p}})
+	sink, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("t"), sinkPricer{hostPricer{model: "gpt-5.6", p: p}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,5 +97,27 @@ func TestAccountantFigureMapsFirstAndReplayColumns(t *testing.T) {
 	}
 	if want := tierUSD(accTestPrice, accountant.TierTokens{CacheRead: 7_000}); !accNear(f.ByComponentReplay["mask"], want) || want == 0 {
 		t.Errorf("replay %v want %v", f.ByComponentReplay["mask"], want)
+	}
+}
+
+// A rescue the client body has too (InBaseline) is not booked: no dollars, no tokens (behavior change 4).
+func TestAccountantFigureInBaselineRescueIsNotBooked(t *testing.T) {
+	e := &Event{FreshInput: 1000}
+	e.SetAccountant(accountant.Result{CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectRescue, ChangeID: "ka:1", InBaseline: true,
+		Saved: accountant.TierTokens{CacheWrite5m: 500}, Caused: accountant.TierTokens{CacheRead: 500}}}})
+	f := e.AccountantFigure(accTestPrice)
+	if f.KeepAliveSavedUSD != 0 || f.TokKeepAlive != (TokenFlow{}) {
+		t.Fatalf("keep-alive %v tokens %+v, want none", f.KeepAliveSavedUSD, f.TokKeepAlive)
+	}
+}
+
+// A spend call on another model is never priced with this request's rates.
+func TestHostPricerRefusesAnotherModel(t *testing.T) {
+	h := hostPricer{model: "a", p: accTestPrice}
+	if v, est := h.PriceAt("b", time.Time{}, accountant.TierInput, 10); v != 0 || !est {
+		t.Fatalf("got %v %v, want 0 true", v, est)
+	}
+	if v, _ := h.PriceAt("a", time.Time{}, accountant.TierInput, 10); v == 0 {
+		t.Fatal("own model not priced")
 	}
 }

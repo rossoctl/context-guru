@@ -1,4 +1,4 @@
-package accwire
+package accrec
 
 import "github.com/rossoctl/accountant"
 

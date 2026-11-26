@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/accountant"
-	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -217,7 +217,7 @@ func TestHeldFloorUsesTheSavedSidePrice(t *testing.T) {
 	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask",
 		Saved: accountant.TierTokens{Input: 50_000}}}})
 	delta := 50_000 * 10e-6
-	if got, want := accwire.HeldFloorUSD(e.AccountantFigure(gpt56()).Fig, delta), 50_000*1e-6; !accNear(got, want) {
+	if got, want := accrec.HeldFloorUSD(e.AccountantFigure(gpt56()).Fig, delta), 50_000*1e-6; !accNear(got, want) {
 		t.Fatalf("floor %v want %v", got, want)
 	}
 }

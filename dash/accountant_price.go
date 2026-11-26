@@ -6,15 +6,24 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // hostPricer is the host's rate table for accountant.Figure (SizedPricer): the rate of one token at the
 // prompt size of its request. The rule lives in modelinfo.Price.RateAt, the same one the metrics sink uses.
-type hostPricer struct{ p modelinfo.Price }
+// It holds the price of ONE model. For any other model (a spend call made on another model) it refuses:
+// rate 0, estimated. It never prices that call with the wrong rates.
+type hostPricer struct {
+	model string
+	p     modelinfo.Price
+}
 
 func (h hostPricer) PriceAt(model string, _ time.Time, t accountant.Tier, promptTokens int64) (float64, bool) {
+	if model != h.model {
+		return 0, true
+	}
 	return h.p.RateAt(model, t, promptTokens)
 }
 
@@ -88,10 +97,25 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		Billed: accountant.Usage{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
 			CacheWrite: int(e.CacheWrite), CacheWrite1h: int(e.CacheWrite1h)},
 		Unsized: w <= 0, // no billed usage: no size, so every token prices at the base rate
-	}, hostPricer{p})
+	}, hostPricer{model: e.Model, p: p})
 	f.Fig = fig
+	// An op with no tokens and no dollars gets no row, as before: its key is in the library's maps with 0.
+	zero := map[string]bool{}
+	for _, o := range e.accRes.Ops {
+		if !o.DryRun && o.Call == nil {
+			zero[strings.TrimPrefix(o.Operator, accwire.OperatorPrefix)] = true
+		}
+	}
+	for _, o := range e.accRes.Ops {
+		if !o.DryRun && o.Call == nil && !(o.Saved.IsZero() && o.Caused.IsZero()) {
+			delete(zero, strings.TrimPrefix(o.Operator, accwire.OperatorPrefix))
+		}
+	}
 	cut := func(m map[string]float64, to map[string]float64) {
 		for k, v := range m {
+			if zero[strings.TrimPrefix(k, accwire.OperatorPrefix)] && v == 0 {
+				continue
+			}
 			to[strings.TrimPrefix(k, accwire.OperatorPrefix)] += v
 		}
 	}
@@ -464,7 +488,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
-		e.EstimatedSavedLowUSD = accwire.HeldFloorUSD(fig.Fig, fig.DeltaUSD-deferFig, accwire.Operator(DeferComponent))
+		e.EstimatedSavedLowUSD = accrec.HeldFloorUSD(fig.Fig, fig.DeltaUSD-deferFig, accwire.Operator(DeferComponent))
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
