@@ -437,15 +437,16 @@ func TestDeferLedgerFailsOpenOnAPanic(t *testing.T) {
 	}
 }
 
-// nthPanicPricer prices the first call and panics on every later one.
+// nthPanicPricer prices the calls before from and panics on every call from then on.
 type nthPanicPricer struct {
 	tdPrices
 	calls *int
+	from  int // the first call that panics (1 = every call)
 }
 
 func (p nthPanicPricer) Price(ctx context.Context, m string) (modelinfo.Price, bool) {
 	*p.calls++
-	if *p.calls > 1 {
+	if *p.calls >= p.from {
 		panic("pricer boom")
 	}
 	return p.tdPrices.Price(ctx, m)
@@ -454,6 +455,14 @@ func (p nthPanicPricer) Price(ctx context.Context, m string) (modelinfo.Price, b
 // #1510: a panic in the tail of capture.finish (PriceMode, PriceCG) must not escape into the handler, and the row is
 // still recorded.
 func TestFinishTailFailsOpenOnAPanic(t *testing.T) {
+	// from 1: the first pricer call (the main model's price) panics. from 2: the cheap model's price in PriceCG.
+	for _, from := range []int{1, 2} {
+		t.Run(fmt.Sprintf("panic from call %d", from), func(t *testing.T) { finishTailPanics(t, from) })
+	}
+}
+
+func finishTailPanics(t *testing.T, from int) {
+	t.Helper()
 	tap := &accTap{}
 	rec, err := dash.NewRecorder(dash.Options{DBPath: filepath.Join(t.TempDir(), "d.db"),
 		BatchSize: 1, FlushInterval: time.Millisecond, Tap: tap.add})
@@ -465,7 +474,7 @@ func TestFinishTailFailsOpenOnAPanic(t *testing.T) {
 	// Our own spend at another model: PriceCG then asks the pricer a second time, in the tail of finish.
 	ctx, sink := cheapmodel.WithDetachedSink(context.Background())
 	cheapmodel.ReplayUsage(ctx, "claude-haiku-5-5", 100, 10, 0, 0)
-	c := &capture{rec: rec, pricer: nthPanicPricer{calls: &calls}, model: "claude-sonnet-5-5", provider: "anthropic",
+	c := &capture{rec: rec, pricer: nthPanicPricer{calls: &calls, from: from}, model: "claude-sonnet-5-5", provider: "anthropic",
 		route: "/v1/messages", tenant: "t", start: time.Now(), llm: sink}
 	func() {
 		defer func() {
@@ -475,8 +484,8 @@ func TestFinishTailFailsOpenOnAPanic(t *testing.T) {
 		}()
 		c.finish(Usage{FreshInput: 5, CacheRead: 100, Output: 5}, true, false, 0, 0)
 	}()
-	if calls < 2 {
-		t.Fatalf("the pricer was called %d times: the test never reached the tail", calls)
+	if calls < from {
+		t.Fatalf("the pricer was called %d times: the test never reached call %d", calls, from)
 	}
 	tap.waitAll(t, 1)
 }
