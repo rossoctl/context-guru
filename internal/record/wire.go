@@ -18,7 +18,7 @@ package record
 //	start_unix  start time, seconds since the epoch (fractional)
 //	total_ms    duration in milliseconds
 //	model       the request's model
-//	headers     the request headers the client sent, credentials removed
+//	headers     the allowlisted request headers the client sent
 //
 // Nothing else: the line holds what went over the wire, and no keys of ours. Claude Code sends
 // its session id in its own header, which the loader does not look for; it then names the trace
@@ -27,8 +27,8 @@ package record
 // REDACTION. Both bodies are redacted before the line is built: the request with ContentJSON
 // (string by string, so it stays valid JSON), the response with RedactSSE for a stream (across
 // event boundaries, so a secret split over two events is caught) and ContentJSON otherwise.
-// Headers: any header that carries a credential is dropped (see dropHeader), and every other
-// value goes through Content, so a credential in an unexpected header is still caught.
+// Headers: only names on the allowlist (see allowedHeaders) are written, and each value goes
+// through Content as a second guard. Every other header is dropped.
 //
 // A body longer than the cap is cut after redaction. A cut request is no longer valid JSON and a
 // cut stream has no message_stop, and the loader skips both, so a partial call is never replayed
@@ -68,27 +68,62 @@ type wireLine struct {
 	Headers   map[string]string `json:"headers,omitempty"`
 }
 
-// dropHeader reports whether a request header must never be written. Credentials by name, the
-// proxy's own control headers, and cookies.
-func dropHeader(name string) bool {
-	n := strings.ToLower(name)
-	switch n {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-goog-api-key":
-		return true
-	}
-	if strings.HasPrefix(n, "x-context-guru-") {
-		return true // carries the CG token
-	}
-	for _, w := range []string{"key", "token", "secret", "auth", "password", "credential"} {
-		if strings.Contains(n, w) {
-			return true
-		}
-	}
-	return false
+// allowedHeaders is the ALLOWLIST of request headers the recorder may write. A header whose name
+// is not here is dropped, so a new header, or a credential sent under a name nobody foresaw
+// (X-Passwd, X-Signature, a gateway session header), never reaches the wire file. A name
+// denylist cannot give that: it fails the moment a client invents a new auth header. To record a
+// new header, add it here on purpose, and only when it can never carry a credential.
+//
+// What is here, and why it is safe:
+//   - content negotiation and client identity: content-type, accept, accept-encoding, user-agent;
+//   - API version and feature flags, which are fixed strings: anthropic-version, anthropic-beta,
+//     openai-beta;
+//   - x-stainless-*: the SDK's own telemetry (language, OS, arch, package version, runtime
+//     version, retry count, timeout). It is matched by prefix (see headerAllowed);
+//   - correlation ids that package agent reads to find a session, a subagent or a parent:
+//     random ids, not credentials.
+//
+// Not here, on purpose: authorization, proxy-authorization, cookie, x-api-key, x-goog-api-key,
+// every x-context-guru-* header (they carry the CG token), and any unknown name.
+var allowedHeaders = map[string]bool{
+	"content-type":      true,
+	"accept":            true,
+	"accept-encoding":   true,
+	"user-agent":        true,
+	"anthropic-version": true,
+	"anthropic-beta":    true,
+	"openai-beta":       true,
+	// Correlation ids read by package agent.
+	"x-claude-code-session-id":     true,
+	"x-claude-code-agent-id":       true,
+	"session-id":                   true,
+	"thread-id":                    true,
+	"x-codex-parent-thread-id":     true,
+	"x-opencode-session-id":        true,
+	"x-opencode-parent-session-id": true,
+	"x-task-id":                    true,
 }
 
-// wireHeaders keeps the headers that carry no credential, values redacted, multi-valued headers
-// joined with ", " as HTTP allows.
+// headerAllowed reports whether a request header may be written.
+func headerAllowed(name string) bool {
+	n := strings.ToLower(name)
+	return allowedHeaders[n] || strings.HasPrefix(n, "x-stainless-")
+}
+
+// AllowedHeaders returns a copy of h with only the headers the recorder may write. The proxy
+// calls it when it queues an event, so a credential is never even held by the recorder queue.
+func AllowedHeaders(h http.Header) http.Header {
+	out := http.Header{}
+	for k, v := range h {
+		if headerAllowed(k) {
+			out[k] = append([]string(nil), v...)
+		}
+	}
+	return out
+}
+
+// wireHeaders keeps the allowed headers, values redacted, multi-valued headers joined with ", "
+// as HTTP allows. It filters again, so Wire is safe for any caller.
 func wireHeaders(h http.Header) map[string]string {
 	if len(h) == 0 {
 		return nil
@@ -100,7 +135,7 @@ func wireHeaders(h http.Header) map[string]string {
 	sort.Strings(names)
 	out := map[string]string{}
 	for _, k := range names {
-		if dropHeader(k) {
+		if !headerAllowed(k) {
 			continue
 		}
 		out[strings.ToLower(k)] = Content(strings.Join(h[k], ", "))

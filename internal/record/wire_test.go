@@ -90,6 +90,9 @@ func TestWireHeadersDropCredentials(t *testing.T) {
 		"Anthropic-Version":        {"2023-06-01"},
 		"X-Claude-Code-Session-Id": {"6d1f2a44-9e3b-4c7a-8f21-0b5d7c9e1a33"},
 		"X-Debug-Note":             {"pasted " + key},
+		"X-Passwd":                 {"sk-test-SECRET-123"},
+		"X-Signature":              {"sk-test-SECRET-123"},
+		"X-Stainless-Lang":         {"js"},
 	}
 	b, _ := Wire(WireCall{Path: "/v1/messages", Headers: h, Request: []byte(`{}`),
 		Response: []byte(`{}`), Status: 200, Start: time.Now(), End: time.Now()}, 0)
@@ -101,6 +104,17 @@ func TestWireHeadersDropCredentials(t *testing.T) {
 	}
 	if got["anthropic-version"] != "2023-06-01" || got["x-claude-code-session-id"] == nil {
 		t.Errorf("ordinary headers missing: %v", got)
+	}
+	for _, gone := range []string{"x-passwd", "x-signature", "x-debug-note"} {
+		if _, ok := got[gone]; ok {
+			t.Errorf("unlisted header %q was written", gone)
+		}
+	}
+	if got["x-stainless-lang"] != "js" {
+		t.Errorf("x-stainless-* not kept: %v", got)
+	}
+	if strings.Contains(string(b), "sk-test-SECRET-123") {
+		t.Errorf("an unlisted header's secret was written")
 	}
 	if strings.Contains(string(b), key) {
 		t.Errorf("a key survived in a header value:\n%s", b)
@@ -114,5 +128,18 @@ func TestWireCapsABody(t *testing.T) {
 		Status: 200, Start: time.Now(), End: time.Now()}, 100)
 	if r := wireLineOf(t, b)["request"].(string); len(r) > 100 {
 		t.Errorf("request not capped: %d bytes", len(r))
+	}
+}
+
+// AllowedHeaders is the filter the proxy applies at the queue: the copy holds listed names only.
+func TestAllowedHeadersCopiesOnlyListedNames(t *testing.T) {
+	in := http.Header{"Authorization": {"Bearer x"}, "X-Passwd": {"y"}, "Anthropic-Beta": {"a", "b"}}
+	out := AllowedHeaders(in)
+	if len(out) != 1 || len(out["Anthropic-Beta"]) != 2 {
+		t.Fatalf("got %v", out)
+	}
+	out["Anthropic-Beta"][0] = "changed"
+	if in["Anthropic-Beta"][0] != "a" {
+		t.Error("the copy shares memory with the input")
 	}
 }
