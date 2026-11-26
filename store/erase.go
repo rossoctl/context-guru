@@ -56,7 +56,12 @@ func sessionPrefixes() []string {
 //     erase count makes it keep none of them (eraseGen).
 //
 // A request for the session that arrives during the erase is new traffic. What it writes before
-// step 4 goes; what it writes after stays, as in the host's own session store.
+// step 4 may go from memory, and a flush between steps 3 and 4 may still write it to disk, where
+// the next LoadSession finds it. What it writes after step 4 stays, as in the host's own session
+// store. No erased data comes back either way.
+//
+// The ownership records match by prefix (OwnPrefix + session + ":"), so the records of a session
+// whose id continues the given one after a ':' go too, as DeleteSessionState documents for rows.
 func (m *Memory) EraseSession(session string) (int64, error) {
 	if m == nil || session == "" {
 		return 0, nil
