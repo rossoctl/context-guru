@@ -275,6 +275,7 @@ test("v2: hooks work when the provider callback runs after transform() has resol
     assert.ok(!logs.some((line) => /no Anthropic or OpenAI provider is configured/.test(line)), `wrong verdict logged: ${logs.join("|")}`)
     await run()
     await done
+    assert.ok(existsSync(join(state, "install.json")), "the transform callback did not start the proxy")
     const record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
     assert.equal(providers[0].settings.baseURL, `http://127.0.0.1:${record.port}/anthropic/v1`)
     const hook = registered.hooks.find((candidate) => candidate.options.providerID === "anthropic")
