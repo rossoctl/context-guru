@@ -162,18 +162,27 @@ func TestEraseAll(t *testing.T) {
 	}
 }
 
-// A hosted table is shared by every tenant: EraseAll clears memory and leaves the table.
+// A hosted table, and its pending writes, are shared by every tenant: EraseAll refuses and changes
+// nothing, not even this tenant's memory.
 func TestEraseAllRefusedOnAHostedTable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	m, d := newDiskStore(t, path, DiskOptions{Hosted: true}, stateOpts())
 	defer d.Close()
 	m.Put(BilledPrefix+"t1:s1", []byte("1"))
 	d.Flush()
+	m.Put(BilledPrefix+"t2:s9", []byte("2")) // another tenant's write, still pending
 	if _, err := m.EraseAll(); !errors.Is(err, ErrHostedEraseAll) {
 		t.Fatalf("EraseAll on a hosted table: err = %v, want ErrHostedEraseAll", err)
 	}
-	if keys := rowKeys(t, d); !keys[BilledPrefix+"t1:s1"] {
+	keys := rowKeys(t, d) // flushes the pending write
+	if !keys[BilledPrefix+"t1:s1"] {
 		t.Error("EraseAll deleted a hosted table's rows")
+	}
+	if !keys[BilledPrefix+"t2:s9"] {
+		t.Error("a refused EraseAll dropped another tenant's pending write")
+	}
+	if _, ok := m.Get(BilledPrefix + "t1:s1"); !ok {
+		t.Error("a refused EraseAll cleared memory")
 	}
 }
 
@@ -190,5 +199,107 @@ func TestEraseWithoutADisk(t *testing.T) {
 	var nilMem *Memory
 	if _, err := nilMem.EraseAll(); err != nil {
 		t.Error(err)
+	}
+}
+
+// A LoadSession that starts after the erase cleared memory, and reads the rows before the erase
+// deletes them, must not leave them in memory: the erase's second pass removes them. The test
+// holds flushMu, as a running flush does, so the load runs inside that window.
+func TestEraseSessionLoadInsideTheErase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	m1, d1 := newDiskStore(t, path, DiskOptions{}, stateOpts())
+	m1.Put(SumPrefix+"s1", []byte("SUMMARY"))
+	if err := d1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	m, d := newDiskStore(t, path, DiskOptions{}, stateOpts())
+	defer d.Close()
+	m.Put(BilledPrefix+"s1", []byte("1")) // so the test can see the first pass ran
+	d.Flush()
+	d.flushMu.Lock()
+	done := make(chan error, 1)
+	go func() { _, err := m.EraseSession("s1"); done <- err }()
+	testutil.WaitFor(t, "the erase clears memory", func() bool {
+		_, ok := m.Get(BilledPrefix + "s1")
+		return !ok
+	})
+	m.LoadSession("s1") // the rows are still on disk
+	if _, ok := m.Get(SumPrefix + "s1"); !ok {
+		t.Fatal("setup: the load inside the erase found no row")
+	}
+	d.flushMu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := m.Get(SumPrefix + "s1"); ok {
+		t.Errorf("a load inside the erase left the erased summary in memory: %q", got)
+	}
+	m.mu.Lock()
+	_, marked := m.loadedAt["s1"]
+	m.mu.Unlock()
+	if marked {
+		t.Error("the load inside the erase left its mark")
+	}
+}
+
+// The session's ownership records go, and each payload only it stashed. A payload another session
+// also stashed stays, with that session's record. The reserve's counters follow.
+func TestEraseSessionDropsItsPayloads(t *testing.T) {
+	m := NewMemory(Options{})
+	PutStash(m, "h1", []byte("ONLY S1"))
+	PutStash(m, "h2", []byte("S1 AND S2"))
+	m.Put(OwnPrefix+"s1:h1", []byte{1})
+	m.Put(OwnPrefix+"s1:h2", []byte{1})
+	m.Put(OwnPrefix+"s2:h2", []byte{1})
+	m.MarkSticky("s1", "id")
+	before := m.StashStats()
+
+	if _, err := m.EraseSession("s1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"h1", OwnPrefix + "s1:h1", OwnPrefix + "s1:h2"} {
+		if _, ok := m.Get(k); ok {
+			t.Errorf("%q is still in memory after the erase", k)
+		}
+	}
+	for _, k := range []string{"h2", OwnPrefix + "s2:h2"} {
+		if _, ok := m.Get(k); !ok {
+			t.Errorf("%q went, but another session owns it", k)
+		}
+	}
+	after := m.StashStats()
+	if after.Live != before.Live-1 || after.Bytes != before.Bytes-int64(len("ONLY S1")) {
+		t.Errorf("reserve after the erase = %d entries, %d bytes; want %d, %d",
+			after.Live, after.Bytes, before.Live-1, before.Bytes-int64(len("ONLY S1")))
+	}
+	if after.Expired != before.Expired {
+		t.Error("the erase booked a payload as expired")
+	}
+	if len(m.Sticky("s1")) != 0 {
+		t.Error("the erased session's sticky set is still in memory")
+	}
+}
+
+// EraseAll removes every key in memory, the rewind reserve and ownership records included.
+func TestEraseAllDropsTheReserve(t *testing.T) {
+	m := NewMemory(Options{})
+	PutStash(m, "h1", []byte("PAYLOAD"))
+	m.Put(OwnPrefix+"s1:h1", []byte{1})
+	m.Put("cg:xseen:c1", []byte{1})
+	m.MarkSticky("s1", "id")
+	if _, err := m.EraseAll(); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"h1", OwnPrefix + "s1:h1", "cg:xseen:c1"} {
+		if _, ok := m.Get(k); ok {
+			t.Errorf("%q is still in memory after EraseAll", k)
+		}
+	}
+	if st := m.StashStats(); st.Live != 0 || st.Bytes != 0 {
+		t.Errorf("reserve after EraseAll = %d entries, %d bytes; want 0, 0", st.Live, st.Bytes)
+	}
+	if len(m.Sticky("s1")) != 0 {
+		t.Error("a sticky set is still in memory after EraseAll")
 	}
 }

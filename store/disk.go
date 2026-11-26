@@ -243,10 +243,15 @@ func TenantStateRows(ctx context.Context, db *sql.DB, tenantID string) (int64, e
 // not an error. Rows of a session whose id continues the given one after a ':' go too: the key
 // format cannot tell them apart, and state is rebuilt from traffic.
 func DeleteSessionState(db *sql.DB, session string) (int64, error) {
+	return deleteSessionState(db, session, defaultLoadTimeout)
+}
+
+// deleteSessionState is DeleteSessionState with its time limit. EraseSession gives it the erase's.
+func deleteSessionState(db *sql.DB, session string, timeout time.Duration) (int64, error) {
 	if db == nil || session == "" {
 		return 0, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultLoadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var n int64
 	for _, p := range StatePrefixes {
@@ -647,9 +652,15 @@ func (m *Memory) dropLocked(match func(string) bool) int {
 	n := 0
 	for k, el := range m.items {
 		if match(k) {
-			// Not m.remove: that books a pinned key as LOST, and a purge is not a loss.
-			if e := el.Value.(*entry); e.pinned {
+			// Not m.remove: that books a pinned key as LOST and a payload as EXPIRED, and a purge
+			// is neither.
+			e := el.Value.(*entry)
+			if e.pinned {
 				m.pinnedN--
+			}
+			if e.stash {
+				m.stashN--
+				m.stashBytes -= int64(len(e.payload))
 			}
 			m.ll.Remove(el)
 			delete(m.items, k)
