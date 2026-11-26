@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
@@ -27,7 +27,7 @@ import (
 // figTap collects what each finished request's accountant figure was.
 type figTap struct {
 	mu   sync.Mutex
-	figs []dash.AccFigure
+	figs []accountant.USDFigure
 	oks  []bool
 }
 
@@ -72,7 +72,7 @@ func postTwice(t *testing.T, h *Handler, session string) {
 	accPost(t, h, session)
 }
 
-func sumFigure(f dash.AccFigure) float64 {
+func sumFigure(f accountant.USDFigure) float64 {
 	t := f.DeltaUSD
 	for _, v := range f.ByComponent {
 		t += v
@@ -137,10 +137,8 @@ func TestAccountantFigureMatchesTheDashboardRow(t *testing.T) {
 		if math.Abs(want.DeltaUSD-tap.figs[i].DeltaUSD) > 1e-12 {
 			t.Errorf("request %d: dashboard %v, hook %v", i, want.DeltaUSD, tap.figs[i].DeltaUSD)
 		}
-		for k, v := range want.ByComponent {
-			if math.Abs(v-tap.figs[i].ByComponent[k]) > 1e-12 {
-				t.Errorf("request %d component %s: dashboard %v, hook %v", i, k, v, tap.figs[i].ByComponent[k])
-			}
+		if math.Abs(want.KeepAliveSavedUSD-tap.figs[i].KeepAliveSavedUSD) > 1e-12 || math.Abs(want.TTLUSD-tap.figs[i].TTLUSD) > 1e-12 {
+			t.Errorf("request %d: keep-alive/ttl differ: dashboard %v/%v, hook %v/%v", i, want.KeepAliveSavedUSD, want.TTLUSD, tap.figs[i].KeepAliveSavedUSD, tap.figs[i].TTLUSD)
 		}
 	}
 	if !tap.oks[1] {

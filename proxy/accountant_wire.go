@@ -9,7 +9,6 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -198,33 +197,35 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 	return *c.accRes, true
 }
 
-// accFigure is the request's accountant figure in dollars per component, priced with the host pricer at the model's
-// prompt-size tiers (Price.At). It works with or without the dashboard, and it can be called at any time after the
-// response: it joins the job and prices the request if finish has not (accCompute), so the order of the two does not
-// matter. ok is false when the request books no figure: no billed usage, a rejected or multi-round request, an
-// observe run, a trace that dropped operations, no model price, or any panic. It never changes the request.
-// Tool deferral's ledger calls it (#1445).
-func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig dash.AccFigure, ok bool) {
+// accFigure is the request's accountant figure in dollars: accountant.Figure, priced with the host pricer at the
+// prompt size of each side (PriceAt, Price.At). ByComponent is keyed by operator. It works with or without the
+// dashboard, and it can be called at any time after the response: it joins the job and prices the request if finish
+// has not (accCompute), so the order of the two does not matter. ok is false when the request books no figure: no
+// billed usage, a rejected or multi-round request, an observe run, a trace that dropped operations, no model price, a
+// result that fails a gate of accountant.Withhold (checks and unpriced; the size gate is the dashboard's), or any
+// panic. It never changes the request. Tool deferral's ledger calls it (#1445).
+func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig accountant.USDFigure, ok bool) {
 	if c == nil || c.pricer == nil || c.model == "" {
-		return dash.AccFigure{}, false
+		return accountant.USDFigure{}, false
 	}
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("accountant: the figure panicked; the request books no figure", "panic", p)
-			fig, ok = dash.AccFigure{}, false
+			fig, ok = accountant.USDFigure{}, false
 		}
 	}()
 	res, have := c.accCompute(usage, usageOK)
-	if !have || c.observe || c.trace.OpsDropped != 0 {
-		return dash.AccFigure{}, false
+	if !have || c.observe || c.trace.OpsDropped != 0 || accountant.Withhold(res, accountant.SizeNotGiven) != "" {
+		return accountant.USDFigure{}, false
 	}
-	price, priced := c.pricer.Price(ctx, c.model)
-	if !priced {
-		return dash.AccFigure{}, false
+	if _, priced := c.pricer.Price(ctx, c.model); !priced {
+		return accountant.USDFigure{}, false
 	}
-	e := &dash.Event{FreshInput: usage.FreshInput, CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite, CacheWrite1h: usage.CacheWrite1h}
-	e.SetAccountant(res)
-	return e.AccountantFigure(price), true
+	return accountant.Figure(accountant.FigureInput{
+		Model: c.model, At: c.start, Output: int(usage.Output), Result: res,
+		Billed: accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
+			CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)},
+	}, metricsPricer{prices: c.pricer}), true
 }
 
 // finishAccountant ends a request that has no dashboard: it prices the request (which books the metrics), drops the
