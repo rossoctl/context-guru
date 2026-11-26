@@ -236,6 +236,10 @@ func TestBypassedRequestStoresNoFallback(t *testing.T) {
 	if !e.Bypassed {
 		t.Fatalf("setup: bypassed %v, want true", e.Bypassed)
 	}
+	// The gate books a bypassed request (no size_unknown): its $0 saving is a measured $0.
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("bypassed request: fallback %q, want none (booked)", fb)
+	}
 	if e.AccFallback != "" {
 		t.Fatalf("stored acc_fallback %q on a bypassed request, want none", e.AccFallback)
 	}

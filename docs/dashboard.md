@@ -165,7 +165,7 @@ The library's reasons (`check_sum`, `check_unique_change`, `check_spans`, `check
 `accountant.Withhold`, the same rule the metrics push and the `/stats` deferral ledger use (#1465). A `check_sum`
 failure in a section that no operation claims (accountant `Check.Claims` 0) is not one of them: a change that no
 operation reported moved that section, the reported operations are still right, and the request books their
-saving. `ops_dropped`, `observe` and the three row reasons are the host's own gates. The size bound is the library's: it measures the client messages and compares them with the message tokens the operations saved, less the ones they caused. Rows stored before v0.11 can hold `size_unknown`. They stay readable as text.
+saving. `ops_dropped`, `observe` and the three row reasons are the host's own gates. The size bound is the library's: it measures the client messages and compares them with the message tokens the operations saved, less the ones they caused. Rows stored before this change can hold `size_unknown`. They stay readable as text.
 
 The same reason is stored in `requests.acc_fallback` for each request that logs the line. A request with no
 accountant record (`no_record`) logs no line and stores no reason: it had nothing to price. A bypassed request
