@@ -232,9 +232,6 @@ func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig
 	}, metricsPricer{prices: c.pricer})
 	// The dashboard row's gate, so a request the row refuses books no figure here either (accrec.Gate).
 	in := accrec.GateIn{Observe: c.observe, OpsDropped: c.trace.OpsDropped, Rows: accrec.GateRowsOf(c.trace.Run)}
-	if c.trace.Run != nil {
-		in.TokensBefore = c.trace.Run.TokensBefore
-	}
 	if reason, _ := accrec.Gate(res, fig, in); reason != "" {
 		return accountant.USDFigure{}, false
 	}

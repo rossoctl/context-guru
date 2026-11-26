@@ -157,20 +157,19 @@ What the library prices:
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
-`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `size_unknown`, `implausible_size`,
+`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `implausible_size`,
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `server_held_history`. A saving nothing
 measured is not shown.
 
-The library's reasons (`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`) come from
+The library's reasons (`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`, `implausible_size`) come from
 `accountant.Withhold`, the same rule the metrics push and the `/stats` deferral ledger use (#1465). A `check_sum`
 failure in a section that no operation claims (accountant `Check.Claims` 0) is not one of them: a change that no
 operation reported moved that section, the reported operations are still right, and the request books their
-saving. The size bound, `ops_dropped`, `observe` and the three row reasons are the host's own gates.
+saving. `ops_dropped`, `observe` and the three row reasons are the host's own gates. The size bound is the library's: it measures the client messages and compares them with the message tokens the operations saved, less the ones they caused. Rows stored before v0.11 can hold `size_unknown`. They stay readable as text.
 
 The same reason is stored in `requests.acc_fallback` for each request that logs the line. A request with no
 accountant record (`no_record`) logs no line and stores no reason: it had nothing to price. A bypassed request
-(`x-context-guru-bypass: true`) logs `size_unknown`, because bypass leaves the request size at 0, but stores no
-reason: the client asked for no context-guru, so its $0 is a measured $0. Overview reads the column:
+(`x-context-guru-bypass: true`) stores no reason: the client asked for no context-guru, so its $0 is a measured $0. Overview reads the column:
 
 - `fallback_requests` is the count, `fallback` the count by reason, and `fallback_cost_usd` their `cost_usd`
   plus `cg_llm_cost_usd`.
@@ -313,8 +312,8 @@ Limits:
   of 10,000 threads (the oldest go first), the next request of the thread is a first request again.
 - The figures are estimates. The library converts removed bytes to tokens with the request's own
   billed-token ratio. A figure that implies more removed tokens than the request had is rejected
-  (`implausible_size`). The bound counts message tokens, so it leaves out operations on the tool
-  section (removed or rewritten declarations).
+  (`implausible_size`). The library measures the client messages itself. The bound counts message tokens, so it leaves out the tokens of tool
+  declarations (removed or rewritten).
 - The cost and the provider's cache saving are not the library's.
 - Rows stored before the switch (`priced_by` empty) keep their legacy figures. The Components tab,
   the summarize ledger and the replay cap value those rows with the legacy rule at read time, and

@@ -174,8 +174,7 @@ const (
 	FallbackCheckUniqueChange  = accrec.GateCheckUniqueChange  // two operations share a ChangeID
 	FallbackCheckSpans         = accrec.GateCheckSpans         // an operation's spans do not add up to its sizes
 	FallbackCheckOther         = accrec.GateCheckOther         // a fatal library check this host has no name for
-	FallbackSizeUnknown        = accrec.GateSizeUnknown        // TokensBefore is 0: the plausibility bound cannot be checked
-	FallbackImplausibleSize    = accrec.GateImplausibleSize    // the library saved more tokens than the request had
+	FallbackImplausibleSize    = accrec.GateImplausibleSize    // the library saved more message tokens than the request had
 	FallbackFigureWithoutRow   = accrec.GateFigureWithoutRow   // a library figure for a component with no row
 	FallbackDuplicateName      = accrec.GateDuplicateName      // two rows share a component name
 	FallbackActedWithoutFigure = accrec.GateActedWithoutFigure // a component acted and the library has no figure for it
@@ -192,8 +191,8 @@ const FallbackUnrecorded = "unrecorded"
 // session, or the pipeline did not run) has nothing to price, so it is not a fallback, and AccFallback stays "".
 //
 // A bypassed request is not a fallback either. The client asked for no context-guru, so its $0 saving is a
-// measured $0, and its cost belongs in the share. It falls back only because bypass leaves TokensBefore at 0
-// (FallbackSizeUnknown). Stored, it would take bypassed spend out of the share and raise it.
+// measured $0, and its cost belongs in the share. Stored, a fallback would take bypassed spend out of the share and
+// raise it.
 func (e *Event) RecordAccountantFallback() {
 	if e.Bypassed {
 		e.AccFallback = ""
@@ -298,7 +297,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		rows = append(rows, accrec.GateRow{Name: c.Component, Acted: c.Acted})
 	}
 	if reason, detail := accrec.Gate(*e.accRes, fig.Fig, accrec.GateIn{Observe: e.accObserve, OpsDropped: e.accOpsDropped,
-		TokensBefore: e.TokensBefore, Rows: rows}); reason != "" {
+		Rows: rows}); reason != "" {
 		e.accUnpricedWhy = detail
 		return reason
 	}
