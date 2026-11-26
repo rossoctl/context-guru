@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/thinkcount"
 )
 
@@ -16,9 +17,10 @@ import (
 func everyFieldSet(t *testing.T) Usage {
 	t.Helper()
 	u := Usage{
-		Searches: 2, SearchLoaded: []string{"Read"}, SearchDropped: 1, Live: &LiveFacts{},
+		Searches: 2, SearchLoaded: []string{"Read"}, SearchDropped: 1, Live: &LiveFacts{}, PrefixRewritten: true,
 		FreshInput: 11, CacheRead: 22, CacheWrite: 33, Output: 44, CacheWrite1h: 5,
 		StopReason: "stop", Backend: "A", ToolUseNames: []string{"Bash"}, ToolUseIncomplete: true,
+		ToolParams: respfacts.ToolParams{TimeoutMs: 1, HasTimeout: true}, Spawn: respfacts.Spawn{N: 1},
 		Thinking: thinkcount.Response{Opaques: []string{"sig"}, Tokens: 7, HasTokens: true},
 	}
 	v := reflect.ValueOf(u)

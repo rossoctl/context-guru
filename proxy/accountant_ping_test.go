@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 var pingAt = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
@@ -42,7 +41,7 @@ func TestPingSavingsPricesAndStoresFacts(t *testing.T) {
 	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
 		t.Fatalf("ok=%v res=%+v", ok, res)
 	}
-	f, ok := st.take(accPingKey("s", "main"))
+	f, ok := st.Take(accPingKey("s", "main"))
 	if !ok || f.PingWindow == "" || !f.LastPing.Equal(time.UnixMilli(pingAt.UnixMilli())) {
 		t.Fatalf("facts %+v ok=%v", f, ok)
 	}
@@ -64,7 +63,7 @@ func TestPingSavingsSkipRules(t *testing.T) {
 		if _, ok := PingSavings(r, st); ok {
 			t.Errorf("%s: converted", name)
 		}
-		if len(st.m) != 0 {
+		if st.Len() != 0 {
 			t.Errorf("%s: facts stored", name)
 		}
 	}
@@ -86,37 +85,6 @@ func TestPingSavingsNilStoreIsFine(t *testing.T) {
 	}
 }
 
-func TestPingStoreTakeDeletesAndOverwriteKeepsLatest(t *testing.T) {
-	s := NewPingStore()
-	s.put("k", accountant.PingFacts{PingWindow: "a"})
-	s.put("k", accountant.PingFacts{PingWindow: "b"})
-	f, ok := s.take("k")
-	if !ok || f.PingWindow != "b" {
-		t.Fatalf("%+v %v", f, ok)
-	}
-	if _, ok := s.take("k"); ok {
-		t.Fatal("take must delete")
-	}
-	var nilStore *PingStore
-	nilStore.put("k", accountant.PingFacts{})
-	if _, ok := nilStore.take("k"); ok {
-		t.Fatal("nil store")
-	}
-}
-
-func TestPingStoreIsBounded(t *testing.T) {
-	s := NewPingStore()
-	for i := 0; i < pingStoreMax+500; i++ {
-		s.put(fmt.Sprint("k", i), accountant.PingFacts{PingWindow: "w"})
-	}
-	if len(s.m) > pingStoreMax {
-		t.Fatalf("len %d > %d", len(s.m), pingStoreMax)
-	}
-	if _, ok := s.take(fmt.Sprint("k", pingStoreMax+499)); !ok {
-		t.Fatal("the newest entry must survive")
-	}
-}
-
 func TestEntryFactsReadsPingFactsUntilDropped(t *testing.T) {
 	st := NewPingStore()
 	PingSavings(okReport(), st)
@@ -125,7 +93,7 @@ func TestEntryFactsReadsPingFactsUntilDropped(t *testing.T) {
 	if f.LastPing.IsZero() || f.PingWindow == "" || f.PingRead != nil {
 		t.Fatalf("%+v", f)
 	}
-	st.drop(accPingKey("s", "main"), "") // the capture spends them once the request is priced
+	st.Drop(accPingKey("s", "main"), "") // the capture spends them once the request is priced
 	g := entryFacts("", "", nil, st, "s", th)
 	if !g.LastPing.IsZero() || g.PingWindow != "" {
 		t.Fatalf("second request got %+v", g)
@@ -285,21 +253,21 @@ func TestPingFactsSurviveARequestThatBooksNothing(t *testing.T) {
 	st := NewPingStore()
 	PingSavings(okReport(), st)
 	key := accPingKey("s", "main")
-	if _, ok := st.peek(key); !ok {
+	if _, ok := st.Peek(key); !ok {
 		t.Fatal("no facts after the ping")
 	}
 	// Reading the facts for a request (entryFacts) does not spend them.
 	entryFacts("", "", nil, st, "s", accountant.Thread{ID: "main"})
-	if _, ok := st.peek(key); !ok {
+	if _, ok := st.Peek(key); !ok {
 		t.Fatal("entryFacts spent the ping facts: a request that books nothing would lose them")
 	}
-	st.drop(key, "")
-	if _, ok := st.peek(key); ok {
+	st.Drop(key, "")
+	if _, ok := st.Peek(key); ok {
 		t.Fatal("drop kept the facts")
 	}
-	st.drop(key, "") // idempotent
+	st.Drop(key, "") // idempotent
 	var nilStore *PingStore
-	nilStore.drop(key, "")
+	nilStore.Drop(key, "")
 }
 
 // A ping that arrives while a request is in flight is not spent by that request: finish drops only
@@ -307,16 +275,16 @@ func TestPingFactsSurviveARequestThatBooksNothing(t *testing.T) {
 func TestDropKeepsANewerPing(t *testing.T) {
 	st := NewPingStore()
 	key := accPingKey("s", "main")
-	st.put(key, accountant.PingFacts{PingWindow: "w1", LastPing: pingAt})
-	read, _ := st.peek(key) // the request reads window w1 ...
-	st.put(key, accountant.PingFacts{PingWindow: "w2", LastPing: pingAt.Add(time.Minute)})
-	st.drop(key, read.PingWindow) // ... and is priced after w2 arrived
-	f, ok := st.peek(key)
+	st.Put(key, accountant.PingFacts{PingWindow: "w1", LastPing: pingAt})
+	read, _ := st.Peek(key) // the request reads window w1 ...
+	st.Put(key, accountant.PingFacts{PingWindow: "w2", LastPing: pingAt.Add(time.Minute)})
+	st.Drop(key, read.PingWindow) // ... and is priced after w2 arrived
+	f, ok := st.Peek(key)
 	if !ok || f.PingWindow != "w2" {
 		t.Fatalf("the newer ping was dropped with the older one: %+v %v", f, ok)
 	}
-	st.drop(key, "w2")
-	if _, ok := st.peek(key); ok {
+	st.Drop(key, "w2")
+	if _, ok := st.Peek(key); ok {
 		t.Fatal("the facts the request read were kept")
 	}
 }
@@ -335,18 +303,18 @@ func TestFinishSpendsThePingFactsOnlyWhenItPrices(t *testing.T) {
 		pings := NewPingStore()
 		PingSavings(okReport(), pings)
 		key := accPingKey("s", "main")
-		if _, ok := pings.peek(key); !ok {
+		if _, ok := pings.Peek(key); !ok {
 			t.Fatal("the ping stored nothing")
 		}
 		c := &capture{rec: rec, savings: newSavingsTracker(), pings: pings, tenant: "t1", provider: "anthropic",
 			model: "m", route: "/v1/messages", start: time.Now(), status: 200, trace: apply.Trace{Session: "s"}}
 		c.accBegin(accountant.RequestMeta{RequestID: "r1", Session: "s", Model: "m", At: time.Now()}, body)
 		c.accEnd(thread.Result{ID: thread.Primary}, body, nil)
-		if _, ok := pings.peek(key); !ok {
+		if _, ok := pings.Peek(key); !ok {
 			t.Fatal("accEnd spent the facts before the request was priced")
 		}
 		c.finish(usage, usageOK, false, 0, 0)
-		_, still := pings.peek(key)
+		_, still := pings.Peek(key)
 		return !still
 	}
 	if run(Usage{}, false) {
@@ -368,14 +336,14 @@ func TestPingSavingsDoesNotStoreFactsForAManualPing(t *testing.T) {
 	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
 		t.Fatalf("a manual ping must still be priced: ok=%v res=%+v", ok, res)
 	}
-	if f, ok := st.take(accPingKey("s", "main")); ok {
+	if f, ok := st.Take(accPingKey("s", "main")); ok {
 		t.Fatalf("a manual ping stored facts %+v: the next request would credit its write twice", f)
 	}
 	// The automatic ping next to it still stores them.
 	if _, ok := PingSavings(okReport(), st); !ok {
 		t.Fatal("an automatic ping was not converted")
 	}
-	if _, ok := st.take(accPingKey("s", "main")); !ok {
+	if _, ok := st.Take(accPingKey("s", "main")); !ok {
 		t.Fatal("an automatic ping stored no facts")
 	}
 }

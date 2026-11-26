@@ -1,10 +1,13 @@
 package apply
 
 import (
+	"hash/fnv"
 	"log/slog"
 	"strconv"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -38,19 +41,22 @@ import (
 //     provider hashes `tools` → `system` → `messages`, so anything in the first two arrays
 //     precedes every message breakpoint. This function only ever writes 1h into the head,
 //     so it cannot produce the illegal order.
-//   - **The 1h tier must actually arrive, and on the models that carry this service's spend it
-//     does not.** Measured live on this gateway, one request each with the head labelled 1h:
-//     `aws/claude-haiku-4-5` came back with `ephemeral_1h_input_tokens: 36,251` of 36,574
-//     written — GRANTED; `aws/claude-sonnet-5` came back with `ephemeral_1h_input_tokens: 0`
-//     and all 48,212 tokens on the 5-minute tier — silently downgraded, with an otherwise
-//     normal 200. So the `ttl` field is NOT stripped in transit (Haiku honouring it proves it
-//     arrives); Bedrock's 1h support simply covers the Claude 4.5 family, and this service's
-//     spend is Opus 5, Opus 4.8, Sonnet 5 and Opus 4.6. Zero 1h writes appear in 19,805
-//     production requests, which is the same fact seen from the billing side.
+//   - **The 1h tier must actually arrive, and the grant depends on the model and the provider.**
+//     Measured live on this gateway with fresh writes, one request each with the head labelled 1h:
+//     `aws/claude-haiku-4-5` came back with `ephemeral_1h_input_tokens: 36,251` of 36,574 written
+//     (granted); `aws/claude-sonnet-5` came back with 0 of 48,212 (refused, an otherwise normal 200).
+//     That refusal was real but is out of date: on 2026-11-19 direct requests to the same gateway
+//     (litellm 1.108.4, Bedrock), each writing a fresh ~12.6k-token system block with ttl 1h, were
+//     granted on claude-sonnet-5, claude-sonnet-5-5, claude-opus-4-8, claude-opus-5-5 and
+//     claude-haiku-5-5 (about 12.6k tokens each). So the `ttl` field reaches the provider, and
+//     whether it is honoured varies with model, provider and date.
 //
-//     Hence: implemented, verifiable, and off. `Usage.CacheWrite1h` is what says whether a
-//     request that asked for 1h got it, and while that is zero on a model the honest
-//     projection for this policy on that model is $0.
+//     `Usage.CacheWrite1h` on a request that WROTE the entry says whether a request that asked for
+//     1h got it. A 0 on a request that only read the head says nothing (a read writes nothing).
+//
+// The head-only shape protects only `tools` and `system`, a small part of a Claude Code prompt
+// that other sessions keep warm anyway. The message history stays on the 5-minute tier. For long
+// waits use the `1-hour-on-wait` strategy (RelabelAllTTL1h below), which relabels the keep-alive ping.
 //
 // Fails open: any parse trouble returns the input untouched.
 
@@ -77,7 +83,7 @@ var headTTLPaths = [...]string{"tools", "system"}
 // ponytail: the gate is evaluated per request, so a session growing across the threshold starts
 // asking for 1h mid-conversation and a compaction can take it back — the head is then re-labelled
 // and, because this never STRIPS an existing ttl, a request can carry 1h while its neighbours do
-// not. Harmless while this is off and while the provider downgrades it anyway (a differing ttl
+// not. Harmless while this is off or the provider refuses it (a differing ttl
 // does not change the prefix hash, so neither direction costs a cache miss); if it is ever
 // switched on for real, latch the decision per session instead of recomputing it.
 //
@@ -165,4 +171,115 @@ func headPrefixTokens(body []byte) int {
 		n += tokens.Count(blocks[i].Get("text").String())
 	}
 	return n
+}
+
+// RelabelAllTTL1h re-labels EVERY existing cache breakpoint of a body as a one-hour entry: tools,
+// system and messages. Two callers use it. The keeper uses it on the keep-alive PING body of
+// `1-hour-on-wait` (#1243): the ping is the request that switches a cached prompt from 5 minutes to 1 hour,
+// and on the measured gateway that switch is a read. And BodyOpts uses it on a REAL main-thread request in
+// the 1-hour modes D and C (#1261): such a request writes at 1 hour, so nothing is switched.
+//
+// The same three constraints as upgradeHeadTTL hold, and each is why this is safe:
+//
+//   - It adds no breakpoint. It only sets `ttl` on a mark the client already sent, so the cap of
+//     four is not touched.
+//   - The order rule (1h entries before 5m ones) holds because NO breakpoint is left at 5m: all
+//     of them are 1h.
+//   - It never strips an existing ttl and sets "1h" on every mark, so a second call changes
+//     nothing (idempotent).
+//
+// A request with no breakpoint is returned untouched. It fails open: any edit error returns the
+// input body whole, never half-labelled.
+func RelabelAllTTL1h(body []byte, provider bschemas.ModelProvider) (out []byte, upgraded bool) {
+	if !explicitBreakpointProvider(provider) || len(body) == 0 {
+		return body, false
+	}
+	next := body
+	// relabel sets ttl on the mark at path when it is an object that does not ask 1h yet. A mark
+	// that already asks 1h counts as upgraded: the request is a 1h request all the same.
+	relabel := func(path string, cc gjson.Result) bool {
+		if !cc.IsObject() {
+			return true
+		}
+		upgraded = true
+		if cc.Get("ttl").String() == "1h" {
+			return true
+		}
+		set, err := sjson.SetBytes(next, path+".ttl", "1h")
+		if err != nil {
+			return false
+		}
+		next = set
+		return true
+	}
+	// The top-level mark of automatic caching is a mark too (#1279).
+	if !relabel("cache_control", gjson.GetBytes(next, "cache_control")) {
+		return body, false
+	}
+	for _, arr := range headTTLPaths {
+		res := gjson.GetBytes(next, arr)
+		if !res.IsArray() {
+			continue
+		}
+		for i, el := range res.Array() {
+			if !relabel(arr+"."+strconv.Itoa(i)+".cache_control", el.Get("cache_control")) {
+				return body, false
+			}
+		}
+	}
+	msgs := gjson.GetBytes(next, "messages")
+	if msgs.IsArray() {
+		for i, m := range msgs.Array() {
+			base := "messages." + strconv.Itoa(i)
+			if !relabel(base+".cache_control", m.Get("cache_control")) {
+				return body, false
+			}
+			content := m.Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			for j, blk := range content.Array() {
+				if !relabel(base+".content."+strconv.Itoa(j)+".cache_control", blk.Get("cache_control")) {
+					return body, false
+				}
+			}
+		}
+	}
+	if !upgraded {
+		return body, false
+	}
+	return next, true
+}
+
+// relabelOps reports the relabel of RelabelAllTTL1h on the MESSAGES section, one rewrite
+// per message whose bytes changed. before and after are the whole bodies. The tools and system
+// sections are reported by the proxy, which diffs them (proxy/accountant_envelope.go); messages
+// cannot be diffed there, because a pipeline component may have edited the same message.
+//
+// The ChangeID starts with "headttl:", the prefix the accountant library finds a held-longer
+// entry by (design section 4.4): without it the library books no rescue for a gap past 5 minutes.
+// It comes from the message as it was before the relabel, so the same message has the same
+// ChangeID on every request.
+func relabelOps(before, after []byte) []accountant.Operation {
+	b, a := gjson.GetBytes(before, "messages").Array(), gjson.GetBytes(after, "messages").Array()
+	if len(b) != len(a) {
+		return nil
+	}
+	var ops []accountant.Operation
+	for i := range b {
+		if b[i].Raw == a[i].Raw {
+			continue
+		}
+		h := fnv.New64a()
+		h.Write([]byte(b[i].Raw))
+		ops = append(ops, accountant.Operation{
+			Kind:       accountant.KindRewrite,
+			Operator:   accwire.Operator(accwire.OpHeadTTL),
+			At:         accountant.Position{Section: accountant.SectionMessages, Index: i},
+			SizeBefore: accountant.Size{Bytes: len(b[i].Raw)},
+			SizeAfter:  accountant.Size{Bytes: len(a[i].Raw)},
+			ChangeID:   "headttl:" + strconv.FormatUint(h.Sum64(), 16),
+		})
+	}
+	return ops
 }

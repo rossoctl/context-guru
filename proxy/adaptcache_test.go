@@ -12,122 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 	"github.com/rossoctl/context-guru/tenant"
 )
-
-func TestRowFactsDefaultGates(t *testing.T) {
-	ok := rowFacts{turn: 1, prefix: 80000, ping: 0.5}
-	if ok.defaultK() != 2 {
-		t.Fatalf("an eligible row gets %d pings, want 2", ok.defaultK())
-	}
-	for name, f := range map[string]rowFacts{"first request": {turn: 0, prefix: 80000}, "small prefix": {turn: 1, prefix: 79999}, "dear ping": {turn: 1, prefix: 80000, ping: 0.51}} {
-		if f.defaultK() != 0 {
-			t.Errorf("%s: %d pings, want 0", name, f.defaultK())
-		}
-	}
-	// gateway dollars are scale 1: a 400 s return rescued by the first ping is worth one rewrite minus one read, minus the ping
-	f := rowFacts{u: 2, gap: 400, returned: true, toEnd: 3600, stake: 0.3375, ping: 0.03}
-	if g := f.gain(2, autoX, true, 1, 1); math.Abs(g-(0.3375-0.03)) > 1e-12 {
-		t.Errorf("K2 on a 400 s return = %v", g)
-	}
-	// SessionEnd cancels the pings after a session's last response
-	last := rowFacts{u: 2, toEnd: 0, ping: 0.03}
-	if g := last.gain(3, autoX, true, 1, 1); g != 0 {
-		t.Errorf("with SessionEnd the last response costs %v, want 0", g)
-	}
-	if g := last.gain(3, autoX, false, 1, 1); math.Abs(g+0.09) > 1e-12 {
-		t.Errorf("without SessionEnd the last response costs %v, want -0.09", g)
-	}
-}
-
-// segRows: everyone else favours K3. The target's "tool_use" responses come back after 1000 s (K3 rescues them) and its "end_turn" ones after
-// three hours (every ping is wasted), so no single plan suits it and a plan per stop reason does.
-func segRows(target string) ([]predictive.AutoRow, []rowFacts) {
-	const t0 = int64(1_786_000_000_000)
-	var rows []predictive.AutoRow
-	var facts []rowFacts
-	add := func(scope string, sessions int, gapFor func(i int) (float64, string)) {
-		for s := 0; s < sessions; s++ {
-			for i := 0; i < 40; i++ {
-				gap, stop := gapFor(i)
-				f := rowFacts{u: 2, gap: gap, returned: true, toEnd: math.Inf(1), stake: 0.3, ping: 0.03, turn: i, prefix: 100000, stop: stop, model: "m"}
-				g := make([]float64, autoK+1)
-				for k := 1; k <= autoK; k++ {
-					g[k] = f.gain(k, autoX, true, cfScale, cfPingScale)
-				}
-				rows = append(rows, predictive.AutoRow{Scope: scope, Session: fmt.Sprintf("%s-%d", scope, s), EndMs: t0 + int64(i)*3600e3 + int64(s)*1000, Gain: g})
-				facts = append(facts, f)
-			}
-		}
-	}
-	for u := 0; u < 4; u++ {
-		add(fmt.Sprintf("fleet-%d", u), 30, func(int) (float64, string) { return 1000, "tool_use" })
-	}
-	add(target, 50, func(i int) (float64, string) {
-		if i%2 == 0 {
-			return 1000, "tool_use"
-		}
-		return 3 * 3600, "end_turn"
-	})
-	return rows, facts
-}
-
-func TestAutoSpecSegmentedShipsAPlanPerSegment(t *testing.T) {
-	rows, facts := segRows("me")
-	until := int64(1_786_000_000_000) + 50*3600e3
-	spec, rec := autoSpec(rows, facts, "me", 0, until, true, "")
-	if rec == "ship" {
-		t.Fatalf("one plan for a tenant that needs two cannot beat K3 on held-out data: %v", spec["evidence"])
-	}
-	spec, rec = autoSpec(rows, facts, "me", 0, until, true, "stop_reason")
-	if rec != "ship" {
-		t.Fatalf("a plan per stop reason: rec %s, evidence %v", rec, spec["evidence"])
-	}
-	b, _ := json.Marshal(spec)
-	ps, err := predictive.ParseSpec(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for stop, want := range map[string]int{"tool_use": 3, "end_turn": 0, "max_tokens": 3} { // an unseen value takes the fleet plan
-		k, _ := ps.PlanOf(ps.RuleFor(&predictive.Facts{StopReason: stop}))
-		if k < want || (want == 0 && k != 0) {
-			t.Errorf("stop_reason %s runs %d pings, want %d", stop, k, want)
-		}
-	}
-	// the default is in the gate
-	found := false
-	for _, p := range spec["evidence"].(map[string]any)["paired_vs_baselines"].([]any) {
-		found = found || p.(map[string]any)["vs"] == "default(K2+SessionEnd)"
-	}
-	if !found {
-		t.Error("the shipped default is not one of the gate's baselines")
-	}
-}
-
-func TestSegmentPredicatesSelectTheirRowsLive(t *testing.T) {
-	f := rowFacts{hour: 7, dow: 2, prefix: 90000, model: "m1", agent: "claude-cli", stop: "end_turn"}
-	live := predictive.Facts{HourUTC: 7, DowUTC: 2, PrefixTok: 90000, Model: "m1", Agent: "claude-cli", StopReason: "end_turn"}
-	other := predictive.Facts{HourUTC: 8, DowUTC: 3, PrefixTok: 10000, Model: "m2", Agent: "codex", StopReason: "tool_use"}
-	for name, seg := range segFeatures {
-		_, when := seg(&f)
-		spec := map[string]any{"schema": predictive.SpecSchema, "menu": map[string]any{"K1": map[string]any{"gaps_s": []float64{270}}},
-			"policy": map[string]any{"kind": "rules", "segments": []any{map[string]any{"id": "x", "when": when, "rule": map[string]any{"kind": "plan", "plan": "K1"}}}}}
-		b, _ := json.Marshal(spec)
-		ps, err := predictive.ParseSpec(b)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if k, _ := ps.PlanOf(ps.RuleFor(&live)); k != 1 {
-			t.Errorf("%s: the segment does not select its own request live", name)
-		}
-		if k, _ := ps.PlanOf(ps.RuleFor(&other)); k != 0 {
-			t.Errorf("%s: the segment selects another request", name)
-		}
-	}
-}
 
 func TestAdaptCacheReportAndApply(t *testing.T) {
 	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
@@ -158,7 +47,7 @@ func TestAdaptCacheReportAndApply(t *testing.T) {
 	k1 := byID["K1"]["in_sample"].(map[string]any)
 	// in expectation: a rescued request still misses 2.8% of the time (this model's natural rate), a first ping rewrites 0.89% of the time
 	st, pg := 91000*(3.75e-6-3e-7), 91000*3e-7+7*3e-6+15e-6
-	want := 3 * (st*(1-0.028) - pg - fidPFirst*st)
+	want := 3 * (st*(1-0.028) - pg - campaign.FidPFirst*st)
 	if math.Abs(k1["net_usd"].(float64)-want) > 0.006 || math.Abs(k1["rescues"].(float64)-3*0.972) > 0.006 || k1["sessions_helped"] != float64(1) {
 		t.Errorf("K1 %v, want net %.4f", k1, want)
 	}
@@ -216,7 +105,7 @@ func TestAdaptApplyShipsActiveAndShadowsTheRest(t *testing.T) {
 	}{{"ship", false, campaignModeActive}, {"baseline", false, campaignModeShadow}, {"baseline", true, campaignModeActive}, {"insufficient_data", true, campaignModeOff}} {
 		rec, want := c.rec, c.want
 		id := newCampaignID()
-		spec, _ := autoSpec(nil, nil, tid, 0, 1, true, "")
+		spec, _ := campaign.BuildSpec(nil, nil, tid, 0, 1, true, "")
 		spec["policy"] = map[string]any{"kind": "rules", "segments": []any{}, "fallback": map[string]any{"kind": "none"}} // the fleet plan of a non-ship build
 		spec["menu"] = map[string]any{"K4": map[string]any{"gaps_s": []float64{270, 270, 270, 270}, "max_pings": 4}}
 		spec["own_policy"], spec["own_plan"] = map[string]any{"kind": "rules", "segments": []any{}, "fallback": map[string]any{"kind": "plan", "plan": "K4"}}, "K4"
@@ -350,45 +239,6 @@ func TestAdaptReportGateMatchesTheBuilder(t *testing.T) {
 	}
 }
 
-// SessionEnd cancels every ping after the session's last response, whichever model's conversation the ping belongs to.
-func TestSessionEndStopsPingsAcrossModels(t *testing.T) {
-	const t0 = int64(1_786_000_000_000)
-	a := &kvcache.Request{ID: 1, User: "u", ConversationID: "s", Model: "m1", TS: t0, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	b := &kvcache.Request{ID: 2, User: "u", ConversationID: "s", Model: "m2", TS: t0 + 300e3, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	_, facts := autoRowsX([]*kvcache.Request{a, b}, flatPrice, true, t0+10*3600e3)
-	// a's model never comes back; the session's last response ends 300 s after a's: only a's first ping (at ~270 s) is sent
-	if fired, _ := facts[0].outcome(3, autoX, true); fired != 1 {
-		t.Errorf("a: %d pings with SessionEnd, want 1", fired)
-	}
-	if fired, _ := facts[0].outcome(3, autoX, false); fired != 3 {
-		t.Errorf("a: %d pings without SessionEnd, want 3", fired)
-	}
-	if fired, _ := facts[1].outcome(3, autoX, true); fired != 0 {
-		t.Errorf("b, the last response: %d pings with SessionEnd, want 0", fired)
-	}
-}
-
-func TestExpectedReplayChargesFailuresAndOtherSessionsHits(t *testing.T) {
-	f := rowFacts{u: 2, gap: 400, returned: true, toEnd: 3600, span: math.Inf(1), prefix: 100000, nextPrefix: 60000, pRead: 3e-7, pWrite: 3.75e-6, ping: 0.03, model: "claude-sonnet-x"}
-	p := &fidParams{h: 0.2, head: map[string]float64{"claude-sonnet-x": 10000}}
-	rescue, ping, pings, rescues := f.expected(1, autoX, true, p)
-	stake := (60000 - 10000) * (3.75e-6 - 3e-7) // the next request reuses 60K, of which a miss would still read the 10K head
-	if want := stake * (1 - 0.013 - 0.2); math.Abs(rescue-want) > 1e-12 || math.Abs(rescues-(1-0.013-0.2)) > 1e-12 {
-		t.Errorf("rescue %v (%v), want %v", rescue, rescues, want)
-	}
-	if want := 0.03 + fidPFirst*100000*(3.75e-6-3e-7); math.Abs(ping-want) > 1e-12 || pings != 1 {
-		t.Errorf("ping %v x %v, want %v x 1", ping, pings, want)
-	}
-	// a return past the cliff of the last touch is no rescue; one before the cliff of the response needs no ping
-	for _, gap := range []float64{271 + 2 + 290, 200} {
-		g := f
-		g.gap = gap
-		if r, _, _, _ := g.expected(1, autoX, true, p); r != 0 {
-			t.Errorf("gap %v: rescue %v, want 0", gap, r)
-		}
-	}
-}
-
 // A single-tenant proxy answers /api/adapt/cache only to a direct loopback caller: not to a remote address, not through a relay.
 func TestAdaptCacheLocalIsLoopbackOnly(t *testing.T) {
 	h := localAdaptHandler(t, filepath.Join(t.TempDir(), "d.db.adapt.json"))
@@ -450,34 +300,11 @@ func TestAdaptCacheManagerScopeAndBasisRules(t *testing.T) {
 	}
 }
 
-// The ship gate is one rule for the build and the report: tying blanket K3 fails it even when the plan beats everything else.
-func TestShipGateNeedsToBeatK3TheFleetAndTheDefault(t *testing.T) {
-	sess := make([]string, 200)
-	sub, worse := make([]float64, 200), make([]float64, 200)
-	for i := range sub {
-		sess[i] = fmt.Sprintf("s%d", i%40)
-		sub[i], worse[i] = 1, 0.5
-	}
-	if ok, _ := shipGate(sub, gateLegs(worse, worse, worse, 3), sess); !ok {
-		t.Error("a plan that beats every leg must pass")
-	}
-	for leg := 0; leg < 3; leg++ {
-		v := [3][]float64{worse, worse, worse}
-		v[leg] = sub
-		if ok, failed := shipGate(sub, gateLegs(v[0], v[1], v[2], 3), sess); ok || len(failed) != 1 {
-			t.Errorf("tying leg %d passes (failed %v)", leg, failed)
-		}
-	}
-	if n := len(gateLegs(worse, worse, nil, 3)); n != 2 {
-		t.Errorf("without a default the gate has %d legs, want K3 and the fleet plan", n)
-	}
-}
-
 // seedRules writes a finished campaign for tenant whose mode was last set by by, and loads it.
 func seedRules(t *testing.T, f *mgrFixture, dir, tenantID, by, mode, rec string) string {
 	t.Helper()
 	id := newCampaignID()
-	spec, _ := autoSpec(nil, nil, tenantID, 0, 1, true, "")
+	spec, _ := campaign.BuildSpec(nil, nil, tenantID, 0, 1, true, "")
 	spec["policy"] = map[string]any{"kind": "rules", "segments": []any{}, "fallback": map[string]any{"kind": "none"}}
 	if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
 		t.Fatal(err)
@@ -574,22 +401,6 @@ func TestAdaptCacheForceOnTheAccountsOwnCampaignIsAudited(t *testing.T) {
 	}
 }
 
-// The keeper holds one entry per thread of a session: a request on another thread does not end this thread's pings.
-func TestPingSpanIsPerThread(t *testing.T) {
-	const t0 = int64(1_786_000_000_000)
-	a := &kvcache.Request{ID: 1, User: "u", ConversationID: "s", Model: "m", TS: t0, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	b := &kvcache.Request{ID: 2, User: "u", ConversationID: "s", ThreadID: "a:sub", Model: "m", TS: t0 + 100e3, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	c := &kvcache.Request{ID: 3, User: "u", ConversationID: "s", Model: "m", TS: t0 + 2000e3, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	_, facts := autoRowsX([]*kvcache.Request{a, b, c}, flatPrice, false, t0+10*3600e3)
-	if facts[0].span != 1999 {
-		t.Errorf("the main thread's span = %v s, want 1999 (its own next request, not the sub-agent's at 99 s)", facts[0].span)
-	}
-	p := &fidParams{head: map[string]float64{}}
-	if _, _, pings, _ := facts[0].expected(3, autoX, false, p); pings < 2.9 {
-		t.Errorf("the sub-agent's request stopped the main thread's pings: %v", pings)
-	}
-}
-
 // A manager who sets a campaign while an adapt build runs wins: the build's campaign is not switched on over it. A campaign written before
 // mode_by existed counts as set by its creator.
 func TestAdaptCacheManagerGuardHoldsAcrossTheBuildAndForOldCampaigns(t *testing.T) {
@@ -663,9 +474,9 @@ func seedStopReasonHistory(t *testing.T, f *mgrFixture, tid string) {
 	t.Helper()
 	// a small fixture: 16 sessions of 10 requests, with the build's evidence floors lowered to match (the full floors need ~2,000 rows, which
 	// costs about a minute per test under -race)
-	oldTst, oldSes := autoMinTst, autoMinSes
-	autoMinTst, autoMinSes = 30, 8
-	t.Cleanup(func() { autoMinTst, autoMinSes = oldTst, oldSes })
+	oldTst, oldSes := campaign.AutoMinTst, campaign.AutoMinSes
+	campaign.AutoMinTst, campaign.AutoMinSes = 30, 8
+	t.Cleanup(func() { campaign.AutoMinTst, campaign.AutoMinSes = oldTst, oldSes })
 	const sessions, perSession = 16, 10
 	start := time.Now().Add(-28 * 24 * time.Hour).UnixMilli()
 	for s := 0; s < sessions; s++ {
@@ -745,6 +556,7 @@ func TestAdaptReportReadsTheCallersRowsPastTheFleetCap(t *testing.T) {
 // Reports are bounded per account: adaptReportBurst an hour, then 429.
 func TestAdaptCacheReportsAreRateLimitedPerAccount(t *testing.T) {
 	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	f.fixLimiterClocks(midMinute())
 	jar, tid := f.signUpJar(t, "user@ibm.com")
 	otherJar, _ := f.signUpJar(t, "other@ibm.com")
 	f.record(t, tid, "s1", &dash.Event{TS: time.Now().Add(-time.Hour).UnixMilli(), Model: "m1", Status: 200, CacheRead: 90000, UpstreamMs: 1000, CostUSD: 0.03})
@@ -773,7 +585,7 @@ func TestAdaptHeatmapIsInTheStrategyTimezone(t *testing.T) {
 		t.Skip("no tz database: ", err)
 	}
 	ts := time.Date(2026, 8, 11, 22, 30, 0, 0, time.UTC) // a Tuesday
-	facts := []rowFacts{{startMs: ts.UnixMilli()}}
+	facts := []campaign.RowFacts{{StartMs: ts.UnixMilli()}}
 	m := adaptHeatmap(facts, []int{0}, []float64{1.5}, []float64{0.5}, loc)
 	if m[2][1] != 1 { // Mon=0, so Wednesday is row 2; 01:xx is column 1
 		t.Errorf("Wednesday 01:00 cell = %v; grid %v", m[2][1], m)
@@ -806,7 +618,7 @@ func TestAdaptOptionsShowLocalHours(t *testing.T) {
 	if got := segLabel("dow", "Tuesday", loc, ref); got != "Tue 03:00 - Wed 03:00" {
 		t.Errorf("Tuesday (UTC) shows as %q", got)
 	}
-	facts := []rowFacts{{hour: 22, dow: 2}}
+	facts := []campaign.RowFacts{{Hour: 22, Dow: 2}}
 	rows := []predictive.AutoRow{{Scope: "me"}}
 	if got := segPlanDisplay("hour", facts, "me", rows, func(string) int { return 3 }, loc, ref); got != "01:00-02:00: K3" {
 		t.Errorf("by_hour plan shows as %q", got)
@@ -821,6 +633,7 @@ func TestAdaptOptionsShowLocalHours(t *testing.T) {
 // A busy process answers 503 with Retry-After and spends none of the account's hourly report budget.
 func TestAdaptCacheBusyAnswers503WithoutSpendingTheBudget(t *testing.T) {
 	f, _ := newCampaignFixture(t, "ship", "parity.model.json")
+	f.fixLimiterClocks(midMinute())
 	jar, tid := f.signUpJar(t, "user@ibm.com")
 	f.record(t, tid, "s1", &dash.Event{TS: time.Now().Add(-time.Hour).UnixMilli(), Model: "m1", Status: 200, CacheRead: 90000, UpstreamMs: 1000, CostUSD: 0.03})
 	adaptCacheMu.Lock()
@@ -839,34 +652,12 @@ func TestAdaptCacheBusyAnswers503WithoutSpendingTheBudget(t *testing.T) {
 }
 
 // #719 review: the adapt arms' text named "270 s" after the default moved to 240 s. The number
-// now comes from autoX; this pins every spaced arm's text to it, so it cannot drift again.
+// now comes from campaign.AutoX; this pins every spaced arm's text to it, so it cannot drift again.
 func TestAdaptLabelsStateTheSpacingTheArmsRunAt(t *testing.T) {
-	want := fmt.Sprintf("%d s", autoX)
+	want := fmt.Sprintf("%d s", campaign.AutoX)
 	for _, id := range []string{"default", "K1", "K2", "K3"} {
 		if d := adaptLabels[id][1]; !strings.Contains(d, want) {
 			t.Errorf("adapt arm %s says %q, want it to name the %s spacing the arms run at", id, d, want)
-		}
-	}
-}
-
-// The adapt replay gives a row the floor of its wait, as the keeper does: 20k for a tool stop or a
-// subagent, the general floor otherwise, and the general floor only for OpenAI (the keeper plans no
-// wait for OpenAI).
-func TestRowFloorFollowsTheWaitAndTheProvider(t *testing.T) {
-	pol := CachePolicy{WaitPlan: true, MinPrefixTokens: 80000}
-	for _, c := range []struct {
-		name string
-		f    rowFacts
-		want int
-	}{
-		{"main tool stop", rowFacts{stop: "tool_use"}, 20000},
-		{"main end_turn", rowFacts{stop: "end_turn"}, 80000},
-		{"subagent end_turn", rowFacts{stop: "end_turn", subagent: true}, 20000},
-		{"openai tool stop", rowFacts{stop: "tool_calls", openai: true}, 80000},
-		{"openai subagent", rowFacts{stop: "end_turn", openai: true, subagent: true}, 80000},
-	} {
-		if got := rowFloor(pol, &c.f); got != c.want {
-			t.Errorf("%s: floor %d, want %d", c.name, got, c.want)
 		}
 	}
 }

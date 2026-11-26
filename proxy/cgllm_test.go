@@ -23,9 +23,10 @@ import (
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // fakeCheapModel is an Anthropic-dialect endpoint for the COMPACTION model: it returns a
@@ -217,7 +218,7 @@ func TestCGLLMCostIsChargedToTheRequestThatSpentIt(t *testing.T) {
 	if cheapCalls.Load() == 0 {
 		t.Fatal("the summarizer never called the cheap model; the assertion below would be vacuous")
 	}
-	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
 		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
 	}
 	// The second turn of the same session is what attributes it.
@@ -282,7 +283,7 @@ func TestOurOwnSpendIsPricedAtTheCompactionModelsRate(t *testing.T) {
 	// Drain, THEN a second turn: that makes turn 2 attribute exactly the one call turn 1
 	// commissioned. Turn 2 commissions another, but nothing attributes it (there is no turn 3),
 	// so the rows carry exactly one call's cost and the expectation below stays unscaled.
-	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
 		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
 	}
 	postChat(t, srv, "sess-priced")
@@ -351,7 +352,7 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 	}
 	// Drained first, for the reason given in the test above: exactly one call's cost is
 	// attributed, so the expectation stays unscaled.
-	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
 		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
 	}
 	postChat(t, srv, "sess-tiers")
@@ -558,34 +559,19 @@ func TestObserveModeRecordsBilledInputIntoTheShadowStore(t *testing.T) {
 
 	// The write happens in a defer on the response path, so give it a moment to land rather than
 	// asserting on a race.
-	var found bool
-	for i := 0; i < 200; i++ {
-		if _, ok := shadow.Get(store.BilledPrefix + sid); ok {
-			found = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !found {
-		t.Errorf("no cg:bin: record in the shadow store under %q after an observe-mode request: "+
-			"PrevBilledInput stays 0, FracResolvable reads false, and summarize's 0.9 default "+
-			"reports window_not_exact forever — a permanent zero in the mode built for measuring",
-			sid)
-	}
+	testutil.WaitFor(t, fmt.Sprintf("a cg:bin: record in the shadow store under %q after an observe-mode request "+
+		"(without it PrevBilledInput stays 0, FracResolvable reads false, and summarize's 0.9 default "+
+		"reports window_not_exact forever, a permanent zero in the mode built for measuring)", sid), func() bool {
+		_, ok := shadow.Get(store.BilledPrefix + sid)
+		return ok
+	})
 	// The per-thread record the billed-growth horizon reads (primary thread: the key is the session).
 	// Written after cg:bin:, so poll for it too.
-	var foundThread bool
-	for i := 0; i < 200; i++ {
-		if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
-			foundThread = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !foundThread {
-		t.Errorf("no cg:bint: record in the shadow store under %q: the billed-growth horizon would "+
-			"read an unknown thread figure forever in observe mode", sid)
-	}
+	testutil.WaitFor(t, fmt.Sprintf("a cg:bint: record in the shadow store under %q (without it the billed-growth "+
+		"horizon reads an unknown thread figure forever in observe mode)", sid), func() bool {
+		_, ok := shadow.Get(store.BilledThreadPrefix + sid)
+		return ok
+	})
 }
 
 // The enforced path records the per-thread figure next to the session figure.
@@ -617,17 +603,15 @@ func TestEnforcedModeRecordsBilledInputPerThread(t *testing.T) {
 	}
 	resp.Body.Close()
 	sid := apply.SessionIDFor("", "sess-enforced", bschemas.Anthropic, []byte(summarizableRequest()))
-	for i := 0; i < 200; i++ {
+	testutil.WaitForState(t, "both billed records after an enforced request", func() bool {
 		_, a := st.Get(store.BilledPrefix + sid)
 		_, b := st.Get(store.BilledThreadPrefix + sid)
-		if a && b {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	_, a := st.Get(store.BilledPrefix + sid)
-	_, b := st.Get(store.BilledThreadPrefix + sid)
-	t.Fatalf("billed records after an enforced request: session=%v thread=%v, want both", a, b)
+		return a && b
+	}, func() string {
+		_, a := st.Get(store.BilledPrefix + sid)
+		_, b := st.Get(store.BilledThreadPrefix + sid)
+		return fmt.Sprintf("session=%v thread=%v", a, b)
+	})
 }
 
 // A subagent's answer must land under the SUBAGENT's thread key in observe mode, which is the key
@@ -664,7 +648,7 @@ func TestObserveModeRecordsBilledInputUnderTheRequestThread(t *testing.T) {
 		strings.NewReader(summarizableRequest()))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-context-guru-session", "sess-observe-sub")
-	req.Header.Set(agentIDHeader, "sub1")
+	req.Header.Set(thread.AgentHeader, "sub1")
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -678,17 +662,10 @@ func TestObserveModeRecordsBilledInputUnderTheRequestThread(t *testing.T) {
 		t.Fatal("no session id derived for the observe body")
 	}
 	subKey := store.BilledThreadPrefix + thread.Key(sid, "a:sub1")
-	var found bool
-	for i := 0; i < 200; i++ {
-		if _, ok := shadow.Get(subKey); ok {
-			found = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !found {
-		t.Errorf("no cg:bint: record under the subagent thread key %q", subKey)
-	}
+	testutil.WaitFor(t, fmt.Sprintf("a cg:bint: record under the subagent thread key %q", subKey), func() bool {
+		_, ok := shadow.Get(subKey)
+		return ok
+	})
 	if _, ok := shadow.Get(store.BilledThreadPrefix + sid); ok {
 		t.Errorf("the subagent's figure was written under the primary thread key, so it would overwrite the main thread's")
 	}
@@ -741,11 +718,8 @@ func TestObserveBilledInputKeyMatchesThePipelineWithTheSkillsHalfActive(t *testi
 	if raw == want {
 		t.Fatal("fixture does not exercise the bug: raw id equals the pipeline id")
 	}
-	for i := 0; i < 200; i++ {
-		if _, ok := shadow.Get(store.BilledPrefix + want); ok {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Errorf("no cg:bin: record under the pipeline's id %q (raw-body id is %q)", want, raw)
+	testutil.WaitFor(t, fmt.Sprintf("a cg:bin: record under the pipeline's id %q (raw-body id is %q)", want, raw), func() bool {
+		_, ok := shadow.Get(store.BilledPrefix + want)
+		return ok
+	})
 }

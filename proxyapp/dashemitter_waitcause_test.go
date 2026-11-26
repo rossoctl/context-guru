@@ -16,7 +16,7 @@ import (
 // TestDashEmitterKeepAlivePingCarriesNoWaitCause pins issue #424's own requirement: a
 // keep-alive ping — plain (record1) or the cache_aware_summarizer's summary-substitute
 // (#402, recordSummarySubstitute) — must never get a waiting_for/wake_cause label, and must
-// never touch internal/waitcause's per-thread state.
+// never touch waitcause's per-thread state.
 //
 // dashEmitter.KeepAlivePing is the ONLY place a ping's dash.Event is built (see its own doc
 // comment); proxy/keepalive.go's record1 and recordSummarySubstitute both reach it through

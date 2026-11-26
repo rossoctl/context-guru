@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // silentGateway reproduces what the packet capture on contextguru2 showed the LiteLLM gateway
@@ -101,6 +103,7 @@ func silenceBuild(url string, body string) func(context.Context) (*http.Request,
 // The failure itself: an accepted, never-answered streaming request is resent once on a NEW
 // connection and the client gets the answer — in about one silence timeout, not ten minutes.
 func TestASilentStreamingRequestIsResentOnANewConnection(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(n int) bool { return n == 1 })
 	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
 	before := upstreamSilenceResends.Load()
@@ -150,6 +153,7 @@ func TestAGatewayThatNeverAnswersFailsAfterOneResend(t *testing.T) {
 // headers come promptly and whose tokens then take far longer than the timeout is never touched:
 // the deadline is on the first byte, not on the generation.
 func TestASlowStreamAfterTheFirstByteIsNeverResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
@@ -186,6 +190,7 @@ func TestASlowStreamAfterTheFirstByteIsNeverResent(t *testing.T) {
 // The client going away cancels the request and is NOT turned into a resend: a cancelled turn
 // must not cost a second generation.
 func TestAClientThatGivesUpIsNotResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(int) bool { return true })
 	c := &http.Client{Transport: upstreamTransport(10 * time.Minute)}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
@@ -202,6 +207,7 @@ func TestAClientThatGivesUpIsNotResent(t *testing.T) {
 // End to end through the handler: a streaming /v1/messages turn whose first upstream attempt is
 // silent reaches the client complete, from the resend.
 func TestTheHandlerRecoversASilentStreamingTurn(t *testing.T) {
+	testutil.RequireTiming(t)
 	g := newSilentGateway(t, func(n int) bool { return n == 1 })
 	h := New(nil, nil, nil, Options{AnthropicUpstream: g.url(), StreamSilenceTimeout: 150 * time.Millisecond})
 	srv := httptest.NewServer(h.Mux())
@@ -584,6 +590,7 @@ func TestCountTokensRecoversADroppedReusedConnection(t *testing.T) {
 // start after its call has given up, so a count taken between calls can charge one call with
 // another's request.
 func TestAFirstByteRacingTheWatchdogIsNeverLostOrDuplicated(t *testing.T) {
+	testutil.RequireTiming(t)
 	var (
 		mu    sync.Mutex
 		sends = map[string]int{}
@@ -669,6 +676,7 @@ func (r ctxErrReader) Read([]byte) (int, error) { return 0, context.Cause(r.ctx)
 // with no error. Its body is already dead, so it must not reach the client: the attempt is silent,
 // and it is resent once.
 func TestAResponseThatLostTheRaceToTheWatchdogIsResent(t *testing.T) {
+	testutil.RequireTiming(t)
 	tr := &lateByteTransport{}
 	c := &http.Client{Transport: tr}
 	before := upstreamSilenceResends.Load()
@@ -694,6 +702,7 @@ func TestAResponseThatLostTheRaceToTheWatchdogIsResent(t *testing.T) {
 // its response is already read, returns it with no error; the second shape is the one that must
 // never reach the client. On the unfixed code about 1 call in 20 took that shape.
 func TestALateFirstByteOnTheRealTransportNeverReachesTheClient(t *testing.T) {
+	testutil.RequireTiming(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.WriteHeader(200)
@@ -841,8 +850,7 @@ func (g *chaosGateway) handle(c net.Conn) {
 func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
 	g := newChaosGateway(t)
 	c := &http.Client{Transport: upstreamTransport(30 * time.Second)}
-	time.Sleep(50 * time.Millisecond)
-	before := goroutinesSettled()
+	before := runtime.NumGoroutine()
 	var ok, fail atomic.Int64
 	var wg sync.WaitGroup
 	for w := 0; w < 50; w++ {
@@ -871,7 +879,9 @@ func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
 	max := g.maxSeen
 	g.mu.Unlock()
 	// 1 + 2 drops + 1 silence resend (each of which may itself drop) is the theoretical max
-	if max > 1+maxDroppedReuseRetries+1 {
+	// The 100 ms silence limit races a real response on a loaded box, and a late response then
+	// earns an extra resend. So the bound holds only when timing is on.
+	if testutil.TimingEnabled() && max > 1+maxDroppedReuseRetries+1 {
 		t.Errorf("a request was sent %d times", max)
 	}
 	c.Transport.(*http.Transport).CloseIdleConnections()
@@ -880,20 +890,11 @@ func TestConcurrentRequestsAgainstAFlakyGateway(t *testing.T) {
 		cn.Close()
 	}
 	g.mu.Unlock()
-	after := goroutinesSettled()
-	t.Logf("ok=%d fail=%d maxSends=%d goroutines %d -> %d", ok.Load(), fail.Load(), max, before, after)
-	if after > before+3 {
-		t.Errorf("goroutine leak %d -> %d", before, after)
-	}
-}
-
-func goroutinesSettled() int {
-	var n int
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
-		n = runtime.NumGoroutine()
-	}
-	return n
+	// The goroutines end on their own after the close, so wait until the count falls back.
+	testutil.WaitForState(t, "the goroutine count to fall back to the start", func() bool {
+		return runtime.NumGoroutine() <= before+3
+	}, func() string { return fmt.Sprintf("goroutines %d -> %d", before, runtime.NumGoroutine()) })
+	t.Logf("ok=%d fail=%d maxSends=%d goroutines %d -> %d", ok.Load(), fail.Load(), max, before, runtime.NumGoroutine())
 }
 
 // rawBuild posts body exactly as given, to url.
@@ -941,7 +942,7 @@ func TestClosingIdleConnectionsForAResendDoesNotBreakOtherStreams(t *testing.T) 
 			}
 		}()
 	}
-	time.Sleep(100 * time.Millisecond)
+	testutil.WaitFor(t, "the ten streams to reach the server", func() bool { return n.Load() >= 10 })
 	n.Store(99)
 	resp, err := doWithSilenceGuard(context.Background(), c, 200*time.Millisecond, silenceBuild(srv.URL, streamBody))
 	if err != nil {

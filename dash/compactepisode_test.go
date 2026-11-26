@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/kvcache"
 )
 

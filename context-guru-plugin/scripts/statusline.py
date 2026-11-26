@@ -476,7 +476,7 @@ def _fetch_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     cached, cached_age = None, None
     try:
         st = os.stat(cache_path)
-        cached_age = time.time() - st.st_mtime
+        cached_age = cgcache.now() - st.st_mtime
         with open(cache_path, encoding="utf-8") as fh:
             cached = json.load(fh)
         if cached_age < STATS_CACHE_TTL_SECONDS:
@@ -532,7 +532,7 @@ def _stale_stats(port: str, session_id: str | None) -> tuple[dict | None, str]:
     cached, age = None, None
     try:
         path = _stats_cache_path(port, session_id)
-        age = time.time() - os.stat(path).st_mtime
+        age = cgcache.now() - os.stat(path).st_mtime
         with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
     except (OSError, ValueError):
@@ -666,6 +666,15 @@ def _update_available_segment() -> str | None:
         installed = ""
     if installed and (latest == installed or latest == f"v{installed}"):
         return None  # already current
+    if installed:
+        # A beta is not "behind" the older stable that releases/latest names (#1254).
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import settings  # noqa: PLC0415 - as in _our_port
+            if not settings.update_is_newer(latest, installed):
+                return None
+        except Exception:  # noqa: BLE001 - fail open: keep the segment
+            pass
     if fields["answer"] == "auto":
         return f"{GREEN}▲ {latest} auto{RESET}"
     return f"{GREEN}▲ update {latest}{RESET}"
@@ -872,7 +881,7 @@ def _fetch_json(port: str, query: str, tag: str, ttl: float,
     path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
     cached, age = None, 0.0
     try:
-        age = max(0.0, time.time() - os.stat(path).st_mtime)
+        age = max(0.0, cgcache.now() - os.stat(path).st_mtime)
         with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
         if age < ttl:
@@ -930,7 +939,7 @@ def _bg_json(port: str, query: str, tag: str, ttl: float) -> tuple[dict | None, 
     path = os.path.join(_tmpdir(), f"context-guru-statusline-{port}-{tag}.json")
     cached, age = None, 0.0
     try:
-        age = max(0.0, time.time() - os.stat(path).st_mtime)
+        age = max(0.0, cgcache.now() - os.stat(path).st_mtime)
         with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
     except (OSError, ValueError):
@@ -1064,7 +1073,7 @@ def _main_cs(cs: dict | None) -> dict | None:
         merged.pop("window_exact", None)
     # The main thread's own plan and next-request prices, or none: never a sub-agent's. With no
     # prices on the entry, the cold price falls back to the main thread's rewrite_usd (_cache_view).
-    for k in ("held_until_ms", "next_warm_usd", "next_cold_usd"):
+    for k in ("held_until_ms", "next_warm_usd", "next_cold_usd", "ttl_unproven"):
         merged.pop(k, None)
         if k in main:
             merged[k] = main[k]
@@ -1220,10 +1229,10 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
     cli = None
     exp = _num(pc, "expires_at")
     if exp is not None:
-        cli = exp - time.time()
+        cli = exp - cgcache.now()
     elif pc.get("warm") is False:
         cli = 0.0
-    srv, tokens, usd, ping = None, _num(pc, "recache_tokens_if_cold"), None, False
+    srv, tokens, usd, ping, unproven = None, _num(pc, "recache_tokens_if_cold"), None, False, False
     ttl = 3600.0 if pc.get("ttl") == "1h" else 300.0
     srv = remaining_seconds(cs, cs_age)
     cold_usd = warm_usd = None
@@ -1236,11 +1245,14 @@ def _cache_view(payload: dict, cs: dict | None, cs_age: float) -> dict:
         if cold_usd is None:
             cold_usd = usd
         ttl, ping = ttl if ttl_s_bad(cs) else cs["ttl_s"], bool(cs.get("keepalive"))
+        # A free 1-hour ping made the clock an hour long on a route not yet proven to grant it (#1243): the
+        # clock is drawn with a "1h?" mark until the thread's return proves it. The same rule as the band's.
+        unproven = cs.get("ttl_unproven") is True
     # ONE source drives the clock at a time. The old rule gave the proxy only the first 3 s of a copy and then
     # let Claude Code's own expiry win whenever it was later (it counts from a different start), so the
     # clock jumped up ~10 s and back down at the next refresh: "two alternating timers".
     if srv is not None and (cs_age <= PROXY_FRESH_SECONDS or cli is None or srv >= cli):
-        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping,
+        return {"remaining": srv, "source": "proxy", "tokens": tokens, "usd": usd, "ttl": ttl, "ping": ping, "unproven": unproven,
                 "warm_usd": warm_usd, "cold_usd": cold_usd, "model": cs.get("model"), "held": held_seconds(cs, cs.get("now_ms"), cs_age)}
     if cli is not None:
         return {"remaining": cli, "source": "client", "tokens": tokens, "usd": None, "ttl": ttl, "ping": False}
@@ -1284,7 +1296,7 @@ def _cache_segment(view: dict, level: int | None = 0) -> str | None:
     ping = " ↻" if (view.get("ping") or held is not None) and rem > 0 else ""
     if ping and state != "critical":
         colour = CYAN  # kept warm by pings: its own colour, so "pinged" reads at a glance
-    clock = _clock(rem) + ("!" if state == "critical" else "")
+    clock = _clock(rem) + ("!" if state == "critical" else "") + (" 1h?" if view.get("unproven") else "")
     if level == 1:
         return f"{DIM}cache{RESET} {colour}{glyph} {clock}{ping}{RESET}"
     bar = f"{colour}{'█' * cells}{DIM}{'░' * (CACHE_BAR_CELLS - cells)}{RESET}"

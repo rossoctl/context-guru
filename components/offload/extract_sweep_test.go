@@ -18,9 +18,9 @@ import (
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // fakeAsker stands in for the host's PrefixAsker. It records what was asked and what session it was

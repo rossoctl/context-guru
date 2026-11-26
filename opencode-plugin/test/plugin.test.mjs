@@ -40,6 +40,12 @@ test("adds the OpenCode session header", async () => {
     const routed = { headers: {} }
     await hooks["chat.headers"]({ sessionID: "session-test", provider: { info: { id: "anthropic" } } }, routed)
     assert.equal(routed.headers["x-context-guru-session"], "session-test")
+    assert.equal(routed.headers["x-context-guru-request-kind"], undefined)
+
+    // The built-in "compaction" agent runs the summary request: the request carries the mark.
+    const compaction = { headers: {} }
+    await hooks["chat.headers"]({ sessionID: "session-test", agent: "compaction", provider: { info: { id: "anthropic" } } }, compaction)
+    assert.equal(compaction.headers["x-context-guru-request-kind"], "compaction")
 
     // A provider the plugin did not route does not send traffic to the proxy: no header.
     const other = { headers: {} }

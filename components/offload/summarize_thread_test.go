@@ -9,8 +9,8 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // The summary checkpoint, the single-flight registry and the cold-deferral registry are keyed by
@@ -265,7 +265,10 @@ func TestCacheAwareSideRequestIsReplayOnly(t *testing.T) {
 			t.Errorf("%s side request stored a checkpoint", phase)
 		}
 	}
-	time.Sleep(50 * time.Millisecond) // a commission that slipped through would have called the model by now
+	// A commission that slipped through is in flight or deferred. Drain every one, then count.
+	if !WaitForAllSummariesForTest(5 * time.Second) {
+		t.Fatal("a summary is still in flight after the side requests")
+	}
 	if n := model.calls.Load(); n != 1 {
 		t.Fatalf("model calls after the side requests = %d, want 1", n)
 	}

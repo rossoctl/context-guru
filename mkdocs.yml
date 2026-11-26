@@ -137,9 +137,11 @@ nav:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
       - Data dependence & storage off: data-dependence.md
+      - Client coverage: client-coverage.md
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
       - Keep an idle prompt cache warm: how-to/cache-keepalive.md
+      - Choose a cache strategy: how-to/cache-strategies.md
       - Choose a cache TTL: how-to/kv-cache-ttl.md
       - Budget keep-alive pings: how-to/kv-cache-keepalive-budget.md
   - Components:

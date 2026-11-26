@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"math"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 )
 
 // TestCaptureDropsRatherThanBlocks is the property that lets the dashboard exist
@@ -17,12 +19,41 @@ import (
 // immediately and count the loss. If this ever blocks, enabling observability
 // becomes a latency incident.
 func TestCaptureDropsRatherThanBlocks(t *testing.T) {
-	r, err := NewRecorder(Options{DBPath: ":memory:", QueueSize: 4,
-		BatchSize: 1000, FlushInterval: time.Hour}) // writer will not drain
+	// The writer must not drain the queue during the burst. A large BatchSize does not do that: the
+	// writer still moves each event from the queue into its in-memory batch, so how many drop
+	// depended on how often it got the CPU (#1241: 170 of 500 on a 10-core laptop). So hold the
+	// writer instead. It writes after every event (BatchSize 1), and a second connection holds an
+	// exclusive lock on the file, so the first insert waits on busy_timeout. Then at most 1 event is
+	// in the writer and QueueSize are in the queue: everything else must drop, on any machine.
+	path := filepath.Join(t.TempDir(), "d.db")
+	const queue = 4
+	r, err := NewRecorder(Options{DBPath: path, QueueSize: queue, BatchSize: 1, FlushInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			r.Close()
+		}
+	}()
+	lock, err := testdb.Open(t, path).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lock.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	unlock := func() {
+		if lock != nil {
+			if _, err := lock.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+				t.Logf("release the writer lock: %v (later steps may wait on busy_timeout)", err)
+			}
+			lock.Close()
+			lock = nil
+		}
+	}
+	defer unlock()
 
 	const n = 500
 	done := make(chan struct{})
@@ -32,12 +63,13 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 		}
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Record blocked on a full queue; capture must never block a request")
-	}
+	awaitSignal(t, "500 Record calls to return (Record must not block on a full queue; capture must never block a request)", done)
 
+	// Release the writer before reading Stats. The read itself would not wait (WAL), but Stats can
+	// take a new connection from the pool, and a new connection first runs the DSN's
+	// journal_mode(WAL) pragma, which needs a lock: under the lock that took the full 5 s of
+	// busy_timeout (measured). The burst is over, so Captured and Dropped no longer change.
+	unlock()
 	s := r.Stats()
 	if s.Captured != n {
 		t.Errorf("captured = %d; want %d", s.Captured, n)
@@ -45,17 +77,28 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 	if s.Dropped == 0 {
 		t.Fatal("a full queue dropped nothing; either the drop is not counted or the queue grew")
 	}
-	// With a depth-4 queue and a writer that never flushes, the overwhelming
-	// majority must be dropped — proving the queue is genuinely bounded and not
-	// quietly growing to absorb the burst.
-	if s.Dropped < int64(n)/2 {
-		t.Errorf("only %d of %d dropped through a depth-%d queue; is the queue unbounded?",
-			s.Dropped, n, s.QueueCap)
+	// With the writer held, only the queue and the one event in the writer's hands survive. Anything
+	// more means the queue grew to absorb the burst.
+	if want := int64(n - queue - 1); s.Dropped < want {
+		t.Errorf("only %d of %d dropped through a depth-%d queue with the writer held, want at least %d; "+
+			"is the queue unbounded?", s.Dropped, n, s.QueueCap, want)
 	}
 	// The drop must be VISIBLE, not merely survived — every other number depends on
 	// the viewer knowing coverage was incomplete.
-	if s.QueueCap != 4 {
-		t.Errorf("queue cap = %d; want the configured 4", s.QueueCap)
+	if s.QueueCap != queue {
+		t.Errorf("queue cap = %d; want the configured %d", s.QueueCap, queue)
+	}
+
+	// Close: every captured event is now written, counted as dropped, or counted as a write error.
+	// None is lost without a count.
+	err = r.Close()
+	closed = true // before the check: a second Close would panic on close(r.done) and hide err
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := r.Stats(); s.Written+s.Dropped+s.Errors != s.Captured {
+		t.Errorf("written %d + dropped %d + errors %d != captured %d: an event was lost without a count",
+			s.Written, s.Dropped, s.Errors, s.Captured)
 	}
 }
 

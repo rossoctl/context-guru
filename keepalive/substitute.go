@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/thread"
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // cachePhaseAt classifies the cache phase of an entry last touched at prevStartedAt, for a
@@ -82,8 +83,8 @@ func substituteWindow(seconds int, ttl, idle time.Duration) time.Duration {
 // turn the summary goes out after the last planned ping, at the extra slot, extraSlotMargin before the
 // normal hold deadline (210 s after the last ping at the 5-minute defaults). The cache then has
 // ttl - (idle - extraSlotMargin) left (90 s), so the window widens to that plus two sweep ticks (94 s),
-// and never narrows. A planned ping and every other summary path keep substituteWindow. The owner's
-// choice, 2026-10-30: "give it more time, it can run on the 210 sec mark".
+// and never narrows. A planned ping and every other summary path keep substituteWindow.
+// The extra request runs on the 210 s mark, so the window gets more time.
 func extraSummaryWindow(w, ttl, idle time.Duration) time.Duration {
 	if extra := ttl - (idle - extraSlotMargin) + 2*tick; extra > w {
 		return extra
@@ -132,7 +133,9 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 	}
 	e := j.e
 	k.mu.Lock()
-	model, prefix, ceiling, ttl1h := e.model, e.prefix, e.pol.Ceiling(), e.ttl1h || e.pol.HeadTTL1h
+	model, prefix, ttl1h := e.model, e.prefix, e.ttl1h || e.pol.HeadTTL1h
+	miss, capPol := e.missUSD, e.capPolicy()
+	route := e.route
 	endpoint, ttl, idle := e.endpoint, cacheLifetime(e.provider, model, ttl1h), e.pol.Idle
 	k.mu.Unlock()
 	window := substituteWindow(info.PreExpirySeconds, ttl, idle)
@@ -154,34 +157,55 @@ func (k *Keeper) fireSummarySubstitute(j pingJob) bool {
 		return false
 	}
 	// Respect the keep-alive $ cap on a PROJECTION, before spending anything.
+	//
+	// THE VALUE RULE (#1439). The summary takes the place of one ping and renews the same entry, so
+	// it protects the miss that ping protects. It is allowed when it costs less than that miss
+	// (SubstituteVerdict). An explicit operator cap still applies; unset means no flat cap.
 	cost := k.projectedSummaryUSD(model, endpoint, prefix)
-	if cost > ceiling {
+	if v := capPol.SubstituteVerdict(cost, miss); v != VerdictOK {
 		k.summarySubstituteOverBudget.Add(1)
-		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute would exceed the "+
-			"per-ping cost cap; pinging normally instead",
+		slog.Debug("context-guru: cache_aware_summarizer keep-alive substitute refused ("+v.Reason()+
+			"); pinging normally instead",
 			"tenant", tenantLabel(j.tenant), "session", j.session,
-			"estimate_usd", cost, "ceiling_usd", ceiling)
+			"estimate_usd", cost, "miss_usd", miss, "cap_usd", capPol.PingCap(), "verdict", v.Reason())
 		return false
 	}
 	// REFRESHING an existing reserve (as opposed to creating a session's first one) only earns
-	// back its own cost when the material it folds in is worth more than the call itself — see
+	// back its own cost when the material it folds in is worth more than the call adds — see
 	// issue #415. Creating the first reserve has no such test: it is compared against "no reserve
 	// at all" (the full-rewrite cold return this whole mechanism exists to avoid), not against a
 	// slightly smaller one, so info.IsRefresh gates this block to the refresh case alone.
+	//
+	// WHAT THE REFRESH ADDS, NOT WHAT THE CALL COSTS (#1144). A refresh at a planned ping takes
+	// the place of a due ping that reads the same prefix, so that read is paid either way. The cost to weigh is the
+	// extra over the ping: the reply. `cost` (the whole call) stays the figure for the spending cap
+	// above. refresh_cost: full keeps the old test, against `cost`.
 	if info.IsRefresh {
 		saving := k.expectedRefreshSavingUSD(model, endpoint, prefix, info.RefreshTailTokens)
-		if saving < cost {
+		extra := k.projectedRefreshExtraUSD(model, prefix, route, endpoint)
+		// The extra cost is the right figure only when the refresh REPLACES a ping that reads the
+		// same bytes: a planned ping (not the extra slot, where a decline sends nothing, so the
+		// refresh adds the whole call) and a candidate on the prefix_ask path (messages and
+		// model.source: config read the prefix at their own price). Anything else weighs the
+		// whole call, as before #1144.
+		weighed := extra
+		if info.RefreshFullCost || j.extra || !info.ReadsPingPrefix {
+			weighed = cost
+		}
+		if saving < weighed {
 			k.summarySubstituteRefreshNotWorthIt.Add(1)
 			slog.Debug("context-guru: cache_aware_summarizer refresh would cost more than it saves; "+
 				"pinging normally instead",
 				"tenant", tenantLabel(j.tenant), "session", j.session,
-				"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving, "projected_cost_usd", cost)
+				"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving,
+				"projected_cost_usd", cost, "extra_cost_usd", extra, "refresh_cost_full", info.RefreshFullCost)
 			return false
 		}
 		k.summarySubstituteRefreshPaid.Add(1)
 		slog.Debug("context-guru: cache_aware_summarizer refresh pays for itself; refreshing the reserve",
 			"tenant", tenantLabel(j.tenant), "session", j.session,
-			"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving, "projected_cost_usd", cost)
+			"tail_tokens", info.RefreshTailTokens, "expected_saving_usd", saving,
+			"projected_cost_usd", cost, "extra_cost_usd", extra, "refresh_cost_full", info.RefreshFullCost)
 	}
 	start := k.now()
 	res := dispatch(offload.CacheAwareSummarizerCallTimeout())
@@ -244,7 +268,7 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	var price Price
 	priced := false
 	if model != "" {
-		price, priced = k.price(endpoint, model, prefix)
+		price, priced = k.price(endpoint, model, billedPrompt(u, prefix))
 	}
 	// Same clock, same gate, same reason as record1: a substitute call reads the SAME cached
 	// prefix a ping would (it is built from the byte-identical forwarded body — see
@@ -252,7 +276,10 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	// cache_state: pre_expiry reads, and only when it read or wrote something: a write re-created
 	// the entry and started a fresh lifetime (#580).
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
-		j.touch(provider, startedAt.UnixMilli())
+		// The question is built from the forwarded body, so it carries that body's own markers: a read with
+		// plain markers moves a 1-hour entry back to 5 minutes (the same rule as PingNow). The tier is the one
+		// those markers state, not the one the entry holds.
+		j.touch(provider, startedAt.UnixMilli(), apply.AllBreakpointsAskExtendedTTL(j.raw), oneHourRoute(provider, endpoint, route, model))
 	}
 	var cost float64
 	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
@@ -265,6 +292,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	e.refreshed = u.CacheRead
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		e.refreshedAt = startedAt
+		// The substitute renewed the entry at the tier its markers carry (the client's): D must not call the
+		// entry gone from the last request alone.
+		k.noteTouchLocked(j.key.id(), startedAt, cacheLifetime(j.provider, model, apply.AllBreakpointsAskExtendedTTL(j.raw)), u.CacheRead+u.CacheWrite)
 	}
 	k.mu.Unlock()
 	for {
@@ -310,7 +340,7 @@ func (k *Keeper) sweepAnswerUSD(j pingJob, model string, u Usage) float64 {
 	if model == "" {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, billedPrompt(u, prefix))
 	if !ok || price.Zero() {
 		return 0
 	}
@@ -338,18 +368,19 @@ func (k *Keeper) projectedSweepBatchesUSD(model, endpoint string, prefix int64, 
 	if model == "" || prefix <= 0 || n < 1 {
 		return 0
 	}
-	price, ok := k.price(endpoint, model, prefix)
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
 	if !ok || price.Zero() {
 		return 0
 	}
 	return float64(n) * (float64(prefix)*price.CacheRead + float64(sweepOutputBudgetGuess)*price.Output)
 }
 
-// affordableSweepBatches is how many of the planned batches the per-ping ceiling admits: the largest
-// n <= planned with n x (one question's projected cost) <= ceiling. 0 means not even one fits, and the
+// affordableSweepBatches is how many of the planned batches the operator's cap (Policy.PingCap(), +Inf when
+// unset) and the value rule admit: the largest n <= planned with n x (one question's projected cost) <=
+// ceiling and below miss (SubstituteVerdict). 0 means not even one fits, and the
 // caller sends the ordinary ping. A ceiling that admits fewer than planned LOWERS the batch count, so a
 // ping still sweeps what it can afford (the smallest candidates are left unasked).
-func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, planned int, ceiling float64) int {
+func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, planned int, ceiling, miss float64) int {
 	if planned < 1 {
 		planned = 1
 	}
@@ -357,29 +388,34 @@ func (k *Keeper) affordableSweepBatches(model, endpoint string, prefix int64, pl
 	if one <= 0 { // unpriced: the old behaviour, nothing to compare, nothing to lower
 		return planned
 	}
-	// NO CAP admits every planned batch. Policy.Ceiling() returns +Inf for a negative MaxUSDPerPing ("no
+	// NO CAP admits every planned batch. Policy.PingCap() returns +Inf for an unset or negative MaxUSDPerPing ("no
 	// ceiling", which somebody has to type on purpose). Dividing +Inf by a cost and converting it to int is
 	// implementation-defined (MinInt64 on gc); the clamp below would turn that into "zero batches", so the
 	// one policy that asks for no cap would get no sweep at all.
 	//
 	// A ceiling of zero or less (or NaN) keeps the meaning the old check had: every positive cost exceeds
-	// it, so nothing is admitted. Policy.Ceiling() never returns one (it resolves zero to the default), so
+	// it, so nothing is admitted. Policy.PingCap() never returns one (zero and below give +Inf), so
 	// this is only a guard for a direct caller. It is EXPLICIT because int(NaN) and int(-Inf) are
 	// implementation-defined: on gc they happen to be negative, which the clamp below also turns into zero,
 	// so a test on this platform cannot tell this guard from that accident. The guard keeps the answer
 	// right on a platform where the conversion differs.
-	if math.IsInf(ceiling, 1) {
-		return planned
+	n := planned
+	if !math.IsInf(ceiling, 1) {
+		if !(ceiling > 0) {
+			return 0
+		}
+		// A huge finite cap is unlimited: int() of a float past the int range is implementation-defined
+		// (MinInt64 on gc/amd64), which the clamp would turn into zero batches.
+		if q := ceiling / one; q >= float64(planned) {
+			n = planned
+		} else {
+			n = max(0, int(q))
+		}
 	}
-	if !(ceiling > 0) {
-		return 0
-	}
-	n := int(ceiling / one)
-	if n > planned {
-		n = planned
-	}
-	if n < 0 {
-		n = 0
+	// THE VALUE RULE (#1439): the questions of one ping slot protect ONE miss, so n of them are
+	// weighed together against it, as K pings are. Lower n until the batch costs less than the miss.
+	for n > 0 && (Policy{}).SubstituteVerdict(float64(n)*one, miss) != VerdictOK {
+		n--
 	}
 	return n
 }
@@ -396,7 +432,7 @@ func (k *Keeper) sweepWaitCause(j pingJob) offload.SweepPingWait {
 	if k.o.OpenTasks != nil {
 		bg, tm = k.o.OpenTasks(j.tenant, j.session, j.thread)
 	}
-	waitingFor, tool := waitcause.ClassifyWaitingForTerminal(terminal, names, stop, false, usageOK, bg, tm)
+	waitingFor, tool := waitcause.ClassifyWaitingForClient(e.identity, terminal, names, stop, false, usageOK, bg, tm)
 	return offload.SweepPingWait{WaitingFor: waitingFor, WaitTool: tool, LastTurnRead: int(turnRead)}
 }
 
@@ -434,7 +470,9 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	}
 	e := j.e
 	k.mu.Lock()
-	model, prefix, ceiling, endpoint := e.model, e.prefix, e.pol.Ceiling(), e.endpoint
+	model, prefix, endpoint := e.model, e.prefix, e.endpoint
+	miss, capPol := e.missUSD, e.capPolicy()
+	ceiling := capPol.PingCap()
 	k.mu.Unlock()
 	// THE CEILING PRICES EVERY QUESTION THE SWEEP WILL ASK, not one (#132). The sweep plans info.Batches
 	// questions, each reading the prefix again and paying its own answer. If the ceiling admits fewer than
@@ -444,20 +482,20 @@ func (k *Keeper) fireSweepSubstitute(j pingJob) (substituted bool) {
 	if planned < 1 {
 		planned = 1
 	}
-	allowed := k.affordableSweepBatches(model, endpoint, prefix, planned, ceiling)
+	allowed := k.affordableSweepBatches(model, endpoint, prefix, planned, ceiling, miss)
 	if allowed < 1 {
 		cost := k.projectedSweepUSD(model, endpoint, prefix)
 		k.sweepOverBudget.Add(1)
-		slog.Debug("context-guru: sweep keep-alive question would exceed the per-ping cost cap; "+
+		slog.Debug("context-guru: sweep keep-alive question refused by the cost cap or the value rule; "+
 			"pinging normally instead",
-			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "ceiling_usd", ceiling)
+			"tenant", tenantLabel(j.tenant), "session", j.session, "estimate_usd", cost, "miss_usd", miss, "cap_usd", ceiling)
 		return false
 	}
 	wait := k.sweepWaitCause(j)
 	if allowed < planned {
 		k.sweepBatchesLowered.Add(1)
 		wait.MaxBatches = allowed
-		slog.Debug("context-guru: sweep keep-alive: the per-ping cost cap admits fewer questions than planned; "+
+		slog.Debug("context-guru: sweep keep-alive: the cost cap or the value rule admits fewer questions than planned; "+
 			"asking fewer",
 			"tenant", tenantLabel(j.tenant), "session", j.session, "planned", planned, "allowed", allowed,
 			"ceiling_usd", ceiling)

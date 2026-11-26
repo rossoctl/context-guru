@@ -13,12 +13,13 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -96,18 +97,15 @@ func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 }
 
 // responsesWire is wireGroups for the Responses wire: for each slot, the index of its input item, which is
-// the accountant's message position (proxy accParse). A string input is one position, index 0. The
+// the accountant's message position (accwire.Responses). A string input is one position, index 0. The
 // instructions slot is the system section, not an input item, and gets -1: no message operation may be
 // placed there.
 func responsesWire(slots []responseSlot) []int {
 	wire := make([]int, len(slots))
 	for i, s := range slots {
-		switch idx, ok := responseInputIndex(s.path); {
-		case ok:
+		if idx, ok := accwire.Responses.WireIndex(s.path); ok {
 			wire[i] = idx
-		case s.path == "input":
-			wire[i] = 0
-		default:
+		} else {
 			wire[i] = -1
 		}
 	}
@@ -532,12 +530,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
-	// A previous_response_id request contains only this turn's delta, not a
+	// A server-held-history request (schema.ServerHeldHistory) contains only this turn's delta, not a
 	// cumulatively growing transcript. Boundary/TurnAt would interpret a smaller
 	// delta as agent compaction and report a cached prefix we cannot see. Keep
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
-	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	serverHeldHistory := schema.ServerHeldHistory(o.Body)
 	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
 	// lifetime below are one fact — this request's cache lifetime.
 	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
@@ -553,9 +551,9 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			// because a refresh under either one kept the provider's single entry warm (#766).
 			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
 			// metadata id when the body carries one, else the content hash. alias below stays
-			// the bare content hash for the cold decision's own clock (aliasSeen).
+			// the bare content hash for the cold decision's own clock (aliasSeenState).
 			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
-			// so load them before aliasSeen reads. Kept on the bare-hash alias, as #770
+			// so load them before aliasSeenState reads. Kept on the bare-hash alias, as #770
 			// wrote it — the store's alias keys use that id.
 			if alias != res.Session {
 				loadSessionState(st, alias)
@@ -566,8 +564,12 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
 				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
-			if at := aliasSeen(st, alias, nowMs); at > prevAt {
-				prevAt = at
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 {
+				res.TouchAtMs, res.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
+			if seen.at > prevAt {
+				prevAt = seen.at
 			}
 			if prevAt > 0 && nowMs >= prevAt {
 				idleMs = nowMs - prevAt
@@ -601,7 +603,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		NoCacheBreakpoint: !explicitBreakpointProvider(bschemas.OpenAI),
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
-		// A previous_response_id points to upstream-held history that this
+		// Server-held history (schema.ServerHeldHistory) is upstream-held history that this
 		// request cannot inspect or replace. Summarizing only the visible tail
 		// would claim to compact a history that remains in the provider's state.
 		DisallowCountChange: !gjson.GetBytes(o.Body, "input").IsArray() || serverHeldHistory,

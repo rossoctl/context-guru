@@ -122,6 +122,41 @@ func Peek(s Store, key string) bool {
 	return ok
 }
 
+// Keeps reports whether s can remember a value at all. It is false for a nil store and for Nop, the store of a
+// tenant with storage switched off: there a Put is dropped and a Get always misses. It is a type test on purpose.
+// "Get returned false" would also say it for a key that expired or was never written, and a reader must tell the
+// two apart: a missing record in a store that keeps things means "no fact", and a store that keeps nothing never
+// held the fact.
+func Keeps(s Store) bool {
+	switch s.(type) {
+	case nil, Nop, *Nop:
+		return false
+	}
+	return true
+}
+
+// ValuePeeker is an OPTIONAL Store capability: reading a live value WITHOUT touching it. It is Peeker with the
+// payload. A reader that only reports a fact (the dashboard asking "was the last touch a free 1-hour ping")
+// must not slide the TTL of a clock record, or its polling would keep a dead clock alive and a later cold
+// check would read an old time instead of "unknown".
+//
+// The no-slide guarantee holds only for a store that implements this. Today that is Memory alone. PeekValue falls
+// back to Get for any other store, and Get slides the TTL.
+type ValuePeeker interface {
+	// PeekValue returns the payload of a present, unexpired key, without sliding the TTL or reordering the LRU.
+	// It never removes an expired entry and never reads the disk copy.
+	PeekValue(key string) ([]byte, bool)
+}
+
+// PeekValue reads key without touching it, when the store can. A store without the capability falls back to
+// Get, as Peek does.
+func PeekValue(s Store, key string) ([]byte, bool) {
+	if pk, ok := s.(ValuePeeker); ok {
+		return pk.PeekValue(key)
+	}
+	return s.Get(key)
+}
+
 // FrozenLoser is an OPTIONAL Store capability: reporting that a frozen decision
 // under key was dropped (TTL expiry / pin cap) rather than never taken. A bare Get
 // miss cannot tell those apart, and they call for opposite behavior — "never frozen"
@@ -232,7 +267,7 @@ const (
 	// fires one turn late is the safe direction.
 	BilledPrefix = "cg:bin:"
 	// BilledThreadPrefix is BilledPrefix per THREAD: the billed input of the previous turn of one
-	// thread (internal/thread.Key(session, thread)), so a side request or a subagent that shares the
+	// thread (thread.Key(session, thread)), so a side request or a subagent that shares the
 	// session cannot move the main thread's figure. It is metadata (one integer), read only by the
 	// billed-growth horizon (Ctx.PrevBilledInputThread). BilledPrefix stays the session figure every
 	// other reader uses. Pinned like BilledPrefix, so memory pressure does not erase it between
@@ -1121,13 +1156,23 @@ func (m *Memory) FrozenLossStats() (dropped, repaired int64) {
 // read-only probe mutate the store's accounting — including stash_expired and the reserve's byte
 // total — from a caller that only asked a question. The sweep reclaims it at the normal time.
 func (m *Memory) Peek(key string) bool {
+	_, ok := m.PeekValue(key)
+	return ok
+}
+
+// PeekValue is Peek with the payload. See ValuePeeker. The slice is the stored one: the caller reads it only.
+func (m *Memory) PeekValue(key string) ([]byte, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	el, ok := m.items[key]
 	if !ok {
-		return false
+		return nil, false
 	}
-	return !m.now().After(el.Value.(*entry).expires)
+	e := el.Value.(*entry)
+	if m.now().After(e.expires) {
+		return nil, false
+	}
+	return e.payload, true
 }
 
 func (m *Memory) Get(key string) ([]byte, bool) {

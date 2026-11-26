@@ -2,40 +2,27 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
+
+	"github.com/rossoctl/context-guru/accrec"
 )
 
-// A thread's state lives in memory in the library. Without a save, every restart drops the active
-// changes of every live session: the next request of each one is priced as an estimate (context-guru#768,
-// major 2). The snapshot holds hashes and sizes, no message text (accountant persist.go).
+// The format of the state and the rules for when it may be restored are accrec's (state.go). This file
+// holds the file I/O: where the state goes, how it is written and when it is saved.
 const (
-	// accStateMaxAge is how old a snapshot may be and still be restored. No cache entry outlives the longest
-	// TTL (1h), so an older snapshot holds only expired state.
-	accStateMaxAge = time.Hour
-	// accStateEvery is how often the state is saved while running, so a kill -9 or a crash loses minutes, not all.
-	accStateEvery = time.Minute
-	// accStateVersion is the version of the proxy's own part of the state: how accBodies hashes a body. Change it
-	// whenever that hash changes. The library snapshot has its own version inside. A file with another version is
-	// ignored (issue #917). Version 1 was the unwrapped library snapshot, so a file from before the wrap fails the
-	// check too. Version 2 is the wrap with the hash that leaves out cache marks, nested ones included.
-	accStateVersion = 2
+	accStateMaxAge    = accrec.StateMaxAge
+	accStateEvery     = accrec.StateEvery
+	accStateVersion   = accrec.StateVersion
+	accThinkingMaxAge = accrec.ThinkingMaxAge
 )
 
 // accStateFile is the file on disk: the proxy version around the library snapshot.
-type accStateFile struct {
-	Version  int             `json:"cgStateVersion"`
-	Snapshot json.RawMessage `json:"snapshot"`
-	// Thinking is the count of each thinking block (savingsTracker.thinking): a key and a number each. A file
-	// written before it has none, and restores with an empty table.
-	Thinking json.RawMessage `json:"thinking,omitempty"`
-}
+type accStateFile = accrec.StateFile
 
 // lastSaved holds the bytes of the last file written, so a save with no change skips the write.
 type lastSaved struct {
@@ -47,15 +34,7 @@ type lastSaved struct {
 // It syncs the temp file before the rename, so a power loss cannot leave an empty file under the final name.
 // It writes nothing when the bytes equal the last file written.
 func (s *savingsTracker) save(path string) error {
-	snap, err := s.trackers.Snapshot()
-	if err != nil {
-		return err
-	}
-	thinking, err := json.Marshal(s.thinking)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(accStateFile{Version: accStateVersion, Snapshot: snap, Thinking: thinking})
+	data, err := s.SnapshotState()
 	if err != nil {
 		return err
 	}
@@ -102,15 +81,10 @@ func removeStaleTemps(path string) {
 	}
 }
 
-// accThinkingMaxAge is how old a state file may be and still give back its thinking counts. A count is
-// keyed by a signature's hash, not by a time, and a block can come back long after its cache entry expired
-// (it is billed as fresh input then), so the counts outlive the snapshot's hour.
-const accThinkingMaxAge = 24 * time.Hour
-
 // restore loads a snapshot saved by save. It fails open: a missing, stale or unreadable file is logged
 // and the proxy starts with empty state, as before. It reports whether it restored the snapshot. The
 // thinking counts are restored on their own: from a file up to accThinkingMaxAge old, and also when the
-// snapshot is refused.
+// snapshot is refused (accrec.Recorder.RestoreState holds the rules).
 func (s *savingsTracker) restore(path string, now time.Time) bool {
 	removeStaleTemps(path)
 	fi, err := os.Stat(path)
@@ -126,30 +100,20 @@ func (s *savingsTracker) restore(path string, now time.Time) bool {
 		return false
 	}
 	data, err := os.ReadFile(path)
-	var f accStateFile
-	if err == nil {
-		switch {
-		case json.Unmarshal(data, &f) != nil:
-			err = errors.New("not a state file")
-		case f.Version != accStateVersion:
-			err = errors.New("state file has proxy version " + strconv.Itoa(f.Version) + ", this proxy uses " + strconv.Itoa(accStateVersion))
-		}
+	if err != nil {
+		slog.Warn("accountant: state not restored; starting empty", "path", path, "err", err)
+		return false
 	}
-	if err == nil && len(f.Thinking) > 0 {
-		// The counts only refine a price, so a bad table is logged and dropped, and the snapshot is still read.
-		if terr := json.Unmarshal(f.Thinking, s.thinking); terr != nil {
-			slog.Warn("accountant: thinking counts not restored", "path", path, "err", terr)
-		}
+	res := s.RestoreState(data, age)
+	if res.ThinkingErr != nil {
+		slog.Warn("accountant: thinking counts not restored", "path", path, "err", res.ThinkingErr)
 	}
-	if err == nil && age > accStateMaxAge {
+	if res.TooOld {
 		slog.Info("accountant: state file is older than any cache entry; only the thinking counts are restored", "path", path, "age", age.Round(time.Second))
 		return false
 	}
-	if err == nil {
-		err = s.trackers.Restore(f.Snapshot)
-	}
-	if err != nil {
-		slog.Warn("accountant: state not restored; starting empty", "path", path, "err", err)
+	if res.Err != nil {
+		slog.Warn("accountant: state not restored; starting empty", "path", path, "err", res.Err)
 		return false
 	}
 	slog.Info("accountant: state restored", "path", path, "bytes", len(data))

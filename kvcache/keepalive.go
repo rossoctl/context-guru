@@ -62,8 +62,8 @@ type PingBudgeter interface {
 //
 //	0.0870 + (ping_input×input + ping_output×output) / (prefix × (write_5m − cache_read))
 //
-// which is 8.70% only in the limit. At the documented multiples and one token each way it is
-// 8.70% at 125k tokens, 8.72% at 20k, 8.96% at 2k and 9.74% at 500 — a spread of the same
+// which is 8.70% only in the limit. At the documented multiples, 7 input tokens (DefaultPingInputTokens) and 1
+// output token it is 8.71% at 125k tokens, 8.75% at 20k, 9.22% at 2k and 10.79% at 500 — a spread of the same
 // order as the margins this arm is decided by. MinPrefix exists for exactly that reason, and
 // nothing below the tens of thousands of tokens should be read as 8.70%.
 //

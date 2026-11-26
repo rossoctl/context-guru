@@ -11,6 +11,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // turnStash models the host's stash the way proxy's sentStash behaves: it holds the message count
@@ -75,18 +76,19 @@ func TestCacheAwareDetachedPrefixAskCommitsAfterTheTurnIsStashed(t *testing.T) {
 	// here, then let the host stash this turn's body (its upstream answered 200) and run its hook as
 	// the request ends. (On this branch that wait finds the held deferral and times out after 1 s;
 	// with an Offload-time start it drains the stale call, which is what this test must catch.)
-	WaitForSummaryForTest(convKey(ctx), time.Second)
+	// waitForSummary, not WaitForSummaryForTest: the test needs that short timeout, and the
+	// exported hook has a 30 s floor.
+	// A held deferral makes the drain run to its bound, so skip the drain when one is held.
+	if !deferralPending(convKey(ctx)) {
+		waitForSummary(convKey(ctx), 30*time.Second)
+	}
 	asker.put(len(in))
 	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := loadCheckpoint(ctx); ok {
-			break
-		}
-		WaitForSummaryForTest(ctx.Session, 100*time.Millisecond)
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the detached commission commits a checkpoint", func() bool {
+		_, ok := loadCheckpoint(ctx)
+		return ok
+	})
 	if n := CacheAwareSummarizerStalePrefix() - staleBefore; n != 0 {
 		t.Fatalf("the detached commission ended stale_prefix %d time(s): it read the previous turn's "+
 			"stash instead of this turn's", n)
@@ -121,14 +123,10 @@ func TestAReplacedWarmDeferralIsDispatchedWithoutTheHook(t *testing.T) {
 	turn(in)           // commissions, deferred
 	asker.put(len(in)) // its request ended: the body is stashed (no hook is ever called)
 	turn(append(append([]bschemas.ChatMessage(nil), in...), caMsg(bschemas.ChatMessageRoleUser, "and then?")))
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := loadCheckpoint(ctx); ok {
-			break
-		}
-		WaitForSummaryForTest(ctx.Session, 100*time.Millisecond)
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the replaced warm deferral is dispatched and commits a checkpoint", func() bool {
+		_, ok := loadCheckpoint(ctx)
+		return ok
+	})
 	if _, ok := loadCheckpoint(ctx); !ok {
 		t.Fatal("no checkpoint: the replaced warm deferral was dropped instead of dispatched")
 	}
@@ -221,7 +219,9 @@ func TestWaitForSummaryCoversTheGapBetweenTakeAndStart(t *testing.T) {
 	t.Cleanup(func() { betweenTakeAndStartForTest = nil })
 	go ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	<-inGap
-	if WaitForSummaryForTest(convKey(ctx), 50*time.Millisecond) {
+	// waitForSummary, not WaitForSummaryForTest: the exported hook has a 30 s floor, and this
+	// test needs the short limit to see the wait time out.
+	if waitForSummary(convKey(ctx), 50*time.Millisecond) {
 		t.Fatal("WaitForSummaryForTest returned while a taken deferral had not started yet")
 	}
 	close(release)

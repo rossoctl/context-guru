@@ -9,7 +9,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-review
 process.env.CONTEXT_GURU_PORT_START = "9300"
 
 import plugin, { stateDirectory, effectiveSettings, withLock } from "../index.js"
-import { stubProxyBinary, deadProxyBinary, pickyProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, deadProxyBinary, pickyProxyBinary, waitUntilUnhealthy, timingOnly } from "./helpers.mjs"
 
 const context = (directory, logs = []) => ({ directory, client: { app: { log: async ({ body }) => { logs.push(body.message) } } } })
 const anthropic = (baseURL = "https://api.anthropic.com") => ({ anthropic: { options: { baseURL } } })
@@ -68,7 +68,7 @@ test("a strategy set keeps the saved preset and does not invent one", async () =
 })
 
 // ---- Round 1, finding 2 (reviewer 2): the lock must outlive the work it protects.
-test("a lock that is held and kept alive is not broken, even when it is old", async () => {
+test("a lock that is held and kept alive is not broken, even when it is old", timingOnly, async () => {
   const root = mkdtempSync(join(tmpdir(), "context-guru-lock-"))
   const lock = join(root, ".lock")
   const longer = Date.now() + 3000
@@ -115,7 +115,7 @@ test("a pinned release that is not published gives an error that says so", async
     const config = { provider: anthropic() }
     await hooks.config(config)
     assert.equal(config.provider.anthropic.options.baseURL, "https://api.anthropic.com")
-    assert.ok(logs.some((message) => /v0\.7\.3 is not published yet/.test(message)), logs.join("|"))
+    assert.ok(logs.some((message) => /v0\.7\.9 is not published yet/.test(message)), logs.join("|"))
   } finally {
     server.close()
     process.env.PATH = previousPath
@@ -156,7 +156,7 @@ test("the download runs outside the lock", async () => {
   }
 })
 
-test("startProxy fails fast when its own child exits, and leaves the base URL alone", async () => {
+test("startProxy fails fast when its own child exits, and leaves the base URL alone", timingOnly, async () => {
   const directory = "/tmp/context-guru-r1-child-exits"
   process.env.CONTEXT_GURU_BIN = deadProxyBinary()
   const logs = []
@@ -320,10 +320,11 @@ test("an install.env version with shell characters cannot run a command", async 
   const directory = "/tmp/context-guru-r1-version"
   const state = stateDirectory(directory)
   const marker = join(tmpdir(), `context-guru-injected-${process.pid}`)
-  // A managed binary sits in the state directory. install.json from an earlier run names a hostile tag.
+  // A managed binary sits in the state directory. It reports no version, so the plugin reads
+  // install.json from an earlier run, which names a hostile tag.
   const { copyFileSync, chmodSync } = await import("node:fs")
   mkdirSync(join(state, "bin"), { recursive: true })
-  copyFileSync(stubProxyBinary(), join(state, "bin", "context-guru-proxy"))
+  copyFileSync(stubProxyBinary(undefined, { version: null }), join(state, "bin", "context-guru-proxy"))
   chmodSync(join(state, "bin", "context-guru-proxy"), 0o755)
   writeFileSync(join(state, "install.json"), JSON.stringify({ version: `v1;touch ${marker}`, port: 1 }))
   const previousBin = process.env.CONTEXT_GURU_BIN

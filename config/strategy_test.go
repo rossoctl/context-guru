@@ -35,6 +35,15 @@ func TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys(t *testing.T) {
 			// Resolved() is what the proxy runs on. Strategy is only the name it was filled from.
 			ro, rn := co.Cache.Resolved(), cn.Cache.Resolved()
 			rn.Strategy = ""
+			// An old file wrote keepalive_max_usd_per_ping: 0.5. A strategy no longer writes it (#1420): an
+			// old file keeps its 0.5 as the operator's own flat cap, a new form has none. Compare the rest.
+			if name != "1-hour-head" && ro.KeepAliveMaxUSDPerPing != 0.5 {
+				t.Errorf("%s: the old file lost its flat cap: %v", name, ro.KeepAliveMaxUSDPerPing)
+			}
+			if rn.KeepAliveMaxUSDPerPing != 0 {
+				t.Errorf("%s: the strategy sets a flat cap of %v; it must set none", name, rn.KeepAliveMaxUSDPerPing)
+			}
+			ro.KeepAliveMaxUSDPerPing = 0
 			if !reflect.DeepEqual(ro, rn) {
 				t.Errorf("%s: effective config differs\n old: %+v\n new: %+v", name, ro, rn)
 			}
@@ -52,7 +61,7 @@ func TestStrategyFillsKeys(t *testing.T) {
 	}
 	k := c.Cache
 	if !k.KeepAlive || k.KeepAliveIdleSeconds != 240 || k.KeepAliveMaxPings != 2 ||
-		k.KeepAliveMaxUSDPerPing != 0.5 || k.KeepAliveMinPrefixTokens != 80000 ||
+		k.KeepAliveMaxUSDPerPing != 0 || k.KeepAliveMinPrefixTokens != 80000 ||
 		k.KeepAliveIdleSeconds1h != 3540 || k.KeepAliveMaxPings1h != 2 {
 		t.Fatalf("2-ping keys wrong: %+v", k)
 	}
@@ -124,7 +133,7 @@ func TestStrategiesJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Default != "auto" || len(v.Strategies) != 6 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
+	if v.Default != "auto" || len(v.Strategies) != 8 || v.Strategies[1].Cache["keepalive_idle_seconds"] != float64(240) {
 		t.Fatalf("bad json: %s", b)
 	}
 }
@@ -141,7 +150,7 @@ func TestStrategiesJSONHasPresetsAndProviders(t *testing.T) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 6 {
+	if !reflect.DeepEqual(v.Presets, PresetNames()) || len(v.Strategies) != 8 {
 		t.Fatalf("bad json: %s", b)
 	}
 	for _, s := range v.Strategies {
@@ -212,8 +221,91 @@ func TestClaudeCodeOfferIsUnchangedByTheOpenAITags(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head"}
+	want := []string{"none", "auto", "1-ping", "2-ping", "1-hour-head", "1-hour-on-wait", "1-hour-always"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Claude Code would offer %v, want %v", got, want)
+	}
+}
+
+// #1243: 1-hour-on-wait keeps auto's keep-alive keys and adds the one-hour-on-wait switch.
+func TestOneHourOnWaitStrategy(t *testing.T) {
+	c, err := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadBytes([]byte("cache:\n  strategy: auto\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Cache.KeepAliveOneHourOnWait || c.Cache.HeadTTL1h {
+		t.Fatalf("flags wrong: %+v", c.Cache)
+	}
+	norm := func(x CacheConfig) CacheConfig { x.Strategy, x.KeepAliveOneHourOnWait = "", false; return x }
+	if !reflect.DeepEqual(norm(c.Cache), norm(a.Cache)) {
+		t.Errorf("keep-alive keys differ from auto:\n%+v\n%+v", norm(c.Cache), norm(a.Cache))
+	}
+	if a.Cache.KeepAliveOneHourOnWait {
+		t.Error("auto must not switch it on")
+	}
+	row, _ := LookupStrategy("1-hour-head")
+	if strings.Contains(row.Desc, "SILENTLY DOWNGRADED") || strings.Contains(row.Desc, "$0") ||
+		!strings.Contains(row.Desc, "history") || !strings.Contains(row.Desc, "2026-11-19") || !strings.Contains(row.Desc, "claude-opus-5-5") {
+		t.Errorf("1-hour-head description is wrong: %s", row.Desc)
+	}
+	if on, _ := LookupStrategy("1-hour-on-wait"); !on.Spends {
+		t.Error("1-hour-on-wait sends pings, so it spends")
+	}
+}
+
+// #1261: 1-hour-always is the explicit opt-in of C. It keeps auto's keep-alive keys, adds only its own key,
+// never turns on through another strategy or by default, and its text says it does not pay off for most users.
+func TestOneHourAlwaysIsAnExplicitOptIn(t *testing.T) {
+	c, err := LoadBytes([]byte("cache:\n  strategy: 1-hour-always\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := LoadBytes([]byte("cache:\n  strategy: auto\n"))
+	w, _ := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n"))
+	if !c.Cache.KeepAliveOneHourAlways || c.Cache.KeepAliveOneHourOnWait || c.Cache.HeadTTL1h {
+		t.Fatalf("flags wrong: %+v", c.Cache)
+	}
+	if a.Cache.KeepAliveOneHourAlways || w.Cache.KeepAliveOneHourAlways {
+		t.Error("auto or 1-hour-on-wait turned the opt-in on")
+	}
+	if def, _ := LoadBytes([]byte("{}")); def.Cache.KeepAliveOneHourAlways || def.Cache.Resolved().KeepAliveOneHourAlways {
+		t.Error("the default config turned the opt-in on")
+	}
+	norm := func(x CacheConfig) CacheConfig { x.Strategy, x.KeepAliveOneHourAlways = "", false; return x }
+	if !reflect.DeepEqual(norm(c.Cache), norm(a.Cache)) {
+		t.Errorf("keep-alive keys differ from auto:\n%+v\n%+v", norm(c.Cache), norm(a.Cache))
+	}
+	row, _ := LookupStrategy("1-hour-always")
+	for _, want := range []string{"ON MOST USERS IT DOES NOT PAY OFF", "+22%", "77 worse", "39%", "-25%", "#1261"} {
+		if !strings.Contains(row.Desc, want) {
+			t.Errorf("the description lacks %q: %s", want, row.Desc)
+		}
+	}
+	if !row.Spends {
+		t.Error("1-hour-always sends pings for subagents, so it spends")
+	}
+}
+
+// D's threshold: 150,000 tokens by default, settable, never negative.
+func TestOneHourRebuildTokensDefaultsTo150000(t *testing.T) {
+	c, _ := LoadBytes([]byte("{}"))
+	if got := c.Cache.Resolved().KeepAliveOneHourRebuildTokens; got != 150000 {
+		t.Errorf("default = %d, want 150000", got)
+	}
+	c, err := LoadBytes([]byte("cache:\n  keepalive_one_hour_rebuild_tokens: 90000\n"))
+	if err != nil || c.Cache.Resolved().KeepAliveOneHourRebuildTokens != 90000 {
+		t.Errorf("a set value is not kept: %v %+v", err, c.Cache)
+	}
+	// A negative value turns D off: it is kept as it is, never reset to the default.
+	neg, err := LoadBytes([]byte("cache:\n  keepalive_one_hour_rebuild_tokens: -1\n"))
+	if err != nil || neg.Cache.Resolved().KeepAliveOneHourRebuildTokens != -1 {
+		t.Errorf("-1 (D off) was not kept: %v %+v", err, neg.Cache.Resolved())
+	}
+	if d, _ := LoadBytes([]byte("cache:\n  strategy: 1-hour-on-wait\n")); !strings.Contains(func() string { r, _ := LookupStrategy("1-hour-on-wait"); return r.Desc }(), "150,000") || d.Cache.KeepAliveOneHourAlways {
+		t.Error("the 1-hour-on-wait text does not name D's threshold, or it turned C on")
 	}
 }

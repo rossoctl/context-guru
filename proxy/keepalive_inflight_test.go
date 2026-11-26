@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -15,9 +16,11 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/tidwall/gjson"
 )
 
@@ -83,7 +86,7 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 		req.Header.Set("x-api-key", "sk-test")
 		req.Header.Set("anthropic-version", "2023-06-01")
 		if agent != "" {
-			req.Header.Set(agentIDHeader, agent)
+			req.Header.Set(thread.AgentHeader, agent)
 		}
 		resp, err := srv.Client().Do(req)
 		if err != nil {
@@ -95,15 +98,15 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 	// record runs in serve's defer, AFTER the response reaches the client: wait for it, or the next
 	// request's record can run first and take the turn the gate counts. The first turn is refused
 	// by the gate (counted skipped), the second is held (live).
-	settled := func(done func(KeepAliveStats) bool) {
-		for deadline := time.Now().Add(5 * time.Second); !done(h.keeper.Stats()) && time.Now().Before(deadline); {
-			time.Sleep(5 * time.Millisecond)
-		}
+	settled := func(what string, done func(KeepAliveStats) bool) {
+		t.Helper()
+		testutil.WaitForState(t, what, func() bool { return done(h.keeper.Stats()) },
+			func() string { return fmt.Sprintf("%+v", h.keeper.Stats()) })
 	}
 	post("", "fix the bug")
-	settled(func(st KeepAliveStats) bool { return st.Skipped >= 1 })
+	settled("the first turn is counted skipped", func(st KeepAliveStats) bool { return st.Skipped >= 1 })
 	post("", "fix the bug", "done", "thanks")
-	settled(func(st KeepAliveStats) bool { return st.Live >= 1 })
+	settled("the second turn is held", func(st KeepAliveStats) bool { return st.Live >= 1 })
 	if h.keeper.Stats().Live != 1 {
 		t.Fatalf("setup: %d live, want 1 (%+v)", h.keeper.Stats().Live, h.keeper.Stats())
 	}
@@ -111,17 +114,17 @@ func TestASlowSubagentRequestDoesNotDelayTheMainThreadsPing(t *testing.T) {
 	go func() { post("sub1", "SUMMARIZE the module for the main agent"); close(done) }()
 	select {
 	case <-slowArrived:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second): //timing:ok safety bound on a channel, not a delay
 		t.Fatal("the slow request never arrived")
 	}
-	h.keeper.Sweep(clock.advance(61 * time.Second)) // the main thread is due; the subagent's call is still open
+	sweepAfter(h.keeper, clock, 61*time.Second) // the main thread is due; the subagent's call is still open
 	if n := pings.Load(); n != 1 {
 		t.Errorf("%d main-thread pings while a subagent request was in flight, want 1 (on time)", n)
 	}
 	unblock()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second): //timing:ok safety bound on a channel, not a delay
 		t.Fatal("the slow request never finished")
 	}
 }
@@ -137,13 +140,11 @@ func TestAnOpenRequestOnTheSameThreadPausesItsPing(t *testing.T) {
 	k.arrive("t1", "sess-1", "")                   // request B, overlapping
 	recordTurn(t, k, pol, kaBody, clock.now(), up) // A finishes and holds
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(30 * time.Millisecond)
 	if fs.n() != 0 {
 		t.Errorf("%d pings while another request of the same thread was open", fs.n())
 	}
 	k.depart("t1", "sess-1", "") // B ends without a hold (a failed request)
 	k.Sweep(clock.advance(time.Second))
-	time.Sleep(30 * time.Millisecond)
 	if fs.n() != 1 {
 		t.Errorf("%d pings after the thread's last request ended, want 1", fs.n())
 	}
@@ -174,7 +175,6 @@ func TestAPanicBeforeTheHandOffStillDeparts(t *testing.T) {
 			bschemas.Anthropic, "/v1/messages", http.StatusOK, Usage{CacheRead: 48576}, true)
 	}()
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(30 * time.Millisecond)
 	if fs.n() != 1 {
 		t.Errorf("%d pings after A's record panicked before its hand-off, want 1 "+
 			"(A's open count leaked and paused the thread)", fs.n())
@@ -229,13 +229,11 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 		hold("s"+string(rune('a'+i)), bad)
 	}
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(50 * time.Millisecond)
 	st := k.Stats()
 	if st.Failed != routeFailLimit || st.RouteTrips != 1 {
 		t.Fatalf("failed %d (want %d), trips %d (want 1)", st.Failed, routeFailLimit, st.RouteTrips)
 	}
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(50 * time.Millisecond)
 	if int(sent.Load()) != routeFailLimit {
 		t.Errorf("%d pings, want %d: a failed session must not be pinged again", int(sent.Load()), routeFailLimit)
 	}
@@ -251,7 +249,6 @@ func TestPingThatRefreshesNothingFailsAndTripsTheRoute(t *testing.T) {
 	empty.Store(false)
 	hold("s-good", good)
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(50 * time.Millisecond)
 	if int(sent.Load()) != routeFailLimit+1 || k.Stats().Failed != routeFailLimit {
 		t.Errorf("working route: %d pings, %d failed", int(sent.Load()), k.Stats().Failed)
 	}
@@ -284,7 +281,6 @@ func TestARealMissIsNotAFailedPing(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		k.Sweep(clock.advance(290 * time.Second))
-		time.Sleep(30 * time.Millisecond)
 	}
 	st := k.Stats()
 	if sent.Load() != 4 || st.Missed != 2 || st.Failed != 0 || st.RouteTrips != 0 || st.Wrote != 1 {
@@ -321,7 +317,6 @@ func TestPingFailureNeedsNoUsageOrAnError(t *testing.T) {
 				Usage{CacheRead: 48576, CacheWrite: 1200}, true)
 		}
 		k.Sweep(clock.advance(290 * time.Second))
-		time.Sleep(30 * time.Millisecond)
 		if got := k.Stats().Failed == 1; got != c.failed {
 			t.Errorf("%s: failed %v, want %v", c.name, got, c.failed)
 		}
@@ -348,9 +343,7 @@ func TestOverloadedPingsDoNotTripTheRoute(t *testing.T) {
 		}
 	}
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(50 * time.Millisecond)
 	k.Sweep(clock.advance(290 * time.Second)) // the next slot retries
-	time.Sleep(50 * time.Millisecond)
 	if st := k.Stats(); st.Failed != 0 || st.RouteTrips != 0 || sent.Load() != 2*(routeFailLimit+1) {
 		t.Errorf("529/429s: failed %d, trips %d, sent %d (want 0, 0, %d: every session retried)", st.Failed, st.RouteTrips, sent.Load(), 2*(routeFailLimit+1))
 	}
@@ -375,7 +368,6 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 		hold("s" + strconv.Itoa(n))
 	}
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(50 * time.Millisecond)
 	if k.Stats().RouteTrips != 1 {
 		t.Fatalf("%d trips after %d 400s, want 1", k.Stats().RouteTrips, routeFailLimit)
 	}
@@ -394,7 +386,6 @@ func TestBreakerCountsA4xxForgetClearsItAndAnOpenAIDoubleMissStops(t *testing.T)
 	hold("openai-miss")
 	for i := 0; i < 3; i++ {
 		k.Sweep(clock.advance(290 * time.Second))
-		time.Sleep(30 * time.Millisecond)
 	}
 	if sent.Load() != 2 {
 		t.Errorf("%d pings, want 2 (one miss goes on, the second stops the session)", sent.Load())
@@ -433,7 +424,6 @@ func TestAuthRefusalStopsOnlyThatCredential(t *testing.T) {
 	}
 	for _, d := range []time.Duration{190, 100, 190} { // due: alice-0 + bob, then alice-1..3, then bob again
 		k.Sweep(clock.advance(d * time.Second))
-		time.Sleep(50 * time.Millisecond)
 	}
 	st := k.Stats()
 	if st.RouteTrips != 0 {
@@ -495,10 +485,8 @@ func TestCredentialIDsDoNotCollideOnAMask(t *testing.T) {
 	}
 	hold("a", a)
 	k.Sweep(clock.advance(290 * time.Second)) // a's key is refused
-	time.Sleep(50 * time.Millisecond)
 	hold("b", b)
 	k.Sweep(clock.advance(290 * time.Second))
-	time.Sleep(50 * time.Millisecond)
 	if sentB.Load() != 1 {
 		t.Errorf("the look-alike key got %d pings, want 1: it is a different credential", sentB.Load())
 	}
@@ -534,10 +522,8 @@ func TestA403BlocksTheKeyOnThatModelOnly(t *testing.T) {
 		}
 		hold("a", kaBody)
 		k.Sweep(clock.advance(290 * time.Second)) // model A refused
-		time.Sleep(50 * time.Millisecond)
 		hold("b", bodyB)
 		k.Sweep(clock.advance(290 * time.Second))
-		time.Sleep(50 * time.Millisecond)
 		if sentB.Load() != c.otherPings {
 			t.Errorf("%d on model A: the same key on model B got %d pings, want %d", c.status, sentB.Load(), c.otherPings)
 		}
@@ -554,4 +540,17 @@ func TestA403BlocksTheKeyOnThatModelOnly(t *testing.T) {
 			t.Errorf("%d: forget left the credential blocked", c.status)
 		}
 	}
+}
+
+// sweepAfter sweeps d after the real "now". A keeper that serves real HTTP stamps each entry with
+// the real time, but the test clock was anchored at the start of the test. Sweeping at
+// clock+d makes the ping due only if the setup took less than d minus Idle of real time, and a
+// loaded box breaks that. So it re-anchors the test clock to the real time first (never back).
+func sweepAfter(k *keeper, clock *testClock, d time.Duration) {
+	clock.mu.Lock()
+	if now := time.Now(); now.After(clock.at) {
+		clock.at = now
+	}
+	clock.mu.Unlock()
+	k.Sweep(clock.advance(d))
 }

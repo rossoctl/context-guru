@@ -17,9 +17,9 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Tests for the WARM PATH (#491).
@@ -797,6 +797,54 @@ func TestAnExpandOfAWarmDropIsMarkedWarm(t *testing.T) {
 	}
 }
 
+// #1191 blocker 2. IBM Bob's route sends no cache_control and has no known cache lifetime, so every
+// request's phase is unknown, and an unknown phase counted as cold: the warm run reset on every request
+// and the trigger never fired. The provider's own report settles it: a thread whose previous turn read
+// the cache is warm for the warm path.
+func TestAnUnknownPhaseThreadThatReadTheCacheIsWarmForTheWarmPath(t *testing.T) {
+	bobLike := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3 // phase unknown, as on Bob's route
+		return c
+	}
+	pending := func(r *warmRig) bool {
+		warmMu.Lock()
+		defer warmMu.Unlock()
+		th := warmThreads[r.key()]
+		return th != nil && th.warmPending()
+	}
+	for _, tc := range []struct {
+		name      string
+		read      int
+		wantFired bool
+	}{
+		{"the previous turn read the cache: warm", 5000, true},
+		{"the previous turn read nothing: still cold", 0, false},
+		{"the previous turn failed: still cold", -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newWarmRig(t, "w-unknown", warmCfg, payingTail(), 1.0)
+			if p := bobLike(r).CachePhase(0); p != components.CachePhaseUnknown {
+				t.Fatalf("fixture: phase = %v, want unknown", p)
+			}
+			// warm_every_n is 3: the first request has no earlier turn, so 3 more must count as warm.
+			for i := 0; i < 4; i++ {
+				r.request(bobLike(r))
+				if i < 3 {
+					if tc.read < 0 { // a failed forward read nothing, whatever the usage said
+						ResolveWarmQuestion(r.session, "", false, 5000)
+					} else {
+						ResolveWarmQuestion(r.session, "", true, tc.read)
+					}
+				}
+			}
+			if got := pending(r); got != tc.wantFired {
+				t.Fatalf("warm question due = %v, want %v", got, tc.wantFired)
+			}
+		})
+	}
+}
+
 // #1191. With warm on, a thread the keep-alive cannot ping still asks its warm question: the question
 // runs after a forwarded request, not at a ping. IBM Bob's route can never be pinged (an OpenAI
 // provider, cache strategy none), and bob-ultrahigh is the one preset with warm on. Still one copy only:
@@ -824,6 +872,33 @@ func TestAWarmThreadTheKeepAliveCannotPingStillAsks(t *testing.T) {
 				t.Fatalf("counters = %+v, want 1 question fired and nothing counted not_registered", c)
 			}
 		})
+	}
+}
+
+// #1196 review. On the same Bob-like route, the apply of a held warm answer must see the phase the warm
+// path decided. The apply judged the phase again with the cold rule, so a held answer went in as a cold
+// drop with no cost gate, on a live cache.
+func TestAHeldWarmAnswerOnAnUnknownPhaseGoesThroughTheWarmGate(t *testing.T) {
+	bobLike := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3
+		return c
+	}
+	r := newWarmRig(t, "w-unknown-apply", warmCfg, payingTail(), 1.0)
+	for i := 0; i < 4; i++ {
+		r.request(bobLike(r))
+		if i < 3 {
+			ResolveWarmQuestion(r.session, "", true, 5000)
+		}
+	}
+	r.forward()
+	if !r.held() {
+		t.Fatalf("fixture: no answer is waiting after the question: %+v", SweepWarmCounters())
+	}
+	ResolveWarmQuestion(r.session, "", true, 5000) // the turn that asked read the cache too
+	_, rep := r.request(bobLike(r))
+	if rep.Events["sweep_warm_gate_accept"] != 1 || rep.Events[eventAppliedWarm] == 0 {
+		t.Fatalf("events = %v, want the warm gate's accept and warm drops: the cache is live", rep.Events)
 	}
 }
 
@@ -1011,7 +1086,7 @@ func TestAWarmQuestionThatNeverAskedLeavesThePingFree(t *testing.T) {
 	}
 }
 
-// ⭐ GATE MODEL (#491, David). The provider reads back only up to a cache entry written BEFORE the change.
+// ⭐ GATE MODEL (#491). The provider reads back only up to a cache entry written BEFORE the change.
 // A drop deeper than the look-back from the last breakpoint rewrites the WHOLE conversation; a drop inside
 // it rewrites only the tail from the drop.
 func deepFixture(exchanges int) (*bschemas.BifrostChatRequest, []warmRemoval, int) {
@@ -1481,7 +1556,7 @@ func TestTheTriggerCountsAnOutputThatOnlyQuotesMarkerSyntaxAsRemovable(t *testin
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Decision records (#491, David): every trigger and apply-gate decision, accepted or refused.
+// Decision records (#491): every trigger and apply-gate decision, accepted or refused.
 
 func decisionsOf(stage string) []WarmDecision {
 	var out []WarmDecision
@@ -1577,7 +1652,7 @@ func TestTheDecisionLogKeepsTheLastFiftyAndOneInfoLineEach(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// The turns-left model (#491, David)
+// The turns-left model (#491)
 
 func turnsCtx(window int, exact bool, billed int, cutFrac float64) *components.Ctx {
 	return &components.Ctx{CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, PrevBilledInputThread: billed, CutFrac: cutFrac}
@@ -2937,5 +3012,49 @@ func TestTheWarmDecisionForASmallSubagentIgnoresTheMainThreadsFill(t *testing.T)
 	}
 	if _, _, ok := warmRatios(c.ModelName, c.PrevBilledInput, localTokens(req.Input)); ok {
 		t.Fatalf("fixture: the session figure must be an impossible ratio against this thread's local size")
+	}
+}
+
+// #1191 D4. One "live" verdict per request: the cold apply of a Store-held answer (coldStep) must see
+// the phase the warm path sees. On a route with an unknown phase (IBM Bob's), a thread whose previous
+// turn read the cache is live, so an unchanged prefix keeps its held answer, as on any warm request.
+// With no read the request stays cold and the answer is applied cold, as before.
+func TestTheColdApplyUsesTheMeasuredReadOnAnUnknownPhase(t *testing.T) {
+	bobLike := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3 // phase unknown, as on Bob's route
+		return c
+	}
+	for _, tc := range []struct {
+		name     string
+		read     int
+		wantCold int
+	}{
+		{"the previous turn read the cache: live, the answer stays held", 5000, 0},
+		{"the previous turn read nothing: cold, the answer is applied", 0, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// warm_every_n 50: no warm question runs, so the only answer is the ping's, in the Store.
+			r := newWarmRig(t, "w-d4-cold", "warm: true\nwarm_every_n: 50\nwarm_min_age_turns: 5\n", payingTail(), 1.0)
+			r.request(bobLike(r))
+			dispatch, _, reason, ok := SweepPingSubstitute(r.key())
+			if !ok {
+				t.Fatalf("fixture: no ping question offered: %s", reason)
+			}
+			if res := dispatch(time.Second, SweepPingWait{}); !res.Held {
+				t.Fatalf("fixture: the ping held no answer: %+v", res)
+			}
+			ResolveWarmQuestion(r.session, "", true, tc.read)
+
+			_, rep := r.request(bobLike(r))
+
+			if got := rep.Events[eventAppliedCold]; got != tc.wantCold {
+				t.Fatalf("sweep_applied_cold = %d, want %d (events %v)", got, tc.wantCold, rep.Events)
+			}
+			h, ok := getHeld(r.st, r.key())
+			if held, wantHeld := ok && !h.Spent, tc.wantCold == 0; held != wantHeld {
+				t.Fatalf("answer still held = %v, want %v", held, wantHeld)
+			}
+		})
 	}
 }

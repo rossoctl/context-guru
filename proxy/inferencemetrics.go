@@ -147,9 +147,10 @@ func (im *InferenceMetrics) Observe(e *dash.Event, elapsed time.Duration) {
 
 	if e.CostUSD > 0 {
 		im.cost.Add(ctx, e.CostUSD, mp)
-		if e.PriceEstimated {
-			im.estimatedCost.Add(ctx, e.CostUSD, mp)
-		}
+		// Only the dollars of the tiers priced from a fallback rate (#1248). It is often 0: add it
+		// anyway, so the series exists and the panel reads 0 and not "no data". Do not feed it
+		// PriceEstimated: that marks the SAVING (penalty_unknown), not the rate.
+		im.estimatedCost.Add(ctx, e.FallbackRateCostUSD, mp)
 	}
 
 	if elapsed > 0 {
@@ -242,8 +243,14 @@ func (im *InferenceMetrics) observeCacheMiss(ctx context.Context, e *dash.Event,
 	}
 }
 
-// missCostUSD is the avoidable write premium: the written prefix times (write rate minus read rate),
-// as dash/keepalive.go defines a lapse. It is zero for a model with no rate. It does not default.
+// missCostUSD is the avoidable write premium (docs/metrics/spec.md 5.4): what the written prefix
+// cost above a read of the same tokens. Each write tier is priced at its own rate, as the bill
+// is: a 5-minute token pays (5-minute write rate - read rate), and a token billed at the 1-hour
+// tier (CacheWrite1h, a part of CacheWrite) pays (1-hour write rate - read rate), the same
+// split dash/keepalive.go prices a lapse with. Each part is never below zero. Output and fresh
+// input are not in it: a hit would have paid them too. It is zero for a model with no price. A
+// tier rate the price leaves blank is the model's standard multiple of its input rate, as
+// Price.Resolved fills it (#1248).
 func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 	if im.prices == nil || e.CacheWrite <= 0 {
 		return 0
@@ -252,16 +259,29 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 	if !ok {
 		return 0
 	}
-	p = p.Resolved(e.Model)
+	p = p.At(modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)).Resolved(e.Model)
+	w1h := min(max(e.CacheWrite1h, 0), e.CacheWrite)
+	usd := 0.0
 	if prem := p.CacheWrite - p.CacheRead; prem > 0 {
-		return float64(e.CacheWrite) * prem
+		usd += float64(e.CacheWrite-w1h) * prem
 	}
-	return 0
+	if prem := p.CacheWrite1h() - p.CacheRead; prem > 0 && w1h > 0 {
+		usd += float64(w1h) * prem
+	}
+	return usd
 }
 
 // missCause maps the event's reason and cause to the spec's set: ttl_expiry, prefix_change,
-// model_changed, compaction_after_rewrite, bypass_flip, cold_start, other. A hit is not a miss.
-// tools, system and effort changes all change the cached prefix, so they are prefix_change.
+// model_changed, compaction_after_rewrite, bypass_flip, concurrent, unexplained, cold_start,
+// other. A hit is not a miss. tools, system and effort changes all change the cached prefix, so
+// they are prefix_change. unexplained is a miss that wrote cache tokens while the comparison with
+// the previous request found no difference. A miss with nothing to compare with (the first of a
+// live thread after a restart) is other: the proxy does not guess. A miss that wrote nothing
+// re-created no prefix: it stays other, and its miss cost is zero.
+//
+// It stays in this host package for now: its inputs (dash.Event, the Cache* and Cause* values and
+// AttributeCache that sets them) are all in dash/, also a host package. Moving it alone would
+// define those values again in a library package.
 func missCause(e *dash.Event) (string, bool) {
 	switch e.CacheMissReason {
 	case dash.CacheHit, "":
@@ -280,6 +300,11 @@ func missCause(e *dash.Event) (string, bool) {
 		return "bypass_flip", true
 	case dash.CauseToolsChanged, dash.CauseSystemChanged, dash.CauseEffortChanged:
 		return "prefix_change", true
+	case dash.CauseConcurrent:
+		return "concurrent", true
+	}
+	if e.CacheMissReason == dash.CacheUnknown && e.CacheMissCause == "" && e.PrefixCompared && e.CacheWrite > 0 {
+		return "unexplained", true
 	}
 	return "other", true
 }

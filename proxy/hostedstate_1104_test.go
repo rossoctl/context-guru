@@ -26,7 +26,7 @@ func hostedProcess(t *testing.T, f *hostedFixture, db *sql.DB, withDisk bool) (*
 	if !withDisk {
 		return src, nil
 	}
-	d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, FlushEvery: time.Millisecond})
+	d, err := store.OpenDisk(db, store.DiskOptions{MetadataOnly: true, FlushEvery: time.Millisecond, LoadTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

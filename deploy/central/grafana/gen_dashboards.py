@@ -21,6 +21,11 @@ DIR_SAVED, DIR_ADDED = ',direction="saved"', ',direction="added"'
 RESCUE_SAVED, RESCUE_ADDED = ',effect="rescue",direction="saved"', ',effect="rescue",direction="added"'
 TIER_READ = ',tier="cache_read"'
 TIER_PROMPT = ',tier=~"cache_read|cache_write_5m|cache_write_1h|input"'
+# The ping failure ratio: failed and timeout over sent pings. skipped is not sent, so it is in neither.
+# The numerator is padded with the sent pings times zero: with no failure yet, it has no series, and
+# the ratio would show no data, not 0 %. "> 0" makes no pings no data, not a division by zero.
+PING_FAILED = ',outcome=~"failed|timeout"'
+PING_SENT = ',outcome=~"ok|failed|timeout"'
 
 
 def var(name, label, query, multi=True):
@@ -71,6 +76,14 @@ def stat(pid, title, expr, x, y, w=4, h=4, unit="short", desc="", decimals=None,
         d["fieldConfig"]["defaults"]["color"] = color(c)
     if big:
         d["options"]["text"] = {"valueSize": 56}
+    return d
+
+
+def failure_colors(d):
+    """A failure share is green at 0, orange from 1 %, red from 5 %. A fixed red showed 0 % in red."""
+    d["fieldConfig"]["defaults"]["color"] = {"mode": "thresholds"}
+    d["fieldConfig"]["defaults"]["thresholds"] = {"mode": "absolute", "steps": [
+        {"color": GREEN, "value": None}, {"color": ORANGE, "value": 0.01}, {"color": RED, "value": 0.05}]}
     return d
 
 
@@ -237,10 +250,11 @@ def cache():
     P.append(series(3, "Miss cost by cause (USD, selected range)", [(inc("llm_cache_miss_cost_usd_total", "cause"), "{{cause}}")],
                     0, 8, 8, 8, unit=USD, kind="bargauge", instant=True,
                     desc="The write premium on the re-written prefix, priced with each model's own rate. A model with no rate counts the miss and books no money."))
-    P.append(series(4, "Ping outcomes (per hour)", [(f'{rate("llm_keepalive_pings_total", "outcome")} * 3600', "{{outcome}}")],
-                    8, 8, 10, 8, stack=True, bars=True,
-                    colors={"ok": GREEN, "skipped": BLUE, "failed": RED, "timeout": ORANGE},
-                    desc="Pings per hour. A timeout is a ping that ran to its 60 s limit; it is booked at its projected cost (#754). A skipped ping leaves no row, so it does not show."))
+    sent = inc("llm_keepalive_pings_total", extra=PING_SENT)
+    P.append(failure_colors(stat(4, "Ping failure ratio",
+                  f'({inc("llm_keepalive_pings_total", extra=PING_FAILED)} or {sent} * 0) / (({sent}) > 0)',
+                  8, 8, w=10, h=8, unit="percentunit", decimals=1, big=True,
+                  desc="Share of the sent pings that failed or timed out over the selected range. A failed or timed-out ping does not keep the cache warm, and a timeout is still booked at its projected cost (#754). A skipped ping was not sent, so it is not in the ratio. The first failure of a model can read as 0, because increase() does not count the first sample of a new series. No data means no ping was sent in the range.")))
     P.append(stat(5, "Pings that paid",
                   f'({inc("llm_savings_cache_effect_usd_total", extra=RESCUE_SAVED)} - {inc("llm_savings_cache_effect_usd_total", extra=RESCUE_ADDED)}) / clamp_min({inc("llm_keepalive_cost_usd_total")}, 1e-9)',
                   18, 8, w=6, h=4, unit="suffix: x", decimals=1, c=GREEN, big=True,
@@ -253,9 +267,8 @@ def cache():
         (f'{rate("llm_keepalive_cost_usd_total")} * 3600', "ping cost"),
         (f'({rescue(RESCUE_SAVED)} - {rescue(RESCUE_ADDED)}) * 3600', "rescue (net of reads)"),
         (f'(({rescue(RESCUE_SAVED)} - {rescue(RESCUE_ADDED)}) - {rate("llm_keepalive_cost_usd_total")}) * 3600', "net")],
-        0, 16, 16, 8, unit=USD, colors={"ping cost": ORANGE, "rescue (net of reads)": GREEN, "net": BLUE},
+        0, 16, 24, 8, unit=USD, colors={"ping cost": ORANGE, "rescue (net of reads)": GREEN, "net": BLUE},
         desc="Do the pings pay? The rescue is a write that became a read, so its value is the write saved minus the read paid."))
-    P.append(text(7, "Shared-warm tokens", "**No data yet.**\n\nThe counter `llm_keepalive_shared_warm_tokens_total` needs #853.", 16, 16, 8, 8))
     return dash("central-cache", "Cache and keep-alive", "Does the cache pay, and do pings pay?", P, ["cache"])
 
 
@@ -353,9 +366,9 @@ def inference():
         (quant(0.99, "llm_inference_ttfb_seconds"), "p99")], 0, 13, 12, 8, unit="s", colors={"p50": GREEN, "p95": YELLOW, "p99": RED},
         desc="Time from request to the first byte of a streamed answer. A buffered stream has no true first byte and is left out."))
     P.append(series(9, "Time to first token p95 by model (seconds)", [(quant(0.95, "llm_inference_ttfb_seconds", "model"), "{{model}}")], 12, 13, 12, 8, unit="s"))
-    P.append(series(10, "Output tokens per streamed request", [
-        (f'{rate(tok, "model", tier("output"))} / clamp_min(sum by (model) (rate(llm_inference_requests_total{{{FILTER},stream="true"}}[$__rate_interval])), 1e-9)', "{{model}}")],
-        0, 21, 12, 8, desc="Not a speed. Output tokens divided by streamed requests, by model. A true tokens per second needs the time spent writing, which is not recorded."))
+    P.append(series(10, "Output tokens per request", [
+        (f'{rate(tok, "model", tier("output"))} / clamp_min(sum by (model) (rate(llm_inference_requests_total{{{FILTER},status_class="2xx"}}[$__rate_interval])), 1e-9)', "{{model}}")],
+        0, 21, 12, 8, desc="Not a speed. Output tokens divided by successful requests, streamed or not, by model. The token counter has no stream label, and a failed request bills no output (#1248). A true tokens per second needs the time spent writing, which is not recorded."))
     P.append(series(11, "Time the proxy added (seconds)", [
         (quant(0.5, "llm_inference_added_seconds"), "p50"), (quant(0.95, "llm_inference_added_seconds"), "p95"),
         (quant(0.99, "llm_inference_added_seconds"), "p99")], 12, 21, 12, 8, unit="s", colors={"p50": GREEN, "p95": YELLOW, "p99": RED},
@@ -364,7 +377,7 @@ def inference():
                     desc="Provider cost at request time. Each proxy prices with its own rate table."))
     P.append(stat(13, "Spend priced from a fallback rate", f'{inc("llm_inference_estimated_cost_usd_total")} / clamp_min({inc("llm_inference_cost_usd_total")}, 1e-9)',
                   16, 29, w=8, h=8, unit="percentunit", decimals=1, c=YELLOW, big=True,
-                  desc="Share of spend where the model had no rate of its own. A high value means the money panels are a guess."))
+                  desc="Share of spend priced from a fallback rate: a cache-read rate that no price source states, for a model that is not Claude, filled from a default multiple (R47). A high value means the money panels are a guess."))
     return dash("central-inference", "Inference", "What do the models consume, and how fast do they answer?", P, ["inference"])
 
 

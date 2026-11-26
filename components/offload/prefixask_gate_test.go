@@ -39,7 +39,7 @@ func TestPrefixAskCacheOK(t *testing.T) {
 	}
 }
 
-// The owner chose the read rule only (2026-10-26, #721): the cap ships OFF, so a large write is
+// The rule checks the read only (#721): the cap ships OFF, so a large write is
 // accepted when the read is good. The cap rows above force it on through prefixAskJudge.
 func TestPrefixAskCacheOKShipsWithTheCapOff(t *testing.T) {
 	if prefixAskWriteCapEnabled {

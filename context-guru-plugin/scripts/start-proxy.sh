@@ -513,10 +513,20 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
       [ -n "$LATEST" ] && UC_LATEST="$LATEST"
     fi
 
+    # Only a STRICTLY NEWER latest counts. `releases/latest` never names a prerelease, so an
+    # installed beta differs from it and is older than nothing (#1254). The comparison lives in
+    # settings.py (semantic-version order). If it gives no answer, fall back to "differs".
+    UC_NEWER=""
+    if [ -n "$UC_LATEST" ] && [ "$UC_LATEST" != "$HAVE" ]; then
+      UC_NEWER=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" update-check newer \
+                   --latest "$UC_LATEST" --installed "$HAVE" 2>/dev/null \
+                   | sed -n 's/^newer=//p' | head -1)
+      [ -n "$UC_NEWER" ] || UC_NEWER=true
+    fi
     # `skipped=` only gates the ASK branch below — it must never block "auto", or a version the
     # user skipped BEFORE later saying "always" would silently suppress every future auto-upgrade
     # too, since skipped is never cleared once set.
-    if [ -n "$UC_LATEST" ] && [ "$UC_LATEST" != "$HAVE" ]; then
+    if [ "$UC_NEWER" = true ]; then
       if [ "$UC_ANSWER" = auto ]; then
         # "always": stage the new binary in the background; it takes effect through the fingerprint
         # below at the NEXT session start, never mid-session. install.sh's swap is safe on disk (an
@@ -524,7 +534,10 @@ if [ "$UPDATE_CHECK" = 1 ] && [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ]; th
         # port — on a shared box possibly a colleague's live session, and on this one the session
         # reading this very note.
         (
-          CONTEXT_GURU_UPGRADE=1 "${HERE}/install.sh" >>"$LOG" 2>&1
+          # Install the tag the check found, not "latest" again: a stale redirect gave this tag, a
+          # fresh one could give another, and the note below names this one (#1276). install.sh
+          # writes the installed tag to the update-check record after a successful install.
+          CONTEXT_GURU_UPGRADE=1 CONTEXT_GURU_VERSION="$UC_LATEST" "${HERE}/install.sh" >>"$LOG" 2>&1
         ) </dev/null >/dev/null 2>&1 &
         disown 2>/dev/null || true
         note "updating the proxy in the background (${HAVE} -> ${UC_LATEST}); takes effect next session"
@@ -584,6 +597,50 @@ SYNC_STRATEGY=$(printf '%s\n' "$SYNC_OUT" | sed -n 's/^strategy=//p' | head -1)
 fingerprint_want() {
   printf 'preset=%s strategy=%s idle=%s upstream=%s port=%s bin=%s\n' \
     "$PRESET" "$SYNC_STRATEGY" "$IDLE_EXIT" "$UPSTREAM" "$PORT" "$HAVE"
+}
+
+# The strategy name in the keep-alive file may come from a newer release than the proxy binary we are
+# about to run (#1383). The plugin holds no table (the proxy owns it), so ask the binary. A binary that
+# does not know the name rejects the whole config at load (config/strategy.go) and exits, and the
+# session has no proxy. The answer is `known`, `unknown` or `unchecked` (the check could not run, the
+# recorded version is too old, or it timed out). `known` keeps the config. Then:
+#   - `unknown` (positive): restart with preset `off` and WITHOUT --config, because the proxy cannot
+#     load that file.
+#   - `unchecked`, warm (a proxy already runs): leave the running proxy alone. Nothing changes.
+#   - `unchecked`, cold (no proxy runs): start with preset `off` and WITHOUT --config, because a
+#     proxy with preset off beats no proxy.
+# The file is never edited or deleted, so a later upgrade uses it. Fails open.
+USE_CONFIG=1
+STRATEGY_RESOLVED=0
+RS_RESULT=""
+RS_UNKNOWN_NAME=""
+note_unknown_off() {
+  note "preset is off: the installed proxy (${HAVE:-unknown version}) does not know the strategy"
+  note "\`${RS_UNKNOWN_NAME:-$SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
+}
+resolve_strategy() {
+  [ "$STRATEGY_RESOLVED" = 1 ] && return 0
+  STRATEGY_RESOLVED=1
+  case "$SYNC_STRATEGY" in ''|none) return 0 ;; esac
+  [ -n "$HERE" ] && [ -x "${HERE}/settings.py" ] || return 0
+  # --bin "$BIN": ask the binary this script will launch, not the one settings.py would find itself.
+  rs_out=$(CONTEXT_GURU_STATE="$STATE" "${HERE}/settings.py" strategy known \
+             --port "$PORT" --name "$SYNC_STRATEGY" --bin "$BIN" 2>/dev/null) || rs_out=""
+  rs_result=$(printf '%s\n' "$rs_out" | sed -n 's/^result=//p' | head -1)
+  [ "$rs_result" = known ] && return 0
+  case "$rs_result" in unknown) ;; *) rs_result=unchecked ;; esac
+  RS_RESULT="$rs_result"
+  if [ "$rs_result" = unknown ]; then
+    RS_UNKNOWN_NAME="$SYNC_STRATEGY"
+    # A warm start sets RS_DEFER: it prints this note only after the old proxy is gone.
+    if [ "${RS_DEFER:-0}" != 1 ]; then note_unknown_off; fi
+  else
+    note "could not check if the installed proxy (${HAVE:-unknown version}) knows the"
+    note "strategy \`${SYNC_STRATEGY}\` in keepalive-${PORT}.yaml. The file is kept."
+  fi
+  USE_CONFIG=0
+  PRESET=off
+  SYNC_STRATEGY=none
 }
 
 # Stop the proxy we started, so a new one can come up with the new configuration.
@@ -661,11 +718,31 @@ stop_running_proxy() {
 if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
   fp_have=$(cat "$FINGERPRINT" 2>/dev/null)
   fp_want=$(fingerprint_want)
+  owner_have=$(cat "$OWNER" 2>/dev/null)
+  owner_now=theirs_unset
+  [ -n "$owner_have" ] && owner_now=$(owner_verdict "$owner_have")
+  # Only when a restart looks due: ask whether the binary knows the strategy, then decide again.
+  if [ -n "$fp_have" ] && [ -n "$SYNC_STRATEGY" ] && [ "$fp_have" != "$fp_want" ] \
+     && [ "$owner_now" != "theirs" ]; then
+    RS_DEFER=1
+    resolve_strategy
+    RS_DEFER=0
+    if [ "$RS_RESULT" = unchecked ]; then
+      # The check could not run. A running proxy is evidence the binary works, and a wrong restart
+      # costs more than a stale configuration: leave it alone.
+      note "the running proxy on port ${PORT} is left as it is."
+      exit 0
+    fi
+    fp_want=$(fingerprint_want)
+    if [ "$RS_RESULT" = unknown ] && [ "$fp_have" = "$fp_want" ]; then
+      # Steady state: the running proxy already failed over. Nothing starts in this session.
+      note "the running proxy already runs without that file. Upgrade the plugin and the proxy (/context-guru:update)."
+    fi
+  fi
   # Leave it alone unless we can prove a change is needed. Three of these four cases are deliberate
   # no-ops, because the cost of a wrong restart (interrupting somebody else's session) is higher than
   # the cost of a stale preset (reported, and fixed by the next cold start).
-  owner_have=$(cat "$OWNER" 2>/dev/null)
-  if [ -n "$owner_have" ] && [ "$(owner_verdict "$owner_have")" = "theirs" ]; then
+  if [ "$owner_now" = "theirs" ]; then
     # ANOTHER PROJECT's proxy, whatever the fingerprint says. This is the regression the per-project
     # port exists to remove: two projects sharing port 8787 with different presets took turns killing
     # each other's proxy on every session start, and each kill wiped the in-memory store. A restart
@@ -703,9 +780,11 @@ if curl -fsS --max-time 2 "$HEALTH" >/dev/null 2>&1; then
     fi
     # Not answering: the port is free even though the old process has not exited. Fall through and
     # start the new one, or the session is left routed at a port nothing is listening on.
+    [ "$RS_RESULT" = unknown ] && note_unknown_off
     note "the old proxy on port ${PORT} stopped answering but has not exited yet; starting the new one."
     rm -f "$FINGERPRINT" 2>/dev/null || true
   else
+    [ "$RS_RESULT" = unknown ] && note_unknown_off
     note "configuration changed, restarting the proxy on port ${PORT}."
     note "  was: ${fp_have}"
     note "  now: ${fp_want}"
@@ -824,7 +903,7 @@ compute_preset_and_strategy_notes() {
   # test, which only covered the preset. TestTheStartupNoteUsesAStrategyNameSettingsKnows covers it now
   # (the earlier spelling of that name in this comment was of a test that never existed).
   STRATEGY_NOTE="none"
-  if [ -f "$KEEPALIVE_CFG" ]; then
+  if [ -f "$KEEPALIVE_CFG" ] && [ "$USE_CONFIG" = 1 ]; then
     CONFIG_ARGS=(--config "$KEEPALIVE_CFG")
     # Same fail-open discipline as the preset read below: an unreadable or marker-less file must
     # still start the proxy, and must report what is KNOWN rather than something confident and wrong.
@@ -871,6 +950,10 @@ compute_preset_and_strategy_notes() {
     fi
   fi
 }
+resolve_strategy
+if [ -n "$RS_RESULT" ]; then
+  note "the proxy starts with preset off and without that file. Upgrade the plugin and the proxy (/context-guru:update)."
+fi
 compute_preset_and_strategy_notes
 
 # attempt_launch: the re-probe, the launch, and the health-wait loop, as a function rather than

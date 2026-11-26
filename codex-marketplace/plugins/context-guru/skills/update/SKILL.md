@@ -21,6 +21,9 @@ exit the current session and run this directly in an ordinary shell:
 ~/.local/state/context-guru-codex/context-guru-update
 ```
 
+The standalone command can print `result=current` and change nothing. That means the installed
+version is not older than the latest release. Tell the user so.
+
 The standalone command downloads and checksum-verifies the release, then restarts context-guru's
 owned user service. Starting a new Codex session afterward avoids coupling a session to the proxy
 restart that updates its own transport.

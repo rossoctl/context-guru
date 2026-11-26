@@ -256,6 +256,9 @@ type adaptToolsReq struct {
 	// inBaseline is set (opt.onlyFiltered only) when the accountant priced this request's toolfilter
 	// removal: its tokens count, its dollars do not, as in DeclFilterSavings (context-guru#911).
 	inBaseline bool
+	// removed is the tokens the filter removed (opt.onlyFiltered only). The saving prices at the size the
+	// request would have had without the filter: sent plus removed.
+	removed int64
 }
 
 // adaptToolsSet is one declaration set: its tool count, when it was first seen, and the billed
@@ -343,7 +346,7 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	out := &carriedScan{Items: map[string]*carried{}, keepRequests: opt.perRequest}
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
-		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input, `+inBaselineCol+`
+		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input, `+inBaselineCol+`, r.filtered_decl_tokens
 		FROM requests r WHERE `+where+` AND r.tools > 0 ORDER BY r.ts`, args...)
 	if err != nil {
 		return nil, err
@@ -351,9 +354,12 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	for rows.Next() {
 		var t, s string
 		var q adaptToolsReq
-		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh, &q.inBaseline); err != nil {
+		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh, &q.inBaseline, &q.removed); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if !opt.onlyFiltered {
+			q.removed = 0
 		}
 		reqs[t+"\x00"+s] = append(reqs[t+"\x00"+s], q)
 		out.Coverage.Requests++
@@ -483,6 +489,10 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 		p, ok := modelinfo.Price{}, false
 		if price != nil && r.model != "" {
 			p, ok = price(r.model)
+			// The request bills at the rates of ITS prompt size (#1407, #1438). These declarations
+			// were carried, so the sent size is the size they were billed at. For a filter saving the
+			// size is sent plus removed: the request without the filter.
+			p = p.At(modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite) + r.removed)
 		}
 		rate := p.Input
 		switch {

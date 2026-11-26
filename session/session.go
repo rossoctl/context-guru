@@ -117,6 +117,8 @@ func ExplicitID(cands ...string) string {
 // re-rolled only by /clear). Both survive the agent's context compaction, which the derived
 // hash does not. A request carrying both resolves to user_id, by this order. The Bob IDE
 // sends neither. Its id is a header, which Explicit takes as a host id after these.
+// TODO: `user_id` in its JSON-object form is a Claude Code rule. Move it behind agent/claudecode (for
+// example claudecode.SessionFromBody) when a body-level hook exists.
 var metadataKeys = [...]string{"user_id", "taskId"}
 
 // Explicit is the ONE rule for which explicit id a request carries: the header first, then
@@ -182,6 +184,40 @@ func metaSessionID(v string) string {
 		return ""
 	}
 	return m.SessionID
+}
+
+// UserKey names the PERSON behind a Claude Code `metadata.user_id`, not the conversation: the
+// account id when the client states one ("a:<uuid>"), else the device id ("d:<id>"), else, for the
+// older flat form "user_<hash>_account_<uuid>_session_<uuid>", the part before the session
+// ("l:user_<hash>_account_<uuid>"). The kind prefix keeps two kinds from ever colliding.
+// "" for anything else, including a plain id: a plain `user_id` may be a per-conversation id (see
+// Explicit), and a key that changes per conversation would name no one. The caller hashes the key
+// with a secret before it is stored; the raw id never leaves memory.
+func UserKey(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" || len(s) > maxMetadataLen {
+		return ""
+	}
+	if isJSONObject(s) {
+		var m struct {
+			AccountUUID string `json:"account_uuid"`
+			DeviceID    string `json:"device_id"`
+		}
+		if err := json.Unmarshal([]byte(s), &m); err != nil {
+			return ""
+		}
+		switch {
+		case m.AccountUUID != "":
+			return "a:" + m.AccountUUID
+		case m.DeviceID != "":
+			return "d:" + m.DeviceID
+		}
+		return ""
+	}
+	if head, _, ok := strings.Cut(s, "_session_"); ok && strings.HasPrefix(head, "user_") && len(head) > len("user_") {
+		return "l:" + head
+	}
+	return ""
 }
 
 // Scoped is Resolve namespaced by tenant, for a hosted multi-tenant deployment. An

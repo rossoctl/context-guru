@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -93,20 +93,20 @@ func TestCompactionPointForUsesTheStartupReadInLocalClaudeCodeOnly(t *testing.T)
 	body := []byte(`{"model":"claude-opus-5"}`)
 	cc := reqWithAgent("claude-cli/2.1.319 (external, cli)")
 	h := &Handler{opts: Options{ClaudeCompact: compactionpoint.ClaudeCode{EnvWindow: "200k"}}}
-	if p := h.compactionPointFor(cc, body, 1_000_000); p.Source != compactionpoint.Configured || p.Tokens(1_000_000) != 167_000 {
+	if p := h.compactionPointFor(cc, identify(cc), body, 1_000_000); p.Source != compactionpoint.Configured || p.Tokens(1_000_000) != 167_000 {
 		t.Errorf("local claude code: %+v", p)
 	}
 	// Codex, Bob, an unknown client and no User-Agent get the table.
 	for _, ua := range []string{"codex_cli_rs/0.160.0", "bob/1.2", "curl/8", ""} {
-		if p := h.compactionPointFor(reqWithAgent(ua), body, 1_000_000); p.Source != compactionpoint.Assumed {
+		if p := h.compactionPointFor(reqWithAgent(ua), identify(reqWithAgent(ua)), body, 1_000_000); p.Source != compactionpoint.Assumed {
 			t.Errorf("agent %q: %+v, want the table", ua, p)
 		}
 	}
 	hosted := &Handler{opts: Options{ClaudeCompact: compactionpoint.ClaudeCode{EnvWindow: "200k"}, Tenants: &TenantSource{}}}
-	if p := hosted.compactionPointFor(cc, body, 1_000_000); p.Source != compactionpoint.Assumed {
+	if p := hosted.compactionPointFor(cc, identify(cc), body, 1_000_000); p.Source != compactionpoint.Assumed {
 		t.Errorf("hosted: %+v", p)
 	}
-	if p := (&Handler{}).compactionPointFor(cc, body, 1_000_000); p.Source != compactionpoint.Assumed {
+	if p := (&Handler{}).compactionPointFor(cc, identify(cc), body, 1_000_000); p.Source != compactionpoint.Assumed {
 		t.Errorf("nothing set: %+v", p)
 	}
 }
@@ -234,27 +234,27 @@ func TestCompactionPointForBobAndCodex(t *testing.T) {
 		return r
 	}
 	// Our window 1M, Bob's window not seen: 0.5 x 200,000.
-	if p := h.compactionPointFor(req("bobshell/1.0.3"), body, 1_000_000); p.Source != compactionpoint.ClientDefault || p.Tokens(1_000_000) != 100_000 {
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), identify(req("bobshell/1.0.3")), body, 1_000_000); p.Source != compactionpoint.ClientDefault || p.Tokens(1_000_000) != 100_000 {
 		t.Errorf("bob, window not seen: %+v", p)
 	}
 	h.noteBobModelInfo([]byte(`{"data":[{"model_name":"claude-opus-5","model_info":{"max_input_tokens":400000}},{"model_name":"x","model_info":{}}]}`))
-	if p := h.compactionPointFor(req("bobshell/1.0.3"), body, 1_000_000); p.Tokens(1_000_000) != 200_000 {
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), identify(req("bobshell/1.0.3")), body, 1_000_000); p.Tokens(1_000_000) != 200_000 {
 		t.Errorf("bob, window seen 400k: %+v", p)
 	}
 	// A model with no entry in the info response keeps the fallback.
-	if p := h.compactionPointFor(req("bobshell/1.0.3"), []byte(`{"model":"other"}`), 1_000_000); p.Tokens(1_000_000) != 100_000 {
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), identify(req("bobshell/1.0.3")), []byte(`{"model":"other"}`), 1_000_000); p.Tokens(1_000_000) != 100_000 {
 		t.Errorf("bob, model not in info: %+v", p)
 	}
-	if p := h.compactionPointFor(req("codex_cli_rs/0.160.0"), body, 272_000); p.Source != compactionpoint.Configured || p.Tokens(272_000) != 150_000 {
+	if p := h.compactionPointFor(req("codex_cli_rs/0.160.0"), identify(req("codex_cli_rs/0.160.0")), body, 272_000); p.Source != compactionpoint.Configured || p.Tokens(272_000) != 150_000 {
 		t.Errorf("codex: %+v", p)
 	}
 	for _, ua := range []string{"curl/8", "bobcat/1.0", "my-bob-tool/2", "xcodex/1", ""} {
-		if p := h.compactionPointFor(req(ua), body, 1_000_000); p.Source != compactionpoint.Assumed {
+		if p := h.compactionPointFor(req(ua), identify(req(ua)), body, 1_000_000); p.Source != compactionpoint.Assumed {
 			t.Errorf("UA %q must use the table: %+v", ua, p)
 		}
 	}
 	h.opts.Tenants = &TenantSource{}
-	if p := h.compactionPointFor(req("bobshell/1.0.3"), body, 1_000_000); p.Source == compactionpoint.ClientDefault {
+	if p := h.compactionPointFor(req("bobshell/1.0.3"), identify(req("bobshell/1.0.3")), body, 1_000_000); p.Source == compactionpoint.ClientDefault {
 		t.Error("hosted proxy must read nothing")
 	}
 }
@@ -307,5 +307,15 @@ func TestBobModelInfoPassThroughRecordsWindow(t *testing.T) {
 	}
 	if h.bobWindow("claude-opus-5") != 200_000 {
 		t.Errorf("window = %d", h.bobWindow("claude-opus-5"))
+	}
+}
+
+// A `.` element in the system-settings path still reads the file, as os.Open always did.
+func TestReadBobCompactAcceptsADotElementInTheSystemPath(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, filepath.Join(dir, "s.json"), `{"model":{"compressionThreshold":0.7}}`)
+	env := envOf(map[string]string{"BOB_SHELL_CLI_SYSTEM_SETTINGS_PATH": dir + "/./s.json"})
+	if b := ReadBobCompact(env, ""); b.Threshold != "0.7" {
+		t.Errorf("got %+v", b)
 	}
 }

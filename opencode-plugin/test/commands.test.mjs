@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -83,6 +83,37 @@ test("status script reports a healthy proxy and its savings", async () => {
   } finally {
     server.close()
   }
+})
+
+// A binary that does not know --version may start serving instead. The status must not wait for it.
+test("status script ends when the binary does not answer --version", async () => {
+  const directory = "/tmp/context-guru-project-hung-version"
+  await registerScripts(directory)
+  const state = stateDirectory(directory)
+  const binary = join(mkdtempSync(join(tmpdir(), "context-guru-hung-")), "context-guru-proxy")
+  writeFileSync(binary, "#!/bin/sh\nexec sleep 60\n")
+  chmodSync(binary, 0o755)
+  writeEnv(state, { state, port: 1, binary, managed: "yes", version: "v0.0.1-test" })
+
+  // Only stdout is a pipe: a stub left running must not hold this test open through stdin or stderr.
+  // stderr goes to a file, which cannot hold the test open.
+  const stderrPath = join(mkdtempSync(join(tmpdir(), "context-guru-status-stderr-")), "stderr")
+  const stderrFd = openSync(stderrPath, "w")
+  const child = spawn("sh", [join(state, "context-guru-status")], { stdio: ["ignore", "pipe", stderrFd] })
+  closeSync(stderrFd)
+  let stdout = ""
+  child.stdout.on("data", (chunk) => { stdout += chunk })
+  const killer = setTimeout(() => child.kill("SIGKILL"), 15000)
+  const started = Date.now()
+  const status = await new Promise((resolve) => child.on("close", (code) => resolve(code)))
+  clearTimeout(killer)
+
+  assert.ok(Date.now() - started < 15000, `status took ${Date.now() - started} ms`)
+  assert.equal(status, 0)
+  assert.match(stdout, /install=present/)
+  assert.match(stdout, /proxy=down/)
+  // The stopped binary must not leave a shell job notice ("Killed: 9") in the command output.
+  assert.doesNotMatch(readFileSync(stderrPath, "utf8"), /Killed/)
 })
 
 test("install script reports an absent install", async () => {
@@ -261,21 +292,21 @@ test("first startup downloads the release binary and extracts under the state di
   const state = stateDirectory(directory)
 
   // A release fixture: the working stub proxy as a tarball, plus its checksums line.
-  const stub = stubProxyBinary()
+  const stub = stubProxyBinary(undefined, { version: "0.7.9" })
   const fixture = mkdtempSync(join(tmpdir(), "context-guru-release-"))
   const archive = join(fixture, "archive.tar.gz")
   spawnSync("tar", ["-czf", archive, "-C", dirname(stub), "context-guru-proxy"])
   const archiveBytes = readFileSync(archive)
   const checksum = createHash("sha256").update(archiveBytes).digest("hex")
-  // The plugin downloads its pinned release, v0.7.3, and never asks which release is latest.
-  const archiveName = `context-guru_0.7.3_${PLATFORMS[process.platform]}_${ARCHITECTURES[process.arch]}.tar.gz`
+  // The plugin downloads its pinned release, v0.7.9, and never asks which release is latest.
+  const archiveName = `context-guru_0.7.9_${PLATFORMS[process.platform]}_${ARCHITECTURES[process.arch]}.tar.gz`
 
   const requested = []
   const server = createServer((request, response) => {
     requested.push(request.url)
-    if (request.url === "/releases/download/v0.7.3/checksums.txt") {
+    if (request.url === "/releases/download/v0.7.9/checksums.txt") {
       response.end(`${checksum}  ${archiveName}\n`)
-    } else if (request.url === `/releases/download/v0.7.3/${archiveName}`) {
+    } else if (request.url === `/releases/download/v0.7.9/${archiveName}`) {
       response.end(archiveBytes)
     } else {
       response.statusCode = 404
@@ -302,7 +333,7 @@ test("first startup downloads the release binary and extracts under the state di
 
     assert.ok(existsSync(join(state, "bin", "context-guru-proxy")))
     record = JSON.parse(readFileSync(join(state, "install.json"), "utf8"))
-    assert.equal(record.version, "v0.7.3")
+    assert.equal(record.version, "v0.7.9")
     assert.equal(record.managed, true)
     assert.ok(!requested.includes("/releases/latest"), "the plugin must not ask for the latest release")
     assert.equal(config.provider.anthropic.options.baseURL, `http://127.0.0.1:${record.port}/anthropic/v1`)

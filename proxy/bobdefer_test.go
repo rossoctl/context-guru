@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"github.com/rossoctl/context-guru/internal/inbandtest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -88,6 +90,12 @@ func bobDeferHandler(t *testing.T, preset []byte, upstream string, used ...[]str
 // bobDeferHandlerBare is the handler with no history: only real requests build it.
 func bobDeferHandlerBare(t *testing.T, preset []byte, upstream string) *Handler {
 	t.Helper()
+	return bobHandlerPriced(t, preset, upstream, tdPrices{})
+}
+
+// bobHandlerPriced runs preset on Bob's route with the given prices.
+func bobHandlerPriced(t *testing.T, preset []byte, upstream string, prices modelinfo.Pricer) *Handler {
+	t.Helper()
 	cfg, err := config.LoadBytes(preset)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +106,7 @@ func bobDeferHandlerBare(t *testing.T, preset []byte, upstream string) *Handler 
 		t.Fatal(err)
 	}
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{BobUpstream: upstream,
-		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: tdPrices{}})
+		ToolDeferPath: filepath.Join(t.TempDir(), tooldefer.FileName), Prices: prices})
 	t.Cleanup(h.Close)
 	return h
 }
@@ -256,10 +264,10 @@ func TestBobDeferNeverRemovesAKeepListTool(t *testing.T) {
 // A streamed reply that calls our search is answered in band on Bob's route: Bob gets the tool's
 // own call, never ours, and the follow-up declares the tool at the end of `tools`.
 func TestBobDeferStreamedSearchIsAnsweredInBand(t *testing.T) {
-	r1 := ccRole("r1") + ccCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
-		ccCallArgs("r1", 0, `{"names":["office_edit"]}`) + ccFinish("r1", "tool_calls") + ccUsage("r1") + ccDone
-	r2 := ccRole("r2") + ccCallStart("r2", 0, "c2", "office_edit") + ccCallArgs("r2", 0, `{"path":"/w/a.docx"}`) +
-		ccFinish("r2", "tool_calls") + ccUsage("r2") + ccDone
+	r1 := inbandtest.CCRole("r1") + inbandtest.CCCallStart("r1", 0, "c1", tooldefer.ClientSearchName) +
+		inbandtest.CCCallArgs("r1", 0, `{"names":["office_edit"]}`) + inbandtest.CCFinish("r1", "tool_calls") + inbandtest.CCUsage("r1") + inbandtest.CCDone
+	r2 := inbandtest.CCRole("r2") + inbandtest.CCCallStart("r2", 0, "c2", "office_edit") + inbandtest.CCCallArgs("r2", 0, `{"path":"/w/a.docx"}`) +
+		inbandtest.CCFinish("r2", "tool_calls") + inbandtest.CCUsage("r2") + inbandtest.CCDone
 	up := &csUpstream{script: []string{r1, r2}}
 	us := httptest.NewServer(up)
 	defer us.Close()

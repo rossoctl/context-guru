@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
-import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { spawn, spawnSync } from "node:child_process"
@@ -10,14 +10,15 @@ const DEFAULT_PRESET = "off"
 // The picker ladder is a plugin choice. The proxy lists every preset it registers, not this ladder.
 const PRESETS = ["off", "conservative", "medium", "high", "xhigh", "ultrahigh"]
 // The plugin downloads this release unless CONTEXT_GURU_VERSION says otherwise. `strategies` exists
-// from v0.7.1. An older binary cannot give the plugin its strategy table, so there is no fallback.
-const PINNED_VERSION = "v0.7.3"
+// from MIN_VERSION. An older binary cannot give the plugin its strategy table, so there is no fallback.
+const PINNED_VERSION = "v0.7.9"
+const MIN_VERSION = "v0.7.1"
 
 // The strategy table has one owner: the proxy. `context-guru-proxy strategies` prints it as JSON.
 // The plugin keeps no copy. It runs the command with a short time limit. A binary that does not know
 // the word would start serving, so the command gets a loopback port 0 and is killed at the limit.
 export function loadStrategyTable(binaryPath) {
-  const update = `update the proxy to ${PINNED_VERSION} or later (/context-guru-update, or remove the binary so the plugin downloads ${PINNED_VERSION})`
+  const update = `update the proxy to ${MIN_VERSION} or later (/context-guru-update, or remove the binary so the plugin downloads ${PINNED_VERSION})`
   const run = spawnSync(binaryPath, ["strategies"], {
     encoding: "utf8",
     timeout: 5000,
@@ -60,7 +61,7 @@ function strategyFiles(table, dialects) {
   }
 }
 
-// Content capture is always off for a proxy this plugin starts. The owner decided this on 2026-11-10.
+// Content capture is always off for a proxy this plugin starts.
 // The flag wins over the environment in the proxy, and the environment is set too, so no start path can
 // miss it. Every start path goes through these two helpers: the first start, the recovery spawn
 // (which also fixes an older install.json that was written without the flag), and the start script.
@@ -72,9 +73,24 @@ export function captureOffEnv(env = process.env) {
   return { ...env, DASHBOARD_CONTENT: "0" }
 }
 
+function stateRoot() {
+  return process.env.CONTEXT_GURU_STATE || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-opencode")
+}
+
 export function stateDirectory(directory) {
-  const root = process.env.CONTEXT_GURU_STATE || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "context-guru-opencode")
-  return join(root, createHash("sha256").update(directory).digest("hex").slice(0, 16))
+  return join(stateRoot(), createHash("sha256").update(directory).digest("hex").slice(0, 16))
+}
+
+// All projects share one downloaded copy per release, in <root>/bin/<version>/. Each project's
+// bin/context-guru-proxy is a symlink to it, so the scripts and records keep one path per project.
+function sharedBinary(version) {
+  if (!/^v[A-Za-z0-9._-]+$/.test(version ?? "")) return undefined
+  return join(stateRoot(), "bin", version, "context-guru-proxy")
+}
+
+function wantedVersion() {
+  const version = process.env.CONTEXT_GURU_VERSION || PINNED_VERSION
+  return version.startsWith("v") ? version : `v${version}`
 }
 
 function readJSON(path) {
@@ -125,9 +141,10 @@ function releasesBase() {
   return process.env.CONTEXT_GURU_RELEASES_URL || `https://github.com/${REPOSITORY}/releases`
 }
 
-async function downloadBinary(state) {
-  let version = process.env.CONTEXT_GURU_VERSION || PINNED_VERSION
-  if (!version.startsWith("v")) version = `v${version}`
+async function downloadBinary() {
+  const version = wantedVersion()
+  const destination = sharedBinary(version)
+  if (!destination) throw new Error(`CONTEXT_GURU_VERSION is not a release tag: ${version}`)
 
   const { platform, architecture } = releasePlatform()
   const number = version.slice(1)
@@ -149,11 +166,11 @@ async function downloadBinary(state) {
 
   // Extract under the state directory, not os.tmpdir(): the renameSync onto the
   // destination must stay on one filesystem, or it fails with EXDEV wherever /tmp
-  // is tmpfs and the state directory is on disk (common on Linux).
-  const workDirectory = join(state, `download-${process.pid}-${randomBytes(3).toString("hex")}`)
+  // is tmpfs and the state directory is on disk (common on Linux). The rename also
+  // means two projects that download the same release at once never write one file.
+  const workDirectory = join(stateRoot(), "bin", `download-${process.pid}-${randomBytes(3).toString("hex")}`)
   const archivePath = join(workDirectory, "archive.tar.gz")
   const extractDirectory = join(workDirectory, "extract")
-  const destination = join(state, "bin", "context-guru-proxy")
   mkdirSync(extractDirectory, { recursive: true, mode: 0o700 })
   try {
     writeFileSync(archivePath, archive, { mode: 0o600 })
@@ -171,8 +188,9 @@ async function downloadBinary(state) {
     }
     if (!source) throw new Error("release archive does not contain context-guru-proxy")
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 })
+    // Before the rename: another instance may run the shared file as soon as it exists.
+    spawnSync("chmod", ["755", source])
     renameSync(source, destination)
-    spawnSync("chmod", ["755", destination])
   } finally {
     spawnSync("rm", ["-rf", workDirectory])
   }
@@ -181,14 +199,49 @@ async function downloadBinary(state) {
 
 export function findBinaryForTest(state) { return findBinary(state) }
 
+// The release tag a binary reports with --version ("context-guru-proxy 0.7.3 (commit …)" gives v0.7.3).
+// The binary is the source of truth: the update script swaps it and does not rewrite install.json.
+function reportedVersion(path) {
+  const run = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", env: { ...process.env, LISTEN_ADDR: "127.0.0.1:0", CONFIG: "" } })
+  const match = /^context-guru-proxy v?(\d[A-Za-z0-9._-]*)/.exec(run.stdout ?? "")
+  return match ? `v${match[1]}` : undefined
+}
+
 function findBinary(state) {
   const configured = process.env.CONTEXT_GURU_BIN
   if (configured && existsSync(configured)) return { path: configured, managed: false }
   const path = executableOnPath("context-guru-proxy")
   if (path) return { path, managed: false }
   const managed = join(state, "bin", "context-guru-proxy")
-  if (existsSync(managed)) return { path: managed, managed: true, version: readJSON(join(state, "install.json"))?.version }
+  if (existsSync(managed)) return { path: managed, managed: true, version: reportedVersion(managed) ?? readJSON(join(state, "install.json"))?.version }
+  const shared = sharedBinary(wantedVersion())
+  if (shared && existsSync(shared)) return { path: shared, managed: true, version: wantedVersion() }
   return undefined
+}
+
+// Points this project's bin/context-guru-proxy at the shared copy. An older plugin downloaded a copy
+// into the project itself: it moves to the shared place, or goes when the shared place has that
+// version already. A rename on one filesystem is atomic and copies nothing. The caller holds the lock
+// on the state root, so no other instance moves or links the same file at the same time.
+function shareBinary(state, binary) {
+  const link = join(state, "bin", "context-guru-proxy")
+  if (!binary.managed || (binary.path === link && lstatSync(link).isSymbolicLink())) return binary
+  let target = binary.path
+  if (binary.path === link) {
+    target = sharedBinary(binary.version)
+    // The version is not known: keep the copy where it is, as before.
+    if (!target) return binary
+    if (existsSync(target)) rmSync(link)
+    else {
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+      renameSync(link, target)
+    }
+  }
+  mkdirSync(dirname(link), { recursive: true, mode: 0o700 })
+  const temporary = `${link}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`
+  symlinkSync(target, temporary)
+  renameSync(temporary, link)
+  return { ...binary, path: link }
 }
 
 function freePort(start = 8787) {
@@ -222,9 +275,28 @@ async function waitForHealthy(port) {
   return false
 }
 
+// A shell function for the scripts that need STATE and ROOT set. release_shared PATH removes a shared
+// copy of the proxy when no other project still uses it: no other project's symlink points at it, and
+// no other project's install.env records its version.
+const RELEASE_SHARED = `release_shared() {
+  case "$1" in "$ROOT"/bin/*/context-guru-proxy) ;; *) return 0 ;; esac
+  shared_version=$(basename "$(dirname "$1")")
+  for other in "$ROOT"/*/; do
+    other=\${other%/}
+    [ "$other" = "$STATE" ] && continue
+    [ "$(readlink "$other/bin/context-guru-proxy" 2>/dev/null)" = "$1" ] && return 0
+    grep -qxF "version=$shared_version" "$other/install.env" 2>/dev/null && return 0
+  done
+  rm -f "$1"
+  rmdir "$(dirname "$1")" 2>/dev/null || true
+}`
+
 function resetScript(state) {
   return `#!/bin/sh
 set -u
+STATE=${shQuote(state)}
+ROOT=${shQuote(dirname(state))}
+${RELEASE_SHARED}
 PID_FILE=${JSON.stringify(join(state, "proxy.pid"))}
 BIN_FILE=${JSON.stringify(join(state, "bin", "context-guru-proxy"))}
 if [ -f ${JSON.stringify(join(state, "install.env"))} ]; then . ${JSON.stringify(join(state, "install.env"))}; fi
@@ -239,7 +311,11 @@ if [ -f "$PID_FILE" ]; then
   esac
 fi
 rm -f "$PID_FILE"
-if [ "$(head -1 ${JSON.stringify(join(state, "managed-binary"))} 2>/dev/null)" = yes ]; then rm -f "$BIN_FILE"; fi
+if [ "$(head -1 ${JSON.stringify(join(state, "managed-binary"))} 2>/dev/null)" = yes ]; then
+  shared=$(readlink "$BIN_FILE" 2>/dev/null || true)
+  rm -f "$BIN_FILE"
+  [ -n "$shared" ] && release_shared "$shared"
+fi
 printf '%s\\n' 'context-guru: proxy stopped; remove the plugin entry and restart OpenCode to unroute.'
 `
 }
@@ -263,7 +339,7 @@ else
 fi
 if [ -n "\${binary:-}" ] && [ -f "$binary" ]; then
   printf '%s\\n' "binary=$binary" "managed=\${managed:-unknown}" "version=\${version:-unknown}"
-  reported=$("$binary" --version 2>/dev/null | head -1 || true)
+  reported=$( { LISTEN_ADDR=127.0.0.1:0 CONFIG= "$binary" --version 2>/dev/null & pid=$!; ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & watch=$!; wait "$pid"; kill "$watch" 2>/dev/null; } 2>/dev/null | head -1 || true)
   [ -n "$reported" ] && printf '%s\\n' "binary_reports=$reported"
 fi
 [ -n "\${preset:-}" ] && printf '%s\\n' "preset=$preset" "strategy=\${strategy:-}" "dialects=\${dialects:-}"
@@ -300,7 +376,7 @@ STATE=${shQuote(state)}
 if [ -f "$STATE/disabled" ]; then
   rm -f "$STATE/disabled"
   printf '%s\\n' "result=re-enabled"
-  printf '%s\\n' "note=restart OpenCode so providers route through the proxy again"
+  printf '%s\\n' "note=a session that was routed when it started goes back to the proxy when the proxy is healthy; restart OpenCode for a session that started while context-guru was disabled"
 fi
 if [ ! -f "$STATE/install.env" ]; then
   printf '%s\\n' "result=never-installed"
@@ -334,19 +410,31 @@ set -u
 REPO="\${CONTEXT_GURU_REPO:-rossoctl/context-guru}"
 RELEASES="\${CONTEXT_GURU_RELEASES_URL:-https://github.com/\$REPO/releases}"
 STATE=${shQuote(state)}
-if [ ! -f "$STATE/install.env" ]; then
+ROOT=${shQuote(dirname(state))}
+${RELEASE_SHARED}
+if [ -f "$STATE/install.env" ]; then
+  . "$STATE/install.env"
+elif [ -f "$STATE/bin/context-guru-proxy" ]; then
+  # A start that refused a too-old binary writes no install.env. The downloaded binary is still there.
+  binary="$STATE/bin/context-guru-proxy"
+  managed=yes
+else
   printf '%s\\n' "result=never-installed"
   exit 0
 fi
-. "$STATE/install.env"
 if [ "\${managed:-no}" != "yes" ]; then
   printf '%s\\n' "result=external" "binary=\${binary:-}"
   printf '%s\\n' "note=this binary was not downloaded by the plugin; update it where it came from"
   exit 0
 fi
+# The binary says what it is. install.env can be out of date. A binary that does not know --version
+# may start serving instead, so it gets a loopback port 0 and is stopped after 5 s, as in reportedVersion.
+reported=$( { LISTEN_ADDR=127.0.0.1:0 CONFIG= "$binary" --version 2>/dev/null & pid=$!; ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & watch=$!; wait "$pid"; kill "$watch" 2>/dev/null; } 2>/dev/null | head -1 | sed -n 's/^context-guru-proxy v\\{0,1\\}\\([0-9][A-Za-z0-9._-]*\\).*/v\\1/p')
+if [ -n "$reported" ]; then version=$reported; fi
 latest=$(curl -fsSI --max-time 10 "$RELEASES/latest" 2>/dev/null | tr -d '\\r' | sed -n 's/^[Ll]ocation:.*\\/tag\\///p' | head -1)
 case "$latest" in
-  ''|*[!A-Za-z0-9._-]*) printf '%s\\n' "result=lookup-failed" "reason=odd-tag"; exit 1 ;;
+  # The tag names a directory under $ROOT/bin, so "." and ".." are odd too.
+  ''|.*|*[!A-Za-z0-9._-]*) printf '%s\\n' "result=lookup-failed" "reason=odd-tag"; exit 1 ;;
 esac
 printf '%s\\n' "installed=\${version:-unknown}" "latest=$latest"
 if [ "$latest" = "\${version:-}" ]; then
@@ -388,12 +476,23 @@ if [ -f "$STATE/proxy.pid" ]; then
   esac
   rm -f "$STATE/proxy.pid"
 fi
-mv "$replacement" "$binary" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
-chmod 755 "$binary"
-if [ "$(uname -s)" = "Darwin" ]; then xattr -d com.apple.quarantine "$binary" 2>/dev/null || true; fi
-grep -v '^version=' "$STATE/install.env" > "$STATE/install.env.new" || true
-printf '%s\\n' "version=$latest" >> "$STATE/install.env.new"
-mv "$STATE/install.env.new" "$STATE/install.env"
+# Install into the shared place under a temp name, then rename: another project may update at once.
+# Then point this project at it. Another project that uses the old version keeps it.
+shared="$ROOT/bin/$latest/context-guru-proxy"
+old=$(readlink "$binary" 2>/dev/null || true)
+mkdir -p "$ROOT/bin/$latest" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+mv "$replacement" "$shared.tmp.$$" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+chmod 755 "$shared.tmp.$$"
+if [ "$(uname -s)" = "Darwin" ]; then xattr -d com.apple.quarantine "$shared.tmp.$$" 2>/dev/null || true; fi
+mv -f "$shared.tmp.$$" "$shared" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+rm -f "$binary.tmp.$$"
+ln -s "$shared" "$binary.tmp.$$" && mv -f "$binary.tmp.$$" "$binary" || { printf '%s\\n' "result=error" "reason=install"; exit 1; }
+if [ -n "$old" ] && [ "$old" != "$shared" ]; then release_shared "$old"; fi
+if [ -f "$STATE/install.env" ]; then
+  grep -v '^version=' "$STATE/install.env" > "$STATE/install.env.new" || true
+  printf '%s\\n' "version=$latest" >> "$STATE/install.env.new"
+  mv "$STATE/install.env.new" "$STATE/install.env"
+fi
 printf '%s\\n' "result=updated" "version=$latest"
 if [ -f "$STATE/context-guru-start" ]; then
   sh "$STATE/context-guru-start"
@@ -408,6 +507,8 @@ function uninstallScript(state) {
 # context-guru: stop the proxy and disable routing for this project. --yes applies; --purge also removes the binary and state files.
 set -u
 STATE=${shQuote(state)}
+ROOT=${shQuote(dirname(state))}
+${RELEASE_SHARED}
 yes=0
 purge=0
 for arg in "$@"; do
@@ -424,7 +525,7 @@ if [ "$yes" -ne 1 ]; then
   printf '%s\\n' "action=stop-proxy" "action=disable-routing"
   [ "$purge" -eq 1 ] && printf '%s\\n' "action=purge-binary-and-state"
   printf '%s\\n' "apply=sh $STATE/context-guru-uninstall --yes"
-  printf '%s\\n' "note=providers unroute when OpenCode next restarts; /context-guru-install undoes this"
+  printf '%s\\n' "note=open OpenCode sessions send requests straight to the provider at once; with the plugin option fallback: false, providers unroute when OpenCode next restarts; /context-guru-install undoes this"
   exit 0
 fi
 if [ -f "$STATE/proxy.pid" ]; then
@@ -440,10 +541,13 @@ printf 'disabled by context-guru-uninstall\\n' > "$STATE/disabled"
 if [ "$purge" -eq 1 ]; then
   # Remove a binary only when the plugin downloaded it: the marker file says "yes" AND the binary
   # lives in this project's state directory. A binary from PATH or CONTEXT_GURU_BIN is never removed.
+  # That binary is a symlink to a shared copy. The copy goes only with its last user.
+  shared=$(readlink "$STATE/bin/context-guru-proxy" 2>/dev/null || true)
   if [ "$(head -1 "$STATE/managed-binary" 2>/dev/null)" = yes ]; then
     case "\${binary:-}" in "$STATE"/bin/*) rm -f "$binary" 2>/dev/null ;; esac
   fi
   rm -rf "$STATE/bin"
+  [ -n "$shared" ] && release_shared "$shared"
   rm -f "$STATE/install.json" "$STATE/install.env" "$STATE/proxy.yaml" "$STATE/proxy.log" "$STATE/dashboard.db" "$STATE/managed-binary" "$STATE/context-guru-start"
   rm -f "$STATE/settings.env" "$STATE/options.env" "$STATE/strategies.tsv" "$STATE/strategies.aliases" "$STATE/strategies.default"
   rm -f "$STATE/context-guru-reset" "$STATE/context-guru-status" "$STATE/context-guru-update" "$STATE/context-guru-uninstall" "$STATE/context-guru-preset" "$STATE/context-guru-strategy"
@@ -451,7 +555,7 @@ if [ "$purge" -eq 1 ]; then
 else
   printf '%s\\n' "result=uninstalled" "purged=no" "binary_kept=\${binary:-}"
 fi
-printf '%s\\n' "note=restart OpenCode so providers stop routing through the proxy"
+printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; with the plugin option fallback: false, restart OpenCode so providers stop routing through the proxy"
 printf '%s\\n' "undo=/context-guru-install"
 `
 }
@@ -692,7 +796,7 @@ const COMMAND_SPECS = [
     description: "Repair the context-guru proxy and routing for this project",
     script: "context-guru-install",
     intro: "Repair this project's context-guru install.",
-    outro: () => "That block ran just now and already did what it could; it is idempotent, so re-running it is safe. Report its result plainly. If it printed result=re-enabled or a note about restarting OpenCode, tell the user to restart OpenCode so providers route through the proxy again.",
+    outro: () => "That block ran just now and already did what it could; it is idempotent, so re-running it is safe. Report its result plainly. If it printed result=re-enabled or a note about restarting OpenCode, tell the user what the note says: a session that was routed when it started goes back to the proxy without a restart, and a session that started while context-guru was disabled needs an OpenCode restart.",
   },
   {
     name: "context-guru-update",
@@ -706,7 +810,7 @@ const COMMAND_SPECS = [
     description: "Stop the context-guru proxy and disable routing",
     script: "context-guru-uninstall",
     intro: "Uninstall context-guru from this project.",
-    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them to restart OpenCode so providers stop routing through the proxy, and that /context-guru-install undoes this. Never run it with --yes without asking first.",
+    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider (with the plugin option fallback: false, they must restart OpenCode first), and that /context-guru-install undoes this. Never run it with --yes without asking first.",
   },
   {
     name: "context-guru-preset",
@@ -840,7 +944,56 @@ function providerUpstream(original, dialect, own) {
   return proxyUpstreamURL(original)
 }
 
-export function routeProviders(config, port, own) {
+// Fall back only when the proxy cannot have received the request. Node gives ECONNREFUSED in the
+// cause; Bun, which runs OpenCode, gives ConnectionRefused on the error itself.
+function refusedCode(error) {
+  for (const code of [error?.code, error?.cause?.code]) if (code === "ECONNREFUSED" || code === "ConnectionRefused") return code
+  return undefined
+}
+
+function replayable(body) {
+  return body == null || typeof body === "string" || body instanceof ArrayBuffer || ArrayBuffer.isView(body) || body instanceof Blob || body instanceof URLSearchParams
+}
+
+// Per project: { down, until }. "down" sends requests direct; "until" is the end of the window after
+// a failed restart, in which chat.headers starts no new restart.
+const proxyHealth = new Map()
+const OWN_FETCH = Symbol("context-guru fail-open fetch")
+
+// Sends to the proxy while it is usable, else to the upstream the proxy would use: the upstream plus
+// the path after /<dialect> (proxy/proxy.go). The direct request carries the caller's own method,
+// headers, body and signal; only the plugin's session and request-kind headers are removed.
+function failOpenFetch({ state, port, dialect, upstream, inner, client }) {
+  const wrapped = async (input, init) => {
+    // The AI SDK passes a string URL. A Request object, or a URL that is not this proxy's route, goes to
+    // inner unchanged: no fallback and no disabled check.
+    const url = typeof input === "string" || input instanceof URL ? new URL(input) : undefined
+    const prefix = `/${dialect}/`
+    if (!url || url.host !== `127.0.0.1:${port}` || !url.pathname.startsWith(prefix)) return inner(input, init)
+    const direct = () => {
+      const headers = new Headers(init?.headers)
+      headers.delete("x-context-guru-session")
+      headers.delete("x-context-guru-request-kind")
+      return inner(`${upstream.replace(/\/+$/, "")}${url.pathname.slice(prefix.length - 1)}${url.search}`, { ...init, headers })
+    }
+    if (existsSync(join(state, "disabled")) || proxyHealth.get(state)?.down) return direct()
+    try {
+      return await inner(input, init)
+    } catch (error) {
+      const code = refusedCode(error)
+      if (!code || init?.signal?.aborted || !replayable(init?.body)) throw error
+      proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+      let host = "upstream"
+      try { host = new URL(upstream).host } catch {}
+      await safeLog(client, "warn", `proxy refused the connection (${code}); sent the request to ${host} without context-guru`)
+      return direct()
+    }
+  }
+  wrapped[OWN_FETCH] = inner
+  return wrapped
+}
+
+export function routeProviders(config, port, own, fallback) {
   config.provider ||= {}
   const configuredIds = Object.keys(config.provider)
   const modelIds = modelProviderIds(config)
@@ -865,6 +1018,12 @@ export function routeProviders(config, port, own) {
     const provider = config.provider[id] ||= {}
     provider.options ||= {}
     provider.options.baseURL = `http://127.0.0.1:${port}/${dialect}/v1`
+    if (!fallback) continue
+    // A fetch another plugin set earlier is chained. A re-run config hook unwraps our own first.
+    const previous = provider.options.fetch
+    const inner = previous?.[OWN_FETCH] ?? (typeof previous === "function" ? previous : (input, init) => fetch(input, init))
+    const upstream = routes.find((route) => route.id === id).upstream
+    provider.options.fetch = failOpenFetch({ ...fallback, port, dialect, upstream, inner })
   }
   return routes
 }
@@ -955,12 +1114,13 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
   // The download can take minutes. It runs before the lock: it writes a temp name and renames it, so
   // two instances that both download only replace the file with the same bytes.
   let binary = findBinary(state)
-  if (!binary) binary = await downloadBinary(state)
+  if (!binary) binary = await downloadBinary()
   return withLock(dirname(state), async () => {
     // Another instance may have put a binary in place while this one waited. Keep the version we
-    // know: the file on disk does not carry it until install.json is written.
+    // know when the file on disk does not report one.
     const found = findBinary(state)
     if (found) binary = { ...found, version: found.version || binary?.version }
+    binary = shareBinary(state, binary)
     const dialects = [...new Set(routes.map((route) => route.dialect))]
     const table = loadStrategyTable(binary.path)
     const resolved = resolveStrategy(table, requestedStrategy, dialects)
@@ -977,7 +1137,10 @@ async function startProxy({ directory, preset, requestedStrategy, options, route
     const running = existing?.port ? await healthy(existing.port) : false
     let onDisk
     try { onDisk = readFileSync(join(state, "proxy.yaml"), "utf8") } catch {}
-    if (running && existing.fingerprint === fingerprint && onDisk === configText) return { port: existing.port, state }
+    if (running && existing.fingerprint === fingerprint && onDisk === configText) {
+      await safeLog(client, "info", `proxy reused on 127.0.0.1:${existing.port}; recovery: ${join(state, "context-guru-reset")}`)
+      return { port: existing.port, state }
+    }
     // Another setting is wanted: stop this project's old proxy and reuse its port.
     if (running) await stopRecordedProxy(state, existing.port)
 
@@ -1022,50 +1185,166 @@ const proxyRecoveries = new Map()
 // recorded port so routed providers keep working without an OpenCode restart.
 // Single-flight: concurrent requests share one recovery; a failed recovery is
 // retried by the next request, never in a loop.
-async function ensureProxyRunning(directory, client) {
+// With fallback on, a request waits about RESTART_WAIT_MS (plus one health check of up to 1.5 s first);
+// the restart goes on in the background
+// and the request goes direct. After a failed restart, DOWN_WINDOW_MS of requests go direct and
+// start no new restart, so OpenCode's own retries do not each start one.
+const RESTART_WAIT_MS = 5000
+const DOWN_WINDOW_MS = 30000
+async function ensureProxyRunning(directory, client, fallback = false) {
   const state = stateDirectory(directory)
   const record = readJSON(join(state, "install.json"))
   if (!record?.port || !record.binary || !Array.isArray(record.args) || !record.args.length) return
-  if (await healthy(record.port)) return
+  if (fallback && proxyHealth.get(state)?.until > Date.now()) return
+  if (await healthy(record.port)) {
+    if (fallback && proxyHealth.get(state)?.down) await safeLog(client, "info", `proxy is healthy again on 127.0.0.1:${record.port}; requests go through context-guru`)
+    proxyHealth.delete(state)
+    return
+  }
   if (existsSync(join(state, "disabled"))) return
-  const inFlight = proxyRecoveries.get(state)
-  if (inFlight) return inFlight
-  const recovery = withLock(dirname(state), async () => {
-    // Another instance may have restarted it while this one waited for the lock.
-    if (await healthy(record.port)) return
-    await recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client)
-  }).finally(() => proxyRecoveries.delete(state))
-  proxyRecoveries.set(state, recovery)
-  return recovery
+  let recovery = proxyRecoveries.get(state)
+  // One request waits for a restart. Others that come while it runs go direct at once.
+  if (recovery && fallback) {
+    proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+    return
+  }
+  if (!recovery) {
+    recovery = withLock(dirname(state), async () => {
+      // Another instance may have restarted it while this one waited for the lock.
+      if (await healthy(record.port)) return true
+      return recoverProxy(state, readJSON(join(state, "install.json")) ?? record, client, fallback)
+    }).then((ok) => {
+      if (ok) proxyHealth.delete(state)
+      else proxyHealth.set(state, { down: true, until: Date.now() + DOWN_WINDOW_MS })
+    }, (error) => {
+      proxyHealth.set(state, { down: true, until: Date.now() + DOWN_WINDOW_MS })
+      throw error
+    }).finally(() => proxyRecoveries.delete(state))
+    proxyRecoveries.set(state, recovery)
+  }
+  if (!fallback) return recovery
+  let timer
+  const capped = await Promise.race([
+    recovery.then(() => false, () => false),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(true), RESTART_WAIT_MS) }),
+  ])
+  clearTimeout(timer)
+  if (!capped) return
+  proxyHealth.set(state, { down: true, until: proxyHealth.get(state)?.until ?? 0 })
+  await safeLog(client, "warn", `proxy is not healthy after ${RESTART_WAIT_MS / 1000} s; requests go to the provider without context-guru while it restarts`)
 }
 
-async function recoverProxy(state, record, client) {
+async function recoverProxy(state, record, client, fallback = false) {
   const logPath = join(state, "proxy.log")
+  const failed = async (why) => {
+    const direct = fallback ? `; requests go to the provider without context-guru for ${DOWN_WINDOW_MS / 1000} s` : ""
+    await safeLog(client, "error", `proxy recovery failed on 127.0.0.1:${record.port} (${why}); see ${logPath}${direct}`)
+    return false
+  }
   const log = openSync(logPath, "a", 0o600)
   let child
+  let exited
   try {
     child = spawn(record.binary, withCaptureOff(record.args ?? []), { detached: true, stdio: ["ignore", log, log], env: captureOffEnv() })
-    child.once("error", () => {})
-  } catch {
-    return
+    exited = new Promise((resolve) => { child.once("exit", (code, signal) => resolve({ code, signal })); child.once("error", (error) => resolve({ error })) })
+  } catch (error) {
+    return failed(`could not start: ${error?.code ?? "error"}`)
   } finally {
     closeSync(log)
   }
+  // A binary that cannot start at all (missing, not executable) has no pid. Spawn does not throw for it.
+  if (typeof child.pid !== "number") return fallback ? failed("could not start") : false
   child.unref()
-  if (typeof child.pid !== "number") return
-  if (!(await waitForHealthy(record.port))) {
+  const started = Date.now()
+  // With the fallback on, a child that exits, or never starts, fails the restart at once, and requests go
+  // direct. `fallback: false` keeps the old restart: it polls /healthz for the full time, so a wrapper that
+  // starts the proxy in the background and exits still gives a working restart.
+  const health = waitForHealthy(record.port).then((ok) => ({ ok }))
+  const outcome = await (fallback ? Promise.race([health, exited.then((result) => ({ exited: result }))]) : health)
+  if (outcome.exited) {
+    const { error, code, signal } = outcome.exited
+    return failed(error ? `could not start: ${error.code ?? "error"}` : signal ? `exited with signal ${signal}` : `exited with code ${code}`)
+  }
+  if (!outcome.ok) {
     try { process.kill(child.pid, "SIGTERM") } catch {}
-    await safeLog(client, "error", `proxy recovery failed on 127.0.0.1:${record.port}; see ${logPath}`)
-    return
+    return failed(`not healthy in ${Math.round((Date.now() - started) / 1000)} s`)
   }
   writeRecoveryFiles(state, child.pid, record.managed === true)
   await safeLog(client, "info", `proxy recovered on 127.0.0.1:${record.port}`)
+  return true
+}
+
+// Lifecycle signals (#1313). The proxy's keep-alive retires a held cache entry when the client says
+// the session ended or was compacted. OpenCode's own events are the source. A signal carries only a
+// session id, an event name and a reason from the proxy's closed set (proxy/clientsignal.go).
+// Fire and forget: a lost signal only means the keep-alive acts as it does without signals.
+//   OpenCode v1 (event hook, v1.18.29 packages/sdk/js/src/v2/gen/types.gen.ts) and v2 (ctx.event.subscribe,
+//   2.4.1 packages/client/src/promise/generated/types.ts):
+//     session.compacted (v1) / session.compaction.ended (v2) -> SessionStart, compact
+//     session.deleted                                         -> SessionEnd, other
+//     permission.asked, permission.v2.asked (v1 SDK type)     -> Notification, permission_prompt
+//     question.asked (v1 only; v2 has no such event)          -> Notification, elicitation_dialog
+const SIGNAL_EVENTS = {
+  "session.compacted": ["SessionStart", "compact"],
+  "session.compaction.ended": ["SessionStart", "compact"],
+  "session.deleted": ["SessionEnd", "other"],
+  "permission.asked": ["Notification", "permission_prompt"],
+  "permission.v2.asked": ["Notification", "permission_prompt"],
+  "question.asked": ["Notification", "elicitation_dialog"],
+}
+// v2 subscribe takes this list as a filter and ignores names the v2 host does not have (the v1 names).
+export const SIGNAL_EVENT_TYPES = Object.keys(SIGNAL_EVENTS)
+const SIGNAL_TIMEOUT_MS = 1000
+// Bound on the sessions a plugin remembers. The oldest id goes first. A dropped id only means no signal
+// for that session, which is what happens without signals.
+const MAX_SIGNAL_SESSIONS = 256
+
+function signalsOff(env = process.env) {
+  return ["off", "0", "false"].includes(String(env.CONTEXT_GURU_CLIENT_SIGNALS ?? "").trim().toLowerCase())
+}
+
+// One per plugin instance. It signals only for a session that already sent a request through the proxy
+// (noteSession), so a session on a provider this plugin did not route never signals.
+export function createSignaler(fetcher = globalThis.fetch) {
+  let port
+  const sessions = new Set()
+  return {
+    setPort(value) { port = value },
+    noteSession(sessionID) {
+      if (typeof sessionID !== "string" || !sessionID) return
+      sessions.delete(sessionID) // a session seen again counts as newest
+      sessions.add(sessionID)
+      if (sessions.size > MAX_SIGNAL_SESSIONS) sessions.delete(sessions.values().next().value)
+    },
+    handle(type, sessionID) {
+      const mapped = SIGNAL_EVENTS[type]
+      if (!mapped || !port || typeof sessionID !== "string" || !sessions.has(sessionID) || signalsOff()) return
+      const [event, kind] = mapped
+      if (event === "SessionEnd") sessions.delete(sessionID)
+      try {
+        void Promise.resolve(fetcher(`http://127.0.0.1:${port}/signal`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: sessionID, event, kind }),
+          signal: AbortSignal.timeout(SIGNAL_TIMEOUT_MS),
+        })).catch(() => undefined)
+      } catch {
+        // A signal must never break OpenCode.
+      }
+    },
+  }
 }
 
 async function ContextGuruPlugin({ directory, client }, options = {}) {
   const { preset, requestedStrategy } = effectiveSettings(stateDirectory(directory), options)
+  // On by default: when the proxy is down, a request goes to the provider. `fallback: false` turns it off.
+  const fallback = options.fallback !== false
   let routedIds = new Set()
+  const signaler = createSignaler()
   return {
+    event: async ({ event }) => {
+      signaler.handle(event?.type, event?.properties?.sessionID)
+    },
     config: async (config) => {
       const state = stateDirectory(directory)
       try {
@@ -1079,15 +1358,18 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
           return
         }
         const own = recordedRoutes(state)
-        const preview = { provider: config.provider ? structuredClone(config.provider) : {}, model: config.model, small_model: config.small_model, agent: config.agent }
+        // Only the base URLs: a provider option can be a function (another plugin's fetch), which structuredClone refuses.
+        const providers = Object.entries(config.provider ?? {}).map(([id, provider]) => [id, { options: { baseURL: provider?.options?.baseURL } }])
+        const preview = { provider: Object.fromEntries(providers), model: config.model, small_model: config.small_model, agent: config.agent }
         const routes = routeProviders(preview, 0, own)
         if (!routes.length) {
           await safeLog(client, "debug", "no Anthropic or OpenAI provider is configured; leaving OpenCode unchanged")
           return
         }
         const proxy = await startProxy({ directory, preset, requestedStrategy, options, routes, client })
-        routeProviders(config, proxy.port, own)
+        routeProviders(config, proxy.port, own, fallback ? { state, client } : undefined)
         routedIds = new Set(routes.map((route) => route.id))
+        signaler.setPort(proxy.port)
       } catch (error) {
         await safeLog(client, "error", `proxy startup failed: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -1097,11 +1379,20 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
       const id = input.provider?.info?.id ?? input.model?.providerID
       if (!id || !routedIds.has(id)) return
       try {
-        await ensureProxyRunning(directory, client)
+        await ensureProxyRunning(directory, client, fallback)
       } catch {
         // Recovery must never break the request it is trying to save.
       }
-      if (input.sessionID) output.headers["x-context-guru-session"] = input.sessionID
+      if (input.sessionID) {
+        output.headers["x-context-guru-session"] = input.sessionID
+        signaler.noteSession(input.sessionID)
+      }
+      // OpenCode 1 runs its summary request as the built-in "compaction" agent: it is named in
+      // packages/opencode/src/agent/agent.ts (name: "compaction") and fetched in
+      // packages/opencode/src/session/compaction.ts (agents.get("compaction")), v1.19.6. The proxy reads
+      // this mark, not the prompt. This keys on the agent NAME, so a user agent with the same name is
+      // marked too. The opposite miss (no mark) is covered by the prompt match in the proxy.
+      if (input.agent === "compaction") output.headers["x-context-guru-request-kind"] = "compaction"
     },
   }
 }
@@ -1120,6 +1411,7 @@ async function setupV2(ctx) {
   // v2 has no client.app.log; the documented channel is the console.
   const log = { app: { log: async ({ body }) => { (body.level === "error" ? console.error : console.log)(body.message) } } }
   let routedIds = []
+  const signaler = createSignaler()
   // Hooks are registered from inside the provider callback, as soon as the routed ids are known, and
   // each hook checks the routed set at request time. So the order of "callback runs" and
   // "transform() resolves" does not matter: a callback that runs late still gets its hooks, and
@@ -1136,8 +1428,30 @@ async function setupV2(ctx) {
       } catch {
         // Recovery must never break the request it is trying to save.
       }
-      if (event.sessionID) event.request.headers.set("x-context-guru-session", event.sessionID)
+      if (event.sessionID) {
+        event.request.headers.set("x-context-guru-session", event.sessionID)
+        signaler.noteSession(event.sessionID)
+      }
+      // The v2 hook names the request: SessionRequestKind is "primary" | "compaction" | "title" | "generate"
+      // (packages/plugin/src/promise/session.ts, v2.4.1).
+      if (event.kind === "compaction") event.request.headers.set("x-context-guru-request-kind", "compaction")
     }, { providerID: id }))
+  }
+
+  // The v2 subscription is optional: a host without ctx.event only loses the signals.
+  try {
+    const events = ctx.event?.subscribe?.({ types: SIGNAL_EVENT_TYPES })
+    if (events) {
+      void (async () => {
+        try {
+          for await (const event of events) signaler.handle(event?.type, event?.data?.sessionID)
+        } catch {
+          // The stream ended or failed: no more signals, nothing else changes.
+        }
+      })()
+    }
+  } catch {
+    // Same: signals are optional.
   }
 
   try {
@@ -1186,6 +1500,7 @@ async function setupV2(ctx) {
         })
       }
       routedIds = targets.map((target) => target.id)
+      signaler.setPort(proxy.port)
       for (const id of routedIds) hookProvider(id)
     })
     // The transform callback may run after transform() resolves, so do not read routedIds here.

@@ -333,3 +333,18 @@ func TestManualPingRestartsTheOneHourAutomaticClock(t *testing.T) {
 		t.Fatalf("no scheduled ping 59 min after the press (%d)", n)
 	}
 }
+
+// #1279: the cold gate (apply.CacheLifetime) and the keeper (ResolveTier) read the same root-only 1h body alike.
+func TestRootOnlyOneHourBodyIsOneHourForTheGateAndTheKeeper(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-5-5","cache_control":{"type":"ephemeral","ttl":"1h"},"messages":[{"role":"user","content":"hi"}]}`)
+	if d, _ := apply.CacheLifetime(bschemas.Anthropic, "claude-sonnet-5-5", body); d != time.Hour {
+		t.Errorf("CacheLifetime = %v, want 1h", d)
+	}
+	if !ResolveTier(body, Usage{CacheWrite: 100, CacheWrite1h: 100}, true, false) {
+		t.Error("ResolveTier did not resolve 1h")
+	}
+	mixed := []byte(`{"cache_control":{"type":"ephemeral"},"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[]}`)
+	if ResolveTier(mixed, Usage{CacheWrite: 100, CacheWrite1h: 100}, true, true) {
+		t.Error("ResolveTier resolved 1h on a mixed body")
+	}
+}

@@ -12,12 +12,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -533,7 +534,7 @@ func (h *Handler) renderMetrics() string {
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
-		unparsedUsage, unreadableUsage := UsageGaps()
+		unparsedUsage, unreadableUsage := respfacts.UsageGaps()
 		// The two accounting-outage counters (#200). Process-wide, so outside the store cast for
 		// the same reason the stash pair is: the parser is package-level.
 		promHeaderProc(&b, "cg_usage_unparsed_total",
@@ -692,6 +693,17 @@ func (h *Handler) renderMetrics() string {
 				`component="`+escapeLabel(name)+`"`, s.Components[name].DurationMs)
 		}
 	}
+
+	// --- the early wait-cause scan (#1225, #1227) -----------------------------
+	promHeaderProc(&b, "cg_waitcause_early_scan_total",
+		"What the keeper did with the early wait-cause scan at response end, for every recorded request that has a scan (the dashboard on), whether or not its keep-alive is on: used (its counts joined the plan), not_ready (still running, today's plan), unknown (it could not say: work bound, server-held history, panic, cancelled; today's plan). A high not_ready or unknown share means the plan is often today's.", "counter")
+	promLine(&b, "cg_waitcause_early_scan_total", `result="used"`, float64(h.scan.used.Load()))
+	promLine(&b, "cg_waitcause_early_scan_total", `result="not_ready"`, float64(h.scan.notReady.Load()))
+	promLine(&b, "cg_waitcause_early_scan_total", `result="unknown"`, float64(h.scan.unknown.Load()))
+	promHeaderProc(&b, "cg_waitcause_writer_scan_total",
+		"How the dashboard writer got the normalized body for its tracker update: early (reused the scan) or own (normalized it itself).", "counter")
+	promLine(&b, "cg_waitcause_writer_scan_total", `source="early"`, float64(h.scan.writerEarly.Load()))
+	promLine(&b, "cg_waitcause_writer_scan_total", `source="own"`, float64(h.scan.writerOwn.Load()))
 
 	// --- keep-alive credit wiring --------------------------------------------
 	promHeaderProc(&b, "cg_keepalive_rescue_facts_missing_total",

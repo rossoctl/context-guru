@@ -2,8 +2,6 @@ package proxy
 
 import (
 	"fmt"
-	"math"
-	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,105 +9,11 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
-func flatPrice(string) (float64, float64, float64, float64, bool) {
+func flatPrice(string, int64) (float64, float64, float64, float64, bool) {
 	return 3e-6, 15e-6, 3e-7, 3.75e-6, true
-}
-
-func TestAutoRowsScoreEachPlanInClosedForm(t *testing.T) {
-	const t0 = int64(1_786_000_000_000)
-	a := &kvcache.Request{ID: 1, User: "u", ConversationID: "s", TS: t0, UpstreamMs: 2000, CachedContext: 100000, CostKnown: true, HasNext: true, NextTS: t0 + 2000 + 400e3}
-	b := &kvcache.Request{ID: 2, User: "u", ConversationID: "s", TS: t0 + 2000 + 400e3, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	late := &kvcache.Request{ID: 3, User: "u", ConversationID: "s2", TS: t0 + 3*3600e3, UpstreamMs: 1000, CachedContext: 100000, CostKnown: true}
-	until := t0 + 2*3600e3
-	for _, se := range []bool{false, true} {
-		rows := autoRows([]*kvcache.Request{a, b, late}, flatPrice, se, until)
-		if len(rows) != 2 {
-			t.Fatalf("session_end=%v: %d rows, want 2 (the row ending after until-2700s is not resolved)", se, len(rows))
-		}
-		stake, ping := 100000*(3.75e-6-3e-7), 100000*3e-7+7*3e-6+15e-6
-		// a returns 400 s after its response: the first ping (279 s) keeps the entry alive to the return; the second would start after it
-		for k := 1; k <= autoK; k++ {
-			if want := cfScale*stake - cfPingScale*ping; math.Abs(rows[0].Gain[k]-want) > 1e-12 {
-				t.Errorf("K%d on a 400 s return = %v, want %v", k, rows[0].Gain[k], want)
-			}
-		}
-		// b is the session's last response: without the signal every ping is wasted; with it none is sent
-		for k := 1; k <= autoK; k++ {
-			want := -cfPingScale * float64(k) * ping
-			if se {
-				want = 0
-			}
-			if math.Abs(rows[1].Gain[k]-want) > 1e-12 {
-				t.Errorf("session_end=%v: K%d on the last response = %v, want %v", se, k, rows[1].Gain[k], want)
-			}
-		}
-	}
-}
-
-// synthRows: the fleet favours K3; the target tenant returns about 400 s after each response, so K1 is all it needs.
-func synthRows(target string, targetSessions int) []predictive.AutoRow {
-	rng := rand.New(rand.NewSource(7))
-	const t0 = int64(1_786_000_000_000)
-	var rows []predictive.AutoRow
-	add := func(scope string, sessions int, best int) {
-		for s := 0; s < sessions; s++ {
-			for i := 0; i < 30; i++ {
-				g := make([]float64, autoK+1)
-				for k := 1; k <= autoK; k++ {
-					g[k] = 0.2*rng.NormFloat64() - 0.1*float64(k)
-					if k >= best {
-						g[k] += 1
-					}
-				}
-				rows = append(rows, predictive.AutoRow{Scope: scope, Session: fmt.Sprintf("%s-%d", scope, s), EndMs: t0 + int64(s*30+i)*60e3, Gain: g})
-			}
-		}
-	}
-	for u := 0; u < 8; u++ {
-		add(fmt.Sprintf("fleet-%d", u), 80, 3)
-	}
-	add(target, targetSessions, 1)
-	return rows
-}
-
-func TestAutoSpecPicksAndGatesThePlan(t *testing.T) {
-	const t0 = int64(1_786_000_000_000)
-	until := t0 + 80*30*60e3 + 3600e3
-	spec, rec := autoSpec(synthRows("me", 80), nil, "me", t0, until, false, "")
-	ev := spec["evidence"].(map[string]any)
-	if rec != "ship" || ev["subject"] != "auto(K1)" {
-		t.Fatalf("a tenant that only needs K1: rec %s, subject %v, evidence %v", rec, ev["subject"], ev["paired_vs_baselines"])
-	}
-	seg := spec["policy"].(map[string]any)["segments"].([]any)[0].(map[string]any)["rule"].(map[string]any)
-	if seg["plan"] != "K1" {
-		t.Errorf("shipped rule %v, want plan K1", seg)
-	}
-	// a tenant that looks like the fleet gets the fleet plan and the baseline recommendation
-	spec, rec = autoSpec(synthRows("fleet-0", 0), nil, "fleet-0", t0, until, false, "")
-	if rec != "baseline" {
-		t.Errorf("a tenant like the fleet: rec %s, want baseline", rec)
-	}
-	// a tenant whose own plan failed the gate runs the fleet plan, whatever its own refit says: K1 suits its first 75% of sessions well and its
-	// last 25% slightly worse than K3 (0.2 less), so its own whole-window plan is still K1, but K1 loses on the held-out last 30%
-	me := synthRows("me", 80)
-	for i := range me {
-		if me[i].Scope == "me" && me[i].EndMs >= t0+60*30*60e3 {
-			me[i].Gain[1] -= 0.2
-		}
-	}
-	spec, rec = autoSpec(me, nil, "me", t0, until, false, "")
-	rule := spec["policy"].(map[string]any)["segments"].([]any)[0].(map[string]any)["rule"].(map[string]any)
-	if rec == "ship" || rule["plan"] != "K3" {
-		t.Errorf("a non-ship build must run the fleet plan K3: rec %s, rule %v, tuner %v", rec, rule, spec["evidence"].(map[string]any)["tuner"])
-	}
-	// too little history
-	if _, rec = autoSpec(synthRows("me", 3), nil, "me", t0, until, false, ""); rec != "insufficient_data" {
-		t.Errorf("3 sessions: rec %s, want insufficient_data", rec)
-	}
 }
 
 func TestCacheCampaignAutoBuildRunsInProcess(t *testing.T) {
@@ -229,32 +133,6 @@ func TestWriteSpecValidatedKeepsTheOldSpecOnABadOne(t *testing.T) {
 	var got map[string]any
 	if err := readJSONFile(filepath.Join(dir, "spec.json"), &got); err != nil || len(got["policy"].(map[string]any)["segments"].([]any)) != 0 {
 		t.Errorf("the good spec was overwritten: %v %v", got, err)
-	}
-}
-
-// No plan of an auto campaign, and no active campaign decision, schedules a ping later than the configured keep-alive interval.
-func TestAutoPlansNeverPingLaterThanTheConfiguredInterval(t *testing.T) {
-	const t0 = int64(1_786_000_000_000)
-	spec, _ := autoSpec(synthRows("me", 80), nil, "me", t0, t0+80*30*60e3+3600e3, false, "")
-	for name, p := range spec["menu"].(map[string]any) {
-		for _, g := range p.(map[string]any)["gaps_s"].([]float64) {
-			if g > campaignKeepAlive5mIdle {
-				t.Errorf("plan %s has a %v s gap, above the configured %d s", name, g, campaignKeepAlive5mIdle)
-			}
-		}
-	}
-	// the campaign sets the count; the spacing stays the tenant's interval (60 s stays 60 s, as without a campaign), the shipped 240 s if none
-	for _, conf := range []time.Duration{0, 60 * time.Second, 240 * time.Second, 270 * time.Second} {
-		want := conf
-		if conf == 0 {
-			want = campaignKeepAlive5mIdle * time.Second
-		}
-		for _, idle := range []float64{autoX, 280, 300} {
-			got := predDecision{k: 3, idleS: idle, active: true}.apply(CachePolicy{KeepAlive: true, Idle: conf, MaxPings: 2})
-			if got.Idle != want || got.MaxPings != 3 {
-				t.Errorf("a %v s campaign plan under a %v interval: %v x%d, want %v x3", idle, conf, got.Idle, got.MaxPings, want)
-			}
-		}
 	}
 }
 

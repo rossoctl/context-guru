@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 const fiveMin = int64(5 * 60 * 1000)
@@ -77,15 +79,7 @@ func TestARestartRecoversRecencyPerThread(t *testing.T) {
 	const now = int64(1_700_000_000_000)
 	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "s1", Model: "m", TokensBefore: 10, Status: 200})
 	rec.Record(&Event{TS: now + 420_000, TenantID: "t1", SessionID: "s1", ThreadID: "a:S", Model: "m", TokensBefore: 10, Status: 200})
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int64
-		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
-		if n == 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the rows are stored", func() bool { return rec.Stats().Written == 2 })
 	rec.Close()
 
 	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})

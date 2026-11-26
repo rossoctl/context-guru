@@ -81,9 +81,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dispatch"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Key names one tracked THREAD of one session (#423). Thread "" is the primary thread.
@@ -132,13 +133,13 @@ type Policy struct {
 	// Zero means the shipped default (modelinfo.AnthropicDefaultKeepAliveIdle1h and MaxPings1h).
 	Idle1h     time.Duration
 	MaxPings1h int
-	// MaxUSDPerPing refuses a ping whose projected cost exceeds this. PER PING, because ping
-	// cost is bimodal (p50 $0.0004, p99 $0.2275, max $0.3780) while a per-SESSION budget
-	// truncates exactly the long large-prefix sessions holding the value — capping the
-	// window's pings per session at 20 drops the net from +$164 to $92.34.
+	// MaxUSDPerPing is an opt-in flat dollar cap per ping. Pings read it through PingCap(): 0 means
+	// the operator set none and the value rule alone decides (PingVerdict); a negative value also
+	// means no cap. The summary and sweep substitutes read it the same way, through
+	// PingCap() and SubstituteVerdict (#1439): 0 means no flat cap, and the value rule decides.
 	//
-	// Read it through Ceiling(), never directly: zero here means UNCONFIGURED, and for a spend
-	// guard that has to resolve to the default rather than to infinity.
+	// It is PER PING and not per session, because ping cost is bimodal (p50 $0.0004, p99 $0.2275,
+	// max $0.3780 before #1407). A manager strategy replaces it only with a value other than 0.
 	MaxUSDPerPing float64
 	// MaxBodyBytes is the largest request body the keeper holds for one thread (a memory guard).
 	// Zero means MaxBodyBytes (32 MiB). Set LegacyMaxBodyBytes (8 MiB) for the old limit. Read it through
@@ -169,6 +170,17 @@ type Policy struct {
 	// behavior before #858: MaxPings for every wait. The zero Policy has it off, so a host that builds a
 	// Policy by hand keeps the old behavior until it asks.
 	WaitPlan bool
+	// OneHourOnWait turns on the 1-hour-on-wait ping (#1243), MAIN AGENT ONLY: for the main thread on the 5-minute tier whose
+	// wait is long (LongWait), the first ping carries every cache marker at 1 hour and is the only ping
+	// of that wait. Needs WaitPlan.
+	OneHourOnWait bool
+	// OneHourRebuildTokens is the D fallback's threshold: on a costly-switch route, a main thread runs as auto
+	// until its first cold rebuild of a prefix of at least this many tokens, which is written at 1 hour (#1261).
+	// 0 = 150,000. NEGATIVE turns D off (a costly route falls back to plain auto). Read only with OneHourOnWait.
+	OneHourRebuildTokens int
+	// OneHourAlways is the C opt-in: the main thread writes at 1 hour from its first request, with no pings.
+	// Explicit only; ON MOST USERS IT DOES NOT PAY OFF (hosted +22% against auto, laptop -25%; #1261).
+	OneHourAlways bool
 	// ToolWaitMaxPings, BackgroundExtraPings and HumanExtraPings tune the plan. Zero means the shipped
 	// default (DefaultToolWaitMaxPings, DefaultBackgroundExtraPings, DefaultHumanExtraPings). Read only
 	// while WaitPlan is on.
@@ -196,7 +208,7 @@ type Policy struct {
 // manager strategy with HeadTTL1h, whose band allows up to 3590 s) and is left alone: no 5-minute
 // Idle can be that long, because config and the override band refuse it.
 func (p Policy) ForOneHour() Policy {
-	if p.Idle >= 300*time.Second {
+	if p.Idle >= OneHourIdleFloor {
 		p.MaxPings = min(p.MaxPings, modelinfo.AnthropicMaxKeepAliveMaxPings1h)
 		return p
 	}
@@ -274,7 +286,11 @@ func (p Policy) BodyLimit() int {
 	return p.MaxBodyBytes
 }
 
-// Ceiling is the per-ping cost guard that is actually ENFORCED.
+// Ceiling is the old flat guard, where zero means DefaultMaxUSDPerPing. No keeper path reads it any
+// more: pings (#1428) and substitutes (#1439) use the value rule and PingCap. It stays as the pinned
+// default the config loader mirrors.
+//
+// It was the per-ping cost guard that was ENFORCED.
 //
 // The whole of this method is the sentinel. `MaxUSDPerPing == 0` means "nobody configured
 // one", and the shipped code read that as "no cap": `MaxUSDPerPing <= 0 || cost <= cap`. On
@@ -309,15 +325,11 @@ func Disabled() bool {
 	return v == "off" || v == "0" || v == "false"
 }
 
-// headTTLBytesPerToken is the factor the old head-TTL gate used (len(body)/4). It equals
-// config.HeadTTLBytesPerToken; keepalive does not import config.
-const headTTLBytesPerToken = 4
-
 // HeadTTLGateBytes is the head-TTL size gate in bytes of the request body: HeadTTLMinBytes, or the
 // deprecated HeadTTLMinTokens x 4 when only that is set. 0 means the upgrade is off.
 func (p Policy) HeadTTLGateBytes() int {
 	if p.HeadTTLMinBytes > 0 {
 		return p.HeadTTLMinBytes
 	}
-	return p.HeadTTLMinTokens * headTTLBytesPerToken
+	return p.HeadTTLMinTokens * config.HeadTTLBytesPerToken
 }

@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/components/offload"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
 )
@@ -452,7 +452,7 @@ func spanFor(fillFrac, ceilingFrac float64) (float64, bool) {
 // is a pure function under test — no resolver, no network, no clock.
 type windowFn func(model string) (tokens int, exact bool)
 
-// pointFn resolves a model's compaction point (internal/compactionpoint) for a window. The dashboard builds
+// pointFn resolves a model's compaction point (compactionpoint) for a window. The dashboard builds
 // one that puts the operator's compaction_point from the MODEL_PRICES table in front of the bootstrap table,
 // the way it already reads the operator's window. With no field set it is compactionpoint.For.
 type pointFn func(model string, window int) compactionpoint.Point

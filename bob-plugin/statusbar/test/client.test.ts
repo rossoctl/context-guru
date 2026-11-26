@@ -8,6 +8,10 @@ import * as path from 'node:path'
 import { getJson, MAX_BODY_BYTES, poll, readPort, stateDir } from '../src/client'
 import { render } from '../src/model'
 
+// A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+// CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+const timing = process.env.CG_TIMING_TESTS === '1'
+
 type Reply = { status: number, body: unknown }
 type Routes = Record<string, Reply | (() => Reply)>
 
@@ -78,7 +82,7 @@ test('getJson times out on a proxy that never answers', async (t) => {
   const port = (server.address() as net.AddressInfo).port
   const start = Date.now()
   await assert.rejects(getJson('127.0.0.1', port, '/healthz', 200), /timeout/)
-  assert.ok(Date.now() - start < 2000)
+  if (timing) assert.ok(Date.now() - start < 2000)
 })
 
 test('routed and up: renders ctx, clock and saved from the fake proxy', async (t) => {
@@ -187,7 +191,7 @@ test('a server that drips bytes fails within the total deadline', async (t) => {
   t.after(() => proxy.close())
   const start = Date.now()
   await assert.rejects(getJson('127.0.0.1', proxy.port, '/healthz', 300), /timeout/)
-  assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`)
+  if (timing) assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`)
 })
 
 // A proxy restart can close the socket after the headers and part of the body. Node then emits
@@ -205,7 +209,7 @@ test('a reply cut off mid-body fails within the total deadline', { timeout: 3000
   const port = (proxy.address() as net.AddressInfo).port
   const start = Date.now()
   await assert.rejects(getJson('127.0.0.1', port, '/healthz', 300))
-  assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`)
+  if (timing) assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`)
 })
 
 test('a body over 1 MiB fails', async (t) => {

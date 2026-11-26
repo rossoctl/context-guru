@@ -34,7 +34,7 @@ func TestCacheAttributionOnlyUsesKnownExpiry(t *testing.T) {
 		{"openai", "gpt-5.5", 0},
 		{"gemini", "gemini-3-pro", 0},
 	} {
-		if got := cacheAttributionTTLMs(tc.provider, tc.model, false); got != tc.want {
+		if got := (*capture)(nil).attributionTTLMs(tc.provider, tc.model, false); got != tc.want {
 			t.Errorf("%s/%s: TTL = %d, want %d", tc.provider, tc.model, got, tc.want)
 		}
 	}
@@ -52,7 +52,7 @@ func TestCacheAttributionTTLFollowsTheBilledTier(t *testing.T) {
 		{"anthropic", "claude-sonnet-5", false, (5 * time.Minute).Milliseconds()},
 		{"openai", "gpt-5.5", true, 0},
 	} {
-		if got := cacheAttributionTTLMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
+		if got := (*capture)(nil).attributionTTLMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
 			t.Errorf("%s/%s oneHour=%v: TTL = %d, want %d", tc.provider, tc.model, tc.oneHour, got, tc.want)
 		}
 	}
@@ -127,7 +127,13 @@ func fakeUpstreamUsage(t *testing.T, in, cacheRead, cacheWrite int) *httptest.Se
 // dashHandler wires a real pipeline + recorder in front of a fake upstream.
 func dashHandler(t *testing.T, up string, opts dash.Options) (*Handler, *dash.Recorder) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	return dashHandlerCfg(t, up, opts, "preset: codesafe\n")
+}
+
+// dashHandlerCfg is dashHandler with the proxy config given as YAML text.
+func dashHandlerCfg(t *testing.T, up string, opts dash.Options, cfgText string) (*Handler, *dash.Recorder) {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(cfgText))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,6 +636,7 @@ func checkSpend(t *testing.T, spends []time.Duration, budget time.Duration) {
 const maxSmallBodySpend = 30 * time.Millisecond
 
 func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
+	testutil.RequireTiming(t)
 	checkSpend(t, dashboardSpends(t, 50, 2), maxSmallBodySpend)
 }
 
@@ -639,6 +646,7 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 const maxMaxContentSpend = 25 * time.Millisecond
 
 func TestDashboardCaptureAddsNoRequestLatencyAtMaxContent(t *testing.T) {
+	testutil.RequireTiming(t)
 	checkSpend(t, dashboardSpends(t, 20, 24, "accBegin", "accEnd", "accWait", "accBilledTTL", "accCompute"), maxMaxContentSpend)
 }
 

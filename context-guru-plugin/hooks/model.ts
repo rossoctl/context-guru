@@ -10,6 +10,10 @@ type Entry = {
   end_ts?: number
   last_ts?: number
   ttl_s?: number
+  /** ttl_s is 3600 only because of a free 1-hour keep-alive ping on a route not yet proven to grant it. */
+  ttl_unproven?: boolean
+  /** ttl_s is 3600 because the last touch was a free 1-hour keep-alive ping (proven or not): a manual ping would shorten it. */
+  free_hour_ping?: boolean
   held_until_ms?: number
   pings_left?: number
   next_ping_ms?: number
@@ -69,7 +73,7 @@ export function fiveHourWeights(x: unknown): FiveHourWeights | undefined {
 
 /** The LEARNED write weight for this entry's tier (ttl_s 3600 is the 1-hour tier, 300 the 5-minute one), or undefined
  * when the fit did not learn that tier. A weight the fit did not learn is the API price scaled to the account's spend,
- * a guess, so the band does not show it as a share (owner's decision, David Amid, #1135, 2026-11-12). With the tier
+ * a guess, so the band does not show it as a share (#1135). With the tier
  * unknown: the tier the fit learned (5-minute when it learned both). */
 function writeWeight(w: FiveHourWeights, tier: '5m' | '1h' | undefined): number | undefined {
   if (tier === '1h') return w.learned1h ? w.write1h : undefined
@@ -196,11 +200,15 @@ function thread(e: Entry, now: number, fallbackId: string): ThreadView {
     warmUsd: num(e.next_warm_usd),
     coldUsd: cold && cold > 0 ? cold : undefined,
     tokens: num(e.prefix_tokens),
-    writeTier: e.ttl_s === 3600 ? '1h' : e.ttl_s === 300 ? '5m' : undefined,
+    // The tier the entry was BILLED at. An unproven hour is the clock's belief, not a write: the entry was written at 5
+    // minutes, and next_cold_usd is priced at that tier, so the 5-hour share's cold figure uses it too.
+    writeTier: e.ttl_unproven === true ? '5m' : e.ttl_s === 3600 ? '1h' : e.ttl_s === 300 ? '5m' : undefined,
+    isUnproven: e.ttl_unproven === true,
+    isFreeHourPing: e.free_hour_ping === true,
     saved: num(e.saved_usd),
     isHeld: num(e.held_until_ms) !== undefined,
     // What the per-second clock is computed from: a newer document that moves it must replace the stored one.
-    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), num(e.held_until_ms), num(e.pings_left), num(e.next_ping_ms)].join(','),
+    anchor: [num(e.last_ts), num(e.end_ts), num(e.ttl_s), e.ttl_unproven === true ? 'u' : '', e.free_hour_ping === true ? 'h' : '', num(e.held_until_ms), num(e.pings_left), num(e.next_ping_ms)].join(','),
     ...clockOf(e, now),
     nextPingS: nextPingIn(e, now),
   }
@@ -218,8 +226,9 @@ function nextPingIn(e: Entry, now: number): number | undefined {
 }
 
 /** The one rule for the band's Ping button and the pane's "Ping now": show it when the cache is warm, the proxy can
- * ping, and no automatic ping fires before the cache expires. */
-export const showPing = (v: View): boolean => v.main.isWarm && v.pingable !== false && v.main.nextPingS === undefined
+ * ping, no automatic ping fires before the cache expires, and the entry is not at 1 hour from a free 1-hour ping (a press sends
+ * 5-minute markers and would move it back to 5 minutes, #1259). The status line has no Ping button, so it has no twin of this rule. */
+export const showPing = (v: View): boolean => v.main.isWarm && v.pingable !== false && v.main.nextPingS === undefined && !v.main.isFreeHourPing
 
 /** While the button is hidden for a planned ping: `↻ next ping 4:12` (`↻ ping 4:12` on a narrow band), `↻ pinging…` at 0:00. */
 export const nextPingWords = (v: View, narrow: boolean): string | undefined => {
@@ -273,7 +282,8 @@ export function cacheClock(t: ThreadView): { isCold: boolean; glyph: string; bar
     isCold: false,
     glyph: expiring ? '◐' : '●',
     bar: '█'.repeat(cells) + '░'.repeat(CACHE_BAR_CELLS - cells),
-    time: clock(left) + (critical ? '!' : ''),
+    // `1h?` while the hour is a free 1-hour ping's on a route not yet proven to grant it (statusline.py `_cache_segment`).
+    time: clock(left) + (critical ? '!' : '') + (t.isUnproven ? ' 1h?' : ''),
     color,
     ping: pinged,
   }
@@ -322,7 +332,7 @@ function mainEntry(s: Entry, main: Entry): Entry {
   if (main === s) return s
   const out: Entry = { ...s }
   for (const k of ['last_ts', 'end_ts', 'ttl_s', 'prefix_tokens', 'rewrite_usd'] as const) if (main[k] !== undefined) (out as any)[k] = main[k]
-  for (const k of ['held_until_ms', 'pings_left', 'next_ping_ms', 'next_warm_usd', 'next_cold_usd'] as const) (out as any)[k] = main[k]
+  for (const k of ['held_until_ms', 'pings_left', 'next_ping_ms', 'next_warm_usd', 'next_cold_usd', 'ttl_unproven', 'free_hour_ping'] as const) (out as any)[k] = main[k]
   out.keepalive = s.keepalive === true && s.last_ts === main.last_ts
   return out
 }
@@ -418,6 +428,7 @@ const REASONS: Record<string, string> = {
   'not opted in': "Ping isn't enabled for this install yet; it turns on in your next session (or run /context-guru:install)",
   'below limits': 'keep-alive is on, but this thread is below its minimum size or limits',
   'over budget': 'one ping would cost more than the per-ping limit',
+  'not worth it': 'the planned pings would cost more than the cache miss they protect',
   'too large': 'context too large to hold for Ping',
   unsupported: "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
   'pings used': 'the planned keep-alive pings have run out',
@@ -435,6 +446,7 @@ const SHORT_REASONS: Record<string, string> = {
   'not opted in': 'on next session',
   'below limits': 'below limits',
   'over budget': 'over ping limit',
+  'not worth it': 'ping not worth it',
   'too large': 'context too large',
   unsupported: 'not supported',
   'pings used': 'pings used up',

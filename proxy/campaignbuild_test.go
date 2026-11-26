@@ -2,13 +2,13 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -115,7 +115,7 @@ func TestCacheCampaignBuildLifecycle(t *testing.T) {
 	body := []byte(`{"model":"aws/claude-opus-4","stream":true,"messages":[{"role":"user","content":"x"}],"tools":[{"name":"a"}]}`)
 	u := Usage{CacheRead: 150000, CacheWrite: 2000, FreshInput: 5, Output: 300, StopReason: "end_turn"}
 	arr := f.h.keeper.pred.arrive(tid, "s1", "", time.Now().Add(-20*time.Second))
-	d, ok := f.h.keeper.predictiveDecide(arr, false, tid, "s1", "", "anthropic", time.Now().Add(-20*time.Second), body, "claude-cli/1.0", u)
+	d, ok := f.h.keeper.predictiveDecide(arr, false, tid, "s1", "", "anthropic", time.Now().Add(-20*time.Second), body, agent.IdentifyUserAgent("claude-cli/1.0"), u)
 	if !ok || d.active {
 		t.Fatalf("shadow decision = %+v ok=%v", d, ok)
 	}
@@ -137,7 +137,7 @@ func TestCacheCampaignBuildLifecycle(t *testing.T) {
 		t.Fatalf("forced active = %d: %s", w.Code, w.Body)
 	}
 	arr = f.h.keeper.pred.arrive(tid, "s2", "", time.Now())
-	d, _ = f.h.keeper.predictiveDecide(arr, false, tid, "s2", "", "anthropic", time.Now(), body, "claude-cli/1.0", u)
+	d, _ = f.h.keeper.predictiveDecide(arr, false, tid, "s2", "", "anthropic", time.Now(), body, agent.IdentifyUserAgent("claude-cli/1.0"), u)
 	if !d.active {
 		t.Fatal("active campaign decided passively")
 	}
@@ -190,13 +190,13 @@ func TestCacheCampaignSegmentsDecideThePlan(t *testing.T) {
 	}
 	body := []byte(`{"model":"aws/claude-haiku-4-5","messages":[]}`)
 	arr := f.h.keeper.pred.arrive(tid, "s", "", time.Now())
-	d, _ := f.h.keeper.predictiveDecide(arr, false, tid, "s", "", "anthropic", time.Now(), body, "claude-cli", Usage{CacheRead: 200000, StopReason: "end_turn"})
+	d, _ := f.h.keeper.predictiveDecide(arr, false, tid, "s", "", "anthropic", time.Now(), body, agent.IdentifyUserAgent("claude-cli"), Usage{CacheRead: 200000, StopReason: "end_turn"})
 	if d.k != 0 {
 		t.Errorf("the haiku segment says never ping, got k=%d", d.k)
 	}
 	body = []byte(`{"model":"aws/claude-opus-4","messages":[]}`)
 	arr = f.h.keeper.pred.arrive(tid, "s", "t", time.Now())
-	d, _ = f.h.keeper.predictiveDecide(arr, false, tid, "s", "t", "anthropic", time.Now(), body, "claude-cli", Usage{CacheRead: 500, StopReason: "end_turn"})
+	d, _ = f.h.keeper.predictiveDecide(arr, false, tid, "s", "t", "anthropic", time.Now(), body, agent.IdentifyUserAgent("claude-cli"), Usage{CacheRead: 500, StopReason: "end_turn"})
 	if d.k != 2 || d.idleS != 280 {
 		t.Errorf("small opus prefix should take the fixed K2 plan, got k=%d idle=%v", d.k, d.idleS)
 	}
@@ -218,7 +218,7 @@ func TestCacheCampaignWithTheLightGBMModel(t *testing.T) {
 	body := []byte(`{"model":"aws/claude-never-seen","stream":true,"max_tokens":8192,"messages":[{"role":"user","content":"x"}],"tools":[{"name":"a"}]}`)
 	for i, sess := range []string{"s1", "s1", "s2"} {
 		arr := f.h.keeper.pred.arrive(tid, sess, "", time.Now().Add(time.Duration(i-5)*time.Second))
-		d, ok := f.h.keeper.predictiveDecide(arr, false, tid, sess, "", "anthropic", time.Now().Add(time.Duration(i-5)*time.Second), body, "claude-cli/1.0",
+		d, ok := f.h.keeper.predictiveDecide(arr, false, tid, sess, "", "anthropic", time.Now().Add(time.Duration(i-5)*time.Second), body, agent.IdentifyUserAgent("claude-cli/1.0"),
 			Usage{CacheRead: 120000, CacheWrite: 800, FreshInput: 5, Output: 300, StopReason: "tool_use", Live: &LiveFacts{Messages: 3, Tools: 1, MaxTokens: 8192, Effort: "high", CacheTTL: "ephemeral_5m", Agent: "claude-cli", Stream: true}})
 		if !ok || d.k < 0 || d.k > 4 {
 			t.Fatalf("decision %d = %+v ok=%v", i, d, ok)
@@ -226,24 +226,6 @@ func TestCacheCampaignWithTheLightGBMModel(t *testing.T) {
 	}
 	if s, _ := f.h.keeper.pred.forTenant(tid).snapshot(); s.Decisions != 3 {
 		t.Errorf("stats %+v", s)
-	}
-}
-
-// The shadow scorer's constants are the ones the build's replay was calibrated with.
-func TestShadowConstantsMatchTheEngineCalibration(t *testing.T) {
-	b, err := os.ReadFile("../scripts/campaign/engine_calibration.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c struct {
-		Benefit float64 `json:"benefit_scale"`
-		Ping    float64 `json:"ping_scale"`
-	}
-	if err := json.Unmarshal(b, &c); err != nil {
-		t.Fatal(err)
-	}
-	if c.Benefit != cfScale || c.Ping != cfPingScale {
-		t.Fatalf("calibration file has %v / %v, proxy/predictive.go has %v / %v", c.Benefit, c.Ping, cfScale, cfPingScale)
 	}
 }
 

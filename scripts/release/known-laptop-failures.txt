@@ -1,0 +1,2 @@
+# Tests that fail on an unchanged origin/main on the laptop. local-tests.sh does not count them as a
+# failure. One test name per line. The Bob install suite is skipped in part-a.sh itself (#1221).

@@ -148,8 +148,8 @@ func observationOf(c reuseCase) kvcache.Observation {
 			Known: true, Input: c.InputRate, Output: c.InputRate * 5.0,
 			CacheRead: c.InputRate * 0.10, Write5m: c.InputRate * 1.25,
 			Write1h:          c.InputRate * 2.00,
-			PingInputTokens:  1,
-			PingOutputTokens: 1,
+			PingInputTokens:  kvcache.DefaultPingInputTokens,
+			PingOutputTokens: kvcache.DefaultPingOutputTokens,
 		},
 	}
 }

@@ -17,10 +17,10 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // THE COLD APPLY (#404, points 3 and 4).
@@ -57,8 +57,10 @@ const (
 	eventApplyPanic           = "sweep_apply_panic"
 	eventFalseRef             = "sweep_false_ref"
 	// The warm path (#491) applies through the same code and counts apart.
-	eventAppliedWarm  = "sweep_applied_warm"
-	eventFalseRefWarm = "sweep_false_ref_warm"
+	eventAppliedWarm = "sweep_applied_warm"
+	// eventV3DroppedPrefix + a rule name (or "judge") counts the v3 drops each one chose, on the request.
+	eventV3DroppedPrefix = "sweep_v3_dropped_"
+	eventFalseRefWarm    = "sweep_false_ref_warm"
 )
 
 // gateApplyAlreadyMarked: a held drop's output carries a marker one of our components made, so it is
@@ -424,6 +426,10 @@ type SweepExpandNote struct {
 	Overlap bool
 	// Warm: the first expand was of a drop applied on a warm request (#491).
 	Warm bool
+	// Rules counts the first expands of sweep v3 drops by what chose each one: a rule name, or "judge".
+	// One per owner thread that had a first expand: with no thread, every owner of the marker gets one,
+	// and each owner raised its own dropped event. The host counts expands per rule with it (#1191).
+	Rules map[string]int
 }
 
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the
@@ -460,6 +466,10 @@ func NoteSweepExpand(st store.Store, markerID string, tokens int, threadKey stri
 			putDrop(st, rec)
 			if rec.Rule != "" {
 				noteV3Expand(rec.Rule)
+				if note.Rules == nil {
+					note.Rules = map[string]int{}
+				}
+				note.Rules[rec.Rule]++
 			}
 			if !note.First {
 				note.First, note.Overlap = true, overlap
@@ -583,24 +593,66 @@ func changePoint(raw []bschemas.ChatMessage, h heldAnswer) int {
 // ---------------------------------------------------------------------------------------------------
 // The apply.
 
-// sweepColdRequest is the one test for "the cache is gone": apply's own verdict (Ctx.ColdCache), which
-// carries a clock margin. Shadow mode and the apply use it alike, so shadow reports what the apply
-// would do. CachePhase(0) also calls the minute before the margin cold, which is the wrong error here.
+// sweepColdFor is the request's one cache verdict (#1191 D4): sweepVerdict without its reason. On a
+// route with no known cache lifetime and no cache_control (IBM Bob's), the phase is unknown on every
+// request and counts as cold. The provider's report on the thread's previous turn settles it: a turn
+// that read the cache means the cache is live. The read is a token count, metadata only. It is recorded
+// only when warm is on (ResolveWarmQuestion), so with warm off the verdict is the phase test alone.
+// The read is one turn old and has no age limit: after a long idle the first request still counts as
+// live. That is accepted on purpose. That request rewrites the cache, so a question after it reads a
+// live cache, and a held answer meets the warm gate, the stricter one: the worst case is a missed cold
+// apply, not a broken cache (#1196 review).
+func sweepColdFor(c *components.Ctx) bool {
+	cold, _ := sweepVerdict(c)
+	return cold
+}
+
+// The reasons of the cache verdict (#1196, the owner's counter). Each request counts exactly one, as the
+// event eventVerdictPrefix + reason. Counts only, no content.
+const (
+	eventVerdictPrefix = "sweep_cache_verdict_"
+	// verdictKnownCold: the phase is known and the cache is gone.
+	verdictKnownCold = "known_cold"
+	// verdictKnownWarm: the phase is known and the cache is live (warm or pre-expiry).
+	verdictKnownWarm = "known_warm"
+	// verdictUnknownPrefix: the phase is unknown, but the request has a known cached prefix.
+	verdictUnknownPrefix = "unknown_prefix"
+	// verdictUnknownLive: the phase is unknown, and the previous turn read the cache (the #1196 rule).
+	verdictUnknownLive = "unknown_live"
+	// verdictUnknownCold: the phase is unknown, and the previous turn read nothing.
+	verdictUnknownCold = "unknown_cold"
+)
+
+// sweepVerdict is the one test for "the cache is gone", with its reason. sweepColdFor returns only the
+// verdict, so the counted reason cannot differ from the verdict the sweep acts on.
+//
+// The base is apply's own verdict (Ctx.ColdCache), which carries a clock margin. Shadow mode and the
+// apply use it alike, so shadow reports what the apply would do. CachePhase(0) also calls the minute
+// before the margin cold, which is the wrong error here.
 //
 // It is the SAME test the summary reserve graduates on (ColdApplyPhase, #688): cold, or unknown. One
 // narrowing for the sweep: an unknown phase on a request that still has a known cached prefix
-// (CacheAware with MaxCachedIdx >= 0) is NOT cold. Unknown there means "cannot say how much life is
-// left", not "gone", and a drop would rewrite a live prefix. The summary never removes content from
-// inside the prefix, so it can afford the wider test.
-func sweepColdRequest(c *components.Ctx) bool {
+// (CacheAware with MaxCachedIdx >= 0) is NOT cold (unknown_prefix). Unknown there means "cannot say how
+// much life is left", not "gone", and a drop would rewrite a live prefix. The summary never removes
+// content from inside the prefix, so it can afford the wider test.
+func sweepVerdict(c *components.Ctx) (cold bool, reason string) {
 	if c == nil {
-		return false
+		return false, ""
 	}
 	p := c.CachePhase(0)
 	if !ColdApplyPhase(p) {
-		return false
+		return false, verdictKnownWarm
 	}
-	return !(p == components.CachePhaseUnknown && c.CacheAware && c.MaxCachedIdx >= 0)
+	if p != components.CachePhaseUnknown {
+		return true, verdictKnownCold
+	}
+	if c.CacheAware && c.MaxCachedIdx >= 0 {
+		return false, verdictUnknownPrefix
+	}
+	if warmLastRead(thread.Key(c.Session, c.Thread)) > 0 {
+		return false, verdictUnknownLive
+	}
+	return true, verdictUnknownCold
 }
 
 // maxApplyAttempts bounds how often a panicking cold apply gives the answer back.
@@ -615,7 +667,7 @@ func SweepApplyPanics() int64 { return sweepApplyPanics.Load() }
 // coldStep runs at the top of every request of the sweep, outside shadow mode. It replays earlier
 // drops, scans for references to them, and applies a held answer when the request is cold or its
 // prefix changed. It returns the stash keys of the drops it wrote or replayed.
-func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) (keys []string, changed int) {
+func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx, cold bool) (keys []string, changed int) {
 	if c == nil || c.Store == nil || c.Session == "" || req == nil {
 		return nil, 0
 	}
@@ -633,7 +685,7 @@ func (e *ExtractSweep) coldStep(req *bschemas.BifrostChatRequest, rep *component
 	}
 
 	// 3. A held answer.
-	ak, ac := e.applyHeld(req, rep, c, tkey)
+	ak, ac := e.applyHeld(req, rep, c, tkey, cold)
 	keys, changed = append(keys, ak...), changed+ac
 	return keys, changed
 }
@@ -826,9 +878,9 @@ type warmApply struct {
 // applyHeld applies the thread's held answer when the request is cold, or when its prefix changed (the
 // drops after the change point). Anything else leaves the answer held and the request unchanged.
 func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
-	tkey string) (keys []string, changed int) {
+	tkey string, cold bool) (keys []string, changed int) {
 	if !e.v3 {
-		return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey)
+		return e.applyHeldFrom(storeHeld{c.Store}, nil, req, rep, c, tkey, cold)
 	}
 	var protected map[string]bool
 	var claimed []string
@@ -840,7 +892,7 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 	}}
 	var before map[string]bool
 	src.onClaim = func() { before = v3MarkedIDs(c, req) }
-	keys, changed, dryDrops := e.applyHeldFromDry(src, nil, req, rep, c, tkey)
+	keys, changed, dryDrops := e.applyHeldFromDry(src, nil, req, rep, c, tkey, cold)
 	if dryDrops > 0 {
 		// DRY RUN: a cold or changed-prefix cut that was decided and not applied.
 		C, cs := e.v3CutPoint(c)
@@ -864,15 +916,15 @@ func (e *ExtractSweep) applyHeld(req *bschemas.BifrostChatRequest, rep *componen
 // their place. Every other step is the same: claim, recheck, apply with a marker and a stash, commit
 // the drop records, restore on a panic.
 func (e *ExtractSweep) applyHeldFrom(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
-	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int) {
-	keys, changed, _ = e.applyHeldFromDry(src, warm, req, rep, c, tkey)
+	rep *components.Report, c *components.Ctx, tkey string, cold bool) (keys []string, changed int) {
+	keys, changed, _ = e.applyHeldFromDry(src, warm, req, rep, c, tkey, cold)
 	return keys, changed
 }
 
 // applyHeldFromDry is applyHeldFrom that also reports how many drops a DRY RUN decided and did not make. It is 0
 // unless sweep v3's dry_run is on. The cold apply (warm == nil) reads it back without becoming a warm apply.
 func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bschemas.BifrostChatRequest,
-	rep *components.Report, c *components.Ctx, tkey string) (keys []string, changed int, dry int) {
+	rep *components.Report, c *components.Ctx, tkey string, cold bool) (keys []string, changed int, dry int) {
 	dryCount := 0
 	defer func() { dry = dryCount }()
 
@@ -887,7 +939,6 @@ func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bs
 	if c.RawInput != nil {
 		raw = c.RawInput
 	}
-	cold := sweepColdRequest(c)
 	// warmGated: a warm apply on an UNCHANGED prefix, the one case the cold apply never touches. It is
 	// let through only by the economic gate below. A cold request, or a CHANGED prefix, is the cold
 	// apply's own case exactly as #695 defines it: the provider rewrites from there on anyway, so the
@@ -1131,6 +1182,10 @@ func (e *ExtractSweep) applyHeldFromDry(src heldSource, warm *warmApply, req *bs
 		if e.v3 {
 			for _, p := range pending {
 				noteV3Dropped(p.rec.TKind)
+				if p.rec.Rule != "" {
+					// Per rule, on the request: the dashboard keeps it per route, across a restart (#1191).
+					rep.Event(eventV3DroppedPrefix + p.rec.Rule)
+				}
 			}
 		}
 		if warmGated {

@@ -15,7 +15,7 @@ func (Bob) Gateway() agent.GatewaySpec {
 }
 
 // WantsReply is true for the profile GET, and for the model/info GET when not hosted. The
-// model-info half is local-only: Bob is not deployed on hosted for now (owner, 2026-11-12), so the
+// model-info half is local-only: Bob is not deployed on hosted for now, so the
 // rule was not designed for hosted Bob. See docs/reference/hosted-vs-local.md.
 func (Bob) WantsReply(c agent.ControlCall) bool {
 	return IsProfile(c.Method, c.Path) || (!c.Hosted && IsModelInfo(c.Method, c.Path))

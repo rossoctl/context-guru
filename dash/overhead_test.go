@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // BenchmarkRecord measures the ENTIRE cost the dashboard adds to a request
@@ -65,6 +67,7 @@ func BenchmarkObserve(b *testing.B) {
 // anything a caller could perceive. It is a REGRESSION guard: if someone later
 // moves I/O onto the capture path, this fails.
 func TestCaptureOverheadIsNegligible(t *testing.T) {
+	testutil.RequireTiming(t)
 	r, err := NewRecorder(Options{DBPath: ":memory:", QueueSize: 1 << 16})
 	if err != nil {
 		t.Fatal(err)

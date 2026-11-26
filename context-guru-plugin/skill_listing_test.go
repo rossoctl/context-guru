@@ -15,7 +15,7 @@ import (
 // model's listing: `disable-model-invocation: true` in Claude Code, `policy.allow_implicit_invocation: false`
 // in a Codex skill's agents/openai.yaml. The user still runs it by name.
 var displayOnlySkills = []string{"status", "dashboard", "chart", "fill", "heatmap", "timeline", "session",
-	"watch", "doctor", "statusline", "uninstall", "update"}
+	"watch", "doctor", "statusline", "uninstall", "update", "install-beta"}
 
 // maxListedDescription is the longest description a skill in the model's listing may carry, in characters.
 const maxListedDescription = 220

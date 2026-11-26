@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // rsRow is one stored request of the restart-seed tests (#994).
@@ -32,15 +34,7 @@ func restartWithRows(t *testing.T, seedAt int64, rows ...rsRow) *Recorder {
 		rec.Record(&Event{TS: w.ts, TenantID: "t1", SessionID: "s", ThreadID: w.thread, Model: w.model, Status: w.status,
 			KeepAlive: w.keepalive, CacheRead: w.read, CacheWrite: w.write, CacheWrite1h: w.write1h})
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int64
-		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
-		if int(n) == len(rows) {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the rows are stored", func() bool { return rec.Stats().Written == int64(len(rows)) })
 	rec.Close()
 	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
 	if err != nil {

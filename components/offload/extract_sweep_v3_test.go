@@ -13,12 +13,12 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Tests for SWEEP V3 (#491): rules, protection, one big cut at a sweet spot.
@@ -83,6 +83,8 @@ type v3Rig struct {
 	window  int
 	after   []v3T // calls appended after the filler
 	noKA    bool
+	// unknown makes the cache phase unknown, as on IBM Bob's route (#1191).
+	unknown bool
 }
 
 func newV3Rig(t *testing.T, session, cfg string) *v3Rig {
@@ -111,6 +113,9 @@ func (r *v3Rig) request(p int) (*bschemas.BifrostChatRequest, *components.Report
 	c.PrevBilledInput, c.PrevBilledInputThread = p, p
 	if r.noKA {
 		c.CanKeepAlive = func() bool { return false }
+	}
+	if r.unknown {
+		c.CacheAware, c.CacheTTLMs, c.MaxCachedIdx = false, 0, 3
 	}
 	rep := &components.Report{Component: "extract_llm_sweep"}
 	if _, err := r.e.Offload(req, rep, c); err != nil {
@@ -193,6 +198,20 @@ func TestV3SweetSpotUsesTheOperatorCompactionPoint(t *testing.T) {
 	_, rep = r.request(125_000)
 	if rep.Events[eventAppliedWarm] != 0 || r.refused("not_in_sweet_spot") == 0 {
 		t.Fatalf("window C = 200k: 125k is below 140k. events %v refused %v", rep.Events, v3Counters().Refused)
+	}
+}
+
+// #1196 review. On a route with an unknown cache phase (IBM Bob's), a request after a turn that read the
+// cache goes through the v3 step and its warm apply, not the cold cut.
+func TestV3OnAnUnknownPhaseAfterACacheReadCutsWarm(t *testing.T) {
+	r := newV3Rig(t, "v3-unknown", v3Rule)
+	r.unknown = true
+	r.window, r.c, r.cSource = 200_000, 167_000, string(compactionpoint.Operator)
+	r.request(0)
+	ResolveWarmQuestion(r.session, "", true, 5000)
+	_, rep := r.request(125_000)
+	if rep.Events[eventAppliedWarm] != 2 {
+		t.Fatalf("events = %v, want 2 warm drops through the v3 gate: the previous turn read the cache", rep.Events)
 	}
 }
 

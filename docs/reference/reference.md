@@ -28,7 +28,7 @@ carrying a transcript that is, by definition, already this large:
 
 - **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
   — may read up to 128 MiB. The proxy finds it by the opening of the agent's summary prompt
-  (`isAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
+  (`thread.IsAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
   32 MiB it is bypassed**: the proxy forwards it untouched, counts it as
   `components.agent_compaction.gates.oversize_bypass`, and still marks the dashboard row
   `agent_compaction`. The pipeline is too slow on a body that large. A measured 40 MiB body took
@@ -260,7 +260,7 @@ with the expand call is withheld.
 
 `sse_expand_after_stream` is the counter that keeps that trade honest. If it is a meaningful
 fraction of `sse_streamed`, the peek is letting real expand calls through and the fix is to
-splice the continuation into the live stream instead (see `proxy/ssepeek.go`).
+splice the continuation into the live stream instead (see `inband/sse.go`).
 
 #### Freeze-replay health
 
@@ -480,7 +480,7 @@ configuration is on screen:
 ```json
 {
   "scope": "server",
-  "config": { "preset": "codesmart", "pipeline": ["format", "…"], "…": "…" },
+  "config": { "preset": "conservative", "pipeline": ["format", "…"], "…": "…" },
   "description": "The configuration this proxy resolved at startup. …"
 }
 ```
@@ -856,7 +856,7 @@ Always explicit — nothing infers it from the rest of the configuration.
 ### Example
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
@@ -874,7 +874,7 @@ for every component's config block.
 
 | Flag / env | Default | Purpose |
 |---|---|---|
-| `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. `codesmart` is the SWE-bench arm and must be asked for by name. |
+| `--preset` / `PRESET` | `conservative` | Pipeline preset when no `--config`. The six current presets are `off`, `conservative`, `medium`, `high`, `xhigh` and `ultrahigh`. `conservative` is the default. The obsolete name `house` runs the same pipeline. Other presets are [obsolete](presets.md#obsolete-presets) but still load. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
 | `--listen` / `LISTEN_ADDR` | `:4000` | Listen address. The flag exists so the port is visible in `ps` and to a supervisor; before it, the address reached the process only through the environment. |
 | `--version` | — | Print version and commit, then exit. |
@@ -943,6 +943,12 @@ public map does not list either.
 `in`. Unset or 0, it is 2.0x (Anthropic's rate). Set it when a gateway bills the 1-hour write at
 another rate, for example `1.0` for the input rate. A 1-hour write never costs less than a
 5-minute write, so a value below the entry's 5-minute rate gives the 5-minute rate.
+
+`flat: true` turns the built-in prompt-size tiers off for one entry. Some models bill every token
+at higher rates when the prompt is large (for example gpt-5.5 above 272,000 tokens, Claude Haiku 5.5
+above 100,000). The proxy adds these tiers to a price-file entry by default. Set `flat: true` when
+your gateway bills one flat rate. The key is per entry. It does not pass to another entry. Absent,
+or `false`, the built-in tiers apply. A value that is not `true` or `false` stops the load.
 
 These are list prices, not credentials, and the file holds no secret. A malformed one is a
 **startup error** rather than a fallback: a price list that silently failed to load is
@@ -1020,7 +1026,7 @@ DASHBOARD_DB=/var/lib/context-guru/dashboard.db \
 DASHBOARD_RETENTION=720h \
 DASHBOARD_MAX_BYTES=2147483648 \
 DASHBOARD_TRUSTED_CIDRS=10.0.0.0/8,192.168.0.0/16 \
-context-guru-proxy --preset codesmart
+context-guru-proxy --preset conservative
 ```
 
 ### Hosted mode, cold storage, and disk pressure

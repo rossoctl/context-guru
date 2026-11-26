@@ -48,6 +48,50 @@ Past examples. Read these PRs to see the shape of a good fix:
 - A comment like "same as X, but ...", "mirrors X", "kept in step with X", or "this package cannot
   import X". A test that exists only to keep two copies equal.
 
+## Second pattern: logic in a host package
+
+The host packages are `proxy/`, `proxyapp/`, `cmd/context-guru-proxy` and `dash/`. Business
+logic there is a copy that a second host (Cortex, bifrost) does not have. Use the test in
+`CLAUDE.md`, *What goes in the proxy*: would Cortex have to copy this code to behave the same?
+
+- **When:** before each release. The integrator runs this mode on the host-package diff since the
+  last tag: `git diff <last-tag>..origin/main -- proxy proxyapp cmd/context-guru-proxy dash`.
+- **Signs:** a new non-handler function in a host package that decides, scores, prices or parses
+  wire format; a constant with a library twin; a comment such as "mirrors X"; a host function that
+  calls three or more library functions in a fixed order (that order is a host contract).
+- **Report** each leak like a duplicate: the logic, its `file:line`, the library package it
+  belongs in, and whether the library already has a copy that differs.
+- **Past examples.** Read these to see the shape of a leak:
+  - Keep-alive policy choice: the order of account, strategy, campaign and session override lived
+    only in `proxy/keepalive.go` (`recordTouch`, `resolvePolicyWindows`). `keepalive` got only the
+    final `Policy`.
+  - Calibrated constants: the campaign scoring constants (`cfTC=296.5`, `cfScale=0.948`) and the
+    fidelity miss rates per model family sat in `proxy/predictive.go` and `proxy/adaptreplay.go`.
+  - A copy that differs: `rowFloor` in `proxy/adaptcache.go` gave some waits the 80k floor, where
+    the keeper gives them 20k.
+  - Wire format read for meaning: the accountant's body scan, cache marks and envelope diff lived
+    in `proxy/accountant_*.go`, so the savings figure needed proxy-only code.
+  - A fixed call order: the steps before and after `apply` for each request (inject, repair, defer,
+    then record billed input, resolve the summary, touch the keeper) exist only in `proxy/proxy.go`.
+
+## Third pattern: client rule outside agent.Identify
+
+A rule that names one client belongs in `agent.Identify`. Use the test in `CLAUDE.md`,
+*Client-specific code*: does the code name one client?
+
+- **When:** before each release, with the host-leak mode. Scan the diff since the last tag:
+  `git diff <last-tag>..origin/main -- '*.go'`. A full run reads every Go file.
+- **Signs:** `Header.Get("x-<vendor>-`, `claude-code`, `codex`, `opencode`, `bobshell` or a
+  client's prompt phrase outside `agent/`; library code that reads User-Agent; a rule that finds a
+  client by route path; a client rule with no stated fallback. Pi has no plain-string sign, because
+  "pi" matches too much code. Look for the `x-context-guru-client` value Pi sends (in the `agent/pi` package)
+  outside `agent/`.
+- **Report** each one like a duplicate: the rule, its `file:line`, and the agent package it
+  belongs in. Say whether the code also leaks a host boundary. Report it once, as a client rule.
+- A client rule that already has an open issue is not reported again. Link that issue in the report.
+  Example: the Claude Code `metadata.user_id` read in `session/session.go` is a known client rule
+  outside `agent.Identify`.
+
 ## Phase 1: find and report
 
 1. Make a read-only worktree from `origin/main`. Do not touch the main checkout.

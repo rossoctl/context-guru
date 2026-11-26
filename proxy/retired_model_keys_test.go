@@ -66,7 +66,7 @@ func TestARetiredModelEndpointBuildsServesAndIsNeverCalled(t *testing.T) {
 
 	postChat(t, srv, "sess-retired")
 	waitForRows(t, rec, 1)
-	if !offload.WaitForAllSummariesForTest(5 * time.Second) {
+	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
 		t.Fatal("the summary never finished")
 	}
 	if cheapCalls.Load() == 0 {

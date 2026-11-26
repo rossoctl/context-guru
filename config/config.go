@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/rossoctl/context-guru/components"
@@ -89,7 +90,7 @@ type ExpandConfig struct {
 // caller asking, so it is opt-in per account, capped, and reported per ping.
 type CacheConfig struct {
 	// Strategy names a set of the keys below (see strategy.go): none, auto, 1-ping, 2-ping,
-	// 1-hour-head, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
+	// 1-hour-head, 1-hour-on-wait, 1-hour-always, 30-min-ping. The proxy fills the keys the file does not set. A key the file sets wins. Empty:
 	// no strategy, and the file behaves as it always did. An unknown name is a config error.
 	Strategy string `yaml:"strategy"`
 	// KeepAlive turns on the idle keep-alive: for a session that has been idle
@@ -108,8 +109,8 @@ type CacheConfig struct {
 	// timeout = 300 s, the 5-minute lifetime. Measured on a live proxy: 92 of 95 failed pings were
 	// 60 s timeouts, and at 270 a ping that times out returns about 30 s after the cache expired,
 	// so it can only lose the cache (#707). 240 lowers that risk; it does not remove it, because a
-	// ping that runs to its timeout at 240 s still leaves no time to retry. The owner chose 240 and
-	// asked for it to be measured (#716). The earlier 270 choice (#435) was for robustness to where
+	// ping that runs to its timeout at 240 s still leaves no time to retry. The value 240 needs a
+	// measurement (#716). The earlier 270 choice (#435) was for robustness to where
 	// the provider's cache cliff sits, from replays that did not count failed pings.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
@@ -146,8 +147,34 @@ type CacheConfig struct {
 	// 0 = DefaultKeepAliveIdle1h (3540 = 59 min) and DefaultKeepAliveMaxPings1h (1).
 	KeepAliveIdleSeconds1h int `yaml:"keepalive_idle_seconds_1h"`
 	KeepAliveMaxPings1h    int `yaml:"keepalive_max_pings_1h"`
-	// KeepAliveMaxUSDPerPing refuses a ping whose projected cost exceeds this. 0 =
-	// DefaultKeepAliveMaxUSDPerPing.
+	// KeepAliveOneHourOnWait turns on the 1-hour-on-wait ping (#1243), MAIN AGENT ONLY. With it, the main
+	// thread on the 5-minute tier, when it waits for a person, a teammate, background work or an unknown cause gets ONE
+	// ping, at the usual first-ping time, with every cache marker relabelled to 1 hour, and no further
+	// ping on that wait. On the gateway measured on 2026-11-19 the switch is a read, not a rewrite,
+	// so the entry lives 1 hour for the price of one read. A tool wait and EVERY subagent thread behave as
+	// without it. The keeper checks the first 1-hour ping's usage and stops the switch on a route where
+	// it costs a rewrite. It needs the wait plan (WaitPlan), which the proxy turns on by default.
+	KeepAliveOneHourOnWait bool `yaml:"keepalive_one_hour_on_wait"`
+	// KeepAliveOneHourRebuildTokens is the D fallback's threshold of 1-hour-on-wait (#1261). On a route where
+	// the 5m to 1h switch is costly (a rewrite), a main thread runs as auto until its first cold rebuild of a
+	// prefix of at least this many tokens. That rebuild is written at 1 hour, and from then on the thread
+	// writes at 1 hour and gets no pings. Simulated at 150,000 tokens: hosted -12% against auto, owner's laptop
+	// -25%. 0 = DefaultKeepAliveOneHourRebuildTokens. NEGATIVE (-1) turns D off: a costly route then falls back
+	// to plain auto.
+	KeepAliveOneHourRebuildTokens int `yaml:"keepalive_one_hour_rebuild_tokens"`
+	// KeepAliveOneHourAlways is the C opt-in (#1261): the MAIN agent writes at 1 hour from its first request,
+	// on any route. It is an explicit opt-in and never a default: ON MOST USERS IT DOES NOT PAY OFF. Simulated
+	// on Bedrock-shaped data (main threads only): hosted, 97 main sessions: +22% cost against auto, 77 of 97
+	// worse, the 1-hour premium 39% of the cost. The owner's laptop: -25%. See the strategy 1-hour-always and
+	// docs/how-to/cache-strategies.md.
+	KeepAliveOneHourAlways bool `yaml:"keepalive_one_hour_always"`
+	// KeepAliveMaxUSDPerPing is an OPT-IN flat cap: it refuses a ping whose projected cost exceeds
+	// this. 0 (the default) means the operator set none, and only the value rule applies: a planned
+	// ping chain must cost less than the miss it protects (keepalive.Policy.PingVerdict). The
+	// loader does not fill the field, so a set value is always the operator's own. Summary and
+	// sweep calls that replace a ping follow the same rule (#1439): unset means no flat cap, and a call
+	// is allowed when its cost is below the miss it protects. A set value still caps each call.
+	// DefaultKeepAliveMaxUSDPerPing is no longer a cap for them.
 	//
 	// PER PING and not per session, which is the opposite of the obvious design and is
 	// measured. Ping cost is bimodal — p50 $0.0004, mean $0.0084, p99 $0.2275, max $0.3780 —
@@ -217,16 +244,17 @@ type CacheConfig struct {
 	// instead — and simulates net positive at every head share, +$20.19 at f=0.10 to
 	// +$60.56 at f=0.30.
 	//
-	// It is still off, because on the models that carry this service's spend the tier does not
-	// arrive. Measured live, one request each with the head labelled 1h:
-	// aws/claude-haiku-4-5 was GRANTED (ephemeral_1h_input_tokens 36,251 of 36,574 written),
-	// aws/claude-sonnet-5 was silently downgraded (0 of 48,212, and an otherwise normal 200).
-	// So the ttl field DOES reach the provider — Haiku honouring it proves that — and it is
-	// Bedrock's model coverage that refuses: the Claude 4.5 family, not the Opus 5 / 4.8 /
-	// Sonnet 5 this service runs. Zero 1h writes appear in 19,805 production requests, which is
-	// the same fact from the billing side. So this ships implemented, verifiable and off:
-	// Usage.CacheWrite1h is what says whether flipping it on did anything, and while that is
-	// zero on a model the honest projection for it is $0.
+	// It is off by default, and it protects only the head. Whether the provider grants the 1-hour
+	// tier depends on the model and the provider, and it changes over time. Measured with fresh
+	// writes on this gateway: aws/claude-haiku-4-5 GRANTED (ephemeral_1h_input_tokens 36,251 of
+	// 36,574 written); aws/claude-sonnet-5 REFUSED on the earlier date (0 of 48,212 written at 1h,
+	// an otherwise normal 200); on 2026-11-19 direct requests to the same gateway (litellm 1.108.4,
+	// Bedrock), each writing a fresh ~12.6k-token system block with ttl 1h, were GRANTED on
+	// claude-sonnet-5 (12,632), claude-sonnet-5-5 (12,635), claude-opus-4-8 (12,630),
+	// claude-opus-5-5 (12,636) and claude-haiku-5-5 (12,632). So read Usage.CacheWrite1h on a
+	// request that WROTE the entry, per model, and do not assume either way. A zero on a request that
+	// only read the head says nothing: a read writes nothing. The head is a small part of a Claude
+	// Code prompt and other sessions keep it warm, so for long waits see the 1-hour-on-wait strategy.
 	HeadTTL1h bool `yaml:"head_ttl_1h"`
 	// HeadTTLMinBytes gates the 1h head on the request's own size, in bytes of the request body.
 	// 0 = the deprecated head_ttl_min_tokens x 4 when that is set, else DefaultHeadTTLMinBytes
@@ -271,6 +299,9 @@ const (
 	DefaultKeepAliveMaxUSDPerPing = 0.50
 	// DefaultKeepAliveMaxBodyBytes mirrors keepalive.MaxBodyBytes (32 MiB).
 	DefaultKeepAliveMaxBodyBytes = 32 << 20
+	// DefaultKeepAliveOneHourRebuildTokens is the D fallback's threshold (#1261): 150,000 tokens.
+	DefaultKeepAliveOneHourRebuildTokens = 150000
+
 	// DefaultKeepAliveMinPrefix is the general floor: 80000 (#435). It applies to a main thread that
 	// waits for a person or for an unknown cause. DefaultKeepAliveToolWaitMinPrefix replaces it for a tool wait,
 	// background work, a teammate and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
@@ -321,14 +352,14 @@ func (c CacheConfig) Resolved() CacheConfig {
 	if c.KeepAliveMaxPings1h <= 0 {
 		c.KeepAliveMaxPings1h = DefaultKeepAliveMaxPings1h
 	}
-	if c.KeepAliveMaxUSDPerPing <= 0 {
-		c.KeepAliveMaxUSDPerPing = DefaultKeepAliveMaxUSDPerPing
-	}
 	if c.KeepAliveMaxBodyBytes <= 0 {
 		c.KeepAliveMaxBodyBytes = DefaultKeepAliveMaxBodyBytes
 	}
 	if c.KeepAliveMinPrefixTokens <= 0 {
 		c.KeepAliveMinPrefixTokens = DefaultKeepAliveMinPrefix
+	}
+	if c.KeepAliveOneHourRebuildTokens == 0 {
+		c.KeepAliveOneHourRebuildTokens = DefaultKeepAliveOneHourRebuildTokens
 	}
 	if c.KeepAliveToolWaitMaxPings <= 0 {
 		c.KeepAliveToolWaitMaxPings = DefaultKeepAliveToolWaitMaxPings
@@ -555,8 +586,19 @@ func (c *Config) applyPreset() error {
 // 234,437, `below_min_tokens` 64,831, **acted 0 of 5,752 requests**, and an independent
 // sweep found 0 convertible candidates in 11.67M tokens. It was costing 1.53 ms and a
 // TextTokens call per tool message to convert nothing.
+//
+// CURRENT AND OBSOLETE PRESETS (#1345). Six presets are current: off, conservative, medium,
+// high, xhigh, ultrahigh. They are the effort ladder the plugin preset pickers offer. The
+// other 15 are OBSOLETE: cache, safe, balanced, aggressive, coding, mcp, agent, general,
+// summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm. They stay in
+// this map so old configs load and published numbers stay reproducible. They run exactly as
+// before. Do not pick one for a new setup, and do not copy one into a doc example. `conservative`
+// is the binary and tenant default. `house` is an alias of it and runs the same pipeline. Any
+// wording below that calls an obsolete preset "recommended" is historical.
 var presets = map[string][]string{
 	"off": {}, // passthrough: no components (baseline / A-B control)
+	// OBSOLETE (#1345): cache, safe, balanced, aggressive, coding, mcp, agent, general,
+	// summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm.
 	// cache: the volatile-tail split and NOTHING else. This is the preset a stranger
 	// evaluating context-guru on their own Claude Code sessions is pointed at, and the
 	// reason it exists is that it can be verified by reading this one line: no content is
@@ -582,10 +624,13 @@ var presets = map[string][]string{
 	//
 	// Anthropic-family only, and the docs say so: cachesplit is a no-op on implicit
 	// prefix-cache backends (vLLM, llm-d) — see apply/prefixsplit.go.
-	"cache":      {"cachesplit"},
+	// OBSOLETE (#1345).
+	"cache": {"cachesplit"},
+	// OBSOLETE (#1345): safe, balanced, aggressive.
 	"safe":       {"format", "textclean", "searchfold", "cachesplit"},
 	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap", "cachesplit"},
 	"aggressive": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "smartcrush", "extract", "extract_llm", "linecap", "cachesplit"},
+	// OBSOLETE (#1345): coding, mcp.
 	// coding: deterministic only, no model calls. It named `skeleton` until 2026-08 — which is behind the
 	// `cg_skeleton` build tag and therefore NOT registered in a normal binary, so
 	// `preset: coding` failed to build with `unknown component "skeleton"` for every user
@@ -594,6 +639,7 @@ var presets = map[string][]string{
 	// (see docs/results/measured-2026-08.md).
 	"coding": {"format", "textclean", "searchfold", "dedup", "cmdfilter", "extract", "linecap", "cachesplit"},
 	"mcp":    {"format", "textclean", "smartcrush", "cachesplit"},
+	// OBSOLETE (#1345): agent.
 	// agent: tuned for long agentic sessions (e.g. Claude Code on SWE-bench),
 	// where the dominant cost is the transcript of tool outputs (file reads)
 	// re-sent every turn. mask (drop old tool outputs) is the biggest lever
@@ -602,7 +648,7 @@ var presets = map[string][]string{
 	// + dedup add relevance/supersession/dup wins; cachesplit keeps the shared system
 	// prefix cacheable. Order: lossless first, then offload old-then-large, cache last.
 	"agent": {"format", "textclean", "searchfold", "dedup", "failed_run", "mask", "extract", "extract_llm", "cachesplit"},
-	// general: the recommended all-round pipeline, safe+effective for any agent/
+	// OBSOLETE (#1345): general. Historical note: it was the recommended all-round pipeline, safe+effective for any agent/
 	// benchmark. Ordered by pipeline semantics: the lossless trio first (format,
 	// textclean, searchfold — textclean is the plain-text one, and plain text is what most
 	// tool output is: 1,724 of 1,748 distinct outputs in the captures measured here)
@@ -616,6 +662,7 @@ var presets = map[string][]string{
 	// two overlapping old-context reducers (mask is the one kept; summarize
 	// is its own preset — see docs/components.md redundancy notes).
 	"general": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "mask", "extract", "extract_llm", "collapse", "linecap", "cachesplit"},
+	// OBSOLETE (#1345): summarize, summarizer1509.
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
 	"summarize": {"summarize"},
@@ -629,6 +676,7 @@ var presets = map[string][]string{
 	// a configurable head — now lives in `summarize` itself, so a fork would duplicate ~500 lines
 	// of summarizer to deliver three YAML values.
 	"summarizer1509": {"summarize"},
+	// OBSOLETE (#1345): agentdiet.
 	// agentdiet reproduces the published AgentDiet baseline (arXiv:2509.23586, FSE
 	// 2026) so it can be A/B'd against our own reducers on the same traffic. Its
 	// tuned thresholds live in presetConfigs; it runs with `format` only, because
@@ -636,8 +684,9 @@ var presets = map[string][]string{
 	// stacking our offloaders beside it would reduce the same tool outputs first and
 	// there would be nothing left to attribute.
 	"agentdiet": {"format", "agentdiet", "cachesplit"},
-	// codesmart / codesafe are the SWE-bench study's winning configs and the RECOMMENDED
-	// pipelines — but neither is the proxy default, which is `house` (see the --preset flag in
+	// OBSOLETE (#1345): codesmart, codesafe.
+	// codesmart / codesafe are the SWE-bench study's winning configs and were the RECOMMENDED
+	// pipelines — but neither is the proxy default, which is `conservative` (see the --preset flag in
 	// proxyapp/main_run.go). Asserting it here is how five documents came to repeat
 	// it: the claim was copied from three lines away from the flag that disproves it. Their
 	// tuned per-component
@@ -645,7 +694,9 @@ var presets = map[string][]string{
 	// /compact?preset=) resolving them.
 	"codesmart": {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap", "cachesplit"},
 	"codesafe":  {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract", "collapse", "linecap", "cachesplit"},
-	// house / housellm are the SERVICE configs: `house` is what every account runs unless
+	// OBSOLETE (#1345): house, housellm. `house` is not listed in this literal. init() below
+	// copies it from `conservative`, which is the source of truth and the binary default.
+	// house / housellm were the SERVICE configs: `conservative` is what every account runs unless
 	// it says otherwise (tenant.DefaultConfigYAML is this document), `housellm` is the same
 	// pipeline with the compaction-model pass added, applied per account on request.
 	//
@@ -666,13 +717,12 @@ var presets = map[string][]string{
 	// on the same 1,795-request corpus, house vs house+linecap: +152,615 tokens, +0.797 pp,
 	// 14.5% of what was reachable. Real, and an order of magnitude short of "the largest
 	// deterministic lever", which is what the gross number reads as.
-	"house":    {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
 	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
 	// codesmart/housellm chooser. Each tier is a strict superset of the one below it (#417):
-	//   conservative = house, verbatim. No summarizer.
+	//   conservative = the source of truth for the old `house` alias. No summarizer.
 	//   medium       = housellm minus extract_llm_sweep, plus cache_aware_summarizer with
 	//                  cache_state: pre_expiry — the conservative mode. It prepares a summary in
 	//                  the background (in place of one keep-alive ping), keeps it in reserve, and
@@ -710,7 +760,7 @@ var presets = map[string][]string{
 // reader relies on when deciding whether the published numbers describe the shipped
 // default. They describe an ancestor of it. Treat any preset change as a reason to
 // re-measure, not as a documentation edit.
-//   - codesmart (the winning cache-aware config; NOT the proxy default, which is `house`): the LLM
+//   - codesmart (the winning cache-aware config; NOT the proxy default, which is `conservative`): the LLM
 //     relevance-trimmer extract_llm routed to the CHEAP model (model.source: config,
 //     nil-when-unset ⇒ it silently no-ops to deterministic — see docs), gated at 3000
 //     tok so most turns make no model call, ≤4 calls/req; the free deterministic extract
@@ -773,14 +823,6 @@ components:
 components:
   collapse:
     max_tokens: 3000`,
-	// house: the service default, deterministic all the way through — no model call, so it
-	// adds no upstream spend and no latency to anyone else's agent on a shared box.
-	// tenant.DefaultConfigYAML is this pipeline with `mode: sync`, and a test there asserts
-	// the two cannot drift apart.
-	"house": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
-components:
-  extract:
-    min_tokens: 400`,
 	// housellm: house plus the compaction-model pass, as measured on this service.
 	//
 	// WHAT THIS COMPONENT ACTUALLY DOES HERE, measured on production traffic rather than
@@ -902,8 +944,12 @@ components:
     min_tokens: 1000`,
 	// conservative/medium/high/xhigh — the plugin picker's effort ladder. See the comment beside
 	// their entries in the `presets` map above for what distinguishes each tier; the per-component
-	// blocks below are `house`'s and `housellm`'s, copied verbatim rather than re-derived, so a
-	// future retune of either source preset does not silently drift these out of sync.
+	// blocks below are `conservative`'s own and `housellm`'s copy, copied verbatim rather than re-derived, so a
+	// future retune of the source preset does not silently drift these out of sync.
+	// `conservative` is the service default: deterministic all the way through, no model call, so
+	// it adds no upstream spend and no latency to anyone else's agent on a shared box.
+	// tenant.DefaultConfigYAML is this pipeline with `mode: sync`, and a test there asserts
+	// the two cannot drift apart. The obsolete name `house` is copied from this entry by init().
 	"conservative": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
 components:
   extract:
@@ -1087,3 +1133,11 @@ func (c *Config) NewStore() store.Store {
 
 // WaitPlanOn reports whether the per-wait ping plan is on (#858). Absent is on.
 func (c CacheConfig) WaitPlanOn() bool { return c.KeepAliveWaitPlan == nil || *c.KeepAliveWaitPlan }
+
+// init makes `house`, the obsolete name of the old default, an alias of `conservative`. It runs
+// the same pipeline with the same component blocks. Existing configs that say `preset: house`
+// load exactly as before.
+func init() {
+	presets["house"] = slices.Clone(presets["conservative"])
+	presetConfigs["house"] = presetConfigs["conservative"]
+}

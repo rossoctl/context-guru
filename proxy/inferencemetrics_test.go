@@ -100,18 +100,31 @@ func TestRequestsAndErrorsByStatus(t *testing.T) {
 	}
 }
 
+// #1248: the estimated cost is the part of the cost priced from a fallback rate (FallbackRateCostUSD).
+// PriceEstimated marks the saving (penalty_unknown), not the rate, so it books nothing here.
 func TestCostAndEstimatedCost(t *testing.T) {
 	im, r := newInference(t)
-	im.Observe(goodEvent(), time.Second)
 	e := goodEvent()
 	e.PriceEstimated = true
 	im.Observe(e, time.Second)
 	all := collectAll(t, r)
+	est, ok := all["llm.inference.estimated_cost.usd"]
+	if !ok {
+		t.Fatal("no estimated cost series: the panel would read no data, not 0")
+	}
+	if c := sumFloat(est); c != 0 {
+		t.Errorf("estimated cost = %v, want 0 (PriceEstimated is about the saving, not the rate)", c)
+	}
+
+	fb := goodEvent()
+	fb.FallbackRateCostUSD = 0.005
+	im.Observe(fb, time.Second)
+	all = collectAll(t, r)
 	if c := sumFloat(all["llm.inference.cost.usd"]); c < 0.0399 || c > 0.0401 {
 		t.Errorf("cost = %v, want 0.04", c)
 	}
-	if c := sumFloat(all["llm.inference.estimated_cost.usd"]); c < 0.0199 || c > 0.0201 {
-		t.Errorf("estimated cost = %v, want 0.02 (a subset of cost)", c)
+	if c := sumFloat(all["llm.inference.estimated_cost.usd"]); c < 0.00499 || c > 0.00501 {
+		t.Errorf("estimated cost = %v, want 0.005 (only the fallback part of the cost)", c)
 	}
 }
 
@@ -193,7 +206,7 @@ func newInferenceWith(t *testing.T, prices modelinfo.Pricer) (*InferenceMetrics,
 func missEvent(reason, cause string) *dash.Event {
 	e := goodEvent()
 	e.CacheRead, e.CacheWrite, e.CacheWrite1h = 0, 1000, 0
-	e.CacheMissReason, e.CacheMissCause = reason, cause
+	e.CacheMissReason, e.CacheMissCause, e.PrefixCompared = reason, cause, true
 	return e
 }
 
@@ -213,13 +226,39 @@ func TestMissCauseMapsIntoTheSpecSet(t *testing.T) {
 		{dash.CacheUnknown, dash.CauseToolsChanged, "prefix_change", true},
 		{dash.CacheUnknown, dash.CauseSystemChanged, "prefix_change", true},
 		{dash.CacheUnknown, dash.CauseEffortChanged, "prefix_change", true},
-		{dash.CacheUnknown, dash.CauseConcurrent, "other", true},
-		{dash.CacheUnknown, "", "other", true},
+		{dash.CacheUnknown, dash.CauseConcurrent, "concurrent", true},
+		{dash.CacheUnknown, "", "unexplained", true},
+		{dash.CacheUnknown, "some_new_cause", "other", true},
+		{dash.CachePrefixChange, "some_new_cause", "other", true},
 	} {
 		got, miss := missCause(missEvent(tc.reason, tc.cause))
 		if got != tc.want || miss != tc.miss {
 			t.Errorf("(%q,%q) = (%q,%v), want (%q,%v)", tc.reason, tc.cause, got, miss, tc.want, tc.miss)
 		}
+	}
+}
+
+// A miss with no measured difference that wrote nothing re-created no prefix: it is other, not
+// unexplained, and a concurrent miss stays concurrent with or without a write.
+func TestMissCauseNoWriteIsOther(t *testing.T) {
+	e := missEvent(dash.CacheUnknown, "")
+	e.CacheWrite = 0
+	if got, miss := missCause(e); got != "other" || !miss {
+		t.Errorf("unknown, no write = (%q,%v), want (other,true)", got, miss)
+	}
+	e.CacheMissCause = dash.CauseConcurrent
+	if got, _ := missCause(e); got != "concurrent" {
+		t.Errorf("concurrent, no write = %q, want concurrent", got)
+	}
+}
+
+// A miss with nothing to compare with (the first of a live thread after a restart) is other, not
+// unexplained, even when it wrote cache tokens: no comparison ran, so the proxy does not guess.
+func TestMissCauseWithNoBaselineIsOther(t *testing.T) {
+	e := missEvent(dash.CacheUnknown, "")
+	e.PrefixCompared = false
+	if got, miss := missCause(e); got != "other" || !miss {
+		t.Errorf("unknown, no baseline = (%q,%v), want (other,true)", got, miss)
 	}
 }
 
@@ -234,6 +273,35 @@ func TestMissCostIsTheWritePremium(t *testing.T) {
 	want := 1000 * (3.75e-6 - 0.3e-6) // 1000 written tokens
 	if got := sumFloat(all["llm.cache.miss_cost.usd"]); got < want*0.999 || got > want*1.001 {
 		t.Errorf("miss cost = %v, want %v (1000 x (write - read))", got, want)
+	}
+}
+
+// A token written at the 1-hour tier costs more than one at the 5-minute tier, so its premium over
+// a read is larger. The miss cost prices each tier at its own rate, as the bill does. The 1-hour
+// rate is 2.0x input (modelinfo.AnthropicCacheWrite1hFrac), so 6e-6 here.
+func TestMissCostPricesTheOneHourTierAtItsOwnRate(t *testing.T) {
+	p := modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6}
+	im, r := newInferenceWith(t, ratePricer{"claude-sonnet-5-5": p})
+	e := missEvent(dash.CacheTTLExpiry, "")
+	e.CacheWrite1h = 400 // 400 of the 1000 written tokens were billed at the 1-hour tier
+	im.Observe(e, time.Second)
+	want := 600*(3.75e-6-0.3e-6) + 400*(6e-6-0.3e-6) // 0.00435
+	if got := sumFloat(collectAll(t, r)["llm.cache.miss_cost.usd"]); got < want*0.999 || got > want*1.001 {
+		t.Errorf("miss cost = %v, want %v (600 x (5m - read) + 400 x (1h - read))", got, want)
+	}
+}
+
+// A 1-hour count above the whole write is a bad row. It is clamped to the write, so no token is
+// priced twice.
+func TestMissCostClampsTheOneHourPartToTheWrite(t *testing.T) {
+	p := modelinfo.Price{Input: 3e-6, CacheWrite: 3.75e-6, CacheRead: 0.3e-6}
+	im, r := newInferenceWith(t, ratePricer{"claude-sonnet-5-5": p})
+	e := missEvent(dash.CacheTTLExpiry, "")
+	e.CacheWrite1h = 5000 // more than the 1000 written
+	im.Observe(e, time.Second)
+	want := 1000 * (6e-6 - 0.3e-6) // all 1000 at the 1-hour premium, none twice
+	if got := sumFloat(collectAll(t, r)["llm.cache.miss_cost.usd"]); got < want*0.999 || got > want*1.001 {
+		t.Errorf("miss cost = %v, want %v", got, want)
 	}
 }
 

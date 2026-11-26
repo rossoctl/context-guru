@@ -80,6 +80,22 @@ type Price struct {
 	// Currency is the unit of the rates, from the price file's currency key. Empty means USD (see
 	// Unit). Not part of the wire form, so a price's JSON does not change.
 	Currency string `json:"-"`
+
+	// CacheReadFallback is set when Resolved filled the cache-read rate from a fallback rate: no
+	// source stated it, the operator set no multiple, and the model is not a Claude model, so
+	// CacheReadFracFor's Anthropic multiple is a guess (#1248). FallbackCost prices it. Not part
+	// of the wire form.
+	//
+	// The read tier is the only one that can be a fallback. The 5-minute write multiple is a rule
+	// per family that CacheWriteFracFor documents (1.25x where a premium is charged, else 1.0x, no
+	// premium), and the operator Table applies the same rule. The 1-hour tier is billed only by
+	// Claude models, which use their published multiples.
+	CacheReadFallback bool `json:"-"`
+
+	// Tiers hold the rates a request bills above a prompt size (see PriceTier and At). Empty means
+	// one flat rate. A zero entry is unused. A fixed array, so Price stays comparable with ==.
+	// Not part of the wire form, so a price's JSON does not change.
+	Tiers [MaxTiers]PriceTier `json:"-"`
 }
 
 // CacheReadFor is the cache-READ rate per token for a model. This is the ONE place the rule lives.
@@ -120,10 +136,24 @@ func (p Price) CacheWrite1hFor(model string) float64 {
 // Resolved returns the price with both cache tiers filled for the model and their multiples
 // cleared. A price source calls it once the model is known. Callers then read the fields.
 // Write1hFrac stays: no field states the 1-hour rate, so CacheWrite1h still needs it.
+//
+// It also marks a cache-read rate it filled from a fallback rate (see CacheReadFallback). A second
+// call sees the filled rate as stated, so it keeps the mark of the first call and never clears it.
 func (p Price) Resolved(model string) Price {
+	p.CacheReadFallback = p.CacheReadFallback || (!IsClaude(model) && p.CacheRead <= 0 && p.ReadFrac <= 0)
 	p.CacheRead, p.CacheWrite = p.CacheReadFor(model), p.CacheWrite5mFor(model)
 	p.ReadFrac, p.WriteFrac = 0, 0
 	return p
+}
+
+// FallbackCost is the part of Cost that a fallback rate priced: the cache reads, when Resolved
+// marked that rate. It is 0 for a price with no mark, and never below 0 (a feed can state a
+// negative rate, which litellm keeps as it is).
+func (p Price) FallbackCost(cacheRead int64) float64 {
+	if !p.CacheReadFallback || cacheRead <= 0 || p.CacheRead <= 0 {
+		return 0
+	}
+	return float64(float64(cacheRead) * p.CacheRead) // rounded on its own, as in Cost
 }
 
 // Cost prices one request's four token tiers in USD.

@@ -9,6 +9,10 @@ Two reviewers review the PR in parallel, on this machine, with the user's own lo
 reviewer tool. Each one posts its review on the PR. You fix the findings, push, and run this
 skill again for round 2. Reviewer N in round 2 resumes its own round-1 session.
 
+Runs for different PRs are safe at the same time. Each run fetches into its own refs
+(`refs/offload-review/pr<N>/*`) and does not update `refs/remotes/origin/*`. Runs take turns on
+one worktree lock, and a lock left by a dead run is removed.
+
 The reviewer tool is a backend in `scripts/offload-review/backends/<name>.sh`:
 
 - `glm` (the default): GLM through Claude Code, pointed at an internal gateway.
@@ -124,7 +128,7 @@ The next round starts that reviewer fresh, and does not resume the session that 
 
 ## Comments after the approval
 
-Owner rule (David Amid, 2026-11-08): "doc comments don't change the approval." A commit made after
+Doc comments do not change the approval. A commit made after
 both approvals that changes **only comments** keeps both approvals. Do not run a new round for it.
 
 - **Comments are:** Go `//` and `/* */` lines, and `#` lines in shell scripts.

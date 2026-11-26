@@ -478,7 +478,7 @@ optimises would invalidate those measurements rather than improve them.
 **always counted** (`sweep_prefix_cache_read_ZERO`) — a silent miss looks identical to a working call
 except on the bill. A read **below the last real turn's read** is counted too
 (`sweep_prefix_cache_read_below_turn`): the question lost part of a prefix that turn could still read,
-as a model switch does. The owner chose the read rule only (2026-10-26), so a write alone is
+as a model switch does. The rule is the read rule only, so a write alone is
 not refused. A write cap of min(2% of the prefix, 2,000 tokens), counted as `sweep_prefix_cache_write`,
 exists in the code and is off; one constant, `prefixAskWriteCapEnabled`, turns it on. The provider never reads an entry that ends at a text turn, so a correct
 question writes some tail; the read, not the write alone, shows the prefix held (#721).
@@ -566,8 +566,10 @@ left most old outputs unasked. Now a list longer than 12 is **split into balance
 - All verdicts are merged into **one held answer**, keyed by tool-use id, with no output judged twice. The next cold
   request does **one recheck and one cut**.
 - The answer cost is the sum of every batch's usage. `sweep_ask_batches` counts the questions asked.
-- **The keep-alive cost ceiling prices every question the sweep will ask**, not one: `k x (prefix read + answer guess)`.
-  If the ceiling admits fewer than planned, the sweep asks that many and leaves the smallest outputs unasked
+- **The keep-alive cost rule prices every question the sweep will ask**, not one: `k x (prefix read + answer guess)`.
+  A set `keepalive_max_usd_per_ping` caps it. With none set, the value rule decides: the `k` questions must cost less
+  than the one miss they protect. The rule weighs the calls against that miss alone, so one idle span can cost more
+  than one miss in total. If the rule admits fewer than planned, the sweep asks that many and leaves the smallest outputs unasked
   (`sweep_batches_lowered`, `sweep_over_ask_cap`). If it admits none, the ordinary ping goes out.
 - **A batch never starts after the sweep's deadline.** The keeper's timeout (300 s) bounds the whole sweep and each
   question has its own 90 s bound, so `k` slow questions could add up past it. The rest are skipped
@@ -792,7 +794,7 @@ At the ping (published in `/stats` under the keep-alive block): `sweep_asked`, `
 `sweep_batch_skipped` (the same count as the per-request event `sweep_batch_skipped_deadline`),
 `sweep_batch_over_cap` (every candidate left unasked by any limit: `max_ask_batches` or the cost ceiling, the same
 candidates `sweep_over_ask_cap` counts per request), `sweep_batches_lowered`, `keepalive_sweep_substituted`, `keepalive_sweep_ask_failed`,
-`keepalive_sweep_over_budget`, `sweep_batch_by_index` (per batch position: asked, items, judged,
+`keepalive_sweep_over_budget` (counts both refusals: over the cap and not worth it), `sweep_batch_by_index` (per batch position: asked, items, judged,
 fabricated, to see whether later batches judge worse), and `sweep_gates`: the adjudication's own gate and event names
 (`sweep_kept`, `sweep_unparseable`, ...) summed over ping-time questions.
 
@@ -1124,20 +1126,46 @@ covers the point it was written at. A later keep-alive ping can refresh it — w
 covering the larger conversation — instead of sending a plain ping.
 
 **That refresh is not free, so it only happens when it pays for itself.** The rule: refresh only
-when the money a cold return will save is at least as much as the refresh itself costs.
+when the money a cold return will save is at least as much as the refresh **adds** to the ping it
+replaces.
 
-- The refresh's own cost is a cache **read** of the whole conversation plus a short reply.
+- A refresh at a planned keep-alive ping takes the place of that ping. Both read the whole
+  conversation from the cache, so that read is paid either way. This holds when the summary call
+  reads the same cached bytes as the ping: the `prefix_ask` path, which is every Anthropic request
+  on the proxy.
+- What the refresh adds is the **reply**: about 2,000 output tokens instead of 1, about $0.02 on
+  Sonnet 5.
 - The money it saves is the new material it folds in, priced at what writing it on a cold return
   would have cost (the cache **write** rate).
 
 An earlier version of this used a fixed size instead — refresh once 6,000 new tokens had piled up.
 That number was borrowed from a different decision (`resummarize_tokens`, which still controls
-when a TURN re-derives its summary) and was far too small for a refresh: at Sonnet 5's prices,
-6,000 new tokens are worth about $0.015 on the eventual cold return, but the refresh itself costs
-about $0.20. Refreshing at 6,000 tokens meant paying $0.20 to save $0.015 — repeatedly, on an idle
-session, forever. The money rule fixes this: on Sonnet 5's prices it takes roughly **80,000** new
-tokens before a refresh earns itself back, and the number adjusts automatically for other models'
-prices.
+when a TURN re-derives its summary) and was too small for the cost it was weighed against then:
+6,000 new tokens are worth about $0.015 on a cold return at Sonnet 5's prices, and the rule
+counted the whole call, about $0.20 at 900,000 tokens, as the cost. A second version kept the
+whole call as the cost. That asked for roughly 80,000 new tokens at 900,000 tokens, and it asked
+for more as the conversation grew, although the read is paid by the ping anyway.
+
+**Today the rule weighs the saving against the extra cost only (#1144), in the case above.** On
+Sonnet 5's prices a refresh pays after about **8,000** new tokens, whatever the size of the
+conversation: `$0.02 ÷ $2.50 per million`. The number adjusts automatically for other models' prices.
+
+| | Cost the rule weighs | New tokens needed (Sonnet 5) |
+|---|---|---|
+| `refresh_cost: extra` (default) | about $0.02, the reply | about **8,000**, at any prompt size |
+| `refresh_cost: full` | the whole call: the read and the reply | about **80,000** at a 900k prompt |
+
+**These cases still weigh the whole call**, because no ping is replaced or the read is not shared:
+
+- the **extra slot** (the one request after the planned pings are spent; a declined refresh sends
+  nothing there);
+- the `messages` path, where the pipeline builds the request itself;
+- `model.source: config`, where another model reads the conversation with its own cache.
+
+- **The per-ping spending cap does not change.** It still compares the whole call with the cap,
+  because it limits what one keep-alive request spends.
+- **To keep the old rule,** set `refresh_cost: full` on `cache_aware_summarizer`.
+- **The first reserve** has no cost test. That did not change.
 
 #### What it costs, at 900,000 tokens on Sonnet 5
 
@@ -1177,19 +1205,18 @@ $2.25 − $0.20 = $2.05.
 - Both are lower bounds on the value. After a cold return, every warm turn on the summary saves
   about $0.16 more.
 
-**The refresh rule has two errors, and they go in opposite directions.**
+**The refresh rule had two errors, and they go in opposite directions. #1144 fixed (a). (b) is still open.**
 
-- **(a) It counts the full call as the cost.** The code compares the saving with the read of the
-  whole conversation plus a reply (the "own cost" described above). A refresh always takes the place
-  of a due ping, so the read is paid either way. The extra cost is only the reply, about 10 times
-  less. This makes the rule refresh **too seldom**.
+- **(a) It counted the full call as the cost (fixed by default; `refresh_cost: full` restores it).** The code compared the saving with the read of the
+  whole conversation plus a reply (the "own cost" described above). A refresh at a planned ping takes
+  the place of that ping, so the read is paid either way. The extra cost is only the reply, about
+  10 times less. This makes the rule refresh **too seldom**.
 - **(b) It counts the saving as certain (p = 1).** For a session that never comes back, this makes
   the rule refresh **too often**.
 - With the marginal cost, a refresh pays when `p × new tokens × $2.50 per million > $0.02`, so
-  after about `8,000 ÷ p` new tokens. That is about 16k tokens at p = 49% and about 48k at p = 17%,
-  against the roughly 80k the rule asks for today. **So for any p above about 10%, error (a) is the
-  larger one, and the rule today refreshes less often than it should.** A per-session p matters only
-  for sessions where p is below about 10%.
+  after about `8,000 ÷ p` new tokens. That is about 16k tokens at p = 49% and about 48k at p = 17%.
+  The rule today uses p = 1, so it asks for about 8k. **For a session with a low p, such as a
+  subagent, it refreshes at a small expected loss.** A per-session p would fix that.
 
 **Measured return rates.** One developer's traffic through one proxy, Nov 8–15 (the dashboard's
 `requests` table, real requests only, keep-alive pings left out). The sample is every gap of at

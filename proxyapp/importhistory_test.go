@@ -26,7 +26,7 @@ func TestImportHistoryIsANoOpThatExits(t *testing.T) {
 	}
 	db := filepath.Join(t.TempDir(), "d.db")
 
-	out, code, exited := runMain(t, 20*time.Second,
+	out, code, exited := runMain(t,
 		"CG_TEST_MAIN_ARGS=import-history -db "+db+" -home "+home+" -apply")
 
 	if !exited {

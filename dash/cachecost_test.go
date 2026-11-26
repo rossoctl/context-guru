@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // ibmSonnet is the rate litellm-gateway actually bills for aws/claude-sonnet-5 — half the
@@ -130,7 +131,7 @@ func TestAdditiveColumnKeepsExistingRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project", "price_estimated"}
+	added := []string{"cache_saved_usd", "cachesplit_saved_usd", "split_stable_tokens", "project", "price_estimated", "cache_bp_root"}
 	// An old database has no project index, and SQLite refuses to drop an indexed column.
 	if _, err := raw.Exec(`DROP INDEX IF EXISTS idx_requests_project`); err != nil {
 		t.Fatal(err)
@@ -285,15 +286,7 @@ func TestSessionRecencySurvivesARestart(t *testing.T) {
 	e := &Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10, Status: 200}
 	rec.Record(e)
 	// Drain, then stop: this is the restart.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int64
-		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
-		if n == 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the rows are stored", func() bool { return rec.Stats().Written == 1 })
 	rec.Close()
 
 	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
@@ -360,15 +353,7 @@ func TestARestartDoesNotRecoverRecencyFromAPing(t *testing.T) {
 	rec.Record(&Event{TS: now, TenantID: "t1", SessionID: "t1:live", Model: "m", TokensBefore: 10, Status: 200})
 	rec.Record(&Event{TS: now + 1_140_000, TenantID: "t1", SessionID: "t1:live", Model: "m",
 		KeepAlive: true, CacheRead: 50_000, CostUSD: 0.01})
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int64
-		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n)
-		if n == 2 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the rows are stored", func() bool { return rec.Stats().Written == 2 })
 	rec.Close()
 
 	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})
@@ -428,15 +413,7 @@ func TestTailChangeIsPerSessionAndSurvivesARestart(t *testing.T) {
 	e := &Event{TS: now + 5, TenantID: "t", SessionID: "t:s", Model: "m", TokensBefore: 10, Status: 200,
 		SplitStableTokens: 5654, SplitTailHash: tailB}
 	rec.Record(e)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int64
-		_ = rec.DB().sql.QueryRow(`SELECT COUNT(*) FROM requests WHERE split_tail_hash <> 0`).Scan(&n)
-		if n == 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the row is stored", func() bool { return rec.Stats().Written == 1 })
 	rec.Close()
 
 	rec2, err := NewRecorder(Options{DBPath: path, BatchSize: 1, FlushInterval: time.Millisecond})

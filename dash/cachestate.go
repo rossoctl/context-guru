@@ -6,7 +6,10 @@ import (
 	"sort"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/kvcache"
 )
 
 // CacheState is the SERVER's view of one session's prompt cache: what the provider last billed us
@@ -24,7 +27,13 @@ type CacheState struct {
 	// than LastTS+TTL says. Equal to LastTS when the duration is unknown.
 	EndTS      int64 `json:"end_ts"`
 	NowMS      int64 `json:"now_ms"` // server clock, so a client with skew can still count down
-	TTLSeconds int64 `json:"ttl_s"`  // 1800 on OpenAI GPT-5.6+, 3600 if the last cache write was billed at the 1h tier, else 300
+	TTLSeconds int64 `json:"ttl_s"`  // 1800 on OpenAI GPT-5.6+, 3600 if the last cache write was billed at the 1h tier or the last touch was a free 1-hour ping (#1243), else 300
+	// TTLUnproven is true while ttl_s is 3600 only because of a free 1-hour ping on a route not yet proven to
+	// grant the tier. The clients draw the clock with a "1h?" mark. Omitted otherwise.
+	TTLUnproven bool `json:"ttl_unproven,omitempty"`
+	// FreeHourPing is true while ttl_s is 3600 because the last touch was a free 1-hour ping, proven or not.
+	// A manual ping would move that entry back to 5 minutes, so the clients hide the Ping button. Omitted otherwise.
+	FreeHourPing bool `json:"free_hour_ping,omitempty"`
 	// PrefixTokens is what the last request sent: fresh + cache_read + cache_write. If the cache
 	// is cold, this is what the next send rewrites.
 	PrefixTokens int64 `json:"prefix_tokens"`
@@ -44,7 +53,7 @@ type CacheState struct {
 	// Pingable is true when the proxy holds this session's main thread's body and key, so POST
 	// /api/me/cache/ping can work (with keep-alive off and no opt-in it holds nothing and answers 409
 	// "not held"). PingReason says why not, when it is false: "not opted in", "too large", "expired",
-	// "over budget", "unsupported", "pings used", "stopped", "below limits", "done" or "no entry". Both are omitted when the host cannot say, so a client treats
+	// "over budget", "not worth it", "unsupported", "pings used", "stopped", "below limits", "done" or "no entry". Both are omitted when the host cannot say, so a client treats
 	// absence as "unknown".
 	Pingable   *bool  `json:"pingable,omitempty"`
 	PingReason string `json:"ping_reason,omitempty"`
@@ -67,12 +76,17 @@ type CacheState struct {
 
 // ThreadCache is one thread's cache entry. Main is the session's primary thread.
 type ThreadCache struct {
-	ID           string  `json:"id"`
-	Main         bool    `json:"main"`
-	Model        string  `json:"model"`
-	LastTS       int64   `json:"last_ts"`
-	EndTS        int64   `json:"end_ts"`
-	TTLSeconds   int64   `json:"ttl_s"`
+	ID         string `json:"id"`
+	Main       bool   `json:"main"`
+	Model      string `json:"model"`
+	LastTS     int64  `json:"last_ts"`
+	EndTS      int64  `json:"end_ts"`
+	TTLSeconds int64  `json:"ttl_s"`
+	// provider is the row's provider, with Model it gives the lifetime (apply.EntryLifetime). Not sent.
+	provider string
+	// TTLUnproven: see CacheState.
+	TTLUnproven  bool    `json:"ttl_unproven,omitempty"`
+	FreeHourPing bool    `json:"free_hour_ping,omitempty"` // see CacheState
 	PrefixTokens int64   `json:"prefix_tokens"`
 	RewriteUSD   float64 `json:"rewrite_usd"`
 	Priced       bool    `json:"priced"`
@@ -121,6 +135,58 @@ func (p KeepAlivePlan) heldUntil(ttlS int64) int64 {
 // dash holds no keep-alive state of its own; nil means no plan is ever shown.
 func (a *API) SetKeepAlivePlans(fn func(tenantID string, allTenants bool, session string) map[string]KeepAlivePlan) {
 	a.kaPlans = fn
+}
+
+// OneHourTouch is the fact (read by the keeper from the store's one record, apply.LiveOneHourPing) that a thread's last touch was a FREE 1-hour ping: the keep-alive
+// ping asked every cache marker at 1 hour and read the prefix without writing. The entry then lives an
+// hour from the ping, so the clock counts an hour from it, until the thread's next real request. Metadata only.
+type OneHourTouch struct {
+	// AtMS is when the ping started (epoch ms). The fact ends an hour after it, and holds only while the thread's
+	// last touch is within oneHourSlackMS of it.
+	AtMS int64
+	// Proven is true when the route is proven to grant the 1-hour tier. False: the clock is a belief the
+	// thread's return will test, and the clients mark it ("1h?").
+	Proven bool
+}
+
+// SetOneHourTouches supplies the keeper's per-thread 1-hour-ping facts for one session, keyed by thread
+// id. dash keeps none of its own; nil means the clock is never lengthened.
+func (a *API) SetOneHourTouches(fn func(tenantID string, allTenants bool, session string) map[string]OneHourTouch) {
+	a.oneHour = fn
+}
+
+// oneHourSlackMS is how far after the ping's start the ping's own row may sit. The row is recorded when the
+// response arrives, and a ping times out at 60 s, so 2 minutes covers it. A row further past the ping is a later
+// touch (a manual press, a request): the entry is no longer the 1-hour one the ping made.
+const oneHourSlackMS = 2 * 60 * 1000
+
+// applyOneHour lengthens the clock of every entry whose last touch was a free 1-hour ping to the hour, and
+// marks it unproven while the route is. The session entry follows the thread that holds the same touch.
+// Prices keep the tier the entry was billed at: the next request writes its own tier, not the ping's.
+// It changes nothing for an entry already at an hour or more (a client that asks 1h itself).
+func applyOneHour(s *CacheState, touches map[string]OneHourTouch) {
+	for i := range s.Threads {
+		t := &s.Threads[i]
+		// The lifetime of an entry the last touch left at 1 hour, for THIS provider and model: 30 minutes on
+		// OpenAI GPT-5.6+, where no free 1-hour ping exists and nothing is lengthened.
+		hour := touchTTLSeconds(t.provider, t.Model)
+		o, ok := touches[t.ID]
+		// The touch counts only while the thread's last touch is that ping: a newer row means a later touch
+		// moved the entry (defense in depth; the keeper also drops the fact at a request, and refuses a press while it is live).
+		if !ok || t.TTLSeconds >= hour || t.LastTS > o.AtMS+oneHourSlackMS {
+			continue
+		}
+		t.TTLSeconds, t.TTLUnproven, t.FreeHourPing = hour, !o.Proven, true
+		// A thread already at an hour from a real 1-hour write is skipped above and carries no flag, so the button
+		// shows. If it also holds a live free-ping touch, the keeper still refuses the press (ErrAtOneHour): safe,
+		// because that press sends the entry's own 1-hour markers and shortens nothing, but the user sees a 409.
+		if s.LastTS == t.LastTS && s.TTLSeconds < hour {
+			s.TTLSeconds, s.TTLUnproven = hour, !o.Proven
+			// Only the main thread's touch hides the button: a sub-agent's free ping must not hide it for a
+			// main-thread press the keeper would allow.
+			s.FreeHourPing = t.Main
+		}
+	}
 }
 
 // PingState is one thread's answer to "can a manual ping work now": Pingable, or the Reason it cannot.
@@ -186,17 +252,20 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 			t                                    ThreadCache
 			last                                 sql.NullInt64
 			ms                                   sql.NullFloat64
-			model                                sql.NullString
+			model, provider                      sql.NullString
 			prefix                               sql.NullInt64
 			base, cost, cgllm, split, kaSv, ping float64
 			manualSaved, manualCost              float64
 			deferNet                             float64
 		)
-		if err := rows.Scan(&t.ID, &last, &ms, &model, &prefix,
+		if err := rows.Scan(&t.ID, &last, &ms, &model, &provider, &prefix,
 			&base, &cost, &cgllm, &split, &kaSv, &ping, &manualSaved, &manualCost, &deferNet); err != nil {
 			return nil, nil, err
 		}
-		t.TTLSeconds = 300
+		t.provider = provider.String
+		// A thread with no write has no billed tier: its lifetime is the provider's and the model's base one
+		// (OpenAI GPT-5.6+: 30 minutes), not a fixed 5 minutes.
+		t.TTLSeconds = billedTTL(t.provider, model.String, 0)
 		if ttl, ok := ttls[t.ID]; ok {
 			t.TTLSeconds = ttl
 		}
@@ -227,7 +296,7 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 const maxCacheThreads = 16
 
 // threadTTLs maps each thread of the session to the TTL its latest cache write was billed at: 1800
-// on OpenAI GPT-5.6+, 3600 for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then uses 300).
+// on OpenAI GPT-5.6+, 3600 for the 1h tier, else 300. A thread with no write is absent (ThreadsFor then takes the base lifetime of its provider and model: 300, or 1800 on OpenAI GPT-5.6+).
 func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	q, args := cacheTTLQuery(f)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
@@ -258,7 +327,14 @@ func billedTierSQL(alias string) string {
 
 // billedTTL is the lifetime in seconds of an entry written at the billed tier.
 func billedTTL(provider, model string, oneHour int64) int64 {
-	return int64(modelinfo.CacheLifetime(provider, model, oneHour == 1) / time.Second)
+	return int64(apply.EntryLifetime(apply.CacheFacts{Provider: bschemas.ModelProvider(provider), Model: model,
+		BilledOneHour: oneHour == 1}) / time.Second)
+}
+
+// touchTTLSeconds is the lifetime in seconds of an entry whose last touch left it at the 1-hour tier.
+func touchTTLSeconds(provider, model string) int64 {
+	return int64(apply.EntryLifetime(apply.CacheFacts{Provider: bschemas.ModelProvider(provider), Model: model,
+		LastOneHour: true}) / time.Second)
 }
 
 // cacheTTLQuery is threadTTLs' one statement: GROUP BY thread over the session's cache writes
@@ -285,7 +361,7 @@ func cacheThreadsQuery(f Filter) (string, []any) {
 	const agent = "r.keepalive = 0"
 	return `SELECT r.thread_id,
 		MAX(CASE WHEN r.status BETWEEN 200 AND 299 AND r.cache_read + r.cache_write > 0 THEN r.ts END),
-		r.upstream_ms, r.model, r.fresh_input + r.cache_read + r.cache_write,
+		r.upstream_ms, r.model, r.provider, r.fresh_input + r.cache_read + r.cache_write,
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.baseline_cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cg_llm_cost_usd ELSE 0 END),0),
@@ -374,6 +450,7 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 // same derivation as CostWithCacheWrite1h). One definition for /api/cachestate and the manual ping,
 // so the "kept warm" credit is the cold figure the status line already showed.
 func NextRequestUSD(p modelinfo.Price, tokens, ttlS int64) (warm, cold float64) {
+	p = p.At(tokens + kvcache.DefaultPingInputTokens) // the next request sends this prefix plus new input: its tier's rates
 	if ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second) {
 		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
 	}
@@ -466,6 +543,10 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			s.PingsLeft, s.HeldUntilMS = p.PingsLeft, p.heldUntil(ttl)
 			s.NextPingMS = p.NextPingMS
 		}
+	}
+	// After the prices, which keep the tier the entry was billed at.
+	if a.oneHour != nil {
+		applyOneHour(s, a.oneHour(f.Tenant, f.TenantAll, f.Session))
 	}
 	if held := a.pingableFor(f); held != nil {
 		// A thread the host knows nothing about (a restart, or no request since) has no entry.

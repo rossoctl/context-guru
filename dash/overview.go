@@ -348,9 +348,10 @@ type Overview struct {
 	// Breakpoints is the aggregate placement of prompt-cache breakpoints BY LOCATION. Where a
 	// breakpoint sits decides how much prefix it protects, so a count alone cannot answer the
 	// question: system=2/tools=0/messages=0/blocks=1 and system=0/tools=0/messages=3/blocks=0
-	// are both "three breakpoints" and are not remotely the same prompt. These four columns
-	// have existed since the placement work and were readable only one request at a time in
-	// the drawer.
+	// are both "three breakpoints" and are not remotely the same prompt. (The fifth location is
+	// top-level: the one cache_control of automatic caching.) The four
+	// location columns have existed since the placement work; the fifth, cache_bp_root, came with
+	// #1281. They were readable only one request at a time in the drawer.
 	Breakpoints BreakpointTotals `json:"breakpoints"`
 	// CompactionResets is how many turns arrived SMALLER than the previous turn of the same
 	// session — a context-window reset, or the agent compacting its own transcript.
@@ -506,12 +507,14 @@ type Overview struct {
 // BreakpointTotals is prompt-cache breakpoint placement summed by location, plus the number
 // of requests behind it. The provider caps a request at four breakpoints and its automatic
 // caching consumes one of the slots, so the interesting question is never "how many" but
-// "where" — and only these four numbers together answer it.
+// "where" — and only these five numbers together answer it.
 type BreakpointTotals struct {
 	System   int64 `json:"system"`
 	Tools    int64 `json:"tools"`
 	Messages int64 `json:"messages"`
 	Blocks   int64 `json:"blocks"`
+	// Root is the top-level cache_control (automatic caching), one breakpoint on the wire (#1283).
+	Root int64 `json:"root"`
 	// Requests is the denominator, so a total can be read as a per-request average rather
 	// than as a raw sum whose size only reflects the window.
 	Requests int64 `json:"requests"`
@@ -662,9 +665,9 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		AVG(CASE WHEN r.sse_buffered = 1 AND r.ttfb_ms > 0 THEN r.ttfb_ms END),
 		-- Breakpoint placement by location, and the requests behind it.
 		COALESCE(SUM(r.cache_bp_system),0), COALESCE(SUM(r.cache_bp_tools),0),
-		COALESCE(SUM(r.cache_bp_messages),0), COALESCE(SUM(r.cache_bp_blocks),0),
+		COALESCE(SUM(r.cache_bp_messages),0), COALESCE(SUM(r.cache_bp_blocks),0), COALESCE(SUM(r.cache_bp_root),0),
 		COALESCE(SUM(CASE WHEN r.cache_bp_system + r.cache_bp_tools
-			+ r.cache_bp_messages + r.cache_bp_blocks > 0 THEN 1 ELSE 0 END),0),
+			+ r.cache_bp_messages + r.cache_bp_blocks + r.cache_bp_root > 0 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.fresh_input + r.cache_read + r.cache_write),0),
 		-- Our own count over the SAME rows that contributed the figure above, plus how many
 		-- rows those are. See Overview.TokensBeforeBilled: a ratio of the two sums is only a
@@ -716,7 +719,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.SafetyCost.CGLatencyMsTotal,
 		&o.SSEStreamed, &o.SSEBuffered, &ttfbAvg, &upBufAvg,
 		&o.Breakpoints.System, &o.Breakpoints.Tools, &o.Breakpoints.Messages,
-		&o.Breakpoints.Blocks, &o.Breakpoints.Requests, &o.BilledInputTokens,
+		&o.Breakpoints.Blocks, &o.Breakpoints.Root, &o.Breakpoints.Requests, &o.BilledInputTokens,
 		&o.TokensBeforeBilled, &o.BilledInputRows,
 		&o.SSERecorded, &o.SSEStreamRows, &o.CacheTTLRecorded,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &o.CacheWrite1h,
@@ -803,7 +806,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	var (
 		replayProjectedRaw, inflation          int64
 		ttl                                    map[string]int64
-		bs, bt, bm, bb, modalRequests          int64
+		bs, bt, bm, bb, br, modalRequests      int64
 		estimatorDivergenceRows                int64
 		estimatorDivergence                    float64
 		estimatorDivergenceCompactedRows       int64
@@ -954,22 +957,22 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	g.Go(func() error {
 		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.token_accounting, r.cache_miss_reason,
 				r.uncompressed_reason, r.cache_ttl, r.cache_bp_system, r.cache_bp_tools,
-				r.cache_bp_messages, r.cache_bp_blocks, COUNT(*)
+				r.cache_bp_messages, r.cache_bp_blocks, r.cache_bp_root, COUNT(*)
 			FROM requests r WHERE `+cond+`
-			GROUP BY 1,2,3,4,5,6,7,8 ORDER BY 1,2,3,4,5,6,7,8`, args...)
+			GROUP BY 1,2,3,4,5,6,7,8,9 ORDER BY 1,2,3,4,5,6,7,8,9`, args...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		ttl, accountingM, cacheMissM, uncompressedM = map[string]int64{}, map[string]int64{}, map[string]int64{}, map[string]int64{}
-		type bp struct{ s, t, m, b int64 }
+		type bp struct{ s, t, m, b, r int64 }
 		placed := map[bp]int64{}
 		var order []bp
 		for rows.Next() {
 			var acct, miss, unc, tier string
 			var k bp
 			var n int64
-			if err := rows.Scan(&acct, &miss, &unc, &tier, &k.s, &k.t, &k.m, &k.b, &n); err != nil {
+			if err := rows.Scan(&acct, &miss, &unc, &tier, &k.s, &k.t, &k.m, &k.b, &k.r, &n); err != nil {
 				return err
 			}
 			accountingM[acct] += n
@@ -997,11 +1000,14 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			if a.m != b.m {
 				return a.m < b.m
 			}
-			return a.b < b.b
+			if a.b != b.b {
+				return a.b < b.b
+			}
+			return a.r < b.r
 		})
 		for _, k := range order {
 			if placed[k] > modalRequests {
-				modalRequests, bs, bt, bm, bb = placed[k], k.s, k.t, k.m, k.b
+				modalRequests, bs, bt, bm, bb, br = placed[k], k.s, k.t, k.m, k.b, k.r
 			}
 		}
 		return nil
@@ -1149,7 +1155,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	o.CacheTTL = ttl
 	o.Breakpoints.ModalRequests = modalRequests
 	if modalRequests > 0 {
-		o.Breakpoints.Modal = fmt.Sprintf("system=%d, tools=%d, messages=%d, blocks=%d", bs, bt, bm, bb)
+		o.Breakpoints.Modal = fmt.Sprintf("system=%d, tools=%d, messages=%d, blocks=%d, top-level=%d", bs, bt, bm, bb, br)
 	}
 	o.EstimatorDivergenceRows = estimatorDivergenceRows
 	o.EstimatorDivergenceCompacted = estimatorDivergenceCompacted

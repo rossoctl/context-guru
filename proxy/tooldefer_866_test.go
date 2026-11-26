@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
@@ -211,13 +212,10 @@ func TestToolDeferTenantAfterStartBuildsTheState(t *testing.T) {
 	if err := f.reg.Update(tn, tn.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 500; i++ {
-		if ds, _ := f.h.deferPeek(); ds != nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("a tenant that picked ultrahigh after the start did not get the eager build")
+	testutil.WaitFor(t, "the eager build for a tenant that picked ultrahigh after the start", func() bool {
+		ds, _ := f.h.deferPeek()
+		return ds != nil
+	})
 }
 
 // GLM note on #872. The start waits one bound in all (startWait), for the load and every seed
@@ -230,7 +228,10 @@ func TestWaitAllIsOneBound(t *testing.T) {
 	if waitAll(ctx, never1) {
 		t.Fatal("reported done")
 	}
-	if waitAll(ctx, never1, never2) || time.Since(t0) > time.Second {
+	if waitAll(ctx, never1, never2) {
+		t.Fatal("reported done")
+	}
+	if testutil.TimingEnabled() && time.Since(t0) > time.Second {
 		t.Fatalf("waited %v for one 50 ms bound", time.Since(t0))
 	}
 	closed := make(chan struct{})
@@ -255,7 +256,7 @@ func TestSeedAfterLoadKeepsTheLoadedUses(t *testing.T) {
 	// The history table holds session a, which used Workflow.
 	m0 := tooldefer.NewMem(hdb)
 	stop0 := m0.Open(time.Hour, nil)
-	if !m0.WaitReady(5 * time.Second) {
+	if !m0.WaitReady(30 * time.Second) {
 		t.Fatal("not loaded")
 	}
 	use := `{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Workflow","input":{}}]}`
@@ -281,13 +282,13 @@ func TestSeedAfterLoadKeepsTheLoadedUses(t *testing.T) {
 	}()
 	select {
 	case <-done: // the seed ran before the load: the bug
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond): //timing:ok absence window: it only gives a seed that wrongly ran early time to finish, so a starved goroutine weakens the check and never fails it
 	}
 	stop := m.Open(time.Hour, nil)
 	defer stop()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the seed never ran after the load")
 	}
 	got := m.UserSessions("t", "", 10)

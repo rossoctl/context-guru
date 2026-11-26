@@ -753,7 +753,7 @@ or written." ;;
   elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ]; then
     # Attach mode installs no binary, so the name can never be checked later. An unchecked name is
     # refused, not reported as a fact: this is the "dropped decision that reports success" shape.
-    # Two names pass unchecked (owner decision): `none` needs no table, and `auto` is the plugin's own
+    # Two names pass unchecked: `none` needs no table, and `auto` is the plugin's own
     # default, which the remote proxy checks when it loads the setting.
     route_needs "strategy_unchecked" "--cache-strategy $R_STRATEGY cannot be checked: there is no \
 context-guru-proxy binary on this machine to list the strategies, and attach mode installs none. \
@@ -1544,6 +1544,19 @@ resolve_latest_tag() {
   printf 'tag=%s\n' "$v"
 }
 
+# latest_is_newer LATEST HAVE: is LATEST strictly newer than HAVE, in semantic-version order?
+# `releases/latest` never names a prerelease, so an installed beta is NOT behind it (#1254).
+# The comparison lives in settings.py. If that gives no answer, fall back to "the tags differ".
+latest_is_newer() {
+  ln_=$("$(route_here)/settings.py" update-check newer --latest "$1" --installed "$2" 2>/dev/null \
+          | sed -n 's/^newer=//p' | head -1)
+  case "$ln_" in
+    true)  return 0 ;;
+    false) return 1 ;;
+  esac
+  [ "${1#v}" != "${2#v}" ]
+}
+
 # --check-latest: resolve installed vs. latest and REPORT, never download, never install, never
 # write the proxy binary. Exists because the ordinary flow above can only say "a newer release
 # exists" as a side effect of actually fetching one (CONTEXT_GURU_UPGRADE=1) — which is the wrong
@@ -1566,7 +1579,7 @@ if [ "${1:-}" = --check-latest ]; then
            exit 0 ;;
   esac
   emit "latest_version=${latest}"
-  if [ -n "$have" ] && { [ "$have" = "${latest#v}" ] || [ "$have" = "$latest" ]; }; then
+  if [ -n "$have" ] && ! latest_is_newer "$latest" "$have"; then
     emit "result=checked"; emit "update_available=false"
   else
     emit "result=checked"; emit "update_available=true"
@@ -1590,6 +1603,15 @@ if command -v "$BIN" >/dev/null 2>&1; then
     # Do not silently re-download on every install run; say what is there and how to move.
     emit "result=present"
     emit "note=set CONTEXT_GURU_UPGRADE=1 to check for and install a newer release"
+    record_installed_version "$have"
+    exit 0
+  fi
+  # An upgrade never goes backwards, also with an explicit tag (#1276): the background update names
+  # the tag its check found. An older tag than the installed one is refused. Without
+  # CONTEXT_GURU_UPGRADE, an explicit tag still installs (the manual repair path).
+  if [ "$VERSION" != latest ] && [ -n "$have" ] && [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ] && ! latest_is_newer "$VERSION" "$have"; then
+    emit "result=present"
+    emit "note=${have} is not older than the requested release ${VERSION}; nothing to upgrade"
     record_installed_version "$have"
     exit 0
   fi
@@ -1622,7 +1644,15 @@ if [ "$VERSION" = latest ]; then
   # disagree about what "latest" means.
   resolved=$(resolve_latest_tag) || true
   case "$resolved" in
-    tag=*) VERSION="${resolved#tag=}" ;;
+    tag=*) VERSION="${resolved#tag=}"
+           # An upgrade never goes backwards: an installed beta stays when the latest stable is
+           # older (#1254). An explicit CONTEXT_GURU_VERSION still installs any tag.
+           if [ -n "${have:-}" ] && [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ] && ! latest_is_newer "$VERSION" "$have"; then
+             emit "result=present"
+             emit "note=${have} is not older than the latest release ${VERSION}; nothing to upgrade"
+             record_installed_version "$have"
+             exit 0
+           fi ;;
     error=github_rate_limited)
       die "github_rate_limited: GitHub's API is rate limited for this IP (60/hour, shared with everything behind the same address), so the latest version could not be resolved. This says NOTHING about whether a release exists. Wait for the window to reset, or set CONTEXT_GURU_VERSION=vX.Y.Z to skip resolution entirely." ;;
     *)
@@ -1649,6 +1679,11 @@ report_path() {
   emit "result=installed"
   emit "path=${DEST}/${BIN}"
   record_installed_version "$VERSION"
+  # An upgrade also writes the installed tag to the update-check record, so the record never
+  # names an older tag than the one on disk (#1276). Best effort: stamp fails open.
+  if [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ]; then
+    "$(route_here)/settings.py" update-check stamp --latest "$VERSION" >/dev/null 2>&1 || true
+  fi
   # Report — do not fix — a PATH that will not find it. Editing the user's shell rc is a bigger
   # intrusion than this script is entitled to, and the skill can tell them in context.
   case ":${PATH}:" in

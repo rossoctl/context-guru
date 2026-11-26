@@ -45,7 +45,9 @@ type tableEntry struct {
 	// a `/` or a `.`. Only those may match by containment; see lookup.
 	qualified bool
 	price     Price
-	window    int
+	// flat means the entry states one rate for every prompt size, so Price adds no built-in tier.
+	flat   bool
+	window int
 	// compactionPoint is the operator's compaction point in billed tokens, or 0.
 	compactionPoint int
 }
@@ -77,12 +79,15 @@ type tableFileModel struct {
 	// CacheWrite1hFrac is the 1-hour cache-write rate as a multiple of In. 0 (unset) means
 	// AnthropicCacheWrite1hFrac. A gateway that bills the 1-hour write at the input rate sets 1.0.
 	CacheWrite1hFrac float64 `yaml:"cache_write_1h_frac"`
+	// Flat turns the built-in prompt-size tiers off for this entry. Set it when the gateway bills
+	// one flat rate for every prompt size. Unset, the built-in tiers apply (see Price.WithTiers).
+	Flat bool `yaml:"flat"`
 	// Window optionally overrides the context window for a model the public map
 	// does not list either (a preview id), so fraction triggers still scale.
 	Window int `yaml:"window"`
 	// CompactionPoint optionally states, in BILLED input tokens, where the client compacts this model's
 	// conversation (Claude Code on a GLM compacts near 167k of a 200k window). It is NOT derived from
-	// window and does not change it. Used by internal/compactionpoint, for models its bootstrap table
+	// window and does not change it. Used by compactionpoint, for models its bootstrap table
 	// does not know. 0 = unset.
 	CompactionPoint int `yaml:"compaction_point"`
 	// Note is documentation for whoever edits the file — in particular, which
@@ -190,7 +195,7 @@ func ParseTable(b []byte) (*Table, error) {
 			p.WriteFrac = 1.0
 		}
 		t.entries = append(t.entries, tableEntry{match: match, prefix: prefix,
-			qualified: strings.ContainsAny(match, "/."), price: p, window: m.Window, compactionPoint: m.CompactionPoint})
+			qualified: strings.ContainsAny(match, "/."), price: p, flat: m.Flat, window: m.Window, compactionPoint: m.CompactionPoint})
 	}
 	// Longest match first, so `aws/claude-opus-4-8` wins over `aws/claude-opus-4*`
 	// and the file's own order cannot make a lookup ambiguous.
@@ -217,7 +222,7 @@ func ParseTable(b []byte) (*Table, error) {
 //   - A tail claimed by TWO OR MORE differently-priced providers is ambiguous — a
 //     bare request for it cannot be resolved without guessing which provider it
 //     meant, and guessing is exactly the mechanism that caused #324. "Differently
-//     priced" covers the window and compaction point the entry also serves, not only
+//     priced" covers the window, the compaction point and the `flat` tier setting the entry also serves, not only
 //     the rate: Window, WindowExact and CompactionPoint read the same entry, and a
 //     5x-too-high window reported as exact is as wrong as a wrong price. Such a tail is
 //     not indexed at all here, so it falls through to the family/public-map passes
@@ -242,8 +247,8 @@ func deriveBareTails(entries []tableEntry) map[string]tableEntry {
 			continue // an explicit bare entry for this tail already wins on its own
 		}
 		if prev, ok := tails[tail]; ok && prev.match != e.match {
-			// Two providers at one rate and one window are not a guess.
-			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint {
+			// Two providers at one rate, one window and one tier setting are not a guess.
+			if prev.price != e.price || prev.window != e.window || prev.compactionPoint != e.compactionPoint || prev.flat != e.flat {
 				ambiguous[tail] = true
 			}
 			continue
@@ -337,7 +342,11 @@ func (t *Table) Price(_ context.Context, model string) (Price, bool) {
 	// The fill uses the QUERIED model, not the match pattern: a family entry such as
 	// `claude-opus*`, or a containment hit such as `aws/claude-sonnet-5` on
 	// `aws/claude-sonnet-5-5`, serves models with different read tiers.
-	return e.price.Resolved(model), true
+	p := e.price.Resolved(model)
+	if !e.flat {
+		p = p.WithTiers(model)
+	}
+	return p, true
 }
 
 // Window returns an operator-supplied context window, for models the public map
@@ -350,7 +359,7 @@ func (t *Table) WindowExact(ctx context.Context, model string) (int, bool, bool)
 }
 
 // CompactionPoint returns the operator's compaction point for a model, in billed input tokens.
-// ok=false when the entry states none, so the bootstrap table of internal/compactionpoint answers.
+// ok=false when the entry states none, so the bootstrap table of compactionpoint answers.
 func (t *Table) CompactionPoint(_ context.Context, model string) (int, bool) {
 	e, ok := t.lookup(model)
 	if !ok || e.compactionPoint <= 0 {

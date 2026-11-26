@@ -224,9 +224,9 @@
     },
     {
       "id": 4,
-      "type": "timeseries",
-      "title": "Ping outcomes (per hour)",
-      "description": "Pings per hour. A timeout is a ping that ran to its 60 s limit; it is booked at its projected cost (#754). A skipped ping leaves no row, so it does not show.",
+      "type": "stat",
+      "title": "Ping failure ratio",
+      "description": "Share of the sent pings that failed or timed out over the selected range. A failed or timed-out ping does not keep the cache warm, and a timeout is still booked at its projected cost (#754). A skipped ping was not sent, so it is not in the ratio. The first failure of a model can read as 0, because increase() does not count the first sample of a new series. No data means no ping was sent in the range.",
       "datasource": {
         "type": "prometheus",
         "uid": "central-prom"
@@ -239,9 +239,9 @@
       },
       "targets": [
         {
-          "expr": "sum by (outcome)(rate(llm_keepalive_pings_total{proxy=~\"$proxy\", machine=~\"$machine\"}[$__rate_interval])) * 3600",
-          "legendFormat": "{{outcome}}",
+          "expr": "(sum(increase(llm_keepalive_pings_total{proxy=~\"$proxy\", machine=~\"$machine\",outcome=~\"failed|timeout\"}[$__range])) or sum(increase(llm_keepalive_pings_total{proxy=~\"$proxy\", machine=~\"$machine\",outcome=~\"ok|failed|timeout\"}[$__range])) * 0) / ((sum(increase(llm_keepalive_pings_total{proxy=~\"$proxy\", machine=~\"$machine\",outcome=~\"ok|failed|timeout\"}[$__range]))) > 0)",
           "refId": "A",
+          "instant": true,
           "datasource": {
             "type": "prometheus",
             "uid": "central-prom"
@@ -250,83 +250,43 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "custom": {
-            "stacking": {
-              "mode": "normal"
-            },
-            "drawStyle": "bars",
-            "fillOpacity": 80,
-            "lineWidth": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "ok"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#73BF69"
-                }
-              }
-            ]
+          "unit": "percentunit",
+          "noValue": "no data",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
           },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "skipped"
-            },
-            "properties": [
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794F2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "failed"
-            },
-            "properties": [
+                "color": "#73BF69",
+                "value": null
+              },
               {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#F2495C"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "timeout"
-            },
-            "properties": [
+                "color": "#FF9830",
+                "value": 0.01
+              },
               {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#FF9830"
-                }
+                "color": "#F2495C",
+                "value": 0.05
               }
             ]
           }
-        ]
+        },
+        "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom"
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "text": {
+          "valueSize": 56
         }
       }
     },
@@ -443,7 +403,7 @@
       "gridPos": {
         "x": 0,
         "y": 16,
-        "w": 16,
+        "w": 24,
         "h": 8
       },
       "targets": [
@@ -537,21 +497,6 @@
           "displayMode": "table",
           "placement": "bottom"
         }
-      }
-    },
-    {
-      "id": 7,
-      "type": "text",
-      "title": "Shared-warm tokens",
-      "gridPos": {
-        "x": 16,
-        "y": 16,
-        "w": 8,
-        "h": 8
-      },
-      "options": {
-        "mode": "markdown",
-        "content": "**No data yet.**\n\nThe counter `llm_keepalive_shared_warm_tokens_total` needs #853."
       }
     }
   ]

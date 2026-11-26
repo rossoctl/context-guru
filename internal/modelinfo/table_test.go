@@ -579,3 +579,25 @@ models:
 		t.Fatalf("err = %v, want a duplicate-match error", err)
 	}
 }
+
+// Same rate and window is not enough: `flat` decides whether the price has a tier, so two providers
+// that differ only there are ambiguous. The bare id must not take a setting by file order.
+func TestTailDifferingOnlyInFlatIsAmbiguous(t *testing.T) {
+	for _, order := range []string{
+		`[{match: "azure/gpt-5.5", in: 5, out: 30, flat: true}, {match: "aws/gpt-5.5", in: 5, out: 30}]`,
+		`[{match: "aws/gpt-5.5", in: 5, out: 30}, {match: "azure/gpt-5.5", in: 5, out: 30, flat: true}]`,
+	} {
+		tb, err := ParseTable([]byte("models: " + order + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p, ok := tb.Price(context.Background(), "gpt-5.5"); ok {
+			t.Errorf("bare gpt-5.5 resolved (HasTiers=%v) from %s; want ambiguous, not found", p.HasTiers(), order)
+		}
+		for id, wantTier := range map[string]bool{"azure/gpt-5.5": false, "aws/gpt-5.5": true} {
+			if p, ok := tb.Price(context.Background(), id); !ok || p.HasTiers() != wantTier {
+				t.Errorf("%s: ok=%v HasTiers=%v, want %v", id, ok, p.HasTiers(), wantTier)
+			}
+		}
+	}
+}

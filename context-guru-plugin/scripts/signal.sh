@@ -53,7 +53,13 @@ if ev not in ("SessionEnd", "SessionStart", "Notification") or not re.fullmatch(
 if not (ev == "SessionStart" and kind in ("startup", "fork")):
     # The keep-alive event. startup and fork carry nothing for it (the matcher only runs this hook
     # for them so the opt-out below can be sent).
-    print("/signal " + json.dumps({"session": sid, "event": ev, "kind": kind}))
+    body = {"session": sid, "event": ev, "kind": kind}
+    # The permission mode of the client, a short word from the hook input (default, acceptEdits, plan,
+    # bypassPermissions). Sent only when present; the proxy keeps only a closed set.
+    pm = d.get("permission_mode")
+    if isinstance(pm, str) and re.fullmatch(r"[A-Za-z]{1,32}", pm):
+        body["permission_mode"] = pm
+    print("/signal " + json.dumps(body))
 if ev == "SessionStart" and kind in ("startup", "resume", "fork", "clear") and os.environ.get("TSOFF") == "1":
     # The RAW value, so the proxy can tell a deliberate "false" from "auto" (the wire cannot). A short
     # closed-shape value, never content. The 16-character cut only shortens what is sent: every off
@@ -75,7 +81,10 @@ while IFS= read -r line; do
     *SessionEnd*) send "$route" "$body" ;; # the process is about to exit: finish the one request here
     # Hook groups of one event run in parallel, so a SessionStart event can race the hook that starts
     # the proxy: retry a refused connection twice, a second apart, then give up silently (detached).
-    *) ( for _ in 1 2 3; do send "$route" "$body" && break; sleep 1; done & ) >/dev/null 2>&1 ;;
+    # CG_TEST_SIGNAL_DONE_FILE is for tests only, and nothing of the plugin sets it: when it is set, each
+    # detached sender appends one line to that file as it ends, so a test can wait for the send.
+    *) ( { for _ in 1 2 3; do send "$route" "$body" && break; sleep 1; done
+           [ -z "${CG_TEST_SIGNAL_DONE_FILE:-}" ] || echo done >>"$CG_TEST_SIGNAL_DONE_FILE"; } & ) >/dev/null 2>&1 ;;
   esac
 done <<<"$BODIES"
 exit 0

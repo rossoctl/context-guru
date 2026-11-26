@@ -23,6 +23,7 @@ var hostPackages = []string{
 	"cmd",
 	"examples",
 	"internal/modelinfo/litellm",
+	"models/litellm", // the public facade over internal/modelinfo/litellm (#1251); adds no call of its own
 	"dispatch/dispatchtest",
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -83,10 +84,73 @@ func TestWaitForGivesUpBeforeTheTestDeadlineWithItsOwnMessage(t *testing.T) {
 		}()
 		WaitFor(d, "never", func() bool { return false })
 	}()
-	if el := time.Since(start); el > 3*time.Second {
+	if el := time.Since(start); TimingEnabled() && el > 3*time.Second {
 		t.Fatalf("WaitFor waited %v; it must stop before the test deadline", el)
 	}
 	if !strings.Contains(d.msg, "waiting for never") {
+		t.Fatalf("message = %q", d.msg)
+	}
+	// The deadline cut the wait, so the message must name the -timeout and the cut, and must not
+	// claim the condition is fine: the cut does not prove that (#1220 review).
+	if !strings.Contains(d.msg, "-timeout ends in") || !strings.Contains(d.msg, "of its 30s bound") {
+		t.Fatalf("message does not name the test deadline: %q", d.msg)
+	}
+	if strings.Contains(d.msg, "not this condition") {
+		t.Fatalf("message claims more than the cut proves: %q", d.msg)
+	}
+}
+
+func TestCutNoteStatesTheRealTimeLeft(t *testing.T) {
+	for _, c := range []struct {
+		left time.Duration
+		want string
+	}{
+		{1 * time.Second, "-timeout ends in 1s"},
+		{1500 * time.Millisecond, "-timeout ends in 1.5s"},
+		{0, "-timeout has already passed"},
+		{-2 * time.Second, "-timeout has already passed"},
+	} {
+		got := cutNote(pollInterval, 30*time.Second, c.left)
+		if !strings.Contains(got, c.want) || !strings.Contains(got, "only 2ms of its 30s bound") {
+			t.Errorf("cutNote(left=%v) = %q, want it to contain %q", c.left, got, c.want)
+		}
+	}
+}
+
+func TestWaitForInsideTheMarginReportsTheRealDeadline(t *testing.T) {
+	// The deadline is 1 s away, inside the 5 s margin: the wait is clamped to one poll interval.
+	// The message must say about 1 s, not "5.002s" (limit plus margin).
+	d := &deadlineTB{dl: time.Now().Add(time.Second)}
+	func() {
+		defer func() {
+			if p := recover(); p != nil && p != &d.recorder {
+				panic(p)
+			}
+		}()
+		WaitFor(d, "never", func() bool { return false })
+	}()
+	m := regexp.MustCompile(`-timeout ends in ([0-9.]+[a-z]+)`).FindStringSubmatch(d.msg)
+	if m == nil {
+		t.Fatalf("message names no time left: %q", d.msg)
+	}
+	if left, err := time.ParseDuration(m[1]); err != nil || left > 2*time.Second {
+		t.Fatalf("message reports %s left, want about 1s: %q", m[1], d.msg)
+	}
+}
+
+func TestWaitForDoesNotBlameTheDeadlineWhenItDidNotCutTheWait(t *testing.T) {
+	defer SetBoundForTest(30 * time.Millisecond)()
+	// A deadline far away: the 30 ms bound sets the limit, not the deadline.
+	d := &deadlineTB{dl: time.Now().Add(time.Hour)}
+	func() {
+		defer func() {
+			if p := recover(); p != nil && p != &d.recorder {
+				panic(p)
+			}
+		}()
+		WaitFor(d, "never", func() bool { return false })
+	}()
+	if !strings.Contains(d.msg, "waiting for never") || strings.Contains(d.msg, "ran out of time") {
 		t.Fatalf("message = %q", d.msg)
 	}
 }
@@ -183,5 +247,35 @@ func TestNoProductionPackageImportsTestutil(t *testing.T) {
 	}
 	if seen < 50 {
 		t.Fatalf("scanned only %d non-test files; the walk is broken", seen)
+	}
+}
+
+func TestTimingEnabledFollowsTheVariable(t *testing.T) {
+	for val, want := range map[string]bool{"": false, "0": false, "true": false, "1": true} {
+		t.Setenv("CG_TIMING_TESTS", val)
+		if got := TimingEnabled(); got != want {
+			t.Errorf("CG_TIMING_TESTS=%q: TimingEnabled() = %v, want %v", val, got, want)
+		}
+	}
+}
+
+func TestRequireTimingSkipsUnlessSwitchedOn(t *testing.T) {
+	t.Setenv("CG_TIMING_TESTS", "")
+	ran := true
+	t.Run("off", func(t *testing.T) {
+		RequireTiming(t)
+		ran = false // not reached when the test skips
+	})
+	if !ran {
+		t.Error("RequireTiming did not skip with the switch off")
+	}
+	t.Setenv("CG_TIMING_TESTS", "1")
+	ran = false
+	t.Run("on", func(t *testing.T) {
+		RequireTiming(t)
+		ran = true
+	})
+	if !ran {
+		t.Error("RequireTiming skipped with the switch on")
 	}
 }

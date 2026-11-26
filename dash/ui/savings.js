@@ -76,6 +76,11 @@ forTests.writesPrevented = writesPrevented;
 function strategyName(c) {
   if (!c) return '';
   if (!c.keepalive) return c.head_ttl_1h ? '1-hour-head' : 'none';
+  // 1-hour-on-wait is auto's keep-alive keys plus the one-hour switch on a long wait (#1243).
+  if (c.keepalive_one_hour_always && (c.keepalive_idle_seconds || 240) === 240 && (c.keepalive_max_pings || 2) === 2 &&
+      (c.keepalive_max_pings_1h || 1) === 1) return '1-hour-always';
+  if (c.keepalive_one_hour_on_wait && (c.keepalive_idle_seconds || 240) === 240 && (c.keepalive_max_pings || 2) === 2 &&
+      (c.keepalive_max_pings_1h || 1) === 1) return '1-hour-on-wait';
   if ((c.keepalive_idle_seconds || 240) !== 240) return '';
   const k = c.keepalive_max_pings || 2, k1h = c.keepalive_max_pings_1h || 1;
   if (k === 1 && k1h === 1) return '1-ping';

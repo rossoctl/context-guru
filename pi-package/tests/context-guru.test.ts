@@ -1,8 +1,9 @@
 // Unit tests for the extension's pure helpers. Run: node --test tests/*.test.ts (Node 22.18+ strips the types).
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { createServer } from "node:http";
@@ -11,8 +12,14 @@ import type { AddressInfo } from "node:net";
 import {
   CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
   needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
-  stripsChatGPTFields, strategyChoices, type StartCheck,
+  stripsChatGPTFields, strategyChoices, type StartCheck, settingsPath, recoverStaleRoute, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
+  uninstallText, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
 } from "../extensions/context-guru.ts";
+import contextGuru from "../extensions/context-guru.ts";
+
+// A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+// CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+const timing = process.env.CG_TIMING_TESTS === "1";
 
 const install = {
   port: 8800,
@@ -239,7 +246,7 @@ test("a proxy that accepts but never answers fails the check at the time limit",
   try {
     const start = Date.now();
     assert.equal(await proxyAnswers(port, 200), false);
-    assert.ok(Date.now() - start < 2000);
+    if (timing) assert.ok(Date.now() - start < 2000);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -267,14 +274,14 @@ test("a stopped check ends at once, before its time limit", async () => {
     const pending = proxyAnswers(port, 5000, fetch, stop.signal);
     setTimeout(() => stop.abort(), 50);
     assert.equal(await pending, false);
-    assert.ok(Date.now() - start < 1000);
+    if (timing) assert.ok(Date.now() - start < 1000);
   } finally {
     server.closeAllConnections();
     server.close();
   }
 });
 
-test("a conflict is one question: chain, replace, or change nothing", () => {
+test("a conflict is a short question, and each answer's consent text is kept apart from it", () => {
   const p = conflictPrompt({
     result: "needs_decision", conflicts: "anthropic", existing_base_url: '{"anthropic":"https://gw.example"}',
     consent_question_chain: "CHAIN-TEXT", consent_question_replace: "REPLACE-TEXT",
@@ -284,8 +291,10 @@ test("a conflict is one question: chain, replace, or change nothing", () => {
   assert.equal(p.answers[KEEP], undefined, "no answer means nothing changes");
   assert.match(p.title, /somewhere else: anthropic: https:\/\/gw.example\./);
   assert.doesNotMatch(p.title, /\{/);
-  assert.match(p.title, /CHAIN-TEXT/);
-  assert.match(p.title, /REPLACE-TEXT/);
+  // #1158: a pick-list title is a short question. The consent text goes into the confirm dialog.
+  assert.doesNotMatch(p.title, /CHAIN-TEXT|REPLACE-TEXT/);
+  assert.ok(p.title.length < 200, p.title);
+  assert.deepEqual(p.consent, { chain: "CHAIN-TEXT", replace: "REPLACE-TEXT" });
 });
 
 test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
@@ -316,4 +325,311 @@ test("the strategy names come from the proxy's list, and an old proxy offers onl
   assert.deepEqual(old.names, ["none"]);
   assert.match(old.error ?? "", /v0\.7\.1/);
   assert.deepEqual(strategyChoices({}).names, ["none"]);
+});
+
+test("a request does not wait when no restart is running", async () => {
+  const gate = new RestartGate();
+  // The wait settles before a 0 ms timer fires: no wait at all, whatever the machine's load.
+  const first = await Promise.race([gate.wait(10_000).then(() => "wait"), new Promise((r) => setTimeout(() => r("timer"), 0))]);
+  assert.equal(first, "wait");
+});
+
+test("Esc ends the wait at once", async () => {
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const stop = new AbortController();
+  const waiting = gate.wait(10_000, stop.signal).then(() => "ended");
+  stop.abort();
+  assert.equal(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("still waiting"), 1000))]), "ended");
+  assert.equal(await gate.wait(10_000, AbortSignal.abort()).then(() => "ended"), "ended", "an aborted signal waits not at all");
+});
+
+test("a request waits for a running restart and goes as soon as it ends", async () => {
+  const gate = new RestartGate();
+  const release = gate.hold();
+  let went = false;
+  const waiting = gate.wait(10_000).then(() => { went = true; });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(went, false);
+  release();
+  await waiting;
+  assert.equal(went, true);
+});
+
+test("a request waits at most the limit, 10 seconds by default", async () => {
+  assert.equal(FIRST_REQUEST_WAIT_MS, 10_000);
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const start = Date.now();
+  await gate.wait(30);
+  if (timing) assert.ok(Date.now() - start < 500);
+});
+
+test("the start check holds requests only while it restarts, also when the restart throws", async () => {
+  const seen: string[] = [];
+  const hold = () => { seen.push("hold"); return () => seen.push("release"); };
+  await checkAtStart({ ...fake([true]).check, hold });
+  assert.deepEqual(seen, [], "a proxy that answers holds nothing");
+
+  const { check } = fake([false, true], {
+    restart: async () => { seen.push("restart"); throw new Error("boom"); },
+    answers: (() => { const a = [false, true]; return async () => { seen.push("check"); return a.shift() ?? false; }; })(),
+  });
+  assert.equal(await checkAtStart({ ...check, hold }), "restarted");
+  assert.deepEqual(seen, ["check", "hold", "restart", "check", "release"]);
+});
+
+test("each preset has the Claude Code plugin's text, without the markdown", () => {
+  const skill = readFileSync(new URL("../../context-guru-plugin/skills/preset-picker/SKILL.md", import.meta.url), "utf8");
+  const rows = [...skill.matchAll(/^\| `([a-z]+)` \| (.+) \|$/gm)];
+  const plain = (text: string) => text.replace(/\*\*|`/g, "");
+  assert.deepEqual(Object.fromEntries(rows.map(([, name, text]) => [name, plain(text)])), PRESET_TEXT);
+});
+
+test("a preset pick-list label carries the text and maps back to the name", () => {
+  assert.equal(presetLabel("off"), "off: nothing runs, requests go through untouched");
+  assert.equal(presetFromLabel(presetLabel("conservative")), "conservative");
+  assert.equal(presetFromLabel(undefined), undefined);
+});
+
+test("an unknown name is named as unknown, then the list", () => {
+  assert.deepEqual(choiceProblem("preset", "banana", ["off", "medium"], "off"),
+    { text: "Unknown preset 'banana'. Presets: off, medium", level: "error" });
+});
+
+test("the current value is already set, so nothing restarts", () => {
+  assert.deepEqual(choiceProblem("preset", "medium", ["off", "medium"], "medium"),
+    { text: "Already set: preset medium. Nothing changed.", level: "info" });
+  assert.equal(choiceProblem("cache strategy", "none", ["none"], "auto"), undefined);
+});
+
+test("a setting whose restart is pending is not current, so choosing it restarts again", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cg-current-"));
+  writeFileSync(join(dir, "install.json"), JSON.stringify({ preset: "high", cache_strategy: "none" }));
+  assert.equal(currentSetting("preset", dir), "high");
+  assert.equal(currentSetting("cache_strategy", dir), "none");
+  writeFileSync(join(dir, "install.json"), JSON.stringify({ preset: "high", restart_pending: true }));
+  assert.equal(currentSetting("preset", dir), undefined);
+});
+
+test("uninstall names a proxy binary it kept", () => {
+  assert.equal(uninstallText({ models_restore: "restored", service: "stopped", binary_kept: "/opt/p (not downloaded by setup)" }),
+    "context-guru removed (models.json: restored, service: stopped). Kept your proxy binary /opt/p (not downloaded by setup). " +
+    "Re-select the model with /model, or restart Pi.");
+  assert.equal(uninstallText({ models_restore: "restored", service: "stopped" }),
+    "context-guru removed (models.json: restored, service: stopped). Re-select the model with /model, or restart Pi.");
+});
+
+test("a setup that fell back to the none strategy says so", () => {
+  const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "none",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none", dashboard: "d", reset_hatch: "h" });
+  assert.match(text, /Preset off, cache strategy none\. Dashboard: d\n/);
+  assert.match(text, /\ncache strategy auto is not offered for Pi, so setup uses none\.\n/);
+});
+
+test("a setup with no fallback has no note line", () => {
+  const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "auto", dashboard: "d", reset_hatch: "h" });
+  assert.doesNotMatch(text, /so setup uses/);
+  assert.equal(text.split("\n").length, 4);
+});
+
+test("the consent dialog names a strategy fallback before the yes", () => {
+  assert.equal(consentText("ROUTE-TEXT", "cache strategy auto is not offered for Pi, so setup uses none"),
+    "ROUTE-TEXT cache strategy auto is not offered for Pi, so setup uses none.");
+  assert.equal(consentText("ROUTE-TEXT", undefined), "ROUTE-TEXT");
+  const p = conflictPrompt({ consent_question_chain: "C", consent_question_replace: "R", existing_base_url: "x",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none" });
+  assert.deepEqual(p.consent, { chain: "C cache strategy auto is not offered for Pi, so setup uses none.",
+    replace: "R cache strategy auto is not offered for Pi, so setup uses none." });
+});
+
+/** A Pi that records what an extension registers. `emit` runs the handlers of one event. */
+function fakePi() {
+  const handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>> = {};
+  const commands: string[] = [];
+  const pi = {
+    on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => (handlers[name] ??= []).push(fn),
+    registerCommand: (name: string) => commands.push(name),
+    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false, truncated: false }),
+  };
+  const notices: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: { notify: (text: string) => notices.push(text) },
+    model: undefined,
+    modelRegistry: { getAll: () => [] },
+    sessionManager: { getSessionId: () => "s1" },
+  };
+  const emit = (name: string, event: unknown = {}) => (handlers[name] ?? []).forEach((fn) => fn(event, ctx));
+  return { pi: pi as never, commands, notices, emit, events: () => Object.keys(handlers) };
+}
+
+test("a second copy of the package registers nothing and warns once, naming both folders", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  g[LOADED] = "/clone-a/pi-package";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    assert.deepEqual(second.commands, []);
+    assert.deepEqual(second.events(), ["session_start"]);
+    second.emit("session_start");
+    second.emit("session_start");
+    assert.equal(second.notices.length, 1);
+    assert.match(second.notices[0], /two copies/);
+    assert.ok(second.notices[0].includes("/clone-a/pi-package and "), second.notices[0]);
+    assert.ok(second.notices[0].includes(join(dirname(fileURLToPath(import.meta.url)), "..") + "."), second.notices[0]);
+    assert.match(second.notices[0], /settings\.json/);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("the first copy registers its command, and a reload of it after shutdown registers again", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    assert.deepEqual(first.commands, ["context-guru"]);
+    assert.equal(g[LOADED], join(dirname(fileURLToPath(import.meta.url)), ".."));
+    first.emit("session_shutdown", { reason: "reload" });
+    // Released, so a different copy that loads after the reload (the user removed this one) runs.
+    assert.equal(g[LOADED], undefined);
+    const reloaded = fakePi();
+    contextGuru(reloaded.pi);
+    assert.deepEqual(reloaded.commands, ["context-guru"]);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("a shutdown releases only this copy's marker, for /new as for a reload", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    first.emit("session_shutdown", { reason: "new" });
+    assert.equal(g[LOADED], undefined);
+    contextGuru(fakePi().pi);
+    g[LOADED] = "/clone-a/pi-package"; // another copy holds it now
+    first.emit("session_shutdown", { reason: "reload" });
+    assert.equal(g[LOADED], "/clone-a/pi-package");
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("an update whose restart failed is an error that says the proxy is off and what to run", () => {
+  const m = updateMessage({ result: "updated", version: "v0.7.3", restart: "failed", log: "/s/proxy.log" }, 1);
+  assert.equal(m.level, "error");
+  assert.equal(m.text, "context-guru updated to v0.7.3, but the proxy did not start and is off. " +
+    "Run /context-guru status. The log is /s/proxy.log.");
+});
+
+test("an update that restarted, or needed no restart, is info", () => {
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "skipped" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+});
+
+test("an update that exits non-zero is an error even when its facts say updated", () => {
+  assert.equal(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 1).level, "error");
+});
+
+test("an update that was refused shows the reason and the detail", () => {
+  assert.deepEqual(updateMessage({ result: "refused", reason: "binary_not_managed", detail: "x" }, 2),
+    { text: "context-guru update: refused binary_not_managed x", level: "error" });
+});
+
+test("a configure whose restart failed says the proxy is off and what to run", () => {
+  assert.deepEqual(configureMessage({ result: "not_applied", preset: "medium", log: "/s/proxy.log" }, 1, ""), {
+    text: "context-guru: the new setting is saved, but the proxy did not start and is off. " +
+      "Run /context-guru status. The log is /s/proxy.log.",
+    level: "error",
+  });
+});
+
+test("a configure that worked names the preset and the strategy", () => {
+  assert.deepEqual(configureMessage({ result: "configured", preset: "medium", cache_strategy: "none" }, 0, ""),
+    { text: "context-guru now runs preset medium, cache strategy none.", level: "info" });
+});
+
+test("a configure with no facts shows stderr", () => {
+  assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
+});
+
+test("the two-copies warning names the settings.json that Pi uses", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  const before = process.env.PI_CODING_AGENT_DIR;
+  g[LOADED] = "/clone-a/pi-package";
+  process.env.PI_CODING_AGENT_DIR = "/tmp/test-agent";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    second.emit("session_start");
+    assert.ok(second.notices[0].includes('"packages" in /tmp/test-agent/settings.json'), second.notices[0]);
+  } finally {
+    delete g[LOADED];
+    if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = before;
+  }
+});
+
+test("settingsPath names Pi's own settings.json, or the one in PI_CODING_AGENT_DIR", () => {
+  assert.equal(settingsPath({}), "~/.pi/agent/settings.json");
+  assert.equal(settingsPath({ PI_CODING_AGENT_DIR: "/tmp/agent" }), "/tmp/agent/settings.json");
+});
+
+/** A model registry and a session for recoverStaleRoute: models.json can name the proxy or the real endpoint. */
+function staleWorld(onDisk: string) {
+  const seen = { refreshed: 0, set: [] as string[], notices: [] as string[] };
+  const routedAtStart = { port: 8800, base_urls: { anthropic: "http://127.0.0.1:8800/anthropic" } };
+  return {
+    seen, routedAtStart,
+    deps: (installNow: unknown) => ({
+      model: { provider: "anthropic", id: "m", baseUrl: "http://127.0.0.1:8800/anthropic" },
+      installedAtStart: routedAtStart,
+      installNow: installNow as never,
+      refresh: async () => { seen.refreshed++; },
+      find: (provider: string, id: string) => ({ provider, id, baseUrl: onDisk }),
+      setModel: async (m: { baseUrl?: string }) => { seen.set.push(m.baseUrl ?? ""); return true; },
+      notify: (text: string) => seen.notices.push(text),
+    }),
+  };
+}
+
+test("after an uninstall, a session that still uses the proxy URL switches to the endpoint in models.json", async () => {
+  const w = staleWorld("https://gw.example.com");
+  assert.equal(await recoverStaleRoute(w.deps(undefined)), "switched");
+  assert.deepEqual(w.seen.set, ["https://gw.example.com"]);
+  assert.equal(w.seen.notices.length, 1);
+  assert.match(w.seen.notices[0], /context-guru was removed/);
+  assert.match(w.seen.notices[0], /gw\.example\.com/);
+});
+
+test("while context-guru is still installed, nothing is switched (a down proxy is the restart's job)", async () => {
+  const w = staleWorld("https://gw.example.com");
+  assert.equal(await recoverStaleRoute(w.deps(w.routedAtStart)), "still-installed");
+  assert.equal(w.seen.refreshed, 0);
+  assert.deepEqual(w.seen.set, []);
+});
+
+test("a session that does not use the proxy URL is left alone", async () => {
+  const w = staleWorld("https://gw.example.com");
+  const deps = { ...w.deps(undefined), model: { provider: "anthropic", id: "m", baseUrl: "https://gw.example.com" } };
+  assert.equal(await recoverStaleRoute(deps), "not-routed");
+  assert.equal(w.seen.refreshed, 0);
+});
+
+test("when models.json still names the proxy, there is nothing better to switch to", async () => {
+  const w = staleWorld("http://127.0.0.1:8800/anthropic");
+  assert.equal(await recoverStaleRoute(w.deps(undefined)), "no-better-model");
+  assert.deepEqual(w.seen.set, []);
+});
+
+test("a model with no baseUrl in models.json goes to the provider's own API", async () => {
+  const w = staleWorld("");
+  const deps = { ...w.deps(undefined), find: (provider: string, id: string) => ({ provider, id }) };
+  assert.equal(await recoverStaleRoute(deps), "switched");
+  assert.match(w.seen.notices[0], /the provider's own API/);
 });

@@ -22,6 +22,16 @@ _UNUSABLE = "/nonexistent/context-guru"  # every read and write under it fails l
 _dir_memo: dict[str, str] = {}
 
 
+def now() -> float:
+    """The wall clock for cache ages and back-off. CG_TEST_NOW (epoch seconds) pins it, for tests only:
+    no hook or script of the plugin sets it, so a user's run always reads the real clock."""
+    pinned = os.environ.get("CG_TEST_NOW", "")
+    try:
+        return float(pinned) if pinned else time.time()
+    except ValueError:
+        return time.time()
+
+
 def cache_dir() -> str:
     """The private cache directory, created 0700 on first use. A directory that exists but is not
     ours (another user's, on a shared host) or is writable by others is never used: the result is a
@@ -47,7 +57,7 @@ def cache_dir() -> str:
 
 def age_of(path: str) -> float | None:
     try:
-        return max(0.0, time.time() - os.stat(path).st_mtime)
+        return max(0.0, now() - os.stat(path).st_mtime)
     except OSError:
         return None
 
@@ -105,7 +115,7 @@ def _fail_path(path: str) -> str:
 def backoff(path: str) -> dict | None:
     """The recorded failure while its back-off is still running ({n, kind, until}), else None."""
     rec = read_json(_fail_path(path))
-    if rec and isinstance(rec.get("until"), (int, float)) and rec["until"] > time.time():
+    if rec and isinstance(rec.get("until"), (int, float)) and rec["until"] > now():
         return rec
     return None
 
@@ -115,7 +125,7 @@ def record_failure(path: str, kind: str) -> dict:
     prev = read_json(_fail_path(path)) or {}
     n = int(prev.get("n", 0)) + 1 if isinstance(prev.get("n"), (int, float)) else 1
     delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** min(n - 1, 20)))
-    rec = {"n": n, "kind": kind, "until": time.time() + delay}
+    rec = {"n": n, "kind": kind, "until": now() + delay}
     write_atomic(_fail_path(path), json.dumps(rec).encode())
     return rec
 

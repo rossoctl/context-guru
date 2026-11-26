@@ -2,26 +2,30 @@ package proxy
 
 import (
 	"context"
+	"github.com/rossoctl/context-guru/agent"
+	"maps"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
+	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
+	"github.com/rossoctl/context-guru/reqfacts"
+	"github.com/rossoctl/context-guru/session"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
+	"github.com/rossoctl/context-guru/waitcause"
 	"github.com/tidwall/gjson"
 )
 
@@ -69,7 +73,7 @@ type capture struct {
 	route     string
 	provider  string
 	model     string
-	agent     string
+	agent     agent.Client
 	project   string
 	start     time.Time
 	cgMs      float64
@@ -82,6 +86,9 @@ type capture struct {
 	sweepExpandTok int
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
+	// sweepExpandRules counts first expands of a sweep v3 drop by what chose it: a rule name, or "judge"
+	// (#1191). finish adds them to the sweep's component row as sweep_v3_expanded_<rule> events.
+	sweepExpandRules map[string]int
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
@@ -105,7 +112,7 @@ type capture struct {
 	meta dash.Meta
 	// predArrival is set by the handler when a cache campaign tracks this tenant (see LiveFacts.Arrival).
 	predArrival *predictive.Arrival
-	// thread is the session thread this request belongs to (see internal/thread), set by
+	// thread is the session thread this request belongs to (see package thread), set by
 	// noteThread once the session id is known. "" is the primary thread. inherits/hasInherit
 	// name the thread a NEW thread continues by content (thread.Result.Inherits).
 	thread    string
@@ -136,6 +143,10 @@ type capture struct {
 	// on the writer goroutine, not here). See dash/capture.go's write().
 	waits    *waitcause.Tracker
 	waitBody []byte
+	// early is this request's early wait-cause scan (earlyscan.go); nil: none was started. scanStat is the
+	// handler's counters.
+	early    *earlyScan
+	scanStat *scanStats
 	// terminal is Options.TerminalTools (#857), read by the wait-cause closure.
 	terminal []string
 	// The alias derivation's other inputs (#766): the pipeline that will transform this
@@ -156,8 +167,14 @@ type capture struct {
 	kaPings     int
 	kaRefreshed int64
 	kaStrategy  string
+	// kaPlan is the ping plan the keeper built for the wait this response starts (#1198); nil when none
+	// was built. hosted is true on a multi-tenant proxy, whose host clock says nothing about the user.
+	kaPlan *keepalive.PlanInForce
+	hosted bool
 	// kaRefreshedAt is when the provider's entry was last known refreshed (see kaArrival).
 	kaRefreshedAt time.Time
+	// kaRefreshedOneHour: the entry's last touch was a live free 1-hour ping (kaArrival).
+	kaRefreshedOneHour bool
 	// inv is the request's DECLARED inventory (tool / MCP / skill names and their token
 	// weights) plus the tool calls of its last tool-using turn — nil when the request
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
@@ -174,9 +191,13 @@ type capture struct {
 	// and the accountant figure must not be booked.
 	observe bool
 	// pings holds the keep-alive ping facts the next request consumes (Options.Pings; nil = none).
-	pings  *PingStore
-	accReq *accountant.Request
-	// accServerHeldHistory is set for an OpenAI Responses request with previous_response_id: the provider
+	pings *PingStore
+	// endpoint and readSets tell the accountant whether a read sets the TTL on this route
+	// (Provider.ReadSetsTTL). readSets is the keeper's readSetsTTL; nil = never.
+	endpoint string
+	readSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
+	accReq   *accountant.Request
+	// accServerHeldHistory is set for an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider
 	// holds its history, so the accountant has no record of it.
 	accServerHeldHistory bool
 	// accNoResult says why no Result was attached when Compute was reached and gave none.
@@ -208,7 +229,7 @@ type capture struct {
 
 // newCapture starts a capture for one request, or returns nil when the dashboard
 // is off — every call site is nil-safe, so the disabled path costs one nil check.
-func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenancy) *capture {
+func (h *Handler) newCapture(r *http.Request, cl agent.Client, provider, route string, tn *Tenancy) *capture {
 	defer timedSpan("newCapture")()
 	if h.rec == nil {
 		return nil
@@ -223,7 +244,7 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 	return &capture{
 		rec: h.rec, pricer: h.opts.Prices, preset: tn.Preset, tenant: tn.ID,
 		route: route, provider: provider,
-		agent: r.UserAgent(), start: time.Now(),
+		agent: cl, start: time.Now(),
 		llm:      &cheapmodel.Sink{},
 		unique:   map[string]int{},
 		waits:    h.waits,
@@ -231,6 +252,15 @@ func (h *Handler) newCapture(r *http.Request, provider, route string, tn *Tenanc
 		savings:  h.savings, pings: h.opts.Pings, metrics: h.opts.MetricsSink, inference: h.opts.InferenceMetrics,
 		observe: tn.Mode == components.ModeObserve,
 		authSub: provider == string(bschemas.Anthropic) && callerIsSubscription(r),
+		hosted:  h.opts.Tenants != nil,
+	}
+}
+
+// noteKeepAlivePlan records the ping plan the keeper built for the wait this response starts (#1198).
+func (c *capture) noteKeepAlivePlan(p *keepalive.PlanInForce) {
+	defer c.timed("noteKeepAlivePlan")()
+	if c != nil {
+		c.kaPlan = p
 	}
 }
 
@@ -292,6 +322,19 @@ func (c *capture) noteAgentCompaction(v bool) {
 	}
 }
 
+// noteReadSets gives the capture the upstream and the keeper's proof, for Provider.ReadSetsTTL. Nil-safe.
+func (c *capture) noteReadSets(endpoint string, f func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool) {
+	if c != nil {
+		c.endpoint, c.readSets = endpoint, f
+	}
+}
+
+// prefixRewritten says the client rewrote the prefix of this request: the agent's own compaction came just
+// before it, or the tracker found the thread forks or rewinds another one. Nil-safe.
+func (c *capture) prefixRewritten() bool {
+	return c != nil && ((c.compKnown && c.compVerdict != "") || c.hasInherit)
+}
+
 // noteThread records which thread of the session this request belongs to.
 func (c *capture) noteThread(res thread.Result) {
 	defer c.timed("noteThread")()
@@ -307,7 +350,7 @@ func (c *capture) noteThread(res thread.Result) {
 // noteWaitBody stashes the PRISTINE request body for issue #424's RECORD half, so finish()
 // can scan it (waitcause.Tracker.Observe) after the request has already gone upstream. This
 // is a slice-header copy — the request path pays nothing beyond this one field write, however
-// large the body: see internal/waitcause's own benchmark for what the scan itself costs, and
+// large the body: see waitcause's own benchmark for what the scan itself costs, and
 // why that cost belongs on finish()'s side of the line, not here. Call site: proxy.go, right
 // after noteThread, with `orig` — the body as the agent sent it, before any pipeline rewrite,
 // the same body threadFor already matches on.
@@ -375,130 +418,6 @@ func (c *capture) noteInventory(provider string, body []byte) {
 	c.inv = dash.ScanInventory(provider, body)
 }
 
-// The dialect map metaFromBody normalizes. Two dialects onto one set of columns, because a
-// column that means `reasoning_effort` for one client and nothing for another cannot be
-// aggregated:
-//
-//	Anthropic  max_tokens, temperature, top_p, stream, tools[], tool_choice{type},
-//	           system[] (blocks, or a bare string), thinking{type,budget_tokens},
-//	           output_config{effort}
-//	OpenAI     max_tokens / max_completion_tokens, temperature, top_p, stream, tools[],
-//	           tool_choice (a bare string, or {function:{name}}), reasoning_effort,
-//	           and no top-level system at all — it is a role=system message
-//
-// metaFromBody reads the request's metadata off the raw body in ONE structural pass.
-//
-// One pass, and it is measured rather than assumed. This runs on the request goroutine, so
-// the shape of the cost matters more than its absolute size:
-//
-//	one ForEach over the top-level object   0.55 ms/MB, 1 allocation
-//	one gjson path query per field (12)     2.7  ms/MB, ~5 allocations
-//
-// The per-field version re-scans past the whole `messages` array once per field, which is
-// 5x the work for a body of any interesting size — so the single pass wins, even though it
-// pays for one body-length copy (`gjson.ParseBytes` is `Parse(string(json))`). For scale:
-// the pipeline on this same path already runs seven whole-body path queries to count
-// breakpoints, and re-serializes the body outright when a component rewrites a message.
-// ponytail: costs one body-sized short-lived copy; swap for a zero-copy iterator if this
-// ever appears in a profile.
-//
-// The ForEach never parses `messages` — each value is skipped structurally by byte — so the
-// cost is linear in the body and independent of the transcript's depth or message count.
-//
-// Breakpoint counts are NOT read here: the pipeline already counts them to respect the
-// provider's cap of four, and they reach the event on the trace for free (see FromTrace).
-func metaFromBody(body []byte) dash.Meta {
-	m := metaFromBodyRefs(body)
-	// COPY EVERY STRING OUT OF THE BODY. gjson's String() returns a substring of `body` without
-	// copying, so a Meta built from it holds the WHOLE request body alive for as long as the Meta
-	// lives — and it lives far past the request: the event carries it to the writer, and the SSE
-	// hub keeps the last 256 events for late subscribers. On CG2, 256 kept events from
-	// 1,000-message sessions held 1-20 MB bodies each: four OOM kills at the 8 GiB limit on
-	// 2026-10-19/20. strings.Clone makes each field a few bytes of its own.
-	m.ReasoningEffort = strings.Clone(m.ReasoningEffort)
-	m.ThinkingMode = strings.Clone(m.ThinkingMode)
-	m.ToolChoice = strings.Clone(m.ToolChoice)
-	return m
-}
-
-// metaFromBodyRefs reads the fields. Its strings ALIAS body; only metaFromBody may return them.
-func metaFromBodyRefs(body []byte) dash.Meta {
-	var m dash.Meta
-	gjson.ParseBytes(body).ForEach(func(k, v gjson.Result) bool {
-		switch k.Str {
-		case "max_tokens", "max_completion_tokens":
-			// Either dialect's output cap. Anthropic's spelling wins if a body carries
-			// both, which is what an Anthropic-shaped upstream would honour too.
-			if m.MaxTokens == 0 || k.Str == "max_tokens" {
-				m.MaxTokens = int(v.Int())
-			}
-		case "temperature":
-			// Number-typed only, and by POINTER: "0" and absent are different facts, and a
-			// non-numeric value is a malformed request rather than a temperature.
-			if v.Type == gjson.Number {
-				f := v.Float()
-				m.Temperature = &f
-			}
-		case "top_p":
-			if v.Type == gjson.Number {
-				f := v.Float()
-				m.TopP = &f
-			}
-		case "stream":
-			m.Stream = v.Bool()
-		case "reasoning_effort": // OpenAI: top level
-			m.ReasoningEffort = v.String()
-		case "output_config": // Anthropic: nested, never top level
-			// Both accepted forms: the bare level string and {"type": "<level>"}.
-			if e := v.Get("effort"); e.Exists() {
-				if e.IsObject() {
-					m.ReasoningEffort = e.Get("type").String()
-				} else {
-					m.ReasoningEffort = e.String()
-				}
-			}
-		case "thinking":
-			m.ThinkingMode = v.Get("type").String()
-			m.ThinkingBudget = int(v.Get("budget_tokens").Int())
-		case "tool_choice":
-			m.ToolChoice = toolChoiceMode(v)
-		case "tools":
-			m.Tools = int(v.Get("#").Int())
-		case "system":
-			// A bare string is one block; an array is its length. A COUNT, never the text:
-			// the system prompt is a request's most sensitive content, and its shape is
-			// what explains a cache prefix. The text belongs to transcript capture, under
-			// that gate and that redaction.
-			if v.IsArray() {
-				m.SystemBlocks = int(v.Get("#").Int())
-			} else if v.Type == gjson.String && v.Str != "" {
-				m.SystemBlocks = 1
-			}
-		}
-		return true
-	})
-	return m
-}
-
-// toolChoiceMode normalizes the two dialects' tool_choice shapes to the forcing MODE.
-// OpenAI sends a bare string ("auto"|"none"|"required") or an object naming a function;
-// Anthropic sends an object ({"type":"auto"|"any"|"none"|"tool"}). The forced tool's name
-// is deliberately dropped: it is unbounded client text and no aggregate asks for it.
-func toolChoiceMode(v gjson.Result) string {
-	if v.Type == gjson.String {
-		return v.Str
-	}
-	if v.IsObject() {
-		if t := v.Get("type"); t.Type == gjson.String {
-			return t.Str
-		}
-		if v.Get("function.name").Exists() {
-			return "tool" // OpenAI's object form forces one named function
-		}
-	}
-	return ""
-}
-
 func (c *capture) noteCG(ms float64) {
 	defer c.timed("noteCG")()
 	if c != nil {
@@ -517,7 +436,7 @@ func (c *capture) noteKeepAlive(ka kaArrival) {
 	defer c.timed("noteKeepAlive")()
 	if c != nil {
 		c.kaPings, c.kaRefreshed, c.kaStrategy = ka.pings, ka.refreshed, ka.strategyID
-		c.kaRefreshedAt = ka.refreshedAt
+		c.kaRefreshedAt, c.kaRefreshedOneHour = ka.refreshedAt, ka.refreshedOneHour
 	}
 }
 
@@ -560,6 +479,36 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 		if note.Warm {
 			c.sweepFalseExpWarm++
 		}
+	}
+	for rule, n := range note.Rules {
+		if c.sweepExpandRules == nil {
+			c.sweepExpandRules = map[string]int{}
+		}
+		c.sweepExpandRules[rule] += n
+	}
+}
+
+// addSweepExpandEvents puts the first expands of sweep v3 drops, by rule, on the sweep's component row
+// of this request, beside the drops it raised per rule (sweep_v3_dropped_<rule>). The dashboard keeps
+// the row with the request's route and sums its events, so the expand rate per rule reads per route,
+// across a restart (#1191). A request with no sweep row (the sweep was not in its pipeline) keeps only
+// the request-level counts.
+func addSweepExpandEvents(e *dash.Event, rules map[string]int) {
+	for i := range e.Components {
+		row := &e.Components[i]
+		if row.Component != "extract_llm_sweep" {
+			continue
+		}
+		// A copy: the row shares the component report's own map (dash.Event.FromTrace).
+		events := maps.Clone(row.Events)
+		if events == nil {
+			events = map[string]int{}
+		}
+		row.Events = events
+		for rule, n := range rules {
+			row.Events["sweep_v3_expanded_"+rule] += n
+		}
+		return
 	}
 }
 
@@ -616,7 +565,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		Preset:   c.preset,
 		Status:   c.status,
 	}
-	e.Agent = dash.AgentFor(c.agent)
+	e.Agent = c.agent.Label
 	e.Project = c.project
 	e.Meta = c.meta
 	e.FromTrace(c.trace, c.unique)
@@ -660,6 +609,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// that case as WaitingUnknown rather than WaitingRetry.
 	waits, tenantID, sessionID, threadID, waitBody, status := c.waits, e.TenantID, e.SessionID, e.ThreadID, c.waitBody, c.status
 	toolUseNames, stopReason, terminal := usage.ToolUseNames, usage.StopReason, c.terminal
+	toolParams, spawn := usage.ToolParams, usage.Spawn
 	if usage.ToolUseIncomplete {
 		terminal = []string{} // the name list may miss the true last call: never "done" (#857)
 	}
@@ -668,9 +618,23 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// Both closures run on the writer goroutine, one after the other: normalize once, lazily.
 	var normMsgs []bschemas.ChatMessage
 	var normDone bool
+	early, scanStat := c.early, c.scanStat
 	norm := func() []bschemas.ChatMessage {
 		if !normDone {
-			normMsgs, normDone = apply.NormalizeMessages(provider, waitBody), true
+			// The scan that ran while the request was upstream already normalized this body: reuse it when it
+			// is ready, else normalize here, as before. The check never blocks.
+			if r := early.result(); r != nil {
+				normMsgs = r.Messages()
+				if scanStat != nil {
+					scanStat.writerEarly.Add(1)
+				}
+			} else {
+				normMsgs = apply.NormalizeMessages(provider, waitBody)
+				if scanStat != nil && early != nil {
+					scanStat.writerOwn.Add(1)
+				}
+			}
+			normDone = true
 		}
 		return normMsgs
 	}
@@ -679,25 +643,49 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		rec := c.rec
 		e.LifecycleFn = func() *dash.LifecycleRow {
 			return rec.ObserveLifecycle(tenantID, sessionID, threadID, ts, endTS,
-				scanLifecycle(norm, waitBody), cacheW, cacheW1h)
+				reqfacts.ScanLifecycle(norm, waitBody), cacheW, cacheW1h)
 		}
 	}
 	e.BypassCount, e.BypassBytes = c.trace.BypassCount, len(waitBody)
 	e.WaitCause = func() dash.WaitCauseResult {
-		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm)
+		obs := waits.ObserveWith(tenantID, sessionID, threadID, waitBody, norm, waitcause.ForClient(c.agent))
 		waits.RecordOutcome(tenantID, sessionID, threadID, obs.MsgCount, status)
-		waitingFor, waitTool := waitcause.ClassifyWaitingForTerminal(
-			terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
-		return dash.WaitCauseResult{
+		waitingFor, waitTool := waitcause.ClassifyWaitingForClient(
+			c.agent, terminal, toolUseNames, stopReason, failedCall, usageOK, obs.OpenBackground, obs.OpenTeammate)
+		res := dash.WaitCauseResult{
 			WaitingFor: waitingFor, WaitTool: waitTool, WakeCause: obs.WakeCause,
 			OpenBackground: obs.OpenBackground, OpenTeammate: obs.OpenTeammate,
 			MonitorExpiryMs: obs.MonitorExpiryMs,
 		}
+		// The metadata that predicts when the user returns (#1198). The wait tool's `timeout` and
+		// `run_in_background` are kept only for a wait on the tool's own result (waitTool is set).
+		if waitTool != "" {
+			if toolParams.HasTimeout {
+				v := toolParams.TimeoutMs
+				res.WaitToolTimeoutMs = &v
+			}
+			if toolParams.HasBackground {
+				v := toolParams.Background
+				res.WaitToolBackground = &v
+			}
+		}
+		// A prompt is known only for a response that was read: an unknown cause says nothing.
+		if waitingFor != waitcause.WaitingUnknown {
+			res.WaitPrompt = waitcause.PromptNone
+			if waitingFor == waitcause.WaitingHuman {
+				res.WaitPrompt = waitcause.PromptOf(toolUseNames)
+			}
+		}
+		// The person's id, raw, for the writer to hash. Read here, on the writer goroutine.
+		res.Fanout, res.SpawnType = spawn.N, spawn.Type
+		res.UserKey = session.UserKey(gjson.GetBytes(waitBody, "metadata.user_id").String())
+		return res
 	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	addSweepExpandEvents(e, c.sweepExpandRules)
 	if d := c.deferFacts; d != nil {
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
@@ -816,13 +804,15 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	} else {
 		age = entryAgeMs(sinceMs, e.TS, c.kaRefreshedAt)
 	}
-	e.AttributeCache(seenSession, seenModel, age, cacheAttributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
+	e.PrefixCompared = known
+	e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
 	// saving is the accountant library's rescue, not computed from these.
 	e.SinceLastMs = sinceMs
 	e.KeepAlivePings, e.KeepAliveRefreshed = c.kaPings, c.kaRefreshed
 	e.KeepAliveStrategyID = c.kaStrategy
+	c.fillStrategyMeta(e)
 
 	var price modelinfo.Price
 	priced := false
@@ -844,34 +834,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	if c.accReq != nil && usageOK && !c.accDone {
 		c.accDone = true
-		// A rejected request (a status that is not 0 and not 2xx) books no saving, in tokens or in
-		// dollars. The response body of a 4xx or 5xx can still carry a usage object, but the provider
-		// billed none of the request, so the library must not price a saving on it. DropUnbilledSavings
-		// zeroed the tokens above; skipping the compute leaves the event with no Result, so PriceMode
-		// books no dollars either (acc_fallback no_result, reason rejected_status). PingSavings refuses
-		// a non-2xx ping the same way. A status of 0 (the request never reached a provider) is not a rejection.
-		if c.rejected() {
-			c.accNoResult = "rejected_status"
-		} else if c.accNoResult == accDeferralUnplaced {
-			// accEnd found a deferral it could not describe to the library (billedBody). Computing on the bodies
-			// as they are would fail the sum check, so no figure is computed and the log line names the reason.
-		} else if c.rounds <= 1 {
-			c.accBilledTTL(usage)
-			if res, ok := c.savings.computeSafe(c.accReq, usage); ok {
+		// The rules for which request books no figure are accrec.Recorder.Price's: a rejected status, a deferral
+		// that could not be placed, several upstream rounds and a panic in the library. DropUnbilledSavings zeroed
+		// the tokens above; a request with no figure leaves the event with no Result, so PriceMode books no dollars
+		// either (acc_fallback no_result). PingSavings refuses a non-2xx ping the same way.
+		out := c.savings.Price(c.accReq, accrec.PriceIn{
+			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
+			BeforeCompute: func() { c.accBilledTTL(usage) },
+			// The event and the metrics are booked before the rescue counter and the ping-facts drop, as they always were.
+			AfterCompute: func(res accountant.Result) {
 				e.SetAccountant(res)
 				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
-					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)})
-			} else {
-				c.accNoResult = "compute_panicked"
-			}
-			// Pings went out in the gap this request ended, yet no ping facts were found for its thread:
-			// the credit for them is lost. Count it, so a host that does not wire the ping side shows.
-			if c.kaPings > 0 && c.accPingWindow == "" {
-				c.savings.noteRescueFactsMissing()
-			}
-			// The ping facts were read for this request; now that it is priced they are spent.
-			c.pings.drop(accPingKey(c.accMeta.Session, c.accThread), c.accPingWindow)
-		}
+					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)}, int(usage.Output))
+			},
+			Session: c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
+		})
+		c.accNoResult = out.NoResult
 	}
 	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
 	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
@@ -941,27 +919,16 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	c.rec.Record(e)
 }
 
-// entryAgeMs is how old the provider's cache entry was when the request arrived: the gap since
-// the last real request, cut short by a ping that refreshed the entry later than that request.
+// entryAgeMs is the library's apply.EntryAgeMs: the proxy passes facts, and the rule lives with the cold
+// check (#1350). attributionTTLMs, below, does the same for apply.BilledLifetimeMs.
 func entryAgeMs(sinceMs, tsMs int64, refreshedAt time.Time) int64 {
-	if refreshedAt.IsZero() || sinceMs <= 0 {
-		return sinceMs
-	}
-	if age := tsMs - refreshedAt.UnixMilli(); age >= 0 && age < sinceMs {
-		return age
-	}
-	return sinceMs
+	return apply.EntryAgeMs(sinceMs, tsMs, refreshedAt)
 }
 
-// cacheAttributionTTLMs is the lifetime of the entry this request tried to read. oneHour is the
-// tier the provider BILLED that entry at (the whole write at 1h on the thread's previous request),
-// not the tier a request asked for: a one-hour ask the provider billed at five minutes stays
-// five minutes. false (also "unknown") keeps the five-minute lifetime.
-func cacheAttributionTTLMs(provider, model string, oneHour bool) int64 {
-	if _, kind := apply.CacheLifetime(bschemas.ModelProvider(provider), model, nil); kind != apply.CacheLifetimeExact {
-		return 0
-	}
-	return modelinfo.CacheLifetime(provider, model, oneHour).Milliseconds()
+// attributionTTLMs passes the two facts to apply.BilledLifetimeMs, which decides the lifetime the miss verdict
+// judges against: the tier the last write was billed at, and whether the last touch was a live free 1-hour ping.
+func (c *capture) attributionTTLMs(provider, model string, prevOneHour bool) int64 {
+	return apply.BilledLifetimeMs(bschemas.ModelProvider(provider), model, prevOneHour, c != nil && c.kaRefreshedOneHour)
 }
 
 // LiveFacts are the request-side inputs of a learned keep-alive campaign, taken from the same places the dashboard row is filled from, so
@@ -983,7 +950,7 @@ func (c *capture) liveFacts(ttfbMs float64) *LiveFacts {
 		return nil
 	}
 	return &LiveFacts{Messages: c.trace.Messages, Tools: c.meta.Tools, SystemBlocks: c.meta.SystemBlocks, MaxTokens: c.meta.MaxTokens,
-		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent, Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
+		Effort: c.meta.ReasoningEffort, Thinking: c.meta.ThinkingMode, CacheTTL: c.trace.CacheTTL, Agent: c.agent.ModelAgent(c.provider), Stream: c.meta.Stream, TTFBMs: ttfbMs, Arrival: c.predArrival}
 }
 
 // noteRounds records how many upstream rounds the request took (1 without an expand). Nil-safe.
@@ -1008,19 +975,53 @@ func (c *capture) accDrop() {
 // rejected is true when the provider answered with a status that is not 2xx. Status 0 means no upstream
 // answered (such as /compact), and is not a rejection.
 func (c *capture) rejected() bool {
-	return c.status != 0 && (c.status < 200 || c.status > 299)
+	return accrec.Rejected(c.status)
 }
 
 func (c *capture) noResultWhy(usageOK bool) string {
-	switch {
-	case c.accReq == nil:
-		return "no_record" // no session, or the pipeline did not run: accEnd never noted a request, or the job opened none
-	case !usageOK:
-		return "no_usage"
-	case c.accNoResult != "":
-		return c.accNoResult
-	case c.rounds > 1:
-		return "upstream_rounds=" + strconv.Itoa(c.rounds)
+	return accrec.NoResultWhy(c.accReq != nil, usageOK, c.accNoResult, c.rounds)
+}
+
+// fillStrategyMeta sets the strategy metadata that one request alone decides (#1198): the host's
+// UTC offset and the ping plan. The wait's tool parameters and prompt, the turn, the concurrency and
+// the person's hash are filled on the writer (WaitCause, dash.Recorder).
+//
+// The offset comes from the host's own time zone at the request time, and only on a local proxy,
+// where the host is the user's machine. A hosted proxy has no zone of its user, so it leaves the
+// field NULL (unknown).
+func (c *capture) fillStrategyMeta(e *dash.Event) {
+	if !c.hosted {
+		_, off := c.start.Zone()
+		v := off / 60
+		e.TZOffsetMin = &v
 	}
-	return ""
+	e.ClientEntrypoint = c.agent.Entrypoint
+	if p := c.kaPlan; p != nil {
+		e.KAPlannedPings, e.KAMinPrefixTokens, e.KAIdleS = &p.MaxPings, &p.MinPrefixTokens, &p.IdleSeconds
+	}
+}
+
+// startEarlyScan starts the early wait-cause scan of body (earlyscan.go). It needs the tracker (the dashboard
+// is on) and a non-empty body. Nil-safe.
+func (c *capture) startEarlyScan(h *Handler, ctx context.Context, provider bschemas.ModelProvider, body []byte) {
+	if c == nil || h == nil || h.waits == nil || len(body) == 0 {
+		return
+	}
+	c.scanStat = &h.scan
+	c.early = startEarlyScan(ctx, provider, body, h.scanGate, h.scanDone, waitcause.ForClient(c.agent))
+}
+
+// stopEarlyScan ends the scan's work in progress when the request is over. Nil-safe.
+func (c *capture) stopEarlyScan() {
+	if c != nil {
+		c.early.stop()
+	}
+}
+
+// earlyOpenTasks is the keeper's non-blocking take of the early scan at response end. Nil-safe.
+func (c *capture) earlyOpenTasks(h *Handler) *keepalive.TaskCounts {
+	if c == nil || h == nil {
+		return nil
+	}
+	return c.early.openTasks(&h.scan)
 }

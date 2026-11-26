@@ -17,6 +17,18 @@ import (
 type metricsPricer struct{ prices modelinfo.Pricer }
 
 func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float64, bool) {
+	return p.rate(model, t, 0)
+}
+
+// PriceAt is the sized form (acmetrics.SizedPricer): the rate of a request with promptTokens
+// prompt tokens. It uses the tier rule of the dashboard (modelinfo.Price.At). A price with no tiers,
+// or a size that is not above a line, gives the base rate, the same as Price.
+func (p metricsPricer) PriceAt(model string, _ time.Time, t acmetrics.Tier, promptTokens int64) (float64, bool) {
+	return p.rate(model, t, promptTokens)
+}
+
+// rate reads one tier rate. A promptTokens of 0 or less gives the base rate.
+func (p metricsPricer) rate(model string, t acmetrics.Tier, promptTokens int64) (float64, bool) {
 	if p.prices == nil {
 		return 0, true
 	}
@@ -24,14 +36,14 @@ func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float
 	if !ok {
 		return 0, true // unknown model: no money, marked estimated
 	}
-	pr = pr.Resolved(model)
+	pr = pr.Resolved(model).At(promptTokens)
 	switch t {
 	case acmetrics.TierInput:
 		return pr.Input, false
 	case acmetrics.TierCacheRead:
-		return pr.CacheRead, false
+		return pr.CacheRead, pr.CacheReadFallback // a fallback rate is marked estimated (#1248)
 	case acmetrics.TierCacheWrite5m:
-		return pr.CacheWrite, false
+		return pr.CacheWrite, false // a rule per family, not a guess (see CacheReadFallback)
 	case acmetrics.TierCacheWrite1h:
 		return pr.CacheWrite1h(), false
 	case acmetrics.TierOutput:
@@ -39,6 +51,8 @@ func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float
 	}
 	return 0, true
 }
+
+var _ acmetrics.SizedPricer = metricsPricer{}
 
 // NewMetricsSink returns the accountant sink for the savings counters, priced from prices. A nil
 // prices gives zero money and marks every figure estimated.
@@ -52,7 +66,7 @@ func NewMetricsSink(m metric.Meter, prices modelinfo.Pricer, components ...strin
 
 // observeMetrics hands one priced request to the sink. It runs after the request is answered. A
 // panic in the sink costs the metric only: the request has been served (R46, R20).
-func (c *capture) observeMetrics(res accountant.Result, usage accountant.Usage) {
+func (c *capture) observeMetrics(res accountant.Result, usage accountant.Usage, output int) {
 	if c == nil || c.metrics == nil || c.accReq == nil {
 		return
 	}
@@ -61,5 +75,5 @@ func (c *capture) observeMetrics(res accountant.Result, usage accountant.Usage) 
 			slog.Error("metrics: Observe panicked; this request books no metric", "panic", p)
 		}
 	}()
-	c.metrics.Observe(acmetrics.Observation{Meta: c.accMeta, Usage: usage, Result: res})
+	c.metrics.Observe(acmetrics.Observation{Meta: c.accMeta, Usage: usage, Result: res, Output: output})
 }

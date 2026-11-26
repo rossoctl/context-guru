@@ -20,8 +20,9 @@ var FeatureNames = [NIn]string{
 	"ag_claude-cli", "ag_openai", "ag_asyncopenai",
 }
 
-// pingFresh is the measured law of a keep-alive's own cost: ~7 fresh input tokens and 1 output token on top of the cached read.
-const pingFresh = 7
+// pingFresh is a keep-alive's own fresh input on top of the cached read (its output is 1 token). It is
+// kvcache.DefaultPingInputTokens, the one constant the keeper and the campaign replay also use.
+const pingFresh = kvcache.DefaultPingInputTokens
 
 const (
 	gapRing    = 50   // closed gaps per tenant the quantile looks at

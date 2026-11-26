@@ -10,6 +10,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func scriptsDir(t *testing.T) string {
@@ -1051,6 +1053,7 @@ func runCheck(t *testing.T, port, binBody string) (out string, code int, elapsed
 // check that fails on a loaded CI runner, and a flaky test here would get muted, which is how the
 // property would be lost a second time.
 func TestCheckHookFinishesInsideItsOwnTimeout(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -1203,6 +1206,7 @@ func TestCheckHookRecoversSilently(t *testing.T) {
 // port is one of the likeliest reasons to need that block, and it was the one case that never
 // produced it.
 func TestStartHookBudgetsOnWallClockNotIterations(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -2317,7 +2321,7 @@ func TestStatuslineReportsLoadingNotDownOnATimeout(t *testing.T) {
 		t.Errorf("got %q, want the loading indicator %q (NOT the down indicator — the proxy may be "+
 			"perfectly healthy and merely slow)", strings.TrimSpace(out), "cg: stats loading…")
 	}
-	if elapsed > 2*time.Second {
+	if testutil.TimingEnabled() && elapsed > 2*time.Second {
 		t.Errorf("took %v against a stalling port; the HTTP fetch carries its own ~0.6s timeout, "+
 			"so this should return in well under the script's own 2s backstop", elapsed)
 	}
@@ -2574,9 +2578,13 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 		{"clock skew: far in the past", -100000, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			expiresAt := time.Now().Add(time.Duration(c.remainingSec * float64(time.Second))).Unix()
+			// The script's clock is pinned to now, so the render is exact however long python takes to start.
+			now := time.Now().Unix()
+			expiresAt := now + int64(c.remainingSec)
 			stdin := fmt.Sprintf(`{"prompt_cache": {"warm": true, "expires_at": %d}}`, expiresAt)
-			out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
+			env := routedEnv(port)
+			env["CG_TEST_NOW"] = fmt.Sprint(now)
+			out, code, _ := runStatusline(t, env, stdin, "--cache")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
@@ -2591,17 +2599,15 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
-			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
-			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
-			// value, never ahead of it.
-			// Minutes are shown whole above EXPIRING_SECONDS (a calm, non-ticking figure), so the
-			// tolerance there is a whole minute, rounded down.
-			tol := 2
+			// The clock is pinned, so the figure is exact. Minutes are shown whole above
+			// EXPIRING_SECONDS (a calm, non-ticking figure), so the tolerance there is a whole
+			// minute, rounded down.
+			tol := 0
 			if c.remainingSec > 60 {
 				tol = 60
 			}
 			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-tol {
-				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
+				t.Errorf("remaining=%.0fs: got %q (%ds), want within %ds below that", c.remainingSec, got, gotSec, tol)
 			}
 		})
 	}
@@ -2954,11 +2960,13 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	// isolation between different tests), so this test drives the script directly instead.
 	py := requireTool(t, "python3")
 	tmp := t.TempDir()
+	pinned := fmt.Sprint(time.Now().Unix())
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
+		// The script's clock is pinned, so no render can outlive the 30 s TTL however slow python starts.
 		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
-			"CLAUDE_PLUGIN_OPTION_PORT="+port)
+			"CLAUDE_PLUGIN_OPTION_PORT="+port, "CG_TEST_NOW="+pinned)
 		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
@@ -4570,7 +4578,7 @@ func runHatch(t *testing.T, state, home, cwd string, args ...string) (string, in
 // skill can tell the user, and a recovery copy of the file that was edited exists BESIDE it — not
 // in a shared, hashed ledger under the state directory. See recovery_dir_for() in settings.py.
 func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
-	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	path := filepath.Join(proj, "settings.json")
 	writeJSON(t, path, map[string]any{"theme": "dark"})
 
@@ -5334,7 +5342,7 @@ func TestStatuslineRefusesMachineWideWithoutTheFlag(t *testing.T) {
 // in a later, separate invocation reads it back — this is the mechanism the statusline skill and
 // `preset`'s fallback are supposed to consume instead of hardcoding or re-deriving scope.
 func TestResolveInstallScopeRoundTrips(t *testing.T) {
-	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
 	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
 		t.Fatal(err)
@@ -5375,7 +5383,7 @@ func TestResolveInstallScopeRoundTrips(t *testing.T) {
 
 	// A second, unrelated project directory that was never routed at all still says "ask" — the
 	// record is per-project, not global.
-	otherProj := t.TempDir()
+	otherProj := realTempDir(t)
 	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
 	cmd.Dir = otherProj
@@ -5654,7 +5662,7 @@ func TestProjectKeyFailsOpenWithoutGitBinary(t *testing.T) {
 // is actually routing the project must win, not the one that was resolved first.
 func TestMigrationTiebreakPrefersTheStillRoutingWorktree(t *testing.T) {
 	requireTool(t, "git")
-	state, home, root := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, root := realTempDir(t), realTempDir(t), realTempDir(t)
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
@@ -6690,9 +6698,9 @@ func TestDryRunAgreesWithARealRunAboutWhatIsLeft(t *testing.T) {
 // recovery_original despite `reset_hatch=unavailable`, which the old, single-state-dir design could
 // not have claimed.
 func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
-	home, proj := t.TempDir(), t.TempDir()
+	home, proj := realTempDir(t), realTempDir(t)
 	// A FILE where the state directory should be, so every path inside it is unusable.
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	blocked := filepath.Join(realTempDir(t), "not-a-dir")
 	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -7598,13 +7606,15 @@ func fakeProxyDir(t *testing.T, port string, listen bool) string {
 		}
 	}
 	if listen {
+		// The trailing context-guru-proxy argument keeps the name in this process's command line,
+		// as in fakeProxyDirAnyPort: install.sh checks it before it stops a proxy by PID (#1217).
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +
 			"class H(http.server.BaseHTTPRequestHandler):\n" +
 			"    def do_GET(self):\n" +
 			"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
 			"    def log_message(self, *a): pass\n" +
-			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n' context-guru-proxy\n"
 	}
 	script := "#!/usr/bin/env bash\n" +
 		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
@@ -8276,7 +8286,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	requireTool(t, "git")
 
 	t.Run("not a git repo: skipped, nothing written", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		path := filepath.Join(dir, ".claude", "settings.local.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -8292,7 +8302,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("a git repo with no .gitignore: the entry is added", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -8338,7 +8348,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("already covered by an existing .gitignore: reported unchanged, file untouched", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -8365,7 +8375,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("unwritable directory: skipped, never fails the caller", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -10500,16 +10510,17 @@ func fakeProxyDirAnyPort(t *testing.T) string {
 		"addr=\"\"\n" +
 		"while [ $# -gt 0 ]; do case \"$1\" in --listen) addr=$2; shift 2;; *) shift;; esac; done\n" +
 		"port=${addr##*:}\n" +
-		// `exec -a`, so the process this leaves behind still has context-guru-proxy in its command
-		// line. Everything that signals a proxy in this plugin checks that first and kills by PID -
-		// never by pattern - so a fake that execs away its own name is a fake nothing will ever stop.
-		"exec -a context-guru-proxy " + py + " -c '\n" +
+		// The name context-guru-proxy is also passed as an ARGUMENT, so the process this leaves behind
+		// has it in its command line. Everything that signals a proxy in this plugin checks that first
+		// and kills by PID - never by pattern. `exec -a` is not enough: on macOS Python re-launches
+		// itself and `ps` shows the Python.app path, not the name (#1217).
+		"exec " + py + " -c '\n" +
 		"import http.server, sys\n" +
 		"class H(http.server.BaseHTTPRequestHandler):\n" +
 		"    def do_GET(self):\n" +
 		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
 		"    def log_message(self, *a): pass\n" +
-		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\"\n"
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\" context-guru-proxy\n"
 	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -10667,19 +10678,18 @@ func projectPortOption(t *testing.T, file string) string {
 	return fmt.Sprint(opts["port"])
 }
 
-// waitPortClosed is the negative of waitForHealthz: nothing accepts a connection there any more.
+// waitPortClosed is the negative of waitForHealthz: the port refuses connections. Only a refused
+// connection counts: a dial that timed out under load says nothing about the listener.
 func waitPortClosed(t *testing.T, port string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
-		if err != nil {
-			return
+	testutil.WaitFor(t, "port "+port+" to refuse connections", func() bool {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+		if err == nil {
+			_ = c.Close()
+			return false
 		}
-		_ = c.Close()
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Errorf("something is still listening on port %s", port)
+		return errors.Is(err, syscall.ECONNREFUSED)
+	})
 }
 
 // TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo.
@@ -10704,7 +10714,7 @@ func waitPortClosed(t *testing.T, port string) {
 // legitimately share one port and the proxy-stop guard fires instead, is
 // TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy.
 func TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
 	sd := filepath.Join(state, "context-guru")
 
@@ -11304,13 +11314,7 @@ func TestResettingAProjectFallsBackToTheMachineWideInstall(t *testing.T) {
 	// "declined silently" and "already healthy, nothing to do" are the same observation, and the
 	// first version of this test could not tell them apart.
 	stopFakeProxy(t, state, port2)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := net.DialTimeout("tcp", "127.0.0.1:"+port2, 200*time.Millisecond); err != nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitPortClosed(t, port2)
 	logs := t.TempDir()
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Dir = proj
@@ -11440,7 +11444,7 @@ func TestUserScopeThenProjectKeepsTwoPorts(t *testing.T) {
 //
 // `scope` is the discriminator, in whatever row carries it, which is what install.sh already uses.
 func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	sd := filepath.Join(state, "context-guru")
 	userFile := filepath.Join(home, ".claude", "settings.json")
 	projReal, err := filepath.EvalSymlinks(proj)
@@ -11512,7 +11516,7 @@ func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
 
 	// And the symptom that makes losing the row worse than sharing a port: a SECOND project, which
 	// has no legacy row of its own and only ever sees the machine-wide `options.port`.
-	other := t.TempDir()
+	other := realTempDir(t)
 	f2, c2 := settingsInDir(t, sd, home, other, "port", "alloc", "--dry-run")
 	if c2 != 0 {
 		t.Fatalf("second project alloc exit %d %v", c2, f2)
@@ -11589,7 +11593,7 @@ func TestAddWithoutAllocDoesNotAdoptTheMachineWidePort(t *testing.T) {
 // project whose only routing IS the machine-wide one (`adopt` folded it in, or the machine never had
 // any other install) with the reason that says so; allow from anywhere when asked for explicitly.
 func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
-	home, state, proj, folded := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj, folded := realTempDir(t), realTempDir(t), realTempDir(t), realTempDir(t)
 	sd := filepath.Join(state, "context-guru")
 	userFile := filepath.Join(home, ".claude", "settings.json")
 	projFile := filepath.Join(proj, ".claude", "settings.local.json")
@@ -12316,10 +12320,7 @@ func TestTheTwoMachineWideAnswersGetTwoDifferentConsentQuestions(t *testing.T) {
 func portRoutedProject(t *testing.T, port string) (dir string, env []string) {
 	t.Helper()
 	dir = t.TempDir()
-	real, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	real := evalSymlinks(t, dir)
 	claude := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claude, 0o755); err != nil {
 		t.Fatal(err)
@@ -12493,8 +12494,56 @@ func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
 	if b, err := os.ReadFile(log); err == nil && strings.Contains(string(b), "declined") {
 		t.Errorf("declined a project it is routed to: %s", b)
 	}
-	if strings.Contains(out, "8787") {
+	// The output also carries the fixture's t.TempDir() path, whose random digits can hold "8787"
+	// (#1214: a suffix 2672248787 failed CI), and a pid that can be 8787. So take the path out
+	// first, in both spellings, and match 8787 only where start-proxy.sh names a port.
+	scrubbed := out
+	for _, p := range []string{evalSymlinks(t, dir), dir} {
+		scrubbed = strings.ReplaceAll(scrubbed, p, "<dir>")
+	}
+	if defaultPortInOutput.MatchString(scrubbed) {
 		t.Errorf("output names 8787 for a project routed to 8841: %s", out)
+	}
+}
+
+// defaultPortInOutput matches 8787 where start-proxy.sh names a port: "port=8787", "port 8787",
+// ":8787" in a URL and "proxy-8787.log". Not in a pid, and not as digits inside a longer number.
+var defaultPortInOutput = regexp.MustCompile(`(port[= ]|:|proxy-)8787([^0-9]|$)`)
+
+func evalSymlinks(t *testing.T, p string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
+// realTempDir is t.TempDir() with symlinks resolved. On macOS t.TempDir() is under /var, a link to
+// /private/var, and settings.py reports the resolved spelling. A test that compares a path from the
+// script with a path it built itself must use one spelling for both (#1217). On Linux the result is
+// the same as t.TempDir().
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	return evalSymlinks(t, t.TempDir())
+}
+
+// TestDefaultPortInOutputIgnoresLongerNumbers pins the matcher of
+// TestTheHooksResolveThePortWithoutTheOptionEnv (#1214).
+func TestDefaultPortInOutputIgnoresLongerNumbers(t *testing.T) {
+	for s, want := range map[string]bool{
+		"routed to http://127.0.0.1:8787/anthropic":   true,
+		"does not name port 8787; pass --force":       true,
+		"run start: pid=4321 port=8787 preset=medium": true,
+		"log: /state/proxy-8787.log":                  true,
+		"run start: pid=8787 port=8841 preset=medium": false,
+		"/tmp/TestX2672248787/001/state":              false,
+		"http://127.0.0.1:87871/anthropic":            false,
+		"routed to 8841":                              false,
+	} {
+		if got := defaultPortInOutput.MatchString(s); got != want {
+			t.Errorf("MatchString(%q) = %v, want %v", s, got, want)
+		}
 	}
 }
 
@@ -12906,5 +12955,58 @@ func TestUpdateCheckSkipAndAlwaysAnswersCoexist(t *testing.T) {
 	if facts["answer"] != "auto" || facts["skipped"] != "v0.3.1-testupdate1" {
 		t.Errorf("update-check show reports answer=%q skipped=%q, want auto / v0.3.1-testupdate1 — "+
 			"both preferences must survive on disk together", facts["answer"], facts["skipped"])
+	}
+}
+
+// #1243. After a free 1-hour keep-alive ping the proxy reports ttl_s 3600, anchored at the ping, and
+// ttl_unproven while the route is not yet proven to grant the tier. The status line counts the hour and
+// draws "1h?" after the clock while it is unproven (the band's cacheClock draws the same text). A proven
+// route and an ordinary 5-minute entry carry no mark.
+func TestStatuslineDrawsAnHourClockAndMarksItWhileUnproven(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+now = 1_700_000_000_000
+def cs(extra, main_extra=None):
+    d = {"last_ts": now - 200_000, "end_ts": now - 199_000, "now_ms": now, "ttl_s": 3600, "model": "m",
+         "prefix_tokens": 486000, "keepalive": True}
+    d.update(extra)
+    return d
+def seg(c):
+    return m._cache_segment(m._cache_view({}, c, 0))
+print(seg(cs({"ttl_unproven": True})))   # unproven: an hour counted from the ping, marked
+print(seg(cs({})))                       # proven: a plain hour clock
+print(seg(cs({"ttl_s": 300, "last_ts": now - 100_000, "end_ts": now - 99_000})))  # an ordinary 5-minute entry
+# The main thread's own entry decides: a subagent's mark must not leak onto it, and the main's must show.
+sess = cs({"ttl_s": 300, "ttl_unproven": True, "last_ts": now - 1000, "end_ts": now - 1000})
+sess["threads"] = [{"id": "", "main": True, "model": "m", "last_ts": now - 200_000, "end_ts": now - 199_000, "ttl_s": 3600}]
+print(m._cache_view({}, m._main_cs(sess), 0)["unproven"])
+sess["threads"][0]["ttl_unproven"] = True
+print(m._cache_view({}, m._main_cs(sess), 0)["unproven"])
+`
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the check: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "56:") || !strings.HasSuffix(strings.TrimSpace(strings.TrimSuffix(lines[0], "↻")), "1h?") {
+		t.Errorf("unproven hour: %q, want a clock near 56:40 then 1h?", lines[0])
+	}
+	if !strings.Contains(lines[1], "56:") || strings.Contains(lines[1], "1h?") {
+		t.Errorf("proven hour: %q, want a plain clock with no mark", lines[1])
+	}
+	if strings.Contains(lines[2], "1h?") || !strings.Contains(lines[2], "3:") {
+		t.Errorf("a 5-minute entry: %q, want its own short clock and no mark", lines[2])
+	}
+	if lines[3] != "False" || lines[4] != "True" {
+		t.Errorf("the mark must follow the main thread's own entry: got %q then %q, want False then True", lines[3], lines[4])
 	}
 }

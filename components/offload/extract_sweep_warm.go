@@ -13,9 +13,9 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/schema"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // THE WARM PATH (#491).
@@ -97,6 +97,9 @@ type warmThread struct {
 	count, run int
 	// lastLocal is the local token count of the previous request, the other half of the billed ratio.
 	lastLocal int
+	// lastRead is the cache read the provider reported for the thread's previous forwarded turn (a
+	// count, set by ResolveWarmQuestion). It tells a live cache when the phase is unknown (#1191).
+	lastRead int
 	// Growth of the billed prompt per warm turn, as METADATA (three numbers): the billed size at the start
 	// of the current growth run, the turns since then, and the last billed size seen. A shrink (a client
 	// compaction, our own sweep, a rewind) restarts the run, so the average is over the turns since.
@@ -153,6 +156,17 @@ func warmFor(key string) *warmThread {
 	t = &warmThread{touched: time.Now()}
 	warmThreads[key] = t
 	return t
+}
+
+// warmLastRead is the cache read the provider reported for the thread's previous forwarded turn, 0 when
+// none is recorded. It does not touch or create the thread.
+func warmLastRead(key string) int {
+	warmMu.Lock()
+	defer warmMu.Unlock()
+	if t := warmThreads[key]; t != nil {
+		return t.lastRead
+	}
+	return 0
 }
 
 // warmTriggerHook, set only by tests, runs at the top of the trigger so a test can make it panic and
@@ -808,12 +822,11 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 // ---------------------------------------------------------------------------------------------------
 // The step, run on every request of the thread when warm is on.
 
-func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) (keys []string, changed int) {
+func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx, cold bool) (keys []string, changed int) {
 	if c == nil || c.Store == nil || c.Session == "" || req == nil || c.Bypass || c.Mode == components.ModeObserve {
 		return nil, 0
 	}
 	tkey := thread.Key(c.Session, c.Thread)
-	cold := sweepColdRequest(c)
 
 	// The thread's counters. prevLocal is the previous request's local size, the other half of the billed
 	// ratio, read BEFORE it is replaced by this request's.
@@ -905,7 +918,7 @@ func (e *ExtractSweep) warmStep(req *bschemas.BifrostChatRequest, rep *component
 		warmMu.Unlock()
 		wa := &warmApply{}
 		wa.gate = e.warmGate(c, req, run, growthFrom, growthTurns, prevLocal, wa)
-		wk, wn := e.applyHeldFrom(memHeld{tkey}, wa, req, rep, c, tkey)
+		wk, wn := e.applyHeldFrom(memHeld{tkey}, wa, req, rep, c, tkey, cold)
 		if wn > 0 {
 			return wk, wn
 		}
@@ -1125,6 +1138,14 @@ func ResolveWarmQuestion(session, threadID string, forwarded bool, turnRead int)
 func runWarmQuestion(tkey string, forwarded bool, turnRead int) {
 	warmMu.Lock()
 	t, ok := warmThreads[tkey]
+	if ok {
+		// The provider's cache read on this turn, for the next request's phase (warmStep). A request
+		// that failed read nothing.
+		t.lastRead = 0
+		if forwarded {
+			t.lastRead = turnRead
+		}
+	}
 	if !ok || !t.warmPending() {
 		warmMu.Unlock()
 		// No question starts for this request, also when its due window ended during a long forward.

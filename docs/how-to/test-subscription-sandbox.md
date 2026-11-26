@@ -183,7 +183,7 @@ kind of config the plugin would otherwise generate:
 
 ```sh
 cat > "$SANDBOX/state/keepalive.yaml" <<'EOF'
-preset: cache
+preset: conservative
 cache:
   keepalive: true
   keepalive_idle_seconds: 240

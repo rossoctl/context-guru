@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // --- the plugin reads the table from the proxy -------------------------------------------------
@@ -132,7 +133,7 @@ func TestAnOldProxyBinaryGetsTheUpdateMessageWithinTheTimeLimit(t *testing.T) {
 	if !strings.Contains(facts["note"], "update the proxy to v0.7.1 or later") {
 		t.Errorf("the error does not say to update the proxy to v0.7.1: %q", facts["note"])
 	}
-	if took > 8*time.Second {
+	if testutil.TimingEnabled() && took > 8*time.Second {
 		t.Errorf("took %s; the time limit was 1 s", took)
 	}
 	if got := readFileString(t, marker); !strings.Contains(got, "LISTEN_ADDR=127.0.0.1:0") {
@@ -206,14 +207,14 @@ func TestSyncKeepsAnOldKeysFileAndOnlyMovesItsPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A binary that cannot list strategies: sync must not need it.
-	bin, _ := oldProxyBin(t)
-	facts, code, took := settingsWithBin(t, bin, []string{"CONTEXT_GURU_STATE=" + state, "CONTEXT_GURU_STRATEGIES_TIMEOUT=30"},
+	bin, called := oldProxyBin(t)
+	facts, code, _ := settingsWithBin(t, bin, []string{"CONTEXT_GURU_STATE=" + state, "CONTEXT_GURU_STRATEGIES_TIMEOUT=30"},
 		"strategy", "sync", "--port", keepalivePort, "--preset", "high")
 	if code != 0 || facts["result"] != "synced" {
 		t.Fatalf("exit %d %v", code, facts)
 	}
-	if took > 5*time.Second {
-		t.Errorf("sync waited %s: it called the binary", took)
+	if _, err := os.Stat(called); err == nil {
+		t.Error("sync called the binary")
 	}
 	got := readFileString(t, path)
 	if want := strings.Replace(old, "preset: off", "preset: high", 1); got != want {
