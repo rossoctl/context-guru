@@ -5,8 +5,8 @@
 #
 # Examples:
 #   scripts/cortex-with-cg.sh                  # newest context-guru tag, build only
-#   scripts/cortex-with-cg.sh v0.7.9           # build only
-#   scripts/cortex-with-cg.sh v0.7.9 --install # build, install, restart the proxy
+#   scripts/cortex-with-cg.sh v0.7.10           # build only
+#   scripts/cortex-with-cg.sh v0.7.10 --install # build, install, restart the proxy
 #
 # What it does:
 #   1. Clones Cortex to $CORTEX_DIR (default ~/git/cortex) if it is not there.
