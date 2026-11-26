@@ -54,7 +54,7 @@ func TestRowStatsAndPushAgreeOnTheSizeBound(t *testing.T) {
 			}
 			// The metrics push.
 			r := sdk.NewManualReader()
-			s, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), metricsPricer{prices: tdPrices{}})
+			s, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), modelinfo.ChainRates(tdPrices{}))
 			if err != nil {
 				t.Fatal(err)
 			}
