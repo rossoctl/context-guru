@@ -84,8 +84,8 @@ func TestPingNowSendsOneOrdinaryPingAndReportsItAsManual(t *testing.T) {
 		t.Fatalf("reports = %d, want 1", len(reps))
 	}
 	r := reps[0]
-	if !r.Manual || r.Strategy != "manual" || r.RewriteUSD != 0.18 || r.CostUSD != res.CostUSD {
-		t.Errorf("report = %+v, want Manual, strategy \"manual\", the avoided rewrite and the ping's cost", r)
+	if !r.Manual || r.Strategy != "manual" || res.AvoidedUSD != 0.18 || r.CostUSD != res.CostUSD {
+		t.Errorf("report = %+v, want Manual, strategy \"manual\", and the ping's cost; the answer holds the estimate, the report none", r)
 	}
 }
 
@@ -203,7 +203,7 @@ func TestPingNowIsRateLimitedPerThread(t *testing.T) {
 
 // A ping that read nothing paid for a write, so it avoided nothing: no rewrite credit.
 func TestPingNowCreditsNothingWhenThePingMissed(t *testing.T) {
-	k, sink, _ := manualKeeper(t)
+	k, _, _ := manualKeeper(t)
 	fakeOf(k).setResp(func(DispatchRequest) (Usage, int, error) {
 		return Usage{CacheWrite: 48576, Output: 1}, http.StatusOK, nil
 	})
@@ -214,8 +214,8 @@ func TestPingNowCreditsNothingWhenThePingMissed(t *testing.T) {
 	if res.Usage.CacheRead != 0 {
 		t.Fatalf("usage = %+v", res.Usage)
 	}
-	if r := sink.all()[0]; r.RewriteUSD != 0 {
-		t.Errorf("a ping that wrote credited a rewrite of %v", r.RewriteUSD)
+	if res.AvoidedUSD != 0 {
+		t.Errorf("a ping that wrote credited a rewrite of %v", res.AvoidedUSD)
 	}
 }
 

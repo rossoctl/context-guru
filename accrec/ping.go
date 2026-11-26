@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/components"
 )
 
@@ -48,10 +49,10 @@ func pingStart(r components.KeepAliveReport) time.Time {
 // converted: no Window (its ChangeID would be shared by every such ping), a status outside
 // 200-299, or no usage (it billed nothing). Manual and sweep-substitute pings are converted.
 //
-// A MANUAL ping is priced, so its cost is on its row, but its facts are not stored. The write it avoided
-// is already booked on its own row as ManualSavedUSD, from the user's estimate. Storing the facts too
-// would let the next real request credit the same write again as a library rescue, and the total would
-// count it twice (context-guru#768 B3: $0.0200 booked, about $0.0096 true).
+// A MANUAL ping works like a scheduled one: its facts are stored, and the accountant credits the rescue on the
+// thread's next real request (#1460). Its row books no estimate (ManualSavedUSD), so the write it avoided is
+// counted once, as that rescue. Before #1460 the row booked the user's estimate and the facts were not stored,
+// because both together counted the write twice (context-guru#768 B3: $0.0200 booked, about $0.0096 true).
 //
 // A panic in the library is recovered and logged, and the ping is reported as not converted. The keeper
 // runs this in its own goroutine, so an unrecovered panic would end the process (issue #918).
@@ -77,10 +78,42 @@ func PingSavings(r components.KeepAliveReport, st PingSink, calls PingCalls) (re
 	if st != nil {
 		st.NotePriced()
 	}
-	if !r.Manual && st != nil {
+	if st != nil {
 		st.Put(PingKey(r.Session, ThreadID(r.Thread)), facts)
 	}
 	return res, true
+}
+
+// PingObservation is the savings-counter observation of a priced ping. Output stays unset on purpose: a ping
+// books only a spend operation, and its output is priced through the spend call.
+func PingObservation(r components.KeepAliveReport, res accountant.Result) acmetrics.Observation {
+	return acmetrics.Observation{
+		Meta: accountant.RequestMeta{RequestID: "", Session: r.Session, Model: r.Model,
+			At: time.UnixMilli(r.TS), Billing: accountant.Billing{Mode: accountant.BillingAPI}},
+		Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
+			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)},
+		Result: res,
+	}
+}
+
+// BookPing is the always-on path of a ping (#1457). It prices the ping (PingSavings), stores its facts for the
+// thread's next real request, and books the result into the savings counters. It needs no dashboard. ok is false
+// when the ping is not converted, and then nothing is booked. A panic in the sink costs the metric only: the
+// result is returned either way. obs may be nil.
+func BookPing(r components.KeepAliveReport, st PingSink, calls PingCalls, obs acmetrics.Observer) (accountant.Result, bool) {
+	res, ok := PingSavings(r, st, calls)
+	if !ok || obs == nil {
+		return res, ok
+	}
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				slog.Error("metrics: ping Observe panicked; this ping books no savings metric", "panic", p)
+			}
+		}()
+		obs.Observe(PingObservation(r, res))
+	}()
+	return res, ok
 }
 
 // oneHourIf is time.Hour when on, else 0.

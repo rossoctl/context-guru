@@ -163,7 +163,7 @@ func TestManualPingIsReportedAsManualWithTheAvoidedWrite(t *testing.T) {
 	}
 	r := reps[0]
 	if !r.Manual || r.Strategy != "manual" || r.Session != "sess-a" || r.Thread != "" ||
-		r.RewriteUSD != out["rewrite_usd"].(float64) || r.CostUSD != out["ping_usd"].(float64) {
+		r.CostUSD != out["ping_usd"].(float64) {
 		t.Errorf("report = %+v for response %v", r, out)
 	}
 }

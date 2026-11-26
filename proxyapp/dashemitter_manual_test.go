@@ -26,7 +26,7 @@ func TestDashEmitterWritesAManualPingRow(t *testing.T) {
 	em.KeepAlivePing(components.KeepAliveReport{
 		Tenant: "t1", Session: "s1", Model: "aws/claude-sonnet-5", Provider: "anthropic",
 		Route: "/v1/messages", CacheRead: 48576, CostUSD: 0.0098, Status: 200,
-		TS: time.Now().UnixMilli(), Manual: true, Strategy: "manual", RewriteUSD: 0.18,
+		TS: time.Now().UnixMilli(), Manual: true, Strategy: "manual",
 	})
 	em.KeepAlivePing(components.KeepAliveReport{
 		Tenant: "t1", Session: "s1", Model: "aws/claude-sonnet-5", Provider: "anthropic",
@@ -53,7 +53,7 @@ func TestDashEmitterWritesAManualPingRow(t *testing.T) {
 	if manual == nil || auto == nil {
 		t.Fatalf("want one manual and one automatic ping row: %+v", page.Requests)
 	}
-	if !manual.KeepAlive || manual.ManualSavedUSD != 0.18 || manual.CostUSD != 0.0098 {
+	if !manual.KeepAlive || manual.ManualSavedUSD != 0 || manual.CostUSD != 0.0098 {
 		t.Errorf("manual row = keepalive %v saved %v cost %v", manual.KeepAlive, manual.ManualSavedUSD, manual.CostUSD)
 	}
 	if auto.ManualSavedUSD != 0 {

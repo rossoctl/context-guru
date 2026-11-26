@@ -1237,10 +1237,9 @@ type KeepAliveReport struct {
 	// budget at all.
 	MaxTokens int
 	// Manual marks a ping the USER asked for (keepalive.Keeper.PingNow), not one the keeper
-	// scheduled; Strategy is then "manual". RewriteUSD is the cache write it avoided, 0 when it
-	// read nothing. A sink keeps both off every strategy's ledger.
-	Manual     bool
-	RewriteUSD float64
+	// scheduled; Strategy is then "manual". A sink keeps it off every strategy's ledger. The write
+	// it avoided is not on the report: the accountant credits it on the thread's next real request (#1460).
+	Manual bool
 	// SweepAnswerUSD is, when extract_llm_sweep's question stood in for this ping, what the ANSWER cost
 	// beyond the read a plain ping would have paid (#404 point 9): the output (thinking included), plus
 	// any fresh input or cache write. Booked here once, on the ping row the question replaced, as the

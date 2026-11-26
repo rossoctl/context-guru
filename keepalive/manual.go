@@ -60,9 +60,10 @@ type ManualRequest struct {
 	// MinGap is the least time between two manual pings of this thread; zero is no limit.
 	MinGap time.Duration
 	// RewriteUSD is what writing the thread's current context into a cold cache would cost: the
-	// credit when this ping keeps it warm. The host prices it (it knows the TTL tier the cache
-	// was written at); the keeper only carries it onto the report, and zeroes it when the ping
-	// read nothing, because then it avoided nothing.
+	// host's estimate of what this ping keeps warm. The host prices it (it knows the TTL tier the
+	// cache was written at). It is for the answer to the press only (ManualResult.AvoidedUSD,
+	// ManualSavedUSD) and is never booked: the accountant credits the rescue on the thread's next
+	// real request (#1460).
 	RewriteUSD float64
 }
 
@@ -211,7 +212,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 			DurationMs: float64(k.now().Sub(start).Microseconds()) / 1000.0, TS: k.now().UnixMilli(),
 			Agent: agent, Preset: preset, StopReason: u.StopReason, FreshInput: u.FreshInput,
 			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.vary%pingVary,
-			Manual: true, Strategy: ManualStrategyID, RewriteUSD: res.AvoidedUSD,
+			Manual: true, Strategy: ManualStrategyID,
 			Window: job.gapStart, Header: resp.Header,
 		})
 	}
@@ -277,7 +278,8 @@ func ManualPingBlock(oneHourLive bool, lastTouch time.Time, ttl time.Duration, n
 	return ""
 }
 
-// ManualSavedUSD is the money one manual ping kept: the rewrite it avoided less its own cost. A ping
+// ManualSavedUSD is the host's estimate of the money one manual ping kept. It answers the press and feeds the
+// status line. It is not booked (#1460). It is the rewrite it avoided less its own cost. A ping
 // that read nothing (AvoidedUSD is 0), or cost more than the write, kept nothing warm, so it saved 0.
 func ManualSavedUSD(rewriteUSD float64, res ManualResult) float64 {
 	saved := rewriteUSD - res.CostUSD
