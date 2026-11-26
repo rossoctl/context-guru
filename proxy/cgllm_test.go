@@ -215,9 +215,9 @@ func TestCGLLMCostIsChargedToTheRequestThatSpentIt(t *testing.T) {
 	// overstate its own saving.
 	postChat(t, srv, "sess-own")
 	waitForRows(t, rec, 1)
-	if cheapCalls.Load() == 0 {
-		t.Fatal("the summarizer never called the cheap model; the assertion below would be vacuous")
-	}
+	// The model call is made by a detached summary, which the request path may start after
+	// the commissioning request's row is written. Wait for the call; do not read the count once.
+	testutil.WaitFor(t, "the summarizer to call the cheap model (without a call the assertion below is vacuous)", func() bool { return cheapCalls.Load() > 0 })
 	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
 		t.Fatal("turn 1's summary never finished, so there is no cost to attribute")
 	}
@@ -277,9 +277,9 @@ func TestOurOwnSpendIsPricedAtTheCompactionModelsRate(t *testing.T) {
 	// rate rather than about which row it landed on.
 	postChat(t, srv, "sess-priced")
 	waitForRows(t, rec, 1)
-	if calls.Load() == 0 {
-		t.Fatal("the compaction model was never called, so this proves nothing")
-	}
+	// The model call is made by a detached summary, which the request path may start after
+	// the commissioning request's row is written. Wait for the call; do not read the count once.
+	testutil.WaitFor(t, "the compaction model to be called (without a call this proves nothing)", func() bool { return calls.Load() > 0 })
 	// Drain, THEN a second turn: that makes turn 2 attribute exactly the one call turn 1
 	// commissioned. Turn 2 commissions another, but nothing attributes it (there is no turn 3),
 	// so the rows carry exactly one call's cost and the expectation below stays unscaled.
@@ -347,9 +347,9 @@ func TestOurOwnSpendCountsTheCacheTiersToo(t *testing.T) {
 	// rate rather than about which row it landed on.
 	postChat(t, srv, "sess-tiers")
 	waitForRows(t, rec, 1)
-	if calls.Load() == 0 {
-		t.Fatal("the compaction model was never called, so this proves nothing")
-	}
+	// The model call is made by a detached summary, which the request path may start after
+	// the commissioning request's row is written. Wait for the call; do not read the count once.
+	testutil.WaitFor(t, "the compaction model to be called (without a call this proves nothing)", func() bool { return calls.Load() > 0 })
 	// Drained first, for the reason given in the test above: exactly one call's cost is
 	// attributed, so the expectation stays unscaled.
 	if !offload.WaitForAllSummariesForTest(30 * time.Second) {
