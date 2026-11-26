@@ -8,12 +8,25 @@ import (
 )
 
 func seedFresh(t *testing.T, rec *Recorder, session string, fresh ...int) {
+	seedFreshWrite(t, rec, session, 0, fresh...)
+}
+
+func seedFreshWrite(t *testing.T, rec *Recorder, session string, write int64, fresh ...int) {
 	t.Helper()
 	now := time.Now().UnixMilli()
 	for i, f := range fresh {
 		e := mkEvent(now-int64(len(fresh)-i)*1000, session, "gpt-5.6", 1000, 800)
-		e.Status, e.FreshInput, e.CacheRead = 200, int64(f), 5000
+		e.Status, e.FreshInput, e.CacheRead, e.CacheWrite = 200, int64(f), 5000, write
 		seed(t, rec, e)
+	}
+}
+
+// An Anthropic-like session bills the new turn as cache write: fresh 2, write 3,000.
+func TestNextInputTokensCountsCacheWrite(t *testing.T) {
+	_, rec := newTestAPI(t, Options{})
+	seedFreshWrite(t, rec, "an", 3_000, 2, 2, 2)
+	if got := rec.DB().NextInputTokens(Filter{Session: "an"}); got != 3_002 {
+		t.Errorf("got %d, want 3002", got)
 	}
 }
 

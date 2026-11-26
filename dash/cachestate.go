@@ -447,21 +447,21 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 const (
 	// NextInputWindow is how many of a session's last billed requests set its next-request size.
 	NextInputWindow = 10
-	// DefaultNextInputTokens is the fresh input of a next request when the session has no history.
-	// It is a user turn plus a tool result, not a ping. The local dashboard data (11,912 billed
-	// Anthropic requests) has a median of 2 here, because Anthropic bills a new turn as cache
-	// write and not as fresh input. That figure says nothing for a provider that bills the new
-	// turn as fresh input (OpenAI). So the value is a chosen one: 500 tokens, a short turn.
-	DefaultNextInputTokens = 500
+	// DefaultNextInputTokens is the new input of a next request when the session has no history.
+	// It is a user turn plus a tool result, not a ping. The value, 1,000 tokens, is the rounded
+	// median of fresh_input + cache_write over a local dashboard sample of billed requests (pings
+	// excluded), mostly Anthropic. No OpenAI sample yet.
+	DefaultNextInputTokens = 1000
 )
 
-// NextInputTokens is the fresh input to expect on the session's next real request: the median
-// fresh_input of its last NextInputWindow billed requests (pings excluded), or
+// NextInputTokens is the new input to expect on the session's next real request: the median of
+// fresh_input + cache_write (the tokens not read from the cache; on Anthropic a new turn is billed
+// as cache write) of its last NextInputWindow billed requests (pings excluded), or
 // DefaultNextInputTokens when it has none. It reads token counts only.
 func (d *DB) NextInputTokens(f Filter) int64 {
 	f.WithKeepAlive = false
 	cond, args := f.where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.fresh_input FROM requests r WHERE `+cond+
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.fresh_input + r.cache_write FROM requests r WHERE `+cond+
 		` AND r.status BETWEEN 200 AND 299 AND r.cache_read + r.cache_write + r.fresh_input > 0
 		ORDER BY r.ts DESC LIMIT ?`, append(args, NextInputWindow)...)
 	if err != nil {
