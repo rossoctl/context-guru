@@ -1228,7 +1228,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	// the window functions answer "which tier is in force" without a query per row: the entry's
 	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
 	// tell is whether this session's most recent write (latest ts, then id: two writes in one
-	// millisecond do not tie) was billed at 1 hour (keepalive.BilledOneHour).
+	// millisecond do not tie) had a head that lives 1 hour (keepalive.HeadLifetimeOneHour: a mixed write counts).
 	rows, err := d.sql.QueryContext(d.readCtx(), `WITH u AS (
 		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model, r.provider AS provider,
 		       r.cache_read + r.cache_write AS prefix,
@@ -1236,7 +1236,7 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		       COUNT(*) OVER w2 AS turns,
 		       MAX(r.ts) OVER w2 AS last_ts,
 		       CASE WHEN r.cache_write > 0 THEN ROW_NUMBER() OVER ww END AS wrn,
-		       CASE WHEN `+keepalive.BilledOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h
+		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),

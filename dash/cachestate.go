@@ -318,12 +318,13 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// billedTierSQL is 1 when the write on row alias was billed entirely at the 1h tier, else 0. A mixed
-// write is 0. The rule is keepalive.BilledOneHour, through keepalive.BilledOneHourWriteSQL. SQL cannot
+// billedTierSQL is 1 when the HEAD of the write on row alias lives 1 hour, else 0. A mixed write
+// (1h head, 5m tail) is 1: the panel's clock follows the head. The rule is
+// keepalive.HeadLifetimeOneHour, through keepalive.HeadLifetimeOneHourWriteSQL. SQL cannot
 // parse a model name, so it gives only the BILLED tier; the Go side finishes the lifetime with
 // modelinfo.CacheLifetime from the row's provider and model (billedTTL).
 func billedTierSQL(alias string) string {
-	return "CASE WHEN " + keepalive.BilledOneHourWriteSQL(alias) + " THEN 1 ELSE 0 END"
+	return "CASE WHEN " + keepalive.HeadLifetimeOneHourWriteSQL(alias) + " THEN 1 ELSE 0 END"
 }
 
 // billedTTL is the lifetime in seconds of an entry written at the billed tier.

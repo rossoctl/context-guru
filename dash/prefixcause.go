@@ -50,7 +50,9 @@ func FactsOf(e *Event) PrefixFacts {
 		Bypassed: e.Bypassed, Messages: e.Messages,
 		PromptTokens: e.FreshInput + e.CacheRead + e.CacheWrite,
 		Rewrote:      !e.Bypassed && e.TokensAfter < e.TokensBefore,
-		OneHour:      keepalive.BilledOneHour(e.CacheWrite, e.CacheWrite1h, false), NoWrite: e.CacheWrite == 0,
+		// The whole-entry rule (a mixed write is not one hour): the cause test asks if the whole
+		// prefix was still cached, and a 5-minute tail is not.
+		OneHour: keepalive.BilledOneHour(e.CacheWrite, e.CacheWrite1h, false), NoWrite: e.CacheWrite == 0,
 	}
 }
 

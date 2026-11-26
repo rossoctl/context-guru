@@ -218,10 +218,10 @@ func TestBobRouteRowReadsCacheWrites(t *testing.T) {
 			if err := json.NewDecoder(resp.Body).Decode(&cs); err != nil {
 				t.Fatalf("/api/cachestate: status %d: %v", resp.StatusCode, err)
 			}
-			// The cold write is MIXED: 20157 tokens at 1 hour and 158 at 5 minutes. The 5-minute tail
-			// expires first, so the keeper (keepalive.BilledOneHour) and this panel say 300 s.
-			if cs["ttl_s"] != float64(300) || cs["cache_write"] != float64(20315) {
-				t.Fatalf("/api/cachestate ttl_s = %v cache_write = %v, want 300 and 20315 (body %v)",
+			// The cold write is MIXED: 20157 tokens at 1 hour and 158 at 5 minutes. The head lives
+			// 1 hour (keepalive.HeadLifetimeOneHour), and only the tail expires in 5 minutes.
+			if cs["ttl_s"] != float64(3600) || cs["cache_write"] != float64(20315) {
+				t.Fatalf("/api/cachestate ttl_s = %v cache_write = %v, want 3600 and 20315 (body %v)",
 					cs["ttl_s"], cs["cache_write"], cs)
 			}
 		})
