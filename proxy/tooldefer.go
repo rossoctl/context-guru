@@ -411,6 +411,19 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 	if di == nil || !usageOK {
 		return
 	}
+	// Fail open (#1510): this runs in the handler's terminal defer. A panic in the synchronous part (Book, noteDefer,
+	// the tokenizer weight) costs the figure only. When the counts were booked, the request books as unpriced when
+	// no dollars are pending; otherwise nothing is booked.
+	var tenant string
+	booked, moneyPending := false, false
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("tool deferral: the ledger step panicked; the request books no figure", "panic", p)
+			if booked && !moneyPending {
+				failOpenAccountant("ledger unpriced", func() { h.deferFlow(nil).Parts().Ledger.AddMoney(tenant, tooldefer.Money{}, false) })
+			}
+		}
+	}()
 	b, ok := h.deferFlow(nil).Book(ctx, di, tooldefer.Response{FreshInput: u.FreshInput, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
 		CacheWrite1h: u.CacheWrite1h, Searches: u.Searches, SearchLoaded: u.SearchLoaded, SearchDropped: u.SearchDropped}, usageOK, st)
 	if !ok {
@@ -420,13 +433,14 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 	// dollars are the accountant's one figure for tooldefer, on both paths (#1441). The facts go first and stay
 	// synchronous: the search turns are spend operations that the accountant reads when it prices the request. The
 	// dollars wait for the accountant, so they are booked off the handler path (capture.runDeferBook).
+	tenant, booked = b.Request.Tenant, true
 	cp.noteDefer(b.Request, b.Distinct)
 	ledger := h.deferFlow(nil).Parts().Ledger
-	tenant := b.Request.Tenant
 	if cp == nil {
 		ledger.AddMoney(tenant, tooldefer.Money{}, false)
 		return
 	}
+	moneyPending = true
 	cp.deferBook = func() {
 		// Fail open: finish runs this in the handler's defer on the dashboard path, and accCompute is outside
 		// accFigure's own recover. A panic costs the figure only: the request books as unpriced.

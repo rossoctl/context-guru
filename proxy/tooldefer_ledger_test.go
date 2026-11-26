@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/testutil"
+	"github.com/rossoctl/context-guru/lifecycle"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -369,5 +370,52 @@ func TestFinishFailsOpenWhenTheAccountantPanics(t *testing.T) {
 			}
 			return ""
 		}(), dash.FallbackNoResult)
+	}
+}
+
+// #1510: deferLedger runs in the handler's terminal defer. A panic in its synchronous part (Book, noteDefer, the
+// tokenizer weight) must not reach the handler. The test panics noteDefer through a capture whose timed hook panics
+// after the ledger counts are booked; the request then books as unpriced. The later steps of lifecycle.Finish run.
+func TestDeferLedgerFailsOpenOnAPanic(t *testing.T) {
+	for _, dash := range []bool{true, false} {
+		name := map[bool]string{true: "dashboard on", false: "dashboard off"}[dash]
+		t.Run(name, func(t *testing.T) {
+			h := tdHandler(t, "ultrahigh", "http://x")
+			defer h.Close()
+			// With the dashboard off the capture is lean: the accountant's savings tracker and no recorder (#1451).
+			c := asyncCapture()
+			if dash {
+				c.rec = h.rec
+			}
+			// The seam: the timing hook panics when noteDefer ends, after the counts are booked.
+			hook := func(call string, _ time.Duration) {
+				if call == "noteDefer" {
+					panic("noteDefer boom")
+				}
+			}
+			spendHook.Store(&hook)
+			defer spendHook.Store(nil)
+			di := &tooldefer.Info{Tenant: "t", Model: "claude-sonnet-5-5", Outcome: tooldefer.Outcome{DeferredTokens: 1000, ListTokens: 100}}
+			later := false
+			func() {
+				defer func() {
+					if p := recover(); p != nil {
+						t.Fatalf("the panic escaped into the handler: %v", p)
+					}
+				}()
+				lifecycle.Finish(lifecycle.Fin{
+					Ledger: func() {
+						h.deferLedger(context.Background(), c, di, Usage{CacheRead: 5000, Output: 5}, true, searchTally{})
+					},
+					Counters: func() { later = true },
+				})
+			}()
+			if !later {
+				t.Fatal("the step after the ledger did not run")
+			}
+			if st := h.toolDefer().ledger.Snapshot(); st.Requests != 1 || st.Unpriced != 1 || st.Net != 0 {
+				t.Fatalf("ledger = %+v, want 1 request booked as unpriced", st)
+			}
+		})
 	}
 }
