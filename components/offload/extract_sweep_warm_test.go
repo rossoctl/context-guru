@@ -1915,12 +1915,18 @@ type batchAsker struct {
 	mu    sync.Mutex
 	calls int
 	fn    func(n int, ask string) (string, components.PrefixUsage, error)
+	left  []time.Duration // time left on each call's context deadline, -1 for none
 }
 
-func (a *batchAsker) Ask(_ context.Context, _, ask string) (string, components.PrefixUsage, error) {
+func (a *batchAsker) Ask(ctx context.Context, _, ask string) (string, components.PrefixUsage, error) {
+	d := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		d = time.Until(dl)
+	}
 	a.mu.Lock()
 	n := a.calls
 	a.calls++
+	a.left = append(a.left, d)
 	a.mu.Unlock()
 	if a.fn != nil {
 		return a.fn(n, ask)
@@ -2114,24 +2120,34 @@ func TestTheWarmSweepOuterTimeoutFitsSeveralBatches(t *testing.T) {
 			t.Fatalf("the warm sweep asked %d of 3 batches", got)
 		}
 	})
-	// Timing: the bound IS the behavior. Each batch is well under one question's bound; three together
-	// are over it. Only the timing pool runs this.
-	t.Run("three batches together pass one question's bound", func(t *testing.T) {
-		testutil.RequireTiming(t)
-		prev := llmCallTimeout
-		llmCallTimeout = 250 * time.Millisecond // one question's bound
-		defer func() { llmCallTimeout = prev }()
-		slow := &batchAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
-			time.Sleep(100 * time.Millisecond) // each batch is under the bound; three together are over it
-			return dropAll(ask), components.PrefixUsage{CacheRead: 19595, Fresh: 40, Output: 90}, nil
-		}}
-		r := bigWarmRig(t, "w-outer", 30, slow)
-		for i := 0; i < 3; i++ {
+	// The property: the outer timeout is long enough that N batches of normal length finish inside it.
+	// The asker reads the deadline of the context it gets. With one question's bound set far above the
+	// outer one, that deadline is the outer deadline. No wall-clock wait: the asker does not sleep.
+	t.Run("the outer deadline is the keeper's, and fits the batches", func(t *testing.T) {
+		const batches = 3
+		perQuestion := llmCallTimeout
+		outer := CacheAwareSummarizerCallTimeout()
+		if outer < time.Duration(batches)*perQuestion {
+			t.Fatalf("outer timeout %v is under %d x one question's bound %v", outer, batches, perQuestion)
+		}
+		llmCallTimeout = 10 * time.Hour // so the outer deadline is the earlier one
+		defer func() { llmCallTimeout = perQuestion }()
+		probe := &batchAsker{}
+		r := bigWarmRig(t, "w-outer", 30, probe)
+		for i := 0; i < batches; i++ {
 			r.request(nil)
 		}
 		r.forward()
-		if got := slow.count(); got != 3 {
-			t.Fatalf("the warm sweep asked %d of 3 batches: the OUTER bound must be the keeper's, not one question's", got)
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		if len(probe.left) != batches {
+			t.Fatalf("the warm sweep asked %d of %d batches", len(probe.left), batches)
+		}
+		for i, d := range probe.left {
+			// Wide margins: the deadline set at the start is at most outer, and at least half of it is left.
+			if d > outer || d < outer/2 {
+				t.Errorf("batch %d saw %v left, want between %v and %v: the OUTER bound must be the keeper's", i, d, outer/2, outer)
+			}
 		}
 	})
 }
