@@ -77,3 +77,23 @@ func TestStakeAndMissNeverBelowZero(t *testing.T) {
 		t.Errorf("got %+v ok %v", d, ok)
 	}
 }
+
+// A mixed write (a 1-hour head, a 5-minute tail): the stake and the miss are the tail rewrite while the head lives.
+func TestPriceDecisionHeadPricesTheTail(t *testing.T) {
+	price := func(string, int64) (float64, float64, float64, float64, bool) {
+		return 3e-6, 15e-6, 0.3e-6, 3.75e-6, true
+	}
+	const head, tail = 20_157, 150
+	d, ok := PriceDecisionHead(price, "claude-sonnet-5", head+tail, head+tail, true, head)
+	if !ok {
+		t.Fatal("not priced")
+	}
+	want := float64(tail) * (3.75e-6 - 0.3e-6)
+	if d.Miss < want*0.999 || d.Miss > want*1.001 || d.Stake < want*0.999 || d.Stake > want*1.001 {
+		t.Errorf("miss %v stake %v, want the tail %v", d.Miss, d.Stake, want)
+	}
+	whole, _ := PriceDecisionHead(price, "claude-sonnet-5", head+tail, head+tail, false, 0)
+	if whole.Miss <= d.Miss*10 {
+		t.Errorf("whole-prefix miss %v is not far above the tail miss %v", whole.Miss, d.Miss)
+	}
+}

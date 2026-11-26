@@ -21,6 +21,7 @@ import (
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -354,7 +355,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 			q := mp.At(n)
 			return q.Input, q.Output, q.CacheRead, q.CacheWrite, true
 		}
-		dp, _ = campaign.PriceDecision(at, model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
+		dp, _ = campaign.PriceDecisionHead(at, model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0, keepalive.MixedHead(u.CacheWrite, u.CacheWrite1h))
 		pIn, pOut, pRead, pWrite, _ = at(model, 0)
 	}
 	now := k.now()

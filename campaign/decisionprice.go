@@ -37,6 +37,13 @@ type DecisionPrices struct {
 // prefix just below a price line sends a ping above it. When the ping's size has no price, the
 // request's own rates stand in. The accountant owns each formula (PingCost, MissCost).
 func PriceDecision(price PriceFunc, model string, prefix, promptTokens int64, oneHour bool) (DecisionPrices, bool) {
+	return PriceDecisionHead(price, model, prefix, promptTokens, oneHour, 0)
+}
+
+// PriceDecisionHead is PriceDecision on a mixed entry. head above 0 is the 1-hour head of the write
+// (keepalive.MixedHead) and it lives, so the stake and the miss are the tail rewrite only; oneHour then does not
+// count. The replay and the live campaign both give the head of the request's own write.
+func PriceDecisionHead(price PriceFunc, model string, prefix, promptTokens int64, oneHour bool, head int64) (DecisionPrices, bool) {
 	pIn, pOut, pRead, pWrite, ok := price(model, promptTokens)
 	if !ok {
 		return DecisionPrices{}, false
@@ -47,10 +54,10 @@ func PriceDecision(price PriceFunc, model string, prefix, promptTokens int64, on
 	if in, out, read, write, ok := price(model, size); ok {
 		ping = rates(in, out, read, write)
 	}
-	d := DecisionPrices{PIn: pIn, POut: pOut, PRead: pRead, PWrite: pWrite, Stake: Stake(prefix, pRead, pWrite)}
+	d := DecisionPrices{PIn: pIn, POut: pOut, PRead: pRead, PWrite: pWrite, Stake: StakeHead(prefix, head, pRead, pWrite)}
 	var table accountant.SizedPricer = modelinfo.OnePrice{Model: model, Price: ping} // boxed once, for both figures
 	d.Ping, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, FreshInput: kvcache.DefaultPingInputTokens, Output: 1}, table)
-	d.Miss, _ = accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, OneHour: oneHour}, table)
+	d.Miss, _ = accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, OneHour: oneHour, HeadTokens: head, HeadAlive: head > 0}, table)
 	return d, true
 }
 

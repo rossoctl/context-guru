@@ -68,12 +68,30 @@ func (p Policy) PingCap() float64 {
 // write rate. Zero when the price is unknown. The accountant owns the formula (accountant.MissCost):
 // it floors a miss at 0, and a miss never has a negative value.
 func MissUSD(price Price, model string, prefix int64, oneHour bool) float64 {
-	return missUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, oneHour)
+	return missUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, oneHour, 0)
 }
 
-// missUSDWith is MissUSD for a rate table that the caller built once (see pingUSDWith).
-func missUSDWith(rates accountant.SizedPricer, model string, prefix int64, oneHour bool) float64 {
-	usd, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, PromptTokens: PingPrompt(prefix), OneHour: oneHour}, rates)
+// MixedHead is the size of the 1-hour head of a write that billed some tokens at 1 hour and some at 5
+// minutes (a head-TTL write: the 1-hour part is the head). A write all at 1 hour or all at 5 minutes has no
+// separate head: 0.
+func MixedHead(cacheWrite, cacheWrite1h int64) int64 {
+	if cacheWrite1h > 0 && cacheWrite1h < cacheWrite {
+		return cacheWrite1h
+	}
+	return 0
+}
+
+// MissUSDHead is MissUSD on a mixed entry. head above 0 is the 1-hour head that lives, so the miss rewrites the
+// tail only (accountant.MissCost with HeadTokens and HeadAlive). head 0 is MissUSD.
+func MissUSDHead(price Price, model string, prefix int64, oneHour bool, head int64) float64 {
+	return missUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, oneHour, head)
+}
+
+// missUSDWith is MissUSD for a rate table that the caller built once (see pingUSDWith). It is the one place
+// the keeper builds a miss. head above 0 is a 1-hour head that lives: oneHour then does not count.
+func missUSDWith(rates accountant.SizedPricer, model string, prefix int64, oneHour bool, head int64) float64 {
+	usd, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, PromptTokens: PingPrompt(prefix), OneHour: oneHour,
+		HeadTokens: head, HeadAlive: head > 0}, rates)
 	return usd
 }
 

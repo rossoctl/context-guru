@@ -74,8 +74,10 @@ func EntryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 // as the entry's TTL. Without it the library treats a gap of 5 to 60 minutes as hot and can overstate a rescue by up
 // to 55 minutes of idle time.
 //
-// The rule is keepalive.BilledOneHour's, which ResolveTier uses: a write bills its tier on the tokens it
-// wrote; a turn that wrote nothing bills none and keeps the thread's last billed tier (issue #1078). A
+// The rule is keepalive.HeadLifetimeOneHour's (the accountant lowers only when nothing was billed at 1h): a write
+// lives 1 hour when any token of it was billed at 1 hour, so the 1-hour head of a head-TTL write keeps its tier and
+// only a write with no 1h token lowers the entry. The keeper keeps its own whole-entry rule for the ping plan
+// (keepalive.BilledOneHour). A turn that wrote nothing bills none and keeps the thread's last billed tier (issue #1078). A
 // thread with no earlier write has none to keep, so the asked tier stands. Only an exact lifetime has a TTL
 // that can be lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at the start
 // and is not redone; it matters only when another thread of the session touched the entry.
@@ -90,7 +92,7 @@ func BilledTTL(tiers *TierStore, key string, f accountant.EntryFacts, cacheWrite
 	if !known {
 		prev = true // no earlier write: the asked tier stands on a read-only turn
 	}
-	oneHour := keepalive.BilledOneHour(cacheWrite, cacheWrite1h, prev)
+	oneHour := keepalive.HeadLifetimeOneHour(cacheWrite, cacheWrite1h, prev)
 	if cacheWrite > 0 || oneHour {
 		tiers.Set(key, oneHour) // a read-only turn leaves the remembered tier alone
 	}

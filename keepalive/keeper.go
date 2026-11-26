@@ -560,6 +560,10 @@ type Keeper struct {
 	// turn that only READS the cache bills no write, so it carries no tier of its own and
 	// inherits this. Written beside turns, so it is bounded and reset exactly as turns is.
 	tier1h map[string]bool
+	// headTok remembers, per THREAD, the size of the 1-hour head of a mixed entry (a head-TTL thread): the
+	// tokens the last mixed write billed at the 1-hour tier. A turn that reads the head writes none at 1 hour,
+	// so it inherits this. It prices the miss (see headOf). Bounded and reset as tier1h is.
+	headTok map[string]int64
 	// toolSeen remembers, per THREAD (keyed like live), that a response of it called a tool (#858).
 	// Bounded and reset exactly as turns is.
 	toolSeen map[string]bool
@@ -682,7 +686,7 @@ func New(o Options) *Keeper {
 		o.Go = func(f func()) { go f() }
 	}
 	return &Keeper{o: o, stop: make(chan struct{}), done: make(chan struct{}),
-		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourThreads: map[string]oneHourThread{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
+		live: map[string]*kaEntry{}, turns: map[string]int{}, tier1h: map[string]bool{}, headTok: map[string]int64{}, toolSeen: map[string]bool{}, lastVary: map[string]int{}, oneHourRoutes: map[string]*oneHourRouteState{}, oneHourProbes: map[string]oneHourProbe{}, oneHourThreads: map[string]oneHourThread{}, oneHourFirst: map[string]bool{}, lastTouch: map[string]touchRec{}, inflight: map[string]int{},
 		routeFails: map[string]int{}, routeTripped: map[string]time.Time{}, credDead: map[string]time.Time{}}
 }
 
@@ -759,6 +763,7 @@ func (k *Keeper) Shutdown() {
 	k.bytes = 0
 	k.turns = map[string]int{}
 	k.tier1h = map[string]bool{}
+	k.headTok = map[string]int64{}
 	k.toolSeen = map[string]bool{}
 	k.lastVary = map[string]int{}
 }
@@ -1049,6 +1054,7 @@ func (k *Keeper) Record(r Record) {
 	// below beside turns: a request the gates above refuse must not grow tier1h.
 	k.mu.Lock()
 	prev1h := k.tier1h[key]
+	head := mixedHead(k.headTok[key], u, usageOK)
 	k.mu.Unlock()
 	ttl1h := ResolveTier(body, u, usageOK, prev1h) && provider != bschemas.OpenAI
 	// Only a policy that is ON swaps to the one-hour schedule. ForOneHour never sets KeepAlive, so
@@ -1120,7 +1126,7 @@ func (k *Keeper) Record(r Record) {
 	if emitter == nil {
 		emitter = components.NopEmitter{}
 	}
-	pingUSD, missUSD := k.projectedPingAndMissUSD(model, prefix, route, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID)))
+	pingUSD, missUSD := k.projectedPingAndMissUSD(model, prefix, route, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID)), headOf(pol, ttl1h, oneHour, head))
 	e := &kaEntry{
 		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt, gapStart: startedAt,
 		cred: r.Cred, touchAlias: r.TouchAlias,
@@ -1152,12 +1158,14 @@ func (k *Keeper) Record(r Record) {
 	// A write bills a tier; a read-only turn bills none and leaves the remembered one alone.
 	if usageOK && (u.CacheWrite > 0 || ttl1h) {
 		k.tier1h[key] = ttl1h
+		k.headTok[key] = head
 	}
 	if len(k.turns) > MaxTurnKeys {
 		// Reset both, keeping the current thread: dropping its tier here would send its next
 		// read-only turn back to the 5-minute schedule.
 		k.turns = map[string]int{key: k.turns[key]}
 		k.tier1h = map[string]bool{}
+		k.headTok = map[string]int64{}
 		k.toolSeen = map[string]bool{key: seen}
 		// Keep the step of every thread that still holds a live entry, and of this one: a live
 		// thread that lost its step would send its next ping at step 0, the same bytes as a ping 1
@@ -1174,6 +1182,7 @@ func (k *Keeper) Record(r Record) {
 		}
 		if usageOK && (u.CacheWrite > 0 || ttl1h) {
 			k.tier1h[key] = ttl1h
+			k.headTok[key] = head
 		}
 	}
 	// Drop any previous entry either way: it is stale now, and if the gate refuses this request
@@ -1288,7 +1297,9 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 
 // projectedPingAndMissUSD is projectedPingUSD and projectedMissUSD on one price lookup: the record path
 // needs both for each response, so the price is read and boxed once.
-func (k *Keeper) projectedPingAndMissUSD(model string, prefix int64, route, endpoint string, oneHour bool) (ping, miss float64) {
+//
+// head above 0 is the 1-hour head of a mixed entry that lives: the miss is then the tail rewrite (MissUSDHead).
+func (k *Keeper) projectedPingAndMissUSD(model string, prefix int64, route, endpoint string, oneHour bool, head int64) (ping, miss float64) {
 	if model == "" || prefix <= 0 {
 		return 0, 0
 	}
@@ -1300,7 +1311,7 @@ func (k *Keeper) projectedPingAndMissUSD(model string, prefix int64, route, endp
 	if !price.Zero() {
 		ping = pingUSDWith(rates, model, prefix, int64(pingOutputBudget(route)))
 	}
-	return ping, missUSDWith(rates, model, prefix, oneHour)
+	return ping, missUSDWith(rates, model, prefix, oneHour, head)
 }
 
 // projectedMissUSD is what one cache miss costs over a hit on this prefix, at the tier of the
@@ -1315,6 +1326,33 @@ func (k *Keeper) projectedMissUSD(model string, prefix int64, endpoint string, o
 		return 0
 	}
 	return MissUSD(price, model, prefix, oneHour)
+}
+
+// mixedHead is the size of the 1-hour head of the thread's entry after this response (MixedHead of the write).
+// A read-only turn keeps prev, the head of the last write. Pure, and 0 on any doubt (the miss is then priced
+// for the whole prefix, as before).
+func mixedHead(prev int64, u Usage, usageOK bool) int64 {
+	if !usageOK || u.CacheWrite <= 0 {
+		return prev
+	}
+	if h := MixedHead(u.CacheWrite, u.CacheWrite1h); h > 0 {
+		return h
+	}
+	if u.CacheWrite1h >= u.CacheWrite {
+		return 0 // all at 1 hour: no separate head
+	}
+	return prev // all at 5 minutes: the head was read, not written, and lives on
+}
+
+// headOf is the head size the miss price may use, or 0 for the whole-prefix price. A miss is priced from the
+// tail only for a head-TTL thread on the 5-minute ping plan: the ping gap is shorter than 5 minutes, so the
+// 1-hour head lives at every miss that ping can prevent. A 1-hour thread, a 1-hour ping plan or an entry with no
+// remembered head keeps the whole-prefix price (the head's own expiry is then what a ping protects).
+func headOf(pol Policy, ttl1h, oneHourPing bool, head int64) int64 {
+	if head <= 0 || ttl1h || oneHourPing || !pol.HeadTTL1h || pol.Idle >= OneHourIdleFloor {
+		return 0
+	}
+	return head
 }
 
 // missAtOneHour says whether a miss on this entry would rewrite at the 1-hour tier though the provider has
@@ -1453,6 +1491,7 @@ func (k *Keeper) Forget(tenantID string) {
 		delete(k.live, key)
 		delete(k.turns, key)
 		delete(k.tier1h, key)
+		delete(k.headTok, key)
 		delete(k.toolSeen, key)
 		offload.ClearKeepAliveCandidate(thread.Key(e.session, e.thread))
 	}

@@ -108,12 +108,12 @@ func TestLiveTierOfTwoWritesInOneMillisecondFollowsTheLaterRow(t *testing.T) {
 	}
 }
 
-// seedOneHourTiers and FactsOf read the same rule as the keeper, on a mixed write too.
-func TestFactsOfOneHourIsTheKeepersRule(t *testing.T) {
+// FactsOf (and seedOneHourTiers) read the head rule, on a mixed write too: the same rule as the accountant's BilledTTL.
+func TestFactsOfOneHourIsTheHeadRule(t *testing.T) {
 	for _, c := range []struct{ write, write1h int64 }{{0, 0}, {100, 0}, {100, 40}, {100, 100}} {
 		got := FactsOf(&Event{CacheWrite: c.write, CacheWrite1h: c.write1h}).OneHour
-		if want := keepalive.BilledOneHour(c.write, c.write1h, false); got != want {
-			t.Errorf("write %d / 1h %d: FactsOf.OneHour = %v, keeper %v", c.write, c.write1h, got, want)
+		if want := keepalive.HeadLifetimeOneHour(c.write, c.write1h, false); got != want {
+			t.Errorf("write %d / 1h %d: FactsOf.OneHour = %v, head rule %v", c.write, c.write1h, got, want)
 		}
 	}
 }

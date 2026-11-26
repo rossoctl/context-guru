@@ -63,6 +63,13 @@ func TestBilledTTL(t *testing.T) {
 	if BilledTTL(tiers, "k", exact1h, 100, 100) {
 		t.Error("a write billed at 1h lowered the TTL")
 	}
+	// A mixed write (a 1-hour head, a 5-minute tail) keeps the 1-hour tier, and a read-only turn after it too.
+	if BilledTTL(tiers, "head", exact1h, 20_157+158, 20_157) {
+		t.Error("a mixed write lowered the 1-hour head to 5m")
+	}
+	if BilledTTL(tiers, "head", exact1h, 0, 0) {
+		t.Error("a read-only turn after a mixed write lowered the head")
+	}
 	if BilledTTL(NewTierStore(), "new", exact1h, 0, 0) {
 		t.Error("a thread with no earlier write lowered the asked tier")
 	}
