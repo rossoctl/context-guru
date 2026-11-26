@@ -1,13 +1,27 @@
 # Helpers for scripts/offload-review.sh. Source this file. It has its own file so a test can use it.
-# The caller sets $lockdir before it calls lock. It works with bash 3.2 (macOS /bin/bash).
+# The caller sets $lockdir before it calls lock. It needs bash 4 or newer (see require_bash4).
 
-# self_pid: the pid of the current shell. Bash 4+ gives the pid of a subshell (BASHPID). Bash 3.2
-# has no BASHPID, so a subshell then reports the pid of the script that started it.
+# require_bash4 [major]: stop with a clear message when bash is older than 4. Bash 3.2 (macOS
+# /bin/bash) has no BASHPID, so a subshell there reports the pid of the script that started it.
+# Then the lock cannot tell a subshell from the script. The optional argument is for a test.
+require_bash4() {
+  local major=${1:-${BASH_VERSINFO[0]}}
+  [ "$major" -ge 4 ] && return 0
+  echo "offload-review needs bash 4 or newer. This is bash $major. On macOS, install it with 'brew install bash' and put it first on PATH: the '#!/usr/bin/env bash' line then finds it." >&2
+  return 1
+}
+
+# self_pid: the pid of the current shell (BASHPID: the pid of a subshell, not of the script).
 # Do not call it in $(...): that runs a new subshell, with another BASHPID.
-self_pid() { echo "${BASHPID:-$$}"; }
+self_pid() { echo "$BASHPID"; }
+
+# lock_age <dir>: the age of the directory in seconds.
+lock_age() {
+  echo $(( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || date +%s) ))
+}
 
 # lock: take the worktree lock, a directory with the holder's pid in it. A lock whose holder is
-# dead, or that has no pid file for over 60 s, is stale: lock removes it and tries again. A lock
+# dead, or that has no pid file for 60 s or more, is stale: lock removes it and tries again. A lock
 # with a live holder is waited for, for up to 60 s (OFFLOAD_LOCK_TRIES x 0.1 s).
 lock() {
   local n=0 tries=${OFFLOAD_LOCK_TRIES:-600} pid age
@@ -16,8 +30,8 @@ lock() {
     if [ -n "$pid" ]; then
       kill -0 "$pid" 2>/dev/null || { lock_take_stale "$pid"; continue; }
     elif [ -d "$lockdir" ]; then
-      age=$(( $(date +%s) - $(stat -c %Y "$lockdir" 2>/dev/null || stat -f %m "$lockdir" 2>/dev/null || date +%s) ))
-      if [ "$age" -gt 60 ]; then lock_take_stale ""; continue; fi
+      age=$(lock_age "$lockdir")
+      if [ "$age" -ge 60 ]; then lock_take_stale ""; continue; fi
     fi
     n=$((n + 1))
     if [ "$n" -ge "$tries" ]; then
@@ -40,18 +54,28 @@ lock_take_stale() {
     echo "offload-review: removed the stale worktree lock ${lockdir} (holder pid ${seen:-unknown})" >&2
     rm -rf -- "$gone"
   else
-    # Put it back. If that fails, a new lock exists. Remove the renamed one only when its holder is
-    # dead. A live one stays: its ".stale.*" name blocks nobody.
-    mv "$gone" "$lockdir" 2>/dev/null || { kill -0 "$now" 2>/dev/null || rm -rf -- "$gone"; }
+    # Put it back. If that fails, a new lock exists, so the renamed one serves no holder.
+    mv "$gone" "$lockdir" 2>/dev/null || lock_orphan "$gone" "$now"
   fi
 }
 
-unlock() { rm -rf -- "$lockdir"; }
+# lock_orphan <dir> <pid>: a renamed lock that could not go back. Remove it when its holder is dead,
+# or when the pid is empty ("not yet written") and the dir is 60 s old or older. Keep it otherwise.
+# A kept one blocks nobody: its ".stale.*" name is not the lock.
+lock_orphan() {
+  if [ -n "$2" ]; then
+    kill -0 "$2" 2>/dev/null || rm -rf -- "$1"
+  elif [ "$(lock_age "$1")" -ge 60 ]; then
+    rm -rf -- "$1"
+  fi
+  return 0
+}
 
-# unlock_if_held: for an EXIT trap. Removes the lock only when this process holds it.
-unlock_if_held() {
+# unlock: remove the lock only when this process holds it (the pid file has its pid). A holder
+# that lost its lock as stale must not remove the lock of a new holder. It also works as an EXIT trap.
+unlock() {
   [ -n "${lockdir:-}" ] || return 0
-  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ] && unlock
+  if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$BASHPID" ]; then rm -rf -- "$lockdir"; fi
   return 0
 }
 
