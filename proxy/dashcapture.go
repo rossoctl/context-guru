@@ -5,6 +5,7 @@ import (
 	"github.com/rossoctl/context-guru/agent"
 	"maps"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -180,7 +181,7 @@ type capture struct {
 	// declares no tools, and nil when the dashboard is off. Read on the request path with
 	// the pristine body, like meta; emitted at finish, where the session id is known.
 	inv *dash.Inventory
-	// savings is the handler's accountant tracker (nil without a dashboard); accReq is this
+	// savings is the handler's accountant tracker (nil only on a handler built without one); accReq is this
 	// request's record (nil when it was skipped); accDone guards a double finish.
 	savings *savingsTracker
 	// metrics receives each priced request for the push metrics (Options.MetricsSink; nil = off).
@@ -197,6 +198,10 @@ type capture struct {
 	endpoint string
 	readSets func(provider bschemas.ModelProvider, endpoint, route, model string, pinged bool) bool
 	accReq   *accountant.Request
+	// accRes is the accountant's Result for this request, set once by accCompute (nil when the request books no figure).
+	accRes *accountant.Result
+	// accMu guards accCompute on a lean capture, where the ledger's hook and the finish goroutine can both call it. nil otherwise.
+	accMu *sync.Mutex
 	// accServerHeldHistory is set for an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider
 	// holds its history, so the accountant has no record of it.
 	accServerHeldHistory bool
@@ -304,7 +309,7 @@ func (c *capture) noteTrace(tr apply.Trace) {
 		return
 	}
 	c.trace = tr
-	if tr.Run == nil {
+	if tr.Run == nil || c.rec == nil { // no dashboard: nothing marks a saving unique
 		return
 	}
 	for _, rep := range tr.Run.Components {
@@ -554,6 +559,12 @@ func (c *capture) observeSSE(ttfbMs float64, buffered bool) {
 func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, contentCap, contentMax int) {
 	defer c.timed("finish")()
 	if c == nil {
+		return
+	}
+	if c.rec == nil {
+		// No dashboard: the accountant still runs (#1451), after the handler returns. finish runs in the handler's
+		// defer, so a synchronous wait would hold the next request on a keep-alive connection. No row waits for it.
+		go c.finishAccountant(usage, usageOK)
 		return
 	}
 	e := &dash.Event{
@@ -832,24 +843,10 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	defer c.savings.drop(c.accReq)
 	// accCompute is its own span: the accountant's compute is not the dashboard's capture work (#1059).
 	endAcc := timedSpan("accCompute")
-	if c.accReq != nil && usageOK && !c.accDone {
-		c.accDone = true
-		// The rules for which request books no figure are accrec.Recorder.Price's: a rejected status, a deferral
-		// that could not be placed, several upstream rounds and a panic in the library. DropUnbilledSavings zeroed
-		// the tokens above; a request with no figure leaves the event with no Result, so PriceMode books no dollars
-		// either (acc_fallback no_result). PingSavings refuses a non-2xx ping the same way.
-		out := c.savings.Price(c.accReq, accrec.PriceIn{
-			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
-			BeforeCompute: func() { c.accBilledTTL(usage) },
-			// The event and the metrics are booked before the rescue counter and the ping-facts drop, as they always were.
-			AfterCompute: func(res accountant.Result) {
-				e.SetAccountant(res)
-				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
-					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)}, int(usage.Output))
-			},
-			Session: c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
-		})
-		c.accNoResult = out.NoResult
+	// The rules for which request books no figure are accrec.Recorder.Price's (see accCompute). A request with no
+	// figure leaves the event with no Result, so PriceMode books no dollars either (acc_fallback no_result).
+	if res, ok := c.accCompute(usage, usageOK); ok {
+		e.SetAccountant(res)
 	}
 	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
 	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
@@ -858,6 +855,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		c.savings.recordThinking(usage.Thinking)
 	}
 	endAcc()
+	c.savings.finished(c, usage, usageOK)
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accServerHeldHistory {
 		e.SetAccountantServerHeldHistory()
