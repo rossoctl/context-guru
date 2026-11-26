@@ -385,13 +385,13 @@ func TestSumFailureGateIsWithholdOnTheRowAndTheLedgerAndThePush(t *testing.T) {
 			if got := e.AccountantFallback(); got != tc.want {
 				t.Errorf("row fallback %q, want %q", got, tc.want)
 			}
-			reason, _ := accrec.Gate(*e.accRes, accountant.USDFigure{}, accrec.GateIn{TokensBefore: e.TokensBefore,
+			reason, _ := accrec.Gate(*e.accRes, accountant.USDFigure{}, accrec.GateIn{
 				Rows: []accrec.GateRow{{Name: "mask", Acted: true}, {Name: "idle"}}})
 			// The gate also refuses a figure with no component entry; the library's reasons are what must agree.
 			if tc.want == "" && reason == FallbackCheckSum || tc.want != "" && reason != tc.want {
 				t.Errorf("accrec.Gate (the /stats gate) reason %q, want %q", reason, tc.want)
 			}
-			if got := accountant.Withhold(*e.accRes, accountant.SizeNotGiven); got != tc.want {
+			if got := accountant.Withhold(*e.accRes); got != tc.want {
 				t.Errorf("the push's Withhold %q, want %q", got, tc.want)
 			}
 		})

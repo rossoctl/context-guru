@@ -73,7 +73,10 @@ func TestReplayBooksTheSameFigures(t *testing.T) {
 	t.Log("digests:", got)
 	// Accountant v0.10.0 (#121) adds the field Check.Claims to the marshaled Result. Cases 0, 1, 2 and 5 carry a
 	// ratio_range check, so their digests changed. No booked figure changed.
-	const want = "a768dfcc8394d0db ad6f6258f2136947 5a5b01339873476e a1ca4676152f8123 1cf6bfca006c491d f47c376586834631"
+	// Accountant v0.11.0 (#126) adds Result.MessageTokens and PricedOp.SavedMessages and CausedMessages, so all six
+	// digests changed again. With those three fields cut out, the digests are the same as at v0.10.0, so no booked
+	// figure changed.
+	const want = "02d72204cd970df1 56fc871a41bc7751 1309964574cab962 d971c4871fd610a2 11491f0785c3d540 44b694c4f36e1fc1"
 	if got != want {
 		t.Fatalf("booked figures changed:\n got  %s\n want %s", got, want)
 	}
