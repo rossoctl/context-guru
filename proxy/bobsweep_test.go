@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rossoctl/context-guru/components/offload"
@@ -101,28 +102,30 @@ func bobSweepBody(t *testing.T, n int) []byte {
 		`,"messages":[` + strings.Join(msgs, ",") + `]}`)
 }
 
+var bobSweepRuns atomic.Int64
+
 func TestBobUltrahighSweepAsksBobOnALongChat(t *testing.T) {
-	// Fails on main today, on 2 blockers, each one enough alone. The fix PRs of #1191 remove this skip.
-	//  1. No conversation copy: Ctx.CanKeepAlive is keeper.canPing, false on Bob (ping: not_registered).
-	//  2. Every Bob request is cold, so the warm count never reaches warm_every_n (no trigger check).
 	// #1191's blocker 3 (the 30-turn defaults) is not covered: the chat is long enough for the defaults.
-	t.Skip("#1191: the sweep cannot ask on Bob's route yet (no copy without a ping; every request cold)")
 	up := &bobSweepUpstream{}
 	us := httptest.NewServer(up)
 	defer us.Close()
 	srv := httptest.NewServer(bobSweepHandler(t, us.URL).Mux())
 	defer srv.Close()
+	// One task id per run: the sweep's warm state is process-wide and keyed by it, so a repeat run
+	// (-count=N) in one process would otherwise start with the earlier run's request count.
+	task := fmt.Sprintf("bob-task-sweep-%d", bobSweepRuns.Add(1))
 	before := offload.SweepWarmCounters()
 	pingBefore := offload.SweepPingCounters()
 
-	// 64 turns. With the defaults (warm_every_n 30, warm_min_age_turns 30) the first check comes at about
-	// turn 30, when the grep is only 29 model turns old, so it finds no candidate; the count then restarts
-	// and the next check, at about turn 60, finds it.
-	for n := 1; n <= 64; n++ {
+	// 45 turns. With the defaults (warm_every_n 30, warm_min_age_turns 30) the first check comes at turn
+	// 30, and the grep from turn 1 is old enough then, so the one question goes out there. The next check
+	// is due at turn 60. (A 64-turn run sees a second question at 60: the stub's 2-byte reply is unusable,
+	// so no answer is held and the next check asks again.)
+	for n := 1; n <= 45; n++ {
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+bobModelPath, bytes.NewReader(bobSweepBody(t, n)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Apikey bob-caller-key")
-		req.Header.Set("X-Task-Id", "bob-task-sweep")
+		req.Header.Set("X-Task-Id", task)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -148,7 +151,7 @@ func TestBobUltrahighSweepAsksBobOnALongChat(t *testing.T) {
 				reasons, p.NotRegistered-pingBefore.NotRegistered)
 		})
 	// No request follows, so no second question can start: one more would mean the trigger fired twice
-	// in 64 turns, while the next check is due at about turn 90.
+	// in 45 turns, while the next check is due at turn 60.
 	qs := up.questions()
 	if len(qs) != 1 {
 		t.Fatalf("got %d sweep questions, want exactly 1", len(qs))

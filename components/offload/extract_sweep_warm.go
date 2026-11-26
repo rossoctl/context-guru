@@ -1096,7 +1096,6 @@ func noteWarmTrigger(reason string) {
 // ---------------------------------------------------------------------------------------------------
 // The question, after the forward.
 
-// warmPending reports whether a trigger is waiting for its request to be forwarded.
 // warmDue reports whether a warm question is due on the thread: registered and not yet started.
 func warmDue(key string) bool {
 	warmMu.Lock()
@@ -1105,6 +1104,7 @@ func warmDue(key string) bool {
 	return t != nil && t.warmPending()
 }
 
+// warmPending reports whether a trigger is waiting for its request to be forwarded.
 func (t *warmThread) warmPending() bool {
 	return !t.pendingAt.IsZero() && time.Since(t.pendingAt) < warmPendingMax
 }
