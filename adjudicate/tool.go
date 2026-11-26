@@ -48,7 +48,6 @@
 package adjudicate
 
 import (
-	"strconv"
 	"sync/atomic"
 
 	"github.com/tidwall/gjson"
@@ -134,18 +133,7 @@ func ToolDefRaw(provider string) []byte {
 
 // HasTool reports whether body already declares the tool. This is the ADVERTISE test, and a host must
 // answer stray calls exactly when it is true.
-func HasTool(provider string, body []byte) bool {
-	field := "function.name"
-	if provider == schema.WireAnthropic || schema.IsResponses(provider) {
-		field = "name"
-	}
-	for _, t := range gjson.GetBytes(body, "tools").Array() {
-		if t.Get(field).String() == ToolName {
-			return true
-		}
-	}
-	return false
-}
+func HasTool(provider string, body []byte) bool { return schema.HasToolNamed(provider, body, ToolName) }
 
 // Inject appends the tool to body's tools array, byte-stably and idempotently.
 //
@@ -199,36 +187,11 @@ func toolChoiceIsAuto(tc gjson.Result) bool {
 // leaves the next request's repair to fix it. On that path the repair is the ONLY defence and the agent
 // does pay one turn.
 func ResponseCallIDs(provider string, resp []byte) (ids []string) {
-	if schema.IsResponses(provider) {
-		gjson.GetBytes(resp, "output").ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "function_call" && item.Get("name").String() == ToolName {
-				if id := item.Get("call_id").String(); id != "" {
-					ids = append(ids, id)
-				}
-			}
-			return true
-		})
-		return ids
-	}
-	if provider == schema.WireAnthropic {
-		gjson.GetBytes(resp, "content").ForEach(func(_, blk gjson.Result) bool {
-			if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
-				if id := blk.Get("id").String(); id != "" {
-					ids = append(ids, id)
-				}
-			}
-			return true
-		})
-		return ids
-	}
-	gjson.GetBytes(resp, "choices.0.message.tool_calls").ForEach(func(_, tc gjson.Result) bool {
-		if tc.Get("function.name").String() == ToolName {
-			if id := tc.Get("id").String(); id != "" {
-				ids = append(ids, id)
-			}
+	for _, c := range schema.OutputCalls(provider, resp) {
+		if c.Name == ToolName && c.ID != "" {
+			ids = append(ids, c.ID)
 		}
-		return true
-	})
+	}
 	return ids
 }
 
@@ -251,98 +214,39 @@ func ResponseCallIDs(provider string, resp []byte) (ids []string) {
 // that calls this tool alongside a CLIENT tool is handed to the client whole, so for that turn this
 // repair is the only defence rather than a second one. See the co-call note in the response loop.
 func AnswerStrayCalls(provider string, body []byte) (out []byte, answered int) {
-	if schema.IsResponses(provider) {
-		return answerResponsesStrayCalls(body)
-	}
-	msgs := gjson.GetBytes(body, "messages")
-	if !msgs.IsArray() {
-		return body, 0
-	}
-	// An id-less tool_use would make "" a live key, and then a tool_result carrying no tool_use_id --
-	// someone else's block -- would match it and be overwritten. Both halves of the pair must name an id.
+	// The reader drops a call with no id: an empty id would be a live key, and a tool_result carrying
+	// no call id -- someone else's block -- would match it and be overwritten. Both halves of the
+	// pair must name an id.
 	ours := map[string]bool{}
-	for _, m := range msgs.Array() {
-		if provider == schema.WireAnthropic {
-			for _, blk := range m.Get("content").Array() {
-				if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
-					if id := blk.Get("id").String(); id != "" {
-						ours[id] = true
-					}
-				}
-			}
-			continue
-		}
-		for _, tc := range m.Get("tool_calls").Array() {
-			if tc.Get("function.name").String() == ToolName {
-				if id := tc.Get("id").String(); id != "" {
-					ours[id] = true
-				}
-			}
+	for _, c := range schema.RequestCalls(provider, body) {
+		if c.Name == ToolName {
+			ours[c.ID] = true
 		}
 	}
 	if len(ours) == 0 {
 		return body, 0
 	}
 	out = body
-	for mi, m := range msgs.Array() {
-		base := "messages." + strconv.Itoa(mi)
-		if provider != schema.WireAnthropic {
-			if m.Get("role").String() != "tool" || !ours[m.Get("tool_call_id").String()] {
-				continue
-			}
-			if nb, err := sjson.SetBytes(out, base+".content", StrayAnswer); err == nil {
-				out, answered = nb, answered+1
-			}
+	for _, r := range schema.RequestResults(provider, body) {
+		if !ours[r.CallID] {
 			continue
 		}
-		for bi, blk := range m.Get("content").Array() {
-			if blk.Get("type").String() != "tool_result" || !ours[blk.Get("tool_use_id").String()] {
-				continue
-			}
-			path := base + ".content." + strconv.Itoa(bi)
-			nb, err := sjson.SetBytes(out, path+".content", StrayAnswer)
-			if err != nil {
-				continue
-			}
-			out, answered = nb, answered+1
-			// The block is no longer an error: leaving is_error set tells the model its own call
-			// failed while handing it the answer to that call.
-			if blk.Get("is_error").Exists() {
-				if nb, err := sjson.SetBytes(out, path+".is_error", false); err == nil {
-					out = nb
-				}
-			}
+		path := r.Path(provider)
+		field := ".content"
+		if schema.IsResponses(provider) {
+			field = ".output"
 		}
-	}
-	if answered > 0 {
-		strayAnswered.Add(int64(answered))
-	}
-	return out, answered
-}
-
-func answerResponsesStrayCalls(body []byte) ([]byte, int) {
-	items := gjson.GetBytes(body, "input")
-	if !items.IsArray() {
-		return body, 0
-	}
-	ours := map[string]bool{}
-	for _, item := range items.Array() {
-		if item.Get("type").String() == "function_call" && item.Get("name").String() == ToolName {
-			if id := item.Get("call_id").String(); id != "" {
-				ours[id] = true
-			}
-		}
-	}
-	if len(ours) == 0 {
-		return body, 0
-	}
-	out, answered := body, 0
-	for i, item := range items.Array() {
-		if item.Get("type").String() != "function_call_output" || !ours[item.Get("call_id").String()] {
+		nb, err := sjson.SetBytes(out, path+field, StrayAnswer)
+		if err != nil {
 			continue
 		}
-		if next, err := sjson.SetBytes(out, "input."+strconv.Itoa(i)+".output", StrayAnswer); err == nil {
-			out, answered = next, answered+1
+		out, answered = nb, answered+1
+		// The block is no longer an error: leaving is_error set tells the model its own call
+		// failed while handing it the answer to that call.
+		if r.Block >= 0 && r.Raw.Get("is_error").Exists() {
+			if nb, err := sjson.SetBytes(out, path+".is_error", false); err == nil {
+				out = nb
+			}
 		}
 	}
 	if answered > 0 {

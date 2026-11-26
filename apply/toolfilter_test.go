@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -240,7 +241,7 @@ func TestFilterProseWordBoundary(t *testing.T) {
 func removalDecisions(body []byte) (dec map[string]bool, ok bool) {
 	var declared []string
 	gjson.GetBytes(body, "tools").ForEach(func(_, tv gjson.Result) bool {
-		if n := declName(tv); n != "" {
+		if n := schema.ToolDeclName(tv); n != "" {
 			declared = append(declared, n)
 		}
 		return true
@@ -258,7 +259,7 @@ func removalDecisions(body []byte) (dec map[string]bool, ok bool) {
 	}
 	survived := map[string]bool{}
 	gjson.GetBytes(out, "tools").ForEach(func(_, tv gjson.Result) bool {
-		survived[declName(tv)] = true
+		survived[schema.ToolDeclName(tv)] = true
 		return true
 	})
 	dec = make(map[string]bool, len(declared))
