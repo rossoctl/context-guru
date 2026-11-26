@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -359,9 +360,14 @@ func (p Pricing) writeRate(tier TTL) float64 {
 // ping is needed: a five-minute entry has to be touched roughly twelve times as often as a
 // one-hour one to be held for the same wall-clock span. Charging two different per-ping rates
 // would be inventing a price no provider publishes.
+//
+// The accountant owns the formula (accountant.PingCost). This is the simulator's what-if, so it
+// reads the ping input of THIS Pricing, which an operator can edit in the page. The live ping reads
+// no override: its body is fixed (keepalive.PingUSD).
 func (p Pricing) KeepAliveCost(cached int64, s Semantics) float64 {
-	return float64(cached)*p.CacheRead + float64(p.PingInputTokens)*p.Input +
-		float64(s.pingOutput(p))*p.Output
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: p.Model, Prefix: cached, FreshInput: p.PingInputTokens, Output: s.pingOutput(p)},
+		modelinfo.FlatRates{Input: p.Input, Output: p.Output, CacheRead: p.CacheRead})
+	return usd
 }
 
 // RecreateCost is what a keep-alive costs when it arrives TOO LATE: the entry has already

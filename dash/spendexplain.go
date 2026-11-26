@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/thread"
 )
@@ -383,15 +384,17 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		}
 		sd.USD += u.Total
 		if isRewrite {
-			excess := float64(r.write) * (p.CacheWrite - p.CacheRead)
-			if r.write1h > 0 {
-				if prem := p.CacheWrite1hPremium(); prem > 0 {
-					excess += float64(r.write1h) * prem
-				}
+			// The accountant owns the miss formula (MissCost): each write tier at its own rate, never below zero.
+			w1h := int64(r.write1h) // the part of the write at the 1-hour tier, within [0, write]
+			if w1h > int64(r.write) {
+				w1h = int64(r.write)
 			}
-			if excess < 0 {
-				excess = 0
+			if w1h < 0 {
+				w1h = 0
 			}
+			m5, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: int64(r.write) - w1h, PromptTokens: int64(ctx)}, p.Pricer())
+			m1h, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: w1h, PromptTokens: int64(ctx), OneHour: true}, p.Pricer())
+			excess := m5 + m1h
 			rc := out.Rewrites[cause]
 			if rc == nil {
 				rc = &RewriteCause{}

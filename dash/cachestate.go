@@ -7,6 +7,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
@@ -515,17 +516,22 @@ func medianNextInput(v []int64) int64 {
 	return (v[len(v)/2-1] + v[len(v)/2]) / 2
 }
 
-// NextRequestUSD prices a cached prefix of `tokens` for the next request: warm is a cache read, cold
+// NextRequestUSD prices a cached prefix of `tokens` for the NEXT real request: warm is a cache read, cold
 // is a rewrite at the write rate of the tier the cache was written at (2.0x input on the 1h tier;
 // same derivation as CostWithCacheWrite1h). nextIn is the new input that request adds to the
-// prefix (NextInputTokens); it picks the price tier. One definition for /api/cachestate and the
-// manual ping, so the "kept warm" credit is the cold figure the status line already showed.
-func NextRequestUSD(p modelinfo.Price, tokens, nextIn, ttlS int64) (warm, cold float64) {
-	p = p.At(tokens + nextIn) // the next request sends this prefix plus new input: its tier's rates
-	if ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second) {
-		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
-	}
-	return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite
+// prefix (NextInputTokens); it picks the price tier. The dashboard's cache-state view (/api/cachestate)
+// shows both figures, so the "kept warm" figure and the cold figure agree.
+//
+// The accountant owns the arithmetic: warm is the read of the prefix (PingCost with no fresh input),
+// cold is warm plus the miss (MissCost). The size is the prefix plus the next request's own input, not
+// the size of a ping (keepalive.PingPrompt): it prices the next request, which is what this is. The
+// tier is the entry's own, by its lifetime (ttlS), as the keeper's miss uses the entry's tier.
+func NextRequestUSD(p modelinfo.Price, model string, tokens, nextIn, ttlS int64) (warm, cold float64) {
+	size := tokens + nextIn // the next request sends this prefix plus new input: its tier's rates
+	warm, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: tokens, PromptTokens: size}, p.Pricer())
+	miss, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: tokens, PromptTokens: size,
+		OneHour: ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second)}, p.Pricer())
+	return warm, warm + miss
 }
 
 // rewrite is next's cold half, the figure RewriteUSD has always carried.
@@ -589,7 +595,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			nextIn = a.db(r).NextInputTokens(f, model)
 			sizes[model] = nextIn
 		}
-		warm, cold = NextRequestUSD(p, tokens, nextIn, ttl)
+		warm, cold = NextRequestUSD(p, model, tokens, nextIn, ttl)
 		return warm, cold, true
 	}
 	s.RewriteUSD, s.Priced = rewrite(next, s.Model, s.PrefixTokens, s.TTLSeconds)

@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/campaign"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -335,12 +335,13 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 		return predDecision{}, false
 	}
 	model := gjson.GetBytes(body, "model").String()
-	var pIn, pOut, pRead, pWrite float64
-	if p := k.h.opts.Prices; p != nil && model != "" {
-		if price, ok := p.Price(context.Background(), model); ok && !price.Zero() {
-			pIn, pOut, pRead, pWrite = price.Input, price.Output, price.CacheRead, price.CacheWrite
-		}
+	// The same economics as the replay (campaign.PriceDecision): the rates of the request's own prompt
+	// size, and a ping priced at its own. A tiered model decides on the tiers that replay saw.
+	var dp campaign.DecisionPrices
+	if k.h.opts.Prices != nil && model != "" {
+		dp, _ = campaign.PriceDecision(k.h.autoPrice(), model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
 	}
+	pIn, pOut, pRead, pWrite := dp.PIn, dp.POut, dp.PRead, dp.PWrite
 	now := k.now()
 	pc.mu.Lock()
 	pc.calls++
@@ -372,7 +373,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 		StopReason: u.StopReason, Agent: lf.Agent, Thinking: lf.Thinking, Stream: lf.Stream, PIn: pIn, POut: pOut, PRead: pRead, PWrite5m: pWrite,
 	}
 	pc.tr.Ended(a, resp)
-	pingCost := resp.PingCost()
+	pingCost := dp.Ping
 	st := startedAt.UTC()
 	facts := campaign.NewFacts(model, u.StopReason, resp.Agent, int64(resp.Prefix), pingCost, st.Hour(), int(st.Weekday()))
 	pc.mu.Lock()
@@ -400,7 +401,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	if pc.npend < predPendingMax {
 		pc.npend++
 		tk := session + "\x00" + thread
-		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: campaign.Stake(int64(resp.Prefix), pRead, pWrite), ping: pingCost})
+		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: dp.Stake, ping: pingCost})
 	}
 	return predDecision{campaign: pc, k: kk, idleS: idle, active: pc.meta.Mode == campaignModeActive && !optedOut}, true
 }

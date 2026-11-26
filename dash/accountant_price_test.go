@@ -303,11 +303,11 @@ func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
 
 // NextRequestUSD names the 1h tier by the modelinfo TTL, not by a literal.
 func TestNextRequestUSDColdAtTheOneHourRate(t *testing.T) {
-	_, cold := NextRequestUSD(accTestPrice, 1000, 0, 3600)
+	_, cold := NextRequestUSD(accTestPrice, "claude-sonnet-5", 1000, 0, 3600)
 	if want := 1000 * accTestPrice.CacheWrite1h(); !accNear(cold, want) {
 		t.Errorf("1h cold = %v, want %v", cold, want)
 	}
-	_, cold = NextRequestUSD(accTestPrice, 1000, 0, 300)
+	_, cold = NextRequestUSD(accTestPrice, "claude-sonnet-5", 1000, 0, 300)
 	if want := 1000 * accTestPrice.CacheWrite; !accNear(cold, want) {
 		t.Errorf("5m cold = %v, want %v", cold, want)
 	}

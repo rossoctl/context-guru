@@ -12,6 +12,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
@@ -1266,9 +1267,9 @@ func (k *Keeper) price(endpoint, model string, prefix int64) (Price, bool) {
 	return k.o.Dispatcher.Price(context.Background(), endpoint, model, prefix)
 }
 
-// projectedPingUSD is what one ping on this prefix will cost: the prefix at the model's own
-// cache-read rate, plus the route's output budget. Computed at record time so the guard can
-// refuse an expensive ping BEFORE sending it rather than reporting it afterwards.
+// projectedPingUSD is what one ping on this prefix will cost: PingUSD, with the route's output budget.
+// Computed at record time so the guard can refuse an expensive ping BEFORE sending it rather than
+// reporting it afterwards.
 //
 // Zero when the model is not priced, which lets the ping through — refusing to protect a cache
 // because a price list is incomplete would be the wrong failure, and the spend still lands on
@@ -1281,7 +1282,7 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 	if !ok || price.Zero() {
 		return 0
 	}
-	return float64(prefix)*price.CacheRead + float64(pingOutputBudget(route))*price.Output
+	return PingUSD(price, model, prefix, int64(pingOutputBudget(route)))
 }
 
 // projectedMissUSD is what one cache miss costs over a hit on this prefix, at the tier of the
@@ -1335,7 +1336,8 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	if !ok || price.Zero() {
 		return 0
 	}
-	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, Output: summaryOutputBudgetGuess, PromptTokens: pingPrompt(prefix)}, price.Pricer())
+	return usd
 }
 
 // projectedRefreshExtraUSD is what a refresh costs OVER the ping it replaces (#1144): the summary

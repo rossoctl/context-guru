@@ -1094,10 +1094,12 @@ func (e *Event) sweepWarmRewriteUSD(p modelinfo.Price, component string) float64
 	if e.CacheWrite > 0 && e.CacheWrite < n {
 		n = e.CacheWrite
 	}
-	if n <= 0 || p.CacheWrite <= p.CacheRead {
+	if n <= 0 {
 		return 0
 	}
-	return float64(n) * (p.CacheWrite - p.CacheRead)
+	// The accountant owns the miss formula: the write rate minus the read rate, never below zero.
+	usd, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, Prefix: n, PromptTokens: modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)}, p.Pricer())
+	return usd
 }
 
 // SummarizerComponents is THE list of pipeline components whose removals are EARLIER transcript:

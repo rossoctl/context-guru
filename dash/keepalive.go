@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
@@ -1281,13 +1282,14 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				// identical (#706), but the reply is one token and output is billed as generated.
 				// max_tokens 0 is accepted by this gateway and bills none, but the figure has to
 				// match what is sent, not the cheapest shape available.
-				p = p.At(r.Prefix + kvcache.DefaultPingInputTokens) // the ping reads this prefix: the rates of that prompt size
-				r.PingUSDEach = float64(r.Prefix)*p.CacheRead + p.Output
-				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
+				// The accountant prices the ping and the miss (keepalive.PingUSD, keepalive.MissUSD), at the
+				// rates of the ping's prompt size. The miss is the one of the entry's own tier.
+				r.PingUSDEach = keepalive.PingUSD(p, r.Model, r.Prefix, 1)
+				r.MissUSD = keepalive.MissUSD(p, r.Model, r.Prefix, oneHour == 1)
 				if r.PingUSDEach > 0 {
-					r.BreakevenPings = int64(r.MissUSD / r.PingUSDEach)
+					r.BreakevenPings = int64(keepalive.MissUSD(p, r.Model, r.Prefix, false) / r.PingUSDEach)
 					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
-					miss1h := float64(r.Prefix) * (p.CacheWrite1h() - p.CacheRead)
+					miss1h := keepalive.MissUSD(p, r.Model, r.Prefix, true)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
 					// pings bridges twelve times the wall clock: K x X per span still, but the
@@ -1843,9 +1845,10 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.AddressableUSD += e.usd
 	}
 	if out.Priced {
-		p = p.At(prefix + kvcache.DefaultPingInputTokens) // a ping reads this prefix: the rates of that prompt size
-		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
-		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
+		// The accountant prices the ping and the miss (keepalive.PingUSD, keepalive.MissUSD). The calculator
+		// has no tier for an expiry, so the miss is the 5-minute one.
+		out.PingUSDEach = keepalive.PingUSD(p, model, prefix, 1)
+		out.AvoidedUSDEach = keepalive.MissUSD(p, model, prefix, false)
 	}
 	// finish fills the money columns of a rung from its counts.
 	finish := func(row *CalcRow) {
@@ -1854,7 +1857,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		}
 		if out.Priced {
 			row.PingUSD = float64(row.Pings) * out.PingUSDEach
-			row.SavedUSD = float64(row.Convertible) * out.AvoidedUSDEach
+			row.SavedUSD = accountant.AvoidedMissesUSD(row.Convertible, out.AvoidedUSDEach)
 			row.NetUSD = row.SavedUSD - row.PingUSD
 		}
 	}
