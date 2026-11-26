@@ -36,7 +36,7 @@ The integrator and the reviewers can be people or AI agent sessions. The rules a
 2. **Sort the open PRs into features.** Group them by what a user gets, not by author or by date: for example "save-more commands", "status line", "test fixes". Show which PRs depend on which.
 3. **The release owner picks the groups.** The integrator does not add or drop an item without the owner.
 4. **Record what is out**, and why. An item that moves to the next release keeps its issue.
-5. **Scan for new business logic in host packages and for client rules outside `agent.Identify`.** Run `refactor-scan` on the diff since the last tag, in its host-leak and client-rule modes (host-leak: logic in `proxy/` that a library package should hold; client-rule: a rule that names one client, outside `agent.Identify`). Open an issue for each leak. A leak does not block the release unless the owner says so.
+5. **Scan for new business logic in host packages and for client rules outside `agent.Identify`.** Run `refactor-scan` on the diff since the last tag, in its host-leak and client-rule modes (host-leak: logic in a host package (`proxy/`, `proxyapp/`, `cmd/context-guru-proxy`, `dash/`) that a library package should hold; client-rule: a rule that names one client, outside `agent.Identify`). Open an issue for each leak. A leak does not block the release unless the owner says so.
 6. **Find the measurements owed before this release** (see [Measurements before a release](#measurements-before-a-release)). Put each one on the list.
 
 ### Measurements before a release
@@ -192,8 +192,8 @@ An approval counts only for the head it names. If the head moves (a rebase, a fi
   - After each merge, watch the CI of `main`. If it turns red, fix forward with a fix PR. Do not revert a good PR, unless the fix is not clear.
   - **Why:** a serial re-run costs about one full CI run (about 40 minutes) for each pair of PRs. A break between 2 green PRs is rare: about 1 in 30 merges in the v0.7.4 cycle. A fix PR is cheap.
   - **Exception 1:** a merge of `main` that the integrator resolved by hand in code gets its CI first. In v0.7.4, a hand merge lost a SQL placeholder (#1173).
-  - **Exception 3:** `main` moved in the same packages as the PR since its approval. Before the merge, the integrator runs a merged-tree check: build, `go vet ./...`, and the tests of the touched packages. Two green PRs once broke `main` together (#1407 and #1410, fixed by #1426). This check does not wait for a full CI run. It runs on the merged tree.
   - **Exception 2:** the tag. `main` must be green at the tagged commit.
+  - **Exception 3:** `main` moved in the same packages as the PR since its approval. Before the merge, the integrator runs a merged-tree check: build, `go vet ./...`, and the tests of the touched packages. Two green PRs once broke `main` together (#1407 and #1410, fixed by #1426). This check does not wait for a full CI run. It runs on the merged tree.
   - **Note:** GitHub's merge queue does this automatically. It tests each PR on top of the PRs ahead of it. Turning it on is a repo setting for the owner.
 - **A merge that bypasses the branch rules needs the release owner's authority.** Get it in words, for the release or for a named PR.
   - **Standing rule:** when the only rule that blocks a PR is "1 approving GitHub review from someone other than the author", the integrator may merge with `--admin`, with no new yes. The 2 offload reviews post as comments under the login of the person who ran them, often the author, so GitHub does not count them.
