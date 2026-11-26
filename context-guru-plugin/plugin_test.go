@@ -7290,6 +7290,10 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 		}
 		env = append(env, kv)
 	}
+	// install.sh asks the proxy binary for its strategy list with a 5 s limit. On a loaded machine a
+	// stub that only prints a file can take longer, and the install then stops with
+	// strategy_list_unavailable. 30 s is the bound the other strategy tests use for the same reason.
+	env = append(env, "CONTEXT_GURU_STRATEGIES_TIMEOUT=30")
 	path := os.Getenv("PATH")
 	if extraPath == "" {
 		// The plugin asks the proxy binary for its strategies. Without a stub first on PATH, a test
