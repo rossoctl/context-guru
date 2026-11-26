@@ -146,6 +146,14 @@ What the library prices:
 - **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
 - **A break nobody owns.** A break that a change left behind when it ended is counted on the
   `ended_change` row. A break the client body has too (a client edit, an expiry) is not counted.
+- **The interaction.** On a rescued request, a ping kept the cache warm and an operation also
+  changed the body. Some tokens the client body would have written cold were read instead. No
+  single operation or ping owns them (accountant design §6.2), so the library reports them apart,
+  as `Result.Interaction`. They are counted on the `interaction` row, inside the baseline delta.
+  The metrics book the same dollars as `llm_savings_interaction_usd_total`. Before, the dashboard
+  left them out, so its saving was lower than the metrics on a rescued request. One difference is
+  older than this row: the metrics also book the re-rate that no component owns in that counter,
+  and the dashboard books it on the `ended_change` row. The totals agree; the two rows do not.
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
@@ -504,8 +512,8 @@ equal the full totals.
 - **`tokens.saved`, `tokens.caused`.** The sums over every feature.
 - **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
   `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
-  (the 1-hour head's premium and rescue) and `ended_change` (the break a change left when it
-  ended). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
+  (the 1-hour head's premium and rescue), `ended_change` (the break a change left when it
+  ended) and `interaction` (the tokens no operation owns on a rescued request). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
   any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`
   plus the `cachesplit` component's `saved_usd`. Full read only.
 - **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
@@ -562,7 +570,7 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`. The Tool deferral card says
     "Net of the names list." The dollar card says "Net of the names list and the searches": the
     searches are requests of their own and have no token figure here.
-  - Preset: every other entry (the preset's components and `ended_change`).
+  - Preset: every other entry (the preset's components, `ended_change` and `interaction`).
 - **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
   weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
   `min(used% × saved_usd / cost_usd, 100 − used%)` for the window: the provider stops a user at

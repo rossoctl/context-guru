@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
+	"sync"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -145,4 +149,103 @@ func (c *capture) accBilledTTL(u Usage) {
 		return
 	}
 	c.accFacts = c.savings.LowerTTL(c.accReq, c.accMeta.Session, c.accThread, c.accFacts, u.CacheWrite, u.CacheWrite1h)
+}
+
+// accCapture returns the capture the accountant runs on. With the dashboard on it is cp. With the dashboard off it is
+// a lean capture that holds only what the accountant reads, so the accountant runs on every request (#1451). It is
+// nil when the handler has no savings tracker. The lean capture has no recorder: finish sends it to
+// finishAccountant, and no dashboard code runs on it.
+func (h *Handler) accCapture(cp *capture, start time.Time, provider, route string, tn *Tenancy) *capture {
+	if cp != nil {
+		return cp
+	}
+	if h == nil || h.savings == nil {
+		return nil
+	}
+	return &capture{pricer: h.opts.Prices, route: route, provider: provider, start: start, savings: h.savings, accMu: new(sync.Mutex),
+		pings: h.opts.Pings, metrics: h.opts.MetricsSink, observe: tn.Mode == components.ModeObserve}
+}
+
+// accCompute joins the accountant's job and prices the request once, then books the metrics. It is idempotent: the
+// first call with a billed usage prices, and later calls return the same Result. ok is false when the request books
+// no figure (see accrec.Recorder.Price for the rules). It reads sizes, hashes and token counts only. Nil-safe.
+func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool) {
+	if c == nil {
+		return accountant.Result{}, false
+	}
+	if c.accMu != nil {
+		c.accMu.Lock() // the ledger's hook and the finish goroutine can both ask
+		defer c.accMu.Unlock()
+	}
+	c.accWait()
+	if c.accReq != nil && usageOK && !c.accDone {
+		c.accDone = true
+		out := c.savings.Price(c.accReq, accrec.PriceIn{
+			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
+			BeforeCompute: func() { c.accBilledTTL(usage) },
+			// The metrics are booked before the rescue counter and the ping-facts drop, as they always were.
+			AfterCompute: func(res accountant.Result) {
+				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
+					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)}, int(usage.Output))
+			},
+			Session: c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
+		})
+		c.accNoResult = out.NoResult
+		if out.Priced {
+			r := out.Result
+			c.accRes = &r
+		}
+	}
+	if c.accRes == nil {
+		return accountant.Result{}, false
+	}
+	return *c.accRes, true
+}
+
+// accFigure is the request's accountant figure in dollars: accountant.Figure, priced with the host pricer at the
+// prompt size of each side (PriceAt, Price.At). ByComponent is keyed by operator. It works with or without the
+// dashboard, and it can be called at any time after the response: it joins the job and prices the request if finish
+// has not (accCompute), so the order of the two does not matter. ok is false when the request books no figure: no
+// billed usage, a rejected or multi-round request, an observe run, a trace that dropped operations, no model price, a
+// result that fails a gate of accountant.Withhold (checks and unpriced; the size gate is the dashboard's), or any
+// panic. It never changes the request. It is the hook for #1445's deferral ledger. Nothing in production calls it yet in
+// this PR: only the tests do.
+func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig accountant.USDFigure, ok bool) {
+	if c == nil || c.pricer == nil || c.model == "" {
+		return accountant.USDFigure{}, false
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: the figure panicked; the request books no figure", "panic", p)
+			fig, ok = accountant.USDFigure{}, false
+		}
+	}()
+	res, have := c.accCompute(usage, usageOK)
+	if !have || c.observe || c.trace.OpsDropped != 0 || accountant.Withhold(res, accountant.SizeNotGiven) != "" {
+		return accountant.USDFigure{}, false
+	}
+	if _, priced := c.pricer.Price(ctx, c.model); !priced {
+		return accountant.USDFigure{}, false
+	}
+	return accountant.Figure(accountant.FigureInput{
+		Model: c.model, At: c.start, Output: int(usage.Output), Result: res,
+		Billed: accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
+			CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)},
+	}, metricsPricer{prices: c.pricer}), true
+}
+
+// finishAccountant ends a request that has no dashboard. It runs on its own goroutine, off the client's path. It prices the request (which books the metrics), drops the
+// record and keeps the thinking counts. Fail open: a panic here costs the figure only.
+func (c *capture) finishAccountant(usage Usage, usageOK bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: finish panicked; the request books no figure", "panic", p)
+		}
+	}()
+	defer func() { c.savings.drop(c.accReq) }() // a closure: accReq is set by the join in accCompute
+	c.accCompute(usage, usageOK)
+	if usageOK && !c.rejected() {
+		c.savings.recordThinking(usage.Thinking)
+	}
+	c.savings.finished(c, usage, usageOK)
 }

@@ -286,8 +286,8 @@ Labels in this section:
 | `cause` | `model_changed`, `ended_change`, `none` | Why the effect happened. `model_changed`: the model changed. `ended_change`: a change that was active before stopped. `none`: no single cause. |
 | `direction` | `saved`, `added` | Whether the cache effect lowered or raised the bill. |
 | `model` | As in 5.1 | The model of the baseline cost. |
-| `result` | `priced`, `unpriced`, `skipped` | What the `accountant` did with the request. |
-| `reason` | For `unpriced`: `penalty_unknown`, `unknown_kind`, `operator_not_allowed` and others from the library. For `fallback`: the gate that declined. | Why the request was not priced, or why no saving was booked. |
+| `result` | `priced`, `unpriced`, `withheld`, `skipped` | What the `accountant` did with the request. |
+| `reason` | For `unpriced`: `penalty_unknown`, `unknown_kind`, `operator_not_allowed` and others from the library. For `fallback`: the gate that declined. For `withheld`: the library gate that failed (`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`, `size_unknown`, `implausible_size`). | Why the request was not priced, or why no saving was booked. |
 | `check` | `sum`, `order`, `unique_change`, `spans`, `attribution`, `conservation`, `shared_warm` | The library check that failed. |
 
 
@@ -298,12 +298,14 @@ Labels in this section:
 | `llm_savings_saved_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_saved` priced at the tier rate at request time. When the host's `Pricer` also has `PriceAt`, each side is priced at its own prompt size: the full bill difference, with the tokens that stay and the output re-rated. Context-guru has `PriceAt`. It uses the same tier rule as the dashboard (`Price.At`). |
 | `llm_savings_added_usd_total` | counter | none | `kind`, `tier`, `component` | `tokens_added` priced the same way. |
 | `llm_savings_cache_effect_usd_total` | counter | none | `effect`, `cause`, `direction` | Cache effects: `effect` is `break`, `rescue`, `split`, `ttl_premium`, `ttl_rescue`. `direction` is `saved` or `added`. `cause` is `model_changed`, `ended_change` or `none`. |
+| `llm_savings_interaction_usd_total` | counter | none | `direction` | The tokens no operation owns on a rescued request (`Result.Interaction` minus `InteractionCaused`), and the re-rate no operation owns. `direction` is `saved` or `added`. **Not** in `saved` or `added`: add it to them for the net saving. The dashboard books the interaction on its `interaction` row. |
 | `llm_savings_baseline_usd_total` | counter | none | `model` | What the traffic would have cost with no change. |
-| `llm_savings_requests_total` | counter | 1 | `result` | `result` is `priced`, `unpriced`, `skipped`. |
+| `llm_savings_requests_total` | counter | 1 | `result` | `result` is `priced`, `unpriced`, `withheld`, `skipped`. |
 | `llm_savings_unpriced_total` | counter | 1 | `reason` | Why a request was not priced. Values come from the library: `penalty_unknown`, `unknown_kind`, `operator_not_allowed` and others. |
 | `llm_savings_estimated_total` | counter | 1 | none | Requests whose figure is marked estimated. |
 | `llm_savings_check_failures_total` | counter | 1 | `check` | Failed library checks: `sum`, `order`, `unique_change`, `spans`, `attribution`, `conservation`, `shared_warm`. |
 | `llm_savings_fallback_total` | counter | 1 | `reason` | Requests that booked no saving because the dashboard gate declined. |
+| `llm_savings_withheld_total` | counter | 1 | `reason` | Requests whose figure failed a gate of the library (`accountant.Withhold`, accountant v0.9.0). The push books only the cost of their spends. `reason` is one of `check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`, `size_unknown`, `implausible_size`. Context-guru gives the library no size before the change, so `size_unknown` and `implausible_size` do not occur. |
 
 **Saved tokens and added tokens.** Both counters compare the request as it was sent with the request as the client wrote it. They are two sides of one change, and neither one is net.
 - `llm_savings_saved_tokens_total`: tokens the provider billed less, because of a change. Example: `dedup` removes 10,000 tokens from the prompt. Saved: 10,000 at tier `input`, or at tier `cache_read` if those tokens would have been read from the cache.
@@ -313,7 +315,7 @@ Labels in this section:
 - Tokens at different tiers have different prices, so `saved_tokens - added_tokens` is not a money figure. Use the `usd` counters for money. Each `usd` counter is its tokens priced at the tier rate at request time (R33).
 - The tokens counters answer "how much did the traffic shrink or grow?". The `usd` counters answer "did it pay?".
 
-**No double counting (5).** `llm_savings_saved_usd_total` and `llm_savings_added_usd_total` are the only counters that add up to the saving. They already include the cache effects. `llm_savings_cache_effect_usd_total` is a breakdown of the same money by effect. A query must never add it to `saved` or `added`. A test checks that, for each priced request, the sum of the cache effects is not larger than `saved + added`. **Open:** confirm with the `accountant` that cache effects are part of the component figures. If they are not, give them `kind="cache"` and drop the separate counter.
+**No double counting (5).** `llm_savings_saved_usd_total` and `llm_savings_added_usd_total` add up to the saving, with `llm_savings_interaction_usd_total`, which is in neither of them. They already include the cache effects. `llm_savings_cache_effect_usd_total` is a breakdown of the same money by effect. A query must never add it to `saved` or `added`. A test checks that, for each priced request, the sum of the cache effects is not larger than `saved + added`. **Open:** confirm with the `accountant` that cache effects are part of the component figures. If they are not, give them `kind="cache"` and drop the separate counter.
 
 The `component` count is bounded by the shipped list. **Open:** confirm the count is small enough to keep as a label.
 
