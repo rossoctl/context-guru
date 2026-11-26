@@ -121,3 +121,33 @@ func TestHostPricerRefusesAnotherModel(t *testing.T) {
 		t.Fatal("own model not priced")
 	}
 }
+
+// A component that acted can have counted ops of 0 tokens (the byte ratio truncates). Its key stays at $0,
+// so the request still prices and the other component's real figure is booked. A zero-token op of a name
+// with no row gets no envelope row.
+func TestAccountantFigureKeepsAZeroTokenKeyOfAnActedComponent(t *testing.T) {
+	e := &Event{FreshInput: 1000, CacheRead: 100, Model: "m", TokensBefore: 5000, TokensAfter: 4000,
+		Components: []CompRow{
+			{Component: "mask", Acted: true, Mutated: true, SavedGross: 10, SavedUnique: 10},
+			{Component: "extract", Acted: true, Mutated: true, SavedGross: 500, SavedUnique: 500},
+		}}
+	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
+		{OpID: "1", Operator: "context-guru.mask", ChangeID: "c1"},
+		{OpID: "2", Operator: "context-guru.extract", ChangeID: "c2", Saved: accountant.TierTokens{Input: 500}},
+		{OpID: "3", Operator: "context-guru.noview", ChangeID: "c3"},
+	}})
+	f := e.AccountantFigure(accTestPrice)
+	if _, ok := f.ByComponent["mask"]; !ok {
+		t.Fatalf("the acted component lost its key: %v", f.ByComponent)
+	}
+	if _, ok := f.ByComponent["noview"]; ok {
+		t.Fatalf("a zero-token op with no row got a row: %v", f.ByComponent)
+	}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	if e.Components[1].SavedUSD <= 0 {
+		t.Fatalf("the real figure was not booked: %+v", e.Components)
+	}
+}

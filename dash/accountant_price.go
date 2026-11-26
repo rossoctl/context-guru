@@ -99,11 +99,19 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 		Unsized: w <= 0, // no billed usage: no size, so every token prices at the base rate
 	}, hostPricer{model: e.Model, p: p})
 	f.Fig = fig
-	// An op with no tokens and no dollars gets no row, as before: its key is in the library's maps with 0.
+	// A zero-token op of a name with NO row in e.Components gets no envelope row: its key is in the library's
+	// maps with 0. A name with a row keeps its key at $0: a component that acted can have counted ops of 0
+	// tokens (the byte ratio truncates), and without its key accOverride would drop the whole request's saving.
+	hasRow := map[string]bool{}
+	for _, c := range e.Components {
+		hasRow[c.Component] = true
+	}
 	zero := map[string]bool{}
 	for _, o := range e.accRes.Ops {
 		if !o.DryRun && o.Call == nil {
-			zero[strings.TrimPrefix(o.Operator, accwire.OperatorPrefix)] = true
+			if n := strings.TrimPrefix(o.Operator, accwire.OperatorPrefix); !hasRow[n] {
+				zero[n] = true
+			}
 		}
 	}
 	for _, o := range e.accRes.Ops {
