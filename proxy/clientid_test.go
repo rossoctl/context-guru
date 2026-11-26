@@ -3,7 +3,6 @@ package proxy
 import (
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/compactionpoint"
-	"github.com/rossoctl/context-guru/dash"
 	"net/http/httptest"
 	"testing"
 )
@@ -34,8 +33,7 @@ func TestClientOfNamesMatchTheCompactionSwitch(t *testing.T) {
 	}
 }
 
-// This is the old compactionpoint.ClientOf table (#1320), now pinned against Identify. The Claude rule
-// is also pinned to dash.AgentFor: both come from agent.Identify.
+// This is the old compactionpoint.ClientOf table (#1320), now pinned against Identify.
 func TestCompactionClientKeepsTheOldPicks(t *testing.T) {
 	for ua, want := range map[string]compactionpoint.Client{
 		"claude-cli/2.1.319 (external, cli)": compactionpoint.ClientClaude,
@@ -57,9 +55,6 @@ func TestCompactionClientKeepsTheOldPicks(t *testing.T) {
 		cl := agent.IdentifyUserAgent(ua)
 		if got := compactionClient(cl); got != want {
 			t.Errorf("compactionClient(%q) = %q, want %q", ua, got, want)
-		}
-		if dashClaude := dash.AgentFor(ua) == "claude-code" || dash.AgentFor(ua) == "claude-cli"; dashClaude != (want == compactionpoint.ClientClaude) {
-			t.Errorf("%q: dash.AgentFor = %q disagrees", ua, dash.AgentFor(ua))
 		}
 	}
 }

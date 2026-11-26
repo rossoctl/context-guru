@@ -24,6 +24,8 @@ type ProxiedCall struct {
 	SpanID   string // the host makes it, it is not a rule
 	ParentID string
 	Provider string // the provider the call went to, such as "anthropic"
+	// Client is agent.Client.Label from agent.Identify. "" gives the generic label (ClientLabel).
+	Client string
 
 	ReqBody   []byte // the PRISTINE inbound body, before the pipeline
 	RespBody  []byte // the SSE event stream, a JSON body, or nil
@@ -54,6 +56,7 @@ func TurnFromCall(c ProxiedCall) Turn {
 		SpanID:    c.SpanID,
 		ParentID:  c.ParentID,
 		System:    c.Provider,
+		Client:    c.Client,
 		Start:     c.Start,
 		End:       c.End,
 		// int64 -> int: a token count that overflowed int32 would be a 2-billion-token request.

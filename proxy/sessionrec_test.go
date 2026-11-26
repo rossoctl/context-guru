@@ -29,6 +29,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent"
 	_ "github.com/rossoctl/context-guru/components/all"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/expand"
@@ -431,7 +432,7 @@ func TestRecordSessionIDInObserveMode(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	// A Tenancy with no session id, as observe mode leaves it.
-	rc := h.newRecCtx(bschemas.Anthropic, ccBody("hello"), &Tenancy{}, "")
+	rc := h.newRecCtx(bschemas.Anthropic, ccBody("hello"), &Tenancy{}, "", agent.Client{})
 
 	if rc.traceID != testSessionUUID {
 		t.Fatalf("trace id = %q, want Claude Code's own session UUID %q\n"+
@@ -450,7 +451,7 @@ func TestRecordSessionIDFallbackIsNeverEmptyAndIsMarked(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	body := []byte(`{"model":"aws/claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}`)
-	rc := h.newRecCtx(bschemas.Anthropic, body, &Tenancy{}, "")
+	rc := h.newRecCtx(bschemas.Anthropic, body, &Tenancy{}, "", agent.Client{})
 
 	if rc.traceID == "" {
 		t.Fatal("trace id is empty: the file would be named .otel.json and merge unrelated sessions")
@@ -469,7 +470,7 @@ func TestRecordSessionIDUsesTheExplicitID(t *testing.T) {
 	h := &Handler{recorder: r}
 
 	body := []byte(`{"model":"gpt-x","messages":[{"role":"system","content":"You are Bob."},{"role":"user","content":"hi"}]}`)
-	rc := h.newRecCtx(bschemas.OpenAI, body, &Tenancy{}, bobIDETask)
+	rc := h.newRecCtx(bschemas.OpenAI, body, &Tenancy{}, bobIDETask, agent.Client{})
 
 	if want := "cg-derived-" + bobIDETask; rc.traceID != want {
 		t.Fatalf("trace id = %q, want %q", rc.traceID, want)
@@ -524,7 +525,7 @@ func TestRecordBobIDECallIsKeyedOnXTaskID(t *testing.T) {
 // Recording off: no recorder, no clone, no work.
 func TestRecCtxIsZeroWhenRecordingOff(t *testing.T) {
 	h := &Handler{} // recorder nil
-	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{}, "")
+	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{}, "", agent.Client{})
 	if rc.traceID != "" || rc.pristine != nil {
 		t.Fatalf("recording off must yield the zero recCtx, got %+v", rc)
 	}
@@ -586,13 +587,13 @@ func TestRecordNeedsTheTenantsConsentInHostedMode(t *testing.T) {
 	defer r.Close()
 	h := &Handler{recorder: r, opts: Options{Tenants: &TenantSource{}}}
 
-	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}, ""); rc.traceID != "" || rc.pristine != nil {
+	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1"}, "", agent.Client{}); rc.traceID != "" || rc.pristine != nil {
 		t.Fatalf("recorded a tenant who never opted in: %+v", rc)
 	}
-	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), nil, ""); rc.traceID != "" {
+	if rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), nil, "", agent.Client{}); rc.traceID != "" {
 		t.Fatalf("recorded an unauthenticated request in hosted mode: %+v", rc)
 	}
-	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true}, "")
+	rc := h.newRecCtx(bschemas.Anthropic, ccBody("x"), &Tenancy{ID: "t1", RecordTraces: true}, "", agent.Client{})
 	if rc.traceID != testSessionUUID || rc.tenantID != "t1" {
 		t.Fatalf("opted-in tenant: got trace %q tenant %q, want %q and t1", rc.traceID, rc.tenantID, testSessionUUID)
 	}

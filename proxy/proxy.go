@@ -74,7 +74,7 @@ import (
 type Options struct {
 	// ClaudeCompact is the user's own Claude Code auto-compact setting, read ONCE at start-up in
 	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
-	// is set. It applies only to requests whose User-Agent is Claude Code (dash.AgentFor gives
+	// is set. It applies only to requests whose User-Agent is Claude Code (agent.Identify gives
 	// "claude-code" or "claude-cli"). All other requests use the table.
 	ClaudeCompact compactionpoint.ClaudeCode
 	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
@@ -1530,7 +1530,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, ac, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
+			h.newRecCtx(provider, orig, tn, explicitSess, cl), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
 	}
 }
 
@@ -1944,6 +1944,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 				h.recorder.Record(&recEvent{
 					traceID:   rc.traceID,
 					tenantID:  rc.tenantID,
+					client:    rc.client,
 					provider:  provider,
 					path:      r.URL.Path,
 					headers:   record.AllowedHeaders(r.Header), // a filtered copy: the writer reads it after serve returns

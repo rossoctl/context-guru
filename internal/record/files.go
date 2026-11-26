@@ -62,6 +62,13 @@ func WithDerivedTurns(sessionID string, spans []Span) (out []Span) {
 		calls = append(calls, Call{Order: sp.StartTime, Messages: msgs, ToolDefs: defs})
 	}
 	turns := ReconstructTurns(calls)
+	client := ""
+	for _, sp := range spans {
+		if c, _ := sp.ResourceAttr[ResService].(string); c != "" {
+			client = c
+			break
+		}
+	}
 	if len(turns) == 0 {
 		return spans
 	}
@@ -72,7 +79,7 @@ func WithDerivedTurns(sessionID string, spans []Span) (out []Span) {
 		if err != nil {
 			continue // FirstSeen is a span start time; skip rather than invent one
 		}
-		res = append(res, DerivedTurnSpan(sessionID, derivedSpanID(sessionID, t.Sequence, t.Root), "", t, start))
+		res = append(res, DerivedTurnSpan(sessionID, derivedSpanID(sessionID, t.Sequence, t.Root), "", t, start, client))
 	}
 	return res
 }

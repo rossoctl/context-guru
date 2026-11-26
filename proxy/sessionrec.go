@@ -235,7 +235,7 @@ func (r *sessionRecorder) handle(e *recEvent) {
 	turn.Redact(r.bodyCap)
 	span := turn.ToOTLP()
 	if r.exp != nil {
-		if err := r.exp.export(e.tenantID, span); err != nil {
+		if err := r.exp.export(e.tenantID, e.client, span); err != nil {
 			r.errors.Add(1)
 			r.log.Warn("cg.record: could not export a turn", "err", err, "trace_id", e.traceID)
 		}
@@ -258,7 +258,7 @@ func (r *sessionRecorder) buildTurn(e *recEvent, parent string) (record.Turn, er
 		return record.Turn{}, err
 	}
 	return record.TurnFromCall(record.ProxiedCall{
-		TraceID: e.traceID, SpanID: spanID, ParentID: parent, Provider: string(e.provider),
+		TraceID: e.traceID, SpanID: spanID, ParentID: parent, Client: e.client, Provider: string(e.provider),
 		ReqBody: e.reqBody, RespBody: e.respBody, RespIsSSE: e.respIsSSE, RespSize: e.respSize,
 		Start: e.start, End: e.end, UpstreamMS: e.upstreamMS, FirstByteMS: e.firstByteMS, Rounds: e.rounds,
 		FreshInput: e.usage.FreshInput, CacheRead: e.usage.CacheRead, CacheWrite: e.usage.CacheWrite,

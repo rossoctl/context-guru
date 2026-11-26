@@ -84,14 +84,18 @@ func newRecExportWith(exp sdktrace.SpanExporter) *recExport {
 // tracerFor returns the tracer for one tenant. The tenant id is a RESOURCE attribute (Dudi's
 // point 5: one collector receives several accounts, so each span must say whose it is), and a
 // resource belongs to a provider, so each tenant gets its own provider over the shared exporter.
-func (x *recExport) tracerFor(tenantID string) trace.Tracer {
-	if t, ok := x.tracer[tenantID]; ok {
+// The client label (agent.Client.Label) is a resource attribute too, so each tenant and client pair
+// gets its own provider. "" gives the generic label (record.ClientLabel).
+func (x *recExport) tracerFor(tenantID, client string) trace.Tracer {
+	client = record.ClientLabel(client)
+	key := tenantID + "\x00" + client
+	if t, ok := x.tracer[key]; ok {
 		return t
 	}
 	attrs := []attribute.KeyValue{
 		attribute.String(record.ResService, record.ServiceNameProxy),
 		attribute.String(record.ResServiceVer, record.CollectorVersion),
-		attribute.String(record.ResClient, "claude-code"),
+		attribute.String(record.ResClient, client),
 	}
 	if tenantID != "" {
 		attrs = append(attrs, attribute.String(record.ResTenant, tenantID))
@@ -107,13 +111,13 @@ func (x *recExport) tracerFor(tenantID string) trace.Tracer {
 			sdktrace.WithExportTimeout(recExportTimeout))),
 	)
 	t := tp.Tracer("github.com/rossoctl/context-guru/internal/record")
-	x.tracer[tenantID] = t
-	x.tpByT[tenantID] = tp
+	x.tracer[key] = t
+	x.tpByT[key] = tp
 	return t
 }
 
 // export sends one span. Called on the writer goroutine only.
-func (x *recExport) export(tenantID string, s record.OTLPSpan) error {
+func (x *recExport) export(tenantID, client string, s record.OTLPSpan) error {
 	tid, err := trace.TraceIDFromHex(s.TraceID)
 	if err != nil {
 		return fmt.Errorf("record: trace id %q: %w", s.TraceID, err)
@@ -134,7 +138,7 @@ func (x *recExport) export(tenantID string, s record.OTLPSpan) error {
 				TraceID: tid, SpanID: pid, TraceFlags: trace.FlagsSampled}))
 		}
 	}
-	tr := x.tracerFor(tenantID)
+	tr := x.tracerFor(tenantID, client)
 
 	x.mu.Lock()
 	x.ids.next(tid, sid)

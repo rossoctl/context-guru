@@ -56,13 +56,14 @@ const (
 	AttrToolLifted = "cg.tool.from_body" // true: read out of the message body, not observed
 )
 
-// DerivedTurnSpan renders one reconstructed turn as a span.
+// DerivedTurnSpan renders one reconstructed turn as a span. client is the client label of the session's
+// observed spans (see ClientLabel for the fallback).
 //
 // start is the start time of the model call whose body first carried the turn -- the earliest
 // moment the proxy can prove the turn existed by. It is NOT when the human typed, and the span
 // carries no end time for exactly that reason: a zero-length span is honest about knowing one
 // instant, where a fabricated duration would not be.
-func DerivedTurnSpan(sessionID, spanID, parentID string, t ReconTurn, start time.Time) Span {
+func DerivedTurnSpan(sessionID, spanID, parentID string, t ReconTurn, start time.Time, client string) Span {
 	at := map[string]any{
 		AttrTurnDerived:   true,
 		AttrTurnSequence:  t.Sequence,
@@ -85,7 +86,7 @@ func DerivedTurnSpan(sessionID, spanID, parentID string, t ReconTurn, start time
 		StartTime:    ts,
 		EndTime:      ts, // no duration is knowable from this side; see the comment above
 		Attributes:   at,
-		ResourceAttr: map[string]any{"service.name": "claude-code"},
+		ResourceAttr: map[string]any{ResService: ClientLabel(client)},
 		Status:       Status{Code: StatusOK},
 	}
 }
