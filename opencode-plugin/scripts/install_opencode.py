@@ -2,13 +2,18 @@
 """Install or remove OpenCode's context-guru plugin, and OpenCode itself when it is missing, in one run.
 
 install-opencode.sh downloads the release's plugin, checks its SHA-256, and runs this file from it, with the
-user's answers on the terminal. See docs/superpowers/specs/2026-11-23-opencode-one-command-installer-design.md.
+user's answers on the terminal. See docs/superpowers/specs/2026-11-23-opencode-one-command-installer-design.md
+and docs/superpowers/specs/2026-11-25-opencode-installer-provider-setup-design.md.
 
   * OpenCode changes only after a yes. The config files change only after the consent yes.
-  * The installer never reads, asks for, or stores a key: the plugin uses OpenCode's own login.
+  * Directly: the installer never sees a key; OpenCode's own login does. A gateway: the installer asks for its key,
+    checks it with the gateway's model list, and writes it to OpenCode's key file only. It never shows, logs or
+    records it.
   * A record lists what this file added, so uninstall removes that and nothing else.
 """
 import argparse
+from dataclasses import dataclass
+import getpass
 import hashlib
 import json
 import os
@@ -18,9 +23,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Optional
+from urllib.error import HTTPError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 OPENCODE_NPM = "opencode-ai"
-TESTED_OPENCODE = "1.19.5"  # only named in a note: the installer installs the latest, as the Pi installer does
+TESTED_OPENCODE = "1.19.6"  # only named in a note: the installer installs the latest, as the Pi installer does
 MIN_OPENCODE = (1, 18, 29)  # the first release that calls the plugin's v1 server() export
 PUBLIC_REGISTRY = "https://registry.npmjs.org/"
 INSTALL_PAGE = "https://opencode.ai/docs"
@@ -30,7 +39,24 @@ MARKER = "opencode-context-guru"
 CONFIGS = (("opencode.json", "index.js", "https://opencode.ai/config.json"),
            ("tui.json", "tui.js", "https://opencode.ai/tui.json"))
 DOWNLOAD_STEP = "Download context-guru for OpenCode"
-INSTALL_STEPS = ("Check this computer", "OpenCode", "Your consent", "The context-guru plugin", "Check that it works")
+INSTALL_STEPS = ("Check this computer", "Your models", "OpenCode", "Your consent", "The context-guru plugin",
+                 "Login", "Check that it works")
+DIRECT = ("anthropic", "openai")  # the built-in provider ids that the plugin routes
+# API format -> (provider id, AI SDK package, display name). A gateway gets its own id, so a direct login's key
+# never goes to it. The plugin routes any id that contains "anthropic" or "openai" (index.js providerDialect).
+GATEWAYS = {"anthropic": ("anthropic-gateway", "@ai-sdk/anthropic", "Anthropic gateway"),
+            "openai": ("openai-gateway", "@ai-sdk/openai", "OpenAI gateway")}
+MODELS_TEXT = """context-guru works with Anthropic and OpenAI models only.
+It can reach them directly, or through a gateway that
+speaks the Anthropic or OpenAI API (for example LiteLLM).
+Other providers (Google, Groq, local models, ...) are not routed.
+
+How do you reach your models?
+  1) Anthropic or OpenAI directly
+  2) A custom base URL (a company gateway)
+  3) Another provider: exit, change nothing"""
+NOT_SUPPORTED = "Nothing was changed. context-guru supports Anthropic and OpenAI models."
+ABSENT = {"absent": True}  # in the record: the key was not there before the install
 UNINSTALL_STEPS = ("Stop the proxies", "Remove the plugin", "Local data", "OpenCode itself")
 
 
@@ -38,8 +64,57 @@ class Stop(Exception):
     """A step cannot go on. The message says why, and what to do."""
 
 
+@dataclass(frozen=True)
+class Connection:
+    """How OpenCode reaches the models. Directly: all None. A gateway: its provider id, `<url>/v1` and 2 models."""
+    provider: Optional[str]
+    base_url: Optional[str]
+    model: Optional[str]
+    small_model: Optional[str]
+
+
 def config_dir():
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+
+
+def auth_path():
+    """OpenCode's own key file, which `opencode auth login` writes."""
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode/auth.json"
+
+
+def read_keys():
+    path = auth_path()
+    if not path.exists() or not path.read_text().strip():
+        return {}
+    try:
+        keys = json.loads(path.read_text())
+    except ValueError:
+        raise Stop(f"{path}, OpenCode's key file, is not valid JSON. Fix or move it, then run this again.") from None
+    return keys if isinstance(keys, dict) else {}
+
+
+def save_keys(keys):
+    """OpenCode's key file, as `opencode auth login` writes it: atomic, mode 0600. A symlink stays: the write goes
+    to the file it points to."""
+    path = Path(os.path.realpath(auth_path()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=".auth.json.")  # mkstemp makes 0600
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(json.dumps(keys, indent=2) + "\n")
+    os.replace(temp, path)
+
+
+def write_key(provider, key):
+    """Add one API key to OpenCode's key file. The other entries stay."""
+    save_keys({**read_keys(), provider: {"type": "api", "key": key}})
+
+
+def remove_key(provider):
+    """Remove one entry from OpenCode's key file, the inverse of write_key. The other entries stay."""
+    keys = read_keys()
+    if provider in keys:
+        del keys[provider]
+        save_keys(keys)
 
 
 def plugin_dir():
@@ -97,6 +172,44 @@ def write_json(path, value):
     os.replace(temp, path)
 
 
+def gateway_url(text):
+    """`<url>/v1` for a gateway base URL: https, or http on this computer only."""
+    # The message never repeats the text: a pasted URL can hold a key.
+    try:
+        url = urlsplit(text.strip())
+        host = url.hostname
+    except ValueError:
+        host = None
+    if not host or not (url.scheme == "https" or (url.scheme == "http" and host in ("127.0.0.1", "localhost"))):
+        raise Stop("the base URL must start with https:// (http:// only on 127.0.0.1 or localhost). "
+                   "Nothing was changed.")
+    if "@" in url.netloc or url.query or url.fragment:
+        raise Stop("the base URL must not hold a user name, a password, a query or a fragment. OpenCode's login "
+                   "keeps the key. Nothing was changed.")
+    path = url.path.rstrip("/").removesuffix("/v1")
+    return urlunsplit((url.scheme, url.netloc, path + "/v1", "", ""))
+
+
+def dialect(provider_id):
+    """The API format the plugin routes a provider id as (index.js providerDialect), or None."""
+    lower = str(provider_id).lower()
+    return "anthropic" if "anthropic" in lower else "openai" if "openai" in lower else None
+
+
+def slot(document, key):
+    """(the object that holds `key`, the name in it). `provider.<id>` is nested; the other keys are top level."""
+    head, _, rest = key.partition(".")
+    return (document.get(head), rest) if rest else (document, head)
+
+
+def logged_in(text):
+    """The provider ids with a login, from `opencode auth list`: the first word of each `●` line, lower case. A key
+    in the environment (the Environment block) counts too."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return {line.split("●", 1)[1].split()[0].lower() for line in plain.splitlines()
+            if "●" in line and line.split("●", 1)[1].split()}
+
+
 def manual_steps():
     lines = ["To install it by hand, add these entries to the \"plugin\" list:"]
     for name, file, _ in CONFIGS:
@@ -140,6 +253,13 @@ class Terminal:
     def say(self, text):
         print(text, file=self.stream_out, flush=True)
 
+    def secret(self, question):
+        """Hidden input, for a key."""
+        try:
+            return getpass.getpass(question + " ", stream=self.stream_out).strip()
+        except EOFError:
+            raise Stop("no answer (the input ended). Nothing more was changed.") from None
+
     def ask(self, question, default=""):
         self.stream_out.write(question + " ")
         self.stream_out.flush()
@@ -155,6 +275,13 @@ class Shell:
     def which(self, name):
         return shutil.which(name)
 
+    def interactive(self, cmd):
+        """Runs a program on the user's terminal (a login), and returns its exit code."""
+        try:
+            return subprocess.run(cmd).returncode
+        except FileNotFoundError:
+            return 127
+
     def run(self, cmd, cwd=None):
         try:
             # OpenCode takes its project folder from PWD as well, so PWD must name the same folder as cwd.
@@ -167,9 +294,29 @@ class Shell:
             return subprocess.CompletedProcess(cmd, 124, "", f"{cmd[0]}: no answer in 10 minutes")
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """A redirect would copy the key headers to the new host, also over http. So a 3xx stays a 3xx."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class Web:
+    """One HTTPS GET to the gateway. TLS is always checked. A redirect is not followed."""
+
+    def get(self, url, headers):
+        try:
+            with build_opener(_NoRedirect).open(Request(url, headers=headers), timeout=20) as answer:
+                return answer.status, answer.read().decode(errors="replace")
+        except HTTPError as error:
+            return error.code, ""
+
+
 class Installer:
-    def __init__(self, terminal, shell, source, downloaded=False):
+    def __init__(self, terminal, shell, source, downloaded=False, web=None):
         self.terminal, self.shell, self.source, self.downloaded = terminal, shell, Path(source), downloaded
+        self.web = web or Web()
+        self.key = None  # the gateway key, in memory only: never in a message, the record or opencode.json
         self.registry = os.environ.get("CG_OC_NPM_REGISTRY") or PUBLIC_REGISTRY
         self.steps, self.record = (), {}
 
@@ -178,8 +325,14 @@ class Installer:
         try:
             self.begin(INSTALL_STEPS)
             self.step("Check this computer", "It reads OpenCode's config files. Nothing changes in this step.")
+            self.terminal.say(f"   OpenCode's config folder: {config_dir()}")
             documents = self.read_configs()
             self.record = load_json(record_path())
+            self.step("Your models", "How OpenCode reaches the models. Nothing changes in this step.")
+            self.connection = self.ask_connection(documents)
+            if self.connection is None:
+                self.terminal.say(NOT_SUPPORTED)
+                return 0
             self.step("OpenCode", "OpenCode is the AI coding agent that context-guru works in. This step installs "
                                   "or updates OpenCode, after your yes.")
             self.ensure_opencode()
@@ -191,18 +344,138 @@ class Installer:
             self.step("The context-guru plugin", f"It goes to {plugin_dir()}, and into OpenCode's config for every "
                                                  "project. Your config files are backed up first.")
             self.install_plugin(documents)
+            self.name_projects_off()
             self.save_record()
-            self.finish()
-            return 0
+            self.login()
+            return self.finish()
         except Stop as stop:
             self.terminal.say(f"context-guru: {stop}")
             return 1
+        except KeyboardInterrupt:
+            self.terminal.say("\nStopped. Nothing more was changed.")
+            return 130
 
     def read_configs(self):
         jsonc = config_dir() / "opencode.jsonc"
         if jsonc.exists():
             raise Stop(f"OpenCode reads {jsonc}, and the installer does not change JSONC files.\n{manual_steps()}")
         return {name: load_json(config_dir() / name) for name, _, _ in CONFIGS}
+
+    def ask_connection(self, documents):
+        """The connection from the user's answers (or the CG_OC_* variables); None for another provider."""
+        env = os.environ.get
+        if not env("CG_OC_GATEWAY_URL"):
+            self.terminal.say(MODELS_TEXT)
+            choice = None
+            while choice not in ("1", "2", "3"):
+                try:
+                    choice = self.terminal.ask("Your choice [1]:", "1")
+                except Stop:  # the input ended: the same as "another provider"
+                    return None
+            if choice == "3":
+                return None
+            if choice == "1":
+                return Connection(None, None, None, None)
+        url = gateway_url(env("CG_OC_GATEWAY_URL") or self.terminal.ask(
+            "The gateway's base URL (for example https://litellm.example.com):"))
+        api = env("CG_OC_API")
+        if api and api not in GATEWAYS:
+            raise Stop(f"CG_OC_API must be anthropic or openai, not {api!r}. Nothing was changed.")
+        if not api:
+            self.terminal.say("The gateway's API format:\n  1) Anthropic (recommended for Claude models)\n  2) OpenAI")
+        while api not in GATEWAYS:
+            answer = self.terminal.ask("API format [1]:", "1").lower()
+            api = {"1": "anthropic", "2": "openai"}.get(answer, answer)
+        provider = GATEWAYS[api][0]
+        # The plugin refuses two upstreams of one API format, and then routes nothing.
+        document = documents["opencode.json"]
+        providers = document.get("provider") if isinstance(document.get("provider"), dict) else {}
+        # The plugin routes each provider id of `provider` and of every agent model (index.js modelProviderIds).
+        # `model` and `small_model` are not counted: the installer writes them.
+        agents = document.get("agent") if isinstance(document.get("agent"), dict) else {}
+        agent_ids = [agent["model"].split("/", 1)[0] for agent in agents.values()
+                     if isinstance(agent, dict) and isinstance(agent.get("model"), str) and "/" in agent["model"]]
+        for other in dict.fromkeys([*providers, *agent_ids]):
+            if other != provider and dialect(other) == api:
+                entry = providers.get(other)
+                base = ((entry.get("options") or {}) if isinstance(entry, dict) else {}).get("baseURL")
+                raise Stop(f"OpenCode's config already has the {api} provider \"{other}\""
+                           f"{f' at {base}' if base else ''}. context-guru routes one {api} upstream only, so it "
+                           f"cannot add {url} too. Remove \"{other}\" from {config_dir() / 'opencode.json'}, "
+                           "then run this again. Nothing was changed.")
+        old = (((documents["opencode.json"].get("provider") or {}).get(provider) or {}).get("options") or {}).get("baseURL")
+        if old and old != url:
+            self.terminal.say(f"OpenCode's config already has \"{provider}\" at {old}.")
+            if not self.yes(f"Replace it with {url}?", default=False):
+                raise Stop("Nothing was changed.")
+        models = self.check_key(url, api, provider)
+        if models:
+            self.terminal.say("Models at the gateway:\n" + "\n".join(
+                f"  {number}) {model}" for number, model in enumerate(models, 1)))
+        model = env("CG_OC_MODEL") or self.pick("The model for your work", models, ("sonnet",))
+        small = env("CG_OC_SMALL_MODEL") or self.pick("The small model, for session titles", models, ("haiku",),
+                                                      model)
+        return Connection(provider, url, model, small)
+
+    def check_key(self, url, api, provider):
+        """Ask for the key (or offer OpenCode's saved one) and check it with the gateway's model list. Returns the
+        model ids, or [] when the list cannot be read. The key stays in self.key."""
+        saved = (read_keys().get(provider) or {}).get("key")
+        self.key_existed = bool(saved)
+        if saved and self.yes(f"Use the key that OpenCode has for {provider}?", default=True):
+            self.key, self.key_is_new = saved, False
+        else:
+            self.key, self.key_is_new = None, True
+        host = urlsplit(url).hostname
+        for _ in range(3):
+            if self.key is None:
+                self.key = self.terminal.secret(
+                    "Your key for this gateway (the input is hidden: paste it, then press Enter):")
+            if any(ord(char) < 32 or ord(char) == 127 for char in self.key):
+                # http.client would refuse the header with an error that holds the key.
+                self.terminal.say("The key has a control character (for example a line break). Paste it again.")
+                self.key = None
+                continue
+            try:
+                status, body = self.web.get(f"{url}/models", {"x-api-key": self.key, "anthropic-version": "2023-06-01",
+                                                               "Authorization": f"Bearer {self.key}"})
+            except OSError as error:
+                # str(error) names the cause (DNS, TLS); it never holds the key, which goes in a header only.
+                self.terminal.say(f"The installer cannot read the model list from {host} ({error}). The final check "
+                                  "tests the key.")
+                return []
+            if status in (401, 403):
+                self.terminal.say("The gateway refused the key.")
+                self.key, self.key_is_new = None, True
+                continue
+            try:
+                ids = sorted({item["id"] for item in json.loads(body)["data"] if isinstance(item.get("id"), str)})
+            except (ValueError, KeyError, TypeError, AttributeError):
+                self.terminal.say(f"The installer cannot read the model list from {host} (HTTP {status}). The "
+                                  "final check tests the key.")
+                return []
+            if status != 200:
+                self.terminal.say(f"The installer cannot read the model list from {host} (HTTP {status}). The "
+                                  "final check tests the key.")
+                return []
+            self.terminal.say("✓ The gateway accepted the key.")
+            return [model for model in ids if "claude" in model.lower()] if api == "anthropic" else ids
+        raise Stop("the gateway refused the key 3 times. Nothing was changed.")
+
+    def pick(self, question, models, prefer, fallback=None):
+        """A model: a number from the list, or a name. The default is the first id with a `prefer` word."""
+        default = next((model for model in models for word in prefer if word in model.lower()),
+                       fallback or (models[0] if models else None))
+        while True:
+            hint = f" [{models.index(default) + 1} = {default}]" if default in models else (
+                f" [{default}]" if default else " (for example aws/claude-sonnet-5-5)")
+            answer = self.terminal.ask(f"{question}: a number from the list, or a model name{hint}:"
+                                       if models else f"{question}, as the gateway names it{hint}:",
+                                       default or "").strip()
+            if answer.isdigit() and 1 <= int(answer) <= len(models):
+                return models[int(answer) - 1]
+            if answer and not answer.isdigit():
+                return answer
 
     @staticmethod
     def tested_note(shown):
@@ -295,6 +568,9 @@ class Installer:
         self.terminal.say(
             "   • In every project, OpenCode's Anthropic and OpenAI requests go through a local context-guru proxy\n"
             "     on 127.0.0.1. Your requests and their answers pass through it.\n"
+            + (f"   • You chose: the gateway at {urlsplit(self.connection.base_url).hostname}.\n"
+               if self.connection.provider else "   • You chose: Anthropic or OpenAI directly (no gateway).\n")
+            +
             "   • While you are away, the proxy sends short keep-alive requests with your own credential, to keep\n"
             "     the prompt cache warm. They cost a little. /context-guru-strategy none turns them off.\n"
             + ("   • The preset is off: request bodies go to the provider unchanged." if preset == "off" else
@@ -320,6 +596,8 @@ class Installer:
                 shutil.copy2(path, backup_dir() / name)
             elif not document:
                 document["$schema"] = schema
+            if name == "opencode.json":
+                self.write_connection(document)
             entries = document.get("plugin") if isinstance(document.get("plugin"), list) else []
             ours = [entry for entry in entries if is_ours(entry)]
             options = self.carried_options(document)
@@ -332,31 +610,161 @@ class Installer:
                     self.terminal.say(f"Replaced another copy of the plugin in {name}: {entry_path(entry)}")
         self.terminal.say(f"✓ context-guru plugin installed for every project ({config_dir()}).")
 
-    def finish(self):
-        self.step("Check that it works", "One short test prompt through OpenCode starts the proxy and checks it.")
-        if self.yes("Send one test prompt now? It costs one short request.", default=False):
-            with tempfile.TemporaryDirectory(prefix="cg-opencode-check.") as folder:
-                folder = os.path.realpath(folder)
-                out = self.shell.run(["opencode", "run", "Reply with the single word: ok"], cwd=folder)
-                self.terminal.say(f"OpenCode answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
-                state = project_state(folder)
-                status, reset = state / "context-guru-status", state / "context-guru-reset"
-                proxy = facts(self.shell.run(["sh", str(status)]).stdout).get("proxy") if status.exists() else None
-                # The check's own proxy would idle for 24 h (and send keep-alive) for a folder that is gone.
-                if reset.exists():
-                    self.shell.run(["sh", str(reset)])
-                shutil.rmtree(state, ignore_errors=True)
-            # opencode run can print a provider error and still exit 0, so its text counts too.
-            answered = out.returncode == 0 and "Error:" not in out.stdout + out.stderr
-            if proxy == "up" and answered:
-                self.terminal.say("✓ The proxy started, and OpenCode answered through it.")
-            elif proxy == "up":
-                self.terminal.say("The proxy started, but OpenCode could not answer (see above). If OpenCode has "
-                                  "no provider login yet, run: opencode auth login")
+    def name_projects_off(self):
+        """/context-guru-uninstall turns context-guru off in one project, and that choice stays (owner decision,
+        2026-11-25). The installer only names those projects, and how to turn each one on again."""
+        folders = []
+        for marker in sorted(state_root().glob("*/disabled")) if state_root().exists() else []:
+            try:
+                folder = json.loads((marker.parent / "install.json").read_text()).get("directory")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(folder, str) and Path(folder).is_dir():
+                folders.append(folder)
+        if folders:
+            count = f"{len(folders)} project{'s' if len(folders) > 1 else ''}"
+            self.terminal.say(f"context-guru is off in {count}, because you turned it off there:\n  "
+                              + "\n  ".join(folders) + "\nTo turn it on again, run /context-guru-install in that project.")
+
+    def logins(self):
+        return logged_in(self.shell.run(["opencode", "auth", "list"]).stdout)
+
+    def login(self):
+        gateway = self.connection.provider
+        if gateway:
+            self.step("Login", "The gateway key goes to OpenCode's own key file. It is shown nowhere.")
+            if self.key_is_new:
+                write_key(gateway, self.key)
+                # A key that was there before the install stays at uninstall; only one the installer added goes.
+                self.record["key_kept" if self.key_existed else "key_written"] = gateway
+                self.save_record()
+            self.terminal.say(f"✓ OpenCode has the key for {gateway} ({auth_path()}).")
+            return
+        self.step("Login", "OpenCode keeps your key in its own login store. The installer never sees the key.")
+        wanted = set(DIRECT)
+        if wanted & self.logins():
+            self.terminal.say("✓ OpenCode already has a login for Anthropic or OpenAI.")
+            return
+        self.terminal.say("OpenCode asks for the provider next. In OpenCode's list, pick Anthropic (or OpenAI), then "
+                          "follow its steps.\nFor a company gateway, press Ctrl-C and run the installer again with "
+                          "choice 2.")
+        before = self.logins()
+        try:
+            self.shell.interactive(["opencode", "auth", "login"])
+        except KeyboardInterrupt:  # the text above tells the user to press it; then the undo offer comes
+            self.terminal.say("")
+        after = self.logins()
+        if wanted & after:
+            self.record["login_started"] = sorted(wanted & after)[0]
+            self.save_record()
+            self.terminal.say("✓ OpenCode has the login.")
+            return
+        other = sorted(after - before)
+        self.terminal.say(f"context-guru cannot route {', '.join(other)}. It routes Anthropic and OpenAI only." if other
+                          else "OpenCode has no login for Anthropic or OpenAI.")
+        if self.yes("Undo the changes of this install?", default=True):
+            self.undo()
+            raise Stop("the install is undone.")
+        raise Stop("to finish, run: opencode auth login. Then run this installer again.")
+
+    def undo(self):
+        """Uninstall without its questions: config entries and keys, the plugin copy, a login the installer started.
+        An OpenCode that the installer installed stays, and the record keeps that fact for uninstall."""
+        self.revert(self.record)
+        if self.record.get("plugin"):
+            shutil.rmtree(self.record["plugin"], ignore_errors=True)
+        if self.record.get("login_started"):
+            self.shell.run(["opencode", "auth", "logout", self.record["login_started"]])
+        if self.record.get("key_written"):
+            remove_key(self.record["key_written"])
+        shutil.rmtree(backup_dir(), ignore_errors=True)
+        if self.record.get("opencode_installed"):
+            self.record = {"opencode_installed": True}
+            self.save_record()
+            self.terminal.say("✓ The changes are undone. OpenCode stays installed. The uninstall removes it.")
+        else:
+            record_path().unlink(missing_ok=True)
+            self.terminal.say("✓ The changes are undone.")
+
+    def write_connection(self, document):
+        """A gateway's provider and models into opencode.json. The record keeps each key's value from before the
+        first install, so uninstall can put it back."""
+        connection = self.connection
+        if not connection.provider:
+            return
+        provider, npm, name = GATEWAYS[dialect(connection.provider)]
+        models = dict.fromkeys((connection.model, connection.small_model))
+        wrote = {f"provider.{provider}": {"npm": npm, "name": name, "options": {"baseURL": connection.base_url},
+                                          "models": {model: {"name": model} for model in models}},
+                 "model": f"{provider}/{connection.model}", "small_model": f"{provider}/{connection.small_model}"}
+        made_provider = "provider" not in document
+        if not isinstance(document.setdefault("provider", {}), dict):
+            raise Stop(f"\"provider\" in {config_dir() / 'opencode.json'} is not a JSON object. Fix it, then run "
+                       "this again.")
+        old = self.record.get("connection") or {}
+        before = {}
+        for key in wrote:
+            holder, field = slot(document, key)
+            before[key] = holder[field] if field in holder else ABSENT
+        for key, value in wrote.items():
+            holder, field = slot(document, key)
+            holder[field] = value
+        # A second run keeps the first run's "before", and what each run wrote.
+        self.record["connection"] = {"wrote": {**old.get("wrote", {}), **wrote},
+                                     "before": {**before, **old.get("before", {})},
+                                     "made_provider": old.get("made_provider", made_provider)}
+
+    @staticmethod
+    def restore_connection(document, connection):
+        """Put back each key the installer wrote, when it still has the installer's value. True when it changed."""
+        changed = False
+        for key, wrote in (connection or {}).get("wrote", {}).items():
+            holder, field = slot(document, key)
+            if not isinstance(holder, dict) or holder.get(field) != wrote:
+                continue
+            before = connection["before"].get(key, ABSENT)
+            if before == ABSENT:
+                del holder[field]
             else:
-                self.terminal.say("The proxy did not answer. If OpenCode has no provider login yet, run: "
-                                  f"opencode auth login. The proxy log is under {state_root()}.")
-        self.terminal.say("Done. Restart any OpenCode that is open now. Then start OpenCode with: opencode")
+                holder[field] = before
+            changed = True
+        if changed and document.get("provider") == {} and connection.get("made_provider"):
+            del document["provider"]
+        return changed
+
+    def finish(self):
+        """Exit code 0 only when a real answer came through the proxy, or the user said no to the check."""
+        self.step("Check that it works", "One short test prompt through OpenCode starts the proxy and checks it.")
+        if not self.yes("Send one test prompt now? It costs one short request.", default=True):
+            self.terminal.say("Not checked. Restart any OpenCode that is open now. Then start OpenCode with: opencode")
+            return 0
+        with tempfile.TemporaryDirectory(prefix="cg-opencode-check.") as folder:
+            folder = os.path.realpath(folder)
+            out = self.shell.run(["opencode", "run", "Reply with the single word: ok"], cwd=folder)
+            self.terminal.say(f"OpenCode answered: {out.stdout.strip()[-200:] or out.stderr.strip()[-200:]}")
+            state = project_state(folder)
+            status, reset = state / "context-guru-status", state / "context-guru-reset"
+            found = facts(self.shell.run(["sh", str(status)]).stdout) if status.exists() else {}
+            # The check's own proxy would idle for 24 h (and send keep-alive) for a folder that is gone.
+            if reset.exists():
+                self.shell.run(["sh", str(reset)])
+            shutil.rmtree(state, ignore_errors=True)
+        # opencode run can print a provider error and still exit 0, so its text counts too.
+        answered = out.returncode == 0 and "Error:" not in out.stdout + out.stderr
+        requests = int(float(found.get("stats_requests") or 0))
+        if found.get("proxy") != "up":
+            self.terminal.say(f"The proxy did not start. Its log is under {state_root()}.")
+        elif not answered:
+            self.terminal.say("The proxy started, but OpenCode could not answer (see above). Check the key "
+                              "(opencode auth login), the base URL and the model.")
+        elif requests < 1:
+            self.terminal.say("OpenCode answered, but not through the proxy: the proxy counted 0 requests. The "
+                              "provider of OpenCode's model is not Anthropic or OpenAI.")
+        else:
+            self.terminal.say("✓ The proxy started, and OpenCode answered through it.")
+            self.terminal.say("Done. Restart any OpenCode that is open now. Then start OpenCode with: opencode")
+            return 0
+        return 1
 
     # ----------------------------------------------------------------------------- uninstall
     def uninstall(self):
@@ -370,18 +778,17 @@ class Installer:
             self.terminal.say(f"✓ Proxies stopped ({len(resets)} projects).")
             self.step("Remove the plugin", "It removes each context-guru entry from OpenCode's config, also one you "
                                            "added by hand. Your other entries stay.")
-            files = record.get("files") or {}
-            known = {str(Path(record["plugin"]) / file) for _, file, _ in CONFIGS} if record.get("plugin") else set()
-            by_hand = []
-            for name, file, schema in CONFIGS:
-                path = config_dir() / name
+            by_hand = self.revert(record)
+            if record.get("login_started"):
+                self.shell.run(["opencode", "auth", "logout", record["login_started"]])
+            if record.get("key_written"):
                 try:
-                    self.remove_entries(path, load_json(path), files.get(name) or {}, schema, known)
+                    remove_key(record["key_written"])
                 except Stop:
-                    by_hand.append(f"{path}: remove this entry by hand: \"{plugin_dir() / file}\"")
-            jsonc = config_dir() / "opencode.jsonc"
-            if jsonc.exists():
-                by_hand.append(f"{jsonc}: remove a context-guru entry by hand, if it has one")
+                    by_hand.append(f"{auth_path()}: remove the \"{record['key_written']}\" entry by hand")
+            if record.get("key_kept"):
+                self.terminal.say(f"The key for {record['key_kept']} stays in {auth_path()}: it was there before the "
+                                  "install.")
             if record.get("plugin"):
                 shutil.rmtree(record["plugin"], ignore_errors=True)
                 try:
@@ -413,14 +820,34 @@ class Installer:
             self.terminal.say(f"context-guru: {stop}")
             return 1
 
+    def revert(self, record):
+        """Remove the plugin entries and put back the connection keys. Returns the lines to change by hand."""
+        files = record.get("files") or {}
+        known = {str(Path(record["plugin"]) / file) for _, file, _ in CONFIGS} if record.get("plugin") else set()
+        by_hand = []
+        for name, file, schema in CONFIGS:
+            path = config_dir() / name
+            try:
+                document = load_json(path)
+                changed = name == "opencode.json" and self.restore_connection(document, record.get("connection"))
+                self.remove_entries(path, document, files.get(name) or {}, schema, known, changed)
+            except Stop:
+                by_hand.append(f"{path}: remove this entry by hand: \"{plugin_dir() / file}\"")
+        jsonc = config_dir() / "opencode.jsonc"
+        if jsonc.exists():
+            by_hand.append(f"{jsonc}: remove a context-guru entry by hand, if it has one")
+        return by_hand
+
     @staticmethod
-    def remove_entries(path, document, record, schema, known):
+    def remove_entries(path, document, record, schema, known, changed=False):
         entries = document.get("plugin")
-        if not isinstance(entries, list) or not any(is_ours(entry, known) for entry in entries):
+        ours = isinstance(entries, list) and any(is_ours(entry, known) for entry in entries)
+        if not ours and not changed:
             return
-        document["plugin"] = [entry for entry in entries if not is_ours(entry, known)]
-        if not document["plugin"] and record.get("had_plugin") is False:
-            del document["plugin"]
+        if ours:
+            document["plugin"] = [entry for entry in entries if not is_ours(entry, known)]
+            if not document["plugin"] and record.get("had_plugin") is False:
+                del document["plugin"]
         if record.get("created") and set(document) <= {"$schema"} and document.get("$schema", schema) == schema:
             path.unlink()
         else:

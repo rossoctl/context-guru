@@ -35,7 +35,9 @@ In scope:
 
 Out of scope:
 - Keys and gateways. The plugin uses OpenCode's own login (`opencode auth login`) and adds no key. The
-  installer never reads, asks for, or stores a key.
+  installer never reads, asks for, or stores a key. (Changed on 2026-11-25: the installer now sets up a
+  gateway and starts OpenCode's login. See
+  [2026-11-25-opencode-installer-provider-setup-design.md](2026-11-25-opencode-installer-provider-setup-design.md).)
 - Per-project install. Windows. The plugin's preset and cache strategy questions (the defaults stay: preset
   `off`, the proxy's default strategy; the installer says how to change them).
 
