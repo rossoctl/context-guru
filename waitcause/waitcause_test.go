@@ -747,7 +747,7 @@ func TestPromptOf(t *testing.T) {
 		{[]string{"ExitPlanMode", "Bash"}, PromptOther},
 	} {
 		if got := PromptOfClient(agent.Client{}, tc.names); got != tc.want {
-			t.Errorf("PromptOf(%v) = %q, want %q", tc.names, got, tc.want)
+			t.Errorf("PromptOfClient(%v) = %q, want %q", tc.names, got, tc.want)
 		}
 	}
 }

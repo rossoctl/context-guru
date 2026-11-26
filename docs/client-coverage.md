@@ -45,7 +45,8 @@ Notes:
 
 Each rule below lives in `agent/claudecode` (or `agent/codex`) and is read through `agent.Client`
 (`agent/rules.go`). **fallback** for every rule here: a client with no rule of its own gets Claude
-Code's rule, as the code did before the rules moved. A zero `Client` (a stored row, an offline
+Code's rule, as the code did before the rules moved. The exception is the tools that wait on a
+person (`AsksHuman`, `IsQuestionTool`): the fallback is the union of Claude Code's and Codex's lists. A zero `Client` (a stored row, an offline
 transcript, a host that passes none) gets the same. No source shows that another client sends
 different text, so only Claude Code has rules for these, and Codex has its own question tool.
 
