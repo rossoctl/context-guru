@@ -151,7 +151,9 @@ What the library prices:
   single operation or ping owns them (accountant design §6.2), so the library reports them apart,
   as `Result.Interaction`. They are counted on the `interaction` row, inside the baseline delta.
   The metrics book the same dollars as `llm_savings_interaction_usd_total`. Before, the dashboard
-  left them out, so its saving was lower than the metrics on a rescued request.
+  left them out, so its saving was lower than the metrics on a rescued request. One difference is
+  older than this row: the metrics also book the re-rate that no component owns in that counter,
+  and the dashboard books it on the `ended_change` row. The totals agree; the two rows do not.
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,

@@ -28,11 +28,29 @@ func interactionRes() accountant.Result {
 }
 
 // The dashboard books the interaction the metrics book, to the micro (it ignored it before). The
-// metrics are llm.savings.interaction.usd, saved minus added.
+// metrics are llm.savings.interaction.usd, saved minus added. gpt-5.6 at 271,500 billed tokens
+// crosses its 272,000 line without context-guru: both sides price the interaction at the size
+// without, the long rate.
 func TestDashboardBooksTheInteractionAsTheMetricsDo(t *testing.T) {
-	const model = "claude-sonnet-4-5"
+	got := map[string]float64{}
+	for _, tc := range []struct {
+		model string
+		usage accountant.Usage
+	}{
+		{"claude-sonnet-4-5", accountant.Usage{CacheRead: 1255, CacheWrite: 13}},
+		{"gpt-5.6", accountant.Usage{CacheRead: 271_500, CacheWrite: 13}},
+	} {
+		t.Run(tc.model, func(t *testing.T) { got[tc.model] = interactionAgrees(t, tc.model, tc.usage) })
+	}
+	// The same tokens at the long rate: the second case really crosses the line.
+	if got["gpt-5.6"] <= got["claude-sonnet-4-5"] {
+		t.Errorf("gpt-5.6 interaction %v, want above the base-rate %v", got["gpt-5.6"], got["claude-sonnet-4-5"])
+	}
+}
+
+func interactionAgrees(t *testing.T, model string, usage accountant.Usage) float64 {
+	t.Helper()
 	res := interactionRes()
-	usage := accountant.Usage{CacheRead: 1255, CacheWrite: 13}
 
 	r := sdk.NewManualReader()
 	s, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), metricsPricer{prices: sizedTierPricer{}})
@@ -66,7 +84,9 @@ func TestDashboardBooksTheInteractionAsTheMetricsDo(t *testing.T) {
 	p, _ := sizedTierPricer{}.Price(context.Background(), model)
 	e := &dash.Event{CacheRead: int64(usage.CacheRead), CacheWrite: int64(usage.CacheWrite)}
 	e.SetAccountant(res)
-	if got := e.AccountantFigure(p).InteractionUSD; !near(got, metric) {
+	got := e.AccountantFigure(p).InteractionUSD
+	if !near(got, metric) {
 		t.Errorf("dashboard InteractionUSD = %.9f, metrics interaction.usd = %.9f: they must agree", got, metric)
 	}
+	return got
 }
