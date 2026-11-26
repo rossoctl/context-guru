@@ -160,7 +160,28 @@ configuration.
 `/context-guru-uninstall --yes --purge` also removes the saved choices (`settings.env`), the strategy
 files, the logs, and the command scripts, except `context-guru-install`, which undoes the uninstall.
 Two files stay: the `disabled` marker, and `dashboard.db.accountant-state.json`, which the proxy writes.
-The next OpenCode start writes the command scripts again. The `disabled` marker keeps routing off.
+The `disabled` marker keeps routing off.
+
+### After an uninstall and a restart
+
+- After `/context-guru-uninstall --yes` and an OpenCode restart, context-guru is off in that project.
+  OpenCode lists only `/context-guru-install` ("Turn context-guru on again in this project"), and the
+  `ctrl+p` palette has no "Context Guru" entry. Other projects are not changed.
+- To remove context-guru from OpenCode completely, for every project, run the installer with `-s uninstall`.
+- Until you restart, the commands stay, because OpenCode cannot remove them from a running session.
+  There, `/context-guru-status` prints `enabled=no` and says that context-guru is uninstalled. The other
+  commands (`update`, `preset`, `strategy`) change nothing: they only say that context-guru is uninstalled,
+  and give the way back. This is the same as in the Pi package.
+- At each start, the log has one line with the way back.
+
+To turn context-guru on again, run the install script in the project state directory from any
+shell, then restart OpenCode:
+
+```sh
+sh <state directory>/context-guru-install
+```
+
+The script removes the `disabled` marker. The next OpenCode start registers the commands again.
 
 ## Troubleshooting
 

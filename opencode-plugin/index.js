@@ -326,12 +326,41 @@ function writeRecoveryFiles(state, pid, managed) {
   writeAtomic(join(state, "context-guru-reset"), resetScript(state), 0o700)
 }
 
+// The one line that says how to turn context-guru on again after an uninstall. The status script
+// calls it with "$STATE", so the shell fills in the path.
+function uninstalledNote(state) {
+  return `context-guru is uninstalled for this project; to turn it on again, run /context-guru-install in this project (or: sh ${join(state, "context-guru-install")}), then restart OpenCode`
+}
+
+// What a command says when its script is gone (an uninstall with --purge, or the installer removed the
+// state folder), in the OpenCode session that still lists the commands.
+const GONE_OUTPUT = "enabled=no\nnote=context-guru is uninstalled for this project; restart OpenCode to remove these commands\n"
+
+// The first lines of a script that changes or downloads something: after an uninstall, in the session that
+// still lists the commands, it says so and stops, as the Pi package does (#1290).
+function stopIfUninstalled() {
+  return `if [ -f "$STATE/disabled" ]; then
+  printf '%s\\n' "enabled=no" "note=${uninstalledNote("$STATE")}"
+  exit 0
+fi`
+}
+
+// The uninstall script writes this marker. With it, a new start registers only /context-guru-install and routes nothing.
+export function isDisabled(state) {
+  return existsSync(join(state, "disabled"))
+}
+
 function statusScript(state) {
   return `#!/bin/sh
 # context-guru: read-only status report. Every fact is a key=value line; the command layer presents it.
 set -u
 STATE=${shQuote(state)}
 if [ -f "$STATE/install.env" ]; then . "$STATE/install.env"; fi
+if [ -f "$STATE/disabled" ]; then
+  printf '%s\\n' "enabled=no" "note=${uninstalledNote("$STATE")}"
+else
+  printf '%s\\n' "enabled=yes"
+fi
 if [ -n "\${port:-}" ]; then
   printf '%s\\n' "install=present" "port=$port" "dashboard=http://127.0.0.1:$port/dashboard/"
 else
@@ -410,6 +439,7 @@ set -u
 REPO="\${CONTEXT_GURU_REPO:-rossoctl/context-guru}"
 RELEASES="\${CONTEXT_GURU_RELEASES_URL:-https://github.com/\$REPO/releases}"
 STATE=${shQuote(state)}
+${stopIfUninstalled()}
 ROOT=${shQuote(dirname(state))}
 ${RELEASE_SHARED}
 if [ -f "$STATE/install.env" ]; then
@@ -525,7 +555,7 @@ if [ "$yes" -ne 1 ]; then
   printf '%s\\n' "action=stop-proxy" "action=disable-routing"
   [ "$purge" -eq 1 ] && printf '%s\\n' "action=purge-binary-and-state"
   printf '%s\\n' "apply=sh $STATE/context-guru-uninstall --yes"
-  printf '%s\\n' "note=open OpenCode sessions send requests straight to the provider at once; with the plugin option fallback: false, providers unroute when OpenCode next restarts; /context-guru-install undoes this"
+  printf '%s\\n' "note=open OpenCode sessions send requests straight to the provider at once; only if you set the plugin option fallback: false yourself (it is on by default), providers unroute when OpenCode next restarts; sh $STATE/context-guru-install undoes this"
   exit 0
 fi
 if [ -f "$STATE/proxy.pid" ]; then
@@ -555,8 +585,9 @@ if [ "$purge" -eq 1 ]; then
 else
   printf '%s\\n' "result=uninstalled" "purged=no" "binary_kept=\${binary:-}"
 fi
-printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; with the plugin option fallback: false, restart OpenCode so providers stop routing through the proxy"
-printf '%s\\n' "undo=/context-guru-install"
+printf '%s\\n' "note=open OpenCode sessions now send requests straight to the provider; only if you set the plugin option fallback: false yourself (it is on by default), restart OpenCode so providers stop routing through the proxy"
+printf '%s\\n' "note=after an OpenCode restart, only /context-guru-install is left; it turns context-guru on again here, or run: sh $STATE/context-guru-install, then restart OpenCode"
+printf '%s\\n' "undo=sh $STATE/context-guru-install, then restart OpenCode"
 `
 }
 
@@ -620,6 +651,7 @@ function pickerScript(state, kind) {
 #   set NAME --restart save NAME and restart this project's proxy now
 set -u
 STATE=${shQuote(state)}
+${stopIfUninstalled()}
 KIND=${kind}
 if [ "$KIND" = preset ]; then
   VALID=${shQuote(PRESETS.join(" "))}
@@ -789,7 +821,7 @@ const COMMAND_SPECS = [
     description: "Show the context-guru proxy status, routing, and savings",
     script: "context-guru-status",
     intro: "Report this project's context-guru status.",
-    outro: (path) => "That block ran just now, before you were asked anything — read it rather than re-deriving it. Present its findings plainly: proxy up or down, port, version, and the savings numbers. If the proxy is down, suggest /context-guru-install. If the user asked for the raw stats JSON, run sh " + path + " --stats with your shell tool and print its output verbatim instead of interpreting it.",
+    outro: (path) => "That block ran just now, before you were asked anything — read it rather than re-deriving it. If it printed enabled=no, say first and plainly that context-guru is uninstalled for this project, and give the way back from its note. Present its findings plainly: proxy up or down, port, version, and the savings numbers. If the proxy is down, suggest /context-guru-install. If the user asked for the raw stats JSON, run sh " + path + " --stats with your shell tool and print its output verbatim instead of interpreting it.",
   },
   {
     name: "context-guru-install",
@@ -810,7 +842,7 @@ const COMMAND_SPECS = [
     description: "Stop the context-guru proxy and disable routing",
     script: "context-guru-uninstall",
     intro: "Uninstall context-guru from this project.",
-    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider (with the plugin option fallback: false, they must restart OpenCode first), and that /context-guru-install undoes this. Never run it with --yes without asking first.",
+    outro: (path) => "That block ran just now and only PLANNED — nothing was stopped yet. Present the plan, then ask the user to confirm. Only after they confirm, run sh " + path + " --yes with your shell tool (append --purge to also delete the binary and state files) and report its output verbatim. Tell them that open sessions now send requests straight to the provider. Only if they set the plugin option fallback: false themselves (it is on by default), they must restart OpenCode first. Tell them how to undo it: /context-guru-install, in this session or after an OpenCode restart (then it is the only context-guru command left), or run sh " + path.replace(/context-guru-uninstall("?)$/, "context-guru-install$1") + " and restart OpenCode. Never run it with --yes without asking first.",
   },
   {
     name: "context-guru-preset",
@@ -828,27 +860,47 @@ const COMMAND_SPECS = [
   },
 ]
 
+// Status reports enabled=no among its other facts; every other command stops there.
+const STOP_AT_UNINSTALLED = "If the block printed enabled=no, say only that context-guru is uninstalled for this project, give the way back from its note, and do nothing else."
+
 function commandText(spec, block, path) {
-  return spec.intro + "\n\n" + block + "\n\n" + spec.outro(path)
+  const stop = spec.name === "context-guru-status" ? "" : STOP_AT_UNINSTALLED + " "
+  return spec.intro + "\n\n" + block + "\n\n" + stop + spec.outro(path)
+}
+
+// After an uninstall, the one command left: the way back in this folder (owner decision, 2026-11-25).
+const INSTALL_SPEC = COMMAND_SPECS.find((spec) => spec.name === "context-guru-install")
+const ENABLE_DESCRIPTION = "Turn context-guru on again in this project"
+
+function registerCommand(config, state, spec, description = spec.description) {
+  // A script that is gone prints GONE_OUTPUT, not a shell error.
+  const script = JSON.stringify(join(state, spec.script))
+  const embed = "!`if [ -f " + script + " ]; then sh " + script + "; else printf '%s' " + shQuote(GONE_OUTPUT) + "; fi`"
+  config.command ||= {}
+  config.command[spec.name] = { description, template: commandText(spec, embed, script) }
 }
 
 function registerCommands(config, state, options) {
   mkdirSync(state, { recursive: true, mode: 0o700 })
   writeCommandScripts(state, options)
-  const embed = (name) => "!`sh " + JSON.stringify(join(state, name)) + "`"
-  const path = (name) => JSON.stringify(join(state, name))
-  config.command ||= {}
-  for (const spec of COMMAND_SPECS) {
-    config.command[spec.name] = {
-      description: spec.description,
-      template: commandText(spec, embed(spec.script), path(spec.script)),
-    }
-  }
+  for (const spec of COMMAND_SPECS) registerCommand(config, state, spec)
+}
+
+function addV2Command(editor, ctx, state, spec, description = spec.description) {
+  editor.add({
+    name: spec.name,
+    description,
+    execute: async ({ sessionID, prompt, delivery }) => {
+      const output = await runCommandScriptText(state, spec.script)
+      await ctx.session.prompt({ ...prompt, sessionID, text: commandText(spec, output, JSON.stringify(join(state, spec.script))), delivery })
+    },
+  })
 }
 
 // The one way any host runs a command script: the v2 chat path and the native TUI dialogs both
 // call this, so a switch cannot differ between them.
 export function runCommandScript(state, name, args = []) {
+  if (!existsSync(join(state, name))) return Promise.resolve({ status: 0, output: GONE_OUTPUT })
   return new Promise((resolve) => {
     const child = spawn("sh", [join(state, name), ...args])
     let output = ""
@@ -1274,6 +1326,17 @@ async function recoverProxy(state, record, client, fallback = false) {
   return true
 }
 
+// A start in a project with the disabled marker registers only /context-guru-install. It refreshes the install
+// script, so the way back that the log line names is there, and logs that line once.
+async function disabledStart(state, log) {
+  try {
+    writeAtomic(join(state, "context-guru-install"), installScript(state), 0o700)
+  } catch {
+    // The script from the last start stays; the log line still names it.
+  }
+  await log(uninstalledNote(state))
+}
+
 // Lifecycle signals (#1313). The proxy's keep-alive retires a held cache entry when the client says
 // the session ended or was compacted. OpenCode's own events are the source. A signal carries only a
 // session id, an event name and a reason from the proxy's closed set (proxy/clientsignal.go).
@@ -1347,16 +1410,21 @@ async function ContextGuruPlugin({ directory, client }, options = {}) {
     },
     config: async (config) => {
       const state = stateDirectory(directory)
+      if (isDisabled(state)) {
+        await disabledStart(state, (message) => safeLog(client, "info", message))
+        try {
+          registerCommand(config, state, INSTALL_SPEC, ENABLE_DESCRIPTION)
+        } catch (error) {
+          await safeLog(client, "error", `command registration failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        return
+      }
       try {
         registerCommands(config, state, options)
       } catch (error) {
         await safeLog(client, "error", `command registration failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       try {
-        if (existsSync(join(state, "disabled"))) {
-          await safeLog(client, "info", "context-guru is disabled for this project; /context-guru-install re-enables it")
-          return
-        }
         const own = recordedRoutes(state)
         // Only the base URLs: a provider option can be a function (another plugin's fetch), which structuredClone refuses.
         const providers = Object.entries(config.provider ?? {}).map(([id, provider]) => [id, { options: { baseURL: provider?.options?.baseURL } }])
@@ -1438,6 +1506,16 @@ async function setupV2(ctx) {
     }, { providerID: id }))
   }
 
+  if (isDisabled(state)) {
+    await disabledStart(state, (message) => console.log(`opencode-context-guru: ${message}`))
+    try {
+      await ctx.command.transform((editor) => addV2Command(editor, ctx, state, INSTALL_SPEC, ENABLE_DESCRIPTION))
+    } catch (error) {
+      console.error(`opencode-context-guru: command registration failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return
+  }
+
   // The v2 subscription is optional: a host without ctx.event only loses the signals.
   try {
     const events = ctx.event?.subscribe?.({ types: SIGNAL_EVENT_TYPES })
@@ -1458,26 +1536,13 @@ async function setupV2(ctx) {
     mkdirSync(state, { recursive: true, mode: 0o700 })
     writeCommandScripts(state, options)
     await ctx.command.transform((editor) => {
-      for (const spec of COMMAND_SPECS) {
-        editor.add({
-          name: spec.name,
-          description: spec.description,
-          execute: async ({ sessionID, prompt, delivery }) => {
-            const output = await runCommandScriptText(state, spec.script)
-            await ctx.session.prompt({ ...prompt, sessionID, text: commandText(spec, output, JSON.stringify(join(state, spec.script))), delivery })
-          },
-        })
-      }
+      for (const spec of COMMAND_SPECS) addV2Command(editor, ctx, state, spec)
     })
   } catch (error) {
     console.error(`opencode-context-guru: command registration failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 
   try {
-    if (existsSync(join(state, "disabled"))) {
-      console.log("opencode-context-guru: disabled for this project; /context-guru-install re-enables it")
-      return
-    }
     const own = recordedRoutes(state)
     await ctx.provider.transform(async (editor) => {
       const routes = []
