@@ -3,42 +3,28 @@ package dash
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// tierUSD prices tokens by tier. A 1h write bills at the 5m write rate plus
-// modelinfo.Price.CacheWrite1hPremium, the same amount Event.CostUSD adds, so the two figures
-// never price the same tokens differently.
-func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
-	return float64(t.Input)*p.Input + float64(t.CacheRead)*p.CacheRead +
-		float64(t.CacheWrite5m)*p.CacheWrite + float64(t.CacheWrite1h)*(p.CacheWrite+p.CacheWrite1hPremium())
+// hostPricer is the host's rate table for accountant.Figure (SizedPricer): the rate of one token at the
+// prompt size of its request. The rule lives in modelinfo.Price.RateAt, the same one the metrics sink uses.
+// It holds the price of ONE model. For any other model (a spend call made on another model) it refuses:
+// rate 0, estimated. It never prices that call with the wrong rates.
+type hostPricer struct {
+	model string
+	p     modelinfo.Price
 }
 
-// accPrices returns the rates of the request sent (with context-guru) and of the request the
-// client built (without it). The size with is the billed prompt: fresh input, cache reads and
-// cache writes. The size without adds what the counted operations removed and takes off what they
-// added. A cache effect only moves tokens between tiers, so it does not change the size. With no
-// billed usage, or no tiers, both sides price at the base rate, as before.
-func (e *Event) accPrices(p modelinfo.Price) (with, without modelinfo.Price) {
-	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
-	if w <= 0 || !p.HasTiers() || e.accRes == nil {
-		b := p.At(0)
-		return b, b
+func (h hostPricer) PriceAt(model string, _ time.Time, t accountant.Tier, promptTokens int64) (float64, bool) {
+	if model != h.model {
+		return 0, true
 	}
-	tot := func(t accountant.TierTokens) int64 {
-		return int64(t.Input + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h)
-	}
-	n := w
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
-			continue
-		}
-		n += tot(o.Saved) - tot(o.Caused)
-	}
-	return p.At(w), p.At(n)
+	return h.p.RateAt(model, t, promptTokens)
 }
 
 // AccFigure is the request's savings in dollars, from the library's tokens. Only dollars are
@@ -70,7 +56,10 @@ type AccFigure struct {
 	// caches, entries lost early): shown, never counted, never charged to a component.
 	UnattributedBreakUSD float64
 	Unpriced             []string // "opID:reason"; an unpriced operation is not a zero saving
-	Estimated            bool     // any counted operation or effect is an estimate
+	Estimated            bool     // any counted operation or effect is an estimate, or a rate the pricer used
+
+	// Fig is the library's own figure, before the mapping above. The held floor reads it.
+	Fig accountant.USDFigure
 
 	// The same figures as tokens by tier, before any pricing (#998). TokByComponent follows exactly
 	// the attribution of ByComponent: the counted operations and the breaks and mark legs each
@@ -85,228 +74,116 @@ type AccFigure struct {
 	TokEndedBreak  TokenFlow // the break an ended change left behind
 }
 
-// AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
-// never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere.
-// Result.Interaction is attributed to nobody: it goes to InteractionUSD, the interaction row.
+// AccountantFigure is the attached Result in dollars. The dollars come from accountant.Figure, priced with
+// the host's rates at the prompt size of each side (hostPricer). This function only maps the library's
+// figure to the dashboard's rows and columns, and takes the tokens of each row from the Result.
 //
-// p carries the model's prompt-size tiers. A saving compares two requests: the one sent (with
-// context-guru) and the one the client built (without it). They can sit in different tiers, so
-// each side is priced at its own prompt size: Saved tokens at the size without, Caused tokens at
-// the size with (accPrices). The tokens that stay change rate when the sizes straddle a line: that
-// re-rate is part of the saving (reRateUSD, bookReRate).
+// It reads a DryRun operation as the library does: computed, never counted. A spend (Call != nil) is a
+// separate bill. Result.Interaction is attributed to nobody: it goes to InteractionUSD, the interaction row.
+//
+// Where the library has a figure the dashboard had no row for:
+//   - UnownedMarkUSD (a mark premium or payback no counted operation owns) goes to the tail breakpoint
+//     row, the same row as before: that component adds the mark in every default preset.
+//   - UnownedReRateUSD (a guard: it is 0 today) goes to EndedBreakUSD, the ended_change row, as before.
 func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
-	pw, pb := e.accPrices(p)
 	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{},
 		TokByComponent: map[string]TokenFlow{}}
 	if e.accRes == nil {
 		return f
 	}
-	// An unpriced op is also in Ops, with zero tokens (compute.go price()/notEnded()). Counting it
-	// would show "saved $0" for something unmeasured. OpIDs are host-supplied: they may be empty or
-	// duplicated, and an Unpriced entry with an empty OpID can be request-level. So an op is skipped
-	// only when its OpID is in the set AND it carries no tokens: that can never drop a real dollar.
-	unpricedIDs := map[string]bool{}
-	for _, u := range e.accRes.Unpriced {
-		unpricedIDs[u.OpID] = true
+	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
+	fig := accountant.Figure(accountant.FigureInput{
+		Model: e.Model, Output: int(e.OutputTokens), Result: *e.accRes,
+		Billed: accountant.Usage{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
+			CacheWrite: int(e.CacheWrite), CacheWrite1h: int(e.CacheWrite1h)},
+		Unsized: w <= 0, // no billed usage: no size, so every token prices at the base rate
+	}, hostPricer{model: e.Model, p: p})
+	f.Fig = fig
+	// A zero-token op of a name with NO row in e.Components gets no envelope row: its key is in the library's
+	// maps with 0. A name with a row keeps its key at $0: a component that acted can have counted ops of 0
+	// tokens (the byte ratio truncates), and without its key accOverride would drop the whole request's saving.
+	hasRow := map[string]bool{}
+	for _, c := range e.Components {
+		hasRow[c.Component] = true
 	}
-	owner := map[string]string{}        // ChangeID -> component; empty ChangeIDs are never owners
-	var effCaused accountant.TierTokens // the Caused tokens of the cache effects booked below
-	var shares []reRateShare            // the counted operations with a net saving: they own the re-rate
+	zero := map[string]bool{}
+	for _, o := range e.accRes.Ops {
+		if !o.DryRun && o.Call == nil {
+			if n := strings.TrimPrefix(o.Operator, accwire.OperatorPrefix); !hasRow[n] {
+				zero[n] = true
+			}
+		}
+	}
+	for _, o := range e.accRes.Ops {
+		if !o.DryRun && o.Call == nil && !(o.Saved.IsZero() && o.Caused.IsZero()) {
+			delete(zero, strings.TrimPrefix(o.Operator, accwire.OperatorPrefix))
+		}
+	}
+	cut := func(m map[string]float64, to map[string]float64) {
+		for k, v := range m {
+			if zero[strings.TrimPrefix(k, accwire.OperatorPrefix)] && v == 0 {
+				continue
+			}
+			to[strings.TrimPrefix(k, accwire.OperatorPrefix)] += v
+		}
+	}
+	cut(fig.ByComponent, f.ByComponent)
+	cut(fig.ByComponentFirst, f.ByComponentFirst)
+	cut(fig.ByComponentReplay, f.ByComponentReplay)
+	f.DeltaUSD = fig.DeltaUSD
+	f.KeepAliveSavedUSD, f.SplitUSD, f.TTLUSD = fig.KeepAliveSavedUSD, fig.SplitUSD, fig.TTLUSD
+	f.EndedBreakUSD = fig.EndedBreakUSD + fig.UnownedReRateUSD
+	f.UnattributedBreakUSD = fig.UnattributedBreakUSD
+	if fig.UnownedMarkUSD != 0 {
+		f.ByComponent[accwire.OpTailBreakpoint] += fig.UnownedMarkUSD
+	}
+	f.Unpriced, f.Estimated = fig.Unpriced, fig.Estimated
+
+	// The tokens of each row (#998). They are the Result's own tokens, not dollars: each operation's, then
+	// each counted effect's, on the row that the figure charged it to.
 	for _, o := range e.accRes.Ops {
 		if o.DryRun || o.Call != nil {
 			continue
 		}
-		c := strings.TrimPrefix(o.Operator, accwire.OperatorPrefix)
-		// An unpriced op still owns the break it caused: a setting with no position is unpriced
-		// (penalty_unknown) and its break is priced from the read the usage shows.
-		if o.ChangeID != "" {
-			if _, dup := owner[o.ChangeID]; !dup { // first owner wins; the library flags duplicates (unique_change)
-				owner[o.ChangeID] = c
-			}
+		if o.Saved.IsZero() && o.Caused.IsZero() {
+			continue // an unpriced operation has no tokens: it adds no token figure, as it adds no dollars
 		}
-		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
+		f.addTok(strings.TrimPrefix(o.Operator, accwire.OperatorPrefix), o.Saved, o.Caused)
+	}
+	for _, ue := range fig.Effects {
+		if !ue.Counted {
 			continue
 		}
-		if n := tierTotal(o.Saved) - tierTotal(o.Caused); n > 0 {
-			shares = append(shares, reRateShare{c, n})
-		}
-		net := tierUSD(pb, o.Saved) - tierUSD(pw, o.Caused)
-		f.ByComponent[c] += net
-		f.addTok(c, o.Saved, o.Caused)
-		read := tierUSD(pb, accountant.TierTokens{CacheRead: o.Saved.CacheRead})
-		f.ByComponentReplay[c] += read
-		f.ByComponentFirst[c] += tierUSD(pb, o.Saved) - read
-		f.DeltaUSD += net
-		f.Estimated = f.Estimated || o.Estimated
-	}
-	for _, ce := range e.accRes.CacheEffects {
-		// Sign convention (accountant internal/engine/compute.go): value = tierUSD(Saved) - tierUSD(Caused).
-		//   break:      Saved is the read that did not happen, Caused the write that did: a cost,
-		//               tierUSD(Caused) - tierUSD(Saved) > 0, charged to the owner of ChangeID.
-		//   rescue:     Saved is the write avoided, Caused the read paid instead: a saving.
-		//   split:      same shape as rescue: a saving.
-		//   ttlPremium: Saved is the 5m write, Caused the dearer 1h write: value < 0 (a cost).
-		//   ttlRescue:  Saved is the 5m write, Caused the read: a saving.
-		//   markPremium: Saved is the input the client body would have billed, Caused the dearer write the
-		//               host's added mark made the provider bill: value < 0 (a cost).
-		//   markPayback: Saved is the input or the write the client body would have billed (a write when the
-		//               client moved its own mark past the host's, accountant v0.6.0), Caused the read the
-		//               host's mark made possible on the next request: value > 0 (a saving).
-		value := tierUSD(pb, ce.Saved) - tierUSD(pw, ce.Caused)
-		effCaused = addTier(effCaused, bookedCaused(ce, owner))
+		ce := ue.Effect
 		switch ce.Kind {
 		case accountant.EffectBreak:
-			switch c, ok := owner[ce.ChangeID]; {
-			case ce.InBaseline: // the client body has this break too: shown, not counted
-				f.UnattributedBreakUSD -= value
-			case ok && ce.ChangeID != "":
-				f.ByComponent[c] += value
-				f.DeltaUSD += value
-				f.addTok(c, ce.Saved, ce.Caused)
-			case ce.ChangeID == "": // an ended change left it behind: counted, owned by no component
-				f.EndedBreakUSD += value
-				f.DeltaUSD += value
+			if ue.Owner != "" {
+				f.addTok(strings.TrimPrefix(ue.Owner, accwire.OperatorPrefix), ce.Saved, ce.Caused)
+			} else {
 				f.TokEndedBreak.addTiers(ce.Saved, ce.Caused)
-			default: // a ChangeID no counted op owns (a dry run): shown, never charged
-				f.UnattributedBreakUSD -= value
 			}
 		case accountant.EffectRescue:
-			f.KeepAliveSavedUSD += value
 			f.TokKeepAlive.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectSplit:
-			f.SplitUSD += value
 			f.TokSplit.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
-			f.TTLUSD += value
 			f.TokTTL.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
-			// markPayback is the other half of markPremium: the next request reads the tail the host's mark
-			// wrote, which the client body would have billed as input, or written again when the client moved
-			// its own mark past the host's. Saved is that input or write, Caused the read:
-			// value > 0, a saving, owned like the premium it repays (accountant design §4.4, accountant#52).
-			// The write premium of a breakpoint the host added: a cost (value < 0), charged to the
-			// operation whose span covers the mark. With no owner it goes on the tail breakpoint row,
-			// the component that adds the mark in every default preset (accountant design §4.4). The
-			// opt-in cacheinject also adds marks: its premium with no covering operation lands on the same
-			// row, so the total is right and only the row name is approximate. Without this case the
-			// effect was unpriced and every request with the default tail breakpoint booked no saving.
-			c, ok := owner[ce.ChangeID]
-			if !ok || ce.ChangeID == "" {
-				c = accwire.OpTailBreakpoint
+			c := accwire.OpTailBreakpoint
+			if ue.Owner != "" {
+				c = strings.TrimPrefix(ue.Owner, accwire.OperatorPrefix)
 			}
-			f.ByComponent[c] += value
-			f.DeltaUSD += value
 			f.addTok(c, ce.Saved, ce.Caused)
-		default:
-			f.Unpriced = append(f.Unpriced, "effect:"+string(ce.Kind)+":unknown_kind")
-			continue
 		}
-		f.Estimated = f.Estimated || ce.Estimated
 	}
-	f.bookReRate(e.reRateUSD(pw, pb, effCaused), shares)
-	// The interaction. Both sides are client-side figures (the client body's cold write, and the read
-	// the operations already book as saved), so the whole net takes the size without, as the library's
-	// Figure prices it. It moves tokens between tiers, so it changes neither size nor the re-rate.
+	// The interaction: the tokens no operation owns on a rescued request. Counted in DeltaUSD (the library
+	// keeps it out of Figure's DeltaUSD, in TotalUSD), owned by no component: the interaction row.
 	if ia, ic := e.accRes.Interaction, e.accRes.InteractionCaused; ia != (accountant.TierTokens{}) || ic != (accountant.TierTokens{}) {
-		f.InteractionUSD = tierUSD(pb, ia) - tierUSD(pb, ic)
+		f.InteractionUSD = fig.InteractionUSD
 		f.DeltaUSD += f.InteractionUSD
 		f.addTok(InteractionComponent, ia, ic)
 	}
-	for _, u := range e.accRes.Unpriced {
-		f.Unpriced = append(f.Unpriced, u.OpID+":"+u.Reason)
-	}
 	return f
-}
-
-func addTier(a, b accountant.TierTokens) accountant.TierTokens {
-	return accountant.TierTokens{Input: a.Input + b.Input, CacheRead: a.CacheRead + b.CacheRead,
-		CacheWrite5m: a.CacheWrite5m + b.CacheWrite5m, CacheWrite1h: a.CacheWrite1h + b.CacheWrite1h}
-}
-
-// bookedCaused is the Caused tokens of a cache effect when AccountantFigure books its value, else zero.
-// It follows the switch there: a break the client body has too (InBaseline), a break no counted
-// operation owns, and an unknown kind are not booked.
-func bookedCaused(ce accountant.CacheEffect, owner map[string]string) accountant.TierTokens {
-	switch ce.Kind {
-	case accountant.EffectBreak:
-		if _, ok := owner[ce.ChangeID]; ce.InBaseline || (ce.ChangeID != "" && !ok) {
-			return accountant.TierTokens{}
-		}
-	case accountant.EffectRescue, accountant.EffectSplit, accountant.EffectTTLPremium, accountant.EffectTTLRescue,
-		accountant.EffectMarkPremium, accountant.EffectMarkPayback:
-	default:
-		return accountant.TierTokens{}
-	}
-	return ce.Caused
-}
-
-// reRateShare is a counted operation with a net saving (saved minus caused tokens, above 0).
-type reRateShare struct {
-	component string
-	net       int
-}
-
-func tierTotal(t accountant.TierTokens) int {
-	return t.Input + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h
-}
-
-// reRateUSD is the change of rate of the tokens that stay in both requests. The saving of a request is
-// the bill without context-guru minus the bill as sent, each at its own prompt size. Pricing the moved
-// tokens is not the whole difference: when the two sizes sit on different sides of a price line, the
-// tokens that stay change rate too. Per tier it is stay x (rate without - rate billed), where stay is
-// the billed tokens of the tier minus what the counted operations caused in it. All output stays:
-// output x (output rate without - output rate billed). 0 when no line is crossed, so a price with no
-// tiers, or an unknown size, gives the figures of before. It can be negative.
-func (e *Event) reRateUSD(pw, pb modelinfo.Price, effCaused accountant.TierTokens) float64 {
-	if pw == pb || e.accRes == nil {
-		return 0
-	}
-	stay := accountant.TierTokens{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
-		CacheWrite5m: int(max(e.CacheWrite-e.CacheWrite1h, 0)), CacheWrite1h: int(e.CacheWrite1h)}
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
-			continue
-		}
-		stay.Input -= o.Caused.Input
-		stay.CacheRead -= o.Caused.CacheRead
-		stay.CacheWrite5m -= o.Caused.CacheWrite5m
-		stay.CacheWrite1h -= o.Caused.CacheWrite1h
-	}
-	// A booked cache effect prices its own full difference (saved at the size without, caused at the
-	// size sent), so its Caused tokens must not be re-rated again. A break the client body has too
-	// (InBaseline) is booked nowhere, so its tokens stay.
-	stay.Input -= effCaused.Input
-	stay.CacheRead -= effCaused.CacheRead
-	stay.CacheWrite5m -= effCaused.CacheWrite5m
-	stay.CacheWrite1h -= effCaused.CacheWrite1h
-	stay.Input, stay.CacheRead = max(stay.Input, 0), max(stay.CacheRead, 0)
-	stay.CacheWrite5m, stay.CacheWrite1h = max(stay.CacheWrite5m, 0), max(stay.CacheWrite1h, 0)
-	return tierUSD(pb, stay) - tierUSD(pw, stay) + float64(e.OutputTokens)*(pb.Output-pw.Output)
-}
-
-// bookReRate splits the re-rate over the counted components in proportion to each one's net saved
-// tokens, so the components add up to the request total. It books in the first-removal column, with the
-// moved tokens it follows. With no such component nobody owns it: it books to EndedBreakUSD, the one
-// counted request-level figure with no owner (accOverride gives it the ended_change row), so the rows
-// still add up to DeltaUSD. A negative re-rate follows the same split, and a component can go below 0.
-func (f *AccFigure) bookReRate(r float64, shares []reRateShare) {
-	if r == 0 {
-		return
-	}
-	f.DeltaUSD += r
-	total := 0
-	for _, sh := range shares {
-		total += sh.net
-	}
-	if total == 0 {
-		f.EndedBreakUSD += r
-		return
-	}
-	for _, sh := range shares {
-		v := r * float64(sh.net) / float64(total)
-		f.ByComponent[sh.component] += v
-		f.ByComponentFirst[sh.component] += v
-	}
 }
 
 // Fallback reasons: why PriceMode booked no saving on an event. AccountantFallback
@@ -619,7 +496,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD - deferFig
-		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD-deferFig)
+		e.EstimatedSavedLowUSD = accrec.HeldFloorUSD(fig.Fig, fig.DeltaUSD-deferFig, accwire.Operator(DeferComponent))
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
@@ -636,28 +513,6 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	e.PriceEstimated = estimated
 	e.AccountantPriced = true
 	return ""
-}
-
-// heldFloorUSD is the lower bound of a held figure. The ceiling (delta) prices each removed token as
-// the write the provider would have made on a cold cache. If the cache was warm, the client would have
-// paid the read rate for the tokens in the warm prefix and the write rate for the rest, so the saving is
-// lower; the read rate is the least a client token costs. The floor re-prices the same removed tokens
-// at the read rate: every Saved token as a read, Caused tokens and the cache effects unchanged in
-// dollars. It is never above the ceiling, and equals it when nothing was priced as a write.
-func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
-	_, p = e.accPrices(p) // Saved tokens are the client body's: priced at its size
-	low := delta
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil || o.Operator == accwire.Operator(DeferComponent) {
-			continue // the deferral's figure is out of the held ceiling, so its tokens are out of the floor
-		}
-		s := o.Saved
-		low -= tierUSD(p, s) - float64(s.Input+s.CacheRead+s.CacheWrite5m+s.CacheWrite1h)*p.CacheRead
-	}
-	if low > delta {
-		return delta // a price table with a read dearer than a write: the floor never exceeds the ceiling
-	}
-	return low
 }
 
 func inAdded(rows []CompRow, name string) bool {
