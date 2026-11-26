@@ -108,7 +108,7 @@ type RowFacts struct {
 	Returned           bool
 	ToEnd              float64 // seconds from this response's end to the end of the session's last response (any model): SessionEnd cancels pings after it
 	Stake, Ping        float64 // one avoided rewrite (prefix x (write - read)) and one ping, gateway $
-	Miss               float64 // the miss the value rule weighs (keepalive.MissUSD): the same figure at the ping's prompt tier, 5-minute write rate. 0 = unknown, and the rule fails open
+	Miss               float64 // the miss the value rule weighs (keepalive.MissUSD): the same figure at the ping's prompt tier, at the 5-minute write rate, or at the 1-hour rate for a row with CacheWrite1h > 0 (the entry was billed at the 1-hour tier). 0 = unknown, and the rule fails open
 	Turn               int     // requests of the conversation before this one
 	Prefix             int64
 	Hour, Dow          int // request start, UTC

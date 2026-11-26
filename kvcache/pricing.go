@@ -331,7 +331,10 @@ func (s Semantics) pingOutput(p Pricing) int64 {
 //
 // The write rate is the tier's, never a blend: that is the whole reason Pricing carries two.
 //
-// The accountant owns the formula (accountant.RequestCost). A request that asked for no cache tier
+// The accountant owns the formula (accountant.RequestCost), with the stored-bill rule: every write token is
+// priced at the 5-minute rate, and the 1-hour part pays the premium on top only when the 1-hour rate is above
+// the 5-minute rate (a 1-hour rate below it bills at 5 minutes). Only a hand-edited simulator pricing reaches
+// that case. A request that asked for no cache tier
 // (TTLNone) writes nothing, so its write tokens are not priced here (see writeRate).
 func (p Pricing) RequestCost(input, read, write, output int64, tier TTL) float64 {
 	b := accountant.Usage{Input: int(input), CacheRead: int(read)}
@@ -395,7 +398,9 @@ func (p Pricing) KeepAliveCost(cached int64, s Semantics) float64 {
 // This is the pathology of a schedule whose interval exceeds the lifetime it is protecting,
 // and pricing it as a read is the arithmetic error that would hide it completely.
 //
-// The accountant owns the formula (accountant.LatePingCost). A tier with no write (TTLNone) has no
+// The accountant owns the formula (accountant.LatePingCost), with the stored-bill rule: the prefix is priced at
+// the 5-minute rate and a 1-hour entry pays the premium on top. A write rate of 0 is unknown, so the cost is 0
+// (only a hand-edited simulator pricing has one). A tier with no write (TTLNone) has no
 // write rate, so the prefix is not priced.
 func (p Pricing) RecreateCost(cached int64, tier TTL, s Semantics) float64 {
 	if tier != TTL5m && tier != TTL1h {

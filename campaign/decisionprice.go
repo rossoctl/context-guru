@@ -48,8 +48,9 @@ func PriceDecision(price PriceFunc, model string, prefix, promptTokens int64, on
 		ping = rates(in, out, read, write)
 	}
 	d := DecisionPrices{PIn: pIn, POut: pOut, PRead: pRead, PWrite: pWrite, Stake: Stake(prefix, pRead, pWrite)}
-	d.Ping, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, FreshInput: kvcache.DefaultPingInputTokens, Output: 1}, modelinfo.OnePrice{Model: model, Price: ping})
-	d.Miss, _ = accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, OneHour: oneHour}, modelinfo.OnePrice{Model: model, Price: ping})
+	var table accountant.SizedPricer = modelinfo.OnePrice{Model: model, Price: ping} // boxed once, for both figures
+	d.Ping, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, FreshInput: kvcache.DefaultPingInputTokens, Output: 1}, table)
+	d.Miss, _ = accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, OneHour: oneHour}, table)
 	return d, true
 }
 

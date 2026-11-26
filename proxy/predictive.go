@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -343,12 +344,18 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	// The MODEL INPUTS keep the rates that the model was trained on. The training data (scripts/campaign/dpbuild.py)
 	// reads each model's base rates (p_in, p_out, p_read, p_write5m), so the Response carries the base
 	// rates (the price at size 0), and its CostUSD is the stored bill of the request (below).
-	price := k.h.autoPrice()
+	// One price lookup for the whole response, with no memo and no closure that outlives the call: the
+	// lookup answers from memory, and a memo would keep an old rate after the price list changes.
+	mp, priced := k.h.livePrice(model)
 	var dp campaign.DecisionPrices
 	var pIn, pOut, pRead, pWrite float64
-	if k.h.opts.Prices != nil && model != "" {
-		dp, _ = campaign.PriceDecision(price, model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
-		pIn, pOut, pRead, pWrite, _ = price(model, 0)
+	if priced {
+		at := func(_ string, n int64) (float64, float64, float64, float64, bool) {
+			q := mp.At(n)
+			return q.Input, q.Output, q.CacheRead, q.CacheWrite, true
+		}
+		dp, _ = campaign.PriceDecision(at, model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
+		pIn, pOut, pRead, pWrite, _ = at(model, 0)
 	}
 	now := k.now()
 	pc.mu.Lock()
@@ -372,7 +379,10 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: cl.ModelAgent(provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
 	}
 	nowMs := now.UnixMilli()
-	cost := k.billedCost(model, startedAt, u)
+	var cost float64
+	if priced {
+		cost = billedCostOf(mp, model, startedAt, u)
+	}
 	resp := &predictive.Response{
 		Request: predictive.Request{Tenant: tenantID, Session: session, Thread: thread, Model: model, TsMs: startedAt.UnixMilli()},
 		EndMs:   nowMs, DecMs: nowMs, Provider: provider, CacheTTL: lf.CacheTTL, Effort: lf.Effort, MaxTokens: lf.MaxTokens, SystemBlocks: lf.SystemBlocks,
@@ -414,13 +424,31 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	return predDecision{campaign: pc, k: kk, idleS: idle, active: pc.meta.Mode == campaignModeActive && !optedOut}, true
 }
 
+// livePrice is the price of a model for one live decision: ok is false with no price source, no model, no
+// price, or a price with no rates. It answers from memory.
+func (h *Handler) livePrice(model string) (modelinfo.Price, bool) {
+	if h.opts.Prices == nil || model == "" {
+		return modelinfo.Price{}, false
+	}
+	p, ok := h.opts.Prices.Price(context.Background(), model)
+	return p, ok && !p.Zero()
+}
+
 // billedCost is the bill of one request, as the dashboard stores it (cost_usd) and as the model was
 // trained on: the rates of the request's own prompt size, and the 1-hour part of the write at the
 // 1-hour rate. The accountant prices it (accountant.RequestCost). It is 0 for a model with no price.
 func (k *keeper) billedCost(model string, at time.Time, u Usage) float64 {
+	p, ok := k.h.livePrice(model)
+	if !ok {
+		return 0
+	}
+	return billedCostOf(p, model, at, u)
+}
+
+func billedCostOf(p modelinfo.Price, model string, at time.Time, u Usage) float64 {
 	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: model, At: at,
 		Billed: accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead), CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)},
-		Output: int(u.Output), PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}, modelinfo.ChainRates(k.h.opts.Prices))
+		Output: int(u.Output), PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}, modelinfo.OnePrice{Model: model, Price: p})
 	return usd
 }
 

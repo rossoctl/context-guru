@@ -331,3 +331,53 @@ func TestToolsEndpointsSendEmptyListsNotNull(t *testing.T) {
 		t.Errorf("/api/tools/last-used tools = %v (%T), want an empty list", last["tools"], last["tools"])
 	}
 }
+
+type modelPricer map[string]modelinfo.Price
+
+func (m modelPricer) Price(_ context.Context, model string) (modelinfo.Price, bool) {
+	p, ok := m[model]
+	return p, ok
+}
+
+// A request bills at the rates of ITS prompt size, and so do all the dollars of its row: the four lines, the
+// write dollars of its cause and the rewrite excess. So the excess of a cause never exceeds its write
+// dollars, and the causes partition the cache-write line, on a tiered model above its line and on a price with
+// blank cache rates.
+func TestSpendExplainPricesTheWholeRowAtItsPromptTier(t *testing.T) {
+	cases := []struct {
+		name, model string
+		price       modelinfo.Price
+		write       int64
+		writeRate   float64 // $/token of the cache write at the row's own size
+		readRate    float64
+	}{
+		{"above the line", "gpt-5.6", gpt56(), 300_000, 10e-6, 1e-6},                                                   // 2x every rate above 272,000
+		{"below the line", "gpt-5.6", gpt56(), 100_000, 5e-6, 0.5e-6},                                                  // base rates
+		{"blank cache rates", "claude-sonnet-5", modelinfo.Price{Input: 3e-6, Output: 15e-6}, 50_000, 3.75e-6, 0.3e-6}, // the model's own multiples
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, rec := newTestAPI(t, Options{})
+			a.SetPricer(modelPricer{c.model: c.price})
+			t0 := int64(1_700_000_000_000) + 7*3600_000
+			e := spendEv(t0, "s", 3, 5, 0, c.write, 0) // a cold start: the whole prefix is written
+			e.Model = c.model
+			seed(t, rec, e)
+			_, body := get(t, a, "/api/spend/explain?now="+itoa(t0+60000), "127.0.0.1:1")
+			cs := body["rewrites"].(map[string]any)["cold_start"].(map[string]any)
+			usd, writeUSD := cs["usd"].(float64), cs["write_usd"].(float64)
+			if usd > writeUSD+1e-12 {
+				t.Errorf("rewrite excess %v is above the write dollars %v", usd, writeUSD)
+			}
+			if want := float64(c.write) * c.writeRate; math.Abs(writeUSD-want) > 1e-9 {
+				t.Errorf("write_usd %v, want %v at the row's own tier", writeUSD, want)
+			}
+			if want := float64(c.write) * (c.writeRate - c.readRate); math.Abs(usd-want) > 1e-9 {
+				t.Errorf("usd %v, want %v", usd, want)
+			}
+			if line := body["usd"].(map[string]any)["cache_write"].(float64); math.Abs(line-writeUSD) > 1e-9 {
+				t.Errorf("the cache-write line %v differs from the sum of the causes %v", line, writeUSD)
+			}
+		})
+	}
+}

@@ -303,6 +303,10 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
+		// The request bills at the rates of ITS prompt size (a long prompt can sit in a dearer tier), as
+		// Event.Price does. Every dollar of the row below (the four lines, the write dollars of a cause and
+		// the rewrite excess) reads this one price, so the causes partition the cache-write line.
+		p = p.Resolved(r.model).At(int64(ctx)) // Resolved first, then At: the order of Price.RateAt
 		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
 		// keying on it would make every side request a new thread and hide real idle expiries.
 		th := ""

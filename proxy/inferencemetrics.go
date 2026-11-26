@@ -261,6 +261,9 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 		return 0
 	}
 	size := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
+	// OnePrice reads each rate with Price.RateAt: the price is Resolved for the model first, then At picks the
+	// tier of the size. That order is deliberate (RateAt's documented order): a blank rate is the model's
+	// multiple of the input rate of the TIER, not of the base.
 	w1h := min(max(e.CacheWrite1h, 0), e.CacheWrite)
 	// The accountant prices each part at its own write tier (MissCost): never below zero, at the rates
 	// of the request's own prompt size.
