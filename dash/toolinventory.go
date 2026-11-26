@@ -752,9 +752,9 @@ func usedList(byKey map[Used]int) []Used {
 	return out
 }
 
-// declWire is the wire the inventory reads names on: an empty wire is Anthropic here.
+// declWire is the wire the inventory reads names on. An empty wire is Anthropic here (isAnthropicWire).
 func declWire(wire string) string {
-	if wire == "" {
+	if isAnthropicWire(wire) {
 		return schema.WireAnthropic
 	}
 	return wire
