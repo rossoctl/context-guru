@@ -7,7 +7,7 @@ go 1.26.4
 require github.com/maximhq/bifrost/core v1.7.0
 
 // accountant prices context operations. The proxy and the dashboard import it, and the tests import its shared test cases.
-require github.com/rossoctl/accountant v0.10.0
+require github.com/rossoctl/accountant v0.11.0
 
 require (
 	github.com/alexaandru/go-sitter-forest/c v1.9.4
@@ -40,7 +40,7 @@ require (
 	modernc.org/sqlite v1.56.0
 )
 
-require github.com/rossoctl/accountant/metrics v0.10.0
+require github.com/rossoctl/accountant/metrics v0.11.0
 
 require (
 	github.com/andybalholm/brotli v1.2.2 // indirect
