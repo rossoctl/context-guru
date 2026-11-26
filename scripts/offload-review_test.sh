@@ -124,13 +124,20 @@ mkdir "$lockdir"; : > "$lockdir/pid"
 touch -t 202001010000 "$lockdir"
 ( lock ) 2>/dev/null && ok "(h) an old lock with an empty pid is taken" || bad "(h) old empty-pid lock not taken"
 rm -rf "$lockdir"
-# Same for the put-back path of lock_take_stale: an empty pid there is not dead.
-mkdir "$lockdir"; : > "$lockdir/pid"; sleep 30 & other=$!
-# Simulate a lost put-back: a live lock stands at $lockdir, the renamed one has an empty pid.
-mv "$lockdir" "$lockdir.stale.test"; mkdir "$lockdir"; echo "$other" > "$lockdir/pid"
-lock_take_stale "999999" 2>/dev/null
-[ -d "$lockdir.stale.test" ] && ok "(h) a renamed lock with an empty pid is kept while young" || bad "(h) young empty-pid lock removed"
-kill "$other" 2>/dev/null; rm -rf "$lockdir" "$lockdir".stale.*
+# lock_orphan: the keep-or-remove rule for a renamed lock that could not go back.
+mkdir "$d/o1"; : > "$d/o1/pid"; lock_orphan "$d/o1" ""
+[ -d "$d/o1" ] && ok "(h) lock_orphan keeps a young lock with an empty pid" || bad "(h) young empty-pid orphan removed"
+touch -t 202001010000 "$d/o1"; lock_orphan "$d/o1" ""
+[ ! -e "$d/o1" ] && ok "(h) lock_orphan removes an old lock with an empty pid" || bad "(h) old empty-pid orphan kept"
+( exit 0 ) & gone_pid=$!; wait $gone_pid; mkdir "$d/o2"; lock_orphan "$d/o2" "$gone_pid"
+[ ! -e "$d/o2" ] && ok "(h) lock_orphan removes a lock with a dead pid" || bad "(h) dead-pid orphan kept"
+sleep 30 & live2=$!; mkdir "$d/o3"; lock_orphan "$d/o3" "$live2"
+[ -d "$d/o3" ] && ok "(h) lock_orphan keeps a lock with a live pid" || bad "(h) live-pid orphan removed"
+kill "$live2" 2>/dev/null; rm -rf "$d/o3"
+# A lock aged exactly at the limit counts as old (60 s or older), the same rule as the waiter's.
+mkdir "$d/o4"; touch -t "$(date -v-60S +%Y%m%d%H%M.%S 2>/dev/null || date -d '-60 seconds' +%Y%m%d%H%M.%S)" "$d/o4"
+lock_orphan "$d/o4" ""; [ ! -e "$d/o4" ] && ok "(h) lock_orphan treats age 60 s as old" || bad "(h) age 60 s orphan kept"
+rm -rf "$d/o4"
 
 # (i) bash older than 4 is refused with a clear message.
 ( require_bash4 3 ) 2>"$d/err" && bad "(i) bash 3 was accepted" || { grep -q "needs bash 4" "$d/err" && grep -q "brew install bash" "$d/err" \

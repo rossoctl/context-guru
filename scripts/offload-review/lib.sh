@@ -21,7 +21,7 @@ lock_age() {
 }
 
 # lock: take the worktree lock, a directory with the holder's pid in it. A lock whose holder is
-# dead, or that has no pid file for over 60 s, is stale: lock removes it and tries again. A lock
+# dead, or that has no pid file for 60 s or more, is stale: lock removes it and tries again. A lock
 # with a live holder is waited for, for up to 60 s (OFFLOAD_LOCK_TRIES x 0.1 s).
 lock() {
   local n=0 tries=${OFFLOAD_LOCK_TRIES:-600} pid age
@@ -31,7 +31,7 @@ lock() {
       kill -0 "$pid" 2>/dev/null || { lock_take_stale "$pid"; continue; }
     elif [ -d "$lockdir" ]; then
       age=$(lock_age "$lockdir")
-      if [ "$age" -gt 60 ]; then lock_take_stale ""; continue; fi
+      if [ "$age" -ge 60 ]; then lock_take_stale ""; continue; fi
     fi
     n=$((n + 1))
     if [ "$n" -ge "$tries" ]; then
@@ -54,14 +54,21 @@ lock_take_stale() {
     echo "offload-review: removed the stale worktree lock ${lockdir} (holder pid ${seen:-unknown})" >&2
     rm -rf -- "$gone"
   else
-    # Put it back. If that fails, a new lock exists. Remove the renamed one only when its holder is
-    # dead. A live one stays: its ".stale.*" name blocks nobody.
-    # An empty pid file means "not yet written", not "dead": that one stays until it is 60 s old.
-    mv "$gone" "$lockdir" 2>/dev/null || {
-      if [ -n "$now" ]; then kill -0 "$now" 2>/dev/null || rm -rf -- "$gone"
-      elif [ "$(lock_age "$gone")" -gt 60 ]; then rm -rf -- "$gone"; fi
-    }
+    # Put it back. If that fails, a new lock exists, so the renamed one serves no holder.
+    mv "$gone" "$lockdir" 2>/dev/null || lock_orphan "$gone" "$now"
   fi
+}
+
+# lock_orphan <dir> <pid>: a renamed lock that could not go back. Remove it when its holder is dead,
+# or when the pid is empty ("not yet written") and the dir is 60 s old or older. Keep it otherwise.
+# A kept one blocks nobody: its ".stale.*" name is not the lock.
+lock_orphan() {
+  if [ -n "$2" ]; then
+    kill -0 "$2" 2>/dev/null || rm -rf -- "$1"
+  elif [ "$(lock_age "$1")" -ge 60 ]; then
+    rm -rf -- "$1"
+  fi
+  return 0
 }
 
 # unlock: remove the lock only when this process holds it (the pid file has its pid). A holder

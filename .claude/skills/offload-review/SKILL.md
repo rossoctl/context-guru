@@ -98,7 +98,7 @@ The next round starts that reviewer fresh, and does not resume the session that 
    ends:
    ```
    scripts/offload-review.sh <pr>
-   scripts/offload-review.sh <pr> --live-tests /tmp/offload-review-pr<N>-rules.md
+   scripts/offload-review.sh <pr> --live-tests ${OFFLOAD_RULES_DIR:-/tmp}/offload-review-pr<N>-rules.md
    ```
 3. **Read the result.** Each reviewer has 3 files in its worktree,
    `.claude/worktrees/review-pr<N>-<backend>-r<1|2>/`:
@@ -151,7 +151,7 @@ Run a round on a head that already has both reviews only when the user asks for 
 Before the round, post on the PR what is new: the replies and any test results. Then run:
 
 ```
-scripts/offload-review.sh <pr> --same-head [--live-tests /tmp/offload-review-pr<N>-rules.md]
+scripts/offload-review.sh <pr> --same-head [--live-tests ${OFFLOAD_RULES_DIR:-/tmp}/offload-review-pr<N>-rules.md]
 ```
 
 Each reviewer resumes its own session and is told that the head did not move. The round counts
