@@ -2,7 +2,6 @@ package proxy_test
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/tidwall/gjson"
 )
 
 // Gateway conformance under the funnel's default preset.
@@ -27,8 +24,7 @@ import (
 //   - a rejected `cache_control` marker makes Claude Code disable prompt caching for the rest
 //     of the conversation, which switches off the exact thing being sold, silently.
 //
-// The preset under test is `cache` (cachesplit alone) throughout, because that is what an
-// evaluator actually runs. The shared Claude-Code-shaped fixtures are in ccbody_test.go, and the
+// The preset under test is `conservative` throughout, the default. The shared Claude-Code-shaped fixtures are in ccbody_test.go, and the
 // two items that were DEFECTS rather than confirmations — the expand-tool gate and the missing
 // count_tokens route — are tested beside their fixes in expandgate_test.go and
 // counttokens_test.go.
@@ -144,164 +140,5 @@ func TestCachePresetDoesNotBufferSSE(t *testing.T) {
 		t.Fatal("no event reached the client while the upstream was still streaming: the " +
 			"response is being buffered. Claude Code aborts a stream silent for 300s, and a " +
 			"stalled first byte reads as context-guru making the model slow.")
-	}
-}
-
-// TestCachePresetNeverAddsACacheControlBreakpoint covers conformance item 2, which is the
-// strongest argument for shipping `cache` rather than a placement preset.
-//
-// The provider caps `cache_control` markers at 4. Exceed it and the request is REJECTED — and
-// Claude Code's reaction to a rejected capability is to retry without it and leave prompt
-// caching OFF for the rest of the conversation. So a breakpoint-budget mistake is not an error
-// the user sees; it silently switches off the thing this whole funnel is selling, and the demo
-// reads as "context-guru made my session more expensive".
-//
-// cachesplit MOVES a breakpoint onto the stable half of a block it splits; it must never add
-// one. The body below arrives at the cap, so any addition at all is a 400.
-func TestCachePresetNeverAddsACacheControlBreakpoint(t *testing.T) {
-	var up upstreamCapture
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		up.record(r)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"type":"message","usage":{"input_tokens":1}}`)
-	}))
-	defer upstream.Close()
-
-	h, _ := buildHandler(t, cachePipeline, upstream.URL)
-	srv := httptest.NewServer(h.Mux())
-	defer srv.Close()
-
-	// Four inbound breakpoints — the provider's cap — spread the way a real client spreads
-	// them: two system blocks, one tool, one message. Assembled as text, for the key-order
-	// reason documented on claudeCodeBody.
-	bp := `,"cache_control":{"type":"ephemeral"}`
-	body := []byte(`{"model":"claude-sonnet-5","max_tokens":64,"system":[` +
-		`{"type":"text","text":` + jsonStr(attributionText) + bp + `},` +
-		`{"type":"text","text":` + jsonStr(volatileSystemText()) + bp + `}` +
-		`],"tools":[{"name":"read_file","input_schema":{"type":"object"}` + bp + `}` +
-		`],"messages":[{"role":"user","content":[{"type":"text","text":"hello"` + bp + `}]}]}`)
-	if !json.Valid(body) {
-		t.Fatalf("test fixture is not valid JSON: %s", body)
-	}
-
-	inbound := countBreakpoints(body)
-	if inbound != 4 {
-		t.Fatalf("test setup is wrong: the request carries %d breakpoints, not the cap of 4", inbound)
-	}
-	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	forwarded := up.body(1)
-	if len(forwarded) == 0 {
-		t.Fatal("upstream received nothing")
-	}
-	// The precondition that stops this being a vacuous pass: the component under test has to
-	// have ACTED. If cachesplit did not split, "breakpoints unchanged" is trivially true and
-	// asserts nothing about the rewrite.
-	if n := len(gjson.GetBytes(forwarded, "system").Array()); n != 3 {
-		t.Fatalf("cachesplit did not split the volatile tail (system has %d blocks, want 3): "+
-			"the breakpoint assertion below would be vacuous", n)
-	}
-	if out := countBreakpoints(forwarded); out != inbound {
-		t.Errorf("breakpoints on the wire = %d, inbound = %d (cap 4). Exceeding the cap is a "+
-			"400, and Claude Code answers a rejected cache_control by disabling prompt caching "+
-			"for the rest of the conversation — silently switching off what this preset exists "+
-			"to demonstrate.\nforwarded: %s", out, inbound, forwarded)
-	}
-}
-
-// countBreakpoints counts cache_control/cachePoint markers anywhere in the body. Both spellings,
-// because Bedrock/Vertex write `cachePoint` where Anthropic writes `cache_control`, and the
-// provider's cap counts whatever arrives.
-func countBreakpoints(body []byte) int {
-	n := 0
-	var walk func(gjson.Result)
-	walk = func(v gjson.Result) {
-		v.ForEach(func(k, val gjson.Result) bool {
-			if k.String() == "cache_control" || k.String() == "cachePoint" {
-				n++
-			}
-			if val.IsObject() || val.IsArray() {
-				walk(val)
-			}
-			return true
-		})
-	}
-	walk(gjson.ParseBytes(body))
-	return n
-}
-
-// TestCachePresetLeavesTheAttributionBlockUntouched covers conformance item 3.
-//
-// Claude Code prepends an attribution block as the FIRST system block, and the API strips it
-// only if that array arrives unchanged. cachesplit reshapes the system array, so the question is
-// whether the first block survives byte-identically.
-//
-// Three separate properties keep it safe, and the second is the one a plausible change would
-// break, so both are exercised below:
-//
-//  1. the attribution block carries no volatile marker, so it is not a split candidate;
-//  2. blocks the split does not act on are re-emitted from their ORIGINAL raw bytes rather than
-//     re-encoded — re-marshalling would reorder keys and change the bytes even with identical
-//     content, which is enough to defeat a positional strip;
-//  3. the split's cache floor (modelinfo.MinCacheableO200k, per model family) excludes a small block even when it does contain a
-//     marker — the second case below, where a user's own prompt happens to mention one.
-//
-// Proving this rather than reasoning about it is what makes the alternative — shipping
-// CLAUDE_CODE_ATTRIBUTION_HEADER=0 in the installer — unnecessary, and keeps it unnecessary.
-func TestCachePresetLeavesTheAttributionBlockUntouched(t *testing.T) {
-	for _, c := range []struct{ name, first string }{
-		{"the ordinary attribution block", attributionText},
-		// Small, but it mentions something the split looks for. Only the token floor keeps this
-		// out of the rewrite; without it the FIRST eligible block is the one that gets split,
-		// and that is this one.
-		{"a small first block that happens to name a volatile marker",
-			attributionText + "\nCurrent branch: whatever the user was talking about\n"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			var up upstreamCapture
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				up.record(r)
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, `{"type":"message","usage":{"input_tokens":1}}`)
-			}))
-			defer upstream.Close()
-
-			h, _ := buildHandler(t, cachePipeline, upstream.URL)
-			srv := httptest.NewServer(h.Mux())
-			defer srv.Close()
-
-			body := claudeCodeBodyWithFirst(t, false, c.first)
-			want := gjson.GetBytes(body, "system.0").Raw
-
-			resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
-				strings.NewReader(string(body)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			forwarded := up.body(1)
-			if len(forwarded) == 0 {
-				t.Fatal("upstream received nothing")
-			}
-			// Precondition: cachesplit must actually have rewritten the array, or "the first
-			// block is unchanged" is true because nothing happened. It must also have split the
-			// SECOND block, not the first — 3 blocks with the attribution intact is the only
-			// shape that means that.
-			blocks := gjson.GetBytes(forwarded, "system").Array()
-			if len(blocks) != 3 {
-				t.Fatalf("cachesplit did not act (system has %d blocks, want 3); the assertion "+
-					"below would be vacuous", len(blocks))
-			}
-			if got := blocks[0].Raw; got != want {
-				t.Errorf("the attribution block changed, so the API will no longer strip it "+
-					"positionally.\n got: %s\nwant: %s", got, want)
-			}
-			if !strings.HasPrefix(blocks[0].Get("text").String(), attributionText) {
-				t.Errorf("the attribution block is no longer the first system block: %s", blocks[0].Raw)
-			}
-		})
 	}
 }

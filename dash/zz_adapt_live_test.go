@@ -52,7 +52,7 @@ func TestAdaptLive(t *testing.T) {
 }
 
 // defaultAdaptDocForTest is tenant.DefaultConfigYAML; dash cannot import tenant.
-const defaultAdaptDocForTest = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
+const defaultAdaptDocForTest = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, toolfilter]
 components:
   extract:
     min_tokens: 400

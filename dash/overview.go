@@ -190,10 +190,6 @@ type Overview struct {
 	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
 	// had moved (the turns it can earn on); SplitCredited is the subset that also read the
 	// stable half from cache instead of re-creating it (the turns it did earn on).
-	// CachesplitHistorical is what the split earned on requests that predate the
-	// instrumentation for it, valued at read time and never stored. nil when it could not be
-	// priced — absent, not zero. See DB.CachesplitHistoricalUSD.
-	CachesplitHistorical *CachesplitHistorical `json:"cachesplit_historical,omitempty"`
 
 	// The idle keep-alive's ledger. Four numbers, and they belong together: a mechanism that
 	// spends the caller's money to avoid a larger charge is only defensible if both sides are

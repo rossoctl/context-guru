@@ -12,4 +12,4 @@ components:
 pipeline:
   - extract
   - format
-  - cachesplit
+  - cacheinject

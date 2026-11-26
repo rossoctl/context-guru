@@ -782,7 +782,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_cachesplit_historical_usd)",
+     "expr": "sum(cg_tenant_cachesplit_saved_usd)",
      "editorMode": "code",
      "legendFormat": "Prefix-cache saved",
      "instant": true,
@@ -842,7 +842,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_cachesplit_historical_usd) + sum(cg_tenant_keepalive_net_usd) + sum(cg_tenant_decl_filter_usd)",
+     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_keepalive_net_usd) + sum(cg_tenant_decl_filter_usd)",
      "editorMode": "code",
      "legendFormat": "Total avoided this month",
      "instant": true,

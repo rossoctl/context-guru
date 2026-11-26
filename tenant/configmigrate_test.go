@@ -10,7 +10,7 @@ import (
 
 // legacyExtractLLMConfig is the exact shape every affected account shared: extract_llm with
 // both deprecated keys, in a flow-style pipeline list.
-const legacyExtractLLMConfig = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+const legacyExtractLLMConfig = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, toolfilter]
 components:
   extract:
     min_tokens: 400

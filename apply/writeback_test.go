@@ -92,28 +92,17 @@ func TestRebuildDoesNotDuplicateABodyMessage(t *testing.T) {
 
 // TestSpliceRewritesEveryMessageAtItsOwnSpan: the writeback edits each changed message's
 // own bytes and splices them all back in ONE pass, using the byte offsets gjson already
-// produced for the PRE-split body plus the shift the volatile-tail split reports.
+// produced for the body as it arrived.
 //
-// That shift is the sharp edge. splitVolatileTail rewrites the top-level `system` value
-// before the writeback runs, which moves every following byte — so a request that BOTH
-// splits and rewrites tool outputs is the case where a wrong offset shows up. The splice
-// verifies each span against the body's own bytes and declines if they disagree, so a
-// wrong shift means NO rewrite reaches the wire at all (fail-open, never corruption) and
-// this test fails on the assertions below.
+// The splice verifies each span against the body's own bytes and declines if they disagree, so a
+// wrong offset means NO rewrite reaches the wire at all (fail-open, never corruption) and this
+// test fails on the assertions below.
 //
 // Several rewrites in one request also exercise the accumulation: the old writeback ran
 // one sjson.SetBytes over the WHOLE body per changed message.
 func TestSpliceRewritesEveryMessageAtItsOwnSpan(t *testing.T) {
-	cfg := pipe(t, "pipeline: [cachesplit, dedup]\n")
+	cfg := pipe(t, "pipeline: [dedup]\n")
 	p, _ := cfg.Build(nil)
-
-	// A system block big enough, with a volatile git tail, so cachesplit's split fires and
-	// shifts every message offset that follows it.
-	stable := strings.Repeat("stable instruction line.\n", 400)
-	sys := []any{map[string]any{
-		"type": "text", "text": stable + "\nRecent commits:\ndeadbeef fix a thing\n",
-		"cache_control": map[string]any{"type": "ephemeral"},
-	}}
 
 	// Four identical tool outputs: dedup rewrites the three repeats, so one request
 	// carries several edits across several body messages.
@@ -126,37 +115,19 @@ func TestSpliceRewritesEveryMessageAtItsOwnSpan(t *testing.T) {
 	}
 	msgs = append(msgs, map[string]any{"role": "user", "content": "the final question"})
 
-	// Key ORDER is the point: `system` must precede `messages` so the split's rewrite of
-	// the system value moves every message offset. json.Marshal of a map sorts keys
-	// ("messages" < "model" < "system") and would put messages FIRST, where the split
-	// shifts nothing and this test would pass with the shift hard-coded to zero. Real
-	// Claude Code bodies happen to order it that way too, which is exactly why the
-	// captured-traffic goldens cannot cover this path.
-	sysEnc, err := json.Marshal(sys)
-	if err != nil {
-		t.Fatal(err)
-	}
 	msgsEnc, err := json.Marshal(msgs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A named Sonnet model: an unnamed one gets the larger Haiku cache floor, and this fixture's
-	// stable half is sized for the split.
-	body := []byte(`{"model":"claude-sonnet-5","system":` + string(sysEnc) +
-		`,"messages":` + string(msgsEnc) + `}`)
+	body := []byte(`{"model":"claude-sonnet-5","system":"be brief","messages":` + string(msgsEnc) + `}`)
 
 	out, changed := apply.Body(context.Background(), p, store.NewMemory(store.Options{}),
 		bschemas.Anthropic, body, "", false)
 	if !changed {
-		t.Fatal("expected the split and the dedup rewrites to be forwarded")
+		t.Fatal("expected the dedup rewrites to be forwarded")
 	}
 	if !gjson.ValidBytes(out) {
 		t.Fatalf("the splice produced invalid JSON: %s", firstBytes(out))
-	}
-	// The split happened, i.e. the offsets the splice used really were shifted.
-	if n := len(gjson.GetBytes(out, "system").Array()); n != 2 {
-		t.Fatalf("volatile-tail split did not fire (%d system blocks); this test needs it "+
-			"to exercise the shifted offsets", n)
 	}
 	// Every repeat was rewritten at its OWN block, and each kept its own tool_use_id —
 	// a misplaced splice would land a marker on the wrong message or corrupt the id.

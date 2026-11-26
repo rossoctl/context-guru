@@ -212,7 +212,7 @@ const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM req
 		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = '` + PricedByAccountant + `'))`
 
 // declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
-// #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
+// #502's EXPLAIN-plan test.
 // Bounded by `cond` directly: a session's own index for session scope, the ts range for a
 // time window, neither for `since=0` — which is why OverviewLean never calls this unscoped.
 func declFilterSavingsQuery(f Filter) (string, []any) {

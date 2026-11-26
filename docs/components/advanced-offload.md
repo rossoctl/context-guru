@@ -763,8 +763,7 @@ accepted is logged as `cg.sweep.dry_run_cut`, with a real cut's fields (`billed_
 - **What Context Guru still adds to the wire in a dry run.** These are not sweep drops and `dry_run` does not touch them:
   the `context_guru_expand` tool (appended to `tools` when the pipeline can mint a marker and the store persists), the
   `context_guru_adjudicate` tool (when `extract_llm_sweep` is in the pipeline, on Anthropic and Responses), the
-  cache-breakpoint work of `cachesplit` and `cacheinject` if they are in the pipeline (the split of the volatile system
-  tail, the placement of `cache_control`), the one-hour head TTL if it is switched on, and every other component in the
+  cache-breakpoint work of `cacheinject` if it is in the pipeline (the placement of `cache_control`), the one-hour head TTL if it is switched on, and every other component in the
   pipeline. The keep-alive pings and the judge's questions are separate requests to the provider; they are not in the
   forwarded body. A pair test should hold these the same on both arms, or list them as the arm difference.
 
@@ -1086,7 +1085,7 @@ is well under θ.
 
 ### Run it alone
 
-The preset is `[format, agentdiet, cachesplit]` on purpose. The method's claim is what **one**
+The preset is `[format, agentdiet]` on purpose. The method's claim is what **one**
 age-targeted reflection achieves; stacking context-guru's own offloaders beside it would reduce the
 same tool outputs first, and there would be nothing left to attribute.
 

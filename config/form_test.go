@@ -392,7 +392,7 @@ pipeline:
   - extract_llm
   - extract_llm_sweep
   - extract
-  - cachesplit
+  - cacheinject
 store:
   ttl_seconds: 900
 `

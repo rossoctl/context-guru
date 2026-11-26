@@ -125,8 +125,8 @@ What the library prices:
   cached), `saved_replay_usd` (at the read tier: content in the cached prefix), and the costs, which
   are `saved_usd` minus both. `priced_by` is `accountant`. On a request the library could not price (a
   fallback) it is `none`: the row books no saving, and the read views do not value it.
-- **The envelope.** The proxy changes `tools` and `system` in seven places (toolschema, toolfilter,
-  cachesplit, headttl, the tail mark, expand and adjudicate). It reports each change to the library
+- **The envelope.** The proxy changes `tools` and `system` in six places (toolschema, toolfilter,
+  headttl, the tail mark, expand and adjudicate). It reports each change to the library
   from a diff of the two bodies. An injected tool declaration (expand, adjudicate) is a cost on a
   row of its own.
 - **Keep-alive.** `keepalive_saved_usd` is the library's rescue. The proxy passes each ping's usage,
@@ -522,7 +522,7 @@ equal the full totals.
   another: the keep-alive rescue saves a cache write and pays cache reads.
 - **`tokens.saved`, `tokens.caused`.** The sums over every feature.
 - **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
-  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
+  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit` (stored rows from before it was removed; new rows have none), `ttl`
   (the 1-hour head's premium and rescue), `ended_change` (the break a change left when it
   ended) and `interaction` (the tokens no operation owns on a rescued request). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
   any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`

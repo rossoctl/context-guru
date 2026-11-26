@@ -826,7 +826,6 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.CacheBPMessages = tr.Breakpoints.Messages
 	e.CacheBPBlocks = tr.Breakpoints.Blocks
 	e.CacheBPRoot = tr.Breakpoints.Root
-	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
 	e.CacheTTL = tr.CacheTTL
 	e.FilteredDeclTokens = tr.FilteredDeclTokens
 	e.RestoredTokens = tr.RestoredTokens

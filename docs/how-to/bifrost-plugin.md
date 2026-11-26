@@ -39,7 +39,7 @@ no transport of its own.
 
 **Markers reach my clients unexpanded.** The plugin alone does not recover anything — the
 expand loop lives in the transport wrapper, not in a hook. Either add the wrapper or run a
-lossless-only pipeline (`format`, `toon`, `cachesplit`) so no marker is ever written.
+lossless-only pipeline (`format`, `toon`) so no marker is ever written.
 
 **Every request lands in the same session.** The transport has to set the
 `context-guru-session` context value. Without it the fallback is a content hash, which

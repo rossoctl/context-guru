@@ -46,13 +46,8 @@ type DB struct {
 	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
 	// lock, so copying it is safe; `go vet` would say otherwise if it did.
 	ctx context.Context
-	// sizeSpread is CachesplitSizeSpread's own TTL cache (dash/cachehistory.go) — a POINTER, not
-	// an inline mutex, so WithContext's shallow copy above stays lock-free and copies the
-	// pointer, sharing one cache across every handle this *DB produces rather than giving each
-	// shallow copy its own, independently-stale one.
-	sizeSpread *cachesplitSizeSpreadCache
 	// sizeStuck is the size rule's memory of a round that deleted rows and freed no space (#1224).
-	// A POINTER for the same reason as sizeSpread: WithContext copies the struct.
+	// A POINTER, so that WithContext's shallow copy stays lock-free.
 	sizeStuck *sizeStuckState
 }
 
@@ -301,7 +296,7 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}, sizeStuck: &sizeStuckState{}}, nil
+	return &DB{sql: sdb, path: path, sizeStuck: &sizeStuckState{}}, nil
 }
 
 // OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
@@ -342,7 +337,7 @@ func OpenReadOnly(path string) (*DB, error) {
 		sdb.Close()
 		return nil, &versionMismatch{have: have}
 	}
-	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+	return &DB{sql: sdb, path: path, readOnly: true}, nil
 }
 
 // A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a

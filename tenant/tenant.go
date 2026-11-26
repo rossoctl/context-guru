@@ -130,7 +130,7 @@ const (
 // than `general`'s. Totals are unaffected. toolfilter is last and carries an empty removal
 // list, so it is a no-op until an account names something; it is in the default so that
 // naming one is a settings change rather than a pipeline change.
-const DefaultConfigYAML = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
+const DefaultConfigYAML = `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, toolfilter]
 components:
   extract:
     min_tokens: 400
@@ -150,14 +150,14 @@ var supersededDefaults = []string{
 	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs (now an alias of
 	// `conservative`, via init): searchfold
 	// and toolfilter added, dedup moved ahead of toon.
-	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
+	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract]
 components:
   extract:
     min_tokens: 400
 mode: sync
 `,
 	// Superseded 2026-08-20 by the addition of textclean.
-	`pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
+	`pipeline: [format, toon, dedup, cmdfilter, extract]
 components:
   extract:
     min_tokens: 400

@@ -18,7 +18,7 @@ import (
 const goldenDir = "../config/testdata/editgolden"
 
 const goldenDoc = `# account config
-pipeline: [format, dedup, cachesplit, extract]  # the order matters
+pipeline: [format, dedup, cacheinject, extract]  # the order matters
 components:
   # keep the big ones
   extract:
@@ -36,7 +36,7 @@ var goldenDocs = map[string]string{
 	"empty":    "",
 	"minimal":  "pipeline: [format]\n",
 	"nopipe":   "components:\n  toolfilter:\n    remove: [a, b]\n",
-	"llm":      "pipeline: [cachesplit, format, extract_llm]\n",
+	"llm":      "pipeline: [cacheinject, format, extract_llm]\n",
 	"badyaml":  "a: [",
 	"always":   "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    always_defer: [mcp__ops]\n",
 	"noremove": "pipeline: [format, toolfilter]\ncomponents:\n  toolfilter:\n    defer: off\n",

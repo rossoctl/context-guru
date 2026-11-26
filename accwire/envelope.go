@@ -14,7 +14,7 @@ import (
 
 // The envelope is the part of a request no pipeline component sees: the tools array, the system
 // array, and the cache marks. The proxy changes it in several places (apply's toolschema,
-// toolfilter, cachesplit, headttl and tail mark; expand.Inject and adjudicate.Inject after the
+// toolfilter, headttl and tail mark; expand.Inject and adjudicate.Inject after the
 // pipeline), and none of them reports an operation. The library's sum check then fails on the
 // tools and system sections, and the event books no saving.
 //
@@ -29,9 +29,6 @@ import (
 //     0 (rewrite/four-operations/hot/5m);
 //   - a declaration both bodies carry with different bytes is a rewrite in place
 //     (rewrite/toolschema-mid-session/break-then-saving/5m);
-//   - a system block split in two is one rewrite on the client block, its SizeAfter the bytes of
-//     both halves (split/delivered/stable-half-read), with a cg:cachesplit: ChangeID, the prefix
-//     the library recognises a split by;
 //   - a system block whose bytes changed in place (a ttl label, a moved mark) is a rewrite in place.
 //
 // Every ChangeID is derived from what changed, never from the turn, so the same change gets the
@@ -187,42 +184,16 @@ func (k kind) systemBlocks(raw []byte) []string {
 	return nil
 }
 
-// systemOps explains the system section. The forwarded body has the client's blocks, one of them
-// possibly split in two (cachesplit), and any block possibly relabelled in place (headttl). The
-// split is found as the one client block whose text equals the text of two adjacent forwarded
-// blocks; nothing else in the proxy changes the system block count.
+// systemOps explains the system section. The forwarded body has the client's blocks, any block
+// possibly relabelled in place (headttl). Nothing in the proxy changes the system block count, so
+// a count change is one this reporter cannot explain: the sum check says so.
 func systemOps(cl, fw []string) []accountant.Operation {
 	var ops []accountant.Operation
-	split := -1
-	if len(fw) == len(cl)+1 {
-		for i := range cl {
-			if i+1 < len(fw) && textOf(cl[i]) != "" && textOf(cl[i]) == textOf(fw[i])+textOf(fw[i+1]) {
-				split = i
-				break
-			}
-		}
-		if split < 0 {
-			return nil // a count change this reporter cannot explain: the sum check says so
-		}
-	} else if len(fw) != len(cl) {
+	if len(fw) != len(cl) {
 		return nil
 	}
 	for i, j := 0, 0; i < len(cl); i, j = i+1, j+1 {
 		pos := accountant.Position{Section: accountant.SectionSystem, Index: i}
-		if i == split {
-			// apply relabels the head to 1h before it splits the block, so the split starts from the
-			// relabelled bytes. The relabel is its own operation: the library books the 1h premium
-			// only through a headttl: ChangeID.
-			before := cl[i]
-			if relabelled := withHeadTTL(cl[i], fw[j]); relabelled != cl[i] {
-				ops = append(ops, envelopeOpID(OpHeadTTL, pos, len(cl[i]), len(relabelled), "headttl:"+hashOf(textOf(cl[i]))))
-				before = relabelled
-			}
-			ops = append(ops, envelopeOpID("cachesplit", pos, len(before), len(fw[j])+len(fw[j+1]),
-				"cg:cachesplit:"+hashOf(textOf(cl[i]))))
-			j++
-			continue
-		}
 		switch {
 		case cl[i] == fw[j]:
 		case headTTLRelabelled(cl[i], fw[j]):

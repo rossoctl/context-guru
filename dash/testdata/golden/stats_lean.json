@@ -31,12 +31,6 @@
  "cache_ttl_recorded": 0,
  "cache_write": 7804120,
  "cache_write_1h": 0,
- "cachesplit_historical": {
-  "models": 0,
-  "requests": 0,
-  "uncovered": 60,
-  "usd": 0
- },
  "cachesplit_saved_usd": 0,
  "cg_latency_ms_avg": 3.7766497461928936,
  "cg_latency_ms_p95": 6,

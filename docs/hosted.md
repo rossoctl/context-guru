@@ -632,7 +632,7 @@ Every new tenant starts on **`conservative`** (formerly named `house`) — the s
 anywhere in the path:
 
 ```yaml
-pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, toolfilter]
 components:
   extract:
     min_tokens: 400
@@ -789,7 +789,7 @@ else's account through the account editor — the settings page itself has no YA
 more, see below:
 
 ```yaml
-pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm_sweep, extract, cachesplit, toolfilter]
+pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm_sweep, extract, toolfilter]
 components:
   extract_llm_sweep:
     min_tokens: 1000
@@ -1262,8 +1262,8 @@ still be in circulation:
   more on its own model calls than it saved — has to *look* negative; that tile is the one
   number an operator reads to decide whether to keep the thing switched on.
 - **`Activity rate by component`** replaces a panel that divided `acted` by `ran`, which
-  painted `cachesplit` as a dead red component. It is mutated-never-acted by design (the
-  split removes no content tokens, it moves them out of the hashed prefix), so the current
+  painted `cachesplit` (now removed) as a dead red component. It was mutated-never-acted by design (the
+  split removed no content tokens, it moved them out of the hashed prefix), so the current
   panel reads over `outcome="mutated"`, and "why did it decline?" has its own panel over
   `cg_component_gate_declines_total`.
 

@@ -159,9 +159,7 @@ the `general` preset against a real gateway, `GET /stats` reported:
 
 `dedup` + `mask` are deterministic; `extract_llm` made one real cheap-model call. Components that
 found nothing to do (`format`, `toon`, `cmdfilter`, `collapse`, `extract`, `failed_run`) sit in
-`top_passthrough` at zero cost — the pipeline is never worse. `cachesplit` is there too, but
-permanently and by design: its `Reformat` always skips because the split it enables is a body-level
-rewrite in `apply`.
+`top_passthrough` at zero cost — the pipeline is never worse.
 
 ## Reversibility, verified
 

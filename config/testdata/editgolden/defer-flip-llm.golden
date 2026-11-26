@@ -9,7 +9,7 @@ components:
     keep:
       - Read
 pipeline:
-  - cachesplit
+  - cacheinject
   - format
   - extract_llm
   - toolfilter

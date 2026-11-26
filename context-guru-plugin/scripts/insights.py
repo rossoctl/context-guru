@@ -102,25 +102,23 @@ SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3, "ok": 4}
 # PRESETS offers through the picker must have an entry here too.
 PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
     "off": (),
-    "cache": ("cachesplit",),
+    "cache": (),
     "house": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
-              "cachesplit", "toolfilter"),
-    "codesmart": ("format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter",
-                  "extract_llm", "extract", "linecap", "cachesplit"),
-    "housellm": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm",
-                 "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
-    "conservative": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
-                      "cachesplit", "toolfilter"),
-    "medium": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
-               "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"),
-    "high": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
-              "extract_llm", "extract", "cachesplit", "toolfilter"),
-    "xhigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
-              "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit",
               "toolfilter"),
+    "codesmart": ("format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter",
+                  "extract_llm", "extract", "linecap"),
+    "housellm": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm",
+                 "extract_llm_sweep", "extract", "toolfilter"),
+    "conservative": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
+                      "toolfilter"),
+    "medium": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+               "textclean", "extract_llm", "extract", "toolfilter"),
+    "high": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean",
+              "extract_llm", "extract", "toolfilter"),
+    "xhigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
+              "textclean", "extract_llm", "extract_llm_sweep", "extract", "toolfilter"),
     "ultrahigh": ("cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold",
-                  "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit",
-                  "toolfilter"),
+                  "textclean", "extract_llm", "extract_llm_sweep", "extract", "toolfilter"),
 }
 
 # What each component this plugin can turn on actually does, in one line a developer can act on,
@@ -130,11 +128,10 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
 # `counterfactual` is the load-bearing field and it has exactly three legal values:
 #
 #   "measured"   — the proxy has a figure for what this component WOULD have removed, measured
-#                  from traffic it never touched. Only two components have one, and both are
+#                  from traffic it never touched. Only one component has one, and it is
 #                  measured rather than simulated: `toolfilter`'s is the qualified-suggestion
 #                  total (the declarations it would have withheld, priced at the tier the
-#                  requests that carried them were really billed), and `cachesplit`'s is the
-#                  keep-alive tab's addressable-expiry figure.
+#                  requests that carried them were really billed).
 #   "related"    — no counterfactual for the component itself, but a MEASURED quantity of the
 #                  waste it targets exists (compaction credit, tool-output weight). Reported as
 #                  evidence that there is something here to win, never as a saving.
@@ -168,8 +165,6 @@ COMPONENTS: dict[str, dict[str, str]] = {
                                "counterfactual": "related"},
     "smartcrush": {"what": "structure-aware compression of large outputs", "counterfactual": "none"},
     "agentdiet":  {"what": "the published AgentDiet baseline, for A/B only", "counterfactual": "none"},
-    "cachesplit": {"what": "moves the cache breakpoint off the volatile tail so the prefix stays "
-                           "cacheable", "counterfactual": "measured"},
     "cacheinject": {"what": "places a cache breakpoint where none was set", "counterfactual": "none"},
     "toolfilter": {"what": "stops sending tool/skill declarations you never invoke",
                    "counterfactual": "measured"},
@@ -1833,7 +1828,7 @@ def collect_components(f: Fetcher, rep: Report, window: Window, preset: str) -> 
     replaying every request through it, which is a benchmark and not a report. So the OFF set is
     reported in three tiers and each is labelled on the wire:
 
-      measured  — `toolfilter` and `cachesplit` only, because the store holds the quantity they
+      measured  — `toolfilter` only, because the store holds the quantity it
                   would have acted on, priced at the tier the requests really paid.
       related   — the offloaders. No figure for the component, but the measured weight of the waste
                   they target (compaction credit, the cost of the episodes compaction is already

@@ -36,8 +36,7 @@ macOS only for now. Bob IDE 2.3 and Bob Shell.
 
 By default the proxy runs the `bob-ultrahigh` preset. It cuts content, and it keeps the originals,
 summaries and held answers on your Mac. The model gets cut content back through the expand repair
-(test T4 passed on the real Bob IDE, 2026-11-11). For lossless components only (`format`, `toon`
-and `cachesplit`), run `configure --preset lossless`.
+(test T4 passed on the real Bob IDE, 2026-11-11). For lossless components only (`format` and `toon`), run `configure --preset lossless`.
 
 ## Install
 
@@ -152,7 +151,7 @@ Or ask Bob "which context-guru preset runs". Bob has three presets:
 
 | Preset | Does |
 |---|---|
-| `lossless` | Reformats requests (`format`, `toon`, `cachesplit`). Nothing is cut. It stores no content. |
+| `lossless` | Reformats requests (`format`, `toon`). Nothing is cut. It stores no content. |
 | `bob-ultrahigh` (default) | context-guru's `ultrahigh`, set up for Bob (see below). It cuts content, and the model can get it back. |
 | `off` | Sends requests through as they are. |
 

@@ -46,12 +46,6 @@ func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string
 			o.TotalSavedUSD += fs.USD
 		}
 	}
-	if f.Session != "" && pricer != nil {
-		if h, err := d.CachesplitHistoricalUSD(f, pricer); err == nil {
-			o.CachesplitHistorical = &h
-			o.TotalSavedUSD += h.USD
-		}
-	}
 	o.Waterfall = o.waterfall()
 	return o, nil
 }

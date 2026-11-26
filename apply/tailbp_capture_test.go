@@ -72,7 +72,7 @@ func rendered(t *testing.T, raw string) string {
 // marked prefix, so it reads the entry turn 1 wrote. Live, turn 2 read 29,939 tokens where it had
 // read 26,885 and written 3,200 without the step.
 func TestTheNextTurnCarriesTheWholePrefixTheTailBreakpointMarked(t *testing.T) {
-	const cfg = "preset: cache\n"
+	const cfg = "preset: conservative\n"
 	in1, in2 := betasTurn(t, "1"), betasTurn(t, "2")
 	if gjson.GetBytes(in1, "messages.1.role").String() != "system" ||
 		!gjson.GetBytes(in1, "messages.0.content.1.cache_control").IsObject() {

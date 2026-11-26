@@ -183,29 +183,28 @@ type TenantMetricsSource interface {
 // TenantMetricRow is one tenant's rollup. Deliberately flat: every field becomes one
 // Prometheus series, and a nested shape would just have to be flattened here anyway.
 type TenantMetricRow struct {
-	TenantID                string
-	Label                   string
-	Requests                int64
-	TokensBefore            int64
-	TokensAfter             int64
-	SavedUnique             int64
-	CacheRead               int64
-	CacheWrite              int64
-	FreshInput              int64
-	OutputTokens            int64
-	CostUSD                 float64
-	BaselineUSD             float64
-	CGLLMCostUSD            float64
-	CacheSavedUSD           float64
-	CachesplitSavedUSD      float64
-	CachesplitHistoricalUSD float64
-	KeepAliveNetUSD         float64
-	DeclFilterUSD           float64
-	CGLatencyMs             float64
-	UpstreamMs              float64
-	Sessions                int64
-	ArchivedCount           int64
-	ArchivedBytes           int64
+	TenantID           string
+	Label              string
+	Requests           int64
+	TokensBefore       int64
+	TokensAfter        int64
+	SavedUnique        int64
+	CacheRead          int64
+	CacheWrite         int64
+	FreshInput         int64
+	OutputTokens       int64
+	CostUSD            float64
+	BaselineUSD        float64
+	CGLLMCostUSD       float64
+	CacheSavedUSD      float64
+	CachesplitSavedUSD float64
+	KeepAliveNetUSD    float64
+	DeclFilterUSD      float64
+	CGLatencyMs        float64
+	UpstreamMs         float64
+	Sessions           int64
+	ArchivedCount      int64
+	ArchivedBytes      int64
 }
 
 type promCache struct {
@@ -983,11 +982,6 @@ func (h *Handler) renderMetrics() string {
 				"What context-guru's volatile-tail split (cachesplit) saved this tenant. Counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the whole cache_read: with cachesplit off a real session's first request still read 45,805 tokens, so only the difference was ever ours. Priced against a cache miss (creation rate), because those tokens carry cache_control. Expect it to be SMALL against a warm-cache workload: Claude Code captures its environment block once per session, and a session start finds the previous session's prefix already expired unless it began inside the provider's TTL — measured, 1,105 of 1,127 starts were cold. A floor.", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_cachesplit_saved_usd", tenantLabels(t), t.CachesplitSavedUSD)
-			}
-			promHeader(&b, "cg_tenant_cachesplit_historical_usd",
-				"The same prefix-split saving as cg_tenant_cachesplit_saved_usd, but on requests written BEFORE it could be measured per request — valued on read from the model's measured stable half, never stored. Only the session's FIRST request of each of those, because crediting a mid-session turn needs the tail hash those rows do not carry. Add it to cg_tenant_cachesplit_saved_usd for the whole-history figure; it stops growing once the pre-instrumentation window ages out of retention.", "gauge")
-			for _, t := range rows {
-				promLine(&b, "cg_tenant_cachesplit_historical_usd", tenantLabels(t), t.CachesplitHistoricalUSD)
 			}
 			promHeader(&b, "cg_tenant_keepalive_net_usd",
 				"This tenant's idle keep-alive credit minus its ping spend: what the mechanism actually netted this tenant, over the same rows Overview's keepalive_net_usd sums (a request the mechanism rescued, less what the pings that rescued it cost). Can read negative — a tenant whose pings mostly missed their own refresh nets a real loss, and this series says so rather than hiding it.", "gauge")

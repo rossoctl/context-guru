@@ -75,8 +75,7 @@ func assertSessionOrTimeIndexed(t *testing.T, name string, plan []string) {
 
 // TestOverviewLeanQueriesAreIndexed is #502's EXPLAIN-plan test, over every statement
 // OverviewLean runs for a SESSION or a DAY (time-window) scope: the main aggregate
-// (leanWindowMainQuery), the declaration-filter credit (declFilterSavingsQuery, both scopes),
-// and the pre-instrumentation cachesplit credit (cachesplitHistoricalQuery, session only). Each
+// (leanWindowMainQuery), the declaration-filter credit (declFilterSavingsQuery, both scopes). Each
 // must show an indexed range read, never an unindexed — or index-but-still-whole — scan of
 // `requests` or of a ranking CTE's own window-sort source.
 //
@@ -110,11 +109,8 @@ func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 	}
 
 	session := Filter{Session: "s-target"}
-	cond, args := session.where()
 	q, qargs := leanWindowMainQuery(session)
 	add("session: main aggregate", q, qargs)
-	q, qargs = cachesplitHistoricalQuery(session, cond, args)
-	add("session: cachesplit historical", q, qargs)
 	q, qargs = declFilterSavingsQuery(session)
 	add("session: decl filter savings", q, qargs)
 
@@ -133,67 +129,9 @@ func TestOverviewLeanQueriesAreIndexed(t *testing.T) {
 	}
 }
 
-// TestCachesplitSizeSpreadQueryItselfIsAWholeTableScan documents, directly, the #502 review's
-// M3 finding: CachesplitSizeSpread's own query has no session or time bound at all — it is
-// deployment-wide by design (a model's stable half is not a per-session fact) — so run
-// uncached it is EXACTLY the shape assertNoWholeTableScan rejects everywhere else. This is why
-// it is excluded from TestOverviewLeanQueriesAreIndexed above rather than included and failing,
-// and why CachesplitSizeSpread caches it with a TTL (see TestCachesplitSizeSpreadIsCached)
-// instead of asking the query planner to bound something that is not bounded by nature.
-func TestCachesplitSizeSpreadQueryItselfIsAWholeTableScan(t *testing.T) {
-	db := openTestDB(t)
-	plan := explainPlan(t, db, `SELECT tenant_id, model, MIN(split_stable_tokens), MAX(split_stable_tokens)
-		FROM requests WHERE split_stable_tokens > 0 GROUP BY tenant_id, model`, nil)
-	full := strings.Join(plan, " | ")
-	if !strings.Contains(full, "SCAN requests") {
-		t.Errorf("expected CachesplitSizeSpread's own query to scan the whole table (that is "+
-			"the point of this test and of caching it), got: %s", full)
-	}
-}
-
-// TestCachesplitSizeSpreadIsCached is the actual M3 fix under test: a session-scoped lean call
-// runs CachesplitHistoricalUSD, which calls CachesplitSizeSpread on every invocation — without
-// a cache, that is the whole-table scan above, once per lean call, i.e. once per status-line
-// render. This inserts a row that would change the computed spread, calls
-// CachesplitSizeSpread twice back to back, and checks the second call still answers from the
-// first call's cached snapshot rather than re-scanning and picking up the new row — proving
-// the cache actually intercepts repeat calls within its TTL, not just that a TTL constant
-// exists.
-func TestCachesplitSizeSpreadIsCached(t *testing.T) {
-	db := openTestDB(t)
-	seed := mkEvent(1000, "s1", "m-cached", 100, 100)
-	seed.TenantID, seed.SplitStableTokens = "t1", 5_000
-	if err := db.insertBatch([]*Event{seed}); err != nil {
-		t.Fatal(err)
-	}
-	first, err := db.CachesplitSizeSpread()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := first["t1"]["m-cached"], [2]int{5_000, 5_000}; got != want {
-		t.Fatalf("first call: m-cached spread = %v, want %v", got, want)
-	}
-
-	// A new row that would widen the spread if this call re-queried.
-	wider := mkEvent(2000, "s2", "m-cached", 100, 100)
-	wider.TenantID, wider.SplitStableTokens = "t1", 9_000
-	if err := db.insertBatch([]*Event{wider}); err != nil {
-		t.Fatal(err)
-	}
-
-	second, err := db.CachesplitSizeSpread()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := second["t1"]["m-cached"], first["t1"]["m-cached"]; got != want {
-		t.Errorf("second call (within the TTL) = %v, want the FIRST call's cached %v — "+
-			"a changed answer means this re-queried instead of serving the cache", got, want)
-	}
-}
-
 // seedLeanFixture inserts a modest fixture used by the plan/correctness tests below: a target
 // session "s-target", several OTHER sessions interleaved with it by timestamp (not merely
-// adjacent in id order), and the tables cachesplitHistoricalQuery/declFilterSavingsQuery need
+// adjacent in id order), and the tables declFilterSavingsQuery needs
 // rows for.
 func seedLeanFixture(t *testing.T, db *DB) {
 	t.Helper()
@@ -243,51 +181,6 @@ func TestOverviewLeanOtherSessionsNeverChangeTheTarget(t *testing.T) {
 	}
 	if o.SavedUnique != wantSavedUnique {
 		t.Errorf("SavedUnique = %d, want %d", o.SavedUnique, wantSavedUnique)
-	}
-}
-
-// TestOverviewLeanTwoTenantsSharingASessionIDStayApart is #502's other correctness gap and
-// #501's own scenario: session ids are client-supplied, so 2 tenants can present the same one.
-// cachesplitHistoricalQuery's ranking CTE (dash/cachehistory.go) is scoped to one session when
-// lean asks for it, and this is the test proving that scoping also carries the tenant — without
-// it, tenant B's rows would change what tenant A's lean call reports for a session id they
-// happen to share, exactly #501's finding.
-func TestOverviewLeanTwoTenantsSharingASessionIDStayApart(t *testing.T) {
-	db := openTestDB(t)
-	// Tenant A: 1 pre-instrumentation-qualifying row (model has a measured stable size,
-	// split_stable_tokens=0, cache_read>0) — the shape CachesplitHistoricalUSD credits.
-	a := mkEvent(1000, "shared-session", "aws/claude-sonnet-5", 100, 100)
-	a.TenantID, a.CacheRead, a.CacheWrite = "tenant-a", 54_304, 1_000
-	// Tenant B: the SAME session id, 10 rows, so if the ranking ever lost the tenant term,
-	// tenant A's "rn=1" row would stop being tenant A's own first row and the credit (or any
-	// other per-session figure) would move.
-	var bRows []*Event
-	for i := 0; i < 10; i++ {
-		e := mkEvent(int64(500+i*10), "shared-session", "aws/claude-sonnet-5", 100, 90)
-		e.TenantID = "tenant-b"
-		bRows = append(bRows, e)
-	}
-	// Teach the pricer the stable size: a session that ALREADY has split_stable_tokens set
-	// establishes the model's known stable half (dash/cachehistory.go's CachesplitSizeSpread).
-	teach := mkEvent(900, "teach", "aws/claude-sonnet-5", 100, 100)
-	teach.TenantID, teach.CacheRead, teach.CacheWrite, teach.SplitStableTokens = "tenant-a", 54_304, 1_000, 5_697
-	if err := db.insertBatch(append([]*Event{teach, a}, bRows...)); err != nil {
-		t.Fatal(err)
-	}
-
-	hist, err := db.CachesplitHistoricalUSD(Filter{Tenant: "tenant-a", Session: "shared-session"}, staticPricer{ibmSonnet})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hist.Requests != 1 {
-		// Without the tenant term, the ranking's rn=1 for "shared-session" goes to whichever
-		// row is chronologically earliest OVERALL — one of tenant-b's 10 rows (ts 500-590, all
-		// before tenant-a's single row at ts=1000) — and the outer WHERE's tenant_id='tenant-a'
-		// then finds no row at all with that id, so tenant-a's own qualifying row is never
-		// counted: Requests goes to 0, not 1. That is the failure this assertion catches.
-		t.Errorf("tenant-a's session=shared-session cachesplit-historical Requests = %d, want 1 "+
-			"(tenant-b's 10 earlier-timestamped rows under the same session id must not steal "+
-			"the ranking's rn=1 from tenant-a's own row)", hist.Requests)
 	}
 }
 

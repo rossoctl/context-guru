@@ -15,7 +15,7 @@ const forTests = typeof module !== 'undefined' ? module.exports : {};
 
 function savedParts(o) {
   const keepalive = o.keepalive_net_usd || 0;
-  const reorder = (o.cachesplit_saved_usd || 0) + ((o.cachesplit_historical && o.cachesplit_historical.usd) || 0);
+  const reorder = o.cachesplit_saved_usd || 0; // stored history only: no new rows (#567)
   const cache = keepalive + reorder;
   const compaction = o.net_saved_usd || 0;
   const filter = o.decl_filter_usd || 0;

@@ -56,9 +56,9 @@ STRATEGIES_RELEASE = "v0.7.1"
 # text; the proxy's test runs it.
 BOB_PRESETS = {
     "off": "preset: off\n",
-    "lossless": "pipeline: [format, toon, cachesplit]\n",
+    "lossless": "pipeline: [format, toon]\n",
     "bob-ultrahigh": """\
-pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, toolfilter]
 components:
   cache_aware_summarizer:
     model:

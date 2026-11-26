@@ -6,7 +6,7 @@ components:
     defer: auto
     keep: []
 pipeline:
-  - cachesplit
+  - cacheinject
   - format
   - extract_llm
   - toolfilter

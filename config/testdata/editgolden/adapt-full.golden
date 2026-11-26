@@ -11,7 +11,7 @@ components:
       - mcp__ops
 pipeline:
   - dedup
-  - cachesplit
+  - cacheinject
   - format
   - toon
-PIPELINE dedup,cachesplit,format,toon
+PIPELINE dedup,cacheinject,format,toon

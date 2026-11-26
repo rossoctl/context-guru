@@ -1204,51 +1204,31 @@ func tenantMetrics(rec *dash.Recorder, prices modelinfo.Pricer) proxy.TenantMetr
 
 type tenantMetricsAdapter struct {
 	rec *dash.Recorder
-	// prices values the pre-instrumentation split figure, which is the one number here that
-	// has to be priced on read. nil = that metric reports 0.
+	// prices values the declaration filter's saving, which is priced on read. nil = 0.
 	prices modelinfo.Pricer
 }
 
 func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRow, error) {
-	// The four queries below are independent — none consumes another's result — so they run
-	// concurrently rather than one after another: CachesplitHistoricalUSDByTenant alone measured
-	// ~2s against a production-sized copy of the DB, and summed sequentially with the other
-	// three that is most of a /metrics scrape's wall time for no reason. A plain
-	// sync.WaitGroup, not an errgroup, because three of these four keep an EXISTING
-	// best-effort contract — a query failure zeroes that one metric for every tenant rather
-	// than failing the whole scrape — and an errgroup's Wait returns the first error, which
-	// would turn one optional query's failure into the whole scrape's.
+	// The three queries below are independent — none consumes another's result — so they run
+	// concurrently rather than one after another. A plain sync.WaitGroup, not an errgroup,
+	// because two of these three keep a best-effort contract — a query failure zeroes that
+	// one metric for every tenant rather than failing the whole scrape — and an errgroup's
+	// Wait returns the first error, which would turn one optional query's failure into the
+	// whole scrape's.
 	var (
 		rows    []dash.TenantMetricRow
 		rowsErr error
-		// The pre-instrumentation split figure, per tenant, priced here because this is the
-		// layer that holds the rates. One query for every tenant, not one per tenant — see
-		// DB.CachesplitHistoricalUSDByTenant for why a query per tenant re-paid the same
-		// whole-table sort N times over.
-		hist = map[string]float64{}
 		// The keep-alive net needs no pricer (the credit is already priced at write time) —
 		// one more grouped-by-tenant query, best-effort like the one above.
 		kaNet = map[string]float64{}
-		// The declaration filter's saving, priced on read the same way the historical split
-		// figure is above.
+		// The declaration filter's saving, priced on read.
 		declFilter = map[string]float64{}
 	)
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		rows, rowsErr = a.rec.DB().TenantMetrics(since)
-	}()
-	go func() {
-		defer wg.Done()
-		if a.prices == nil {
-			return
-		}
-		if byTenant, err := a.rec.DB().CachesplitHistoricalUSDByTenant(since, a.prices); err == nil {
-			for tid, h := range byTenant {
-				hist[tid] = h.USD
-			}
-		}
 	}()
 	go func() {
 		defer wg.Done()
@@ -1286,8 +1266,7 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
 			CacheSavedUSD: r.CacheSavedUSD, CachesplitSavedUSD: r.CachesplitSavedUSD,
-			CachesplitHistoricalUSD: hist[r.TenantID],
-			KeepAliveNetUSD:         kaNet[r.TenantID], DeclFilterUSD: declFilter[r.TenantID],
+			KeepAliveNetUSD: kaNet[r.TenantID], DeclFilterUSD: declFilter[r.TenantID],
 			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
 		})

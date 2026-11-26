@@ -66,7 +66,7 @@ import (
 
 // AdaptCompactionCandidates are the components the search may add, drop, reorder or tune: the shipped
 // deterministic compaction components, in the default pipeline's order. Everything else in an
-// account's pipeline (cachesplit, toolfilter, the LLM components) keeps its place in the
+// account's pipeline (toolfilter, the LLM components) keeps its place in the
 // applied config and is not run by the replay.
 var AdaptCompactionCandidates = config.AdaptCandidates()
 
@@ -81,14 +81,14 @@ func AdaptCompactionKnobAllowed(comp, key string, v int) bool {
 
 // isAdaptReplayable says the replay can run name: it acts on messages and calls no model. The
 // model-calling components (extract_llm, its sweep, the summarizers) would need the account's
-// model to replay, and the envelope components (cachesplit, toolfilter, cacheinject,
+// model to replay, and the envelope components (toolfilter, cacheinject,
 // toolschema) never touch a message, so neither changes a replayed block.
 func isAdaptReplayable(name string) bool {
 	if strings.Contains(name, "llm") || strings.Contains(name, "summar") {
 		return false
 	}
 	switch name {
-	case "cachesplit", "toolfilter", "cacheinject", "toolschema":
+	case "toolfilter", "cacheinject", "toolschema":
 		return false
 	}
 	return true
@@ -626,7 +626,7 @@ func asIntAny(v any) (int, bool) {
 
 // AdaptCompactionMerge returns the pipeline to store: cands in their new order, and every other
 // component of cur kept right after the candidate it followed in cur (walking back past
-// candidates the new order drops), so cachesplit stays after the offloaders and an LLM
+// candidates the new order drops), so an LLM
 // component stays where its owner put it relative to what remains.
 func AdaptCompactionMerge(cur, cands []string) []string { return config.AdaptMerge(cur, cands) }
 

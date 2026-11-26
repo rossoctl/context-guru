@@ -55,8 +55,8 @@ package apply
 // below (`tool_choice`):
 //
 //   - the remove list is configuration, read once per request from the built pipeline;
-//   - the prose region is the system blocks ONLY, minus the environment snapshot cachesplit
-//     already isolates as volatile and minus the billing-header block. It is
+//   - the prose region is the system blocks ONLY, minus the environment snapshot
+//     that old Claude Code versions put there and minus the billing-header block. It is
 //     session-invariant because of what it leaves OUT, not "by construction".
 //
 //     The old argument was that the region is the text schema.SessionHead feeds to

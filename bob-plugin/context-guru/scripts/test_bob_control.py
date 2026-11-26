@@ -32,7 +32,7 @@ def setUpModule():
     unittest.addModuleCleanup(block_network())
 
 
-LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon, cachesplit]\n"
+LOSSLESS = PLUGIN.CONFIG_MARKER + "\npipeline: [format, toon]\n"
 # The proxy's own test runs this exact file through the real pipeline on Bob's route
 # (proxy/bobdefer_test.go), so the preset the plugin writes is the preset that was tested.
 BOB_ULTRAHIGH = (PLUGIN_ROOT.parents[1] / "proxy/testdata/bob_ultrahigh.yaml").read_text()
@@ -160,7 +160,7 @@ class ConfigureTest(Installed):
     def test_the_preset_allow_list_is_a_single_constant(self):
         self.assertEqual(PLUGIN.BOB_PRESETS, {
             "off": "preset: off\n",
-            "lossless": "pipeline: [format, toon, cachesplit]\n",
+            "lossless": "pipeline: [format, toon]\n",
             "bob-ultrahigh": BOB_ULTRAHIGH.removeprefix(PLUGIN.CONFIG_MARKER + "\n")})
         self.assertEqual(PLUGIN.PRICED_PRESETS, ("bob-ultrahigh",))
         self.assertEqual(PLUGIN.DEFAULT_PRESET, "bob-ultrahigh")

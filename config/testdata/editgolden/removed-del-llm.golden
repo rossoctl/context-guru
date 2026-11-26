@@ -5,7 +5,7 @@ components:
   toolfilter:
     remove: []
 pipeline:
-  - cachesplit
+  - cacheinject
   - format
   - extract_llm
   - toolfilter
