@@ -1,6 +1,8 @@
 package lifecycle
 
 import (
+	"log/slog"
+
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
@@ -49,36 +51,51 @@ type Fin struct {
 // A response without usage leaves the previous turn's figure in place: a zero would read as
 // "unknown" and shut the fraction gate.
 func Finish(f Fin) {
+	// Fail open: one recover per step, so a panic in one step costs that step only and the steps after it still run.
 	if f.Touch != nil {
-		f.Touch()
+		failOpen("touch", f.Touch)
 	}
 	if f.Ledger != nil {
-		f.Ledger()
+		failOpen("ledger", f.Ledger)
 	}
 	// Harmless, and nearly free, on a session that never deferred anything. A failed forward
 	// resolves the deferral too: see offload.ResolveDeferredCacheAwareSummary.
-	offload.ResolveDeferredCacheAwareSummary(f.Session, f.ThreadID)
-	offload.ResolveWarmQuestion(f.Session, f.ThreadID, f.Forwarded, f.CacheRead)
+	failOpen("deferred summary", func() { offload.ResolveDeferredCacheAwareSummary(f.Session, f.ThreadID) })
+	failOpen("warm question", func() { offload.ResolveWarmQuestion(f.Session, f.ThreadID, f.Forwarded, f.CacheRead) })
 	if f.Counters != nil {
-		f.Counters()
+		failOpen("counters", f.Counters)
 	}
 	if !f.UsageOK {
 		return
 	}
-	apply.RecordBilledInput(f.Store, f.Session, f.Billed)
-	apply.RecordBilledInputThread(f.Store, f.Session, f.ThreadID, f.Billed)
+	failOpen("billed input", func() {
+		apply.RecordBilledInput(f.Store, f.Session, f.Billed)
+		apply.RecordBilledInputThread(f.Store, f.Session, f.ThreadID, f.Billed)
+	})
 	// Observe mode needs its own record. The enforced path runs no pipeline there, so Session is
 	// empty and the write above does nothing. The off-path run reads the shadow store, which
 	// nothing else writes the billed input into: without this the fraction gate reads "unknown"
 	// on every turn and the projection is a permanent zero.
 	if f.Mode == components.ModeObserve && f.Shadow != nil && f.ObserveSession != nil {
-		if sid := f.ObserveSession(); sid != "" {
-			apply.RecordBilledInput(f.Shadow, sid, f.Billed)
-			obsThread := f.ThreadID
-			if f.ObserveThread != nil {
-				obsThread = f.ObserveThread(sid).ID
+		failOpen("shadow billed input", func() {
+			if sid := f.ObserveSession(); sid != "" {
+				apply.RecordBilledInput(f.Shadow, sid, f.Billed)
+				obsThread := f.ThreadID
+				if f.ObserveThread != nil {
+					obsThread = f.ObserveThread(sid).ID
+				}
+				apply.RecordBilledInputThread(f.Shadow, sid, obsThread, f.Billed)
 			}
-			apply.RecordBilledInputThread(f.Shadow, sid, obsThread, f.Billed)
-		}
+		})
 	}
+}
+
+// failOpen runs one step of Finish. A panic is logged and drops that step only (issue #1510).
+func failOpen(step string, fn func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("lifecycle: a step after the response panicked; it is skipped and the next step runs", "step", step, "panic", p)
+		}
+	}()
+	fn()
 }
