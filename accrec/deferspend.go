@@ -15,14 +15,14 @@ import (
 //
 // The library prices each Call at its own usage and size. The second and third are estimates. The first is an estimate too when usage did not give the output. A cost of 0
 // tokens makes no operation. The ChangeID is empty: a spend is booked once, on the request that paid it.
-func DeferSpendOps(model string, s tooldefer.SearchSpend) []accountant.Operation {
+func DeferSpendOps(s tooldefer.SearchSpend) []accountant.Operation {
 	op := func(id string, u accountant.CallUsage, estimated bool) accountant.Operation {
 		params := map[string]string{}
 		if estimated {
 			params[accwire.SpendParamEstimated] = "true"
 		}
 		return accountant.Operation{ID: id, Kind: accountant.KindSpend, Operator: accwire.Operator(accwire.OpToolDefer),
-			Call: &accountant.ModelCall{Model: model, Params: params, Usage: u}}
+			Call: &accountant.ModelCall{Params: params, Usage: u}}
 	}
 	var ops []accountant.Operation
 	if s.Output > 0 {
@@ -45,21 +45,10 @@ func DeferSpendOps(model string, s tooldefer.SearchSpend) []accountant.Operation
 // gross less net. No pricing here: it only reads the library's figure.
 func DeferMoney(f accountant.USDFigure) tooldefer.Money {
 	op := accwire.Operator(accwire.OpToolDefer)
-	var spend float64
-	for _, l := range f.Lines {
-		if l.Kind == accountant.KindSpend && l.Operator == op && l.Direction == accountant.DirAdded {
-			spend += l.USD
-		}
-	}
+	spend := DeferSpendUSD(f)
 	net := f.ByComponent[op] - spend
 	gross := f.ByComponentFirst[op] + f.ByComponentReplay[op]
 	return tooldefer.Money{Gross: gross, Cost: gross - net, Net: net}
-}
-
-// FigureWithheld says that a request books no accountant figure in dollars: an observe run, a trace that dropped
-// operations, or a result that fails a gate of accountant.Withhold (the size gate is the dashboard's).
-func FigureWithheld(res accountant.Result, observe bool, opsDropped int) bool {
-	return observe || opsDropped != 0 || accountant.Withhold(res, accountant.SizeNotGiven) != ""
 }
 
 // Held says that the library could not rule out a break (penalty_unknown): the thread had no history. The dashboard
@@ -72,4 +61,18 @@ func Held(res accountant.Result) bool {
 		}
 	}
 	return false
+}
+
+// DeferSpendUSD is the cost of the search turns in the library's figure: its spend lines on the tooldefer operator. The
+// library books a spend call as a separate bill, so a host takes it off the deferral figure with this sum. The Call
+// names no model, so the library prices it on the request's own model (the host pricer prices that one model only).
+func DeferSpendUSD(f accountant.USDFigure) float64 {
+	op := accwire.Operator(accwire.OpToolDefer)
+	var spend float64
+	for _, l := range f.Lines {
+		if l.Kind == accountant.KindSpend && l.Operator == op && l.Direction == accountant.DirAdded {
+			spend += l.USD
+		}
+	}
+	return spend
 }

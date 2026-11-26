@@ -77,7 +77,7 @@ type ExtractSweep struct {
 
 	// warm turns on the WARM path (#491): the sweep also asks while the cache is live, holds the answer
 	// in memory, and applies it on a later warm request only if the economic gate says it pays. OFF by
-	// default and in no preset. See extract_sweep_warm.go.
+	// default; on only in the Bob plugin's bob-ultrahigh. See extract_sweep_warm.go.
 	warm bool
 	// warmEveryN is the fewest warm requests of a thread between two warm questions.
 	warmEveryN int
@@ -106,6 +106,7 @@ type ExtractSweep struct {
 	ruleUnrefMinAge      int
 	premiumUSD           float64
 	dryRun               bool
+	tierTarget           bool
 
 	mode markerMode
 }
@@ -171,7 +172,7 @@ type extractSweepConfig struct {
 	KeepRecheckTurns int `yaml:"keep_recheck_turns"`
 	// MaxAskBatches is how many batches of 12 one sweep asks (0 = 4, at most 8). See extract_sweep_batch.go.
 	MaxAskBatches int `yaml:"max_ask_batches"`
-	// Warm turns on the warm path (#491). OFF by default and in no preset. See ExtractSweep.warm.
+	// Warm turns on the warm path (#491). OFF by default; on only in the Bob plugin's bob-ultrahigh. See ExtractSweep.warm.
 	Warm bool `yaml:"warm"`
 	// WarmEveryN is the fewest warm requests of a thread between two warm questions (0 = 30).
 	WarmEveryN int `yaml:"warm_every_n"`
@@ -208,7 +209,10 @@ type extractSweepConfig struct {
 	// cut postpones the compaction. 0 = the cost gate. See extract_sweep_warm.go.
 	CompactionPremiumUSD float64 `yaml:"compaction_premium_usd"`
 	// DryRun (sweep v3, an experiment): everything runs as a normal v3 run, but no drop is ever applied.
-	DryRun                 bool `yaml:"dry_run"`
+	DryRun bool `yaml:"dry_run"`
+	// TierTarget (sweep v3): below the sweet spot, a request above a price-tier line of its model may be cut to just
+	// below that line when the cut pays back. OFF by default. It does nothing without v3, and does not switch v3 on.
+	TierTarget             bool `yaml:"tier_target"`
 	RuleUnreferenced       bool `yaml:"rule_unreferenced"`
 	RuleUnreferencedMinAge int  `yaml:"rule_unreferenced_min_age"`
 	// MarkerMode is how a removed output is referenced. `full`, the default, is the only mode that
@@ -401,7 +405,7 @@ func newExtractSweep(raw []byte) (components.Component, error) {
 	return &ExtractSweep{
 		v3: v3.on, selector: v3.selector, fillSmall: v3.fillSmall, fillLarge: v3.fillLarge, minDropFrac: v3.minDropFrac,
 		protectTools: v3.protectTools, protectPaths: v3.protectPaths, protectLastN: v3.protectLastN,
-		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge, premiumUSD: v3.premiumUSD, dryRun: v3.dryRun,
+		ruleUnref: v3.ruleUnref, ruleUnrefMinAge: v3.ruleUnrefMinAge, premiumUSD: v3.premiumUSD, dryRun: v3.dryRun, tierTarget: v3.tierTarget,
 		minTokens: cfg.MinTokens, minInventory: cfg.MinInventory,
 		mode:     parseMarkerMode(cfg.MarkerMode),
 		evidence: evidence, shadow: cfg.Shadow,
@@ -810,8 +814,10 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// the same model the prefix ask addresses (c.Model.For("incoming")), so one rate card is right
 	// for both.
 	pricing := cheapmodel.PricingFromEnv()
-	if !c.SelfRates.Zero() {
-		pricing = ratesPricing(c.SelfRates)
+	// The request's card keeps its tiers: a leg is priced at the rates of ITS OWN prompt size (see recordLeg).
+	card := c.SelfRates
+	if !card.Zero() {
+		pricing = ratesPricing(card)
 	}
 	var (
 		reply string
@@ -837,7 +843,12 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 	// itself. This is the same defect class as #176, in the component this PR re-scoped.
 	recordLeg := func(ms float64, u components.PrefixUsage) float64 {
 		metrics.RecordExtractionCall(rep.Component, ms)
-		cost := pricing.Cost(int64(u.Fresh), int64(u.Output),
+		legPricing := pricing
+		if !card.Zero() {
+			// Above a price-tier line the whole call bills at the tier's rates (#1329).
+			legPricing = ratesPricing(card.At(int64(u.Fresh) + int64(u.CacheWrite) + int64(u.CacheRead)))
+		}
+		cost := legPricing.Cost(int64(u.Fresh), int64(u.Output),
 			int64(u.CacheWrite), int64(u.CacheRead))
 		metrics.RecordExtractionSpend(rep.Component, cost)
 		return cost
@@ -1340,6 +1351,8 @@ func init() {
 			Hint: "Sweep v3: tool names whose outputs are never dropped (compared without case). For example a task-list tool."},
 		{Key: "protect_paths", Type: components.FieldStrings,
 			Hint: "Sweep v3: glob patterns on the tool input path. An output whose call used a matching path is never dropped. A pattern may use ** for any number of folders. A pattern without a leading / may match the end of the path (docs/plan.md, *.md)."},
+		{Key: "tier_target", Type: components.FieldBool,
+			Hint: "Sweep v3: a request above a price-tier line of its model (OpenAI GPT-5.4 and later above 272k, Haiku 5.5 above 100k) may be cut to just below the line, even when it is below the sweet spot, if the cut pays back before the line is crossed again. Off by default. It does nothing without v3 and does not switch v3 on. A flat price has no line, so nothing changes for it."},
 		{Key: "dry_run", Type: components.FieldBool,
 			Hint: "Sweep v3, an EXPERIMENT for a paired test: Context Guru in the path but NO cut ever. Off by default. With true everything runs as a normal v3 run (the expand tool injection, keep-alive pings, the judge's questions at pings and at the sweet spot, the rules, the recheck, the gate and its logs), but no drop is applied on any path: warm, cold, changed-prefix. Each cut that would have been made is logged as cg.sweep.dry_run_cut with a real cut's numbers and counted in v3.dry_run_cuts. A would-be cut does not start the growth wait, so the run asks as often as a real one would before its first cut. The forwarded request is byte-identical to one with no sweep drops. It does nothing without v3 (warm: true and a v3 setting). Writing it switches v3 on."},
 		{Key: "compaction_premium_usd", Type: components.FieldFloat, Default: 0,

@@ -146,6 +146,14 @@ What the library prices:
 - **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
 - **A break nobody owns.** A break that a change left behind when it ended is counted on the
   `ended_change` row. A break the client body has too (a client edit, an expiry) is not counted.
+- **The interaction.** On a rescued request, a ping kept the cache warm and an operation also
+  changed the body. Some tokens the client body would have written cold were read instead. No
+  single operation or ping owns them (accountant design §6.2), so the library reports them apart,
+  as `Result.Interaction`. They are counted on the `interaction` row, inside the baseline delta.
+  The metrics book the same dollars as `llm_savings_interaction_usd_total`. Before, the dashboard
+  left them out, so its saving was lower than the metrics on a rescued request. One difference is
+  older than this row: the metrics also book the re-rate that no component owns in that counter,
+  and the dashboard books it on the `ended_change` row. The totals agree; the two rows do not.
 
 When the library cannot price an event, the event books **no saving**, and the proxy logs one
 `acc_fallback` line with the reason: `no_result`, `ops_dropped`, `observe`, `unpriced`,
@@ -374,8 +382,10 @@ the same number as `rewrite_usd`). Both are left out when the model has no price
 
 `POST /api/me/cache/ping` with `{"session": "<id>", "thread": "<id, optional>"}` is the Ping
 button. It sends **one** keep-alive ping on that thread now, with the same request and the same
-price as a scheduled ping. It answers `200` with `cache_read`, `cache_write`, `ping_usd`,
-`rewrite_usd`, `saved_usd` (the write it avoided minus the ping) and `warm_until_ms`. Other answers:
+price as a scheduled ping. It answers `200` with `cache_read`, `cache_write`, `ping_usd`, `warm_until_ms`
+and `saving: "pending"`: the accountant credits the saving on the thread's next real request, so the
+answer carries no estimate. (Before #1460 it also carried `rewrite_usd` and `saved_usd`, the write it
+avoided minus the ping. A client must read a missing `saved_usd` as "no figure yet".) Other answers:
 `409 cold` (nothing left to keep warm), `409 not held` (keep-alive is off, so the proxy keeps no
 body or key to ping with), `404 unknown session`, and `429 too soon` (one press per thread every
 30 seconds). It reaches only the caller's own sessions. The caller is the same as for
@@ -413,9 +423,11 @@ per line when there are several headers). The proxy never forwards it upstream.
 Its row is a keep-alive row with `manual_ping` set. `GET /api/stats` reports these rows as
 `manual_pings` (`count`, `ping_usd`, `saved_usd` net of the pings' cost, and `writes_avoided`: the pings that found the cache warm). They are a savings
 category of their own: they join `total_saved_usd`, and no cache strategy's ledger counts them.
-The figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
+**Before #1460** (rows written then keep this figure): the figure is an estimate, not a measurement. It is the write the ping avoided. It comes from the cache lifetime and the prefix size. No request read it back. The Overview marks it "estimate". The figure is an upper bound. A press needs the proxy to hold the thread for keep-alive. With automatic pings on, it can overlap the keep-alive credit for the same avoided write. `saved_usd` is
 `avoided - ping` summed over all presses, so a ping that missed shows as a loss; the per-press
-`saved_usd` in the reply is never below 0, so the two need not match. A press is refused with
+`saved_usd` in the reply (before #1460) was never below 0, so the two need not match. Since #1460 a new row
+holds no estimate (`manual_saved_usd` is 0), so `saved_usd` here is the pings' cost as a negative number, and it stays so.
+The rescue a ping buys appears in the keep-alive figures, on the thread's next real request. The Ping answer says `saving: "pending"`. A press is refused with
 `409 over budget` when one ping would cost more than the operator's per-ping cap, or more than the miss it protects, and `?tenant=` is ignored:
 it pings only the caller's own account.
 
@@ -504,8 +516,8 @@ equal the full totals.
 - **`tokens.saved`, `tokens.caused`.** The sums over every feature.
 - **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
   `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
-  (the 1-hour head's premium and rescue) and `ended_change` (the break a change left when it
-  ended). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
+  (the 1-hour head's premium and rescue), `ended_change` (the break a change left when it
+  ended) and `interaction` (the tokens no operation owns on a rescued request). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
   any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`
   plus the `cachesplit` component's `saved_usd`. Full read only.
 - **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
@@ -562,7 +574,7 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`. The Tool deferral card says
     "Net of the names list." The dollar card says "Net of the names list and the searches": the
     searches are requests of their own and have no token figure here.
-  - Preset: every other entry (the preset's components and `ended_change`).
+  - Preset: every other entry (the preset's components, `ended_change` and `interaction`).
 - **The estimate.** Below the total, dim: `≈ 3% of the 5-hour limit (estimate at API-price
   weights)`. It needs an open 5-hour window, $0.50 of spend and 2% used in it. It is
   `min(used% × saved_usd / cost_usd, 100 − used%)` for the window: the provider stops a user at

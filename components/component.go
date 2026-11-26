@@ -748,13 +748,16 @@ type Ctx struct {
 	// HOST CONTRACT: a host that sets this must stash each request's forwarded body when its
 	// upstream answers, then call offload.ResolveDeferredCacheAwareSummary(session, thread) when
 	// the request ends. cache_aware_summarizer holds a prefix-ask commission until then, so it
-	// reads that request's body and not the previous one (#722).
+	// reads that request's body and not the previous one (#722). It must also call
+	// offload.ResolveWarmQuestion(session, thread, forwarded, cacheRead) when the request ends: the
+	// sweep's warm question runs from it, and it drops the copy kept for that question (#1193).
 	PrefixAsk PrefixAsker
 	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
 	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares
-	// something for a ping (extract_llm_sweep's question) registers only when it returns true, so a
-	// thread that will never be pinged keeps nothing for it. nil => false: a host with no keep-alive
-	// leaves it unset and such a component keeps nothing.
+	// something for a ping (extract_llm_sweep's question) registers for the ping only when it returns
+	// true, so a thread that will never be pinged keeps nothing for a ping. nil => false: a host with no
+	// keep-alive leaves it unset. (extract_llm_sweep with warm on keeps a copy for its warm question
+	// alone, only while that question is due; no ping reads it.)
 	CanKeepAlive func() bool
 	// CacheTTLMs is a known cache lifetime in milliseconds: Anthropic's explicit
 	// expiry tier or GPT-5.6+'s documented 30-minute minimum. The latter has
@@ -1008,6 +1011,44 @@ type TokenRates struct {
 	Output     float64
 	CacheRead  float64
 	CacheWrite float64
+	// Tiers are the rates a request bills above a prompt size (the price table's tiers, resolved to
+	// absolute rates). All zero means a flat price. Read them with At and LineBelow.
+	Tiers [MaxRateTiers]RateTier
+}
+
+// RateTier is one price tier as absolute per-token rates. AbovePromptTokens 0 means the entry is unused.
+type RateTier struct {
+	AbovePromptTokens                    int64
+	Input, Output, CacheRead, CacheWrite float64
+}
+
+// At returns the rates for a request with promptTokens prompt tokens. Above a tier's line the tier's
+// rates apply to every token. With several tiers, the highest line below the prompt size wins. The result
+// has no tiers.
+func (r TokenRates) At(promptTokens int64) TokenRates {
+	var t *RateTier
+	for i := range r.Tiers {
+		c := &r.Tiers[i]
+		if c.AbovePromptTokens > 0 && promptTokens > c.AbovePromptTokens && (t == nil || c.AbovePromptTokens > t.AbovePromptTokens) {
+			t = c
+		}
+	}
+	q := TokenRates{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
+	if t != nil {
+		q = TokenRates{Input: t.Input, Output: t.Output, CacheRead: t.CacheRead, CacheWrite: t.CacheWrite}
+	}
+	return q
+}
+
+// LineBelow returns the highest tier line that promptTokens is above. ok is false when the price is flat
+// or the prompt is at or below every line.
+func (r TokenRates) LineBelow(promptTokens int64) (line int64, ok bool) {
+	for i := range r.Tiers {
+		if c := r.Tiers[i].AbovePromptTokens; c > 0 && promptTokens > c && c > line {
+			line, ok = c, true
+		}
+	}
+	return line, ok
 }
 
 // Zero reports whether no rate is known.
@@ -1015,8 +1056,10 @@ func (r TokenRates) Zero() bool {
 	return r.Input == 0 && r.Output == 0 && r.CacheRead == 0 && r.CacheWrite == 0
 }
 
-// Cost prices one call's four token tiers.
+// Cost prices one call's four token tiers. A card with tiers prices the whole call at the rates of its
+// prompt size (fresh + cache write + cache read), as the provider bills it.
 func (r TokenRates) Cost(fresh, output, cacheWrite, cacheRead int64) float64 {
+	r = r.At(fresh + cacheWrite + cacheRead)
 	return float64(fresh)*r.Input + float64(output)*r.Output +
 		float64(cacheWrite)*r.CacheWrite + float64(cacheRead)*r.CacheRead
 }
@@ -1237,9 +1280,13 @@ type KeepAliveReport struct {
 	// budget at all.
 	MaxTokens int
 	// Manual marks a ping the USER asked for (keepalive.Keeper.PingNow), not one the keeper
-	// scheduled; Strategy is then "manual". RewriteUSD is the cache write it avoided, 0 when it
-	// read nothing. A sink keeps both off every strategy's ledger.
-	Manual     bool
+	// scheduled; Strategy is then "manual". A sink keeps it off every strategy's ledger. The write
+	// it avoided is not on the report: the accountant credits it on the thread's next real request (#1460).
+	Manual bool
+	// RewriteUSD was the cache write a manual ping avoided.
+	//
+	// Deprecated: the keeper no longer sets it (#1460). It stays so that importers still build. A sink must not
+	// book it: the accountant credits the rescue on the thread's next real request.
 	RewriteUSD float64
 	// SweepAnswerUSD is, when extract_llm_sweep's question stood in for this ping, what the ANSWER cost
 	// beyond the read a plain ping would have paid (#404 point 9): the output (thinking included), plus

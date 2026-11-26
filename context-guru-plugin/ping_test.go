@@ -43,7 +43,8 @@ func TestPing(t *testing.T) {
 		want   string
 		code   int
 	}{
-		{"sent", 200, `{"sent":true,"ping_usd":0.04,"rewrite_usd":0.5,"saved_usd":0.46}`, "Kept warm: saved $0.46 net (ping cost $0.04)", 0},
+		{"sent", 200, `{"sent":true,"ping_usd":0.04,"rewrite_usd":0.5,"saved_usd":0.46}`, "Kept warm: saved $0.46 net (ping cost $0.04)", 0}, // an older server
+		{"pending", 200, `{"sent":true,"ping_usd":0.04,"saving":"pending","warm_until_ms":1}`, "Kept warm: ping cost $0.04. Saving pending", 0},
 		{"cold", 409, `{"error":"cold"}`, "already cold", 1},
 		{"unknown", 404, `{"error":"unknown session"}`, "does not know that session", 1},
 		{"no route", 404, `404 page not found`, "does not support manual pings yet", 1}, // Go's mux for a missing route: no JSON

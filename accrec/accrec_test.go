@@ -97,8 +97,8 @@ func TestPingSavingsRules(t *testing.T) {
 	manual := r
 	manual.Manual, manual.Window = true, time.Unix(1_700_000_100, 0)
 	s2 := &sink{put: map[string]accountant.PingFacts{}}
-	if _, ok := PingSavings(manual, s2, PingCalls{}); !ok || s2.priced != 1 || len(s2.put) != 0 {
-		t.Errorf("a manual ping: priced=%d stored=%d, want 1 and 0", s2.priced, len(s2.put))
+	if _, ok := PingSavings(manual, s2, PingCalls{}); !ok || s2.priced != 1 || len(s2.put) != 1 {
+		t.Errorf("a manual ping: priced=%d stored=%d, want 1 and 1", s2.priced, len(s2.put))
 	}
 	if _, ok := PingSavings(r, nil, PingCalls{}); !ok {
 		t.Error("a nil sink must be allowed")

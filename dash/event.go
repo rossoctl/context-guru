@@ -457,8 +457,9 @@ type Event struct {
 	// ManualPing marks a keep-alive row the USER asked for (POST /api/me/cache/ping). It stays a
 	// KeepAlive row — real spend, a real refresh of the provider's entry — and carries strategy id
 	// "manual"; this flag is what every strategy ledger filters on, so a button press never lands
-	// in a strategy's net. ManualSavedUSD is the cache write it avoided (gross; 0 when the ping
-	// read nothing). Its cost is CostUSD, as for any ping.
+	// in a strategy's net. ManualSavedUSD is an ESTIMATE of the cache write it avoided (gross). Only a row
+	// written before #1460 holds one; a newer row holds 0, because the accountant credits the rescue on the
+	// thread's next real request. Its cost is CostUSD, as for any ping.
 	ManualPing     bool    `json:"manual_ping,omitempty"`
 	ManualSavedUSD float64 `json:"manual_saved_usd,omitempty"`
 	// SinceLastMs is the gap from this session's previous REAL request, in milliseconds.
@@ -988,6 +989,8 @@ func (e *Event) PriceCG(prices modelinfo.Pricer, main modelinfo.Price, mainPrice
 		e.CGLLMCostUSD, e.CGCostUnpriced = 0, true
 		return
 	}
+	// The calls bill at the rates of THEIR prompt size, as priceCost does for the request.
+	p = p.At(modelinfo.PromptTokens(e.CGFresh, e.CGCacheRead, e.CGCacheWrite))
 	e.CGLLMCostUSD = p.Cost(e.CGFresh, e.CGCacheRead, e.CGCacheWrite, e.CGOutput)
 	e.CGCostUnpriced = false
 }

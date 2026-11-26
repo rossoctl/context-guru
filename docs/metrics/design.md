@@ -58,7 +58,7 @@ proxy
   4. If the `Pricer` says the rate is a fallback, or the op is `Estimated`, add to the estimated counters.
   5. For a spend op (a component's own LLM call), book the call's usage as `added`, priced with `Call.Model`. Skip it when the library refused to price that call.
 - `component` is the operator name without the host prefix. A name outside the host's list becomes `other`. With no list, the first 64 names are kept and the rest become `other`, with no lock past that limit.
-- The tokens that no op owns on a rescued request (`Result.Interaction` minus `InteractionCaused`) go to `llm_savings_interaction_usd_total{direction}`. It is a breakdown. Never add it to `saved` or `added`.
+- The tokens that no op owns on a rescued request (`Result.Interaction` minus `InteractionCaused`) go to `llm_savings_interaction_usd_total{direction}`. It is in neither `saved` nor `added`. Add it to them for the net saving, as the counter's own help says (accountant design §6.2).
 - Cache effects go to `llm_savings_cache_effect_usd_total` only (and only for `api` billing). They are never added to `saved` or `added` (no double counting, spec section 5.2).
 - Each entry of `Unpriced` adds 1 to `llm_savings_unpriced_total{reason}`. Each entry of `Checks` adds 1 to `llm_savings_check_failures_total{check}`.
 - The inference, keep-alive and cache-health instruments are **not** in the module yet. context-guru builds them in `proxy/inferencemetrics.go` (`NewInferenceMetrics`, `Observe(event, elapsed)`), under the shared `llm.*` names. Cortex must build the same names, or the code moves into the module when Cortex is wired. **Open.**

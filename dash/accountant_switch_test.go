@@ -526,16 +526,17 @@ func TestPriceMode_MarkPremiumIsACostOnTheComponentThatAddedTheMark(t *testing.T
 // delta, but the lever Overview adds beside the baseline (DeferNetUSD) is where the deferral card reads it. So the
 // library's tooldefer figure leaves the baseline (the preset card) and moves to the lever: the lever is that
 // figure minus the search cost, and the total is the same as if the figure had stayed in the baseline.
-func deferralEvent(search float64, held bool) *Event {
+// searchOut is the output tokens of the search calls: each costs 15e-6 at accTestPrice.
+func deferralEvent(searchOut int, held bool) *Event {
 	e := switchEvent()
 	ops := []accountant.PricedOp{
 		{Operator: "context-guru.mask", ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 1000}},
 		{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 5000}},
 	}
-	if search > 0 {
-		// A search turn is a spend operation on the tooldefer operator (#1441). The stated cost is a fact, so it prices as is.
-		ops = append(ops, accountant.PricedOp{Kind: accountant.KindSpend, Operator: "context-guru.tooldefer",
-			Call: &accountant.ModelCall{Usage: accountant.CallUsage{CostUSD: search}}})
+	if searchOut > 0 {
+		// A search turn is a spend operation on the tooldefer operator (#1441). The library prices it.
+		ops = append(ops, accountant.PricedOp{OpID: "s", Kind: accountant.KindSpend, Operator: "context-guru.tooldefer",
+			Call: &accountant.ModelCall{Usage: accountant.CallUsage{Output: searchOut}}})
 	}
 	e.SetAccountant(accountant.Result{Ops: ops})
 	if held {
@@ -583,14 +584,14 @@ func TestPriceMode_TheDeferralFigureMovesFromThePresetToTheLever(t *testing.T) {
 
 // The total does not change with the split: it is the same figure as when the deferral stayed in the baseline.
 func TestPriceMode_MovingTheDeferralFigureLeavesTheTotalAlone(t *testing.T) {
-	e := deferralEvent(0.0002, false)
-	if want := (1000 + 5000) * 0.3e-6; !accNear(eventTotal(e), want-0.0002) {
-		t.Errorf("total %v, want the library's %v less the search cost 0.0002", eventTotal(e), want)
+	e := deferralEvent(20, false)
+	if want := (1000 + 5000) * 0.3e-6; !accNear(eventTotal(e), want-20*15e-6) {
+		t.Errorf("total %v, want the library's %v less the search cost %v", eventTotal(e), want, 20*15e-6)
 	}
 	// Against the same request with no search cost: the total falls by exactly the search cost.
 	none := deferralEvent(0, false)
-	if d := eventTotal(none) - eventTotal(e); !accNear(d, 0.0002) {
-		t.Errorf("a search cost of 0.0002 moved the total by %v", d)
+	if d := eventTotal(none) - eventTotal(e); !accNear(d, 20*15e-6) {
+		t.Errorf("a search cost of %v moved the total by %v", 20*15e-6, d)
 	}
 }
 
@@ -609,7 +610,7 @@ func TestPriceMode_NoDeferralLeavesTheLeverAtZero(t *testing.T) {
 // A search turn is a cost of the deferral figure (#1441): it lowers the lever, the tooldefer row and the cost
 // column, and leaves the preset card alone.
 func TestPriceMode_ASearchTurnIsACostOnTheDeferralFigure(t *testing.T) {
-	none, loaded := deferralEvent(0, false), deferralEvent(0.0004, false)
+	none, loaded := deferralEvent(0, false), deferralEvent(40, false)
 	for _, e := range []*Event{none, loaded} {
 		if fb := e.AccountantFallback(); fb != "" {
 			t.Fatalf("fell back: %q", fb)
@@ -619,11 +620,11 @@ func TestPriceMode_ASearchTurnIsACostOnTheDeferralFigure(t *testing.T) {
 		t.Errorf("the baseline moved with the search cost: %v vs %v",
 			none.BaselineCostUSD-none.CostUSD, loaded.BaselineCostUSD-loaded.CostUSD)
 	}
-	if d := none.DeferNetUSD - loaded.DeferNetUSD; !accNear(d, 0.0004) {
-		t.Errorf("levers %v and %v, want them to differ by the search cost 0.0004", none.DeferNetUSD, loaded.DeferNetUSD)
+	if d := none.DeferNetUSD - loaded.DeferNetUSD; !accNear(d, 40*15e-6) {
+		t.Errorf("levers %v and %v, want them to differ by the search cost 0.0006", none.DeferNetUSD, loaded.DeferNetUSD)
 	}
-	if !accNear(loaded.DeferCostUSD, 0.0004) || !accNear(loaded.DeferGrossUSD, none.DeferGrossUSD) {
-		t.Errorf("cost %v gross %v, want cost 0.0004 and the same gross as with no search (%v)", loaded.DeferCostUSD, loaded.DeferGrossUSD, none.DeferGrossUSD)
+	if !accNear(loaded.DeferCostUSD, 40*15e-6) || !accNear(loaded.DeferGrossUSD, none.DeferGrossUSD) {
+		t.Errorf("cost %v gross %v, want cost 0.0006 and the same gross as with no search (%v)", loaded.DeferCostUSD, loaded.DeferGrossUSD, none.DeferGrossUSD)
 	}
 	var def float64
 	for _, c := range loaded.Components {
@@ -639,7 +640,7 @@ func TestPriceMode_ASearchTurnIsACostOnTheDeferralFigure(t *testing.T) {
 // A held request books no break-affected saving: every component's figure goes to EstimatedSavedUSD, outside every
 // total, the deferral's with them (#1441). The lever is 0 and the deferral does not appear in two places.
 func TestPriceMode_AHeldRequestHoldsTheDeferralWithTheRest(t *testing.T) {
-	e := deferralEvent(0.0002, true)
+	e := deferralEvent(20, true)
 	if !e.EstimateHeld {
 		t.Fatal("the request was not held")
 	}
@@ -649,7 +650,7 @@ func TestPriceMode_AHeldRequestHoldsTheDeferralWithTheRest(t *testing.T) {
 	if e.BaselineCostUSD != e.CostUSD {
 		t.Errorf("a held request books a baseline delta of %v", e.BaselineCostUSD-e.CostUSD)
 	}
-	if want := (1000+5000)*0.3e-6 - 0.0002; !accNear(e.EstimatedSavedUSD, want) {
+	if want := (1000+5000)*0.3e-6 - 20*15e-6; !accNear(e.EstimatedSavedUSD, want) {
 		t.Errorf("held estimate %v, want the preset's and the deferral's %v", e.EstimatedSavedUSD, want)
 	}
 }
@@ -792,5 +793,44 @@ func TestPriceMode_HeldFloorKeepsBreaksAndAddedTokensAndCanBeACost(t *testing.T)
 	}
 	if e.EstimatedSavedLowUSD >= 0 {
 		t.Errorf("floor %v, want a cost (< 0): the added tokens cost more than the removed ones save at the read rate", e.EstimatedSavedLowUSD)
+	}
+}
+
+// The interaction is counted on a row of its own, inside the baseline delta, like the ended change.
+func TestPriceMode_InteractionHasARow(t *testing.T) {
+	e := switchEvent()
+	e.accRes.Interaction = accountant.TierTokens{CacheWrite5m: 100}
+	e.accRes.InteractionCaused = accountant.TierTokens{CacheRead: 100}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	ia := 100*3.75e-6 - 100*0.3e-6
+	var row *CompRow
+	for i := range e.Components {
+		if e.Components[i].Component == InteractionComponent {
+			row = &e.Components[i]
+		}
+	}
+	if row == nil || !accNear(row.SavedUSD, ia) || row.Kind != KindEnvelope || row.PricedBy != PricedByAccountant {
+		t.Fatalf("interaction row %+v, want SavedUSD %v", row, ia)
+	}
+	if row.Tokens.Saved.CacheWrite5m != 100 || row.Tokens.Caused.CacheRead != 100 {
+		t.Fatalf("interaction row tokens %+v", row.Tokens)
+	}
+	if !accNear(e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6+ia) {
+		t.Fatalf("baseline delta %v, want %v", e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6+ia)
+	}
+}
+
+// A pipeline component named like the interaction row would take its figure twice: no saving.
+func TestPriceMode_InteractionNameCollisionFallsBack(t *testing.T) {
+	e := switchEvent()
+	e.Components = append(e.Components, CompRow{Component: InteractionComponent})
+	e.accRes.Interaction = accountant.TierTokens{CacheWrite5m: 100}
+	e.accRes.InteractionCaused = accountant.TierTokens{CacheRead: 100}
+	e.PriceMode(accTestPrice, true)
+	if fb := e.AccountantFallback(); fb != FallbackDuplicateName {
+		t.Fatalf("fallback %q, want %q", fb, FallbackDuplicateName)
 	}
 }

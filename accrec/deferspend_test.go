@@ -13,13 +13,13 @@ import (
 // The search turns of one deferred request are three spend operations on the tooldefer operator, each a Call with its
 // own usage (#1441).
 func TestDeferSpendOps(t *testing.T) {
-	ops := DeferSpendOps("m", tooldefer.SearchSpend{Output: 60, OutputEstimated: true, Loaded: 1500, Write1h: true})
+	ops := DeferSpendOps(tooldefer.SearchSpend{Output: 60, OutputEstimated: true, Loaded: 1500, Write1h: true})
 	if len(ops) != 3 {
 		t.Fatalf("%d operations, want 3: %+v", len(ops), ops)
 	}
 	ids := map[string]accountant.CallUsage{}
 	for _, o := range ops {
-		if o.Kind != accountant.KindSpend || o.Operator != accwire.Operator(accwire.OpToolDefer) || o.Call == nil || o.Call.Model != "m" || o.ChangeID != "" {
+		if o.Kind != accountant.KindSpend || o.Operator != accwire.Operator(accwire.OpToolDefer) || o.Call == nil || o.Call.Model != "" || o.ChangeID != "" {
 			t.Errorf("operation %+v: want a spend on the tooldefer operator with a call and no ChangeID", o)
 		}
 		if o.Call.Params[accwire.SpendParamEstimated] != "true" {
@@ -37,12 +37,12 @@ func TestDeferSpendOps(t *testing.T) {
 		t.Errorf("next write usage %+v, want a 1-hour write", u)
 	}
 	// A stated output is not an estimate, and a 5-minute thread writes at the 5-minute price.
-	ops = DeferSpendOps("m", tooldefer.SearchSpend{Output: 40, Loaded: 100})
+	ops = DeferSpendOps(tooldefer.SearchSpend{Output: 40, Loaded: 100})
 	if ops[0].Call.Params[accwire.SpendParamEstimated] != "" || ops[2].Call.Usage.CacheWrite1h != 0 {
 		t.Errorf("stated output: %+v", ops)
 	}
 	// Nothing to pay, no operation.
-	if got := DeferSpendOps("m", tooldefer.SearchSpend{}); len(got) != 0 {
+	if got := DeferSpendOps(tooldefer.SearchSpend{}); len(got) != 0 {
 		t.Errorf("empty spend made %d operations", len(got))
 	}
 }
@@ -66,7 +66,7 @@ func (flatPricer) PriceAt(_ string, _ time.Time, t accountant.Tier, _ int64) (fl
 func TestDeferMoneyMapsTheLibrarysFigure(t *testing.T) {
 	op := accwire.Operator(accwire.OpToolDefer)
 	ops := []accountant.PricedOp{{OpID: "r", Kind: accountant.KindRewrite, Operator: op, ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 20_000}}}
-	for _, o := range DeferSpendOps("m", tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500}) {
+	for _, o := range DeferSpendOps(tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500}) {
 		ops = append(ops, accountant.PricedOp{OpID: o.ID, Kind: o.Kind, Operator: o.Operator, Call: o.Call})
 	}
 	f := accountant.Figure(accountant.FigureInput{Model: "m", Billed: accountant.Usage{CacheRead: 100_000}, Output: 100,

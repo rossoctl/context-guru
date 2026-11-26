@@ -8,6 +8,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/accountant"
+	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/dash"
@@ -325,26 +326,17 @@ func TestFinishSpendsThePingFactsOnlyWhenItPrices(t *testing.T) {
 	}
 }
 
-// A manual ping is priced, but its facts are not stored: its avoided write is already on its row as
-// ManualSavedUSD, and a stored fact would let the next real request credit the same write again as a
-// rescue (context-guru#768 B3).
-func TestPingSavingsDoesNotStoreFactsForAManualPing(t *testing.T) {
+// A manual ping stores its facts like a scheduled one, so the next real request credits the rescue (#1460).
+func TestPingSavingsStoresFactsForAManualPing(t *testing.T) {
 	st := NewPingStore()
 	r := okReport()
 	r.Manual = true
 	res, ok := PingSavings(r, st)
 	if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil {
-		t.Fatalf("a manual ping must still be priced: ok=%v res=%+v", ok, res)
-	}
-	if f, ok := st.Take(accPingKey("s", "main")); ok {
-		t.Fatalf("a manual ping stored facts %+v: the next request would credit its write twice", f)
-	}
-	// The automatic ping next to it still stores them.
-	if _, ok := PingSavings(okReport(), st); !ok {
-		t.Fatal("an automatic ping was not converted")
+		t.Fatalf("a manual ping must be priced: ok=%v res=%+v", ok, res)
 	}
 	if _, ok := st.Take(accPingKey("s", "main")); !ok {
-		t.Fatal("an automatic ping stored no facts")
+		t.Fatal("a manual ping stored no facts: the next request cannot credit its rescue")
 	}
 }
 
@@ -450,16 +442,16 @@ func TestPingSavingsRecoversFromALibraryPanic(t *testing.T) {
 	}
 }
 
-// context-guru#913: a manual ping stores no facts. The next real request then has no LastPing, and the gap
+// context-guru#913 (history; since #1460 a manual ping stores its facts, as a scheduled one does): the next real request then has no LastPing, and the gap
 // from the request before the ping is longer than the TTL. The issue feared a cold phase, with the request priced
 // at the write tier although the usage shows a cache read. The library takes a billed read as proof that the
 // entry was alive (design §5.2, R45), so the request is hot. The arithmetic: request at t0 writes 100,000
 // tokens, a manual ping at t0+4m reads them, a request at t0+8m reads them again. The gap of 8 minutes is past
 // the 5 minute TTL, and the read of 100,000 tokens covers the whole extent of the first request.
 //
-// The control is the same sequence with an automatic ping. It books a rescue; the manual one books none, since
-// its avoided write is already on its own row as ManualSavedUSD (an estimate by the user's ask). The two phases
-// must agree, and the manual run must carry no unpriced entry and no check failure.
+// The control is the same sequence with an automatic ping. Both books the same rescue, once (#1460): a manual
+// ping has no estimate on its row any more. The two phases must agree, and the manual run must carry no unpriced
+// entry and no check failure.
 func TestTheRequestAfterAManualPingIsHotNotCold(t *testing.T) {
 	const prefix = 100_000
 	run := func(manual bool) accountant.Result {
@@ -508,7 +500,52 @@ func TestTheRequestAfterAManualPingIsHotNotCold(t *testing.T) {
 	if rescue(auto) == 0 {
 		t.Error("the automatic ping booked no rescue: the control is broken")
 	}
-	if n := rescue(manual); n != 0 {
-		t.Errorf("the manual ping's write is booked a second time as a rescue of %d tokens", n)
+	if n := rescue(manual); n != rescue(auto) {
+		t.Errorf("the manual ping's rescue is %d tokens, the scheduled ping's is %d: they must match", n, rescue(auto))
 	}
 }
+
+// A manual ping with no next request in the window is a spend only: one spend operation, no rescue, and the
+// facts wait in the store (#1460). A scheduled ping does the same.
+func TestAManualPingWithNoNextRequestIsASpendOnly(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		st := NewPingStore()
+		r := okReport()
+		r.Manual = manual
+		res, ok := PingSavings(r, st)
+		if !ok || len(res.Ops) != 1 || res.Ops[0].Call == nil || len(res.CacheEffects) != 0 {
+			t.Fatalf("manual=%v: ok=%v ops=%d effects=%d, want one spend and no rescue", manual, ok, len(res.Ops), len(res.CacheEffects))
+		}
+	}
+}
+
+// BookPing books the ping into the savings counters with no dashboard, and stores its facts (#1457).
+func TestBookPingBooksTheSavingsCounters(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		var got []acmetrics.Observation
+		st := NewPingStore()
+		r := okReport()
+		r.Manual = manual
+		res, ok := BookPing(r, st, observerFunc(func(o acmetrics.Observation) { got = append(got, o) }))
+		if !ok || len(got) != 1 || len(got[0].Result.Ops) != len(res.Ops) || got[0].Usage.CacheRead != int(r.CacheRead) {
+			t.Fatalf("manual=%v: ok=%v observations=%d", manual, ok, len(got))
+		}
+		if _, ok := st.Take(accPingKey("s", "main")); !ok {
+			t.Errorf("manual=%v: no facts stored", manual)
+		}
+	}
+	// A skipped ping and a panicking sink book nothing and never fail.
+	bad := okReport()
+	bad.Status = 500
+	n := 0
+	if _, ok := BookPing(bad, NewPingStore(), observerFunc(func(acmetrics.Observation) { n++ })); ok || n != 0 {
+		t.Errorf("a rejected ping booked: ok=%v n=%d", ok, n)
+	}
+	if _, ok := BookPing(okReport(), NewPingStore(), observerFunc(func(acmetrics.Observation) { panic("boom") })); !ok {
+		t.Error("a panicking sink changed the ping's result")
+	}
+}
+
+type observerFunc func(acmetrics.Observation)
+
+func (f observerFunc) Observe(o acmetrics.Observation) { f(o) }

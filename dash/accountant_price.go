@@ -3,42 +3,28 @@ package dash
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
-// tierUSD prices tokens by tier. A 1h write bills at the 5m write rate plus
-// modelinfo.Price.CacheWrite1hPremium, the same amount Event.CostUSD adds, so the two figures
-// never price the same tokens differently.
-func tierUSD(p modelinfo.Price, t accountant.TierTokens) float64 {
-	return float64(t.Input)*p.Input + float64(t.CacheRead)*p.CacheRead +
-		float64(t.CacheWrite5m)*p.CacheWrite + float64(t.CacheWrite1h)*(p.CacheWrite+p.CacheWrite1hPremium())
+// hostPricer is the host's rate table for accountant.Figure (SizedPricer): the rate of one token at the
+// prompt size of its request. The rule lives in modelinfo.Price.RateAt, the same one the metrics sink uses.
+// It holds the price of ONE model. For any other model (a spend call made on another model) it refuses:
+// rate 0, estimated. It never prices that call with the wrong rates.
+type hostPricer struct {
+	model string
+	p     modelinfo.Price
 }
 
-// accPrices returns the rates of the request sent (with context-guru) and of the request the
-// client built (without it). The size with is the billed prompt: fresh input, cache reads and
-// cache writes. The size without adds what the counted operations removed and takes off what they
-// added. A cache effect only moves tokens between tiers, so it does not change the size. With no
-// billed usage, or no tiers, both sides price at the base rate, as before.
-func (e *Event) accPrices(p modelinfo.Price) (with, without modelinfo.Price) {
-	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
-	if w <= 0 || !p.HasTiers() || e.accRes == nil {
-		b := p.At(0)
-		return b, b
+func (h hostPricer) PriceAt(model string, _ time.Time, t accountant.Tier, promptTokens int64) (float64, bool) {
+	if model != h.model {
+		return 0, true
 	}
-	tot := func(t accountant.TierTokens) int64 {
-		return int64(t.Input + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h)
-	}
-	n := w
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
-			continue
-		}
-		n += tot(o.Saved) - tot(o.Caused)
-	}
-	return p.At(w), p.At(n)
+	return h.p.RateAt(model, t, promptTokens)
 }
 
 // AccFigure is the request's savings in dollars, from the library's tokens. Only dollars are
@@ -49,8 +35,8 @@ type AccFigure struct {
 	// and input tiers (content the provider had not cached: a first removal) and the read tier (a
 	// replay of content in the cached prefix). ByComponent minus both is its costs (Caused, breaks).
 	ByComponentFirst, ByComponentReplay map[string]float64
-	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD. It excludes UnattributedBreakUSD,
-	// KeepAliveSavedUSD, SplitUSD and TTLUSD.
+	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD and InteractionUSD. It excludes
+	// UnattributedBreakUSD, KeepAliveSavedUSD, SplitUSD and TTLUSD.
 	DeltaUSD          float64
 	KeepAliveSavedUSD float64 // rescue effects
 	SplitUSD          float64 // cachesplit effects (Saved - Caused): CachesplitSavedUSD
@@ -59,11 +45,21 @@ type AccFigure struct {
 	// Q12): it has no ChangeID, so no component owns it, but the client body would have read that
 	// prefix, so it is part of the bill difference. Negative: a cost.
 	EndedBreakUSD float64
+	// InteractionUSD is the value of the tokens no operation owns on a rescued request (accountant
+	// design §6.2): Result.Interaction minus Result.InteractionCaused, both at the size without
+	// context-guru. A ping kept the cache warm and an operation changed the body, so the client body
+	// would have written these tokens cold and the request read them. Neither the keeper nor the
+	// operation owns them. Counted, owned by no component: the interaction row (InteractionComponent).
+	// The metrics book the same figure as llm.savings.interaction.usd. Signed: positive saves.
+	InteractionUSD float64
 	// UnattributedBreakUSD is the breaks the client body has too (InBaseline: client edits, expired
 	// caches, entries lost early): shown, never counted, never charged to a component.
 	UnattributedBreakUSD float64
 	Unpriced             []string // "opID:reason"; an unpriced operation is not a zero saving
-	Estimated            bool     // any counted operation or effect is an estimate
+	Estimated            bool     // any counted operation or effect is an estimate, or a rate the pricer used
+
+	// Fig is the library's own figure, before the mapping above. The held floor reads it.
+	Fig accountant.USDFigure
 
 	// The same figures as tokens by tier, before any pricing (#998). TokByComponent follows exactly
 	// the attribution of ByComponent: the counted operations and the breaks and mark legs each
@@ -78,244 +74,112 @@ type AccFigure struct {
 	TokEndedBreak  TokenFlow // the break an ended change left behind
 }
 
-// AccountantFigure prices the attached Result. A DryRun operation is skipped: computed,
-// never counted. A spend operation (Call != nil) is not a saving and is priced elsewhere, except
-// tool deferral's search turns: they are a cost of its figure (bookDeferSpend).
-// Result.Interaction is ignored on purpose: the library attributes it to nobody.
+// AccountantFigure is the attached Result in dollars. The dollars come from accountant.Figure, priced with
+// the host's rates at the prompt size of each side (hostPricer). This function only maps the library's
+// figure to the dashboard's rows and columns, and takes the tokens of each row from the Result.
 //
-// p carries the model's prompt-size tiers. A saving compares two requests: the one sent (with
-// context-guru) and the one the client built (without it). They can sit in different tiers, so
-// each side is priced at its own prompt size: Saved tokens at the size without, Caused tokens at
-// the size with (accPrices). The tokens that stay change rate when the sizes straddle a line: that
-// re-rate is part of the saving (reRateUSD, bookReRate).
+// It reads a DryRun operation as the library does: computed, never counted. A spend (Call != nil) is a
+// separate bill. Result.Interaction is attributed to nobody: it goes to InteractionUSD, the interaction row.
+//
+// Where the library has a figure the dashboard had no row for:
+//   - UnownedMarkUSD (a mark premium or payback no counted operation owns) goes to the tail breakpoint
+//     row, the same row as before: that component adds the mark in every default preset.
+//   - UnownedReRateUSD (a guard: it is 0 today) goes to EndedBreakUSD, the ended_change row, as before.
 func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
-	pw, pb := e.accPrices(p)
 	f := AccFigure{ByComponent: map[string]float64{}, ByComponentFirst: map[string]float64{}, ByComponentReplay: map[string]float64{},
 		TokByComponent: map[string]TokenFlow{}}
 	if e.accRes == nil {
 		return f
 	}
-	// An unpriced op is also in Ops, with zero tokens (compute.go price()/notEnded()). Counting it
-	// would show "saved $0" for something unmeasured. OpIDs are host-supplied: they may be empty or
-	// duplicated, and an Unpriced entry with an empty OpID can be request-level. So an op is skipped
-	// only when its OpID is in the set AND it carries no tokens: that can never drop a real dollar.
-	unpricedIDs := map[string]bool{}
-	for _, u := range e.accRes.Unpriced {
-		unpricedIDs[u.OpID] = true
+	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
+	fig := accountant.Figure(accountant.FigureInput{
+		Model: e.Model, Output: int(e.OutputTokens), Result: *e.accRes,
+		Billed: accountant.Usage{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
+			CacheWrite: int(e.CacheWrite), CacheWrite1h: int(e.CacheWrite1h)},
+		Unsized: w <= 0, // no billed usage: no size, so every token prices at the base rate
+	}, hostPricer{model: e.Model, p: p})
+	f.Fig = fig
+	rows := make([]accrec.GateRow, 0, len(e.Components))
+	for _, c := range e.Components {
+		rows = append(rows, accrec.GateRow{Name: c.Component, Acted: c.Acted})
 	}
-	owner := map[string]string{}        // ChangeID -> component; empty ChangeIDs are never owners
-	var effCaused accountant.TierTokens // the Caused tokens of the cache effects booked below
-	var shares []reRateShare            // the counted operations with a net saving: they own the re-rate
+	f.ByComponent, f.ByComponentFirst, f.ByComponentReplay = accrec.ComponentFigure(*e.accRes, fig, rows)
+	f.DeltaUSD = fig.DeltaUSD
+	f.KeepAliveSavedUSD, f.SplitUSD, f.TTLUSD = fig.KeepAliveSavedUSD, fig.SplitUSD, fig.TTLUSD
+	f.EndedBreakUSD = fig.EndedBreakUSD + fig.UnownedReRateUSD
+	f.UnattributedBreakUSD = fig.UnattributedBreakUSD
+	f.Unpriced, f.Estimated = fig.Unpriced, fig.Estimated
+	// The search turns of tool deferral are spend calls, a separate bill in the library's figure. They are a cost of
+	// the deferral figure (#1441), so they come off its row and the request total. The same sum as /stats reads.
+	if spend := accrec.DeferSpendUSD(fig); spend != 0 {
+		f.ByComponent[DeferComponent] -= spend
+		f.DeltaUSD -= spend
+	}
+
+	// The tokens of each row (#998). They are the Result's own tokens, not dollars: each operation's, then
+	// each counted effect's, on the row that the figure charged it to.
 	for _, o := range e.accRes.Ops {
-		if o.Call != nil && !o.DryRun && o.Operator == accwire.Operator(DeferComponent) {
-			f.bookDeferSpend(o.Call, p) // a search turn of tool deferral: a cost on the tooldefer figure (#1441)
-			continue
-		}
 		if o.DryRun || o.Call != nil {
 			continue
 		}
-		c := strings.TrimPrefix(o.Operator, accwire.OperatorPrefix)
-		// An unpriced op still owns the break it caused: a setting with no position is unpriced
-		// (penalty_unknown) and its break is priced from the read the usage shows.
-		if o.ChangeID != "" {
-			if _, dup := owner[o.ChangeID]; !dup { // first owner wins; the library flags duplicates (unique_change)
-				owner[o.ChangeID] = c
-			}
+		if o.Saved.IsZero() && o.Caused.IsZero() {
+			continue // an unpriced operation has no tokens: it adds no token figure, as it adds no dollars
 		}
-		if unpricedIDs[o.OpID] && o.Saved == (accountant.TierTokens{}) && o.Caused == (accountant.TierTokens{}) {
+		f.addTok(strings.TrimPrefix(o.Operator, accwire.OperatorPrefix), o.Saved, o.Caused)
+	}
+	for _, ue := range fig.Effects {
+		if !ue.Counted {
 			continue
 		}
-		if n := tierTotal(o.Saved) - tierTotal(o.Caused); n > 0 {
-			shares = append(shares, reRateShare{c, n})
-		}
-		net := tierUSD(pb, o.Saved) - tierUSD(pw, o.Caused)
-		f.ByComponent[c] += net
-		f.addTok(c, o.Saved, o.Caused)
-		read := tierUSD(pb, accountant.TierTokens{CacheRead: o.Saved.CacheRead})
-		f.ByComponentReplay[c] += read
-		f.ByComponentFirst[c] += tierUSD(pb, o.Saved) - read
-		f.DeltaUSD += net
-		f.Estimated = f.Estimated || o.Estimated
-	}
-	for _, ce := range e.accRes.CacheEffects {
-		// Sign convention (accountant internal/engine/compute.go): value = tierUSD(Saved) - tierUSD(Caused).
-		//   break:      Saved is the read that did not happen, Caused the write that did: a cost,
-		//               tierUSD(Caused) - tierUSD(Saved) > 0, charged to the owner of ChangeID.
-		//   rescue:     Saved is the write avoided, Caused the read paid instead: a saving.
-		//   split:      same shape as rescue: a saving.
-		//   ttlPremium: Saved is the 5m write, Caused the dearer 1h write: value < 0 (a cost).
-		//   ttlRescue:  Saved is the 5m write, Caused the read: a saving.
-		//   markPremium: Saved is the input the client body would have billed, Caused the dearer write the
-		//               host's added mark made the provider bill: value < 0 (a cost).
-		//   markPayback: Saved is the input or the write the client body would have billed (a write when the
-		//               client moved its own mark past the host's, accountant v0.6.0), Caused the read the
-		//               host's mark made possible on the next request: value > 0 (a saving).
-		value := tierUSD(pb, ce.Saved) - tierUSD(pw, ce.Caused)
-		effCaused = addTier(effCaused, bookedCaused(ce, owner))
+		ce := ue.Effect
 		switch ce.Kind {
 		case accountant.EffectBreak:
-			switch c, ok := owner[ce.ChangeID]; {
-			case ce.InBaseline: // the client body has this break too: shown, not counted
-				f.UnattributedBreakUSD -= value
-			case ok && ce.ChangeID != "":
-				f.ByComponent[c] += value
-				f.DeltaUSD += value
-				f.addTok(c, ce.Saved, ce.Caused)
-			case ce.ChangeID == "": // an ended change left it behind: counted, owned by no component
-				f.EndedBreakUSD += value
-				f.DeltaUSD += value
+			if ue.Owner != "" {
+				f.addTok(strings.TrimPrefix(ue.Owner, accwire.OperatorPrefix), ce.Saved, ce.Caused)
+			} else {
 				f.TokEndedBreak.addTiers(ce.Saved, ce.Caused)
-			default: // a ChangeID no counted op owns (a dry run): shown, never charged
-				f.UnattributedBreakUSD -= value
 			}
 		case accountant.EffectRescue:
-			f.KeepAliveSavedUSD += value
 			f.TokKeepAlive.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectSplit:
-			f.SplitUSD += value
 			f.TokSplit.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
-			f.TTLUSD += value
 			f.TokTTL.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
-			// markPayback is the other half of markPremium: the next request reads the tail the host's mark
-			// wrote, which the client body would have billed as input, or written again when the client moved
-			// its own mark past the host's. Saved is that input or write, Caused the read:
-			// value > 0, a saving, owned like the premium it repays (accountant design §4.4, accountant#52).
-			// The write premium of a breakpoint the host added: a cost (value < 0), charged to the
-			// operation whose span covers the mark. With no owner it goes on the tail breakpoint row,
-			// the component that adds the mark in every default preset (accountant design §4.4). The
-			// opt-in cacheinject also adds marks: its premium with no covering operation lands on the same
-			// row, so the total is right and only the row name is approximate. Without this case the
-			// effect was unpriced and every request with the default tail breakpoint booked no saving.
-			c, ok := owner[ce.ChangeID]
-			if !ok || ce.ChangeID == "" {
-				c = accwire.OpTailBreakpoint
+			c := accwire.OpTailBreakpoint
+			if ue.Owner != "" {
+				c = strings.TrimPrefix(ue.Owner, accwire.OperatorPrefix)
 			}
-			f.ByComponent[c] += value
-			f.DeltaUSD += value
 			f.addTok(c, ce.Saved, ce.Caused)
-		default:
-			f.Unpriced = append(f.Unpriced, "effect:"+string(ce.Kind)+":unknown_kind")
-			continue
 		}
-		f.Estimated = f.Estimated || ce.Estimated
 	}
-	f.bookReRate(e.reRateUSD(pw, pb, effCaused), shares)
-	for _, u := range e.accRes.Unpriced {
-		f.Unpriced = append(f.Unpriced, u.OpID+":"+u.Reason)
+	// The interaction: the tokens no operation owns on a rescued request. Counted in DeltaUSD (the library
+	// keeps it out of Figure's DeltaUSD, in TotalUSD), owned by no component: the interaction row.
+	if ia, ic := e.accRes.Interaction, e.accRes.InteractionCaused; ia != (accountant.TierTokens{}) || ic != (accountant.TierTokens{}) {
+		f.InteractionUSD = fig.InteractionUSD
+		f.DeltaUSD += f.InteractionUSD
+		f.addTok(InteractionComponent, ia, ic)
 	}
 	return f
-}
-
-func addTier(a, b accountant.TierTokens) accountant.TierTokens {
-	return accountant.TierTokens{Input: a.Input + b.Input, CacheRead: a.CacheRead + b.CacheRead,
-		CacheWrite5m: a.CacheWrite5m + b.CacheWrite5m, CacheWrite1h: a.CacheWrite1h + b.CacheWrite1h}
-}
-
-// bookedCaused is the Caused tokens of a cache effect when AccountantFigure books its value, else zero.
-// It follows the switch there: a break the client body has too (InBaseline), a break no counted
-// operation owns, and an unknown kind are not booked.
-func bookedCaused(ce accountant.CacheEffect, owner map[string]string) accountant.TierTokens {
-	switch ce.Kind {
-	case accountant.EffectBreak:
-		if _, ok := owner[ce.ChangeID]; ce.InBaseline || (ce.ChangeID != "" && !ok) {
-			return accountant.TierTokens{}
-		}
-	case accountant.EffectRescue, accountant.EffectSplit, accountant.EffectTTLPremium, accountant.EffectTTLRescue,
-		accountant.EffectMarkPremium, accountant.EffectMarkPayback:
-	default:
-		return accountant.TierTokens{}
-	}
-	return ce.Caused
-}
-
-// reRateShare is a counted operation with a net saving (saved minus caused tokens, above 0).
-type reRateShare struct {
-	component string
-	net       int
-}
-
-func tierTotal(t accountant.TierTokens) int {
-	return t.Input + t.CacheRead + t.CacheWrite5m + t.CacheWrite1h
-}
-
-// reRateUSD is the change of rate of the tokens that stay in both requests. The saving of a request is
-// the bill without context-guru minus the bill as sent, each at its own prompt size. Pricing the moved
-// tokens is not the whole difference: when the two sizes sit on different sides of a price line, the
-// tokens that stay change rate too. Per tier it is stay x (rate without - rate billed), where stay is
-// the billed tokens of the tier minus what the counted operations caused in it. All output stays:
-// output x (output rate without - output rate billed). 0 when no line is crossed, so a price with no
-// tiers, or an unknown size, gives the figures of before. It can be negative.
-func (e *Event) reRateUSD(pw, pb modelinfo.Price, effCaused accountant.TierTokens) float64 {
-	if pw == pb || e.accRes == nil {
-		return 0
-	}
-	stay := accountant.TierTokens{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
-		CacheWrite5m: int(max(e.CacheWrite-e.CacheWrite1h, 0)), CacheWrite1h: int(e.CacheWrite1h)}
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
-			continue
-		}
-		stay.Input -= o.Caused.Input
-		stay.CacheRead -= o.Caused.CacheRead
-		stay.CacheWrite5m -= o.Caused.CacheWrite5m
-		stay.CacheWrite1h -= o.Caused.CacheWrite1h
-	}
-	// A booked cache effect prices its own full difference (saved at the size without, caused at the
-	// size sent), so its Caused tokens must not be re-rated again. A break the client body has too
-	// (InBaseline) is booked nowhere, so its tokens stay.
-	stay.Input -= effCaused.Input
-	stay.CacheRead -= effCaused.CacheRead
-	stay.CacheWrite5m -= effCaused.CacheWrite5m
-	stay.CacheWrite1h -= effCaused.CacheWrite1h
-	stay.Input, stay.CacheRead = max(stay.Input, 0), max(stay.CacheRead, 0)
-	stay.CacheWrite5m, stay.CacheWrite1h = max(stay.CacheWrite5m, 0), max(stay.CacheWrite1h, 0)
-	return tierUSD(pb, stay) - tierUSD(pw, stay) + float64(e.OutputTokens)*(pb.Output-pw.Output)
-}
-
-// bookReRate splits the re-rate over the counted components in proportion to each one's net saved
-// tokens, so the components add up to the request total. It books in the first-removal column, with the
-// moved tokens it follows. With no such component nobody owns it: it books to EndedBreakUSD, the one
-// counted request-level figure with no owner (accOverride gives it the ended_change row), so the rows
-// still add up to DeltaUSD. A negative re-rate follows the same split, and a component can go below 0.
-func (f *AccFigure) bookReRate(r float64, shares []reRateShare) {
-	if r == 0 {
-		return
-	}
-	f.DeltaUSD += r
-	total := 0
-	for _, sh := range shares {
-		total += sh.net
-	}
-	if total == 0 {
-		f.EndedBreakUSD += r
-		return
-	}
-	for _, sh := range shares {
-		v := r * float64(sh.net) / float64(total)
-		f.ByComponent[sh.component] += v
-		f.ByComponentFirst[sh.component] += v
-	}
 }
 
 // Fallback reasons: why PriceMode booked no saving on an event. AccountantFallback
 // returns one of them ("" when the override applied).
 const (
-	FallbackNoResult           = "no_result"            // no Result attached (no usage, skipped, expand rounds)
-	FallbackOpsDropped         = "ops_dropped"          // a change could not be placed as an operation
-	FallbackObserve            = "observe"              // the run was observe mode
-	FallbackUnpriced           = "unpriced"             // no usage or no price for the model, or an operation or effect is unpriced
-	FallbackCheckSum           = "check_sum"            // the library's sum check failed
-	FallbackCheckUniqueChange  = "check_unique_change"  // two operations share a ChangeID
-	FallbackCheckSpans         = "check_spans"          // an operation's spans do not add up to its sizes
-	FallbackCheckOther         = "check_other"          // a fatal library check this host has no name for
-	FallbackSizeUnknown        = "size_unknown"         // TokensBefore is 0: the plausibility bound cannot be checked
-	FallbackImplausibleSize    = "implausible_size"     // the library saved more tokens than the request had
-	FallbackFigureWithoutRow   = "figure_without_row"   // a library figure for a component with no row
-	FallbackDuplicateName      = "duplicate_name"       // two rows share a component name
-	FallbackActedWithoutFigure = "acted_without_figure" // a component acted and the library has no figure for it
-	FallbackServerHeldHistory  = "server_held_history"  // an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider holds the history
+	FallbackNoResult           = "no_result"                   // no Result attached (no usage, skipped, expand rounds)
+	FallbackOpsDropped         = accrec.GateOpsDropped         // a change could not be placed as an operation
+	FallbackObserve            = accrec.GateObserve            // the run was observe mode
+	FallbackUnpriced           = accrec.GateUnpriced           // no usage or no price for the model, or an operation or effect is unpriced
+	FallbackCheckSum           = accrec.GateCheckSum           // the library's sum check failed
+	FallbackCheckUniqueChange  = accrec.GateCheckUniqueChange  // two operations share a ChangeID
+	FallbackCheckSpans         = accrec.GateCheckSpans         // an operation's spans do not add up to its sizes
+	FallbackCheckOther         = accrec.GateCheckOther         // a fatal library check this host has no name for
+	FallbackSizeUnknown        = accrec.GateSizeUnknown        // TokensBefore is 0: the plausibility bound cannot be checked
+	FallbackImplausibleSize    = accrec.GateImplausibleSize    // the library saved more tokens than the request had
+	FallbackFigureWithoutRow   = accrec.GateFigureWithoutRow   // a library figure for a component with no row
+	FallbackDuplicateName      = accrec.GateDuplicateName      // two rows share a component name
+	FallbackActedWithoutFigure = accrec.GateActedWithoutFigure // a component acted and the library has no figure for it
+	FallbackServerHeldHistory  = "server_held_history"         // an OpenAI Responses request with server-held history (previous_response_id, conversation, item_reference): the provider holds the history
 )
 
 // FallbackUnrecorded is requests.acc_fallback on a row written before the column existed whose components say
@@ -338,22 +202,6 @@ func (e *Event) RecordAccountantFallback() {
 	e.AccFallback = e.accFallback
 }
 
-// fatalCheckFallback is the fallback reason of a fatal library check (accountant CheckFailure.Fatal):
-// one that means the operation list or its attribution is wrong. The library decides which checks are
-// fatal; this only names them. A fatal check this switch does not know gates all the same, as
-// FallbackCheckOther, so a check the library adds later never passes silently.
-func fatalCheckFallback(check string) string {
-	switch check {
-	case accountant.CheckSum:
-		return FallbackCheckSum
-	case accountant.CheckUniqueChange:
-		return FallbackCheckUniqueChange
-	case accountant.CheckSpans:
-		return FallbackCheckSpans
-	}
-	return FallbackCheckOther
-}
-
 // PricedByAccountant is CompRow.PricedBy on a row the accountant library priced.
 const PricedByAccountant = "accountant"
 
@@ -363,52 +211,20 @@ const PricedByAccountant = "accountant"
 // before the switch has it empty.
 const PricedByNone = "none"
 
-// spendUSD prices one spend Call from its own usage, at the size of its own usage, as accountant.Figure does. A price
-// with no tiers gives the base rates. A cost the response stated (CostUSD) wins: it is a fact, not a rate of ours.
-// Interim: #1440 replaces it with accountant.Figure.
-func spendUSD(p modelinfo.Price, c *accountant.ModelCall) float64 {
-	u := c.Usage
-	if u.CostUSD > 0 {
-		return u.CostUSD
-	}
-	n := int64(u.Input) + int64(u.CacheRead) + int64(u.CacheWrite)
-	q := p.At(n)
-	return tierUSD(q, accountant.TierTokens{Input: u.Input, CacheRead: u.CacheRead,
-		CacheWrite5m: max(u.CacheWrite-u.CacheWrite1h, 0), CacheWrite1h: u.CacheWrite1h}) + float64(u.Output)*q.Output
-}
-
-// bookDeferSpend books one search turn of tool deferral as a cost of the tooldefer figure: the search calls'
-// output, the API's second pass over the loaded definitions, and the next request's write of them (#1441). It is a
-// cost, so it lowers the figure and the request total. It has no tokens on the component row: those hold the
-// body change.
-func (f *AccFigure) bookDeferSpend(c *accountant.ModelCall, p modelinfo.Price) {
-	usd := spendUSD(p, c)
-	f.ByComponent[DeferComponent] -= usd
-	f.DeltaUSD -= usd
-	f.Estimated = f.Estimated || c.Params[accwire.SpendParamEstimated] == "true"
-}
-
-// KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator or
-// the ended-change break, neither of which is a pipeline component.
+// KindEnvelope is the CompRow.Kind of a row the accountant override adds: an envelope operator, the
+// ended-change break or the interaction, none of which is a pipeline component.
 const KindEnvelope = "envelope"
 
 // EndedChangeComponent is the row that carries the break an ended change left behind.
-const EndedChangeComponent = "ended_change"
+const EndedChangeComponent = accrec.EndedChangeComponent
+
+// InteractionComponent is the row that carries the interaction on a rescued request
+// (AccFigure.InteractionUSD): counted, and owned by no component.
+const InteractionComponent = accrec.InteractionComponent
 
 // DeferComponent is the library's component name for tool deferral: the operator context-guru.tooldefer, which the
 // proxy reports from the bodies (accountant R56). Its figure is the deferral's saving.
 const DeferComponent = accwire.OpToolDefer
-
-// envelopeComponents are the operators that change the request envelope (tools, system, cache
-// marks) and may have no pipeline row: the proxy reports them from a body diff
-// (accwire/envelope.go). expand, adjudicate and expand_restore (the copy fixed_restore
-// inserts, #481) are never pipeline components; headttl is a host option; toolschema, toolfilter and cachesplit are components whose row can be absent when
-// the rewrite ran from an equivalent gate (cacheinject runs the split too).
-var envelopeComponents = map[string]bool{
-	accwire.OpExpand: true, accwire.OpAdjudicate: true, accwire.OpHeadTTL: true, accwire.OpExpandRestore: true,
-	"toolschema": true, "toolfilter": true, "cachesplit": true,
-	accwire.OpTailBreakpoint: true, accwire.OpToolDefer: true,
-}
 
 // AccountantEstimated reports whether the applied figure is an estimate: the library could not rule
 // out a break (penalty_unknown, accountant design §6.4). It is false when the override did not apply.
@@ -474,56 +290,32 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		return FallbackServerHeldHistory // before no_result: say the real reason, not that nothing was attached
 	case e.accRes == nil:
 		return FallbackNoResult
-	case e.accOpsDropped != 0:
-		return FallbackOpsDropped
-	case e.accObserve:
-		return FallbackObserve
-	}
-	for _, c := range e.accRes.Checks {
-		if c.Fatal() {
-			return fatalCheckFallback(c.Check)
-		}
 	}
 	fig := e.AccountantFigure(p)
+	// One decision for the row and the /stats ledger (accrec.Gate): a request the row refuses is unpriced there too.
+	rows := make([]accrec.GateRow, 0, len(e.Components))
+	for _, c := range e.Components {
+		rows = append(rows, accrec.GateRow{Name: c.Component, Acted: c.Acted})
+	}
+	if reason, detail := accrec.Gate(*e.accRes, fig.Fig, accrec.GateIn{Observe: e.accObserve, OpsDropped: e.accOpsDropped,
+		TokensBefore: e.TokensBefore, Rows: rows}); reason != "" {
+		e.accUnpricedWhy = detail
+		return reason
+	}
 	// penalty_unknown is not a missing price: the library priced every operation and could not
 	// rule out a break, because the thread has no history or a setting has no position. The design
 	// says to show such a figure and mark it estimated (accountant design §6.4), so it does not gate.
-	// Any other unpriced reason means an operation has no price, and it does.
-	estimated := false
-	for _, u := range fig.Unpriced {
-		if !strings.HasSuffix(u, ":"+accountant.ReasonPenaltyUnknown) {
-			// "opID:reason". A request-level refusal has no operation, so its id is empty: drop the colon.
-			e.accUnpricedWhy = strings.TrimPrefix(u, ":")
-			return FallbackUnpriced
-		}
-		estimated = true
-	}
-	// Plausibility bound on the library's INPUT: a request cannot remove more tokens than it had.
-	// The library converts removed bytes to tokens with the request's own billed-token ratio, so a
-	// usage that does not match the forwarded body (a wrong bytes-to-tokens ratio) would otherwise
-	// publish an inflated figure. Over the bound, or with TokensBefore unknown (0), the bound cannot
-	// be met or checked and the event books no saving. This is a gate, never a rescale of the figure.
-	if e.TokensBefore <= 0 {
-		return FallbackSizeUnknown
-	}
-	if e.countedSavedTokens() > e.TokensBefore {
-		return FallbackImplausibleSize
-	}
-	// A library figure for a component the event has no row for would leave the rows short of
-	// the baseline: the sum invariant would break. An envelope operator (envelopeComponents) gets
-	// its own row; for any other name the event books no saving.
-	rows := map[string]bool{}
+	estimated := accrec.Held(*e.accRes)
+	// An envelope operator (EnvelopeComponents) with no pipeline row gets a row of its own, so the rows still sum to
+	// the baseline delta. The gate has refused any other name.
+	has := map[string]bool{}
 	for _, c := range e.Components {
-		rows[c.Component] = true
+		has[c.Component] = true
 	}
 	var added []CompRow
 	for name := range fig.ByComponent {
-		switch {
-		case rows[name]:
-		case envelopeComponents[name]:
+		if !has[name] {
 			added = append(added, CompRow{Component: name, Kind: KindEnvelope, Acted: true, Mutated: true})
-		default:
-			return FallbackFigureWithoutRow
 		}
 	}
 	// The head-TTL legs (premium and rescue) are a lever's figure like any component's: they go on
@@ -531,37 +323,25 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	if fig.TTLUSD != 0 {
 		fig.ByComponent[accwire.OpHeadTTL] += fig.TTLUSD
 		fig.DeltaUSD += fig.TTLUSD
-		if !rows[accwire.OpHeadTTL] && !inAdded(added, accwire.OpHeadTTL) {
+		if !has[accwire.OpHeadTTL] && !inAdded(added, accwire.OpHeadTTL) {
 			added = append(added, CompRow{Component: accwire.OpHeadTTL, Kind: KindEnvelope, Acted: true, Mutated: true})
 		}
 	}
 	// The break an ended change left behind is counted and owned by no component: it gets a row
 	// of its own, so the rows still sum to the baseline delta.
 	if fig.EndedBreakUSD != 0 {
-		if rows[EndedChangeComponent] {
-			return FallbackDuplicateName
-		}
 		added = append(added, CompRow{Component: EndedChangeComponent, Kind: KindEnvelope, Acted: true})
 		fig.ByComponent[EndedChangeComponent] = fig.EndedBreakUSD
 	}
-	sort.Slice(added, func(i, j int) bool { return added[i].Component < added[j].Component })
-	// Two rows with one name would each take the full figure and break the sum invariant.
-	seen := map[string]bool{}
-	for _, c := range e.Components {
-		if _, ok := fig.ByComponent[c.Component]; ok {
-			if seen[c.Component] {
-				return FallbackDuplicateName
-			}
-			seen[c.Component] = true
-		}
+	// The interaction is counted and owned by no component too: a row of its own, like the ended change.
+	if fig.InteractionUSD != 0 {
+		added = append(added, CompRow{Component: InteractionComponent, Kind: KindEnvelope, Acted: true})
+		fig.ByComponent[InteractionComponent] = fig.InteractionUSD
 	}
+	sort.Slice(added, func(i, j int) bool { return added[i].Component < added[j].Component })
 	saved := make([]float64, len(e.Components))
 	for i, c := range e.Components {
-		v, ok := fig.ByComponent[c.Component]
-		if !ok && c.Acted {
-			return FallbackActedWithoutFigure
-		}
-		saved[i] = v
+		saved[i] = fig.ByComponent[c.Component]
 	}
 	for _, r := range added {
 		e.Components = append(e.Components, r)
@@ -578,13 +358,12 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// counted twice.
 	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, Split: fig.TokSplit, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
-	// Tool deferral has one figure, and the accountant prices it (#1441): the definitions it left out as a shrink of
-	// tools positions, the search tool and the names list as growth (accountant R56), the tier re-rate, and the
-	// search turns as spend operations. The figure sits on the tooldefer row and in the baseline delta above, which
-	// the Overview shows as the preset's saving. It is the deferral's saving, so it leaves the baseline and goes to
-	// the lever Overview adds beside it (DeferNetUSD), where the deferral card and the /stats ledger read it. The
-	// total is the same: the figure is moved, not added. Gross is the saved side of the figure, and cost is gross
-	// less net.
+	// Tool deferral has one figure, the accountant's (#1441): the definitions it left out as a shrink of tools
+	// positions, the search tool and the names list as growth (accountant R56), the tier re-rate, and the search
+	// turns as spend calls. It sits on the tooldefer row and in the baseline delta above, which the Overview shows as
+	// the preset's saving. It is the deferral's saving, so it leaves the baseline and goes to the lever Overview adds
+	// beside it (DeferNetUSD), where the deferral card and the /stats ledger read it. The total is the same: the
+	// figure is moved, not added. Gross is the saved side of the figure, and cost is gross less net.
 	//
 	// A request the library held (below) books no lever: its deferral figure joins the held estimate with every
 	// other component's, so the figure appears in one place and not in two.
@@ -596,9 +375,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 			e.DeferNetUSD = deferFig
 			e.DeferCostUSD = e.DeferGrossUSD - e.DeferNetUSD
 			if e.DeferNetUSD == 0 {
-				// A guard, not a known case. -0 - +0 is -0 under IEEE 754, but deferFig comes from a map entry that
-				// starts at +0, and +a + -a and +0 + -0 are +0, so deferFig is never -0 and this branch is not
-				// reached today. If it ever were, a plain zero is what the field should serialize.
+				// A guard, not a known case: -0 should serialize as a plain zero.
 				e.DeferNetUSD = 0
 			}
 		}
@@ -614,8 +391,8 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// keep-alive tab and the API still agree.
 		//
 		// What is held out: fig.DeltaUSD, which is every component's figure (the deferral's too, #1441), the
-		// head-TTL premium and rescue legs (the headttl row), the ended-change break, and the
-		// filter's part. The figure can
+		// head-TTL premium and rescue legs (the headttl row), the ended-change break, the
+		// interaction (the interaction row), and the filter's part. The figure can
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
 		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
@@ -623,7 +400,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// do not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD
-		e.EstimatedSavedLowUSD = e.heldFloorUSD(p, fig.DeltaUSD)
+		e.EstimatedSavedLowUSD = accrec.HeldFloorUSD(fig.Fig, fig.DeltaUSD)
 		e.EstimateHeld = true
 		e.BaselineCostUSD = e.CostUSD
 		for i := range e.Components {
@@ -642,28 +419,6 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	return ""
 }
 
-// heldFloorUSD is the lower bound of a held figure. The ceiling (delta) prices each removed token as
-// the write the provider would have made on a cold cache. If the cache was warm, the client would have
-// paid the read rate for the tokens in the warm prefix and the write rate for the rest, so the saving is
-// lower; the read rate is the least a client token costs. The floor re-prices the same removed tokens
-// at the read rate: every Saved token as a read, Caused tokens and the cache effects unchanged in
-// dollars. It is never above the ceiling, and equals it when nothing was priced as a write.
-func (e *Event) heldFloorUSD(p modelinfo.Price, delta float64) float64 {
-	_, p = e.accPrices(p) // Saved tokens are the client body's: priced at its size
-	low := delta
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil {
-			continue
-		}
-		s := o.Saved
-		low -= tierUSD(p, s) - float64(s.Input+s.CacheRead+s.CacheWrite5m+s.CacheWrite1h)*p.CacheRead
-	}
-	if low > delta {
-		return delta // a price table with a read dearer than a write: the floor never exceeds the ceiling
-	}
-	return low
-}
-
 func inAdded(rows []CompRow, name string) bool {
 	for _, r := range rows {
 		if r.Component == name {
@@ -671,32 +426,4 @@ func inAdded(rows []CompRow, name string) bool {
 		}
 	}
 	return false
-}
-
-// toolSectionOperators are the operators whose operations act on the tools section, not on messages:
-// the declaration filter and the schema rewrite (accwire/envelope.go reports them from a body
-// diff), the two declarations the proxy injects, and tool deferral, whose deferred definitions are a
-// shrink of tools positions (accountant R56, #908). Their tokens are not in TokensBefore, which counts
-// message text only. Deferral's names list is a growth in messages and saves nothing, so it adds
-// no saved tokens to the bound.
-var toolSectionOperators = map[string]bool{
-	accwire.Operator("toolfilter"): true, accwire.Operator("toolschema"): true,
-	accwire.Operator(accwire.OpExpand): true, accwire.Operator(accwire.OpAdjudicate): true,
-	accwire.Operator(accwire.OpToolDefer): true,
-}
-
-// countedSavedTokens is the Saved tokens, all four tiers, of the operations that feed
-// AccountantFigure.ByComponent: not DryRun, not a spend, and not an operation on the tools section.
-// TokensBefore is the size of the messages. A tool declaration is not in it, so 2,188 removed
-// declaration tokens would look larger than a 121-token conversation and drop the whole result (#907).
-// The bound stays for every operation on messages.
-func (e *Event) countedSavedTokens() int {
-	n := 0
-	for _, o := range e.accRes.Ops {
-		if o.DryRun || o.Call != nil || toolSectionOperators[o.Operator] {
-			continue
-		}
-		n += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
-	}
-	return n
 }

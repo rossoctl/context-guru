@@ -343,7 +343,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		out.Ledger.CGLLMUSD += r.cgllm
 		if r.keepalive {
 			// The autoPing rule (dash/manualping.go): a manual ping is the user's own spend,
-			// booked under manual_saved_usd by every other ledger, not the keeper's.
+			// booked under manual_saved_usd by every other ledger (only on rows written before #1460; a newer row holds 0), not the keeper's.
 			if !r.manual {
 				out.Ledger.PingUSD += r.cost
 			}

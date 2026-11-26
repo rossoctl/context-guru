@@ -66,6 +66,10 @@ type Request struct {
 	WrongGuesses, DroppedSearches int
 	// Tier is how this request was billed.
 	Tier Tier
+	// PromptTokens is the billed prompt size of the request sent.
+	//
+	// Deprecated: nothing reads it. The accountant prices deferral (#1441). Kept so a library user's code still builds.
+	PromptTokens int64
 }
 
 // WrongGuesses is how many wrong guesses one response shows (#866, N8): tools that are in this

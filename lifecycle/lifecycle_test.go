@@ -378,3 +378,32 @@ func TestFinishOrderPinsCountersBeforeBilledInput(t *testing.T) {
 		t.Errorf("the counters run after the ledger and before the billed-input writes: %s", got)
 	}
 }
+
+func TestRatesCarryTheTiers(t *testing.T) {
+	p := modelinfo.Price{Input: 5, Output: 30, CacheRead: 0.5, CacheWrite: 6.25}.WithTiers("gpt-5.6")
+	got := RatesOf(p)
+	if line, ok := got.LineBelow(300_000); !ok || line != 272_000 {
+		t.Fatalf("line = %d %v", line, ok)
+	}
+	if r := got.At(300_000); r.Input != 10 || r.CacheRead != 1 || r.Output != 45 {
+		t.Fatalf("rates above the line = %+v", r)
+	}
+	if _, ok := RatesOf(modelinfo.Price{Input: 5, Output: 30}).LineBelow(900_000); ok {
+		t.Fatal("a flat price has no line")
+	}
+}
+
+// TokenRates.At and Price.At pick the same tier on every prompt size, the lines and just either side.
+func TestRatesAtMatchesPriceAt(t *testing.T) {
+	for _, m := range []string{"gpt-5.6", "claude-haiku-5-5", "claude-sonnet-5-5"} {
+		p := modelinfo.Price{Input: 5, Output: 30, CacheRead: 0.5, CacheWrite: 6.25}.WithTiers(m)
+		r := RatesOf(p)
+		for _, n := range []int64{0, 1, 99_999, 100_000, 100_001, 271_999, 272_000, 272_001, 1_000_000} {
+			q := p.At(n)
+			want := components.TokenRates{Input: q.Input, Output: q.Output, CacheRead: q.CacheRead, CacheWrite: q.CacheWrite}
+			if got := r.At(n); got != want {
+				t.Fatalf("%s at %d: %+v, want %+v", m, n, got, want)
+			}
+		}
+	}
+}

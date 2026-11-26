@@ -17,6 +17,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/thread"
@@ -139,19 +140,19 @@ func (r *warmRig) request(c *components.Ctx) (*bschemas.BifrostChatRequest, *com
 func (r *warmRig) forward() {
 	r.t.Helper()
 	ResolveWarmQuestion(r.session, "", true, 0)
-	// k batches in sequence, each a question over a large prefix, and a slow -race build: 60 s.
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
+	r.waitIdle()
+}
+
+// waitIdle waits until the thread has no warm question asking or pending.
+func (r *warmRig) waitIdle() {
+	r.t.Helper()
+	busy := func() bool {
 		warmMu.Lock()
+		defer warmMu.Unlock()
 		t := warmThreads[r.key()]
-		busy := t != nil && (t.asking || t.warmPending())
-		warmMu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+		return t != nil && (t.asking || t.warmPending())
 	}
-	r.t.Fatal("the warm question did not finish")
+	testutil.WaitFor(r.t, "the warm question finishes", func() bool { return !busy() })
 }
 
 func (r *warmRig) held() bool {
@@ -604,25 +605,27 @@ func TestAWarmQuestionAndAPingQuestionNeverRunTogetherOnAThread(t *testing.T) {
 			}
 		}
 		ResolveWarmQuestion(r.session, "", true, 0)
-		select {
-		case <-blk.in:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the warm question never reached the model")
-		}
+		testutil.WaitFor(t, "the warm question reaches the model", func() bool {
+			select {
+			case <-blk.in:
+				return true
+			default:
+				return false
+			}
+		})
 		if claim := ClaimPing(r.key()); claim.Choice != PingPlain {
 			claim.Release()
 			t.Fatalf("a ping claim during a warm question chose %q, want plain", claim.Choice)
 		}
 		close(blk.out)
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if claim := ClaimPing(r.key()); claim.Choice != PingPlain {
+		testutil.WaitFor(t, "the thread is released after the warm question", func() bool {
+			claim := ClaimPing(r.key())
+			if claim.Choice != PingPlain {
 				claim.Release()
-				return
+				return true
 			}
-			time.Sleep(5 * time.Millisecond)
-		}
-		t.Fatal("the thread was never released after the warm question")
+			return false
+		})
 	})
 }
 
@@ -845,6 +848,36 @@ func TestAnUnknownPhaseThreadThatReadTheCacheIsWarmForTheWarmPath(t *testing.T) 
 	}
 }
 
+// #1191. With warm on, a thread the keep-alive cannot ping still asks its warm question: the question
+// runs after a forwarded request, not at a ping. IBM Bob's route can never be pinged (an OpenAI
+// provider, cache strategy none), and bob-ultrahigh is the one preset with warm on. Still one copy only:
+// the ping registry's (option B, below).
+func TestAWarmThreadTheKeepAliveCannotPingStillAsks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hook func() bool
+	}{
+		{"keep-alive cannot ping the thread", func() bool { return false }},
+		{"no keep-alive hook at all", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newWarmRig(t, "w-nokeep", warmCfg, payingTail(), 1.0)
+			for i := 0; i < 3; i++ {
+				c := warmCtx(r.session, r.st)
+				c.CanKeepAlive = tc.hook
+				r.request(c)
+			}
+			r.forward()
+			if n := atomic.LoadInt64(&r.asker.calls); n != 1 {
+				t.Fatalf("a warm thread the keep-alive cannot ping asked %d times, want 1", n)
+			}
+			if c := SweepWarmCounters(); c.NotRegistered != 0 || c.Fired != 1 {
+				t.Fatalf("counters = %+v, want 1 question fired and nothing counted not_registered", c)
+			}
+		})
+	}
+}
+
 // #1196 review. On the same Bob-like route, the apply of a held warm answer must see the phase the warm
 // path decided. The apply judged the phase again with the cold rule, so a held answer went in as a cold
 // drop with no cost gate, on a live cache.
@@ -872,24 +905,92 @@ func TestAHeldWarmAnswerOnAnUnknownPhaseGoesThroughTheWarmGate(t *testing.T) {
 	}
 }
 
-// ⭐ OPTION B. The warm path keeps no conversation copy of its own. A thread the keep-alive cannot ping,
-// or one with no registry entry, never asks, and that is counted.
-func TestAThreadTheKeepAliveCannotPingNeverAsksAWarmQuestion(t *testing.T) {
-	t.Run("keep-alive cannot ping the thread", func(t *testing.T) {
-		r := newWarmRig(t, "w-nokeep", warmCfg, payingTail(), 1.0)
-		for i := 0; i < 3; i++ {
-			c := warmCtx(r.session, r.st)
-			c.CanKeepAlive = func() bool { return false }
-			r.request(c)
-		}
-		r.forward()
-		if n := atomic.LoadInt64(&r.asker.calls); n != 0 {
-			t.Fatalf("a thread the keep-alive cannot ping asked %d times", n)
-		}
-		if c := SweepWarmCounters(); c.NotRegistered == 0 || c.Fired != 0 {
-			t.Fatalf("counters = %+v, want not_registered counted and no question", c)
+// #1193 review. A copy kept for a thread the keep-alive cannot ping is the warm question's only: the
+// ping path never reads it, and it lives only while a question is due or running, so it never outlives
+// the 30-minute bound on a route the keeper never tracks (IBM Bob's).
+func TestAnUnpingableWarmCopyLivesOnlyForItsQuestion(t *testing.T) {
+	noPing := func(r *warmRig) *components.Ctx {
+		c := warmCtx(r.session, r.st)
+		c.CanKeepAlive = func() bool { return false }
+		return c
+	}
+	held := func(r *warmRig) bool {
+		sweepPingMu.Lock()
+		defer sweepPingMu.Unlock()
+		_, ok := sweepPingCand[r.key()]
+		return ok
+	}
+	t.Run("no question due: no copy", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-idle", warmCfg, payingTail(), 1.0)
+		r.request(noPing(r)) // warm_every_n is 3: the first request fires nothing
+		if held(r) {
+			t.Fatal("a copy was kept for a thread that cannot be pinged and has no question due")
 		}
 	})
+	t.Run("question due: the ping path cannot read the copy", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-due", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		if !held(r) {
+			t.Fatal("no copy for the due warm question")
+		}
+		if HasSweepPingCandidate(r.key()) {
+			t.Fatal("HasSweepPingCandidate = true for a thread the keep-alive cannot ping")
+		}
+		if _, _, _, ok := SweepPingSubstitute(r.key()); ok {
+			t.Fatal("SweepPingSubstitute offered a ping question on a thread the keep-alive cannot ping")
+		}
+	})
+	t.Run("question done: the copy is dropped", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-done", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		r.forward()
+		if held(r) {
+			t.Fatal("the copy outlived its warm question")
+		}
+	})
+	t.Run("question due: a ping claim picks no sweep", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-claim", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		claim := ClaimPing(r.key())
+		defer claim.Release()
+		if claim.Choice != PingNone {
+			t.Fatalf("ClaimPing chose %q, want %q: a ping never asks from the warm question's copy", claim.Choice, PingNone)
+		}
+	})
+	t.Run("due window ended before the host resolved: the copy is dropped", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-late", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		old := warmPendingMax
+		warmPendingMax = 0 // a forward longer than the due window (a long stream, expand rounds)
+		t.Cleanup(func() { warmPendingMax = old })
+		ResolveWarmQuestion(r.session, "", true, 0)
+		if held(r) {
+			t.Fatal("the copy outlived a due window that ended before the host resolved the request")
+		}
+	})
+	t.Run("request not forwarded: the copy is dropped", func(t *testing.T) {
+		r := newWarmRig(t, "w-unping-fail", warmCfg, payingTail(), 1.0)
+		for i := 0; i < 3; i++ {
+			r.request(noPing(r))
+		}
+		ResolveWarmQuestion(r.session, "", false, 0)
+		if held(r) {
+			t.Fatal("the copy outlived a request that was not forwarded")
+		}
+	})
+}
+
+// ⭐ OPTION B. The warm path keeps no conversation copy of its own. A thread with no registry entry
+// never asks, and that is counted.
+func TestAThreadWithNoRegistryCopyNeverAsksAWarmQuestion(t *testing.T) {
 	t.Run("no registry entry (under the floor or cleared)", func(t *testing.T) {
 		r := newWarmRig(t, "w-noreg", warmCfg, payingTail(), 1.0)
 		for i := 0; i < 3; i++ {
@@ -1140,17 +1241,7 @@ func TestTheWarmQuestionIsJudgedByTheSharedCacheReadRule(t *testing.T) {
 			r.request(nil)
 		}
 		ResolveWarmQuestion(r.session, "", true, turnRead)
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			warmMu.Lock()
-			th := warmThreads[r.key()]
-			busy := th != nil && (th.asking || th.warmPending())
-			warmMu.Unlock()
-			if !busy {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		r.waitIdle()
 		return r.held(), copyWarmGates()
 	}
 	if held, _ := run(1000); !held {
@@ -1824,12 +1915,18 @@ type batchAsker struct {
 	mu    sync.Mutex
 	calls int
 	fn    func(n int, ask string) (string, components.PrefixUsage, error)
+	left  []time.Duration // time left on each call's context deadline, -1 for none
 }
 
-func (a *batchAsker) Ask(_ context.Context, _, ask string) (string, components.PrefixUsage, error) {
+func (a *batchAsker) Ask(ctx context.Context, _, ask string) (string, components.PrefixUsage, error) {
+	d := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		d = time.Until(dl)
+	}
 	a.mu.Lock()
 	n := a.calls
 	a.calls++
+	a.left = append(a.left, d)
 	a.mu.Unlock()
 	if a.fn != nil {
 		return a.fn(n, ask)
@@ -2011,21 +2108,48 @@ func TestTheWarmAskHonoursMaxAskBatches(t *testing.T) {
 // The warm sweep's OUTER bound is the keeper's (300 s), as at the ping, not the 90 s of one question: a
 // sweep of k batches would otherwise end after the first one. A timeout of 0 falls back to llmCallTimeout.
 func TestTheWarmSweepOuterTimeoutFitsSeveralBatches(t *testing.T) {
-	prev := llmCallTimeout
-	llmCallTimeout = 40 * time.Millisecond // one question's bound, tiny
-	defer func() { llmCallTimeout = prev }()
-	slow := &batchAsker{fn: func(n int, ask string) (string, components.PrefixUsage, error) {
-		time.Sleep(30 * time.Millisecond) // each batch is under one question's bound; three together are over it
-		return dropAll(ask), components.PrefixUsage{CacheRead: 19595, Fresh: 40, Output: 90}, nil
-	}}
-	r := bigWarmRig(t, "w-outer", 30, slow)
-	for i := 0; i < 3; i++ {
-		r.request(nil)
-	}
-	r.forward()
-	if got := slow.count(); got != 3 {
-		t.Fatalf("the warm sweep asked %d of 3 batches: the OUTER bound must be the keeper's, not one question's", got)
-	}
+	// Logic, always on: with the real bounds and no delay, the warm sweep asks all 3 batches.
+	t.Run("all batches are asked", func(t *testing.T) {
+		fast := &batchAsker{}
+		r := bigWarmRig(t, "w-outer-logic", 30, fast)
+		for i := 0; i < 3; i++ {
+			r.request(nil)
+		}
+		r.forward()
+		if got := fast.count(); got != 3 {
+			t.Fatalf("the warm sweep asked %d of 3 batches", got)
+		}
+	})
+	// The property: the outer timeout is long enough that N batches of normal length finish inside it.
+	// The asker reads the deadline of the context it gets. With one question's bound set far above the
+	// outer one, that deadline is the outer deadline. No wall-clock wait: the asker does not sleep.
+	t.Run("the outer deadline is the keeper's, and fits the batches", func(t *testing.T) {
+		const batches = 3
+		perQuestion := llmCallTimeout
+		outer := CacheAwareSummarizerCallTimeout()
+		if outer < time.Duration(batches)*perQuestion {
+			t.Fatalf("outer timeout %v is under %d x one question's bound %v", outer, batches, perQuestion)
+		}
+		llmCallTimeout = 10 * time.Hour // so the outer deadline is the earlier one
+		defer func() { llmCallTimeout = perQuestion }()
+		probe := &batchAsker{}
+		r := bigWarmRig(t, "w-outer", 30, probe)
+		for i := 0; i < batches; i++ {
+			r.request(nil)
+		}
+		r.forward()
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		if len(probe.left) != batches {
+			t.Fatalf("the warm sweep asked %d of %d batches", len(probe.left), batches)
+		}
+		for i, d := range probe.left {
+			// Wide margins: the deadline set at the start is at most outer, and at least half of it is left.
+			if d > outer || d < outer/2 {
+				t.Errorf("batch %d saw %v left, want between %v and %v: the OUTER bound must be the keeper's", i, d, outer/2, outer)
+			}
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------------------------------

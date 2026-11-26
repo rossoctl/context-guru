@@ -89,8 +89,8 @@ func TestTheDeferralSavingIsOnTheDeferralCardAndTheTotalIsUnchanged(t *testing.T
 // figure (#1441). A search turn is a spend on the tooldefer operator, so the cost column holds it, and the stored net
 // is the component figure.
 func TestTheToolsPageCostIsGrossLessTheOneFigure(t *testing.T) {
-	const search = 0.0001
-	e := deferralEvent(search, false)
+	const search = 10 * 15e-6
+	e := deferralEvent(10, false)
 	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("fell back: %q", fb)
 	}

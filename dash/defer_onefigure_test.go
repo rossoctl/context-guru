@@ -6,6 +6,7 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/tooldefer"
 )
 
@@ -20,7 +21,7 @@ func searchedEvent(price string, fresh int64, saved accountant.TierTokens) *Even
 		Components: []CompRow{{Component: "idle"}}}
 	ops := []accountant.PricedOp{{Operator: accwire.Operator(accwire.OpToolDefer), ChangeID: "cg:tooldefer:x", Saved: saved}}
 	spend := tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500}
-	for _, o := range accrec.DeferSpendOps("m", spend) {
+	for _, o := range accrec.DeferSpendOps(spend) {
 		ops = append(ops, accountant.PricedOp{OpID: o.ID, Kind: o.Kind, Operator: o.Operator, Call: o.Call})
 	}
 	e.SetAccountant(accountant.Result{Ops: ops})
@@ -96,23 +97,6 @@ func TestDeferFigureAboveAPriceLineHoldsTheReRateAndTheSearchTurns(t *testing.T)
 	}
 }
 
-// A spend call prices at the size of its own usage, as accountant.Figure does: a small call stays at the base rates
-// whatever the request's prompt, and a call of its own above the line is dear.
-func TestDeferSpendPricesAtItsOwnSize(t *testing.T) {
-	call := func(in int) *accountant.ModelCall {
-		return &accountant.ModelCall{Usage: accountant.CallUsage{Usage: accountant.Usage{Input: in}}}
-	}
-	if got := spendUSD(gpt56(), call(1000)); !accNear(got, 1000*5e-6) {
-		t.Fatalf("small call: %v", got)
-	}
-	if got := spendUSD(gpt56(), call(300_000)); !accNear(got, 300_000*10e-6) {
-		t.Fatalf("call above the line: %v", got)
-	}
-	if got := spendUSD(accTestPrice, call(300_000)); !accNear(got, 300_000*3e-6) {
-		t.Fatalf("a price with no tiers: %v", got)
-	}
-}
-
 // An unpriced model books no figure anywhere: no lever, no gross, no cost. The ledger counts it as unpriced.
 func TestDeferUnpricedModelBooksNoFigure(t *testing.T) {
 	e := searchedEvent("", 100_000, accountant.TierTokens{CacheRead: 20_000})
@@ -123,5 +107,34 @@ func TestDeferUnpricedModelBooksNoFigure(t *testing.T) {
 	}
 	if e.DeferNetUSD != 0 || e.DeferGrossUSD != 0 || e.DeferCostUSD != 0 || e.AccountantPriced {
 		t.Fatalf("net %v gross %v cost %v priced %v, want no figure", e.DeferNetUSD, e.DeferGrossUSD, e.DeferCostUSD, e.AccountantPriced)
+	}
+}
+
+// A tiered price table and a net-adding request: the deferral adds more tokens than it saves, and pushes the prompt
+// over the line (sent 280,000, without it 255,000). The row's columns and what /stats books (accrec.DeferMoney on the
+// library's figure) are the same numbers, re-rate included, because both read accountant.Figure (#1441).
+func TestDeferRowEqualsTheLedgerOnATieredNetAddingRequest(t *testing.T) {
+	e := searchedEvent("", 280_000, accountant.TierTokens{Input: 5_000})
+	res, _ := e.AccountantResult()
+	res.Ops[0].Caused = accountant.TierTokens{Input: 30_000}
+	e.SetAccountant(res)
+	e.PriceMode(gpt56(), true)
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("fell back: %q", fb)
+	}
+	fig := e.AccountantFigure(gpt56())
+	m := accrec.DeferMoney(fig.Fig)
+	if !accNear(e.DeferNetUSD, m.Net) || !accNear(e.DeferGrossUSD, m.Gross) || !accNear(e.DeferCostUSD, m.Cost) {
+		t.Fatalf("row net %v gross %v cost %v, ledger %+v: want the same numbers", e.DeferNetUSD, e.DeferGrossUSD, e.DeferCostUSD, m)
+	}
+	if e.DeferNetUSD >= 0 {
+		t.Fatalf("net %v: a net-adding request must show a cost", e.DeferNetUSD)
+	}
+	// The re-rate is in it: the same request at flat rates gives a different figure.
+	flat := gpt56()
+	flat.Tiers = [modelinfo.MaxTiers]modelinfo.PriceTier{}
+	f2 := e.AccountantFigure(flat)
+	if accNear(accrec.DeferMoney(f2.Fig).Net, m.Net) {
+		t.Fatalf("a tiered and a flat table give one figure %v: the test does not reach the re-rate", m.Net)
 	}
 }

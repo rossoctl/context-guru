@@ -53,6 +53,10 @@ type Flow struct {
 	// Upstream and Route name the endpoint the request goes to. They key the probe verdicts.
 	Upstream, Route string
 	Parts           func() Parts
+	// Prices prices a model.
+	//
+	// Deprecated: nothing reads it. The accountant prices deferral (#1441). Kept so a library user's code still builds.
+	Prices modelinfo.Pricer
 	// ProjectFor reads the project directory off the client's pristine body: the host passes
 	// apply.ProjectFor. A field, not an import, because apply's own test imports this package.
 	ProjectFor func(provider bschemas.ModelProvider, body []byte) string

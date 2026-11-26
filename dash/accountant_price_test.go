@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -137,7 +138,7 @@ func TestFigure_TTLRescueIsAPositiveSaving(t *testing.T) {
 
 func TestFigure_UnknownEffectKindIsUnpriced(t *testing.T) {
 	f := figOf(accountant.Result{CacheEffects: []accountant.CacheEffect{{Kind: "future", Saved: accountant.TierTokens{Input: 1}}}})
-	if !reflect.DeepEqual(f.Unpriced, []string{"effect:future:unknown_kind"}) || f.DeltaUSD != 0 {
+	if !reflect.DeepEqual(f.Unpriced, []string{":effect_future_unknown_kind"}) || f.DeltaUSD != 0 {
 		t.Fatalf("%+v", f)
 	}
 }
@@ -174,9 +175,11 @@ func TestFigure_ComponentNameTrimsOnlyTheOperatorPrefix(t *testing.T) {
 	}
 }
 
+// The interaction is attributed to nobody: no component's figure holds it. It is counted, on its own
+// field (and on the interaction row, see TestPriceMode_InteractionHasARow).
 func TestFigure_InteractionIsAttributedToNobody(t *testing.T) {
 	f := figOf(accountant.Result{Interaction: accountant.TierTokens{Input: 5000}})
-	if f.DeltaUSD != 0 || len(f.ByComponent) != 0 {
+	if len(f.ByComponent) != 0 || !accNear(f.InteractionUSD, 5000*3e-6) || !accNear(f.DeltaUSD, 5000*3e-6) {
 		t.Fatalf("%+v", f)
 	}
 }
@@ -300,11 +303,11 @@ func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
 
 // NextRequestUSD names the 1h tier by the modelinfo TTL, not by a literal.
 func TestNextRequestUSDColdAtTheOneHourRate(t *testing.T) {
-	_, cold := NextRequestUSD(accTestPrice, 1000, 3600)
+	_, cold := NextRequestUSD(accTestPrice, 1000, 0, 3600)
 	if want := 1000 * accTestPrice.CacheWrite1h(); !accNear(cold, want) {
 		t.Errorf("1h cold = %v, want %v", cold, want)
 	}
-	_, cold = NextRequestUSD(accTestPrice, 1000, 300)
+	_, cold = NextRequestUSD(accTestPrice, 1000, 0, 300)
 	if want := 1000 * accTestPrice.CacheWrite; !accNear(cold, want) {
 		t.Errorf("5m cold = %v, want %v", cold, want)
 	}
@@ -333,13 +336,40 @@ func TestTierTokensCarryEveryLibraryTier(t *testing.T) {
 // A fatal library check this host has no name for still gates the figure (issue #1077). The library
 // decides which checks are fatal; a non-fatal one does not gate.
 func TestAnUnnamedFatalCheckStillGates(t *testing.T) {
-	if got := fatalCheckFallback("some_future_check"); got != FallbackCheckOther {
-		t.Errorf("fatalCheckFallback = %q, want %q", got, FallbackCheckOther)
+	if reason, _ := accrec.Gate(accountant.Result{Checks: []accountant.CheckFailure{{Check: accountant.CheckSum}}}, accountant.USDFigure{},
+		accrec.GateIn{TokensBefore: 1}); reason != FallbackCheckSum {
+		t.Errorf("a fatal sum check gives %q, want %q", reason, FallbackCheckSum)
 	}
 	e := switchEvent()
 	e.accRes.Checks = []accountant.CheckFailure{{Check: accountant.CheckConservation}}
 	e.PriceMode(accTestPrice, true)
 	if got := e.AccountantFallback(); got != "" {
 		t.Errorf("an informational check gated the figure: fallback %q", got)
+	}
+}
+
+// The interaction on a rescued request (accountant design §6.2) is counted in DeltaUSD and owned by
+// no component: Interaction minus InteractionCaused, at the size without context-guru. Before, the
+// dashboard ignored it while the metrics booked it.
+func TestFigure_InteractionCountsAndIsUnowned(t *testing.T) {
+	f := figOf(accountant.Result{
+		Ops: []accountant.PricedOp{{Operator: "context-guru.mask", ChangeID: "c1", Saved: accountant.TierTokens{CacheRead: 100}}},
+		CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectRescue, ChangeID: "ka:main:1",
+			Saved: accountant.TierTokens{CacheWrite5m: 200}, Caused: accountant.TierTokens{CacheRead: 200}}},
+		Interaction:       accountant.TierTokens{CacheWrite5m: 100},
+		InteractionCaused: accountant.TierTokens{CacheRead: 100},
+	})
+	ia := 100*3.75e-6 - 100*0.3e-6
+	if !accNear(f.InteractionUSD, ia) || !accNear(f.DeltaUSD, 100*0.3e-6+ia) {
+		t.Fatalf("interaction %v delta %v, want %v and %v", f.InteractionUSD, f.DeltaUSD, ia, 100*0.3e-6+ia)
+	}
+	if !accNear(f.ByComponent["mask"], 100*0.3e-6) || !accNear(f.KeepAliveSavedUSD, 200*3.75e-6-200*0.3e-6) {
+		t.Fatalf("the interaction moved into a component or the rescue: %+v", f)
+	}
+	if got := f.TokByComponent[InteractionComponent]; got.Saved.CacheWrite5m != 100 || got.Caused.CacheRead != 100 {
+		t.Fatalf("interaction tokens %+v", got)
+	}
+	if g := figOf(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask", Saved: accountant.TierTokens{Input: 1}}}}); g.InteractionUSD != 0 {
+		t.Fatalf("no interaction, figure %v", g.InteractionUSD)
 	}
 }

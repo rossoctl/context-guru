@@ -119,19 +119,9 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The cache write this ping avoids, priced from the SAME prefix and tier /api/cachestate
-	// shows as next_cold_usd.
-	var rewrite float64
-	if p := h.opts.Prices; p != nil && th.Model != "" {
-		if price, ok := p.Price(r.Context(), th.Model); ok && !price.Zero() {
-			_, rewrite = dash.NextRequestUSD(price, th.PrefixTokens, th.TTLSeconds)
-		}
-	}
-
 	res, err := h.keeper.PingNow(keepalive.ManualRequest{
-		Key:        keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread},
-		MinGap:     manualPingMinGap,
-		RewriteUSD: rewrite,
+		Key:    keepalive.Key{Tenant: tenantID, Session: scoped, Thread: thread},
+		MinGap: manualPingMinGap,
 	})
 	var soon *keepalive.TooSoonError
 	var up *keepalive.UpstreamError
@@ -173,14 +163,14 @@ func (h *Handler) manualPing(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "upstream"})
 		return
 	}
-	saved := keepalive.ManualSavedUSD(rewrite, res)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"sent":          true,
-		"cache_read":    res.Usage.CacheRead,
-		"cache_write":   res.Usage.CacheWrite,
-		"ping_usd":      res.CostUSD,
-		"rewrite_usd":   rewrite,
-		"saved_usd":     saved,
+		"sent":        true,
+		"cache_read":  res.Usage.CacheRead,
+		"cache_write": res.Usage.CacheWrite,
+		"ping_usd":    res.CostUSD,
+		// The saving is credited by the accountant on the thread's next real request, so the answer says it is
+		// pending and carries no estimate (#1460). An older plugin reads a missing saved_usd as no saving.
+		"saving":        "pending",
 		"warm_until_ms": res.StartedAt.Add(time.Duration(th.TTLSeconds) * time.Second).UnixMilli(),
 	})
 }

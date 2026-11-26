@@ -206,9 +206,8 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 // prompt size of each side (PriceAt, Price.At). ByComponent is keyed by operator. It works with or without the
 // dashboard, and it can be called at any time after the response: it joins the job and prices the request if finish
 // has not (accCompute), so the order of the two does not matter. ok is false when the request books no figure: no
-// billed usage, a rejected or multi-round request, an observe run, a trace that dropped operations, no model price, a
-// result that fails a gate of accountant.Withhold (checks and unpriced; the size gate is the dashboard's), or any
-// panic. It never changes the request. It is the hook for the deferral ledger (deferLedger).
+// billed usage, a rejected or multi-round request, an observe run, no model price, a request that accrec.Gate
+// refuses (the same gate as the dashboard row: dropped operations, checks, unpriced, size, rows), or any panic. It never changes the request. It is the hook for the deferral ledger (deferLedger).
 func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig accountant.USDFigure, ok bool) {
 	if c == nil || c.pricer == nil || c.model == "" {
 		return accountant.USDFigure{}, false
@@ -220,17 +219,26 @@ func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig
 		}
 	}()
 	res, have := c.accCompute(usage, usageOK)
-	if !have || accrec.FigureWithheld(res, c.observe, c.trace.OpsDropped) {
+	if !have {
 		return accountant.USDFigure{}, false
 	}
 	if _, priced := c.pricer.Price(ctx, c.model); !priced {
 		return accountant.USDFigure{}, false
 	}
-	return accountant.Figure(accountant.FigureInput{
+	fig = accountant.Figure(accountant.FigureInput{
 		Model: c.model, At: c.start, Output: int(usage.Output), Result: res,
 		Billed: accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
 			CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)},
-	}, metricsPricer{prices: c.pricer}), true
+	}, metricsPricer{prices: c.pricer})
+	// The dashboard row's gate, so a request the row refuses books no figure here either (accrec.Gate).
+	in := accrec.GateIn{Observe: c.observe, OpsDropped: c.trace.OpsDropped, Rows: accrec.GateRowsOf(c.trace.Run)}
+	if c.trace.Run != nil {
+		in.TokensBefore = c.trace.Run.TokensBefore
+	}
+	if reason, _ := accrec.Gate(res, fig, in); reason != "" {
+		return accountant.USDFigure{}, false
+	}
+	return fig, true
 }
 
 // finishAccountant ends a request that has no dashboard. It runs on its own goroutine, off the client's path. It prices the request (which books the metrics), drops the
@@ -257,7 +265,7 @@ func (c *capture) accDeferSpend() {
 	if c.accReq == nil || d == nil || !d.spendOK {
 		return
 	}
-	for _, op := range accrec.DeferSpendOps(d.model, d.spend) {
+	for _, op := range accrec.DeferSpendOps(d.spend) {
 		c.accReq.Add(op)
 	}
 }

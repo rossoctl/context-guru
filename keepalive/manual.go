@@ -59,10 +59,9 @@ type ManualRequest struct {
 	Key Key
 	// MinGap is the least time between two manual pings of this thread; zero is no limit.
 	MinGap time.Duration
-	// RewriteUSD is what writing the thread's current context into a cold cache would cost: the
-	// credit when this ping keeps it warm. The host prices it (it knows the TTL tier the cache
-	// was written at); the keeper only carries it onto the report, and zeroes it when the ping
-	// read nothing, because then it avoided nothing.
+	// RewriteUSD is the host's estimate of the write a manual ping avoids.
+	//
+	// Deprecated: the keeper ignores it (#1460). The accountant credits the rescue on the thread's next real request.
 	RewriteUSD float64
 }
 
@@ -74,7 +73,9 @@ type ManualResult struct {
 	// CostUSD is the ping's own cost; Priced is false when the model has no rate.
 	CostUSD float64
 	Priced  bool
-	// AvoidedUSD is the rewrite the ping saved: ManualRequest.RewriteUSD if it read the cache, else 0.
+	// AvoidedUSD was the rewrite the ping saved.
+	//
+	// Deprecated: the keeper no longer sets it, so it is always 0 (#1460). The accountant credits the rescue on the thread's next real request.
 	AvoidedUSD float64
 }
 
@@ -178,9 +179,6 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		return res, &UpstreamError{Status: resp.Status}
 	}
 	res.CostUSD, res.Priced = k.pingCost(endpoint, job.model, prefix, u)
-	if u.CacheRead > 0 {
-		res.AvoidedUSD = r.RewriteUSD
-	}
 	if u.CacheRead > 0 || u.CacheWrite > 0 {
 		// A ping that read the entry refreshed it; one that wrote re-created it and started a fresh
 		// lifetime (#580). The same rule record1 applies, and the same two clocks it moves. The
@@ -211,7 +209,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 			DurationMs: float64(k.now().Sub(start).Microseconds()) / 1000.0, TS: k.now().UnixMilli(),
 			Agent: agent, Preset: preset, StopReason: u.StopReason, FreshInput: u.FreshInput,
 			CacheWrite1h: u.CacheWrite1h, MaxTokens: pingOutputBudget(job.route) + job.vary%pingVary,
-			Manual: true, Strategy: ManualStrategyID, RewriteUSD: res.AvoidedUSD,
+			Manual: true, Strategy: ManualStrategyID,
 			Window: job.gapStart, Header: resp.Header,
 		})
 	}
@@ -277,8 +275,10 @@ func ManualPingBlock(oneHourLive bool, lastTouch time.Time, ttl time.Duration, n
 	return ""
 }
 
-// ManualSavedUSD is the money one manual ping kept: the rewrite it avoided less its own cost. A ping
-// that read nothing (AvoidedUSD is 0), or cost more than the write, kept nothing warm, so it saved 0.
+// ManualSavedUSD is the money one manual ping kept by an estimate: the rewrite it avoided less its own cost.
+//
+// Deprecated: nothing books or shows it any more (#1460). The accountant credits the rescue on the thread's next
+// real request. It stays so that importers still build.
 func ManualSavedUSD(rewriteUSD float64, res ManualResult) float64 {
 	saved := rewriteUSD - res.CostUSD
 	if saved < 0 || res.AvoidedUSD == 0 {
