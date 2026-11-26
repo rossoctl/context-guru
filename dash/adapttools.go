@@ -515,6 +515,7 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 		if ok && r.ts >= out.rewriteTS {
 			out.rewriteTS = r.ts
 			// The one-off cost of the rewrite: the whole prompt written at the 5-minute rate instead of read.
+			// OneHour stays false on purpose: this change keeps the old tier. A 1h rewrite is a separate behavior change.
 			// The accountant prices a miss (R1). It is sized as the request without the filter, as before.
 			prompt := modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite)
 			out.RewriteUSD, _ = accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: prompt, PromptTokens: prompt + r.removed},
