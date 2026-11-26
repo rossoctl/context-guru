@@ -844,3 +844,13 @@ func TestWrongGuesses(t *testing.T) {
 		}
 	}
 }
+
+// A stream with CRLF framing and a [DONE] marker reads like one with LF (#1499). This is a
+// regression pin: the old reader also coped, because TrimSpace dropped the "\r".
+func TestReadSearchesSSEFraming(t *testing.T) {
+	sse := []byte("data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"server_tool_use\",\"name\":\"tool_search_tool_bm25\"}}\r\n\r\n" +
+		"data: [DONE]\r\n\r\n")
+	if r := ReadSearchesSSE(sse); r.Searches != 1 {
+		t.Fatalf("crlf: %+v", r)
+	}
+}

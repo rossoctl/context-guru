@@ -1,9 +1,6 @@
 package expand
 
 import (
-	"bufio"
-	"bytes"
-	"sort"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -36,23 +33,20 @@ func AggregateSSE(provider string, raw []byte) (msg []byte, ok bool) {
 // items. Only a completed response is safe to replay as a continuation prefix;
 // partial output-item deltas can omit arguments or opaque reasoning state.
 func aggregateResponsesSSE(raw []byte) ([]byte, bool) {
-	sc := bufio.NewScanner(bytes.NewReader(raw))
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		ev := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+	var out []byte
+	schema.SSEData(raw, func(d []byte) bool {
+		ev := gjson.ParseBytes(d)
 		if ev.Get("type").String() != "response.completed" {
-			continue
+			return true
 		}
 		resp := ev.Get("response")
 		if resp.IsObject() && resp.Get("output").IsArray() {
-			return []byte(resp.Raw), true
+			out = []byte(resp.Raw)
+			return false
 		}
-	}
-	return nil, false
+		return true
+	})
+	return out, out != nil
 }
 
 // aggregateAnthropicSSE walks the message_start → content_block_* → message_delta
@@ -61,29 +55,20 @@ func aggregateResponsesSSE(raw []byte) ([]byte, bool) {
 // blocks concatenate input_json_delta.partial_json into the block's input.
 func aggregateAnthropicSSE(raw []byte) ([]byte, bool) {
 	type block struct {
-		typ     string
-		text    strings.Builder // for text blocks (and thinking_delta on thinking blocks)
-		partial strings.Builder // for tool_use input_json_delta
-		sig     strings.Builder // for thinking blocks' signature_delta
-		start   gjson.Result    // the content_block object from content_block_start
+		typ   string
+		text  strings.Builder // for text blocks (and thinking_delta on thinking blocks)
+		sig   strings.Builder // for thinking blocks' signature_delta
+		start gjson.Result    // the content_block object from content_block_start
 	}
+	var tools schema.CallStream // the tool_use blocks: schema.CallStream is the one rebuild of them
 	blocks := map[int]*block{}
 	maxIdx := -1
 	stopReason := ""
 	sawStart := false
 
-	sc := bufio.NewScanner(bytes.NewReader(raw))
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(line[len("data:"):])
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		ev := gjson.Parse(payload)
+	schema.SSEData(raw, func(payload []byte) bool {
+		tools.Add(payload)
+		ev := gjson.ParseBytes(payload)
 		switch ev.Get("type").String() {
 		case "message_start":
 			sawStart = true
@@ -109,8 +94,6 @@ func aggregateAnthropicSSE(raw []byte) ([]byte, bool) {
 			switch d.Get("type").String() {
 			case "text_delta":
 				b.text.WriteString(d.Get("text").String())
-			case "input_json_delta":
-				b.partial.WriteString(d.Get("partial_json").String())
 			case "thinking_delta":
 				b.text.WriteString(d.Get("thinking").String())
 			case "signature_delta":
@@ -121,8 +104,9 @@ func aggregateAnthropicSSE(raw []byte) ([]byte, bool) {
 				stopReason = sr
 			}
 		}
-	}
-	if err := sc.Err(); err != nil || !sawStart || maxIdx < 0 {
+		return true
+	})
+	if !sawStart || maxIdx < 0 {
 		return nil, false
 	}
 
@@ -153,10 +137,11 @@ func aggregateAnthropicSSE(raw []byte) ([]byte, bool) {
 			}
 			out, _ = sjson.SetRaw(out, "content.-1", blk)
 		case "tool_use":
+			call, _ := tools.Block(i)
 			blk := `{"type":"tool_use"}`
-			blk, _ = sjson.Set(blk, "id", b.start.Get("id").String())
-			blk, _ = sjson.Set(blk, "name", b.start.Get("name").String())
-			input := strings.TrimSpace(b.partial.String())
+			blk, _ = sjson.Set(blk, "id", call.ID)
+			blk, _ = sjson.Set(blk, "name", call.Name)
+			input := strings.TrimSpace(call.Args)
 			if input == "" {
 				input = "{}"
 			}
@@ -179,30 +164,21 @@ func aggregateAnthropicSSE(raw []byte) ([]byte, bool) {
 // text and tool calls (by index, arguments joined), its finish reason and the usage chunk. ok=false
 // when the stream holds no chunk.
 func aggregateChatSSE(raw []byte) ([]byte, bool) {
-	type call struct {
-		id, name string
-		args     strings.Builder
-	}
 	var text, reasoning strings.Builder
-	calls := map[int64]*call{}
-	var order []int64
+	var tools schema.CallStream // the tool calls: schema.CallStream is the one rebuild of them
 	finish, usage, id, model := "", "", "", ""
 	seen := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		p := strings.TrimSpace(line[5:])
-		if p == "" || p == "[DONE]" || !gjson.Valid(p) {
-			continue
+	schema.SSEData(raw, func(d []byte) bool {
+		p := string(d)
+		if !gjson.Valid(p) {
+			return true
 		}
 		ev := gjson.Parse(p)
 		if !ev.Get("choices").Exists() {
 			// Not a Chat Completions chunk. One small change from the copy this replaced, which
 			// counted any data line: a stream with no chunk now returns ok=false instead of an
 			// empty message. serve bails on both, so the client gets the same bytes.
-			continue
+			return true
 		}
 		seen = true
 		if id == "" {
@@ -213,32 +189,17 @@ func aggregateChatSSE(raw []byte) ([]byte, bool) {
 		}
 		ch := ev.Get("choices.0")
 		if !ch.Exists() {
-			continue
+			return true
 		}
 		if f := ch.Get("finish_reason").String(); f != "" {
 			finish = f
 		}
-		d := ch.Get("delta")
-		text.WriteString(d.Get("content").String())
-		reasoning.WriteString(d.Get("reasoning_content").String())
-		d.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
-			i := tc.Get("index").Int()
-			c := calls[i]
-			if c == nil {
-				c = &call{}
-				calls[i] = c
-				order = append(order, i)
-			}
-			if v := tc.Get("id").String(); v != "" {
-				c.id = v
-			}
-			if v := tc.Get("function.name").String(); v != "" {
-				c.name = v
-			}
-			c.args.WriteString(tc.Get("function.arguments").String())
-			return true
-		})
-	}
+		dl := ch.Get("delta")
+		text.WriteString(dl.Get("content").String())
+		reasoning.WriteString(dl.Get("reasoning_content").String())
+		tools.Add(d)
+		return true
+	})
 	if !seen {
 		return nil, false
 	}
@@ -248,12 +209,10 @@ func aggregateChatSSE(raw []byte) ([]byte, bool) {
 		// GLM and Kimi stream their reasoning: the follow-up's assistant turn keeps it.
 		msg, _ = sjson.Set(msg, "reasoning_content", reasoning.String())
 	}
-	sort.Slice(order, func(a, b int) bool { return order[a] < order[b] })
-	for _, i := range order {
-		c := calls[i]
-		tc, _ := sjson.Set(`{"type":"function","function":{}}`, "id", c.id)
-		tc, _ = sjson.Set(tc, "function.name", c.name)
-		tc, _ = sjson.Set(tc, "function.arguments", c.args.String())
+	for _, c := range tools.Calls() {
+		tc, _ := sjson.Set(`{"type":"function","function":{}}`, "id", c.ID)
+		tc, _ = sjson.Set(tc, "function.name", c.Name)
+		tc, _ = sjson.Set(tc, "function.arguments", c.Args)
 		msg, _ = sjson.SetRaw(msg, "tool_calls.-1", tc)
 	}
 	out := `{"object":"chat.completion","choices":[{"index":0}]}`

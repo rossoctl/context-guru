@@ -67,3 +67,25 @@ func TestResponseToolUseNamesResponsesBuffered(t *testing.T) {
 		t.Fatalf("got %v, want [lookup]", got)
 	}
 }
+
+// A streamed Responses call is named, from the event that opens it or from the terminal event (#1484).
+func TestToolUseNamesResponsesStream(t *testing.T) {
+	ev := func(s string) string { return "data: " + s + "\n\n" }
+	opened := ev(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"c","name":"shell","arguments":""}}`) +
+		ev(`{"type":"response.output_item.added","output_index":1,"item":{"type":"custom_tool_call","call_id":"d","name":"apply_patch","input":""}}`)
+	if got := ToolUseNames(true, []byte(opened)); len(got) != 1 || got[0] != "shell" {
+		t.Errorf("opened: %v, want [shell] (a custom tool call is not counted)", got)
+	}
+	done := ev(`{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"c","name":"read","arguments":"{}"}]}}`)
+	if got := ToolUseNames(true, []byte(done)); len(got) != 1 || got[0] != "read" {
+		t.Errorf("completed: %v, want [read]", got)
+	}
+}
+
+// A stream with CRLF framing reads the same as one with LF (#1499).
+func TestToolUseNamesCRLFStream(t *testing.T) {
+	stream := "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"Bash\"}}\r\n\r\n"
+	if got := ToolUseNames(true, []byte(stream)); len(got) != 1 || got[0] != "Bash" {
+		t.Errorf("got %v", got)
+	}
+}

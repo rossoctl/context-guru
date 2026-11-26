@@ -452,21 +452,11 @@ func readSSEEvent(br *bufio.Reader, ev *bytes.Buffer) ([]byte, error) {
 	}
 }
 
-// sseEventPayload returns the JSON carried by an event's data: line, or "" if it has none.
-func sseEventPayload(ev []byte) string {
-	for _, line := range bytes.Split(ev, []byte("\n")) {
-		i := bytes.IndexByte(line, ':')
-		if i < 0 || !bytes.Equal(bytes.TrimSpace(line[:i]), []byte("data")) {
-			continue
-		}
-		p := string(bytes.TrimSpace(line[i+1:]))
-		if p == "[DONE]" {
-			return ""
-		}
-		return p
-	}
-	return ""
-}
+// sseEventPayload returns the JSON carried by an event's data: lines, or "" if it has none. The
+// framing rules are schema.SSEEventData's. This file keeps its own event reader (readSSEEvent)
+// because it forwards each event byte for byte, framing included, and reads the payload only to
+// decide whether to cut the stream there.
+func sseEventPayload(ev []byte) string { return string(schema.SSEEventData(ev)) }
 
 // startsProxyToolCall reports whether this event OPENS a tool_use block for ANY tool the proxy
 // injected — the one class of block a client must never receive, because only this proxy implements

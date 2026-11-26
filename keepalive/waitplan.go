@@ -5,6 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/waitcause"
 )
@@ -198,17 +199,11 @@ func toolStopWait(w string, noNames bool, stopReason string) string {
 }
 
 // ToolStopReasons are the stop reasons that mean "the response called a tool". The dashboard reads
-// the same list when it looks for the first tool call of a thread in its stored rows.
-var ToolStopReasons = []string{"tool_use", "tool_calls", "function_call"}
+// the same list when it looks for the first tool call of a thread in its stored rows. The list is
+// schema.ToolStopReasonList, as a copy of its own.
+var ToolStopReasons = schema.ToolStopReasonList()
 
-func toolStop(stopReason string) bool {
-	for _, s := range ToolStopReasons {
-		if s == stopReason {
-			return true
-		}
-	}
-	return false
-}
+func toolStop(stopReason string) bool { return schema.IsToolStopReason(stopReason) }
 
 // SpanFacts is what a stored request row says about the idle span that follows it: the facts the
 // plan needs. The dashboard replays the plan from them (Policy.SpanPings).

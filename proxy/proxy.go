@@ -2065,7 +2065,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, h.thinkCollector(provider, resp))
+			first, u, why, ok := h.streamRecOn(w, resp, tee, cl, ag, h.thinkCollector(provider, resp))
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2164,7 +2164,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see record.TurnFromCall.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, nil) // no Anthropic stream here: nothing to collect
+			first, u, why, ok := h.streamRecOn(w, resp, tee, cl, ag, nil) // no Anthropic stream here: nothing to collect
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2191,7 +2191,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		u, why, ok := responseUsageWhy(cl, resp.Header.Get("Content-Type"), respBody, false)
 		if h.savings != nil {
 			u.Thinking = thinkcount.FromBody(resp.Header.Get("Content-Type"), respBody) // issue #1187
 		}
@@ -2438,7 +2438,7 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
-	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
+	return h.streamRecOn(w, resp, tee, agent.Client{}, agent.Base{}, nil)
 }
 
 // thinkCollector is the Collector for a chat response the accountant prices, or nil. The thinking signatures
@@ -2455,7 +2455,7 @@ func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Res
 // streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
 // the shared parser's usage reading (readAgentUsage). think, when not nil, is the thinking collector
 // (thinkCollector), and it reads every byte the client gets.
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, cl agent.Client, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2490,7 +2490,7 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// hidden block as `unreadable_body` rather than as the provider streaming no usage — and a
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
-	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
+	u, why, ok = responseUsageWhy(cl, resp.Header.Get("Content-Type"), win, sn.spliced())
 	{
 		// The request's context carries its logger. A test's hand-built response has no request.
 		ctx := context.Background()

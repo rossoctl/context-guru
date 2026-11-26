@@ -9,7 +9,9 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/providerusage"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // Miss says WHY no billed tiers came back, because "ok=false" meant five different things
@@ -197,18 +199,10 @@ func ParseSSEUsage(raw []byte) (providerusage.Tiers, Miss, string) {
 	// because "no block in what we kept" and "no block anywhere" are different facts.
 	worst := MissAbsent
 	worstPayload := "" // the event `worst` came from, so the record describes the right one
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
+	schema.SSEData(raw, func(d []byte) bool {
 		// Anthropic nests the first usage under message.usage; OpenAI puts it at the top.
 		for _, path := range []string{"usage", "message.usage", "response.usage"} {
-			u := gjson.Get(payload, path)
+			u := gjson.GetBytes(d, path)
 			// providerusage.Present, not Exists: `"usage": null` on every chunk is what OpenAI-dialect
 			// streaming sends absent stream_options.include_usage, and it is not a block.
 			if !providerusage.Present(u) {
@@ -217,7 +211,7 @@ func ParseSSEUsage(raw []byte) (providerusage.Tiers, Miss, string) {
 			one, why := ParseUsage([]byte(`{"usage":` + u.Raw + `}`))
 			if why > worst {
 				worst = why // Miss is ordered benign -> alertable; see its constants
-				worstPayload = payload
+				worstPayload = string(d)
 			}
 			if why != MissNone {
 				continue
@@ -242,7 +236,8 @@ func ParseSSEUsage(raw []byte) (providerusage.Tiers, Miss, string) {
 			}
 			out.Output = max(out.Output, one.Output)
 		}
-	}
+		return true
+	})
 	if found {
 		return out, MissNone, ""
 	}
@@ -280,7 +275,8 @@ type Facts struct {
 	Spawn Spawn
 }
 
-// Read reads one response: usage, stop reason and tool calls. It is the ONE place a miss is counted
+// Read reads one response: usage, stop reason and tool calls. c is the client that sent the request
+// (the zero Client when it is not known). It is the ONE place a miss is counted
 // and recorded — the whole response is in scope here, which is what it takes to say anything
 // about it (ParseUsage is also called per-event by the SSE path, where a skip means nothing).
 //
@@ -294,7 +290,7 @@ type Facts struct {
 // The reason reaches the lifecycle log line beside `usage_reported`, so a deployment that has
 // quietly stopped accounting tokens says which of the five cases it is at the moment it happens,
 // instead of being reconstructed two iterations later from a cost figure.
-func Read(contentType string, body []byte, spliced bool) Facts {
+func Read(c agent.Client, contentType string, body []byte, spliced bool) Facts {
 	if len(body) == 0 {
 		return Facts{Miss: MissNoBody}
 	}
@@ -314,11 +310,12 @@ func Read(contentType string, body []byte, spliced bool) Facts {
 		f.Miss = MissUnreadable
 	}
 	f.StopReason = StopReason(sse, body)
-	f.ToolUseNames = ToolUseNames(sse, body)
+	calls := callsOf(sse, body) // one rebuild of the calls, for the three facts below
+	f.ToolUseNames = namesOf(calls)
 	f.ToolUseIncomplete = spliced
 	if !spliced {
-		f.ToolParams = LastToolParams(sse, body)
-		f.Spawn = Spawns(sse, body)
+		f.ToolParams = lastToolParams(calls)
+		f.Spawn = spawnsOf(c, calls)
 	}
 	// One lookup drives both the counter and the record, so a reason cannot be alertable for one and
 	// not the other. See usageCounters.

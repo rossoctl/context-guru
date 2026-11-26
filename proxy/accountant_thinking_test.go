@@ -96,7 +96,7 @@ func TestStreamReadsThinkingSignatures(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	h := &Handler{savings: newSavingsTracker()}
-	_, u, _, _ := h.streamRecOn(rec, resp, nil, agent.Base{}, h.thinkCollector(bschemas.Anthropic, resp))
+	_, u, _, _ := h.streamRecOn(rec, resp, nil, agent.Client{}, agent.Base{}, h.thinkCollector(bschemas.Anthropic, resp))
 	if rec.Body.String() != stream {
 		t.Fatalf("the client got other bytes")
 	}

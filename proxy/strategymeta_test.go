@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/keepalive"
@@ -18,11 +19,11 @@ import (
 func TestResponseUsageCarriesToolParams(t *testing.T) {
 	body := []byte(`{"id":"m","usage":{"input_tokens":5,"output_tokens":3},"content":[
 		{"type":"tool_use","id":"a","name":"Bash","input":{"command":"x","timeout":240000}}],"stop_reason":"tool_use"}`)
-	u, _, _ := responseUsageWhy("application/json", body, false)
+	u, _, _ := responseUsageWhy(agent.Client{}, "application/json", body, false)
 	if !u.ToolParams.HasTimeout || u.ToolParams.TimeoutMs != 240000 {
 		t.Fatalf("usage tool params = %+v", u.ToolParams)
 	}
-	u, _, _ = responseUsageWhy("application/json", body, true)
+	u, _, _ = responseUsageWhy(agent.Client{}, "application/json", body, true)
 	if u.ToolParams != (respfacts.ToolParams{}) {
 		t.Fatalf("a spliced window must leave the parameters unstated, got %+v", u.ToolParams)
 	}
