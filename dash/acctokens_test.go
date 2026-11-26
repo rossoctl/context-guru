@@ -36,7 +36,7 @@ func tokEvent(ts int64, session string) *Event {
 			{OpID: "2", Operator: "context-guru.extract", ChangeID: "c2",
 				Saved: accountant.TierTokens{CacheRead: 1500, Input: 500}, Caused: accountant.TierTokens{Input: 40}},
 			{OpID: "3", Operator: "context-guru.mask", ChangeID: "c3", DryRun: true, Saved: accountant.TierTokens{Input: 9999}},
-			{OpID: "4", Operator: "context-guru.summarize", ChangeID: "c4", Call: &accountant.ModelCall{}, Saved: accountant.TierTokens{Input: 7777}},
+			{OpID: "4", Operator: "context-guru.summarize", ChangeID: "c4", Kind: accountant.KindSpend, Call: &accountant.ModelCall{}, Saved: accountant.TierTokens{Input: 7777}},
 		},
 		CacheEffects: []accountant.CacheEffect{
 			{Kind: accountant.EffectBreak, ChangeID: "c1", Saved: accountant.TierTokens{CacheRead: 300}, Caused: accountant.TierTokens{CacheWrite5m: 300}},

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -84,18 +85,19 @@ func TestFigureSavedSideIsPricedAtTheClientSize(t *testing.T) {
 
 // A component adds 40,000 tokens to a request of 300,000 tokens. The request sent is above the line
 // (2x). The request without it (260,000) is below. The whole bill difference is a cost:
-// 260,000 x 5e-6 - 300,000 x 10e-6 = -1.70. No component has a net saving, so nobody owns the 260,000
-// that stay going from 1x to 2x (-1.30): it books to the ended-change figure.
+// 260,000 x 5e-6 - 300,000 x 10e-6 = -1.70. The component made the prompt larger, so it owns the
+// re-rate of the 260,000 tokens that stay going from 1x to 2x (-1.30), as accountant.Figure says (#120).
+// Before, nobody owned it and it went to the ended-change figure.
 func TestFigureCausedSideIsPricedAtOurSize(t *testing.T) {
 	e := &Event{FreshInput: 300_000}
 	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask",
 		Caused: accountant.TierTokens{Input: 40_000}}}})
 	f := e.AccountantFigure(gpt56())
-	if want := -40_000 * 10e-6; !accNear(f.ByComponent["mask"], want) {
+	if want := 260_000*5e-6 - 300_000*10e-6; !accNear(f.ByComponent["mask"], want) {
 		t.Fatalf("cost %v want %v", f.ByComponent["mask"], want)
 	}
-	if want := -260_000 * 5e-6; !accNear(f.EndedBreakUSD, want) {
-		t.Fatalf("unowned re-rate %v want %v", f.EndedBreakUSD, want)
+	if f.EndedBreakUSD != 0 {
+		t.Fatalf("the component owns the re-rate, ended-change %v want 0", f.EndedBreakUSD)
 	}
 	if want := 260_000*5e-6 - 300_000*10e-6; !accNear(f.DeltaUSD, want) {
 		t.Fatalf("delta %v want %v", f.DeltaUSD, want)
@@ -145,16 +147,21 @@ func TestFigureReRateSplitsByNetSavedTokens(t *testing.T) {
 	}
 }
 
-// A negative re-rate follows the same split: the request sent is above the line and the one without
-// is below it. The owner of the net saving can go below 0.
+// A negative re-rate goes to the operations that made the prompt larger (#120). Here the net is
+// 20,000 - 50,000 < 0, so prune, which added 50,000, owns the re-rate of the 250,000 tokens that stay
+// (1x without, 2x sent). mask saved 20,000 tokens at the size without (1x) and owns none. The adder goes
+// below 0.
 func TestFigureNegativeReRateCanTakeAComponentBelowZero(t *testing.T) {
 	e := &Event{FreshInput: 300_000}
 	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{
 		{Operator: "context-guru.mask", Saved: accountant.TierTokens{Input: 20_000}},
 		{Operator: "context-guru.prune", Caused: accountant.TierTokens{Input: 50_000}}}})
 	f := e.AccountantFigure(gpt56()) // without: 270,000 (1x); sent: 300,000 (2x)
-	if want := 20_000*5e-6 - 250_000*5e-6; !accNear(f.ByComponent["mask"], want) || f.ByComponent["mask"] >= 0 {
-		t.Fatalf("mask %v want %v (below 0)", f.ByComponent["mask"], want)
+	if want := 20_000 * 5e-6; !accNear(f.ByComponent["mask"], want) {
+		t.Fatalf("mask %v want %v", f.ByComponent["mask"], want)
+	}
+	if want := -50_000*10e-6 + 250_000*(5e-6-10e-6); !accNear(f.ByComponent["prune"], want) || f.ByComponent["prune"] >= 0 {
+		t.Fatalf("prune %v want %v (below 0)", f.ByComponent["prune"], want)
 	}
 	if want := 270_000*5e-6 - 300_000*10e-6; !accNear(f.DeltaUSD, want) {
 		t.Fatalf("delta %v want %v", f.DeltaUSD, want)
@@ -210,7 +217,7 @@ func TestHeldFloorUsesTheSavedSidePrice(t *testing.T) {
 	e.SetAccountant(accountant.Result{Ops: []accountant.PricedOp{{Operator: "context-guru.mask",
 		Saved: accountant.TierTokens{Input: 50_000}}}})
 	delta := 50_000 * 10e-6
-	if got, want := e.heldFloorUSD(gpt56(), delta), 50_000*1e-6; !accNear(got, want) {
+	if got, want := accwire.HeldFloorUSD(e.AccountantFigure(gpt56()).Fig, delta), 50_000*1e-6; !accNear(got, want) {
 		t.Fatalf("floor %v want %v", got, want)
 	}
 }

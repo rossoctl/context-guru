@@ -36,20 +36,7 @@ func (p metricsPricer) rate(model string, t acmetrics.Tier, promptTokens int64) 
 	if !ok {
 		return 0, true // unknown model: no money, marked estimated
 	}
-	pr = pr.Resolved(model).At(promptTokens)
-	switch t {
-	case acmetrics.TierInput:
-		return pr.Input, false
-	case acmetrics.TierCacheRead:
-		return pr.CacheRead, pr.CacheReadFallback // a fallback rate is marked estimated (#1248)
-	case acmetrics.TierCacheWrite5m:
-		return pr.CacheWrite, false // a rule per family, not a guess (see CacheReadFallback)
-	case acmetrics.TierCacheWrite1h:
-		return pr.CacheWrite1h(), false
-	case acmetrics.TierOutput:
-		return pr.Output, false
-	}
-	return 0, true
+	return pr.RateAt(model, t, promptTokens)
 }
 
 var _ acmetrics.SizedPricer = metricsPricer{}
