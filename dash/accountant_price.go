@@ -93,7 +93,8 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	f.Unpriced, f.Estimated = fig.Unpriced, fig.Estimated
 	// The search turns of tool deferral are spend calls, a separate bill in the library's figure. They are a cost of
 	// the deferral figure (#1441), so they come off its row and the request total. The same sum as /stats reads.
-	if spend := accrec.DeferSpendUSD(fig); spend != 0 {
+	spend := accrec.DeferSpendUSD(fig)
+	if spend != 0 {
 		f.ByComponent[DeferComponent] -= spend
 		f.DeltaUSD -= spend
 	}
@@ -139,7 +140,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	// keeps it out of Figure's DeltaUSD, in TotalUSD), owned by no component: the interaction row.
 	if ia, ic := e.accRes.Interaction, e.accRes.InteractionCaused; ia != (accountant.TierTokens{}) || ic != (accountant.TierTokens{}) {
 		f.InteractionUSD = fig.InteractionUSD
-		f.DeltaUSD = fig.CountedUSD()
+		f.DeltaUSD = fig.CountedUSD() - spend // the spend came off the deferral row above: it comes off the total too
 		f.addTok(InteractionComponent, ia, ic)
 	}
 	return f
