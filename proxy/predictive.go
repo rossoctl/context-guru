@@ -434,17 +434,9 @@ func (h *Handler) livePrice(model string) (modelinfo.Price, bool) {
 	return p, ok && !p.Zero()
 }
 
-// billedCost is the bill of one request, as the dashboard stores it (cost_usd) and as the model was
+// billedCostOf is the bill of one request, as the dashboard stores it (cost_usd) and as the model was
 // trained on: the rates of the request's own prompt size, and the 1-hour part of the write at the
-// 1-hour rate. The accountant prices it (accountant.RequestCost). It is 0 for a model with no price.
-func (k *keeper) billedCost(model string, at time.Time, u Usage) float64 {
-	p, ok := k.h.livePrice(model)
-	if !ok {
-		return 0
-	}
-	return billedCostOf(p, model, at, u)
-}
-
+// 1-hour rate. The accountant prices it (accountant.RequestCost).
 func billedCostOf(p modelinfo.Price, model string, at time.Time, u Usage) float64 {
 	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: model, At: at,
 		Billed: accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead), CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)},

@@ -477,6 +477,9 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		}
 		return out.SessionDays[i].Session < out.SessionDays[j].Session
 	})
+	// Rates is the model's BASE price list, as configured. Each row is priced at the rates of its own prompt
+	// size, so on a tiered model a row above its price line has cache_write dollars that can exceed its write
+	// tokens times rates.cache_write.
 	out.Rates = map[string]map[string]float64{}
 	for model, p := range rates {
 		if p.Zero() {
