@@ -119,8 +119,8 @@ type kaEntry struct {
 	held bool
 	// ref is the handle Record.Hold returned: what the Dispatcher sends this entry's pings with and
 	// what Release drops. Meaningful only while held.
-	ref                         dispatch.Ref
-	provider                    bschemas.ModelProvider
+	ref                  dispatch.Ref
+	provider             bschemas.ModelProvider
 	model, route, preset string
 	// identity is the client the host named for the request (Record.Identity).
 	identity agent.Client

@@ -1,6 +1,10 @@
 package dash
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/rossoctl/context-guru/agent"
+)
 
 // How a user actually gets rid of a capability they are paying to carry, and which of the
 // things they carry are safe to get rid of at all.
@@ -42,7 +46,8 @@ import "strings"
 //     the "following skills are available" listing. Skills need `skillOverrides` or the
 //     plugin turned off, so they get their own mechanism rather than the tool one.
 
-// builtinTools is Claude Code's own client-side tool set.
+// Claude Code's own client-side tool set is agent/claudecode.BuiltinTools, read through
+// agent.Client.IsBuiltinTool. The reasons for it, kept from before it moved:
 //
 // It exists because the stored taxonomy cannot tell these apart from a user's own tools: both
 // are KindTool ("a plain client-side tool — Claude Code's built-ins, an agent's own"), so an
@@ -66,7 +71,7 @@ import "strings"
 // So the list errs toward EXCLUDING an unrecognised name. The cost of a false negative is that
 // one tool appears in the actionable list without a warning; the cost of a false positive is
 // that the page stops finding the savings it exists to find. When a new Claude Code tool
-// appears, add it here — a name absent from this list is reported as `client_tool`, which says
+// appears, add it to claudecode.BuiltinTools — a name absent from this list is reported as `client_tool`, which says
 // "check what declares this" rather than either "safe to remove" or "do not touch".
 //
 // DesignSync was this list's own example of a name that merely LOOKS built-in, and that belief
@@ -76,22 +81,12 @@ import "strings"
 // tool-bearing sessions. Workflow and ScheduleWakeup below stay excluded: on this deployment
 // those names belong to other agents' own tools, and filing them here would hide a genuinely
 // removable declaration behind the danger warning.
-var builtinTools = map[string]bool{
-	"Agent": true, "Artifact": true, "ArtifactCheck": true, "ArtifactComments": true,
-	"ArtifactData": true, "AskUserQuestion": true, "Bash": true,
-	"BashOutput": true, "CronCreate": true, "CronDelete": true, "CronList": true,
-	"DesignSync": true, "Edit": true, "EndConversation": true, "EnterWorktree": true,
-	"ExitPlanMode": true, "ExitWorktree": true, "Glob": true, "Grep": true,
-	"KillShell": true, "ListAgents": true, "ListMcpResourcesTool": true, "LSP": true,
-	"Monitor": true, "NotebookEdit": true, "PowerShell": true, "Read": true,
-	"ReadMcpResourceDirTool": true, "ReadMcpResourceTool": true, "SendMessage": true,
-	"SendFeedback": true, "Skill": true, "SlashCommand": true, "TaskCreate": true,
-	"TaskGet": true, "TaskList": true, "TaskOutput": true, "TaskStop": true,
-	"TaskUpdate": true, "TodoWrite": true, "WebFetch": true, "WebSearch": true, "Write": true,
-}
+var builtinClient agent.Client // no request at hand: the fallback rule of every client, Claude Code's list
 
 // IsBuiltinTool reports whether a KindTool declaration is one of Claude Code's own.
-func IsBuiltinTool(kind, name string) bool { return kind == KindTool && builtinTools[name] }
+func IsBuiltinTool(kind, name string) bool {
+	return kind == KindTool && builtinClient.IsBuiltinTool(name)
+}
 
 // Removal is how to stop carrying one declared capability, in the form the user can act on.
 type Removal struct {

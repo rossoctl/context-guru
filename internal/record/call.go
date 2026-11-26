@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
-
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
@@ -166,7 +164,7 @@ func JoinIncomplete(existing, reason string) string {
 // The result is never empty: an empty id yields a hidden ".wire.jsonl" file and merges every
 // unkeyed session into one trace.
 func TraceID(body []byte, derived func() string) string {
-	if id := session.ExplicitID(gjson.GetBytes(body, "metadata.user_id").String()); id != "" {
+	if id := session.ExplicitID(transcriptClient.UserID(body)); id != "" {
 		return id
 	}
 	if derived != nil {

@@ -1263,7 +1263,9 @@ type KeepAliveReport struct {
 	// anything else here, and a sink that timestamps its own row from wall-clock-at-receipt
 	// would disagree with a keeper running on an injected clock.
 	TS int64
-	// Agent, Preset, StopReason and Strategy are copied verbatim from the kaEntry that
+	// Agent is the agent.Client.Label of the request that established this ping (agent.Identify), so a
+	// ping row and a request row of one client carry the same label. Preset, StopReason and Strategy
+	// are copied verbatim from the kaEntry that
 	// established this ping — see keepalive.go's record1 — so a sink that mirrors the
 	// pre-existing dash.Event can reproduce every column it wrote before this type existed.
 	// Strategy is the manager-controlled keep-alive strategy id that resolved this ping's

@@ -27,7 +27,6 @@ import (
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/tooldefer"
 	"github.com/rossoctl/context-guru/waitcause"
-	"github.com/tidwall/gjson"
 )
 
 // The dashboard's capture point. It is a plain struct built from values the
@@ -684,12 +683,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		if waitingFor != waitcause.WaitingUnknown {
 			res.WaitPrompt = waitcause.PromptNone
 			if waitingFor == waitcause.WaitingHuman {
-				res.WaitPrompt = waitcause.PromptOf(toolUseNames)
+				res.WaitPrompt = waitcause.PromptOfClient(c.agent, toolUseNames)
 			}
 		}
 		// The person's id, raw, for the writer to hash. Read here, on the writer goroutine.
 		res.Fanout, res.SpawnType = spawn.N, spawn.Type
-		res.UserKey = session.UserKey(gjson.GetBytes(waitBody, "metadata.user_id").String())
+		res.UserKey = session.UserKey(c.agent.UserID(waitBody))
 		return res
 	}
 	e.CGLatencyMs, e.UpstreamMs = c.cgMs, c.upstream

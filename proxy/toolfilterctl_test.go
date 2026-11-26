@@ -172,6 +172,8 @@ func TestToolFilterUserCannotDropABuiltin(t *testing.T) {
 		// The bypass: claim a kind whose branch does not classify built-ins.
 		`{"kind":"mcp_tool","name":"Read","action":"exclude"}`,
 		`{"kind":"","name":"Bash","action":"exclude"}`,
+		// Claude Code's own tool search: a built-in, though the old list left it out.
+		`{"kind":"tool","name":"ToolSearch","action":"exclude"}`,
 	} {
 		w, _ := f.do(t, "POST", "/api/toolfilter", body, jar)
 		if w.Code != http.StatusForbidden {
