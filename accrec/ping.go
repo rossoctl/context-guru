@@ -23,14 +23,18 @@ type PingCalls struct {
 	Standalone func(accountant.RequestOps) accountant.Result
 }
 
+// ReportUsage is the billed usage of a keeper report.
+func ReportUsage(r components.KeepAliveReport) Usage {
+	return Usage{FreshInput: r.FreshInput, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite, CacheWrite1h: r.CacheWrite1h}
+}
+
 // PingFromReport maps a keeper report to the library's Ping. r.CostUSD is deliberately not
 // carried: the host prices the ping with its own rates.
 func PingFromReport(r components.KeepAliveReport) accountant.Ping {
 	return accountant.Ping{
 		Session: r.Session, ThreadID: r.Thread, Model: r.Model, Host: r.Route,
-		Usage: accountant.CallUsage{Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
-			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)}, Output: int(r.Output)},
-		At: pingStart(r), Window: r.Window,
+		Usage: accountant.CallUsage{Usage: ReportUsage(r).Accountant(), Output: int(r.Output)},
+		At:    pingStart(r), Window: r.Window,
 		// The TTL the ping asked: 1 hour for a 1-hour-on-wait ping (every marker relabelled). A plain ping
 		// leaves it 0 (not known): the library then judges the entry by the previous request's markers.
 		TTL: oneHourIf(r.OneHour),
@@ -90,8 +94,7 @@ func PingObservation(r components.KeepAliveReport, res accountant.Result) acmetr
 	return acmetrics.Observation{
 		Meta: accountant.RequestMeta{RequestID: "", Session: r.Session, Model: r.Model,
 			At: time.UnixMilli(r.TS), Billing: accountant.Billing{Mode: accountant.BillingAPI}},
-		Usage: accountant.Usage{Input: int(r.FreshInput), CacheRead: int(r.CacheRead),
-			CacheWrite: int(r.CacheWrite), CacheWrite1h: int(r.CacheWrite1h)},
+		Usage:  ReportUsage(r).Accountant(),
 		Result: res,
 	}
 }

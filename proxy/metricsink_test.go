@@ -103,7 +103,7 @@ func TestPanickingMetricsSinkDoesNotHurtTheRequest(t *testing.T) {
 // A slow sink is the only way a metric could delay a request, so say it plainly: the pricer must not
 // block. This pins that the pricer adapter returns at once for an unknown model.
 func TestPricerAdapterNeverBlocks(t *testing.T) {
-	p := metricsPricer{prices: fixedPricer{}}
+	p := modelinfo.ChainRates(fixedPricer{})
 	done := make(chan struct{})
 	go func() {
 		p.Price("no-such-model", time.Now(), acmetrics.TierInput)
@@ -120,7 +120,7 @@ func TestPricerAdapterNeverBlocks(t *testing.T) {
 // from a default multiple, for a model that is not Claude, is one. The write tiers follow a rule
 // per family, so they are never marked.
 func TestPricerMarksFallbackTiersEstimated(t *testing.T) {
-	p := metricsPricer{prices: partialPricer{}}
+	p := modelinfo.ChainRates(partialPricer{})
 	for _, tc := range []struct {
 		model string
 		tier  acmetrics.Tier

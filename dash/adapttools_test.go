@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // One session with a main set and a subagent set that carries none of the MCP servers, two
@@ -320,7 +321,8 @@ func TestAdaptToolsMeasuresWhatARemovalSaved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := 2 * 100 * 0.1 // two filtered requests, cache read at opus's 0.1
+	bf, _ := tokens.BilledDeltaFactor("opus") // the filter's tokens are in our tokenizer: the accountant applies the factor once
+	want := 2 * 100 * bf * 0.1                // two filtered requests, cache read at opus's 0.1
 	sv := doc.SavedSoFar.Filter
 	if math.Abs(sv.USD-want) > 1e-9 || sv.Requests != 2 || len(sv.Items) != 1 ||
 		sv.Items[0].RemoveAs != "mcp__srv" || math.Abs(sv.Items[0].USD-want) > 1e-9 || sv.Items[0].Requests != 2 {
@@ -434,7 +436,8 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 		p.Tiers[0] = modelinfo.PriceTier{AbovePromptTokens: 5050, InputMult: 2, ReadMult: 2, WriteMult: 2}
 		return p, ok
 	}
-	tw := 100*0.1 + 100*2.0*2
+	bf, _ := tokens.BilledDeltaFactor("opus")
+	tw := (100*0.1 + 100*2.0*2) * bf
 	for _, f := range []int{100, 150} {
 		part := seedAt(f, tiered).SavedSoFar.Filter
 		sum := 0.0
@@ -449,14 +452,14 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 		}
 	}
 	// 100 tokens read at 0.1, plus 100 tokens in a one-hour write at 2x input.
-	want := 100*0.1 + 100*2.0
+	want := (100*0.1 + 100*2.0) * bf
 	same := seed(100).SavedSoFar.Filter
 	if math.Abs(same.USD-want) > 1e-9 || len(same.Items) != 1 || math.Abs(same.Items[0].USD-want) > 1e-9 {
 		t.Fatalf("filter %+v, want total and the one item both $%v", same, want)
 	}
 	// The filter counted 150 tokens where the set says the item is 100: a 50-token gap per request.
 	gap := seed(150).SavedSoFar.Filter
-	if len(gap.Items) != 2 || gap.Items[1].Kind != "unattributed" || math.Abs(gap.Items[1].USD-50*(0.1+2.0)) > 1e-9 {
+	if len(gap.Items) != 2 || gap.Items[1].Kind != "unattributed" || math.Abs(gap.Items[1].USD-50*(0.1+2.0)*bf) > 1e-9 {
 		t.Fatalf("filter %+v, want an unattributed row of the gap", gap)
 	}
 	// One basis: the rows, unattributed included, always add up to the total.
@@ -465,7 +468,7 @@ func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
 		for _, it := range p.Items {
 			sum += it.USD
 		}
-		if math.Abs(sum-p.USD) > 1e-9 || math.Abs(p.USD-150*(0.1+2.0)) > 1e-9 && p.USD != want {
+		if math.Abs(sum-p.USD) > 1e-9 || math.Abs(p.USD-150*(0.1+2.0)*bf) > 1e-9 && math.Abs(p.USD-want) > 1e-9 {
 			t.Fatalf("rows sum to $%v, total $%v", sum, p.USD)
 		}
 	}

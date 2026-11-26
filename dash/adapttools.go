@@ -31,8 +31,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // KindMCPServer is a whole MCP server as one adapt item: every tool of it, none ever called.
@@ -486,32 +489,36 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			out.pricedRequests++
 			continue
 		}
-		p, ok := modelinfo.Price{}, false
+		// The accountant prices the removal (R1): at the tier of the head of the prefix, at the size without
+		// the declarations (sent plus removed, #1407, #1438), with the tokenizer correction applied once.
+		// These declarations were carried, so the sent size is the size they were billed at.
+		head := accountant.HeadTier(accrec.Usage{FreshInput: r.fresh, CacheRead: r.cacheRead, CacheWrite: r.cacheWrite, CacheWrite1h: r.cacheWrite1h}.Accountant())
+		ok := false
 		if price != nil && r.model != "" {
-			p, ok = price(r.model)
-			// The request bills at the rates of ITS prompt size (#1407, #1438). These declarations
-			// were carried, so the sent size is the size they were billed at. For a filter saving the
-			// size is sent plus removed: the request without the filter.
-			p = p.At(modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite) + r.removed)
+			_, ok = price(r.model)
 		}
-		rate := p.Input
-		switch {
-		case r.cacheRead > 0:
-			rate = p.CacheRead
-		case r.cacheWrite > 0:
-			rate = p.CacheWrite
-			// A one-hour breakpoint precedes every 5-minute one, so when the request wrote any
-			// 1h tokens the declarations at the head were among them: 2x input, not 1.25x.
-			if r.cacheWrite1h > 0 {
-				rate = p.CacheWrite1h()
+		var rate float64
+		if ok {
+			// The correction applies to a removal only. A carried-cost estimate (removed is 0) keeps its tokens.
+			factor := 1.0
+			if r.removed > 0 {
+				factor, _ = tokens.BilledDeltaFactor(r.model)
 			}
+			rate = accountant.RemovalSaving(accountant.RemovalInput{
+				Model: r.model, Tier: head, Prompt: modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite),
+				Removed: int(r.removed), Factor: factor,
+			}, modelinfo.Rates{Lookup: price}).PerTokenUSD
 		}
 		if ok {
 			out.pricedRequests++
 		}
 		if ok && r.ts >= out.rewriteTS {
 			out.rewriteTS = r.ts
-			out.RewriteUSD = float64(r.cacheRead+r.cacheWrite+r.fresh) * (p.CacheWrite - p.CacheRead)
+			// The one-off cost of the rewrite: the whole prompt written at the 5-minute rate instead of read.
+			// The accountant prices a miss (R1). It is sized as the request without the filter, as before.
+			prompt := modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite)
+			out.RewriteUSD, _ = accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: prompt, PromptTokens: prompt + r.removed},
+				modelinfo.Rates{Lookup: price})
 		}
 		if ok && out.keepRequests {
 			cr := carriedRequest{TS: r.ts, SessionStart: list[0].ts, Rate: rate, Keys: make(map[string]bool, len(m))}
@@ -529,10 +536,10 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 				continue
 			}
 			x := float64(v[0]) * rate
-			switch {
-			case r.cacheRead > 0:
+			switch head {
+			case accountant.TierCacheRead:
 				c.USDCacheRead += x
-			case r.cacheWrite > 0:
+			case accountant.TierCacheWrite5m, accountant.TierCacheWrite1h:
 				c.USDCacheWrite += x
 			default:
 				c.USDInput += x

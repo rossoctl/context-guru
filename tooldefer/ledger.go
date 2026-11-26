@@ -1,9 +1,9 @@
 package tooldefer
 
 import (
-	"math"
 	"sync"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
@@ -37,15 +37,28 @@ const (
 // TierOf is the tier the head of the prefix was billed at, from the response usage. The same rule
 // as the dashboard's declaration-filter saving: any cache read means the head was read.
 func TierOf(cacheRead, cacheWrite, cacheWrite1h int64) Tier {
-	switch {
-	case cacheRead > 0:
+	switch accountant.HeadTier(accountant.Usage{CacheRead: int(cacheRead), CacheWrite: int(cacheWrite), CacheWrite1h: int(cacheWrite1h)}) {
+	case accountant.TierCacheRead:
 		return TierRead
-	case cacheWrite1h > 0:
+	case accountant.TierCacheWrite1h:
 		return TierWrite1h
-	case cacheWrite > 0:
+	case accountant.TierCacheWrite5m:
 		return TierWrite
 	}
 	return TierFresh
+}
+
+// accountant is the tier in the library's type.
+func (t Tier) accountant() accountant.Tier {
+	switch t {
+	case TierRead:
+		return accountant.TierCacheRead
+	case TierWrite:
+		return accountant.TierCacheWrite5m
+	case TierWrite1h:
+		return accountant.TierCacheWrite1h
+	}
+	return accountant.TierInput
 }
 
 func rate(p modelinfo.Price, t Tier) float64 {
@@ -141,19 +154,16 @@ func Price(r Request, p modelinfo.Price) (Money, bool) {
 	}
 	f, _ := tokens.BilledDeltaFactor(r.Model)
 	billed := func(n int) float64 { return float64(n) * f }
-	// The gross is what the client's request would have billed: a bigger prompt, which can sit in a
-	// dearer tier. The cost is what the request sent billed, at its own tier.
-	pb := p
-	if r.PromptTokens > 0 {
-		// Round the size without up: truncating could lose one token at a tier line and put the
-		// client's request in the cheaper tier. This errs toward the larger (dearer) side by under 1 token.
-		pb = p.At(r.PromptTokens + int64(math.Ceil(billed(r.DeferredTokens)-billed(r.ListTokens))))
-		p = p.At(r.PromptTokens)
-	} else {
-		p, pb = p.At(0), p.At(0)
-	}
-	gross := billed(r.DeferredTokens) * rate(pb, r.Tier)
-	cost := billed(r.ListTokens) * rate(p, r.Tier)
+	// The accountant prices the removal (R1). The gross is what the client's request would have billed:
+	// a bigger prompt, which can sit in a dearer tier. The cost of the names list is what the request sent
+	// billed, at its own tier. The accountant rounds the size without the change up, so a token at a tier
+	// line is never put in the cheaper side. PromptTokens 0 is unknown and prices at the base rates.
+	fig := accountant.RemovalSaving(accountant.RemovalInput{
+		Model: r.Model, Tier: r.Tier.accountant(), Prompt: r.PromptTokens,
+		Removed: r.DeferredTokens, Added: r.ListTokens, Factor: f, Unsized: r.PromptTokens <= 0,
+	}, modelinfo.OneModel(r.Model, p))
+	gross, cost := fig.SavedUSD, fig.AddedUSD
+	p = p.At(max(r.PromptTokens, 0))
 	var search float64 // the cost the bodies do not show; exactly 0 when no search ran
 	if r.Searches > 0 {
 		out := r.SearchOutput
