@@ -116,3 +116,12 @@ export const timingEnabled = process.env.CG_TIMING_TESTS === "1"
 export const timingOnly = {
   skip: !timingEnabled && "timing test: set CG_TIMING_TESTS=1 to run it",
 }
+
+// Polls until the condition is true, or fails with a message that names what it waited for.
+export async function waitFor(condition, what, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs
+  while (!(await condition())) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
