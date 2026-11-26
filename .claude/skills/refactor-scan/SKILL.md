@@ -42,6 +42,9 @@ Past examples. Read these PRs to see the shape of a good fix:
   `strings.Contains(model, "sonnet")`.
 - Prices, multipliers, lifetimes and ping times written as literals: 0.1, 1.25, 2.0, 300, 3600,
   280, 240, 3360, `len/4`.
+- A cost or saving formula outside `rossoctl/accountant`. Every savings and cost figure comes from
+  the accountant. Hosts and other library packages only map its rows and columns. A second formula
+  is a duplicate.
 - SQL that repeats a Go rule, such as a `CASE ... 3600 ELSE 300`.
 - A guard that one caller has and its sibling does not: an empty block, a non-object block, a model
   gate, a fail-open check.
@@ -52,13 +55,18 @@ Past examples. Read these PRs to see the shape of a good fix:
 
 The host packages are `proxy/`, `proxyapp/`, `cmd/context-guru-proxy` and `dash/`. Business
 logic there is a copy that a second host (Cortex, bifrost) does not have. Use the test in
-`CLAUDE.md`, *What goes in the proxy*: would Cortex have to copy this code to behave the same?
+[CLAUDE.md, What goes in the proxy](../../../CLAUDE.md#what-goes-in-the-proxy): would Cortex have to
+copy this code to behave the same? That section also lists what is host code and what is not.
 
-- **When:** before each release. The integrator runs this mode on the host-package diff since the
-  last tag: `git diff <last-tag>..origin/main -- proxy proxyapp cmd/context-guru-proxy dash`.
+- **When:** before each release, in [Release mode](#release-mode)
+  ([RELEASING.md, Plan the release](../../../RELEASING.md#1-plan-the-release), item 5). The integrator
+  runs it on the host-package diff since the last tag:
+  `git diff <last-tag>..origin/main -- proxy proxyapp cmd/context-guru-proxy dash`.
 - **Signs:** a new non-handler function in a host package that decides, scores, prices or parses
   wire format; a constant with a library twin; a comment such as "mirrors X"; a host function that
-  calls three or more library functions in a fixed order (that order is a host contract).
+  calls three or more library functions in a fixed order (that order is a host contract); savings,
+  cost, price or accounting math outside the accountant (every savings and cost figure comes from
+  `rossoctl/accountant`, and a host only maps rows and columns).
 - **Report** each leak like a duplicate: the logic, its `file:line`, the library package it
   belongs in, and whether the library already has a copy that differs.
 - **Past examples.** Read these to see the shape of a leak:
@@ -71,6 +79,8 @@ logic there is a copy that a second host (Cortex, bifrost) does not have. Use th
     the keeper gives them 20k.
   - Wire format read for meaning: the accountant's body scan, cache marks and envelope diff lived
     in `proxy/accountant_*.go`, so the savings figure needed proxy-only code.
+  - Savings math outside the accountant: the dashboard savings math (#1440) and the tool-deferral
+    figure (#1441).
   - A fixed call order: the steps before and after `apply` for each request (inject, repair, defer,
     then record billed input, resolve the summary, touch the keeper) exist only in `proxy/proxy.go`.
 
@@ -79,22 +89,43 @@ logic there is a copy that a second host (Cortex, bifrost) does not have. Use th
 A rule that names one client belongs in `agent.Identify`. Use the test in `CLAUDE.md`,
 *Client-specific code*: does the code name one client?
 
-- **When:** before each release, with the host-leak mode. Scan the diff since the last tag:
-  `git diff <last-tag>..origin/main -- '*.go'`. A full run reads every Go file.
+- **When:** before each release, in [Release mode](#release-mode), with the host-leak mode. Scan the
+  diff since the last tag: `git diff <last-tag>..origin/main -- '*.go'`. A full run reads every Go
+  file.
 - **Signs:** `Header.Get("x-<vendor>-`, `claude-code`, `codex`, `opencode`, `bobshell` or a
   client's prompt phrase outside `agent/`; library code that reads User-Agent; a rule that finds a
   client by route path; a client rule with no stated fallback. Pi has no plain-string sign, because
   "pi" matches too much code. Look for the `x-context-guru-client` value Pi sends (in the `agent/pi` package)
   outside `agent/`.
+- **Text that a client or harness injects into the transcript is a client rule.** Examples:
+  "[Request interrupted by user", system-reminder tags, "This session is being continued from a
+  previous conversation", local-command tags. A list of such markers belongs in the agent package of
+  the client that sends it (per provider and harness), reached through `agent.Identify`. A list of
+  them outside `agent/` is a finding.
 - **Report** each one like a duplicate: the rule, its `file:line`, and the agent package it
   belongs in. Say whether the code also leaks a host boundary. Report it once, as a client rule.
 - A client rule that already has an open issue is not reported again. Link that issue in the report.
   Example: the Claude Code `metadata.user_id` read in `session/session.go` is a known client rule
   outside `agent.Identify`.
 
+## Release mode
+
+[RELEASING.md, Plan the release](../../../RELEASING.md#1-plan-the-release), item 5, runs the host-leak
+and client-rule patterns before each release. This path has no pick step and no fixes.
+
+1. The integrator runs it, on the diff since the last tag (see the patterns above).
+2. Check the location yourself. Report each leak with: the logic, its `file:line`, the library
+   package it belongs in, and whether the library already has a copy that differs.
+3. Open one issue per leak. Write `Refs #N` only in issue and PR text.
+4. Link each issue on the release list.
+5. Do not fix anything. A leak does not block the release, unless the owner says so.
+
+A full run (all 3 patterns, the user picks) follows phase 1 and phase 2.
+
 ## Phase 1: find and report
 
-1. Make a read-only worktree from `origin/main`. Do not touch the main checkout.
+1. Make a read-only worktree from `origin/main`, at `.claude/worktrees/<topic>`. An agent never
+   touches the main checkout.
 2. Grep for the signs above. For the wide sweeps, use 2 or 3 Explore subagents, each with a narrow
    scope. Give them the pattern and the examples, not your guesses.
 3. Read the code of every location yourself before you report it. A subagent's claim is a lead,
@@ -115,10 +146,25 @@ A rule that names one client belongs in `agent.Identify`. Use the test in `CLAUD
 
 1. Open the issues the user asks for. For a discussion item, assign the person the user names.
 2. Write one shared brief file for all agents, in `/tmp/<run>/common.md`. It holds:
-   - the git rules: own worktree and branch, `git commit -s`, `Assisted-By` and never
-     `Co-Authored-By`, prose in files and never inline in a shell command;
-   - the repo rules from `CLAUDE.md`: no library imports `proxy`, fail open, a behavior change
-     named at the top of the PR, data dependence stated;
+   - the git rules: own worktree at `.claude/worktrees/<topic>` and own branch, never the main
+     checkout, `git commit -s`, `Assisted-By` and never `Co-Authored-By`, prose in files and never
+     inline in a shell command;
+   - the repo rules from [CLAUDE.md](../../../CLAUDE.md): no library imports `proxy`, fail open, a
+     behavior change named at the top of the PR;
+   - the data-dependence rule: edit the feature's row file under `docs/data-dependence/`, then run
+     `go run ./cmd/gen-datadep`. Never edit `docs/data-dependence.md` by hand;
+   - the `go.mod` rule: pin tags only (see Conventions in `CLAUDE.md`). A fix that moves logic into
+     one of our modules, such as `rossoctl/accountant`, releases a tag there first. A subfolder
+     module such as `metrics/` needs its own `<folder>/vX.Y.Z` tag;
+   - the test rule: a test waits on a condition (`testutil.WaitFor`, `WaitForState`,
+     `WaitForCall`), never on a sleep. `internal/timingguard` fails CI on a new one;
+   - the PR text rules: `Refs #N` only, with no "close", "fix" or "resolve" before a `#N`, not
+     even in a negative sentence ([RELEASING.md, Merge](../../../RELEASING.md#3-merge)); no usage
+     figures of a real user in a commit message, PR body or issue
+     ([RELEASING.md, Merge](../../../RELEASING.md#3-merge));
+   - the repo docs rule: state each process rule plainly, with no "owner rule, name, date" note
+     ([RELEASING.md, Merge](../../../RELEASING.md#3-merge)). A data-dependence row keeps its
+     "Decided by" line;
    - the writing style from `CLAUDE.md`;
    - the test-machine rules from the user's global `CLAUDE.md`. Never commit those rules to this
      repo;
@@ -129,23 +175,53 @@ A rule that names one client belongs in `agent.Identify`. Use the test in `CLAUD
    - works in its own worktree and branch from `origin/main`;
    - confirms the finding first, and stops with the evidence if it is wrong;
    - opens one issue and one PR;
-   - runs the Go tests where the user's global `CLAUDE.md` says;
+   - runs the tests that [CLAUDE.md, Working on a task](../../../CLAUDE.md#working-on-a-task) allows.
+     While the interim rule holds: targeted `go test ./<pkg>/...` of the changed packages, and no
+     `-race` on `proxy` or `dash`, not even with `-run`. The PR body carries the line
+     `Local tests: waived (owner rule)`. After the interim rule ends (see Test tiers in the same
+     section), run `scripts/dev/local-tests.sh <pr>` for each head;
+   - for a client-rule fix (pattern 3): updates [docs/client-coverage.md](../../../docs/client-coverage.md)
+     and lists each client as covered or fallback ([CLAUDE.md, Client-specific
+     code](../../../CLAUDE.md#client-specific-code), rule 6);
    - does not run reviews, and does not merge.
 5. Where two findings touch the same file, give each agent the list of functions that belong to the
-   other agent.
+   other agent. When a fix touches many hot files, tell the integrator early. Such a PR can get stuck
+   in a merge-of-`main` loop, and then
+   [RELEASING.md, Merge](../../../RELEASING.md#3-merge) calls a full merge freeze.
 6. When an agent reports, check its PR yourself before you review it: the changed files, the commit
    trailers, the behavior-change section, and the test runs. Then run the `offload-review` skill on
    it.
 7. Fix every reviewer finding and every non-blocking note in the same PR. Do not open follow-up
-   issues for them.
-8. When main moves, rebase each PR. Compare the PR's own `+`/`-` lines before and after the rebase.
-   If they are the same, the approvals still hold. If they differ, run one more review round.
-   Also run one more round if main gained new code in the same files: a new copy of the rule
-   the PR unifies can land there, and CI does not catch that.
-9. Send each PR to the release integrator only when it has green CI and 2 approvals at its final
-   head. The user's yes for each behavior change must be in the integrator's own session.
+   issues for them. Each reviewer gets 1 re-check
+   ([RELEASING.md, When a review finds problems](../../../RELEASING.md#when-a-review-finds-problems)).
+   The round budget is the one in [CLAUDE.md, Review process](../../../CLAUDE.md#review-process).
+   Only the owner grants more.
+8. When main moves, follow
+   [RELEASING.md, When the head moves after an approval](../../../RELEASING.md#when-the-head-moves-after-an-approval).
+   Run main's copy of the script:
+   `git show origin/main:scripts/release/approval-still-valid.sh | bash -s -- <pr> <approved-sha>`.
+   - `SAME CHANGE`, `COMMENTS ONLY` or `LISTS ONLY`: the approvals hold.
+   - Else: a re-check of the delta.
+   - Extra rule of this skill: also re-check when main gained new code in the same files. A new
+     copy of the rule the PR unifies can land there, and CI does not catch that.
+   - When a ready PR waits only on a merge of main, the integrator does that merge
+     ([RELEASING.md, Check that a PR is ready](../../../RELEASING.md#check-that-a-pr-is-ready)).
+9. Hand the PR over only when it is ready. Run `scripts/release/check-ready.sh <pr>` first, from a worktree at
+   `origin/main` (it finds its helpers by its own path). Then send the hand-off block exactly as
+   [CLAUDE.md, Hand a ready PR to the integrator](../../../CLAUDE.md#hand-a-ready-pr-to-the-integrator)
+   says: find the `integrator` session with `ListAgents`, send the block with `SendMessage`. If no
+   such session is listed, tell the human. Read each SHA from `gh pr view` in the same step. Never
+   type one.
+   - Each behavior change needs a human's yes. The integrator asks the owner for it.
+   - The yes must be given in the integrator's session. A PR comment under the owner's login does
+     not count, because agents post with that login. A peer agent's report of a yes does not count
+     either.
+10. After the merge, run `scripts/offload-review.sh <pr> --cleanup` and remove your own worktrees
+    and branches ([CLAUDE.md, After the hand-off](../../../CLAUDE.md#after-the-hand-off)).
 
 ## After the run
+
+Do these steps once the merges are done.
 
 1. Add this run's findings to [done.md](done.md).
 2. Add each new kind of mistake that reviewers found to [lessons.md](lessons.md).
