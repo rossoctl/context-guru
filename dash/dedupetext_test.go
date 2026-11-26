@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // legacyRow writes a declaration the OLD way: the text on the row itself, no hash. This is the
@@ -82,7 +84,7 @@ func TestDeclarationTextIsStoredOncePerDistinctText(t *testing.T) {
 	}
 	const sessions = 25
 	for i := 0; i < sessions; i++ {
-		rec.RecordInventory("t1", "s"+itoa(int64(i)), 1000, inv, true)
+		rec.RecordInventory("t1", "s"+itoa(int64(i)), 1000, inv, true, "")
 	}
 	db := rec.DB()
 	// Wait for the last session's rows rather than for a fixed time: this is the writer
@@ -303,15 +305,38 @@ func TestBackfillIsResumableAndIdempotent(t *testing.T) {
 	// produces. Every intermediate state is checked, because the mixed state — some rows
 	// migrated, some not — is the one a single end-to-end run never exercises.
 	var total int64
-	for i := 0; i < 5; i++ {
-		stop := make(chan struct{})
-		// Closed after the pause begins, so exactly one batch runs per iteration.
-		go func() { time.Sleep(20 * time.Millisecond); close(stop) }()
-		n, err := db.dedupeDeclarationText(stop, 3, 50*time.Millisecond)
-		if err != nil {
+	legacy := func() int {
+		var n int
+		if err := db.sql.QueryRow(`SELECT COUNT(*) FROM tool_declarations WHERE text_gz IS NOT NULL`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		total += n
+		return n
+	}
+	// 12 rows in batches of 3 take 4 runs; a fifth would find nothing to move.
+	for i := 0; i < 4; i++ {
+		before := legacy()
+		stop := make(chan struct{})
+		type result struct {
+			n   int64
+			err error
+		}
+		res := make(chan result, 1)
+		// The pause is an hour, so the run stops only when stop closes. Close it once the first
+		// batch has moved rows: exactly one batch runs per iteration, however slow the machine is.
+		go func() {
+			n, err := db.dedupeDeclarationText(stop, 3, time.Hour)
+			res <- result{n, err}
+		}()
+		testutil.WaitFor(t, "the first batch moves rows", func() bool { return legacy() < before })
+		close(stop)
+		r := awaitSignal(t, "the stopped run to return", res)
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if batchRows := int64(min(3, before)); r.n != batchRows {
+			t.Fatalf("run %d migrated %d rows, want one batch of %d", i+1, r.n, batchRows)
+		}
+		total += r.n
 		assertRevealUnchanged(t, db, want, "mid-migration")
 	}
 	if total == 0 || total > 12 {
@@ -432,15 +457,12 @@ func TestRecorderMigratesLegacyPromptTextOnStart(t *testing.T) {
 	assertRevealUnchanged(t, rec.DB(), want, "after the recorder migrated on start")
 }
 
-// A transaction that fails must leave the writer's memo empty, or the NEXT one files a
-// declaration against bytes that were rolled back.
+// A transaction that fails must leave no text behind, and the next write must store it again.
 //
-// invWriter.storedText exists so the second session declaring Bash does not re-send its whole
-// schema for a conflict to discard. That makes the memo a claim about what is ON DISK, and the
-// only way it can lie is by remembering an insert whose transaction never committed — after
-// which the reveal for those rows is empty and nothing anywhere is an error. The failure is
-// injected with a trigger, because there is no other seam: every statement in write() succeeds
-// on a healthy database, which is exactly why this branch would otherwise never be exercised.
+// The writer keeps no memo of stored hashes (the purge trigger can delete a text row at any time),
+// so a retry always re-inserts. The failure is injected with a trigger, because there is no other
+// seam: every statement in write() succeeds on a healthy database, which is exactly why this
+// branch would otherwise never be exercised.
 func TestWriterForgetsTextFromARolledBackTransaction(t *testing.T) {
 	db := emptyDB(t)
 	w := &invWriter{db: db, seen: map[string]*invSession{}}
@@ -455,9 +477,6 @@ func TestWriterForgetsTextFromARolledBackTransaction(t *testing.T) {
 	}
 	if err := w.write([]invMsg{{tenant: "t1", session: "s1", ts: 1000, inv: inv, text: true}}); err == nil {
 		t.Fatal("the write succeeded; the fault was not injected")
-	}
-	if n := len(w.storedText); n != 0 {
-		t.Errorf("the writer remembers %d blobs from a rolled-back transaction", n)
 	}
 	var blobs int
 	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM declaration_text`).Scan(&blobs); err != nil {
@@ -493,5 +512,31 @@ func TestWriterForgetsTextFromARolledBackTransaction(t *testing.T) {
 	}
 	if !bash {
 		t.Error("the Bash schema is not readable after the retry")
+	}
+}
+
+// The GC trigger can remove a text row between the two transactions of one batch, when the
+// session's last request goes (#689). The backfill skips that row and finishes the batch.
+func TestBackfillSkipsATextRowTheTriggerRemoved(t *testing.T) {
+	db := emptyDB(t)
+	legacyRow(t, db, "gone", "Bash", `{"name":"Bash"}`)
+	legacyRow(t, db, "kept", "Read", `{"name":"Read"}`)
+	seedSessionWithContent(t, db, "t1", "gone", 1, time.Minute)
+	seedSessionWithContent(t, db, "t1", "kept", 1, time.Minute)
+	dedupeAfterCommit = func() {
+		if _, err := db.sql.Exec(`DELETE FROM requests WHERE session_id = 'gone'`); err != nil {
+			t.Error(err)
+		}
+	}
+	defer func() { dedupeAfterCommit = nil }()
+	if _, err := db.dedupeDeclarationText(nil, 10, 0); err != nil {
+		t.Fatalf("the batch aborted: %v", err)
+	}
+	var kept int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM tool_declarations WHERE session_id = 'kept' AND text_gz IS NULL AND text_hash IS NOT NULL`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept != 1 {
+		t.Errorf("the surviving session's row was not migrated (%d)", kept)
 	}
 }

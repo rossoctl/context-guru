@@ -1,0 +1,635 @@
+// Unit tests for the extension's pure helpers. Run: node --test tests/*.test.ts (Node 22.18+ strips the types).
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import {
+  CHAIN, checkAtStart, conflictPrompt, RESTART_TIMEOUT_MS, restartFacts, conflictWords, downNotice, downReason, endKind, forChatGPTSignIn, isRouted, KEEP,
+  needsStartCheck, parseArgs, parseFacts, proxyAnswers, readInstall, REPLACE, START_CHECK_TIMEOUT_MS, StartChecks,
+  stripsChatGPTFields, strategyChoices, type StartCheck, settingsPath, recoverStaleRoute, RestartGate, FIRST_REQUEST_WAIT_MS, PRESET_TEXT, presetLabel, presetFromLabel, choiceProblem, currentSetting,
+  uninstallText, setupDoneText, consentText, LOADED, configureMessage, updateMessage,
+} from "../extensions/context-guru.ts";
+import contextGuru from "../extensions/context-guru.ts";
+
+// A wall-clock bound fails on a busy machine with nothing wrong in the code. A test asserts it only with
+// CG_TIMING_TESTS=1 (the integrator's checks set it; see CLAUDE.md). The rest of the test runs always.
+const timing = process.env.CG_TIMING_TESTS === "1";
+
+const install = {
+  port: 8800,
+  base_urls: { anthropic: "http://127.0.0.1:8800/anthropic", openai: "http://127.0.0.1:8800/openai/v1" },
+  cache_strategy: "auto",
+};
+
+test("a model is routed only when its baseUrl is one setup wrote", () => {
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/anthropic"), true);
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/anthropic/"), true);
+  assert.equal(isRouted(install, "https://api.anthropic.com"), false);
+  assert.equal(isRouted(install, "http://127.0.0.1:8801/anthropic"), false);
+  assert.equal(isRouted(undefined, "http://127.0.0.1:8800/anthropic"), false);
+  assert.equal(isRouted(install, undefined), false);
+});
+
+test("an OpenAI model is routed by its own URL, and OpenAI's own URL is not", () => {
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/openai/v1"), true);
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/openai/v1/"), true);
+  assert.equal(isRouted(install, "https://api.openai.com/v1"), false);
+  assert.equal(isRouted(install, "http://127.0.0.1:8800/openai"), false);
+  // An install from the Anthropic-only version routes no OpenAI model.
+  assert.equal(isRouted({ ...install, base_urls: { anthropic: install.base_urls.anthropic } }, "http://127.0.0.1:8800/openai/v1"), false);
+});
+
+test("a ChatGPT sign-in request loses the fields ChatGPT rejects, and keeps everything else", () => {
+  const payload = {
+    model: "gpt-5.6-luna", input: [{ role: "user" }], stream: true, prompt_cache_key: "s1", store: false,
+    prompt_cache_retention: "24h", prompt_cache_options: { ttl: "30m" }, max_output_tokens: 1000, temperature: 0.2,
+  };
+  const out = forChatGPTSignIn(payload);
+  assert.deepEqual(out, { model: "gpt-5.6-luna", input: [{ role: "user" }], stream: true, prompt_cache_key: "s1", store: false });
+  assert.equal(payload.max_output_tokens, 1000, "the payload Pi built is not changed");
+  assert.equal(forChatGPTSignIn({ model: "gpt-5.6-luna", input: [] }), undefined);
+  assert.equal(forChatGPTSignIn(undefined), undefined);
+  assert.equal(forChatGPTSignIn([1, 2]), undefined);
+});
+
+test("facts parse one key per line and keep '=' inside values", () => {
+  assert.deepEqual(parseFacts("result=routed\nconsent_question=a=b\nnoise\n"), { result: "routed", consent_question: "a=b" });
+});
+
+test("a reload keeps the session, so it sends no end signal", () => {
+  assert.equal(endKind("reload"), undefined);
+  assert.equal(endKind("quit"), "prompt_input_exit");
+  assert.equal(endKind("new"), "clear");
+  assert.equal(endKind("resume"), "resume");
+  assert.equal(endKind("fork"), "other");
+});
+
+test("the install record is read from disk, and a missing or broken one is undefined", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cg-pi-"));
+  assert.equal(readInstall(dir), undefined);
+  writeFileSync(join(dir, "install.json"), "{broken");
+  assert.equal(readInstall(dir), undefined);
+  writeFileSync(join(dir, "install.json"), JSON.stringify(install));
+  assert.deepEqual(readInstall(dir), install);
+});
+
+test("a bare /context-guru runs status, and the first two words are the subcommand and its value", () => {
+  assert.deepEqual(parseArgs(""), { sub: "status", value: "" });
+  assert.deepEqual(parseArgs("   "), { sub: "status", value: "" });
+  assert.deepEqual(parseArgs("preset"), { sub: "preset", value: "" });
+  assert.deepEqual(parseArgs("  preset   medium "), { sub: "preset", value: "medium" });
+});
+
+test("a session start checks the proxy only when installed and some model is routed", () => {
+  assert.equal(needsStartCheck(undefined, ["http://127.0.0.1:8800/anthropic"]), false);
+  assert.equal(needsStartCheck({ ...install, port: undefined }, ["http://127.0.0.1:8800/anthropic"]), false);
+  assert.equal(needsStartCheck(install, []), false);
+  assert.equal(needsStartCheck(install, [undefined, "https://api.anthropic.com"]), false);
+  // The session's model need not be routed: any routed provider is enough.
+  assert.equal(needsStartCheck(install, [undefined, "https://api.x.ai/v1", "http://127.0.0.1:8800/openai/v1"]), true);
+});
+
+/** A StartCheck whose answers come from a list, and that records what it did. */
+function fake(answers: boolean[], over: Partial<StartCheck> = {}) {
+  const log = { checks: 0, restarts: 0, notices: [] as string[] };
+  const check: StartCheck = {
+    port: 8800,
+    hatch: "/state/context-guru-reset",
+    answers: async () => answers[log.checks++] ?? false,
+    restart: async () => {
+      log.restarts++;
+      return { result: "down", service: "restarted" };
+    },
+    active: () => true,
+    notify: (text) => log.notices.push(text),
+    ...over,
+  };
+  return { check, log };
+}
+
+test("a proxy that answers is not restarted and nothing is said", async () => {
+  const { check, log } = fake([true]);
+  assert.equal(await checkAtStart(check), "up");
+  assert.deepEqual(log, { checks: 1, restarts: 0, notices: [] });
+});
+
+test("a proxy that comes back after one restart gives no notice", async () => {
+  const { check, log } = fake([false, true]);
+  assert.equal(await checkAtStart(check), "restarted");
+  assert.deepEqual(log, { checks: 2, restarts: 1, notices: [] });
+});
+
+test("a proxy still down after one restart gives exactly one notice, and no loop", async () => {
+  const { check, log } = fake([false, false, false, false]);
+  assert.equal(await checkAtStart(check), "down");
+  assert.equal(log.checks, 2);
+  assert.equal(log.restarts, 1);
+  assert.equal(log.notices.length, 1);
+  assert.match(log.notices[0], /port 8800 does not answer: one restart did not help\./);
+  assert.match(log.notices[0], /\/context-guru status/);
+  assert.match(log.notices[0], /\/state\/context-guru-reset/);
+});
+
+test("the notice names the reset command the controller reports, and a failed restart still warns", async () => {
+  const reported = fake([false, false], { restart: async () => ({ result: "down", reset_hatch: "/x/context-guru-reset" }) });
+  await checkAtStart(reported.check);
+  assert.match(reported.log.notices[0], /run \/x\/context-guru-reset from a shell/);
+  const thrown = fake([false, false], { restart: async () => { throw new Error("stale"); } });
+  assert.equal(await checkAtStart(thrown.check), "down");
+  assert.match(thrown.log.notices[0], /\/state\/context-guru-reset/);
+});
+
+test("a session that ended during the check gets no restart and no notice", async () => {
+  let active = true;
+  const early = fake([false], { active: () => false });
+  assert.equal(await checkAtStart(early.check), "ended");
+  assert.deepEqual(early.log, { checks: 1, restarts: 0, notices: [] });
+  const late = fake([false, false], { restart: async () => { active = false; return {}; }, active: () => active });
+  assert.equal(await checkAtStart(late.check), "ended");
+  assert.deepEqual(late.log.notices, []);
+});
+
+test("the notice text is one line", () => {
+  assert.equal(downNotice(8800, { service: "restarted" }, "/h").includes("\n"), false);
+});
+
+test("the notice names the real reason the proxy is still down", () => {
+  assert.equal(downReason({ result: "down", service: "restarted" }), "one restart did not help");
+  assert.match(downReason({ result: "down", service: "no_service" }), /service file is missing, so nothing was restarted.*\/context-guru setup/);
+  assert.match(downReason({ result: "down", service: "not_owned" }), /not written by context-guru/);
+  assert.match(downReason({ result: "down", service: "unsupported" }), /no user service/);
+  assert.match(downReason({ result: "down", service: "failed" }), /restart command failed/);
+  assert.match(downReason({ result: "not_installed" }), /no install record/);
+  assert.match(downReason({ result: "already_up" }), /answered the restart check/);
+  assert.equal(downReason({}), "the restart did not run");
+  assert.match(downReason({ result: "busy" }), /held the restart lock, so nothing was restarted/);
+  // A restart stopped at the time limit printed nothing, but it did run.
+  assert.match(downReason({ killed: "true" }), /did not finish within 60 seconds/);
+});
+
+test("a restart stopped at its time limit gets the killed fact", () => {
+  // pi.exec resolves with killed: true on a timeout or an abort (ExecResult in pi-coding-agent).
+  assert.deepEqual(restartFacts({ killed: true, facts: {} }), { killed: "true" });
+  assert.deepEqual(restartFacts({ killed: false, facts: { result: "up" } }), { result: "up" });
+  assert.deepEqual(restartFacts({ facts: { result: "busy" } }), { result: "busy" });
+  assert.equal(RESTART_TIMEOUT_MS, 60_000);
+  assert.match(downNotice(8800, { service: "no_service" }), /port 8800 does not answer: its service file is missing/);
+});
+
+test("the notice names the reset command only when there is one", () => {
+  assert.match(downNotice(8800, {}, "/h/context-guru-reset"), /run \/h\/context-guru-reset from a shell/);
+  assert.doesNotMatch(downNotice(8800, {}), /from a shell|undefined/);
+  const none = fake([false, false], { hatch: undefined, restart: async () => ({ result: "down", service: "restarted" }) });
+  return checkAtStart(none.check).then(() => assert.doesNotMatch(none.log.notices[0], /from a shell|undefined/));
+});
+
+test("a session's end stops only that session's check", () => {
+  const checks = new StartChecks();
+  const a = checks.begin("session-a");
+  const b = checks.begin("session-b");
+  checks.end("session-a");
+  assert.equal(a.active(), false);
+  assert.equal(a.signal.aborted, true);
+  assert.equal(b.active(), true, "the other session's check keeps running");
+  assert.equal(b.signal.aborted, false);
+  checks.end("session-unknown"); // nothing to stop
+  assert.equal(b.active(), true);
+});
+
+test("a session that starts again replaces its own check, and a finished check is forgotten", () => {
+  const checks = new StartChecks();
+  const first = checks.begin("s");
+  const second = checks.begin("s");
+  assert.equal(first.active(), false);
+  assert.equal(second.active(), true);
+  checks.done("s", first.signal); // a late finish of the old check does not drop the new one
+  checks.end("s");
+  assert.equal(second.active(), false);
+  const third = checks.begin("s");
+  checks.done("s", third.signal);
+  checks.end("s"); // already forgotten: nothing aborts
+  assert.equal(third.active(), true);
+});
+
+test("the health check is a GET to localhost /healthz, true only on 200", async () => {
+  const seen: string[] = [];
+  let status = 200;
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.statusCode = status;
+    res.end("ok");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    assert.equal(await proxyAnswers(port), true);
+    status = 503;
+    assert.equal(await proxyAnswers(port), false);
+    assert.deepEqual(seen, ["GET /healthz", "GET /healthz"]);
+  } finally {
+    server.close();
+  }
+  // Nothing listens there now.
+  assert.equal(await proxyAnswers(port, 1000), false);
+});
+
+test("a proxy that accepts but never answers fails the check at the time limit", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const start = Date.now();
+    assert.equal(await proxyAnswers(port, 200), false);
+    if (timing) assert.ok(Date.now() - start < 2000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("each check has a time limit, 5 seconds by default", async () => {
+  assert.equal(START_CHECK_TIMEOUT_MS, 5000);
+  let signal: AbortSignal | undefined;
+  const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+    signal = init?.signal ?? undefined;
+    return new Response("ok");
+  }) as typeof fetch;
+  assert.equal(await proxyAnswers(8800, undefined, fetcher), true);
+  assert.ok(signal, "the request carries a time limit");
+});
+
+test("a stopped check ends at once, before its time limit", async () => {
+  const server = createServer(() => undefined);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const stop = new AbortController();
+    const start = Date.now();
+    const pending = proxyAnswers(port, 5000, fetch, stop.signal);
+    setTimeout(() => stop.abort(), 50);
+    assert.equal(await pending, false);
+    if (timing) assert.ok(Date.now() - start < 1000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("a conflict is a short question, and each answer's consent text is kept apart from it", () => {
+  const p = conflictPrompt({
+    result: "needs_decision", conflicts: "anthropic", existing_base_url: '{"anthropic":"https://gw.example"}',
+    consent_question_chain: "CHAIN-TEXT", consent_question_replace: "REPLACE-TEXT",
+  });
+  assert.deepEqual(p.options, [CHAIN, REPLACE, KEEP]);
+  assert.deepEqual(p.answers, { [CHAIN]: "chain", [REPLACE]: "replace" });
+  assert.equal(p.answers[KEEP], undefined, "no answer means nothing changes");
+  assert.match(p.title, /somewhere else: anthropic: https:\/\/gw.example\./);
+  assert.doesNotMatch(p.title, /\{/);
+  // #1158: a pick-list title is a short question. The consent text goes into the confirm dialog.
+  assert.doesNotMatch(p.title, /CHAIN-TEXT|REPLACE-TEXT/);
+  assert.ok(p.title.length < 200, p.title);
+  assert.deepEqual(p.consent, { chain: "CHAIN-TEXT", replace: "REPLACE-TEXT" });
+});
+
+test("a URL the proxy cannot reproduce offers no chain, and says why", () => {
+  const p = conflictPrompt({ conflicts: "openai", existing_base_url: "x", chain_refused: "openai:openai_path_not_v1",
+    consent_question_replace: "REPLACE-TEXT" });
+  assert.deepEqual(p.options, [REPLACE, KEEP]);
+  assert.match(p.title, /Chain is not offered.*openai_path_not_v1/);
+});
+
+test("conflicts read as plain words, and odd input is shown as it came", () => {
+  assert.equal(conflictWords('{"anthropic":"https://a.example","openai":"https://o.example/v1"}'),
+    "anthropic: https://a.example; openai: https://o.example/v1");
+  assert.equal(conflictWords("not json"), "not json");
+  assert.equal(conflictWords(undefined), "unknown");
+});
+
+test("the ChatGPT field removal skips a chained openai provider only", () => {
+  assert.equal(stripsChatGPTFields(install), true);
+  assert.equal(stripsChatGPTFields(undefined), true);
+  assert.equal(stripsChatGPTFields({ ...install, upstreams: { anthropic: "https://gw.example" } }), true);
+  assert.equal(stripsChatGPTFields({ ...install, upstreams: { openai: "https://gw.example" } }), false);
+});
+
+test("the strategy names come from the proxy's list, and an old proxy offers only none", () => {
+  assert.deepEqual(strategyChoices({ strategies: "none,auto,1-ping,2-ping" }),
+    { names: ["none", "auto", "1-ping", "2-ping"], error: undefined });
+  const old = strategyChoices({ strategies: "none", strategy_error: "update the proxy to v0.7.1 or later" });
+  assert.deepEqual(old.names, ["none"]);
+  assert.match(old.error ?? "", /v0\.7\.1/);
+  assert.deepEqual(strategyChoices({}).names, ["none"]);
+});
+
+test("a request does not wait when no restart is running", async () => {
+  const gate = new RestartGate();
+  // The wait settles before a 0 ms timer fires: no wait at all, whatever the machine's load.
+  const first = await Promise.race([gate.wait(10_000).then(() => "wait"), new Promise((r) => setTimeout(() => r("timer"), 0))]);
+  assert.equal(first, "wait");
+});
+
+test("Esc ends the wait at once", async () => {
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const stop = new AbortController();
+  const waiting = gate.wait(10_000, stop.signal).then(() => "ended");
+  stop.abort();
+  assert.equal(await Promise.race([waiting, new Promise((r) => setTimeout(() => r("still waiting"), 1000))]), "ended");
+  assert.equal(await gate.wait(10_000, AbortSignal.abort()).then(() => "ended"), "ended", "an aborted signal waits not at all");
+});
+
+test("a request waits for a running restart and goes as soon as it ends", async () => {
+  const gate = new RestartGate();
+  const release = gate.hold();
+  let went = false;
+  const waiting = gate.wait(10_000).then(() => { went = true; });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(went, false);
+  release();
+  await waiting;
+  assert.equal(went, true);
+});
+
+test("a request waits at most the limit, 10 seconds by default", async () => {
+  assert.equal(FIRST_REQUEST_WAIT_MS, 10_000);
+  const gate = new RestartGate();
+  gate.hold(); // never released
+  const start = Date.now();
+  await gate.wait(30);
+  if (timing) assert.ok(Date.now() - start < 500);
+});
+
+test("the start check holds requests only while it restarts, also when the restart throws", async () => {
+  const seen: string[] = [];
+  const hold = () => { seen.push("hold"); return () => seen.push("release"); };
+  await checkAtStart({ ...fake([true]).check, hold });
+  assert.deepEqual(seen, [], "a proxy that answers holds nothing");
+
+  const { check } = fake([false, true], {
+    restart: async () => { seen.push("restart"); throw new Error("boom"); },
+    answers: (() => { const a = [false, true]; return async () => { seen.push("check"); return a.shift() ?? false; }; })(),
+  });
+  assert.equal(await checkAtStart({ ...check, hold }), "restarted");
+  assert.deepEqual(seen, ["check", "hold", "restart", "check", "release"]);
+});
+
+test("each preset has the Claude Code plugin's text, without the markdown", () => {
+  const skill = readFileSync(new URL("../../context-guru-plugin/skills/preset-picker/SKILL.md", import.meta.url), "utf8");
+  const rows = [...skill.matchAll(/^\| `([a-z]+)` \| (.+) \|$/gm)];
+  const plain = (text: string) => text.replace(/\*\*|`/g, "");
+  assert.deepEqual(Object.fromEntries(rows.map(([, name, text]) => [name, plain(text)])), PRESET_TEXT);
+});
+
+test("a preset pick-list label carries the text and maps back to the name", () => {
+  assert.equal(presetLabel("off"), "off: nothing runs, requests go through untouched");
+  assert.equal(presetFromLabel(presetLabel("conservative")), "conservative");
+  assert.equal(presetFromLabel(undefined), undefined);
+});
+
+test("an unknown name is named as unknown, then the list", () => {
+  assert.deepEqual(choiceProblem("preset", "banana", ["off", "medium"], "off"),
+    { text: "Unknown preset 'banana'. Presets: off, medium", level: "error" });
+});
+
+test("the current value is already set, so nothing restarts", () => {
+  assert.deepEqual(choiceProblem("preset", "medium", ["off", "medium"], "medium"),
+    { text: "Already set: preset medium. Nothing changed.", level: "info" });
+  assert.equal(choiceProblem("cache strategy", "none", ["none"], "auto"), undefined);
+});
+
+test("a setting whose restart is pending is not current, so choosing it restarts again", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cg-current-"));
+  writeFileSync(join(dir, "install.json"), JSON.stringify({ preset: "high", cache_strategy: "none" }));
+  assert.equal(currentSetting("preset", dir), "high");
+  assert.equal(currentSetting("cache_strategy", dir), "none");
+  writeFileSync(join(dir, "install.json"), JSON.stringify({ preset: "high", restart_pending: true }));
+  assert.equal(currentSetting("preset", dir), undefined);
+});
+
+test("uninstall names a proxy binary it kept", () => {
+  assert.equal(uninstallText({ models_restore: "restored", service: "stopped", binary_kept: "/opt/p (not downloaded by setup)" }),
+    "context-guru removed (models.json: restored, service: stopped). Kept your proxy binary /opt/p (not downloaded by setup). " +
+    "Re-select the model with /model, or restart Pi.");
+  assert.equal(uninstallText({ models_restore: "restored", service: "stopped" }),
+    "context-guru removed (models.json: restored, service: stopped). Re-select the model with /model, or restart Pi.");
+});
+
+test("a setup that fell back to the none strategy says so", () => {
+  const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "none",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none", dashboard: "d", reset_hatch: "h" });
+  assert.match(text, /Preset off, cache strategy none\. Dashboard: d\n/);
+  assert.match(text, /\ncache strategy auto is not offered for Pi, so setup uses none\.\n/);
+});
+
+test("a setup with no fallback has no note line", () => {
+  const text = setupDoneText({ port: "8787", routes: "r", preset: "off", cache_strategy: "auto", dashboard: "d", reset_hatch: "h" });
+  assert.doesNotMatch(text, /so setup uses/);
+  assert.equal(text.split("\n").length, 4);
+});
+
+test("the consent dialog names a strategy fallback before the yes", () => {
+  assert.equal(consentText("ROUTE-TEXT", "cache strategy auto is not offered for Pi, so setup uses none"),
+    "ROUTE-TEXT cache strategy auto is not offered for Pi, so setup uses none.");
+  assert.equal(consentText("ROUTE-TEXT", undefined), "ROUTE-TEXT");
+  const p = conflictPrompt({ consent_question_chain: "C", consent_question_replace: "R", existing_base_url: "x",
+    cache_strategy_note: "cache strategy auto is not offered for Pi, so setup uses none" });
+  assert.deepEqual(p.consent, { chain: "C cache strategy auto is not offered for Pi, so setup uses none.",
+    replace: "R cache strategy auto is not offered for Pi, so setup uses none." });
+});
+
+/** A Pi that records what an extension registers. `emit` runs the handlers of one event. */
+function fakePi() {
+  const handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>> = {};
+  const commands: string[] = [];
+  const pi = {
+    on: (name: string, fn: (event: unknown, ctx: unknown) => unknown) => (handlers[name] ??= []).push(fn),
+    registerCommand: (name: string) => commands.push(name),
+    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false, truncated: false }),
+  };
+  const notices: string[] = [];
+  const ctx = {
+    hasUI: true,
+    ui: { notify: (text: string) => notices.push(text) },
+    model: undefined,
+    modelRegistry: { getAll: () => [] },
+    sessionManager: { getSessionId: () => "s1" },
+  };
+  const emit = (name: string, event: unknown = {}) => (handlers[name] ?? []).forEach((fn) => fn(event, ctx));
+  return { pi: pi as never, commands, notices, emit, events: () => Object.keys(handlers) };
+}
+
+test("a second copy of the package registers nothing and warns once, naming both folders", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  g[LOADED] = "/clone-a/pi-package";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    assert.deepEqual(second.commands, []);
+    assert.deepEqual(second.events(), ["session_start"]);
+    second.emit("session_start");
+    second.emit("session_start");
+    assert.equal(second.notices.length, 1);
+    assert.match(second.notices[0], /two copies/);
+    assert.ok(second.notices[0].includes("/clone-a/pi-package and "), second.notices[0]);
+    assert.ok(second.notices[0].includes(join(dirname(fileURLToPath(import.meta.url)), "..") + "."), second.notices[0]);
+    assert.match(second.notices[0], /settings\.json/);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("the first copy registers its command, and a reload of it after shutdown registers again", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    assert.deepEqual(first.commands, ["context-guru"]);
+    assert.equal(g[LOADED], join(dirname(fileURLToPath(import.meta.url)), ".."));
+    first.emit("session_shutdown", { reason: "reload" });
+    // Released, so a different copy that loads after the reload (the user removed this one) runs.
+    assert.equal(g[LOADED], undefined);
+    const reloaded = fakePi();
+    contextGuru(reloaded.pi);
+    assert.deepEqual(reloaded.commands, ["context-guru"]);
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("a shutdown releases only this copy's marker, for /new as for a reload", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  try {
+    const first = fakePi();
+    contextGuru(first.pi);
+    first.emit("session_shutdown", { reason: "new" });
+    assert.equal(g[LOADED], undefined);
+    contextGuru(fakePi().pi);
+    g[LOADED] = "/clone-a/pi-package"; // another copy holds it now
+    first.emit("session_shutdown", { reason: "reload" });
+    assert.equal(g[LOADED], "/clone-a/pi-package");
+  } finally {
+    delete g[LOADED];
+  }
+});
+
+test("an update whose restart failed is an error that says the proxy is off and what to run", () => {
+  const m = updateMessage({ result: "updated", version: "v0.7.3", restart: "failed", log: "/s/proxy.log" }, 1);
+  assert.equal(m.level, "error");
+  assert.equal(m.text, "context-guru updated to v0.7.3, but the proxy did not start and is off. " +
+    "Run /context-guru status. The log is /s/proxy.log.");
+});
+
+test("an update that restarted, or needed no restart, is info", () => {
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+  assert.deepEqual(updateMessage({ result: "updated", version: "v0.7.3", restart: "skipped" }, 0),
+    { text: "context-guru updated to v0.7.3.", level: "info" });
+});
+
+test("an update that exits non-zero is an error even when its facts say updated", () => {
+  assert.equal(updateMessage({ result: "updated", version: "v0.7.3", restart: "completed" }, 1).level, "error");
+});
+
+test("an update that was refused shows the reason and the detail", () => {
+  assert.deepEqual(updateMessage({ result: "refused", reason: "binary_not_managed", detail: "x" }, 2),
+    { text: "context-guru update: refused binary_not_managed x", level: "error" });
+});
+
+test("a configure whose restart failed says the proxy is off and what to run", () => {
+  assert.deepEqual(configureMessage({ result: "not_applied", preset: "medium", log: "/s/proxy.log" }, 1, ""), {
+    text: "context-guru: the new setting is saved, but the proxy did not start and is off. " +
+      "Run /context-guru status. The log is /s/proxy.log.",
+    level: "error",
+  });
+});
+
+test("a configure that worked names the preset and the strategy", () => {
+  assert.deepEqual(configureMessage({ result: "configured", preset: "medium", cache_strategy: "none" }, 0, ""),
+    { text: "context-guru now runs preset medium, cache strategy none.", level: "info" });
+});
+
+test("a configure with no facts shows stderr", () => {
+  assert.deepEqual(configureMessage({}, 1, "Traceback\n"), { text: "context-guru: error Traceback", level: "error" });
+});
+
+test("the two-copies warning names the settings.json that Pi uses", () => {
+  const g = globalThis as Record<symbol, unknown>;
+  const before = process.env.PI_CODING_AGENT_DIR;
+  g[LOADED] = "/clone-a/pi-package";
+  process.env.PI_CODING_AGENT_DIR = "/tmp/test-agent";
+  try {
+    const second = fakePi();
+    contextGuru(second.pi);
+    second.emit("session_start");
+    assert.ok(second.notices[0].includes('"packages" in /tmp/test-agent/settings.json'), second.notices[0]);
+  } finally {
+    delete g[LOADED];
+    if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = before;
+  }
+});
+
+test("settingsPath names Pi's own settings.json, or the one in PI_CODING_AGENT_DIR", () => {
+  assert.equal(settingsPath({}), "~/.pi/agent/settings.json");
+  assert.equal(settingsPath({ PI_CODING_AGENT_DIR: "/tmp/agent" }), "/tmp/agent/settings.json");
+});
+
+/** A model registry and a session for recoverStaleRoute: models.json can name the proxy or the real endpoint. */
+function staleWorld(onDisk: string) {
+  const seen = { refreshed: 0, set: [] as string[], notices: [] as string[] };
+  const routedAtStart = { port: 8800, base_urls: { anthropic: "http://127.0.0.1:8800/anthropic" } };
+  return {
+    seen, routedAtStart,
+    deps: (installNow: unknown) => ({
+      model: { provider: "anthropic", id: "m", baseUrl: "http://127.0.0.1:8800/anthropic" },
+      installedAtStart: routedAtStart,
+      installNow: installNow as never,
+      refresh: async () => { seen.refreshed++; },
+      find: (provider: string, id: string) => ({ provider, id, baseUrl: onDisk }),
+      setModel: async (m: { baseUrl?: string }) => { seen.set.push(m.baseUrl ?? ""); return true; },
+      notify: (text: string) => seen.notices.push(text),
+    }),
+  };
+}
+
+test("after an uninstall, a session that still uses the proxy URL switches to the endpoint in models.json", async () => {
+  const w = staleWorld("https://gw.example.com");
+  assert.equal(await recoverStaleRoute(w.deps(undefined)), "switched");
+  assert.deepEqual(w.seen.set, ["https://gw.example.com"]);
+  assert.equal(w.seen.notices.length, 1);
+  assert.match(w.seen.notices[0], /context-guru was removed/);
+  assert.match(w.seen.notices[0], /gw\.example\.com/);
+});
+
+test("while context-guru is still installed, nothing is switched (a down proxy is the restart's job)", async () => {
+  const w = staleWorld("https://gw.example.com");
+  assert.equal(await recoverStaleRoute(w.deps(w.routedAtStart)), "still-installed");
+  assert.equal(w.seen.refreshed, 0);
+  assert.deepEqual(w.seen.set, []);
+});
+
+test("a session that does not use the proxy URL is left alone", async () => {
+  const w = staleWorld("https://gw.example.com");
+  const deps = { ...w.deps(undefined), model: { provider: "anthropic", id: "m", baseUrl: "https://gw.example.com" } };
+  assert.equal(await recoverStaleRoute(deps), "not-routed");
+  assert.equal(w.seen.refreshed, 0);
+});
+
+test("when models.json still names the proxy, there is nothing better to switch to", async () => {
+  const w = staleWorld("http://127.0.0.1:8800/anthropic");
+  assert.equal(await recoverStaleRoute(w.deps(undefined)), "no-better-model");
+  assert.deepEqual(w.seen.set, []);
+});
+
+test("a model with no baseUrl in models.json goes to the provider's own API", async () => {
+  const w = staleWorld("");
+  const deps = { ...w.deps(undefined), find: (provider: string, id: string) => ({ provider, id }) };
+  assert.equal(await recoverStaleRoute(deps), "switched");
+  assert.match(w.seen.notices[0], /the provider's own API/);
+});

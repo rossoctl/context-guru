@@ -3,27 +3,65 @@
 A preset is a named, ordered pipeline. Set it once and every explicit field you add overrides it.
 
 ```sh
-context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in YAML
+context-guru-proxy --preset conservative      # or PRESET=conservative, or preset: in YAML
 ```
+
+Six presets are current. They form one ladder. Each step adds to the step below it.
 
 ## Which preset?
 
 | Your workload | Preset |
 |---|---|
-| **Trying context-guru for the first time** | **`cache`** |
-| **Most agents — the recommended pipeline** | **`codesmart`** (pass `--preset codesmart`; the binary defaults to `house`) |
-| Same, but no LLM on the hot path | `codesafe` |
-| A guaranteed-safe, lossless win only | `safe` |
-| General non-agentic traffic | `balanced` |
-| Long agentic sessions | `agent` or `general` |
-| Coding agent reading big source files | `coding` |
-| MCP / list-endpoint JSON arrays | `mcp` |
-| One long transcript to compress, standalone | `summarize` |
-| A cache-unaware summarizer baseline, or a backend with no derivable cache TTL | `summarizer1509` |
-| Squeeze harder, tolerate LLM/structural offload | `aggressive` |
-| Nothing — A/B baseline, passthrough control | `off` |
+| Nothing: passthrough, A/B baseline | `off` |
+| **Start here.** No model calls. | **`conservative`** |
+| Long sessions. Adds a summary for a cold return. | `medium` |
+| Long sessions. Summary at 90% of the window, warm or cold. | `high` |
+| Deepest cut. Adds the model sweep of old tool outputs. | `xhigh` |
+| Deepest cut and tool deferral. Opt-in, experimental. | `ultrahigh` |
+
+`conservative` is the default of the proxy binary and of new hosted accounts. The old default
+name, `house`, runs the same pipeline. It is [obsolete](#obsolete-presets) as a name, and still works.
 
 ## What each one runs
+
+| Preset | What it adds | Pipeline |
+|---|---|---|
+| `off` | Nothing. | *(empty)* |
+| `conservative` | Lossless repack, dedup, command filters, `extract`, cache split. No model calls. | `format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter` |
+| `medium` | `conservative` plus `extract_llm` plus `cache_aware_summarizer` (`cache_state: pre_expiry`). The summary stays in reserve. The proxy uses it only when the cache has expired. | `cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter` |
+| `high` | `medium`, with the summarizer at `cache_state: any`. The summary is made at 90% of the window and used on the next request. | same pipeline as `medium` |
+| `xhigh` | `high` plus `extract_llm_sweep`. It asks the model at the keep-alive ping which old tool outputs are spent. It removes content only on a cold request. | `cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter` |
+| `ultrahigh` | `xhigh` plus tool deferral (`toolfilter` with `defer: auto`). **Opt-in. Experimental.** | same pipeline as `xhigh` |
+
+- `medium` and `high` differ in the settings of `cache_aware_summarizer`, not in the pipeline.
+- `xhigh` and `ultrahigh` differ in the setting `defer: auto` of `toolfilter`, not in the pipeline.
+- `medium`, `high`, `xhigh` and `ultrahigh` call a model. The component gates limit the spend.
+- Full detail for each tier, with the exact rules, is in [Exact pipelines, verbatim](#exact-pipelines-verbatim).
+
+Order is deliberate. The proxy repacks lossless first, then runs the cheap structural
+offloaders, then anything that costs a model call. The `house` family (`house`, `housellm`,
+`conservative` and up) keeps the operator's order: `dedup` and `cmdfilter` run ahead of the
+lossless pair, and `toolfilter` sits after `cachesplit`. That costs per-component attribution
+in `/stats`, never content. See [`config/config.go`](../design.md#config-registry).
+
+## Obsolete presets
+
+!!! warning "Obsolete (#1345)"
+    These 14 presets are **obsolete**: `cache`, `safe`, `balanced`, `aggressive`, `coding`,
+    `mcp`, `agent`, `general`, `summarize`, `summarizer1509`, `codesmart`,
+    `codesafe`, `house`, `housellm`. Do not pick one for a new setup. Use one of the six
+    current presets above.
+
+    They still load and run as before. The proxy keeps them so that old configs work and
+    so that published benchmark numbers stay reproducible. A later release may remove them.
+
+| Preset | Use a current preset instead |
+|---|---|
+| `house` | `conservative` (same pipeline). `house` was the binary default before `conservative`. |
+| `housellm` | `xhigh` (adds the summarizer to it) or `medium`. |
+| `cache`, `safe`, `balanced`, `coding`, `mcp`, `codesafe` | `conservative` (no model calls). |
+| `codesmart`, `aggressive`, `agent`, `general` | `medium` or `high`. |
+| `summarize`, `summarizer1509` | None. These stay by name for baselines and A/B runs. |
 
 | Preset | Pipeline |
 |---|---|
@@ -39,27 +77,18 @@ context-guru-proxy --preset codesmart      # or PRESET=codesmart, or preset: in 
 | `general` | `format, textclean, searchfold, dedup, cmdfilter, extract, extract_llm, cachesplit` |
 | `summarize` | `summarize` |
 | `summarizer1509` | `summarize` |
-| `off` | *(empty)* |
 | `house` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter` |
 | `housellm` | `format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter` |
 
-Order is deliberate: lossless repack first, then the cheap structural offloaders, then
-anything that costs a model call, cache directives last — except in `house` and `housellm`,
-whose order is the operator's on purpose: `dedup` and `cmdfilter` run ahead of the lossless
-pair and `toolfilter` sits after `cachesplit`. That costs per-component attribution in
-`/stats`, never content; the reasons are recorded in
-[`config/config.go`](../design.md#config-registry) and the exemption is noted below.
+`house` and `housellm` are the old **service** configs. Neither is a recommendation.
 
-The last two rows are not options in the chooser above. `house` and `housellm` are the
-**service** configs — what a hosted account runs unless it asks otherwise. They are in the
-table so it lists every preset that exists; pick from the table above this one.
+## Notes on the obsolete presets
 
-## Notes on the ones people pick
+These notes describe how the obsolete presets behave. They stay so that old configs make sense.
 
-### `cache` — start here
+### `cache`
 
-`cachesplit` and nothing else. Pick it when what you want is to find out whether this thing
-helps you, with the smallest possible claim to check:
+`cachesplit` and nothing else. It was the smallest possible claim to check:
 
 - **Nothing is dropped, summarised, or replaced.** No `<<cg:HASH>>` markers, no
   `context_guru_expand` tool added to your requests, no model calls. It splits one oversized
@@ -85,11 +114,10 @@ helps you, with the smallest possible claim to check:
   (vLLM, llm-d), which match to the divergence on their own — so on those it costs nothing
   and buys nothing.
 
-Move to `codesmart` once you want the offloaders too. `safe` is the next step up and is still
-lossless in meaning, but it does rewrite JSON, so `cache` is the one whose promise you can
-confirm by reading a single line of `config/config.go`.
+`safe` is the next step up and is still lossless in meaning, but it does rewrite JSON, so
+`cache` is the one whose promise you can confirm by reading a single line of `config/config.go`.
 
-**`codesmart`** is the shipped default and the cheapest arm in the
+**`codesmart`** was the cheapest arm in the
 [benchmarks](../RESULTS.md) at the highest reward. It is the one preset that ships tuned
 per-component settings rather than a bare name-list, which is why most turns make no model
 call at all.
@@ -159,19 +187,20 @@ start from the closest preset and tune. Full expansions live in
 
 ## Exact pipelines, verbatim
 
-Pipelines below are taken exactly from the `presets` map in `config/config.go`.
+Pipelines below are taken exactly from the `presets` map in `config/config.go`. Rows for the 14 obsolete presets are marked in the [list above](#obsolete-presets).
 
 | Preset | Ordered pipeline | When to use |
 |---|---|---|
-| `house` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | **The default**, for the standalone proxy and for every hosted tenant that has not chosen otherwise. Deterministic all the way through: no model call, so it adds no upstream spend and no latency to anyone else's agent on a shared box. `toolfilter` carries an empty removal list until an account names something. The order is the operator's, not this file's lossless-first rule — see the note below the table. |
-| `housellm` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | `house` plus **both** compaction-model passes, applied per account on request. `extract_llm` works the uncached tail on any turn; `extract_llm_sweep` adjudicates at depth **only on a turn whose prompt cache has expired**. They were one component with a `per_output` / `cold_cache` pair of switches until the cold-sweep split — the sweep is now its own component, so "is it on" is its presence in the pipeline like everything else. The bounds that apply: the sweep's `max_calls` (default one concurrency round, each call adjudicating up to 12 outputs), `extract_llm`'s `llm_max_per_request: 8`, the economic gate on both, and a 3,000-token request trigger. |
-| `conservative` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | The Claude Code plugin picker's tier 1, and `house` verbatim (see above) under a name that reads as an effort level rather than a product name. Deterministic, no model calls. |
+| `house` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | **Obsolete name** of the old default. It is now an alias of `conservative`, which is the default for the standalone proxy and for every hosted tenant that has not chosen otherwise. Deterministic all the way through: no model call, so it adds no upstream spend and no latency to anyone else's agent on a shared box. `toolfilter` carries an empty removal list until an account names something. The order is the operator's, not this file's lossless-first rule — see the note below the table. |
+| `housellm` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | `house` plus **both** compaction-model passes, applied per account on request. `extract_llm` works the uncached tail on any turn; `extract_llm_sweep` asks the request's own model **at the keep-alive ping**, in place of the ping, which old tool outputs are spent. It holds the answer and **removes content only on a cold request** (or, after a changed prefix, only after the change point). Each removal leaves a `<<cg:HASH>>` marker, and `expand` gives the original back. With no keep-alive there is no question. The bounds that apply: the sweep asks about at most 12 outputs per question, `extract_llm`'s `llm_max_per_request: 8` with its economic gate, and a 3,000-token request trigger. |
+| `conservative` | `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract` → `cachesplit` → `toolfilter` | The default, and the Claude Code plugin picker's tier 1. `house` is its obsolete alias. Deterministic, no model calls. |
 | `medium` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 2: `conservative` plus `extract_llm` (`housellm` minus its cold-cache sweep), plus [`cache_aware_summarizer`](../components/advanced-offload.md#two-ways-to-use-cache_state) with `cache_state: pre_expiry`. The summary is prepared in the background, in place of one keep-alive ping, and kept in reserve. It is used only when the user comes back after the cache expired, so the history never changes while the user works. Spends on its own, gated by `extract_llm`'s economic gate and 3,000-token trigger, and by the summarizer's 90%-of-window trigger. Needs keep-alive to prepare a summary; with cache strategy `none` the summarizer almost never acts. |
 | `high` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 3: `medium` with `cache_aware_summarizer` at its default `cache_state: any`. The summary is made at 90% of the window and used on the next request, warm or cold. `summarize` is no longer in any picker tier; it stays available by name (see [Two ways to use `cache_state`](../components/advanced-offload.md#two-ways-to-use-cache_state) for when it is the better choice). |
-| `xhigh` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 4, and the deepest cut it offers: `high` plus `extract_llm_sweep`, i.e. `housellm` plus [`cache_aware_summarizer`](../components/advanced-offload.md#two-ways-to-use-cache_state) at its default trigger (`min_request_frac: 0.9`, `cache_state: any`). The summarizer sends the conversation itself plus one appended instruction, so its call reads the provider's cached prefix instead of paying full price. On Anthropic traffic it depends on #402, #406, #413 and #431. |
+| `xhigh` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | The picker's tier 4, and the deepest cut it offers: `high` plus `extract_llm_sweep` (it asks at the keep-alive ping and removes content only on a cold request), i.e. `housellm` plus [`cache_aware_summarizer`](../components/advanced-offload.md#two-ways-to-use-cache_state) at its default trigger (`min_request_frac: 0.9`, `cache_state: any`). The summarizer sends the conversation itself plus one appended instruction, so its call reads the provider's cached prefix instead of paying full price. On Anthropic traffic it depends on #402, #406, #413 and #431. |
+| `ultrahigh` | `cache_aware_summarizer` → `format` → `dedup` → `toon` → `cmdfilter` → `searchfold` → `textclean` → `extract_llm` → `extract_llm_sweep` → `extract` → `cachesplit` → `toolfilter` | **Experimental** (see the README's "Experimental: ultrahigh"). The picker's tier 5, **opt-in only**: `xhigh` plus **tool deferral** (`toolfilter` with `defer: auto`, #485). A tool that the user's last 3 sessions declared and never used, that this project did not use in its last 10 sessions, and that weighs at least 200 tokens (counted with the proxy's own o200k tokenizer, about 340 Claude tokens) is deferred. An MCP server is one unit: all its tools are deferred together when no tool of it was used, and the 200-token minimum applies to the server's total. The set is decided once per conversation thread and never changes within it. Without 3 sessions of history it defers nothing. **On Claude models** the tool is sent with `defer_loading: true` and is never removed; the model sees its name in a short list and loads it through the API's search tool (`tool_search_tool_bm25`). **When the request has Claude Code's own `ToolSearch`** (#898), the proxy adds no `tool_search_tool_bm25`: the model loads through `ToolSearch`, and the proxy adds `tool_reference` blocks for its own deferred tools to a `select:Name1,Name2` result, on the next request. Any other query passes through. A non-`select:` query passes through untouched and disables nothing. An unknown `ToolSearch` description, or a call to a deferred tool whose own result is a "not loaded", "no such tool" or "does not exist" error, disables the mode for that description (24 h): nothing is deferred. See [the search matrix](../tool-search-matrix.md). A thread that started with the server-side search keeps it. This needs a provider check: picking the preset in the preset picker starts it, and the first session after that is not deferred. **On GPT, GLM and Kimi** (#825), which ignore `defer_loading`, the tool is removed from `tools` and listed by name; the model loads it through Context Guru's own search tool, `context_guru_tools`, which adds it back for the rest of the thread. No provider check runs there, so the first request of a thread can already defer. Off with `toolfilter: {defer: off}`, or in Claude Code with `ENABLE_TOOL_SEARCH=false`. Two account lists change the rule: `keep` (never defer these) and `always_defer` (#878: defer these in every new thread, without the history rule and the project veto; empty by default). The keep list wins over `always_defer`, and a tool on `always_defer` still stays loaded when the thread uses it, when `tool_choice` forces it, when it is a core tool, or when it weighs under 200 tokens. Each list takes a tool name, or `mcp__<server>` for a whole server. The per-thread record is kept on disk in every setup (the session-state table with `--dashboard`, else `context-guru-tooldefer.db` next to the dashboard database path), so a restart never moves a tool; with no durable place, it defers nothing. A Responses request that declares its own `tool_search` (Codex) keeps it, and nothing is deferred on it (#876). |
 | `codesmart` | `format` → `textclean` → `searchfold` → `dedup` → `cmdfilter` → `extract_llm` → `extract` → `cachesplit` | The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. **Changed:** the lossless trio replaced `toon` (2026-08), and the heuristic-deletion components it once carried (`failed_run`, `linecap`) were removed. Re-measure before quoting the published SWE-bench numbers against it. |
 | `codesafe` | `format` → `textclean` → `searchfold` → `dedup` → `cmdfilter` → `extract` → `cachesplit` | `codesmart` minus the LLM pass — **deterministic-only, zero model calls by policy**. The safe control / the choice when you don't want an LLM on the hot path. |
-| `off` | *(empty)* | Passthrough — no components. The baseline / A-B control, and what the [Claude Code plugin](../how-to/install-plugin.md) installs by default; the plugin's actual default saving mechanism is the `5-min-ping` cache strategy (keep-alive), not a pipeline component. |
+| `off` | *(empty)* | Passthrough — no components. The baseline / A-B control, and what the [Claude Code plugin](../how-to/install-plugin.md) installs by default; the plugin's actual default saving mechanism is the `auto` cache strategy (keep-alive), not a pipeline component. |
 | `cache` | `cachesplit` | The volatile-tail split and nothing else: no content dropped, no `<<cg:HASH>>` markers, no `context_guru_expand` tool added to requests, no model calls. Chosen so a stranger deciding whether to route their agent through a local proxy can verify the claim by reading one line of `config/config.go` rather than trusting four components. The savings claim is regime-dependent and the funnel's regime is the weak one: **−34.1% cost / 0% → 96.7% hit** is a benchmark harness running tasks back-to-back inside the provider's 5-minute TTL (and is one task measured three times), while this project's own interactive traffic yields **$0.0298 across 1,127 sessions** — 1,105 of 1,127 session starts read zero from cache. Zero outside a git repo, under the 1,024-token `minSplitTokens` floor, or on an implicit prefix-cache backend (vLLM, llm-d). See [dashboard](../dashboard.md) and [cacheinject](../components/caching.md#cacheinject). |
 | `safe` | `format` → `textclean` → `searchfold` → `cachesplit` | Lossless only: repack JSON compactly and split the volatile system tail so the shared prefix stays cacheable. Zero risk of dropping content. |
 | `balanced` | `format` → `textclean` → `searchfold` → `dedup` → `cmdfilter` → `cachesplit` | Lossless repack + conservative offloads (dedupe, filter command noise) + the cache split. |

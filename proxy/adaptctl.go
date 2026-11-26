@@ -115,44 +115,9 @@ func (h *Handler) adaptConfigApply(w http.ResponseWriter, r *http.Request, kind 
 		"undo": map[string]string{"option": "revert"}})
 }
 
-// adaptCompactionDoc is doc with choice applied: the candidates replaced in place, the searched
-// settings set, nothing else touched.
+// adaptCompactionDoc is doc with choice applied (config.EditAdaptCompaction): the candidates
+// replaced in place, the searched settings set, nothing else touched.
 func adaptCompactionDoc(doc string, choice dash.AdaptCompactionChoice) (string, []string, error) {
-	f, err := config.ParseForm(doc)
-	if err != nil || f.ParseError != "" {
-		return "", nil, statusError{http.StatusConflict, "your stored configuration does not load, so it " +
-			"cannot be edited as fields; a manager must repair it on the account page"}
-	}
-	for c, knobs := range choice.Settings {
-		for k, v := range knobs {
-			// The grid the report searched, or the value already stored.
-			if stored, ok := f.Components[c][k].(int); !dash.AdaptCompactionKnobAllowed(c, k, v) && (!ok || stored != v) {
-				return "", nil, statusError{http.StatusBadRequest, "not an adaptable setting: " + c + "." + k}
-			}
-		}
-	}
-	base := f.Pipeline
-	f.Pipeline = dash.AdaptCompactionMerge(f.Pipeline, choice.Candidates)
-	// The candidates are the only names this may take out; ApplyForm keeps anything else.
-	f.PipelineKnown, f.PipelineBase = dash.AdaptCompactionCandidates, base
-	// Nor does it state the cache block: a parsed form carries one, and ApplyForm would write
-	// `keepalive: false` into a document that never said it, pinning the account against a
-	// default that later changes.
-	f.Cache = nil
-	if f.Components == nil {
-		f.Components = map[string]map[string]any{}
-	}
-	for c, knobs := range choice.Settings {
-		if f.Components[c] == nil {
-			f.Components[c] = map[string]any{}
-		}
-		for k, v := range knobs {
-			f.Components[c][k] = v
-		}
-	}
-	next, err := config.ApplyForm(doc, f)
-	if err != nil {
-		return "", nil, statusError{http.StatusBadRequest, err.Error()}
-	}
-	return next, f.Pipeline, nil
+	next, pipe, err := config.EditAdaptCompaction(doc, choice.Candidates, choice.Settings)
+	return next, pipe, editStatus(err)
 }

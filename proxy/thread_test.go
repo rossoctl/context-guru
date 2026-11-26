@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/rossoctl/context-guru/agent"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +16,9 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/thread"
-	"github.com/rossoctl/context-guru/internal/waitcause"
+	"github.com/rossoctl/context-guru/internal/testutil"
+	"github.com/rossoctl/context-guru/thread"
+	"github.com/rossoctl/context-guru/waitcause"
 )
 
 // threadBody is an Anthropic-dialect body whose messages are the given texts, with Claude Code's
@@ -60,16 +62,15 @@ func TestKeeperHoldsOneEntryPerThread(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			k, _, clock := testKeeper(t, Limits{})
+			k, fs, clock := testKeeper(t, Limits{})
 			var mu sync.Mutex
-			sent := map[string]string{} // thread -> the body its ping carried
-			k.send = func(j pingJob, body []byte) (Usage, int, error) {
+			var sent []string // the body each ping carried; the wire does not name the thread
+			fs.fn = func(_ *http.Request, body []byte) (Usage, int, error) {
 				mu.Lock()
-				sent[j.thread] = string(body)
+				sent = append(sent, string(body))
 				mu.Unlock()
 				return Usage{CacheRead: 48576, Output: 1}, http.StatusOK, nil
 			}
-			k.dispatch = k.fire
 			pol := kaPolicy()
 			pol.MinPrefixTokens = 1000
 			pol.OpenAIIdle = 280 * time.Second
@@ -100,16 +101,25 @@ func TestKeeperHoldsOneEntryPerThread(t *testing.T) {
 			if live := k.LiveSessionKeys(); len(live) != 1 || live[0] != "sess" {
 				t.Errorf("LiveSessionKeys = %v, want the session once", live)
 			}
-			if n := k.sweep(clock.advance(300 * time.Second)); n != 2 {
+			if n := k.Sweep(clock.advance(300 * time.Second)); n != 2 {
 				t.Fatalf("sweep fired %d pings, want 2", n)
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if !strings.Contains(sent[""], "MAIN-THREAD") {
-				t.Errorf("the main thread's ping did not carry its own body: %.80q", sent[""])
+			// Two pings, one carrying each thread's own body and not the other's.
+			var mainPings, subPings int
+			for _, b := range sent {
+				m, s := strings.Contains(b, "MAIN-THREAD"), strings.Contains(b, "SUBAGENT")
+				switch {
+				case m && !s:
+					mainPings++
+				case s && !m:
+					subPings++
+				}
 			}
-			if !strings.Contains(sent["a:S"], "SUBAGENT") {
-				t.Errorf("the subagent's ping did not carry its own body: %.80q", sent["a:S"])
+			if len(sent) != 2 || mainPings != 1 || subPings != 1 {
+				t.Errorf("pings carried %d main-thread and %d subagent bodies of %d sent, want one "+
+					"of each: each thread's ping must carry its own body", mainPings, subPings, len(sent))
 			}
 		})
 	}
@@ -174,33 +184,33 @@ func TestThreadForFallsBackOnAnUnusableHeader(t *testing.T) {
 	req := func(agentID string) *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "/x", nil)
 		if agentID != "\x01unset" {
-			r.Header.Set(agentIDHeader, agentID)
+			r.Header.Set(thread.AgentHeader, agentID)
 		}
 		return r
 	}
-	if id := h.threadFor(req("\x01unset"), "t1", "s", threadBody("main"), false, lg).ID; id != thread.Primary {
+	if id := h.threadFor(req("\x01unset"), identify(req("\x01unset")), "t1", "s", threadBody("main"), false, lg).ID; id != thread.Primary {
 		t.Fatalf("main thread = %q", id)
 	}
-	if id := h.threadFor(req("a9b99ca1f8284c823"), "t1", "s", threadBody("sub"), false, lg).ID; id != "a:a9b99ca1f8284c823" {
+	if id := h.threadFor(req("a9b99ca1f8284c823"), identify(req("a9b99ca1f8284c823")), "t1", "s", threadBody("sub"), false, lg).ID; id != "a:a9b99ca1f8284c823" {
 		t.Fatalf("valid header thread = %q", id)
 	}
 	for _, bad := range []string{"", "   ", "has space", strings.Repeat("x", 500)} {
 		// A continuation of the main thread with a bad header stays on the main thread...
-		if id := h.threadFor(req(bad), "t1", "s", threadBody("main", "a", "u"), false, lg).ID; id != thread.Primary {
+		if id := h.threadFor(req(bad), identify(req(bad)), "t1", "s", threadBody("main", "a", "u"), false, lg).ID; id != thread.Primary {
 			t.Errorf("header %.20q on a main-thread continuation gave %q", bad, id)
 		}
 		// ...and a new conversation with a bad header gets a prefix thread, not the bad value.
-		id := h.threadFor(req(bad), "t1", "s", threadBody("other "+bad), false, lg).ID
+		id := h.threadFor(req(bad), identify(req(bad)), "t1", "s", threadBody("other "+bad), false, lg).ID
 		if id == thread.Primary || strings.HasPrefix(id, "a:") {
 			t.Errorf("header %.20q on a new conversation gave %q", bad, id)
 		}
 	}
 	// No session: the session itself, whatever the header says.
-	if id := h.threadFor(req("x"), "t1", "", threadBody("a"), false, lg).ID; id != thread.Primary {
+	if id := h.threadFor(req("x"), identify(req("x")), "t1", "", threadBody("a"), false, lg).ID; id != thread.Primary {
 		t.Errorf("no session gave %q", id)
 	}
 	// A nil tracker fails open to the session.
-	if id := (&Handler{}).threadFor(req("x"), "t1", "s", threadBody("a"), false, lg).ID; id != thread.Primary {
+	if id := (&Handler{}).threadFor(req("x"), identify(req("x")), "t1", "s", threadBody("a"), false, lg).ID; id != thread.Primary {
 		t.Errorf("nil tracker gave %q", id)
 	}
 }
@@ -221,12 +231,13 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 
+			sent := int64(0)
 			send := func(agentID string, body []byte) {
 				req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(string(body)))
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("x-context-guru-session", "sess-th")
 				if withHeader && agentID != "" {
-					req.Header.Set(agentIDHeader, agentID)
+					req.Header.Set(thread.AgentHeader, agentID)
 				}
 				resp, err := srv.Client().Do(req)
 				if err != nil {
@@ -236,12 +247,16 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 				if resp.StatusCode != 200 {
 					t.Fatalf("proxy returned %d", resp.StatusCode)
 				}
+				// The handler records the row in a deferred func, after the response is on the
+				// wire. Wait for it before the next send, or two rows can take their IDs in the
+				// wrong order, and the sort by ID below then mixes up the threads.
+				sent++
+				waitForRows(t, rec, sent)
 			}
 			send("", threadBody("fix the bug"))
 			send("", threadBody("fix the bug", "spawning a subagent", "go on"))
 			send("agentS", threadBody("investigate file x"))
 			send("agentS", threadBody("investigate file x", "reading", "contents"))
-			waitForRows(t, rec, 4)
 
 			page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
 			if err != nil {
@@ -265,6 +280,11 @@ func TestHandlerKeysRowsAndKeepAliveByThread(t *testing.T) {
 			// The subagent's first request is a cold start of its own thread, never a prefix
 			// change of the session's (fakeUpstream reads 9000 from cache, so every row is a hit;
 			// the label check lives in dash.TestASubagentsFirstRequestIsAColdStart).
+			// The handler hands a finished request to the keeper in a deferred func, after the
+			// response is on the wire. The client can return before that runs, so wait for it.
+			testutil.WaitForState(t, "the keeper to hold one entry per thread",
+				func() bool { return h.keeper.Stats().Live == 2 },
+				func() string { return fmt.Sprintf("%d entries", h.keeper.Stats().Live) })
 			if got := h.keeper.Stats().Live; got != 2 {
 				t.Errorf("keeper holds %d entries after two threads of two turns each, want 2", got)
 			}
@@ -318,7 +338,7 @@ func TestSentStashDropsTheOldestThreadNotTheActiveOne(t *testing.T) {
 	}
 }
 
-// threadBodyWithTools is threadBody plus a tools declaration — the metadata internal/thread
+// threadBodyWithTools is threadBody plus a tools declaration — the metadata package thread
 // reads to tell the main agent from a side request (title, quota check, end-of-turn note).
 func threadBodyWithTools(texts ...string) []byte {
 	var m map[string]any
@@ -328,7 +348,7 @@ func threadBodyWithTools(texts ...string) []byte {
 	return b
 }
 
-// #426 fix, the prefix-ask stash: a side request gets its OWN thread id from internal/thread
+// #426 fix, the prefix-ask stash: a side request gets its OWN thread id from package thread
 // (TestASideRequestDoesNotMoveTheMainThreadsTail), so its own put() can no longer land on the
 // main thread's key and replace its stashed body.
 func TestSentStashSurvivesASideRequest(t *testing.T) {
@@ -404,7 +424,7 @@ func TestKeeperSurvivesASideRequestsArrival(t *testing.T) {
 		t.Fatalf("after the side request's arrival: %d live entries, want 1 (the main thread survives)", got)
 	}
 	rec(side.ID, start.Add(2*time.Second), sideBody) // the side request finishes: nothing of the session is in flight
-	if n := k.sweep(clock.advance(300 * time.Second)); n != 1 {
+	if n := k.Sweep(clock.advance(300 * time.Second)); n != 1 {
 		t.Fatalf("sweep fired %d pings, want 1 (the main thread, still live)", n)
 	}
 }
@@ -417,7 +437,7 @@ func TestWaitCauseSurvivesASideRequest(t *testing.T) {
 	scope := "t1\x00sess"
 
 	// Built by hand, in the same key order as turn2 and side3 below (role before content):
-	// internal/thread's fingerprint hashes an object's keys in DOCUMENT order, so turn2's first
+	// Package thread's fingerprint hashes an object's keys in DOCUMENT order, so turn2's first
 	// message must be byte-for-byte the same shape as this one for the prefix match to hold.
 	turn1 := []byte(`{"model":"claude-sonnet-5",` +
 		`"tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
@@ -464,5 +484,36 @@ func TestWaitCauseSurvivesASideRequest(t *testing.T) {
 	again := wc.Observe("t1", "sess", main.ID, bschemas.Anthropic, turn2)
 	if again.OpenBackground != 1 {
 		t.Fatalf("main thread's open background count = %d after a side request, want 1", again.OpenBackground)
+	}
+}
+
+// A Codex sub-agent and an OpenCode child session name themselves with their own headers. Each reads
+// as an agent thread, so the keeper treats it as a subagent. A main thread of either client stays primary.
+func TestThreadForReadsCodexAndOpenCodeSubagents(t *testing.T) {
+	h := &Handler{threads: thread.New()}
+	lg := slog.New(slog.DiscardHandler)
+	req := func(kv ...string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/x", nil)
+		for i := 0; i < len(kv); i += 2 {
+			r.Header.Set(kv[i], kv[i+1])
+		}
+		return r
+	}
+	tf := func(r *http.Request, session, body string) string {
+		return h.threadFor(r, agent.Identify(r.Header), "t1", session, threadBody(body), false, lg).ID
+	}
+	codex := "codex_cli_rs/0.162.1"
+	if id := tf(req("User-Agent", codex, "thread-id", "t0"), "codex", "main"); id != thread.Primary {
+		t.Fatalf("codex main thread = %q", id)
+	}
+	if id := tf(req("User-Agent", codex, "thread-id", "t9", "x-codex-parent-thread-id", "t0"), "codex", "sub"); id != "a:t9" {
+		t.Fatalf("codex sub-agent thread = %q, want a:t9", id)
+	}
+	oc := "opencode/2.4.1"
+	if id := tf(req("User-Agent", oc, "x-opencode-session-id", "ses_b", "x-opencode-parent-session-id", "ses_a"), "ses_b", "child"); id != "a:ses_b" {
+		t.Fatalf("opencode child thread = %q, want a:ses_b", id)
+	}
+	if id := tf(req("User-Agent", oc, "x-opencode-session-id", "ses_a"), "ses_a", "root"); id != thread.Primary {
+		t.Fatalf("opencode root thread = %q", id)
 	}
 }

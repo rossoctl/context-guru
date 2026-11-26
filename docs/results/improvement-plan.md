@@ -96,7 +96,7 @@ tool-schema overhead. That is *"baseline plus free headroom,"* not *"better comp
   replay result-cache, not from the model** — only 0.24% of tool outputs ever reached haiku.
 - **The cache-write tax.** cg's write/read ratio is 2.82% on TB vs baseline 1.86% (+52%), from
   mutating content inside the cached prefix (§2, §3A).
-- ~~**`context_guru_expand` is referenced 1,496× and callable 0×.**~~ **REFUTED — see §B2.** The
+- **`context_guru_expand` is referenced 1,496× and callable 0× — REFUTED, see §B2.** The
   tool *is* registered, the SSE loop *is* armed, and a live agent restored 3,372 tokens through the
   streaming path. The 4.8M was a cumulative re-count; unique is 234,119 tokens (21× smaller). The
   genuine defect in this area was a latency tautology that buffered every SSE response.
@@ -195,7 +195,7 @@ loss (+8% SWE-small, +52% TB-small). A `min_conversation_tokens` / `min_turns` g
 offloader recovers most of the small-task regression at zero reward risk. Above the gate, escalate
 aggressiveness with size.
 
-**B2. ~~Register `context_guru_expand` on the streaming path~~ — REFUTED; the real bug was a
+**B2. Register `context_guru_expand` on the streaming path — REFUTED; the real bug was a
 latency tautology.** ([#26](https://github.com/rossoctl/context-guru/issues/26) /
 [PR #33](https://github.com/rossoctl/context-guru/pull/33))
 
@@ -243,7 +243,7 @@ value is already replay, so this removes 450 ms/req and $3.26 with negligible sa
 `keep_head_chars`; add the same ~15-token peek to `extract`/`dedup`/`extract_llm` markers so the
 model can decide whether an expand is worth a turn instead of bouncing blindly.
 
-### C. Cross-turn dedup — ~~the biggest untapped token lever~~ **REFUTED by measurement**
+### C. Cross-turn dedup — the biggest untapped token lever, refuted by measurement
 
 **C1 was wrong. The re-send factor is real; the interpretation was not.**
 **`xdedup` is unbuildable, and would be harmful if built.** Measured on the raw request

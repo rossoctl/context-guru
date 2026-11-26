@@ -1,6 +1,7 @@
 ---
 name: session
-description: A one-line timeline of this session: turns, pauses, cache misses, pings and compactions, with a dollar verdict.
+description: A one-line timeline of this session (turns, pauses, cache misses, pings and compactions), with a dollar verdict.
+disable-model-invocation: true
 argument-hint: "[details]"
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" session:*)
 ---

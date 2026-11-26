@@ -1,96 +1,24 @@
 package proxy
 
 import (
-	"strings"
+	"github.com/rossoctl/accountant"
 
-	"github.com/tidwall/gjson"
+	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/thread"
 )
 
-// agentCompactionPhrases are the VERBATIM prompt openings agents use when they ask the
-// model to summarize their own conversation so they can keep going in a smaller context.
-// Each was read out of the shipped agent, not guessed:
-//
-//   - Claude Code 2.1.215 — `Jao()`/`GMu()` build the summary request and hand it to
-//     `Ur({content})`, the user-message factory; `k2` appends it LAST
-//     (`[...forkContextMessages, ...promptMessages]`). Every variant (auto-compact,
-//     /compact, and the "RECENT portion" partial-compact bodies) begins the same way,
-//     so the shared opening is the match. It asks for "full code snippets" and for
-//     security-relevant instructions to be "preserved verbatim".
-//   - Claude Code 2.1.296 (#518) — two prompt variants, chosen per session: "…summary of
-//     the conversation so far" and "…summary of this conversation". The phrase therefore
-//     stops at "summary of ". The prompt is no longer a message of its own: it is an extra
-//     text block inside the last USER message, and a `system` message (`<total_tokens>…`)
-//     still follows it. So the match skips trailing system messages (see lastTurn).
-//   - Bob Shell 1.0.6 (Gemini-CLI fork) — the compression call appends exactly this one
-//     fixed user turn, with the summarizer prompt in `systemInstruction`.
-//
-// Why these must be matched against the LAST message only, and why that is not a free
-// bypass: the phrase is agent-authored boilerplate that is always the final turn of a
-// compaction request. A user who types it (or reads a file containing it) trips the
-// bypass for that ONE request. On the next turn their message is no longer last and
-// compaction resumes. A whole-body match WOULD latch: the phrase would sit in the
-// transcript forever and silently disable compaction for the rest of the session.
-//
-// A false positive here is REACHABLE, not hypothetical: this phrase is quoted verbatim in
-// docs/how-to/agent-compaction.md, so an agent that reads that page lands it in a
-// trailing tool_result.
-//
-// This comment used to claim the cost was "that request's savings — nothing else, because
-// the bypass path writes no session state (no cached-prefix boundary), so it cannot
-// latch." Writing no boundary was the harm, not the safeguard: the provider caches the
-// full body we forwarded, so failing to record its length left the next turn treating
-// those messages as mutable tail, rewriting them, and forcing a cache-write of the whole
-// suffix. apply.BodyOpts now records the length on a bypassed turn too, which is what
-// makes the "one request only" claim actually true.
-// A phrase must contain no character encoding/json escapes (no "<", ">", "&", quotes,
-// newlines): the match runs against the RAW message JSON so that a string content and a
-// content-block array both work, and Go's HTML-escaping would otherwise rewrite the
-// needle on the wire. Bob's full sentence ends in "<state_snapshot>." — cut there.
-var agentCompactionPhrases = []string{
-	"Your task is to create a detailed summary of ",
-	"First, reason in your scratchpad. Then, generate the ",
+// compactionVerdict is what the proxy tells the accountant about a client compaction (R55) and
+// stores on the dashboard row (#947): "unknown" on the first request after the agent's own
+// compaction, "" on any other request. The wire does not yet tell a manual /compact from an
+// auto compaction, so the verdict is never "manual" or "auto".
+func compactionVerdict(th thread.Result) accountant.CompactionTrigger {
+	if th.AfterCompaction {
+		return accountant.CompactionUnknown
+	}
+	return ""
 }
 
-// isAgentCompaction reports whether this request is the agent asking the model to
-// summarize the conversation so far (its own context compaction).
-//
-// Such a request must NOT be compacted: it demands verbatim fidelity over the whole
-// transcript, and any content we replaced with a <<cg:HASH>> marker simply never makes
-// it into the summary — the summary is then baked into the rest of the session, so the
-// loss is permanent and expansion cannot recover it. Compacting the compactor is the one
-// case where the pipeline makes a request strictly worse than no proxy at all.
-//
-// The match is scoped to the last TURN's raw JSON (the phrases contain no characters
-// JSON escapes, so string and content-block shapes both work) and to user-role messages,
-// which is where every known agent puts it. See agentCompactionPhrases and lastTurn.
-func isAgentCompaction(body []byte) bool {
-	msgs := gjson.GetBytes(body, "messages")
-	if !msgs.IsArray() {
-		return false
-	}
-	last, ok := lastTurn(msgs.Array())
-	if !ok || last.Get("role").String() != "user" {
-		return false
-	}
-	for _, p := range agentCompactionPhrases {
-		if strings.Contains(last.Raw, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// lastTurn is the last message that is not a system or developer message. Claude Code 2.1.296
-// ends a request with a `system` message carrying its token budget, after the user turn that
-// holds the compaction prompt. Skipping only those keeps the anti-latch rule above: an earlier
-// USER or assistant turn is never looked at.
-func lastTurn(arr []gjson.Result) (gjson.Result, bool) {
-	for i := len(arr) - 1; i >= 0; i-- {
-		switch arr[i].Get("role").String() {
-		case "system", "developer":
-			continue
-		}
-		return arr[i], true
-	}
-	return gjson.Result{}, false
+// isClientCompaction wires the library detector to the request's Client. The logic is in agent.
+func isClientCompaction(cl agent.Client, body []byte) bool {
+	return agent.IsClientCompaction(cl, body)
 }

@@ -42,7 +42,7 @@ upstream, injects the real key, and selects the pipeline. It exposes `:4000` wit
 ## Quick local smoke test
 
 ```sh
-./bin/context-guru-proxy --preset general
+./bin/context-guru-proxy --preset conservative
 # then, from an agent or curl, against http://localhost:4000/anthropic/v1/messages
 curl -s localhost:4000/stats | jq        # token-weighted savings rollup
 ```
@@ -73,7 +73,7 @@ export EVAL_AGENT=claude-code
 export ANTHROPIC_API_BASE=<IBM litellm base URL>
 export ANTHROPIC_API_KEY=<litellm token>
 export OPENAI_API_KEY=unused OPENAI_API_BASE=http://unused.invalid/v1   # base service marks them required
-export CONTEXT_GURU_PRESET=balanced        # or `off` for the passthrough baseline
+export CONTEXT_GURU_PRESET=conservative       # or `off` for the passthrough baseline
 
 docker compose \
   -f compose.yaml \
@@ -103,7 +103,7 @@ docker compose \
 ### 3. Sweep many task × config cells
 
 [`deploy/eval-containers/sweep.py`](https://github.com/rossoctl/context-guru/blob/main/deploy/eval-containers/sweep.py) automates the matrix
-(baseline vs each component alone vs the `balanced` preset vs competitors) over a task list. It
+(baseline vs each component alone vs the `cg-conservative` cell vs competitors) over a task list. It
 runs each cell, waits for the runner to exit, and appends reward + wall-clock + `/stats` savings
 to `deploy/eval-containers/sweep-results.csv`. It is **resumable** — cells already in the CSV are
 skipped.

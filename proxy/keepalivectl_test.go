@@ -7,7 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
+	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -161,29 +165,63 @@ func TestArmingIgnoresAPostedPerPingBudget(t *testing.T) {
 	if got, has := out["max_usd_per_ping"].(float64); has && got == 99 {
 		t.Error("a posted per-ping budget of $99 was accepted; the guard is the account's own")
 	}
-	// The reported ceiling is the ENFORCED one, and this is the assertion that was missing.
-	//
-	// "not 99" passes on a raw 0, which is exactly the defect: an account that configured no
-	// ceiling stores 0, the request path resolves that to the default through
-	// CachePolicy.Ceiling(), and reporting the raw 0 told the operator the ceiling was $0.00 while
-	// the default was enforced. REVIEW-96 called that "worse than omitting it", the fix went in,
-	// and nothing held it there — reverting armedView to `tn.Cache.MaxUSDPerPing` left the whole
-	// package green. The number on the wire has to be a number somebody could act on.
-	got, has := out["max_usd_per_ping"].(float64)
-	if !has {
-		t.Fatal("the arm response states no per-ping ceiling at all; it is the guard the caller " +
-			"is authorizing spend against")
+	// The flat cap is opt-in (#1420): an account that set none reports none, because none is enforced.
+	// The value rule is the guard then. Reporting the old $0.50 would state a limit nobody enforces.
+	if got, has := out["max_usd_per_ping"]; has {
+		t.Errorf("max_usd_per_ping = %v on an account that configured none; want it absent", got)
 	}
-	if got <= 0 {
-		t.Errorf("max_usd_per_ping = %v on an account that configured none. 0 is the document's "+
-			"\"unconfigured\" sentinel, not a ceiling: the request path resolves it to $%v and "+
-			"enforces that, so reporting 0 states a limit of nothing while infinity looks plausible "+
-			"to whoever reads it.", got, DefaultMaxUSDPerPing)
+}
+
+// An account that set a flat cap sees it in the arm answer: the report is the cap that is enforced.
+func TestArmingReportsAnAccountCap(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, id := f.signUpJar(t, "boss@ibm.com")
+	// The fixture's builder ignores the document. This one reads its `cache:` block, as the proxy binary's does.
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		c, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		return BuiltConfig{Pipe: components.NewPipeline(nil, e), Store: store.NewMemory(store.Options{}),
+			Preset: "test", Cache: keepalive.FromConfig(c.Cache.Resolved())}, nil
+	}, 0)
+	setDoc(t, f, id, "cache:\n  keepalive: true\n  keepalive_max_usd_per_ping: 0.25\n")
+	until := time.Now().Add(time.Hour).UnixMilli()
+	body := fmt.Sprintf(`{"session":"s-1","idle_seconds":280,"max_pings":2,"until":%d}`, until)
+	w, out := f.do(t, http.MethodPost, "/api/me/keepalive/sessions", body, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("arm = %d: %s", w.Code, w.Body)
 	}
-	if got != DefaultMaxUSDPerPing {
-		t.Errorf("max_usd_per_ping = %v, want the enforced default %v — the report and the guard "+
-			"must come from the same resolver (CachePolicy.Ceiling()) or they will drift again",
-			got, DefaultMaxUSDPerPing)
+	if got, has := out["max_usd_per_ping"].(float64); !has || got != 0.25 {
+		t.Errorf("max_usd_per_ping = %v (present %v), want the account's 0.25", out["max_usd_per_ping"], has)
+	}
+}
+
+// The arm answer reports the cap that is ENFORCED for the session's own provider. A manager strategy applies to
+// an Anthropic session and not to an OpenAI one (keepalive.Resolve), so a strategy cap of 0.40 is reported for the
+// first and never for the second.
+func TestArmingReportsTheStrategyCapOnlyWhereItIsEnforced(t *testing.T) {
+	f := newMgrFixture(t)
+	mgrJar, id := f.signUpJar(t, "boss@ibm.com")
+	f.h.keeper.setStrategies([]tenant.Strategy{{ID: "s", Active: true, Target: tenant.Target{Mode: tenant.TargetAll},
+		Windows:     []tenant.Window{{Start: "00:00", End: "23:59", TZ: "UTC"}},
+		IdleSeconds: 240, MaxPings: 2, MaxUSDPerPing: 0.40, UpdatedAt: time.Now().Add(-time.Hour)}})
+	f.record(t, id, "s-oa", &dash.Event{Model: "gpt-5.5", Provider: "openai", CacheRead: 1000})
+	f.record(t, id, "s-an", &dash.Event{Model: "claude-sonnet-5-5", Provider: "anthropic", CacheRead: 1000})
+	until := time.Now().Add(time.Hour).UnixMilli()
+	arm := func(session string) map[string]any {
+		body := fmt.Sprintf(`{"session":%q,"idle_seconds":280,"max_pings":2,"until":%d}`, session, until)
+		w, out := f.do(t, http.MethodPost, "/api/me/keepalive/sessions", body, mgrJar)
+		if w.Code != http.StatusOK {
+			t.Fatalf("arm %s = %d: %s", session, w.Code, w.Body)
+		}
+		return out
+	}
+	if got, _ := arm("s-an")["max_usd_per_ping"].(float64); got != 0.40 {
+		t.Errorf("an Anthropic session reports a cap of %v, want the strategy's 0.40", got)
+	}
+	if got, has := arm("s-oa")["max_usd_per_ping"]; has {
+		t.Errorf("an OpenAI session reports a cap of %v; the strategy layer does not apply to OpenAI, so none is enforced", got)
 	}
 }
 
@@ -324,6 +362,7 @@ func TestConsentWithdrawalIsOpenToAnyPrincipal(t *testing.T) {
 // Arming is rate-limited, because arming is a spend authorization.
 func TestArmingIsRateLimited(t *testing.T) {
 	f := newMgrFixture(t)
+	f.fixLimiterClocks(midMinute())
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
 	until := time.Now().Add(time.Hour).UnixMilli()
 	var limited bool

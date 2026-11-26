@@ -5,18 +5,21 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
+	"github.com/rossoctl/context-guru/store"
+	"modernc.org/sqlite" // pure-Go driver: no extra C toolchain for the dashboard
 )
 
 // memSeq names in-memory databases uniquely. See Open.
@@ -28,6 +31,13 @@ var memSeq atomic.Uint64
 type DB struct {
 	sql  *sql.DB
 	path string // "" for the in-memory store
+	// dropProbe, when set, runs inside DropOldestSessions between picking the victims and
+	// deleting them. Test seam for the window #772 closed: a request landing there must not
+	// change which sessions the delete removes.
+	dropProbe func()
+	// readOnly is set by OpenReadOnly. Every write the handle could make on its own (checkpoint)
+	// checks it; SQLite's mode=ro and query_only refuse any other.
+	readOnly bool
 	// ctx bounds the READS made through this handle, so a request the caller has abandoned stops
 	// costing the process. nil means context.Background().
 	//
@@ -41,6 +51,9 @@ type DB struct {
 	// pointer, sharing one cache across every handle this *DB produces rather than giving each
 	// shallow copy its own, independently-stale one.
 	sizeSpread *cachesplitSizeSpreadCache
+	// sizeStuck is the size rule's memory of a round that deleted rows and freed no space (#1224).
+	// A POINTER for the same reason as sizeSpread: WithContext copies the struct.
+	sizeStuck *sizeStuckState
 }
 
 // WithContext returns a handle whose reads are cancellable, for a caller that has one.
@@ -142,6 +155,14 @@ func Open(path string) (*DB, error) {
 				_ = os.Rename(path+suffix, aside+suffix)
 			}
 		}
+		// The janitor's backup copies (backup.go) are copies of the OLD database. Move them aside
+		// with it. Left in place, the 24-hour rule would trust them as fresh copies of the new,
+		// empty database, and a restore by hand would bring back the old data under the new name.
+		for _, suffix := range []string{".bak", ".bak.1"} {
+			if _, serr := os.Stat(path + suffix); serr == nil {
+				_ = os.Rename(path+suffix, aside+suffix)
+			}
+		}
 		fresh, ferr := openDSN(dsn(path), path)
 		if ferr != nil {
 			return nil, ferr
@@ -170,6 +191,9 @@ var nonDerivedTables = map[string]string{
 	"archived_sessions": `session_id,tenant_id,first_ts,last_ts,requests,content_path,
 	                      content_bytes,full_path,full_bytes,archived_at,remote`,
 	"tenant_spend": `tenant_id,month,usd`,
+	// The session state (#769) is rebuilt from traffic, but only by paying for it again (a summary
+	// is a model call), so a schema bump carries it.
+	"session_state": `key,val,updated`,
 }
 
 // carryNonDerived copies the non-derived tables out of the database renamed aside by
@@ -277,7 +301,108 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}, sizeStuck: &sizeStuckState{}}, nil
+}
+
+// OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
+// beside a live proxy, which owns the file.
+//
+// Open is not safe for that: it migrates the schema (additive DDL, new columns), stamps the
+// version, checkpoints the WAL, and on a version mismatch RENAMES the file aside. Any of those
+// against a database a serving process holds is a write the operator never asked for. This opens
+// with SQLite's mode=ro and query_only, runs none of them, and REFUSES a database whose schema
+// version is not this build's: a reader cannot migrate, and a query written for one schema read
+// against another returns wrong numbers rather than an error.
+//
+// mode=ro still reads the -wal, so rows the live writer has committed but not yet checkpointed
+// are visible. A missing file is an error, not a fresh database. With NO live writer, SQLite
+// still creates an empty -wal and the -shm index beside a WAL database to read it, so the
+// directory must be writable; the database file itself is never modified.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" || path == ":memory:" {
+		return nil, errors.New("dash: OpenReadOnly needs a database file")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&cg_ro=1")
+	if err != nil {
+		return nil, err
+	}
+	// A reader beside a live proxy: a handful of connections, never the 100 the writer's pool
+	// holds, so an analysis cannot crowd the serving process off its own file.
+	sdb.SetMaxOpenConns(4)
+	sdb.SetMaxIdleConns(4)
+	var have string
+	if err := sdb.QueryRow(`SELECT value FROM meta WHERE key='schema_version'`).Scan(&have); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("dash: read-only open: %w", err)
+	}
+	if have != fmt.Sprint(schemaVersion) {
+		sdb.Close()
+		return nil, &versionMismatch{have: have}
+	}
+	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+}
+
+// A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a
+// file written by an older proxy may lack (the Ping button's manual_ping among them). Failing each
+// query with "no such column" would break a reader (the cache-campaign tool opens live databases
+// this way, and operators mix tool and proxy versions), so each read-only connection gets a TEMP
+// view named after each table with additive columns (`requests`, `request_components`) that adds every missing column as its default. Temp objects are searched
+// before main, so every unqualified table name resolves to the shim; the view is per connection and
+// writes nothing to the file. A file with all its columns gets no shim. query_only is switched on
+// last, because it forbids creating even a temp object.
+//
+// The hook is the driver's process-wide one, so it acts only on DSNs carrying cg_ro=1.
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, "cg_ro=1") {
+			return nil
+		}
+		ctx := context.Background()
+		// One shim per table that has additive columns (requests, request_components, ...).
+		tables := map[string]bool{}
+		for _, c := range additiveColumns {
+			tables[c.table] = true
+		}
+		for table := range tables {
+			rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_info('`+table+`')`, nil)
+			if err != nil {
+				return err
+			}
+			have := map[string]bool{}
+			vals := make([]driver.Value, 1)
+			for rows.Next(vals) == nil {
+				if n, ok := vals[0].(string); ok {
+					have[n] = true
+				}
+			}
+			rows.Close()
+			var extra string
+			for _, c := range additiveColumns {
+				if c.table == table && !have[c.column] {
+					extra += ", " + additiveDefault(c.ddl) + " AS " + c.column
+				}
+			}
+			if extra != "" && len(have) > 0 {
+				if _, err := conn.ExecContext(ctx, `CREATE TEMP VIEW `+table+` AS SELECT rowid AS rowid, *`+extra+` FROM main.`+table, nil); err != nil {
+					return err
+				}
+			}
+		}
+		_, err := conn.ExecContext(ctx, `PRAGMA query_only = 1`, nil)
+		return err
+	})
+}
+
+// additiveDefault is the literal a missing additive column reads as: its DEFAULT, else NULL (a
+// column declared without one, like keepalive_strategy_id, reads NULL on an old row).
+func additiveDefault(ddl string) string {
+	if _, def, ok := strings.Cut(ddl, "DEFAULT "); ok {
+		return strings.TrimSpace(def)
+	}
+	return "NULL"
 }
 
 // sanitizeVersion keeps a version string safe to embed in a filename.
@@ -303,6 +428,124 @@ func (d *DB) Close() error {
 		return nil
 	}
 	return d.sql.Close()
+}
+
+// SQL returns the underlying handle, for a host that keeps a table of its own in this database.
+// The session state store (package store) does: it shares this pool, so one pool serializes every
+// writer in the process. The caller must not close it.
+func (d *DB) SQL() *sql.DB { return d.sql }
+
+// deleteSessionState removes the state rows of sessions this dashboard just deleted: each
+// session's own id and its content-derived aliases (the session_alias column). A key another
+// live session still uses is kept, whatever half it uses it by: a session whose rows carry it
+// as their alias, or a headerless session whose own id IS it. Both read that state on every
+// turn (cg:seen:, cg:ttl:), so removing it under them makes a warm cache read cold. Call it
+// AFTER the sessions' request rows are gone — the in-use check counts what is left. Best
+// effort: the state is rebuilt from traffic, so a failure only logs. The retention prune does
+// NOT call it: state follows its own retention.
+func (d *DB) deleteSessionState(sessions, aliases []string) {
+	keys := make([]string, 0, len(sessions)+len(aliases))
+	keys = append(keys, sessions...)
+	keys = append(keys, aliases...)
+	inUse := d.inUseIDs(keys)
+	for _, k := range keys {
+		if k == "" || inUse[k] {
+			continue
+		}
+		if _, err := store.DeleteSessionState(d.sql, k); err != nil {
+			slog.Warn("dash: could not delete the session state of a removed session", "session", k, "err", err)
+		}
+	}
+}
+
+// inUseIDs tells which of the given keys a request row still uses, as a session's alias or as
+// a session's own id. TWO queries for the whole list, not one per key: this runs on the writer
+// goroutine during eviction passes, and requests holds millions of rows in production. An
+// answer that cannot be read — the query fails to open, a row fails to scan, or the scan ends
+// early — says every key is in use. Keeping rows is the safe side, and retention bounds them.
+func (d *DB) inUseIDs(keys []string) map[string]bool {
+	inUse := map[string]bool{}
+	if len(keys) == 0 {
+		return inUse
+	}
+	queries := []string{
+		`SELECT DISTINCT session_alias FROM requests WHERE session_alias IN (`,
+		`SELECT DISTINCT session_id FROM requests WHERE session_id IN (`,
+	}
+	// giveUp keeps the promise above however the answer breaks: every key counts as in use.
+	// Logged once per call, whatever the failure and however many queries it hits.
+	var warned bool
+	giveUp := func(err error) {
+		if !warned {
+			slog.Warn("dash: could not tell whether a removed session's state is still in use",
+				"err", err)
+			warned = true
+		}
+		for _, k := range keys {
+			inUse[k] = true
+		}
+	}
+	for _, q := range queries {
+		for _, chunk := range chunkStrings(keys) {
+			rows, err := d.sql.QueryContext(d.readCtx(), q+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
+			if err != nil {
+				giveUp(err)
+				return inUse
+			}
+			for rows.Next() {
+				var k string
+				// A row that fails to scan says the same thing as a query that fails to open:
+				// the answer is not trustworthy, and a key it could not deliver must not read
+				// as unused.
+				if err := rows.Scan(&k); err != nil {
+					rows.Close()
+					giveUp(err)
+					return inUse
+				}
+				inUse[k] = true
+			}
+			// A scan that fails midway ends the loop early: the keys it did not reach would
+			// read as unused, and the caller would then delete state a live session still
+			// reads. That is the one unsafe direction this function must never fail in.
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				giveUp(err)
+				return inUse
+			}
+			rows.Close()
+		}
+	}
+	return inUse
+}
+
+// sessionAliases lists the distinct alias ids stored on the given sessions' rows, minus each
+// row's own session id (a headerless turn's id IS its alias, and its rows store none). Read
+// BEFORE the rows are deleted: the alias is a column, and the column goes with them.
+func (d *DB) sessionAliases(sessions ...string) ([]string, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	var out []string
+	for _, chunk := range chunkStrings(sessions) {
+		rows, err := d.sql.QueryContext(d.readCtx(), `SELECT DISTINCT session_alias FROM requests
+			WHERE session_alias <> '' AND session_alias <> session_id
+			AND session_id IN (`+placeholders(len(chunk))+`)`, anyArgs(chunk)...)
+		if err != nil {
+			return out, err
+		}
+		for rows.Next() {
+			var a string
+			if rows.Scan(&a) == nil {
+				out = append(out, a)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return out, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // Path returns the on-disk path ("" when in-memory).
@@ -357,20 +600,28 @@ func (d *DB) insertBatch(evs []*Event) error {
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
 		reasoning_effort, thinking_mode, thinking_budget, temperature, top_p, max_tokens, stream,
 		tool_choice, tools, system_blocks,
-		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, stop_reason,
+		cache_bp_system, cache_bp_tools, cache_bp_messages, cache_bp_blocks, cache_bp_root, stop_reason,
 		keepalive_strategy_id, billed_token_factor, thread_id,
-		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		waiting_for, wait_tool, wake_cause, open_background, open_teammate, monitor_expiry_ms,
+		agent_compaction, cache_miss_cause, manual_ping, manual_saved_usd, project, source,
+		sweep_expands, sweep_expand_tokens, sweep_false_expands, sweep_answer_usd, session_alias,
+		price_estimated, acc_priced, estimated_saved_usd, estimate_held, estimated_saved_low_usd,
+		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
+		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
+		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, restored_tokens, currency, ` + strings.Join(requestStoredTokenColumns(), ", ") + `, backend, client_compaction, acc_fallback, ` + strategyMetaCols + `
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `,?,?,?,` + placeholders(strategyMetaN) + `)`)
 	if err != nil {
 		return err
 	}
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
 		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
-		saved_usd, duration_ms, err, gates, events
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by,
+		` + strings.Join(compTokenColumns, ", ") + `
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(compTokenColumns)) + `)`)
 	if err != nil {
 		return err
 	}
@@ -410,7 +661,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		if e.KeepAliveStrategyID != "" {
 			strategyID = e.KeepAliveStrategyID
 		}
-		res, err := reqStmt.Exec(
+		res, err := reqStmt.Exec(append([]any{
 			e.TS, e.TenantID, e.SessionID, e.Model, e.Provider, e.Agent, e.Preset, e.Mode, e.Route, e.Status,
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
@@ -423,10 +674,25 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.Expands, e.ExpandTokens, e.Reverts, e.TokenAccounting, e.CacheMissReason, e.UncompressedReason,
 			e.ReasoningEffort, e.ThinkingMode, e.ThinkingBudget, e.Temperature, e.TopP, e.MaxTokens,
 			boolInt(e.Stream), e.ToolChoice, e.Tools, e.SystemBlocks,
-			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.StopReason,
+			e.CacheBPSystem, e.CacheBPTools, e.CacheBPMessages, e.CacheBPBlocks, e.CacheBPRoot, e.StopReason,
 			strategyID, e.BilledTokenFactor, e.ThreadID,
 			e.WaitingFor, e.WaitTool, e.WakeCause, e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs,
-		)
+			boolInt(e.AgentCompaction), e.CacheMissCause, boolInt(e.ManualPing), e.ManualSavedUSD,
+			// Sanitized HERE, at the write, rather than trusted from the caller: this is the last
+			// point before the value is on disk and on the SSE feed, and a path is a
+			// client-chosen string that could be named after a credential.
+			ProjectPath(e.Project),
+			/* Allow-listed rather than stored as given: this is the field every honesty rule
+			 * downstream keys off, so an unrecognised value must not quietly become a third
+			 * kind of row. Anything but the one known marker records as measured, which is the
+			 * safe direction — it claims LESS about the row. */
+			sourceOf(e.Source),
+			e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands, e.SweepAnswerUSD,
+			e.SessionAlias, boolInt(e.PriceEstimated), boolInt(e.AccountantPriced), e.EstimatedSavedUSD, boolInt(e.EstimateHeld), e.EstimatedSavedLowUSD,
+			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
+			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
+			e.CompactionPoint, e.CompactionPointSource, e.DeferCostUSD,
+		}, append(limitArgs(e.Limits), append(append(append([]any{boolInt(e.AuthSubscription), e.SweepFalseExpandsWarm, e.RestoredTokens, rowCurrency(e.Currency)}, requestStoredTokenArgs(e)...), backendOf(e.Backend), clientCompactionArg(e), e.AccFallback), strategyMetaArgs(e)...)...)...)...)
 		if err != nil {
 			return err
 		}
@@ -442,10 +708,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 			}
 		}
 		for _, c := range e.Components {
-			if _, err := compStmt.Exec(id, c.Component, c.Kind,
+			if _, err := compStmt.Exec(append([]any{id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
 				c.SavedGross, c.SavedUnique, c.SavedUSD, c.DurationMs, c.Err,
-				gatesJSON(c.Gates), gatesJSON(c.Events)); err != nil {
+				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy},
+				c.Tokens.args()...)...); err != nil {
 				return err
 			}
 		}
@@ -559,10 +826,60 @@ func gunzipText(b []byte) string {
 // ON DELETE CASCADE. Returns how many request rows were deleted.
 //
 // maxAge <= 0 disables the age rule; maxBytes <= 0 disables the size rule.
+//
+// This form has no size floor, no backup hook and no eviction hook; the janitor calls PruneWith.
+// The size rule keeps every session whose last request is newer than defaultActiveSessionWindow
+// (1 hour): it deletes rows of such a session only when that one session is over maxBytes by
+// itself. It deletes whole idle sessions, oldest last activity first, not single rows.
 func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, error) {
+	return d.PruneWith(now, PruneOptions{MaxAge: maxAge, MaxBytes: maxBytes, ActiveWindow: defaultActiveSessionWindow})
+}
+
+// defaultActiveSessionWindow is how recent a session's last request must be for the size rule to
+// call the session ACTIVE. The code had no earlier definition of "active session" for deletion
+// (ActiveThreadsWindow is 10 minutes and counts threads for the keep-alive plan, not sessions
+// for eviction), so this is new. One hour: a person who steps away for lunch keeps their session.
+const defaultActiveSessionWindow = time.Hour
+
+// PruneOptions holds the limits of one Prune pass.
+type PruneOptions struct {
+	// MaxAge drops rows older than this. <= 0 disables the age rule.
+	MaxAge time.Duration
+	// MaxBytes is the size limit. <= 0 disables the size rule.
+	MaxBytes int64
+	// FloorBytes is the size at which the size rule stops, even if the database is still over
+	// MaxBytes. 0 = no floor. It is the size rule's own `minKeepBytes`.
+	FloorBytes int64
+	// ActiveWindow marks a session as active when its last request is newer than now-ActiveWindow.
+	// The size rule keeps the rows of an active session unless that one session is over MaxBytes by
+	// itself. <= 0 means no session is active.
+	ActiveWindow time.Duration
+	// BeforeDelete runs before the first delete of the age rule and before the first delete of the
+	// size rule. The janitor uses it to take the backup. For the size rule, a false result
+	// means "do not delete in this pass". For the age rule the result is ignored: the age rule is a
+	// policy the operator set, and a failed copy must not keep rows past it.
+	BeforeDelete func() bool
+	// Evict, when set, deletes whole idle sessions for the size rule instead of the plain delete.
+	// The janitor sets it to its archive-then-delete migration when cold storage is configured, so
+	// the size rule loses no history the remote could hold. It returns how many request rows left
+	// the local database. nil means a plain delete.
+	Evict func([]coldCandidate) (int64, error)
+	// KeepActiveRows stops the size rule from trimming rows of an over-limit active session.
+	// The janitor sets it with --archive-required: that option means "never lose a row".
+	KeepActiveRows bool
+}
+
+// PruneWith is Prune with the full set of options. See PruneOptions.
+func (d *DB) PruneWith(now time.Time, o PruneOptions) (int64, error) {
 	var deleted int64
-	if maxAge > 0 {
-		cutoff := now.Add(-maxAge).UnixMilli()
+	if o.MaxAge > 0 {
+		cutoff := now.Add(-o.MaxAge).UnixMilli()
+		if o.BeforeDelete != nil {
+			var due int
+			if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE ts < ?)`, cutoff).Scan(&due); err == nil && due == 1 {
+				o.BeforeDelete()
+			}
+		}
 		res, err := d.sql.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
 		if err != nil {
 			return deleted, err
@@ -570,54 +887,285 @@ func (d *DB) Prune(now time.Time, maxAge time.Duration, maxBytes int64) (int64, 
 		n, _ := res.RowsAffected()
 		deleted += n
 	}
-	if maxBytes <= 0 {
+	d.pruneClientSignals(now, o.MaxAge)
+	if o.MaxBytes <= 0 {
 		return deleted, nil
 	}
-	// Size rule. Loop because deleting a slice does not immediately shrink the
-	// file (SQLite reuses freed pages), so we bound the work: at most a few
-	// rounds, each dropping the oldest 10% of rows, and stop as soon as the
-	// estimated payload fits.
+	n, err := d.pruneBySize(now, o)
+	return deleted + n, err
+}
+
+// pruneBySize is the size rule. The design, and the reason for each part, is the 2026-11-16
+// incident (#1204): with the WAL checkpoint blocked, the old rule deleted 10,515 rows in 25
+// minutes and the file never got smaller.
+//
+//  1. It checkpoints BEFORE it deletes. A blocked checkpoint (busy=1) leaves the WAL as it is,
+//     and sizeBytes counts the WAL, so the measured size is not a size that deleting rows can
+//     reduce. The rule then does nothing in this pass and tries again in the next one.
+//  2. Each round must lower the measured size. A round that deleted rows and did not lower the
+//     size ends the pass with a WARN. The loop used to delete again, and again.
+//  3. It deletes whole SESSIONS, oldest last activity first, like the disk-pressure rule
+//     (relieveDiskPressure uses the same DropOldestSessions code). A round picks the sessions
+//     whose estimated bytes (rows x average bytes per row) cover the excess, and no more than
+//     what keeps the size above the floor.
+//  4. A session that is ACTIVE (last request inside o.ActiveWindow) is not touched. The one
+//     exception is a session that is over MaxBytes by itself: no other choice can meet the
+//     limit. Then the rule trims that session's oldest rows, not the whole session, so the
+//     conversation in progress keeps its recent turns.
+//  5. The floor ends the pass, so a bad measurement cannot empty the database.
+//  6. The stop in point 2 lasts until the file grows (#1224). It used to last one pass: the next
+//     pass saw the same size and deleted another round, and the floor never triggered because the
+//     size never moved. Now the rule remembers the size at the stop (sizeStuckState) and deletes
+//     nothing while the size is within sizeStuckMargin of it. The database may stay over its
+//     limit, and the history stays: the owner's rule is to prefer keeping data.
+func (d *DB) pruneBySize(now time.Time, o PruneOptions) (int64, error) {
+	var deleted int64
+	size, err := d.sizeBytes()
+	if err != nil || size <= o.MaxBytes {
+		d.sizeStuck.clear() // under the limit by itself: the stuck state is over
+		return 0, err
+	}
+	// Free the WAL first, so the size below is the size that deleting rows can change.
+	if !d.checkpoint() {
+		slog.Warn("dash: size rule skipped; the WAL checkpoint did not complete, so deleting rows cannot free space",
+			"size_bytes", size, "max_bytes", o.MaxBytes)
+		return 0, nil
+	}
+	if size, err = d.sizeBytes(); err != nil || size <= o.MaxBytes {
+		d.sizeStuck.clear()
+		return 0, err
+	}
+	if d.sizeStuck.holds(size, sizeStuckMargin(o.MaxBytes)) {
+		return 0, nil
+	}
+	// The backup is taken only now, when rows are certain to go.
+	if o.BeforeDelete != nil && !o.BeforeDelete() {
+		slog.Warn("dash: size rule skipped; no backup copy could be made, and the rule does not delete without one",
+			"size_bytes", size, "max_bytes", o.MaxBytes)
+		return 0, nil
+	}
+	// A bounded number of rounds: this runs on the writer goroutine.
 	for round := 0; round < 8; round++ {
-		size, err := d.sizeBytes()
-		if err != nil || size <= maxBytes {
-			return deleted, err
-		}
-		var total int64
-		if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests`).Scan(&total); err != nil {
-			return deleted, err
-		}
-		if total == 0 {
+		if size <= o.MaxBytes {
 			return deleted, nil
 		}
-		drop := total / 10
-		if drop < 1 {
-			drop = 1
+		if o.FloorBytes > 0 && size <= o.FloorBytes {
+			slog.Warn("dash: size rule stopped at its floor; the database is still over its limit",
+				"size_bytes", size, "max_bytes", o.MaxBytes, "floor_bytes", o.FloorBytes,
+				"deleted_requests", deleted)
+			return deleted, nil
 		}
-		// No tenant column, and there cannot be one — a byte budget is a property of
-		// the whole file. That is why the per-tenant row quota runs BEFORE this
-		// (Recorder.janitorPass): reached while one tenant's traffic is what put the
-		// database over budget, this statement evicts the QUIET tenants, because
-		// theirs are the oldest rows it selects.
-		//
-		// Row-granular, deliberately, and this is the ONE rule that is. The byte
-		// budget is a hard cap the operator asked to be honoured, and it has to be
-		// satisfiable even when everything in the database belongs to a single
-		// session — dropping whole sessions there means dropping all of it. The
-		// disk-pressure rule (Recorder.relieveDiskPressure) evicts whole sessions
-		// instead, because it has a floor to stop at and so never needs a last resort.
-		res, err := d.sql.Exec(
-			`DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY ts ASC LIMIT ?)`, drop)
+		n, err := d.sizeRound(now, o, size)
+		deleted += n
 		if err != nil {
 			return deleted, err
 		}
-		n, _ := res.RowsAffected()
-		deleted += n
-		// Reclaim the pages so the next sizeBytes reflects the deletion.
-		if err := d.reclaim(); err != nil {
+		if n == 0 {
+			// Only active sessions are left, and none is over the limit by itself, or the
+			// floor allows nothing more. Nothing to do; the next pass looks again.
+			slog.Info("dash: size rule found nothing it may delete",
+				"size_bytes", size, "max_bytes", o.MaxBytes, "floor_bytes", o.FloorBytes)
+			return deleted, nil
+		}
+		ok, err := d.reclaimWAL(true)
+		if err != nil {
 			return deleted, err
 		}
+		if !ok {
+			slog.Warn("dash: size rule stopped; the WAL checkpoint did not complete after a delete",
+				"max_bytes", o.MaxBytes, "deleted_requests", deleted)
+			return deleted, nil
+		}
+		after, err := d.sizeBytes()
+		if err != nil {
+			return deleted, err
+		}
+		if after >= size {
+			slog.Warn("dash: size rule stopped; a round deleted rows and the size did not go down; "+
+				"it deletes nothing more until the file grows",
+				"size_before", size, "size_after", after, "max_bytes", o.MaxBytes,
+				"deleted_requests", deleted)
+			d.sizeStuck.set(after)
+			return deleted, nil
+		}
+		size = after
 	}
 	return deleted, nil
+}
+
+// sizeStuckState remembers the size at which the size rule's last pass found that deleting rows
+// freed no space. Zero means "not stuck". Written and read by the janitor only, so the atomics are
+// for the race detector and for WithContext copies, not for contention.
+type sizeStuckState struct {
+	size   atomic.Int64
+	logged atomic.Bool
+}
+
+// sizeStuckMargin is how far the size must grow past the stuck size to re-arm the rule: 1% of the
+// limit, at least 64 KiB (16 pages of 4 KiB). Smaller than that is the noise of a page or two
+// from ordinary writes; a real change is bigger.
+func sizeStuckMargin(maxBytes int64) int64 { return max(maxBytes/100, 64<<10) }
+
+func (s *sizeStuckState) set(size int64) {
+	if s != nil {
+		s.size.Store(max(size, 1))
+		s.logged.Store(false)
+	}
+}
+
+func (s *sizeStuckState) clear() {
+	if s != nil {
+		s.size.Store(0)
+		s.logged.Store(false)
+	}
+}
+
+// holds reports whether the size rule must do nothing: it is stuck and the size has not grown
+// past the margin. Growth past the margin clears the state. It logs the held state once.
+func (s *sizeStuckState) holds(size, margin int64) bool {
+	if s == nil {
+		return false
+	}
+	stuck := s.size.Load()
+	if stuck == 0 {
+		return false
+	}
+	if size > stuck+margin {
+		slog.Info("dash: size rule re-armed; the file grew past the size where deleting freed nothing",
+			"stuck_size_bytes", stuck, "size_bytes", size, "margin_bytes", margin)
+		s.clear()
+		return false
+	}
+	if !s.logged.Swap(true) {
+		slog.Warn("dash: size rule is holding; the last delete freed no space, so it deletes nothing "+
+			"until the file grows; the database stays over its limit and the history is kept",
+			"stuck_size_bytes", stuck, "size_bytes", size, "margin_bytes", margin)
+	}
+	return true
+}
+
+// sizeRound runs one round of the size rule and returns how many request rows it deleted.
+func (d *DB) sizeRound(now time.Time, o PruneOptions, size int64) (int64, error) {
+	var total int64
+	if err := d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM requests`).Scan(&total); err != nil || total == 0 {
+		return 0, err
+	}
+	perRow := max(size/total, 1)
+	excess := size - o.MaxBytes
+	// Do not plan to go below the floor.
+	if o.FloorBytes > 0 && size-excess < o.FloorBytes {
+		excess = size - o.FloorBytes
+	}
+	cutoff := now.Add(-o.ActiveWindow).UnixMilli()
+	if o.ActiveWindow <= 0 {
+		cutoff = math.MinInt64
+	}
+	// Idle sessions, oldest last activity first. A round looks at a bounded batch.
+	// The floor check below uses the estimate, so one session much fatter than the average can
+	// take the real size under the floor in this round. The overshoot stops there: the next
+	// round measures the real size and ends the pass at the floor.
+	idle, err := d.idleSessions(cutoff, 500)
+	if err != nil {
+		return 0, err
+	}
+	var picked []sessCount
+	var est int64
+	for _, c := range idle {
+		bytes := c.rows * perRow
+		// The first session that would take the size under the floor ends the choice. It
+		// stays: the floor holds even when the next session is the one that is left.
+		if o.FloorBytes > 0 && size-est-bytes < o.FloorBytes {
+			break
+		}
+		picked = append(picked, c)
+		est += bytes
+		if est >= excess {
+			break
+		}
+	}
+	if len(picked) > 0 {
+		if o.Evict != nil {
+			cands := make([]coldCandidate, len(picked))
+			for i, c := range picked {
+				cands[i] = coldCandidate{SessionID: c.key.session, TenantID: c.key.tenant,
+					FirstTS: c.first, LastTS: c.last, Requests: c.rows}
+			}
+			return o.Evict(cands)
+		}
+		keys := make([]sessKey, len(picked))
+		for i, c := range picked {
+			keys[i] = c.key
+		}
+		return d.dropSessionKeys(keys)
+	}
+	if o.KeepActiveRows {
+		return 0, nil
+	}
+	// No idle session may go. Is one active session over the limit by itself?
+	// The over-limit test uses the estimate: its rows x average bytes per row.
+	rows, err := d.sql.QueryContext(d.readCtx(),
+		`SELECT tenant_id, session_id, COUNT(*) FROM requests GROUP BY tenant_id, session_id
+		 HAVING COUNT(*) * ? > ? ORDER BY COUNT(*) DESC LIMIT 1`, perRow, o.MaxBytes)
+	if err != nil {
+		return 0, err
+	}
+	var big sessCount
+	found := false
+	if rows.Next() {
+		found = rows.Scan(&big.key.tenant, &big.key.session, &big.rows) == nil
+	}
+	rows.Close()
+	if !found {
+		return 0, nil
+	}
+	// Rows of an active session are never archived: the remote holds whole sessions, and moving
+	// the conversation in progress would take it away from the person using it. So this trim
+	// deletes rows (the backup holds them), unless KeepActiveRows is set.
+	drop := max(big.rows/10, 1)
+	if o.FloorBytes > 0 {
+		// Stay above the floor, by the same estimate as the session pick.
+		if room := (size - o.FloorBytes) / perRow; room < drop {
+			drop = room
+		}
+		if drop < 1 {
+			return 0, nil
+		}
+	}
+	res, err := d.sql.Exec(
+		`DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE tenant_id = ? AND session_id = ? ORDER BY ts ASC LIMIT ?)`,
+		big.key.tenant, big.key.session, drop)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+type sessCount struct {
+	key         sessKey
+	rows        int64
+	first, last int64
+}
+
+// idleSessions lists sessions whose last request is older than cutoffMS, oldest last activity
+// first, with their row counts.
+func (d *DB) idleSessions(cutoffMS int64, limit int) ([]sessCount, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(),
+		`SELECT tenant_id, session_id, COUNT(*), MIN(ts), MAX(ts) FROM requests GROUP BY tenant_id, session_id
+		 HAVING MAX(ts) < ? ORDER BY MAX(ts) ASC LIMIT ?`, cutoffMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sessCount
+	for rows.Next() {
+		var c sessCount
+		if err := rows.Scan(&c.key.tenant, &c.key.session, &c.rows, &c.first, &c.last); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // sizeBytes reports the database's payload size. page_count*page_size is exact
@@ -648,32 +1196,78 @@ func (d *DB) sizeBytes() (int64, error) {
 // with auto_vacuum=NONE, incremental_vacuum is a silent no-op, so a full VACUUM is
 // the only thing that shrinks it.
 func (d *DB) reclaim() error {
+	_, err := d.reclaimWAL(false)
+	return err
+}
+
+// reclaimWAL is reclaim that also reports whether BOTH checkpoints completed. The size rule needs
+// the answer: when a checkpoint is blocked, the WAL keeps the deletes, the measured size does not
+// fall, and deleting more rows does not help (#1204). Other callers ignore it and keep their old
+// behavior.
+//
+// all=true frees EVERY free page in one call; false frees a bounded batch of 2000 pages (8 MiB at
+// 4 KiB). The size rule needs all: free pages still count in page_count, so with a bounded batch
+// the next round would read the rest as "still over the limit" and delete more sessions than it
+// has to.
+func (d *DB) reclaimWAL(all bool) (bool, error) {
 	// Checkpoint FIRST. In WAL mode a delete lands in the log, not the main file, so
 	// two things go wrong without this: incremental_vacuum finds no free pages to
 	// release (they are not in the main file yet), and sizeBytes — which counts the
 	// WAL, because it is real disk — reports the deletion as GROWTH. The size loop
 	// then reads its own progress backwards and deletes again.
-	d.checkpoint()
+	ok := d.checkpoint()
 	var mode int
 	if err := d.sql.QueryRowContext(d.readCtx(), `PRAGMA auto_vacuum`).Scan(&mode); err == nil && mode == 2 {
-		if _, err := d.sql.Exec(`PRAGMA incremental_vacuum(2000)`); err != nil {
-			return err
+		q := `PRAGMA incremental_vacuum(2000)`
+		if all {
+			q = `PRAGMA incremental_vacuum`
+		}
+		if _, err := d.sql.Exec(q); err != nil {
+			return false, err
 		}
 	} else if _, err := d.sql.Exec(`VACUUM`); err != nil {
-		return err
+		return false, err
 	}
 	// And again, to truncate the WAL the reclaim itself just wrote.
-	d.checkpoint()
-	return nil
+	ok2 := d.checkpoint()
+	return ok && ok2, nil
 }
 
 // checkpoint folds the write-ahead log into the main database and truncates it.
-// Best-effort: a busy checkpoint is not a failure, only a deferral.
-func (d *DB) checkpoint() {
-	if d.path == "" || d.path == ":memory:" {
-		return
+//
+// wal_checkpoint(TRUNCATE) does not error when it cannot run: it returns a row,
+// busy/log/checkpointed, where busy=1 means another connection held a read lock and
+// the WAL was left untouched. d.sql is a pool shared with every dashboard and
+// /metrics reader, so a reader being active is the normal case on a busy deployment
+// — and correlated with the write traffic growing the WAL, which is exactly when the
+// bloat protection this call exists for is most needed.
+//
+// The retry is inside the call, not around it: the pool's busy_timeout(5000) makes
+// SQLite re-ask for the lock through the busy handler for up to 5 seconds, so an
+// outer backoff loop would stack full 5s waits on top of each other (measured: five
+// attempts, 25s). What the old code missed is the ROW — busy=1 after that whole
+// budget means the bloat protection did not run, and err != nil means the pragma
+// itself failed. A reader holding the lock is only the most COMMON cause of the
+// first, so the WARN names the fact (the checkpoint did not complete) rather than
+// one cause of it, and the attributes say which: a fact worth a log line rather
+// than silence — a WAL left to grow made one writer commit take 5.5s and blocked
+// /metrics for 5.2s, and nothing pointed here (#166).
+//
+// It returns true when the checkpoint completed, or when there is nothing to checkpoint (a
+// read-only handle, an in-memory database). It returns false when it did not complete. The size
+// rule reads the result (#1204); the other callers ignore it.
+func (d *DB) checkpoint() bool {
+	if d.readOnly || d.path == "" || d.path == ":memory:" {
+		return true
 	}
-	_, _ = d.sql.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	var busy, logFrames, checkpointed int
+	err := d.sql.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+	if err == nil && busy == 0 {
+		return true
+	}
+	slog.Warn("dash: WAL checkpoint did not complete",
+		"busy", busy, "wal_frames", logFrames, "checkpointed", checkpointed, "err", err)
+	return false
 }
 
 // optimize refreshes the query planner's statistics for tables whose statistics are missing or
@@ -716,16 +1310,125 @@ func (d *DB) optimize() {
 //
 // "Oldest" is MAX(ts) per session — last activity, not first. A long-running session
 // that is still in use must not be evicted because it started a week ago.
+//
+// The victims are picked ONCE, and the delete removes exactly that set (#772). The
+// delete used to re-run the ordering subquery itself, so a request landing between the
+// pick and the delete could change the order: the rows it removed were then not the rows
+// the state cleanup acted on, and a session that stayed lost its state to one that went.
+// The delete runs in chunks of sqlChunk ids, each chunk one statement and so one
+// transaction. A failed chunk returns before the state cleanup, so victims the earlier
+// chunks already removed keep their state until retention — the safe direction. The pick
+// stays outside the deletes, like every other read
+// here (ArchiveSessionFull reads its events outside its delete too): a read-then-write
+// transaction on this shared pool can fail to upgrade its WAL snapshot when the
+// session-state flush commits in between.
 func (d *DB) DropOldestSessions(n int) (int64, error) {
 	if n <= 0 {
 		return 0, nil
 	}
-	res, err := d.sql.Exec(`DELETE FROM requests WHERE session_id IN (
-		SELECT session_id FROM requests GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT ?)`, n)
+	// Before the delete: afterwards the victims cannot be found. A failed pick returns its
+	// error rather than reading as an empty table (#775 review).
+	picked, err := d.oldestSessionKeys(n)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	if len(picked) == 0 {
+		return 0, nil
+	}
+	return d.dropSessionKeys(picked)
+}
+
+// dropSessionKeys deletes the given sessions and their state, and returns how many request rows
+// went. DropOldestSessions (the disk rule) and the size rule both use it, so there is one copy of
+// the delete (#1204).
+func (d *DB) dropSessionKeys(picked []sessKey) (int64, error) {
+	victims := make([]string, len(picked))
+	for i, k := range picked {
+		victims[i] = k.session
+	}
+	if d.dropProbe != nil {
+		d.dropProbe()
+	}
+	// The aliases are columns of the rows about to go, so they are read before the delete.
+	aliases, err := d.sessionAliases(victims...)
+	if err != nil {
+		return 0, err
+	}
+	var affected int64
+	// By (tenant, session): a session id two tenants share must not take the other's rows (#1069).
+	for _, chunk := range chunkKeys(picked) {
+		pairs := strings.TrimSuffix(strings.Repeat("(?,?),", len(chunk)), ",")
+		args := make([]any, 0, 2*len(chunk))
+		for _, k := range chunk {
+			args = append(args, k.tenant, k.session)
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE (tenant_id, session_id) IN (VALUES `+pairs+`)`, args...)
+		if err != nil {
+			return affected, err
+		}
+		n, _ := res.RowsAffected()
+		affected += n
+	}
+	d.deleteSessionState(victims, aliases)
+	return affected, nil
+}
+
+func (d *DB) oldestSessionKeys(n int) ([]sessKey, error) {
+	rows, err := d.sql.Query(`SELECT tenant_id, session_id FROM requests GROUP BY tenant_id, session_id ORDER BY MAX(ts) ASC LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sessKey
+	for rows.Next() {
+		var k sessKey
+		if rows.Scan(&k.tenant, &k.session) == nil {
+			out = append(out, k)
+		}
+	}
+	return out, rows.Err()
+}
+
+func anyArgs(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+// sqlChunk caps how many ids one IN (...) list binds. SQLite caps a statement's variables
+// (32,766 in this driver), and the disk rule can ask for a tenth of all sessions at once, so
+// the lists go in batches instead. A var, not a const, so a test can shrink it and exercise
+// the batch boundaries.
+var sqlChunk = 500
+
+// chunkStrings splits ss into sqlChunk-sized batches, keeping every element and its order.
+func chunkStrings(ss []string) [][]string {
+	var out [][]string
+	for len(ss) > sqlChunk {
+		out = append(out, ss[:sqlChunk])
+		ss = ss[sqlChunk:]
+	}
+	if len(ss) > 0 {
+		out = append(out, ss)
+	}
+	return out
+}
+
+// chunkKeys is chunkStrings for (tenant, session) pairs. A pair binds two variables, so a chunk
+// holds half as many as chunkStrings does, keeping a statement under the same variable cap.
+func chunkKeys(ks []sessKey) [][]sessKey {
+	per := max(sqlChunk/2, 1)
+	var out [][]sessKey
+	for len(ks) > per {
+		out = append(out, ks[:per])
+		ks = ks[per:]
+	}
+	if len(ks) > 0 {
+		out = append(out, ks)
+	}
+	return out
 }
 
 // TenantRowCounts reports how many request rows each tenant holds. The caller
@@ -764,7 +1467,8 @@ func (d *DB) tenantRowCount(tenant string) (int64, error) {
 
 // DropOldestSessionsOfTenant trims one tenant back toward its quota, oldest session
 // first, and returns the rows deleted. DESTRUCTIVE, and only correct when there is no
-// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two.
+// cold storage to migrate to — Recorder.trimTenantToQuota picks between the two. The
+// dropped sessions' state rows go with them, exactly as in DropOldestSessions (#772).
 func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64, error) {
 	var deleted int64
 	// Bounded: each pass drops one session, and a tenant with a pathological number
@@ -777,9 +1481,22 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		if n <= targetRows {
 			return deleted, nil
 		}
-		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = (
-			SELECT session_id FROM requests WHERE tenant_id = ?
-			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1)`, tenant, tenant)
+		// The victim is picked first and deleted by id, so the state cleanup below acts on
+		// the session that actually went (#772) — the delete no longer re-picks it itself.
+		var id string
+		err = d.sql.QueryRowContext(d.readCtx(), `SELECT session_id FROM requests WHERE tenant_id = ?
+			GROUP BY session_id ORDER BY MAX(ts) ASC LIMIT 1`, tenant).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return deleted, nil
+		}
+		if err != nil {
+			return deleted, err
+		}
+		aliases, err := d.sessionAliases(id)
+		if err != nil {
+			return deleted, err
+		}
+		res, err := d.sql.Exec(`DELETE FROM requests WHERE tenant_id = ? AND session_id = ?`, tenant, id)
 		if err != nil {
 			return deleted, err
 		}
@@ -787,7 +1504,28 @@ func (d *DB) DropOldestSessionsOfTenant(tenant string, targetRows int64) (int64,
 		if got == 0 {
 			return deleted, nil // nothing left to drop; avoid spinning
 		}
+		d.deleteSessionState([]string{id}, aliases)
 		deleted += got
 	}
 	return deleted, nil
+}
+
+// setBypassTokens stores the token count of a bypassed request after the fact. A bypassed row
+// is forwarded untouched, so after equals before. Priced with the count still unknown, such a
+// row is labelled "missing"; with a count it is "partial", exactly as when it was counted inline.
+func (d *DB) setBypassTokens(id int64, before, attempted, frozen int) error {
+	_, err := d.sql.Exec(`UPDATE requests SET tokens_before = ?, tokens_after = ?, attempted_tokens = ?,
+		frozen_tokens = ?,
+		token_accounting = CASE WHEN token_accounting = ? AND ? > 0 THEN ? ELSE token_accounting END
+		WHERE id = ?`, before, before, attempted, frozen, AccountingMissing, before, AccountingPartial, id)
+	return err
+}
+
+// clientCompactionArg is the client_compaction column value: NULL when the thread tracker did not
+// see the request (no verdict), else the verdict, "" for none (#947).
+func clientCompactionArg(e *Event) any {
+	if !e.ClientCompactionKnown {
+		return nil
+	}
+	return e.ClientCompaction
 }

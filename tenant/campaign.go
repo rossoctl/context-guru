@@ -70,7 +70,7 @@ type CampaignCell struct {
 	OptimalSavingUSD float64
 	InsufficientData bool
 	// Activatable is false for a simulation-only arm, or a 1h-tier arm on a tenant
-	// whose model does not honor it — see proxy/campaign.go's arm-mapping table. A
+	// whose model does not honor it — see campaign.ArmFor. A
 	// non-activatable cell is still recorded, with SkipReason saying why, never hidden.
 	Activatable bool
 	SkipReason  string
@@ -88,7 +88,7 @@ var ErrNoCampaign = errors.New("tenant: no such strategy campaign")
 // produce. The caller (proxy/campaign.go) has already resolved every cell's arm,
 // created the underlying keepalive_strategies rows, and validated the suggest payload
 // this came from — this method only persists the result.
-func (r *Registry) CreateCampaign(actorID string, c Campaign, cells []CampaignCell) (Campaign, error) {
+func (r *Registry) createCampaign(actorID string, c Campaign, cells []CampaignCell) (Campaign, error) {
 	if c.Name == "" {
 		return Campaign{}, fmt.Errorf("tenant: a campaign needs a name")
 	}
@@ -192,7 +192,7 @@ func (r *Registry) CampaignByID(id string) (Campaign, error) {
 // created — those stop being managed as a group, but they keep matching live traffic
 // until someone deletes or deactivates them individually through the strategy routes,
 // exactly as DeleteStrategy does not retroactively un-ping anything.
-func (r *Registry) ArchiveCampaign(id string) error {
+func (r *Registry) archiveCampaign(id string) error {
 	res, err := r.db.Exec(`UPDATE strategy_campaigns SET status = ? WHERE id = ?`,
 		CampaignStatusArchived, id)
 	if err != nil {
@@ -309,4 +309,21 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// CreateCampaign and ArchiveCampaign commit and then tell the registry's listener (see SetOnChange).
+func (r *Registry) CreateCampaign(actorID string, c Campaign, cells []CampaignCell) (Campaign, error) {
+	out, err := r.createCampaign(actorID, c, cells)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return out, err
+}
+
+func (r *Registry) ArchiveCampaign(id string) error {
+	err := r.archiveCampaign(id)
+	if err == nil {
+		r.changed(ChangeStrategy)
+	}
+	return err
 }

@@ -1,6 +1,7 @@
 package predictive
 
 import (
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"math"
 	"sort"
 	"strings"
@@ -19,8 +20,9 @@ var FeatureNames = [NIn]string{
 	"ag_claude-cli", "ag_openai", "ag_asyncopenai",
 }
 
-// pingFresh is the measured law of a keep-alive's own cost: ~7 fresh input tokens and 1 output token on top of the cached read.
-const pingFresh = 7
+// pingFresh is a keep-alive's own fresh input on top of the cached read (its output is 1 token). It is
+// kvcache.DefaultPingInputTokens, the one constant the keeper and the campaign replay also use.
+const pingFresh = kvcache.DefaultPingInputTokens
 
 const (
 	gapRing    = 50   // closed gaps per tenant the quantile looks at
@@ -174,10 +176,10 @@ func (t *Tracker) closeGap(p pendingGap, nextStartMs int64) {
 			t.cells[k] = c
 		}
 		c.n++
-		if gap <= 300 {
+		if gap <= kvcache.Horizon5m.Seconds() {
 			c.h5++
 		}
-		if gap <= 3600 {
+		if gap <= kvcache.Horizon1h.Seconds() {
 			c.h1++
 		}
 	}
@@ -215,17 +217,14 @@ func b2f(b bool) float64 {
 	return 0
 }
 
-// family mirrors the research tables: opus / sonnet / haiku by substring of the lower-cased model name.
-func family(model string) string {
-	m := strings.ToLower(strings.TrimPrefix(model, "aws/"))
-	switch {
-	case strings.Contains(m, "opus"):
-		return "opus"
-	case strings.Contains(m, "sonnet"):
-		return "sonnet"
-	case strings.Contains(m, "haiku"):
-		return "haiku"
+// FamilyOf mirrors the research tables: opus / sonnet / haiku, from modelinfo.Family (case, provider prefix and variant suffix
+// do not matter). Any other id, fable included, is "other".
+func FamilyOf(model string) string {
+	switch f := modelinfo.Family(model); f {
+	case modelinfo.FamilyOpus, modelinfo.FamilySonnet, modelinfo.FamilyHaiku:
+		return f
 	}
+	// The trained tables know only these three. Fable stays "other" until they are refit.
 	return "other"
 }
 
@@ -311,7 +310,7 @@ func (t *Tracker) Features(a *Arrival, r *Response, row *Row) {
 		out[26+i] = b2f(r.StopReason == s)
 	}
 	for i, s := range [...]string{"opus", "sonnet", "haiku"} {
-		out[31+i] = b2f(family(r.Model) == s)
+		out[31+i] = b2f(FamilyOf(r.Model) == s)
 	}
 	for i, s := range [...]string{"claude-cli", "openai", "asyncopenai"} {
 		out[34+i] = b2f(r.Agent == s)

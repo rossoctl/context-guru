@@ -1,0 +1,164 @@
+# Unit tests for the alert and recording rules, run with promtool (simulated time):
+#   promtool test rules tests/alerts_test.yml
+# A rule that passes `promtool check rules` can still fire at the wrong time. These tests check that
+# each alert fires when it should and stays quiet when it should not.
+
+rule_files:
+  - ../rules/recording.yml
+  - ../rules/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---- ErrorRateHigh: 5xx above 5% for 10 minutes ---------------------------------------------
+  - name: ErrorRateHigh fires on a sustained 5xx rate
+    interval: 1m
+    input_series:
+      # 100 requests/min, 10 of them 5xx -> 10%.
+      - series: 'llm_inference_requests_total{proxy="cortex",machine="m1",model="m",status_class="2xx"}'
+        values: '0+90x40'
+      - series: 'llm_inference_requests_total{proxy="cortex",machine="m1",model="m",status_class="5xx"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ErrorRateHigh
+        exp_alerts: []          # not yet: the condition has not held for 10 minutes
+      - eval_time: 25m
+        alertname: ErrorRateHigh
+        exp_alerts:
+          - exp_labels: {severity: critical, proxy: cortex}
+            exp_annotations:
+              summary: "cortex: more than 5% of requests fail with 5xx"
+              description: "The provider or the proxy is failing."
+
+  - name: ErrorRateHigh stays quiet on 4xx
+    interval: 1m
+    input_series:
+      # 50% of requests are 429. That is a rate limit, not an outage.
+      - series: 'llm_inference_requests_total{proxy="cortex",machine="m1",model="m",status_class="2xx"}'
+        values: '0+50x40'
+      - series: 'llm_inference_requests_total{proxy="cortex",machine="m1",model="m",status_class="4xx"}'
+        values: '0+50x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ErrorRateHigh
+        exp_alerts: []
+
+  - name: ErrorRateHigh stays quiet at 3 percent
+    interval: 1m
+    input_series:
+      - series: 'llm_inference_requests_total{proxy="cortex",machine="m1",model="m",status_class="2xx"}'
+        values: '0+97x40'
+      - series: 'llm_inference_requests_total{proxy="cortex",machine="m1",model="m",status_class="5xx"}'
+        values: '0+3x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ErrorRateHigh
+        exp_alerts: []
+
+  # ---- MachineSilent: pushed in the last day, nothing for 15 minutes ---------------------------
+  - name: MachineSilent fires when a machine stops pushing
+    interval: 1m
+    input_series:
+      # Pushes for 10 minutes, then stops.
+      - series: 'llm_proxy_info{proxy="cortex",machine="gone",preset="p",version="v"}'
+        values: '1x10 _x60'
+      # A second machine keeps pushing and must not alert.
+      - series: 'llm_proxy_info{proxy="cortex",machine="alive",preset="p",version="v"}'
+        values: '1x70'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: MachineSilent
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: MachineSilent
+        exp_alerts:
+          - exp_labels: {severity: info, proxy: cortex, machine: gone}
+            exp_annotations:
+              summary: "cortex gone stopped reporting"
+              description: "No llm_proxy_info for 15 minutes. The machine may be off, or its push may be."
+
+  # ---- Net saving: saved - added, never the cache-effect breakdown -----------------------------
+  - name: NetSavingNegative fires only when added exceeds saved
+    interval: 1m
+    input_series:
+      - series: 'llm_savings_saved_usd_total{proxy="cortex",machine="m1",component="mask"}'
+        values: '0+1x1600'
+      - series: 'llm_savings_added_usd_total{proxy="cortex",machine="m1",component="mask"}'
+        values: '0+2x1600'
+      # A big cache-effect breakdown must change nothing.
+      - series: 'llm_savings_cache_effect_usd_total{proxy="cortex",machine="m1",effect="break",cause="none",direction="added"}'
+        values: '0+100x1600'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: NetSavingNegative
+        exp_alerts:
+          - exp_labels: {severity: warning, proxy: cortex}
+            exp_annotations:
+              summary: "cortex saves less than it costs"
+              description: "Net saving (saved - added) has been below zero for 24 hours."
+
+  - name: NetSavingNegative stays quiet when saved exceeds added
+    interval: 1m
+    input_series:
+      - series: 'llm_savings_saved_usd_total{proxy="cortex",machine="m1",component="mask"}'
+        values: '0+3x1600'
+      - series: 'llm_savings_added_usd_total{proxy="cortex",machine="m1",component="mask"}'
+        values: '0+1x1600'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: NetSavingNegative
+        exp_alerts: []
+
+  # ---- Unpriced ratio --------------------------------------------------------------------------
+  - name: ManyUnpricedRequests fires above 10 percent
+    interval: 1m
+    input_series:
+      - series: 'llm_savings_requests_total{proxy="cortex",machine="m1",result="priced"}'
+        values: '0+80x90'
+      - series: 'llm_savings_requests_total{proxy="cortex",machine="m1",result="unpriced"}'
+        values: '0+20x90'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: ManyUnpricedRequests
+        exp_alerts:
+          - exp_labels: {severity: warning, proxy: cortex}
+            exp_annotations:
+              summary: "cortex: more than 10% of requests are unpriced"
+              description: "The savings figure leaves these requests out."
+
+  # ---- Collector down ---------------------------------------------------------------------------
+  - name: CollectorDown fires when the collector target is down
+    interval: 1m
+    input_series:
+      - series: 'up{job="otel-collector",instance="otel-collector:8888"}'
+        values: '1x5 0x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CollectorDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CollectorDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: otel-collector, instance: "otel-collector:8888"}
+            exp_annotations:
+              summary: "The OpenTelemetry Collector is down"
+              description: "No proxy can push. Nothing is stored until it is back; proxies resend totals."
+
+  # ---- Keep-alive: a rescue is net of the reads that replaced the writes ------------------------
+  - name: keep-alive net counts both sides of the rescue
+    interval: 1m
+    input_series:
+      - series: 'llm_savings_cache_effect_usd_total{proxy="cortex",machine="m1",effect="rescue",cause="none",direction="saved"}'
+        values: '0+10x120'
+      - series: 'llm_savings_cache_effect_usd_total{proxy="cortex",machine="m1",effect="rescue",cause="none",direction="added"}'
+        values: '0+4x120'
+      - series: 'llm_keepalive_cost_usd_total{proxy="cortex",machine="m1",model="m"}'
+        values: '0+1x120'
+    promql_expr_test:
+      # saved 10/min - added 4/min - ping cost 1/min = 5/min = 0.08333/s
+      - expr: proxy:llm_keepalive_net_usd:rate1h
+        eval_time: 100m
+        exp_samples:
+          - labels: 'proxy:llm_keepalive_net_usd:rate1h{proxy="cortex"}'
+            value: 0.08333333333333336

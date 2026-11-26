@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // The registration mode is switched on in TWO places — the control plane enforces it
@@ -57,12 +56,12 @@ func TestRegistrationEnforcementMatchesReportedMode(t *testing.T) {
 	}
 }
 
-// The banner in cmd/context-guru-proxy must not read CG_REGISTER itself — that is
+// The startup banner (proxyapp.Main) must not read CG_REGISTER itself — that is
 // exactly how it came to report "off" for a value this package accepts. Source
-// inspection because there is no way to call into package main; same approach as the
+// inspection because the banner is only a log line inside Main; same approach as the
 // METRICS_TOKEN check in security_test.go, and the thing a reviewer would grep for.
 func TestStartupBannerUsesTheSharedRegisterResolver(t *testing.T) {
-	src, err := os.ReadFile("../cmd/context-guru-proxy/main.go")
+	src, err := os.ReadFile("../proxyapp/main_run.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,41 +126,19 @@ func TestRegistrationBucketIsPerIPv6Prefix(t *testing.T) {
 
 	// End to end: rotating the host part of one /64 does not buy fresh budget.
 	//
-	// Retried on a minute rollover for the reason spendSignInBudget spells out: the
-	// limiter's window is a fixed calendar minute, so a probe straddling a boundary spends
-	// its attempts out of two budgets and neither half reaches the bound. From in here that
-	// is indistinguishable from the bypass this test exists to catch, so the crossing is
-	// detected rather than tolerated.
+	// The limiter's window is a fixed calendar minute. A fake clock fixed mid-minute keeps
+	// the whole probe inside one window, so no real minute boundary can reset the count.
 	t.Setenv(envRegisterMode, "open")
 	const attempts = registrationsPerMinute + 3
-	for try := 0; ; try++ {
-		f := newHostedFixture(t, "up", "openai")
-		limited := false
-		minute, start := time.Now().Truncate(time.Minute), time.Now()
-		for i := 0; i < attempts; i++ {
-			// A fresh email per try too, so a retry is not refused as a duplicate.
-			addr := "[2001:db8::" + strconv.Itoa(i+1) + "]:5555"
-			email := fmt.Sprintf("u%d-%d@ibm.com", try, i)
-			if registerVia(t, f, email, "", addr) == http.StatusTooManyRequests {
-				limited = true
-				break
-			}
-		}
-		if limited {
+	f := newHostedFixture(t, "up", "openai")
+	f.fixLimiterClocks(midMinute())
+	for i := 0; i < attempts; i++ {
+		addr := "[2001:db8::" + strconv.Itoa(i+1) + "]:5555"
+		email := fmt.Sprintf("u%d@ibm.com", i)
+		if registerVia(t, f, email, "", addr) == http.StatusTooManyRequests {
 			return
 		}
-		elapsed := time.Since(start)
-		// Each allowed registration hashes a password with argon2 at 64 MiB; a machine that
-		// spends a whole window on these is reporting itself, not the code.
-		if elapsed >= time.Minute {
-			t.Skipf("inconclusive: %d registrations took %v, longer than the window itself. "+
-				"Re-run on a less loaded machine.", attempts, elapsed)
-		}
-		if !time.Now().Truncate(time.Minute).Equal(minute) && try < 2 {
-			t.Logf("the minute rolled over mid-probe (%v); retrying on a fresh limiter", elapsed)
-			continue
-		}
-		t.Fatalf("rotating addresses inside one IPv6 /64 bypassed the registration limit "+
-			"(%d attempts in %v, inside one window)", attempts, elapsed)
 	}
+	t.Fatalf("rotating addresses inside one IPv6 /64 bypassed the registration limit "+
+		"(%d attempts, inside one window)", attempts)
 }

@@ -62,12 +62,12 @@ route_here() { CDPATH= cd -- "$(dirname -- "$0")" && pwd -P; }
 
 # Every fact the plan and the confirm both report. Kept in one place so `--plan` cannot describe a
 # different install from the one `--confirm` performs.
-R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0
-R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_NOSTATUSLINE=0 R_NOGITIGNORE=0
+R_MODE=local R_SCOPE=project R_ONCONFLICT= R_BASEURL= R_HEALTHURL= R_NOHEALTH=0 R_NOPING=0
+R_STRATEGY= R_UPSTREAM= R_USERSCOPE=0 R_PLAN=0 R_CONFIRM=0 R_STATUSLINE=0 R_NOGITIGNORE=0
 R_PORT= R_PRESET= R_IDLE= R_BIN= R_ONPATH= R_FILE= R_EXISTING= R_CHAINED=false
 # Set by step 0 once the port record is actually written, and read only by route_unwind_port.
 R_PORT_COMMITTED=0
-R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG=
+R_ALREADY=false R_CONSENT=0 R_OURS= R_FROMENV=0 R_SPENDS= R_PIDFILE= R_PROXYLOG= R_STRATLIST_DEFERRED=0
 R_ONEXISTING= R_PORTSOURCE= R_EXISTINGPROJECTS= R_OWNPROJECTROUTE=
 # What step 0 FOUND, read before it writes, so route_unwind_port can undo what this install made
 # and nothing else. `unknown` is the safe default: it is not `absent`, so nothing is released on the
@@ -222,7 +222,7 @@ route_resolve_options() {
   R_PRESET=$(kv "$cfg" option_preset);        : "${R_PRESET:=off}"
   R_IDLE=$(kv "$cfg" option_idle_exit);       : "${R_IDLE:=24h}"
   [ -z "$R_STRATEGY" ] && R_STRATEGY=$(kv "$cfg" option_cache_strategy)
-  : "${R_STRATEGY:=5-min-ping}"
+  : "${R_STRATEGY:=auto}"
   [ -z "$R_UPSTREAM" ] && R_UPSTREAM=$(kv "$cfg" option_upstream)
 }
 
@@ -425,6 +425,7 @@ route_confirm_command() {
   [ -n "$R_UPSTREAM" ] && c="$c --upstream $(shq "$R_UPSTREAM")"
   [ -n "$R_HEALTHURL" ] && c="$c --health-url $(shq "$R_HEALTHURL")"
   [ "$R_NOHEALTH" = 1 ] && c="$c --no-health-check"
+  [ "$R_NOPING" = 1 ] && c="$c --no-ping-header"
   [ "$R_NOGITIGNORE" = 1 ] && c="$c --no-gitignore-check"
   [ "$R_USERSCOPE" = 1 ] && c="$c --i-understand-machine-wide"
   [ -n "$R_ONEXISTING" ] && c="$c --on-existing-projects $(shq "$R_ONEXISTING")"
@@ -503,7 +504,7 @@ everywhere, not only here (a machine-wide switch-off set in /plugin is left as i
   # that exist, and the catch-all asserted "(no spend)" about every name it had not been told about -
   # so a fourth strategy that spends, or 1-hour-head gaining a ping, would make this state something
   # false in the one sentence a human is asked to agree to. consent_question= and confirm_command=
-  # could no longer disagree with each other; this is consent_question= disagreeing with STRATEGIES.
+  # could no longer disagree with each other; this is consent_question= disagreeing with the proxy's table.
   #
   # An unknown spend status reads as SPENDING, not as free: the sentence a user consents to is the
   # wrong place to resolve an uncertainty in their favour.
@@ -673,39 +674,92 @@ route_report() {
   fi
 }
 
-route_main() {
-  route_resolve_options
-
-  # A typo'd strategy name used to reach step 4b, where `settings.py strategy set` correctly refused it
-  # with exit 2 — and `|| true` plus a catch-all `*)` turned that refusal into `strategy_warning=`.
-  # No config file written means `none`, so `--cache-strategy 5-minute-ping` installed a DIFFERENT
-  # mechanism from the one named and reported `result=routed`. That is the same shape as the unknown
-  # flag this script refuses eighty lines down: a dropped decision that reports success. Checked here,
-  # before a binary is downloaded, against the one machine-readable list of names.
-  local slist names
-  slist=$("$(route_here)/settings.py" strategy list 2>/dev/null) || slist=""
+# route_check_strategy <strategy-list output>: map an old name to its new one, refuse a name the proxy
+# does not offer, and read whether it spends. Names, aliases and spends all come from the list.
+route_check_strategy() {
+  local slist=$1 names aliases pair
   names=$(printf '%s\n' "$slist" | sed -n 's/^names=//p')
-  # An empty list is NOT an unknown name, and conflating them made the script state a false thing
-  # about the caller's input: with settings.py unavailable, `--cache-strategy 5-min-ping` - the
-  # default, and obviously a strategy - was refused as "is not a strategy. Known: unavailable", with
-  # the one fault the user could act on buried as a word inside a sentence about a typo. The skill's
-  # next move is to ask which name they meant, about a name that was right. `${names:-unavailable}`
-  # showed the empty case was anticipated; it just routed into the wrong reason.
+  # An empty list is NOT an unknown name: conflating them stated a false thing about the caller's input.
   if [ -z "$names" ]; then
     route_needs "strategy_list_unavailable" "could not read the strategy list, so --cache-strategy \
 $R_STRATEGY was not checked and cache_strategy= in this report may be wrong too. This is a broken \
 plugin install rather than a bad argument: check python3 and $(route_here)/settings.py. Nothing was \
 installed, started or written."
   fi
+  # A name from before the ping-count rename (`5-min-ping`) is accepted and mapped to its new name, so a
+  # saved option or a remembered command still installs. `aliases=` is old:new pairs.
+  aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
+  for pair in ${aliases//,/ }; do
+    [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
+  done
   case ",${names}," in
     *",${R_STRATEGY},"*) : ;;
     *) route_needs "unknown_strategy" "--cache-strategy $R_STRATEGY is not a strategy. Known: \
 ${names}. Nothing was installed, started or written." ;;
   esac
-  # Whether this strategy spends the user's own money is half of what its NAME means, and STRATEGIES
-  # is where that is decided - so it is read from the same output as the names rather than restated
-  # here. Fact keys mangle `-` to `_`.
+  # Whether this strategy spends the user's own money is half of what its NAME means, and the proxy's
+  # table is where that is decided - so it is read from the same output as the names. Fact keys mangle
+  # `-` to `_`.
   R_SPENDS=$(printf '%s\n' "$slist" | sed -n "s/^spends_${R_STRATEGY//-/_}=//p")
+}
+
+# route_check_strategy_late <list>: the same check after the binary is installed. It refuses (and takes
+# the port bookkeeping back) instead of asking, because the plan was already agreed to.
+route_check_strategy_late() {
+  local slist=$1 names aliases pair
+  names=$(printf '%s\n' "$slist" | sed -n 's/^names=//p')
+  aliases=$(printf '%s\n' "$slist" | sed -n 's/^aliases=//p')
+  for pair in ${aliases//,/ }; do
+    [ "${pair%%:*}" = "$R_STRATEGY" ] && R_STRATEGY=${pair#*:}
+  done
+  case ",${names}," in
+    *",${R_STRATEGY},"*) : ;;
+    *) route_unwind_port
+       emit "result=refused"; emit "reason=unknown_strategy"
+       emit "note=--cache-strategy $R_STRATEGY is not a strategy. Known: ${names}. The proxy binary was installed; no routing was written."
+       exit 2 ;;
+  esac
+  R_SPENDS=$(printf '%s\n' "$slist" | sed -n "s/^spends_${R_STRATEGY//-/_}=//p")
+}
+
+route_main() {
+  route_resolve_options
+
+  # A typo'd strategy name used to reach step 4b, where `settings.py strategy set` correctly refused it
+  # with exit 2 - and `|| true` plus a catch-all `*)` turned that refusal into `strategy_warning=`.
+  # No config file written means `none`, so `--cache-strategy 5-minute-ping` installed a DIFFERENT
+  # mechanism from the one named and reported `result=routed`. That is the same shape as the unknown
+  # flag this script refuses eighty lines down: a dropped decision that reports success. Checked here,
+  # before anything is written, against the one machine-readable list of names.
+  #
+  # The list comes from the proxy binary (`settings.py strategy list` runs `context-guru-proxy
+  # strategies`). On a machine with NO binary yet there is nothing to ask, and this script does not
+  # keep a copy of the table to ask instead: the name is checked after step 1 installs the binary
+  # (route_check_strategy_after_install), and the consent question says the spend status is not
+  # known yet. A binary older than v0.7.1 is a hard stop with the update advice.
+  local slist
+  slist=$("$(route_here)/settings.py" strategy list 2>&1) || slist=$slist
+  R_STRATLIST_DEFERRED=0
+  if [ "$(kv "$slist" result)" = error ]; then
+    case "$(kv "$slist" reason)" in
+      no_proxy_binary) R_STRATLIST_DEFERRED=1; slist=""
+                       [ "$R_STRATEGY" = none ] && R_SPENDS=false ;;
+      *) route_needs "strategy_list_unavailable" "$(kv "$slist" note). Nothing was installed, started \
+or written." ;;
+    esac
+  fi
+  if [ "$R_STRATLIST_DEFERRED" = 0 ]; then
+    route_check_strategy "$slist"
+  elif [ "$R_MODE" = attach ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ]; then
+    # Attach mode installs no binary, so the name can never be checked later. An unchecked name is
+    # refused, not reported as a fact: this is the "dropped decision that reports success" shape.
+    # Two names pass unchecked: `none` needs no table, and `auto` is the plugin's own
+    # default, which the remote proxy checks when it loads the setting.
+    route_needs "strategy_unchecked" "--cache-strategy $R_STRATEGY cannot be checked: there is no \
+context-guru-proxy binary on this machine to list the strategies, and attach mode installs none. \
+Install the proxy v0.7.1 or later, or pass --cache-strategy none. Nothing was installed, started \
+or written."
+  fi
 
   if [ "$R_MODE" = attach ]; then
     [ -n "$R_BASEURL" ] || route_needs "attach_needs_base_url" \
@@ -888,6 +942,8 @@ handling auth), replace (theirs is recorded and uninstall puts it back), or abor
 
   if [ "$R_PLAN" = 1 ]; then
     emit "result=planned"
+    [ "$R_STRATLIST_DEFERRED" = 1 ] && [ "$R_STRATEGY" != none ] && [ "$R_STRATEGY" != auto ] && emit "strategy_unchecked=true" \
+      && emit "strategy_unchecked_note=no proxy binary yet, so cache strategy $R_STRATEGY is checked after the binary is installed; an unknown name is then refused before any routing is written"
     if [ "$R_MODE" = attach ]; then emit "binary=(not needed in attach mode)"
     else emit "binary=would_check"; fi
     route_report
@@ -1003,6 +1059,21 @@ back - see port_unwound. A checksum failure must never be worked around."
     esac
     R_ONPATH=$(kv "$iout" on_path)
     [ "$R_ONPATH" = false ] && R_BIN=$(kv "$iout" path)
+    # The binary exists now, so the strategy name can be checked against its table. Nothing is routed
+    # yet; the port bookkeeping is taken back, as for any other failure before routing.
+    if [ "$R_STRATLIST_DEFERRED" = 1 ]; then
+      local dl dlargs=()
+      [ -n "$R_BIN" ] && dlargs=(--bin "$R_BIN")
+      dl=$("$(route_here)/settings.py" strategy list "${dlargs[@]+"${dlargs[@]}"}" 2>&1) || true
+      if [ "$(kv "$dl" result)" != ok ]; then
+        route_unwind_port
+        emit "result=error"; emit "reason=strategy_list_unavailable"
+        emit "detail=$(kv "$dl" note)"
+        emit "note=no routing was written. The proxy binary was installed, but it cannot list its cache strategies."
+        exit 3
+      fi
+      route_check_strategy_late "$dl"
+    fi
   fi
 
   # ---- step 4b: the cache strategy, BEFORE the proxy starts -----------------------------
@@ -1013,7 +1084,7 @@ back - see port_unwound. A checksum failure must never be worked around."
   # `strategy sync` before every launch, so the plugin option wins from the next session onwards. It
   # is still passed here so the very first proxy has the right one without waiting for a sync.
   sout=$("$(route_here)/settings.py" strategy set --name "$R_STRATEGY" \
-           --port "$R_PORT" --preset "$R_PRESET" 2>&1) || true
+           --port "$R_PORT" --preset "$R_PRESET" ${R_BIN:+--bin "$R_BIN"} 2>&1) || true
   case "$(kv "$sout" result)" in
     set|cleared|unchanged) : ;;
     # `not_ours` is genuinely non-fatal: a config we did not write is not a reason to refuse an
@@ -1067,6 +1138,7 @@ proxy is a broken one."
   local add=("$(route_here)/settings.py" add --file "$R_FILE" --url "$(route_url)")
   [ -n "$R_UPSTREAM" ] && add+=(--upstream "$R_UPSTREAM")
   [ -n "$R_BIN" ] && add+=(--bin "$R_BIN")
+  [ "$R_NOPING" = 1 ] && add+=(--no-ping-header)
   [ "$R_SCOPE" = user ] && add+=(--user-scope)
   # BOTH decisions overwrite the routing key - that is what routing through a proxy means. `chain`
   # differs from `replace` only in ADDITIONALLY recording the old value as the upstream, which the
@@ -1231,6 +1303,11 @@ any other project, since the machine-wide install has its own record and port."
   emit "backup=$(kv "$aout" backup)"
   emit "reset_hatch=$(kv "$aout" reset_hatch)"
   emit "replaced=$(kv "$aout" replaced)"
+  # Consent for the manual-ping opt-in header (x-context-guru-ping: 1): said every time it is written, so the user
+  # hears what the proxy keeps and for how long, and how to turn it off.
+  if [ "$R_NOPING" != 1 ]; then
+    emit "ping_note=Ping works with keep-alive off: the Context Guru server keeps your latest request and key in memory so the Ping button can work: for 5 minutes after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, re-run the install with --no-ping-header."
+  fi
   route_install_statusline
   route_enable_plugin "$ares"
   route_ensure_gitignore
@@ -1277,11 +1354,13 @@ in projects that enable it themselves. To have them everywhere, $how" ;;
   esac
 }
 
-# ---- statusline, on by default -------------------------------------------------------------
-# A savings-focused install with nothing showing the savings is a worse first impression than a
-# status line that turns out to be unwanted, and unwanted is one command away (--no-statusline
-# here, or `settings.py off` any time after).
+# ---- statusline, OFF by default since 0.6.1 ---------------------------------------------------
+# The Context Guru mod's band above the prompt now draws everything the status line drew (`saved $x of
+# $y session`, the cache clock, the context bar, `▲ update`), so the install no longer writes a
+# statusLine. `--statusline` asks for it too (both then show the same figures); `/context-guru:statusline`
+# installs it any time after. `--no-statusline` is accepted and does what the default now does.
 #
+# What follows is how the line is written WHEN it is asked for.
 # SAME FILE ROUTING JUST USED — not hardcoded to user scope. This used to write unconditionally
 # to $HOME/.claude/settings.json on the theory that it "renders nothing in a project that is not
 # routed, so it's safe regardless of scope" (skills/statusline/SKILL.md). That argument covers
@@ -1308,7 +1387,7 @@ in projects that enable it themselves. To have them everywhere, $how" ;;
 # silently. `route_here()` already resolves this script's own directory from `$0` for every other
 # call in this file — reuse it instead of a placeholder nothing will ever expand.
 route_install_statusline() {
-  [ "$R_NOSTATUSLINE" = 1 ] && { emit "statusline=skipped"; return 0; }
+  [ "$R_STATUSLINE" = 1 ] || { emit "statusline=off"; return 0; }
   local sout scode=0
   # --no-backup: the routing `add` a few lines up already backed up this file's pre-install
   # state. Without this, this second call took its own backup a moment later — of "routed, no
@@ -1379,7 +1458,9 @@ if [ "${1:-}" = --route ]; then
       --health-url) route_need_value --health-url "${2:-}"; R_HEALTHURL="$2"; shift ;;
       --upstream) route_need_value --upstream "${2:-}"; R_UPSTREAM="$2"; shift ;;
       --no-health-check) R_NOHEALTH=1 ;;
-      --no-statusline) R_NOSTATUSLINE=1 ;;
+      --no-ping-header) R_NOPING=1 ;;
+      --statusline) R_STATUSLINE=1 ;;
+      --no-statusline) R_STATUSLINE=0 ;;
       --no-gitignore-check) R_NOGITIGNORE=1 ;;
       --i-understand-machine-wide) R_USERSCOPE=1 ;;
       --i-consent-to-traffic-interception) R_CONSENT=1 ;;
@@ -1463,6 +1544,19 @@ resolve_latest_tag() {
   printf 'tag=%s\n' "$v"
 }
 
+# latest_is_newer LATEST HAVE: is LATEST strictly newer than HAVE, in semantic-version order?
+# `releases/latest` never names a prerelease, so an installed beta is NOT behind it (#1254).
+# The comparison lives in settings.py. If that gives no answer, fall back to "the tags differ".
+latest_is_newer() {
+  ln_=$("$(route_here)/settings.py" update-check newer --latest "$1" --installed "$2" 2>/dev/null \
+          | sed -n 's/^newer=//p' | head -1)
+  case "$ln_" in
+    true)  return 0 ;;
+    false) return 1 ;;
+  esac
+  [ "${1#v}" != "${2#v}" ]
+}
+
 # --check-latest: resolve installed vs. latest and REPORT, never download, never install, never
 # write the proxy binary. Exists because the ordinary flow above can only say "a newer release
 # exists" as a side effect of actually fetching one (CONTEXT_GURU_UPGRADE=1) — which is the wrong
@@ -1485,7 +1579,7 @@ if [ "${1:-}" = --check-latest ]; then
            exit 0 ;;
   esac
   emit "latest_version=${latest}"
-  if [ -n "$have" ] && { [ "$have" = "${latest#v}" ] || [ "$have" = "$latest" ]; }; then
+  if [ -n "$have" ] && ! latest_is_newer "$latest" "$have"; then
     emit "result=checked"; emit "update_available=false"
   else
     emit "result=checked"; emit "update_available=true"
@@ -1509,6 +1603,15 @@ if command -v "$BIN" >/dev/null 2>&1; then
     # Do not silently re-download on every install run; say what is there and how to move.
     emit "result=present"
     emit "note=set CONTEXT_GURU_UPGRADE=1 to check for and install a newer release"
+    record_installed_version "$have"
+    exit 0
+  fi
+  # An upgrade never goes backwards, also with an explicit tag (#1276): the background update names
+  # the tag its check found. An older tag than the installed one is refused. Without
+  # CONTEXT_GURU_UPGRADE, an explicit tag still installs (the manual repair path).
+  if [ "$VERSION" != latest ] && [ -n "$have" ] && [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ] && ! latest_is_newer "$VERSION" "$have"; then
+    emit "result=present"
+    emit "note=${have} is not older than the requested release ${VERSION}; nothing to upgrade"
     record_installed_version "$have"
     exit 0
   fi
@@ -1541,7 +1644,15 @@ if [ "$VERSION" = latest ]; then
   # disagree about what "latest" means.
   resolved=$(resolve_latest_tag) || true
   case "$resolved" in
-    tag=*) VERSION="${resolved#tag=}" ;;
+    tag=*) VERSION="${resolved#tag=}"
+           # An upgrade never goes backwards: an installed beta stays when the latest stable is
+           # older (#1254). An explicit CONTEXT_GURU_VERSION still installs any tag.
+           if [ -n "${have:-}" ] && [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ] && ! latest_is_newer "$VERSION" "$have"; then
+             emit "result=present"
+             emit "note=${have} is not older than the latest release ${VERSION}; nothing to upgrade"
+             record_installed_version "$have"
+             exit 0
+           fi ;;
     error=github_rate_limited)
       die "github_rate_limited: GitHub's API is rate limited for this IP (60/hour, shared with everything behind the same address), so the latest version could not be resolved. This says NOTHING about whether a release exists. Wait for the window to reset, or set CONTEXT_GURU_VERSION=vX.Y.Z to skip resolution entirely." ;;
     *)
@@ -1568,6 +1679,11 @@ report_path() {
   emit "result=installed"
   emit "path=${DEST}/${BIN}"
   record_installed_version "$VERSION"
+  # An upgrade also writes the installed tag to the update-check record, so the record never
+  # names an older tag than the one on disk (#1276). Best effort: stamp fails open.
+  if [ "${CONTEXT_GURU_UPGRADE:-}" = 1 ]; then
+    "$(route_here)/settings.py" update-check stamp --latest "$VERSION" >/dev/null 2>&1 || true
+  fi
   # Report — do not fix — a PATH that will not find it. Editing the user's shell rc is a bigger
   # intrusion than this script is entitled to, and the skill can tell them in context.
   case ":${PATH}:" in

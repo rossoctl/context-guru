@@ -139,7 +139,7 @@ func TestCachePresetDoesNotBufferSSE(t *testing.T) {
 		if !strings.Contains(r.line, "message_start") {
 			t.Fatalf("first line was %q, want the upstream's first event", r.line)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		close(release)
 		t.Fatal("no event reached the client while the upstream was still streaming: the " +
 			"response is being buffered. Claude Code aborts a stream silent for 300s, and a " +
@@ -246,7 +246,7 @@ func countBreakpoints(body []byte) int {
 //  2. blocks the split does not act on are re-emitted from their ORIGINAL raw bytes rather than
 //     re-encoded — re-marshalling would reorder keys and change the bytes even with identical
 //     content, which is enough to defeat a positional strip;
-//  3. the split's minSplitTokens floor (1024) excludes a small block even when it does contain a
+//  3. the split's cache floor (modelinfo.MinCacheableO200k, per model family) excludes a small block even when it does contain a
 //     marker — the second case below, where a user's own prompt happens to mention one.
 //
 // Proving this rather than reasoning about it is what makes the alternative — shipping

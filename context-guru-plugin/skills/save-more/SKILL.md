@@ -1,7 +1,7 @@
 ---
 name: save-more
-description: Replay your own past sessions under every config Context Guru ships (each preset) and every keep-alive strategy, show what each would have saved, recommend the best, and apply it after a yes. `config` or `cache` for one of them; `--custom` also searches custom combinations of components. Use when asked how to save more, which preset or cache strategy is cheapest for them, or to apply or undo such a change.
-argument-hint: "[config|cache] [details] [--custom] [--days N]  |  apply <config|cache> <option>@<basis>  |  revert <config|cache>"
+description: Replay your past sessions under each preset and keep-alive strategy, show what each would have saved, and apply the best after a yes. Use when asked how to save more or which preset or strategy is cheapest.
+argument-hint: "[config|cache|settings|tools] [details] [--custom] [--days N]  |  apply <config|cache|deferral> <option>@<basis>  |  revert <config|cache|deferral>  |  apply|revert settings <check-id>"
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" save-more:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/settings.py" record-run save-more)
 ---
 
@@ -31,10 +31,22 @@ Then ask ONE question with AskUserQuestion, after the output is printed, never b
   "Apply: preset conservative -> medium? Over the last 30 days it would have saved about $1.49 a week."; options
   "Yes, apply it", "No, leave it". Say it in hindsight (would have saved), never as a promise.
 - No `Apply it?` line: stop. Add nothing.
+- A card "Settings that cost you money" is a separate question, asked AFTER the config and cache question (or alone).
+  Its `Apply it?` lines read `apply settings <check-id>`. Ask: "Change this setting?" plus that check's `Fix:` and
+  `Risk:` lines, verbatim, and its `Cost:` line in hindsight, never as a promise; options "Yes, change it",
+  "No, leave it". One question per check. A check with no `Apply it?` line cannot be changed by Context Guru (managed
+  settings, or your environment): print nothing more about it. A cost of "not measured yet" is never zero: say so.
 
 For each change the user chose, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py"` followed by every word after
 `/context-guru:save-more` on its `Apply it?` line, unchanged, and print the output. On anything else say
-"Nothing changed." and stop.
+"Nothing changed." and stop. A settings change is the same command with the same words, e.g.
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" apply settings disable-experimental-betas`; it edits the user's own
+settings file after a backup, and the output names the backup and the `Undo:` line.
+
+`tools` (the per-tool view of tool deferral) has no `Apply it?` line and no recommendation: ask nothing. If the user
+then asks to keep a tool loaded, to always defer a tool (or take it off that list), or to turn tool search on or off,
+ask one yes/no question that names the tool or the switch. On yes run the matching printed line with `<name>` replaced by the row's name from the `name` column, e.g.
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" apply deferral keep:WebFetch@<basis>`. Never pick a tool yourself.
 
 If the user asks for another row of a table, ask first and quote that screen's own verdict, e.g. "The proxy
 does not recommend high (it says: ...). Apply it anyway?"; never invent a figure. On yes run the `Any row` line

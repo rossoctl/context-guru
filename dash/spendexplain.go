@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 const (
@@ -32,16 +33,16 @@ const (
 	rewriteFrac = 0.8
 	// rewriteMinCtx keeps a 300-token request from being reported as a rewrite.
 	rewriteMinCtx = 2000
-	ttl5m         = 5 * 60 * 1000
-	ttl1h         = 60 * 60 * 1000
+	ttl5m         = int64(modelinfo.AnthropicCacheTTL5m / time.Millisecond)
+	ttl1h         = int64(modelinfo.AnthropicCacheTTL1h / time.Millisecond)
 	liveLookback  = 2 * 60 * 60 * 1000
 )
 
 // Rewrite causes, ordered roughly by how avoidable they are.
 const (
-	CauseColdStart    = "cold_start"      // first request of the session for this model
+	CauseColdStart    = "cold_start"      // first request of the session
 	CauseIdleExpiry   = "idle_expiry"     // gap since the previous request exceeded the cache TTL
-	CauseNewThread    = "new_thread"      // same session, different tools/system (subagent or config change)
+	CauseNewThread    = "new_thread"      // same session, a thread not seen before (subagent, side request, other model, or config change)
 	CauseHistory      = "history_rewrite" // message count fell: compaction, rewind or edit
 	CausePrefixChange = "prefix_change"   // warm, longer history, still rewritten: tools/system/MCP changed
 )
@@ -166,22 +167,23 @@ type SpendExplain struct {
 type SpendLedger struct {
 	GrossSavedUSD float64 `json:"gross_saved_usd"` // sum(baseline - cost) over non-ping rows; MODELLED, session-accumulative
 	CGLLMUSD      float64 `json:"cg_llm_usd"`      // context-guru's own model calls (summariser)
-	PingUSD       float64 `json:"ping_usd"`        // keep-alive pings, billed to the caller
-	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled
+	PingUSD       float64 `json:"ping_usd"`        // the keeper's pings (autoPing; a manual ping is its own category), billed to the caller
+	PingSavedUSD  float64 `json:"ping_saved_usd"`  // modelled; kaSaved over the agent rows the pings inside the window kept warm
 }
 
 type spendRow struct {
 	ts                               int64
-	session, model                   string
+	session, model, thread, provider string
 	tools, sysBlocks, messages       int
 	fresh, read, write, write1h, out int64
 	cost, baseline, cgllm, kaSaved   float64
-	keepalive                        bool
+	keepalive, manual                bool
 	complete                         bool
 }
 
 type threadKey struct {
 	session, model string
+	thread         string // requests.thread_id, "a:<agent>" only; "" for main and side requests
 	tools, sys     int
 }
 
@@ -191,9 +193,12 @@ type threadState struct {
 	ttl      int64
 }
 
-func ttlFor(write1h int64, prev int64) int64 {
-	if write1h > 0 {
-		return ttl1h
+// ttlFor is the lifetime in ms of the entry a row wrote or read: the shared rule
+// (modelinfo.CacheLifetime) from the BILLED tier. A row that billed no 1h write keeps prev, the
+// tier the entry was written at, unless the provider has one fixed lifetime (OpenAI).
+func ttlFor(provider, model string, write1h int64, prev int64) int64 {
+	if _, fixed := modelinfo.FixedCacheLifetime(provider, model); fixed || write1h > 0 {
+		return modelinfo.CacheLifetime(provider, model, write1h > 0).Milliseconds()
 	}
 	return prev
 }
@@ -221,7 +226,7 @@ func classify(p modelinfo.Price, r spendRow) SpendUSD {
 		Output:     float64(r.out) * p.Output,
 	}
 	if r.write1h > 0 {
-		if prem := 2*p.Input - p.CacheWrite; prem > 0 {
+		if prem := p.CacheWrite1hPremium(); prem > 0 {
 			u.CacheWrite += float64(r.write1h) * prem
 		}
 	}
@@ -257,10 +262,13 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		warm.Since -= ttl1h // earlier requests exist only to give the first counted request a past
 	}
 	cond, args := warm.where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.tools, r.system_blocks,
-		r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
-		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, r.keepalive_saved_usd, r.keepalive,
-		r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
+	// kaSavedSince stops the credit's ping half at the counted window (f.Since, not the warm-up
+	// span): PingUSD below counts pings inside the window only, so a ping before it must not
+	// bring a saving in with no cost beside it (#678).
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.provider, r.tools, r.system_blocks,
+		r.thread_id, r.messages, r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens,
+		r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd, `+kaSavedSince("r.", f.Since)+`, r.keepalive,
+		r.manual_ping, r.token_accounting FROM requests r WHERE `+cond+` ORDER BY r.ts, r.id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +277,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	out := &SpendExplain{Rewrites: map[string]*RewriteCause{}}
 	rates := map[string]modelinfo.Price{}
 	threads := map[threadKey]*threadState{}
-	seen := map[[2]string]bool{}
+	seen := map[string]bool{} // sessions with any earlier request, whatever the model or thread
 	models := map[string]*SpendModel{}
 	sessions := map[string]*SpendSession{}
 	days := map[int64]*SpendDay{}
@@ -283,20 +291,26 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 	}
 	for rows.Next() {
 		var r spendRow
-		var ka int
+		var ka, mp int
 		var acct string
-		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.tools, &r.sysBlocks, &r.messages,
+		if err := rows.Scan(&r.ts, &r.session, &r.model, &r.provider, &r.tools, &r.sysBlocks, &r.thread, &r.messages,
 			&r.fresh, &r.read, &r.write, &r.write1h, &r.out, &r.cost, &r.baseline, &r.cgllm,
-			&r.kaSaved, &ka, &acct); err != nil {
+			&r.kaSaved, &ka, &mp, &acct); err != nil {
 			return nil, err
 		}
-		r.keepalive, r.complete = ka != 0, acct == AccountingComplete
+		r.keepalive, r.manual, r.complete = ka != 0, mp != 0, acct == AccountingComplete
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
-		tk := threadKey{r.session, r.model, r.tools, r.sysBlocks}
+		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
+		// keying on it would make every side request a new thread and hide real idle expiries.
+		th := ""
+		if thread.IsAgentThread(r.thread) {
+			th = r.thread
+		}
+		tk := threadKey{r.session, r.model, th, r.tools, r.sysBlocks}
 		prev := threads[tk]
-		sk := [2]string{r.session, r.model}
+		sk := r.session
 		var cause string
 		var gap int64
 		isRewrite := r.complete && ctx >= rewriteMinCtx && float64(r.write) >= rewriteFrac*float64(ctx)
@@ -309,7 +323,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			st = &threadState{ttl: ttl5m}
 			threads[tk] = st
 		}
-		st.ts, st.messages, st.ttl = r.ts, r.messages, ttlFor(r.write1h, ttl5m)
+		st.ts, st.messages, st.ttl = r.ts, r.messages, ttlFor(r.provider, r.model, r.write1h, ttl5m)
 		if r.write1h == 0 && r.write == 0 && prev != nil {
 			st.ttl = prev.ttl // a pure read keeps the tier the entry was written at
 		}
@@ -328,9 +342,14 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		out.USD.add(u)
 		out.Ledger.CGLLMUSD += r.cgllm
 		if r.keepalive {
-			out.Ledger.PingUSD += r.cost
-			out.Ledger.PingSavedUSD += r.kaSaved
+			// The autoPing rule (dash/manualping.go): a manual ping is the user's own spend,
+			// booked under manual_saved_usd by every other ledger (only on rows written before #1460; a newer row holds 0), not the keeper's.
+			if !r.manual {
+				out.Ledger.PingUSD += r.cost
+			}
 		} else {
+			// The ping's saving is credited to the agent row it rescued, never to the ping itself.
+			out.Ledger.PingSavedUSD += r.kaSaved
 			out.Ledger.GrossSavedUSD += r.baseline - r.cost
 		}
 		m := models[r.model]
@@ -366,7 +385,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		if isRewrite {
 			excess := float64(r.write) * (p.CacheWrite - p.CacheRead)
 			if r.write1h > 0 {
-				if prem := 2*p.Input - p.CacheWrite; prem > 0 {
+				if prem := p.CacheWrite1hPremium(); prem > 0 {
 					excess += float64(r.write1h) * prem
 				}
 			}
@@ -383,7 +402,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			rc.USD += excess
 			rc.WriteUSD += float64(r.write) * p.CacheWrite
 			if r.write1h > 0 {
-				if prem := 2*p.Input - p.CacheWrite; prem > 0 {
+				if prem := p.CacheWrite1hPremium(); prem > 0 {
 					rc.WriteUSD += float64(r.write1h) * prem
 				}
 			}
@@ -457,7 +476,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 			continue
 		}
 		out.Rates[model] = map[string]float64{"input": p.Input, "output": p.Output,
-			"cache_read": p.CacheRead, "cache_write": p.CacheWrite, "cache_write_1h": 2 * p.Input}
+			"cache_read": p.CacheRead, "cache_write": p.CacheWrite, "cache_write_1h": p.CacheWrite1h()}
 	}
 	out.Window = map[string]int64{"since": f.Since, "until": f.Until}
 	live, err := d.liveSessions(f, now)
@@ -465,6 +484,30 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		return nil, err
 	}
 	out.Live = live
+	// A list with no entries goes out as [], never null. Go encodes a nil slice as null, and a
+	// client that reads one of these with .get(key, []) gets None, not its default, because the key
+	// is present (#781: cg.py insights details crashed on a dashboard with no expiry yet).
+	if out.IdleGaps == nil {
+		out.IdleGaps = []GapBand{}
+	}
+	if out.TopRewrites == nil {
+		out.TopRewrites = []RewriteEvent{}
+	}
+	if out.Models == nil {
+		out.Models = []*SpendModel{}
+	}
+	if out.Sessions == nil {
+		out.Sessions = []*SpendSession{}
+	}
+	if out.Daily == nil {
+		out.Daily = []*SpendDay{}
+	}
+	if out.SessionDays == nil {
+		out.SessionDays = []SessionDay{}
+	}
+	if out.Live == nil {
+		out.Live = []LiveSession{}
+	}
 	return out, nil
 }
 
@@ -473,7 +516,7 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	lf := Filter{Tenant: f.Tenant, TenantAll: f.TenantAll, Since: now - liveLookback, WithKeepAlive: true}
 	cond, args := lf.where()
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.messages,
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.ts, r.session_id, r.model, r.provider, r.messages,
 		r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h FROM requests r
 		WHERE `+cond+` AND r.token_accounting = 'complete' ORDER BY r.ts`, args...)
 	if err != nil {
@@ -482,14 +525,15 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	defer rows.Close()
 	type acc struct {
 		LiveSession
-		touch int64
+		touch    int64
+		provider string
 	}
 	by := map[string]*acc{}
 	for rows.Next() {
 		var ts, fresh, read, write, w1h int64
-		var sess, model string
+		var sess, model, provider string
 		var msgs int
-		if err := rows.Scan(&ts, &sess, &model, &msgs, &fresh, &read, &write, &w1h); err != nil {
+		if err := rows.Scan(&ts, &sess, &model, &provider, &msgs, &fresh, &read, &write, &w1h); err != nil {
 			return nil, err
 		}
 		ctx := fresh + read + write
@@ -502,6 +546,7 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 		a.touch = ts                                   // the last request of ANY thread refreshed some cache entry
 		if ctx*2 >= a.Context || ts-a.LastTS > ttl1h { // keep the main thread's numbers
 			if ctx >= a.Context/2 {
+				a.provider = provider
 				a.Model, a.LastTS, a.Context, a.Messages = model, ts, ctx, msgs
 				a.TTL1h = w1h > 0 || (a.TTL1h && write == 0)
 			}
@@ -512,10 +557,7 @@ func (d *DB) liveSessions(f Filter, now int64) ([]LiveSession, error) {
 	}
 	var out []LiveSession
 	for _, a := range by {
-		a.TTLMs = ttl5m
-		if a.TTL1h {
-			a.TTLMs = ttl1h
-		}
+		a.TTLMs = modelinfo.CacheLifetime(a.provider, a.Model, a.TTL1h).Milliseconds()
 		a.LastTS = a.touch
 		out = append(out, a.LiveSession)
 	}
@@ -595,6 +637,9 @@ func (a *API) toolsLastUsed(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if out == nil {
+		out = []toolLastUsed{} // [] not null, for the same reason as SpendExplainFor (#781)
 	}
 	writeJSON(w, map[string]any{"tools": out})
 }

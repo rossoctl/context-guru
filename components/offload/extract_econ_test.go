@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 )
 
 // The gate must suppress when the request is cache-aware and the output is small — the
@@ -319,7 +319,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	var r ratioTracker
 	explored := 0
 	for i := 0; i < 20; i++ {
-		if r.exploring("sessA") {
+		if r.exploringOK("sessA") {
 			explored++
 		}
 	}
@@ -330,7 +330,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	// counter spent everything on the first session, leaving every later one with an
 	// unrevisable prior — the off-switch failure exploration exists to prevent, at process
 	// scope.
-	if !r.exploring("sessB") {
+	if !r.exploringOK("sessB") {
 		t.Fatal("a different session must get its own exploration budget")
 	}
 
@@ -353,7 +353,7 @@ func TestGateExploresThenSettles(t *testing.T) {
 	// Once enough evidence exists, exploration stops even if slots remain unused.
 	var r2 ratioTracker
 	r2.observe(200, minRatioSampleTokens+1)
-	if r2.exploring("anySession") {
+	if r2.exploringOK("anySession") {
 		t.Fatal("with sufficient evidence the gate must stop exploring")
 	}
 }
@@ -589,11 +589,14 @@ func TestTheTailIsStillGatedOnItsOwnEconomics(t *testing.T) {
 // The assertion is on the MODEL CALL COUNT, not on the output: both requests must still get a
 // reduced result, and only one of them may pay for it.
 func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
-	// A model that blocks until released, so both goroutines are provably in flight together
-	// — a sleep would make this a timing coincidence rather than a test.
+	// parkingModel parks the LEADER in Complete, so the in-flight key stays held while the
+	// other request's candidate walks up to the single-flight join — a follower by
+	// arrangement, not by timing. Before #748 this test slept 150ms and hoped both requests
+	// were in flight together; under load a straggler joined after the leader finished, made
+	// its own call, and failed the count below (#479 and #162 had the same defect).
+	reply := "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n"
 	release := make(chan struct{})
-	var calls atomic.Int64
-	blocking := blockingModel{calls: &calls, release: release}
+	model := &parkingModel{reply: reply, release: release}
 
 	cfg := "strategy: code\nmin_tokens: 1\neconomic_gate: false\nmodel:\n  source: config\n" +
 		"trigger:\n  min_request_tokens: 1\n"
@@ -610,6 +613,15 @@ func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
 	// cross-session dedup happens while the first extraction is still running.
 	st := store.NewMemory(store.Options{})
 
+	// The hook fires once per candidate, one statement before it joins extractInflight — the
+	// same seam offloadWithParkedLeader uses. One tool result per request, so one candidate
+	// per request and two arrivals total. Same package-global discipline as that helper: no
+	// test here goes parallel, or one test's arrivals would signal another's.
+	const arrivals = 2
+	arrived := make(chan struct{}, arrivals)
+	beforeInflightJoinForTest = func() { arrived <- struct{}{} }
+	t.Cleanup(func() { beforeInflightJoinForTest = nil })
+
 	var wg sync.WaitGroup
 	for _, session := range []string{"session-A", "session-B"} {
 		wg.Add(1)
@@ -619,32 +631,86 @@ func TestConcurrentIdenticalExtractionsCollapseToOneCall(t *testing.T) {
 				userMsg("find the keep records"), toolResultMsg(body),
 			}}
 			c := &components.Ctx{Ctx: context.Background(), Session: session, Store: st,
-				Model: components.ModelSpec{Static: blocking}, CtxWindow: 1_000_000}
+				Model: components.ModelSpec{Static: model}, CtxWindow: 1_000_000}
 			var rep components.Report
 			if _, err := e.Offload(req, &rep, c); err != nil {
 				t.Error(err)
 			}
 		}(session)
 	}
-	// Both goroutines are now either waiting on the model or waiting on the leader. Release.
-	time.Sleep(150 * time.Millisecond)
+	// Both requests have now checked the cross-session result cache (a miss: the leader has
+	// not finished), and both candidates are at the join behind a key the parked leader
+	// still holds. Whichever lost the race is a follower as a fact, not a coincidence.
+	for i := 0; i < arrivals; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			// Unblock both Offloads before failing, so the goroutines and the hook cannot
+			// race the cleanup that nils the hook.
+			close(release)
+			wg.Wait()
+			t.Fatalf("only %d of %d requests reached the single-flight join within 10s — "+
+				"a gate or cap trimmed the batch, so this fixture exercises no cross-session "+
+				"follower", i, arrivals)
+		}
+	}
 	close(release)
 	wg.Wait()
 
-	if got := calls.Load(); got != 1 {
+	if got := atomic.LoadInt64(&model.calls); got != 1 {
 		t.Fatalf("two concurrent requests for byte-identical content made %d model calls; "+
 			"single-flight must collapse them to 1 (this race cost 54%% of a measured run's "+
 			"extraction spend)", got)
 	}
 }
 
-type blockingModel struct {
-	calls   *atomic.Int64
-	release chan struct{}
+// A price table that leaves the write tier blank gets the family's write multiple. Before, every
+// family got 1.25x here, while ParseTable and the price feed gave 1.0x to a family with no premium.
+func TestAgentRatesBlankWriteFollowsTheModelFamily(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		frac  float64
+	}{
+		{"claude-sonnet-5", 1.25},
+		{"azure/gpt-5.5", 1.0},
+		{"azure/gpt-5.6-luna", 1.25},
+		{"gemini-3-flash-preview", 1.0},
+	} {
+		c := &components.Ctx{ModelName: tc.model, SelfRates: components.TokenRates{Input: 2e-6, Output: 1e-5}}
+		fresh, read, write := agentRates(c)
+		if want := fresh * tc.frac; write != want {
+			t.Errorf("%s: write = %v, want %v", tc.model, write, want)
+		}
+		if want := fresh * 0.1; read != want {
+			t.Errorf("%s: read = %v, want %v", tc.model, read, want)
+		}
+	}
 }
 
-func (m blockingModel) Complete(context.Context, string) (string, error) {
-	m.calls.Add(1)
-	<-m.release
-	return "data = json.decode(INPUT)\nOUTPUT = json.encode([r for r in data if \"keep\" in r[\"name\"]])\n", nil
+// A blank read tier follows the request's model: 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on
+// Fable 5.1 and Mythos 5.1, else 0.1x. The literal agent rates (no table) stay at 0.1x.
+func TestAgentRatesBlankReadFollowsTheModelTier(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		frac  float64
+	}{
+		{"claude-opus-5-5", 0.05},
+		{"aws/claude-sonnet-5-5", 0.05},
+		{"claude-fable-5-1", 0.025},
+		{"claude-mythos-5-1", 0.025},
+		{"claude-opus-5", 0.1},
+		{"claude-sonnet-5", 0.1},
+		{"claude-fable-5", 0.1},
+		{"azure/gpt-5.5", 0.1},
+	} {
+		c := &components.Ctx{ModelName: tc.model, SelfRates: components.TokenRates{Input: 2e-6, Output: 1e-5}}
+		fresh, read, _ := agentRates(c)
+		if want := fresh * tc.frac; math.Abs(read-want) > 1e-18 {
+			t.Errorf("%s: read = %v, want %v", tc.model, read, want)
+		}
+	}
+	_, read, _ := agentRates(nil)
+	if want := agentFreshPerMTok / 1e6 * 0.1; math.Abs(read-want) > 1e-18 {
+		t.Errorf("literal agent read = %v, want %v", read, want)
+	}
 }

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -32,8 +34,26 @@ func TestCacheAttributionOnlyUsesKnownExpiry(t *testing.T) {
 		{"openai", "gpt-5.5", 0},
 		{"gemini", "gemini-3-pro", 0},
 	} {
-		if got := cacheAttributionTTLMs(tc.provider, tc.model); got != tc.want {
+		if got := (*capture)(nil).attributionTTLMs(tc.provider, tc.model, false); got != tc.want {
 			t.Errorf("%s/%s: TTL = %d, want %d", tc.provider, tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestCacheAttributionTTLFollowsTheBilledTier(t *testing.T) {
+	hour := time.Hour.Milliseconds()
+	for _, tc := range []struct {
+		provider, model string
+		oneHour         bool
+		want            int64
+	}{
+		{"anthropic", "claude-sonnet-5", true, hour},
+		{"bedrock", "anthropic.claude-sonnet-5", true, hour},
+		{"anthropic", "claude-sonnet-5", false, (5 * time.Minute).Milliseconds()},
+		{"openai", "gpt-5.5", true, 0},
+	} {
+		if got := (*capture)(nil).attributionTTLMs(tc.provider, tc.model, tc.oneHour); got != tc.want {
+			t.Errorf("%s/%s oneHour=%v: TTL = %d, want %d", tc.provider, tc.model, tc.oneHour, got, tc.want)
 		}
 	}
 }
@@ -70,23 +90,50 @@ func anthropicRequest(model string) []byte {
 	return b
 }
 
+// billedUpstream answers like a provider that bills the body it received: 4 bytes a token, the
+// first 80% read from cache and the rest written. A saving priced by the accountant library is
+// checked against the request's own size (PriceMode's plausibility bound), so a test that asserts
+// a saving needs a usage that bills the forwarded body, as a real provider's does.
+func billedUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		// The provider bills the prompt without the definitions of the tools deferred with defer_loading (R56).
+		n := len(billedBytesOf(b)) / 4
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
+		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+		  "usage":{"input_tokens":12,"output_tokens":34,
+		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, n*8/10, n-n*8/10-12)
+	}))
+}
+
 // fakeUpstream returns an Anthropic-shaped response with real usage tiers.
-func fakeUpstream(t *testing.T) *httptest.Server {
+func fakeUpstream(t *testing.T) *httptest.Server { return fakeUpstreamUsage(t, 12, 9000, 1500) }
+
+// fakeUpstreamUsage is fakeUpstream with the prompt usage the caller chooses.
+func fakeUpstreamUsage(t *testing.T, in, cacheRead, cacheWrite int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant",
+		fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant",
 		  "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
-		  "usage":{"input_tokens":12,"output_tokens":34,
-		           "cache_read_input_tokens":9000,"cache_creation_input_tokens":1500}}`))
+		  "usage":{"input_tokens":%d,"output_tokens":34,
+		           "cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}`, in, cacheRead, cacheWrite)
 	}))
 }
 
 // dashHandler wires a real pipeline + recorder in front of a fake upstream.
 func dashHandler(t *testing.T, up string, opts dash.Options) (*Handler, *dash.Recorder) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	return dashHandlerCfg(t, up, opts, "preset: codesafe\n")
+}
+
+// dashHandlerCfg is dashHandler with the proxy config given as YAML text.
+func dashHandlerCfg(t *testing.T, up string, opts dash.Options, cfgText string) (*Handler, *dash.Recorder) {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(cfgText))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,14 +172,12 @@ func (fixedPricer) Price(context.Context, string) (modelinfo.Price, bool) {
 // waitForRows polls until the writer goroutine has persisted n rows.
 func waitForRows(t *testing.T, rec *dash.Recorder, n int64) {
 	t.Helper()
-	for i := 0; i < 400; i++ {
-		if rec.Stats().Written >= n {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("only %d of %d rows persisted (dropped %d, errors %d)",
-		rec.Stats().Written, n, rec.Stats().Dropped, rec.Stats().Errors)
+	testutil.WaitForState(t, fmt.Sprintf("%d rows persisted", n),
+		func() bool { return rec.Stats().Written >= n },
+		func() string {
+			s := rec.Stats()
+			return fmt.Sprintf("%d written, %d dropped, %d errors", s.Written, s.Dropped, s.Errors)
+		})
 }
 
 func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
@@ -140,6 +185,10 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 	defer up.Close()
 	h, rec := dashHandler(t, up.URL, dash.Options{CaptureContent: true, ContentCap: 1 << 16,
 		ContentMaxPerRequest: 10})
+	// A tracker started two hours ago: this test models steady-state traffic, and a
+	// just-started tracker would hold the request inside the restart grace (#496), where the
+	// first request of a thread reads all-cached and nothing is attempted.
+	h.tracker.SetStartedAt(time.Now().Add(-2 * time.Hour).UnixMilli())
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -197,10 +246,9 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 		t.Fatalf("the pipeline did not compact (%d -> %d); the assertions below would be vacuous",
 			e.TokensBefore, e.TokensAfter)
 	}
-	if e.BaselineCostUSD <= e.CostUSD {
-		t.Errorf("baseline %v is not above actual %v despite %d tokens removed",
-			e.BaselineCostUSD, e.CostUSD, e.TokensBefore-e.TokensAfter)
-	}
+	// The saving itself is the accountant library's, checked against a usage that bills the body
+	// (TestDashboardBooksTheAccountantSaving): this upstream's fixed usage does not, so the library's
+	// figure fails the plausibility bound and the event books no saving.
 	if e.CGLatencyMs <= 0 || e.UpstreamMs <= 0 {
 		t.Errorf("latency not captured: cg=%v upstream=%v", e.CGLatencyMs, e.UpstreamMs)
 	}
@@ -253,6 +301,49 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 	}
 	if snap["attempted_tokens"].(float64) <= 0 {
 		t.Error("/stats attempted_tokens not recorded")
+	}
+}
+
+// The dashboard and insights group rows by agent. Bob's real User-Agents (seen live
+// 2026-11-02) must land as "bob" through the capture path, and others must stay as they are.
+func TestDashboardLabelsBobUserAgentsAsBob(t *testing.T) {
+	cases := map[string]string{
+		"IBM Bob/2.3.0": "bob",
+		"ai-sdk/openai-compatible/3.0.36 ai-sdk/provider-utils/5.0.29 runtime/node.js/v24.15.0 IBM Bob/2.3.0": "bob",
+		"bob-shell/2.2.1":                   "bob",
+		"claude-cli/2.0.14 (external, cli)": "claude-cli",
+		"codex_exec/0.160.1":                "codex",
+	}
+	for ua, want := range cases {
+		t.Run(ua, func(t *testing.T) {
+			up := fakeUpstream(t)
+			defer up.Close()
+			h, rec := dashHandler(t, up.URL, dash.Options{})
+			srv := httptest.NewServer(h.Mux())
+			defer srv.Close()
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+				strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", ua)
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			waitForRows(t, rec, 1)
+
+			page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if page.Total != 1 {
+				t.Fatalf("captured %d rows; want 1", page.Total)
+			}
+			if got := page.Requests[0].Agent; got != want {
+				t.Errorf("agent = %q; want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -405,47 +496,58 @@ func manyToolResultsRequest(model string, results int) []byte {
 // cost ~53 ms/request, ~25% of a real request, while the documented figure was
 // ~0.000002%. A benchmark that calls Record directly can never catch that.
 //
-// So this drives the REAL handler over ONE keep-alive connection with content capture
-// ON — the path a client actually pays for — and compares against the same handler
-// with the dashboard off. It fails if the dashboard adds a perceptible cost.
-func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
+//
+// HOW IT MEASURES (#1013, #1031). It times the dashboard's OWN calls on the request goroutine
+// (newCapture, the note* methods, the accountant's accBegin and accEnd, finish) through spendHook, a
+// test-only hook that is nil in production. It does not time the whole request. The old test compared
+// the median of paired whole-request differences against min(45 ms, max(5 ms, 20% of the baseline)).
+// That failed on a slow CI runner: the baseline was 500-730 ms and the added time was 49-77 ms in
+// EVERY round (#1013 reopen comment), so best-of-3 rounds (#1014) did not help. A fastest-request
+// comparison failed too, on a box loaded to 16 busy loops on 4 cores: 7 of 20 runs. The old test also
+// missed a 50 ms sleep in capture.finish under load (#1031), because that cost runs in the handler's
+// defer and hid behind the next "off" request.
+//
+// Why this works. A cost on the request path, before the response or in the defer, adds its full size
+// to EVERY request. Upstream time, pipeline time and the runner's speed are not in the figure. The
+// test sends requests one after the other, waits until each finish has run, and takes the MEDIAN of
+// the dashboard's time per request. The median ignores the few requests that the scheduler stalls.
+// The guarded regression is 50-53 ms and never shrinks under load.
+//
+// Two checks, because the accountant's cost grows with the body (#1059):
+//   - TestDashboardAddsNoRequestLatencyWithContentCapture counts ALL the dashboard's work, the
+//     accountant (accBegin, accEnd) included, on a small body (2 tool results). The growth of the
+//     accountant's cost with body size is tracked in #1059 and is NOT covered by this test.
+//   - TestDashboardCaptureAddsNoRequestLatencyAtMaxContent runs content capture at its maximum
+//     (24 tool results) and leaves the accountant out (accBegin, accEnd, accBilledTTL and accCompute),
+//     because on that body the accountant costs about 24 ms per request under -race and 150 ms under
+//     load (#1059). It covers the capture work.
+//
+// A span that sits inside another (accBilledTTL in accCompute in finish) is counted once: the hook
+// takes a nested span's time out of its parent.
+//
+// MAINTENANCE RULE: new dashboard work on the request path must carry timed(), or this test cannot
+// see it. It sees only the calls that carry timed().
+
+// dashboardSpends sends n requests with a body of the given number of tool results through a
+// dashboard with content capture on. It returns, sorted, the time each request's dashboard calls
+// took on the request goroutine, leaving out the calls named in skip.
+func dashboardSpends(t *testing.T, n, results int, skip ...string) []time.Duration {
+	t.Helper()
 	up := fakeUpstream(t)
 	defer up.Close()
-
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	offAgg := metrics.NewAggregator()
-	offPipe, err := cfg.Build(offAgg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offH := New(offPipe, store.NewMemory(store.Options{}), offAgg,
-		Options{AnthropicUpstream: up.URL, Prices: fixedPricer{}})
 	// Content capture ON: the configuration with the most work to do per request is
 	// the one worth guarding.
 	onH, _ := dashHandler(t, up.URL, dash.Options{
 		CaptureContent: true, ContentCap: 16 << 10, ContentMaxPerRequest: 24,
 	})
+	body := string(manyToolResultsRequest("m", results))
 
-	// 24 tool results = ContentMaxPerRequest, so the capture path does the full amount
-	// of work it is ever allowed to do on one request. A body with a single tool result
-	// exercises 1/24th of it and lets a regression through.
-	body := string(manyToolResultsRequest("m", 24))
-
-	// One connection per handler, reused, so a cost paid in the handler's defer shows
-	// up as latency on the NEXT request rather than being hidden by a fresh dial.
-	newClient := func(h *Handler) (*http.Client, string, func()) {
-		srv := httptest.NewServer(h.Mux())
-		c := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}}
-		return c, srv.URL + "/anthropic/v1/messages", func() {
-			c.CloseIdleConnections()
-			srv.Close()
-		}
-	}
-	one := func(c *http.Client, url string) time.Duration {
-		start := time.Now()
+	srv := httptest.NewServer(onH.Mux())
+	defer srv.Close()
+	c := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 1}}
+	defer c.CloseIdleConnections()
+	url := srv.URL + "/anthropic/v1/messages"
+	one := func() {
 		resp, err := c.Post(url, "application/json", strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
@@ -455,71 +557,97 @@ func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Fatalf("upstream returned %d", resp.StatusCode)
 		}
-		return time.Since(start)
 	}
 
-	offClient, offURL, closeOff := newClient(offH)
-	defer closeOff()
-	onClient, onURL, closeOn := newClient(onH)
-	defer closeOn()
-
-	// PAIRED and INTERLEAVED, then compared on the MEDIAN. Measuring all the off
-	// requests and then all the on requests attributes any drift in machine load to the
-	// dashboard: consecutive runs of that shape disagreed by 4x (+3 ms to +12 ms) on an
-	// idle box, which is not a usable gate. Alternating and taking medians cancels drift
-	// and discards the outliers a shared CI box produces.
-	const warmup, iters = 5, 40
-	for i := 0; i < warmup; i++ {
-		one(offClient, offURL)
-		one(onClient, onURL)
-	}
-	offs := make([]time.Duration, 0, iters)
-	ons := make([]time.Duration, 0, iters)
-	for i := 0; i < iters; i++ {
-		if i%2 == 0 { // alternate which one goes first, so ordering cannot bias either
-			offs = append(offs, one(offClient, offURL))
-			ons = append(ons, one(onClient, onURL))
-			continue
+	var mu sync.Mutex
+	own := map[string]time.Duration{} // time per call name, a nested span taken out of its parent
+	done := make(chan struct{}, 1000)
+	parent := map[string]string{"accBilledTTL": "accCompute", "accCompute": "finish", "accWait": "finish"}
+	hook := func(call string, d time.Duration) {
+		mu.Lock()
+		own[call] += d
+		if p, ok := parent[call]; ok {
+			own[p] -= d
 		}
-		ons = append(ons, one(onClient, onURL))
-		offs = append(offs, one(offClient, offURL))
+		mu.Unlock()
+		if call == "finish" {
+			done <- struct{}{}
+		}
 	}
-	median := func(ds []time.Duration) time.Duration {
-		slices.Sort(ds)
-		return ds[len(ds)/2]
+	// The hook is set BEFORE the warmup, and each request waits for its own finish. finish runs in
+	// the handler's defer, so the client can have the response before it runs. A finish still in
+	// flight across the hook's Store would shift every sample by one.
+	spendHook.Store(&hook)
+	defer spendHook.Store(nil)
+	request := func() {
+		one()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("finish did not run")
+		}
 	}
-	off, on := median(offs), median(ons)
-	added := on - off
+	for i := 0; i < 3; i++ { // warm up
+		request()
+	}
+	out := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
+		mu.Lock()
+		clear(own)
+		mu.Unlock()
+		request()
+		mu.Lock()
+		var sum time.Duration
+		for call, d := range own {
+			if !slices.Contains(skip, call) {
+				sum += d
+			}
+		}
+		out = append(out, sum)
+		mu.Unlock()
+	}
+	if len(done) != 0 {
+		t.Fatalf("%d finish signals left over: the samples are shifted", len(done))
+	}
+	spendHook.Store(nil)
+	slices.Sort(out)
+	return out
+}
 
-	// The budget is RELATIVE with an absolute floor, because a fixed budget cannot mean
-	// the same thing at both ends of this machine's range. Measured on this box: idle, a
-	// fake-upstream request settles around 1-2 ms; with the test suite saturating 16
-	// cores (load average 12.9) the same request's own median was 331 ms. A flat 5 ms
-	// gate is a real constraint in the first case and pure scheduler noise in the second,
-	// which is why it failed roughly one run in three while nothing was wrong.
-	//
-	// 10% of the request's own cost keeps the guard honest at both ends: the regression
-	// this exists to catch (content redaction moved back onto the request goroutine,
-	// ~53 ms) is caught at any baseline, while contention that slows BOTH handlers
-	// equally cannot trip it.
-	//
-	// The gate reads the median, not the minimum. The minimum was tried and is worse: it
-	// is one sample with no averaging, so under load it tracks whichever handler caught
-	// a lucky scheduling moment. In the same run that produced this comment, the paired
-	// medians differed by 1.27 ms while the paired minima differed by 8.13 ms.
-	budget := 5 * time.Millisecond
-	if rel := off / 10; rel > budget {
-		budget = rel
+func checkSpend(t *testing.T, spends []time.Duration, budget time.Duration) {
+	t.Helper()
+	med := spends[len(spends)/2]
+	t.Logf("dashboard time per request on the request goroutine, %d requests: median %v, min %v, max %v (budget %v on the median)",
+		len(spends), med, spends[0], spends[len(spends)-1], budget)
+	if med > budget {
+		t.Errorf("the dashboard spent a median of %v per request on the request goroutine (budget %v): something "+
+			"expensive is on the request path, before the response or in the handler's defer", med, budget)
 	}
-	t.Logf("median per-request latency over %d paired requests: dashboard off %v, on with "+
-		"content ON %v (added %v, budget %v); minima for reference: off %v, on %v",
-		iters, off, on, added, budget, slices.Min(offs), slices.Min(ons))
+}
 
-	if added > budget {
-		t.Errorf("the dashboard added %v per request with content capture on (median of %d "+
-			"paired samples, budget %v = max(5ms, 10%% of the %v baseline)); something "+
-			"expensive is back on the request goroutine", added, iters, budget, off)
-	}
+// maxSmallBodySpend is the budget on the median, 2 tool results, accountant counted. Measured under
+// -race on 4 cores, 5 runs of 50 requests each (median of the per-request times, p95 in brackets):
+//   - idle: 2.5-2.6 ms (4.4-4.5 ms)
+//   - under load, 16 busy loops pinned to 4 cores: 9.1-14.7 ms (30.5-35.8 ms; worst request 58.5 ms)
+//
+// The budget is 2x the worst median (14.7 ms), rounded up to 30 ms. That leaves grace for noise and
+// stays clearly under the 50 ms a regression adds to EVERY request, so the median reaches 50 ms or more.
+// The mean of the same runs reached 30 ms under load, which is why the check uses the median.
+const maxSmallBodySpend = 30 * time.Millisecond
+
+func TestDashboardAddsNoRequestLatencyWithContentCapture(t *testing.T) {
+	testutil.RequireTiming(t)
+	checkSpend(t, dashboardSpends(t, 50, 2), maxSmallBodySpend)
+}
+
+// maxMaxContentSpend is the budget on the median, 24 tool results, accountant left out. Measured
+// under -race on 4 cores with 16 busy loops: worst run mean 10.5 ms. The budget is 2x that, plus
+// grace, and well under the 50 ms the guarded regression adds.
+const maxMaxContentSpend = 25 * time.Millisecond
+
+func TestDashboardCaptureAddsNoRequestLatencyAtMaxContent(t *testing.T) {
+	testutil.RequireTiming(t)
+	checkSpend(t, dashboardSpends(t, 20, 24, "accBegin", "accEnd", "accWait", "accBilledTTL", "accCompute"), maxMaxContentSpend)
 }
 
 // TestDashboardUnderConcurrentTraffic drives the whole path (pipeline, capture,
@@ -593,5 +721,72 @@ func TestDashboardUnderConcurrentTraffic(t *testing.T) {
 	}
 	if s.Errors > 0 {
 		t.Errorf("%d insert errors", s.Errors)
+	}
+}
+
+// A real request through the proxy books the accountant library's saving: the pipeline compacted,
+// the upstream billed the forwarded body, and the stored baseline is above the cost.
+func TestDashboardBooksTheAccountantSaving(t *testing.T) {
+	up := billedUpstream(t)
+	defer up.Close()
+	h, rec := dashHandler(t, up.URL, dash.Options{})
+	h.tracker.SetStartedAt(time.Now().Add(-2 * time.Hour).UnixMilli())
+	srv := httptest.NewServer(h.Mux())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-context-guru-session", "sess-acc")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	waitForRows(t, rec, 1)
+	// The first request of a thread has no history, so its saving is an estimate and is held out of
+	// the books (issue #915). It is booked from the second request on.
+	first, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := first.Requests[0]; !f.PriceEstimated || f.BaselineCostUSD != f.CostUSD || f.EstimatedSavedUSD <= 0 {
+		t.Fatalf("first request: estimated %v baseline %v cost %v held %v, want an estimate held out of the books",
+			f.PriceEstimated, f.BaselineCostUSD, f.CostUSD, f.EstimatedSavedUSD)
+	}
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(string(anthropicRequest("aws/claude-sonnet-5"))))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("x-context-guru-session", "sess-acc")
+	resp2, err := srv.Client().Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	waitForRows(t, rec, 2)
+	page, err := rec.DB().Requests(dash.Filter{}, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := page.Requests[0] // newest first
+	if e.PriceEstimated {
+		t.Fatalf("the second request of the thread is still an estimate")
+	}
+	if e.TokensBefore <= e.TokensAfter {
+		t.Fatalf("the pipeline did not compact (%d -> %d)", e.TokensBefore, e.TokensAfter)
+	}
+	if e.BaselineCostUSD <= e.CostUSD {
+		t.Fatalf("baseline %v is not above actual %v despite %d tokens removed",
+			e.BaselineCostUSD, e.CostUSD, e.TokensBefore-e.TokensAfter)
+	}
+	full, err := rec.DB().Request(e.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priced := false
+	for _, c := range full.Components {
+		priced = priced || c.PricedBy == dash.PricedByAccountant
+	}
+	if !priced {
+		t.Fatalf("no component row is priced by the accountant library: %+v", full.Components)
 	}
 }

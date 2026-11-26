@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
@@ -184,6 +185,7 @@ func TestValidStrategyBounds(t *testing.T) {
 		{"negative ceiling", 280 * time.Second, 2, 0, -0.01, false, 0, false},
 		{"zero ceiling means default, and is fine", 280 * time.Second, 2, 0, 0, false, 0, true},
 		{"negative head-ttl-min-tokens", 280 * time.Second, 2, 0, 0, false, -1, false},
+		{"head-ttl-min-tokens too large to x4", 280 * time.Second, 2, 0, 0, false, 1 << 40, false},
 
 		// The 1h-tier band, only reachable while headTTL1h is set. A positive
 		// headTTLMinTokens (50000, mirroring config.DefaultHeadTTLMinTokens) is used
@@ -216,21 +218,32 @@ func TestValidStrategyBounds(t *testing.T) {
 	}
 }
 
-// knownPredictorIDs and predictorFor are two separate lists by construction (a map a
-// strategy is validated against, a switch pingable() actually evaluates), and nothing
-// forces them to agree except this test — the exact drift a Strategy naming a "known"
-// predictor pingable() cannot actually run would produce.
+// knownPredictorIDs and keepalive's predictorFor are two separate lists by construction (a map a
+// strategy is validated against, a switch pingable() actually evaluates), and nothing forces them
+// to agree except this test — the exact drift a Strategy naming a "known" predictor pingable()
+// cannot actually run would produce. predictorFor is keepalive's own, so the lockstep is checked
+// through the keeper: a strategy naming a KNOWN id with threshold 0 is tracked (the gate passes every
+// prediction), and an UNKNOWN id is refused (pingable fails toward not spending).
 func TestKnownPredictorIDsMatchPredictorFor(t *testing.T) {
+	tracked := func(id string) bool {
+		k, _, clock := testKeeper(t, Limits{})
+		pol := kaPolicy()
+		pol.PredictorID = id
+		pol.PredictorThreshold = 0
+		recordOne(t, k, pol, kaBody, clock.now(), upstream{base: "http://up", path: "/v1/messages"})
+		return k.Stats().Live == 1
+	}
 	for id := range knownPredictorIDs {
-		if _, ok := predictorFor(id); !ok {
-			t.Errorf("%q is in knownPredictorIDs but predictorFor does not recognise it", id)
+		if !tracked(id) {
+			t.Errorf("%q is in knownPredictorIDs but the keeper's predictorFor does not recognise it", id)
 		}
 	}
-	for _, id := range []string{"stop-reason-gated", "not-a-real-one"} {
-		_, wantOK := knownPredictorIDs[id]
-		_, gotOK := predictorFor(id)
-		if gotOK != wantOK {
-			t.Errorf("predictorFor(%q) ok=%v, knownPredictorIDs says %v", id, gotOK, wantOK)
+	for _, id := range []string{"not-a-real-predictor", "stop_reason", "STOP-REASON-GATED"} {
+		if knownPredictorIDs[id] {
+			continue
+		}
+		if tracked(id) {
+			t.Errorf("the keeper accepted predictor %q, which knownPredictorIDs does not list", id)
 		}
 	}
 }
@@ -286,8 +299,8 @@ func TestResolveHeadTTLMatchingStrategyOverridesTheAccount(t *testing.T) {
 	}
 	k.setStrategies([]tenant.Strategy{s})
 	on, tokens := k.resolveHeadTTL("t1", now, false, 0)
-	if !on || tokens != 50000 {
-		t.Errorf("resolveHeadTTL = (%v, %d), want the matched strategy's (true, 50000)", on, tokens)
+	if !on || tokens != 200000 {
+		t.Errorf("resolveHeadTTL = (%v, %d), want the matched strategy's (true, 200000 bytes = 50000 tokens x 4)", on, tokens)
 	}
 }
 
@@ -492,5 +505,131 @@ func TestValidWindowsRequiresAtLeastOne(t *testing.T) {
 	}
 	if err := validWindows([]tenant.Window{{Start: "18:00", End: "09:00"}}); err == nil {
 		t.Error("an overnight window was accepted")
+	}
+}
+
+// #1243: a manager's stored strategy may switch on the 1-hour-on-wait ping, the same way it sets the other
+// strategy keys. It only turns it ON; a strategy that leaves it off keeps the account's own setting.
+func TestStoredStrategyTurnsOnTheOneHourOnWaitPing(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+
+	body := `{"name":"1h on wait","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_on_wait":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	w, out := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	if out["one_hour_on_wait"] != true {
+		t.Errorf("the response does not report one_hour_on_wait: %v", out)
+	}
+	id, _ := out["id"].(string)
+	pol, applied := f.h.keeper.applyStrategy(userID, CachePolicy{WaitPlan: true}, at)
+	if applied != id || !pol.OneHourOnWait || !pol.WaitPlan {
+		t.Fatalf("the stored strategy did not turn the ping on for a hosted tenant: applied=%q policy=%+v", applied, pol)
+	}
+
+	// Turned off by PATCH: the policy no longer carries it.
+	w, _ = f.do(t, http.MethodPatch, "/api/keepalive/strategies/"+id, `{"one_hour_on_wait":false}`, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch = %d: %s", w.Code, w.Body)
+	}
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); pol.OneHourOnWait {
+		t.Error("the strategy still turned the ping on after it was patched off")
+	}
+	// A strategy cannot turn the account's own setting OFF.
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourOnWait: true}, at); !pol.OneHourOnWait {
+		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}
+
+// #1261: the apply hook of the 1-hour modes asks the keeper only for the main thread with tools declared,
+// and only when the account's policy turns a mode on. C (the opt-in) needs no probe.
+func TestOneHourFirstHookFollowsThePolicy(t *testing.T) {
+	f := newMgrFixture(t)
+	body := []byte(`{"model":"aws/claude-sonnet-5"}`)
+	hook := func(cache CachePolicy) func(session, threadID, model string, tools bool) bool {
+		return f.h.oneHourFirstFor(&reqInfo{tn: &Tenancy{ID: "acct", Cache: cache}, body: body, provider: bschemas.Anthropic,
+			endpoint: "http://up", route: "/v1/messages"})
+	}
+	base := CachePolicy{KeepAlive: true, Idle: 240 * time.Second, MaxPings: 2}
+	if h := hook(base); h == nil || h("s1", "", "m", true) {
+		t.Error("a policy with no 1-hour mode relabelled a request")
+	}
+	on := base
+	on.OneHourAlways = true
+	h := hook(on)
+	if !h("s2", "", "m", true) {
+		t.Error("the opt-in did not put a new main thread at 1 hour from its first request")
+	}
+	if h("s3", "a:agent", "m", true) || h("s3", "", "m", false) || h("", "", "m", true) {
+		t.Error("a subagent, a request with no tools, or one with no session was relabelled")
+	}
+	// D without a costly route (no probe ran): auto, nothing relabelled.
+	d := base
+	d.OneHourOnWait = true
+	if hook(d)("s4", "", "m", true) {
+		t.Error("1-hour-on-wait relabelled a request on a route that is not costly")
+	}
+}
+
+// #1261: a manager's stored strategy MAY set 1-hour-always (mode C), like one_hour_on_wait: no hosted/local
+// difference. It only turns it ON. It is the manager's knowing choice: on most users it does not pay off.
+func TestStoredStrategyTurnsOnTheOneHourAlwaysMode(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+
+	body := `{"name":"1h always","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_always":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	w, out := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	if out["one_hour_always"] != true || out["one_hour_on_wait"] != false {
+		t.Errorf("the response does not report one_hour_always alone: %v", out)
+	}
+	id, _ := out["id"].(string)
+	pol, applied := f.h.keeper.applyStrategy(userID, CachePolicy{WaitPlan: true}, at)
+	if applied != id || !pol.OneHourAlways || pol.OneHourOnWait || !pol.WaitPlan {
+		t.Fatalf("the stored strategy did not turn mode C on for a hosted tenant: applied=%q policy=%+v", applied, pol)
+	}
+	w, _ = f.do(t, http.MethodPatch, "/api/keepalive/strategies/"+id, `{"one_hour_always":false}`, mgrJar)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch = %d: %s", w.Code, w.Body)
+	}
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{}, at); pol.OneHourAlways {
+		t.Error("the strategy still turned the mode on after it was patched off")
+	}
+	// A strategy cannot turn the account's own setting OFF.
+	if pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourAlways: true}, at); !pol.OneHourAlways {
+		t.Error("a strategy with the key off switched the account's own setting off")
+	}
+}
+
+// A parked account that keeps D off (-1) keeps it when a manager strategy switches 1-hour-on-wait on: the
+// strategy fills the switch and leaves the account's threshold alone.
+func TestAStoredStrategyLeavesTheAccountsDOffAlone(t *testing.T) {
+	loc, _ := time.LoadLocation(tenant.DefaultStrategyTZ)
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, loc)
+	f := newMgrFixture(t)
+	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
+	_, userID := f.signUpJar(t, "user@ibm.com")
+	body := `{"name":"1h on wait","idle_seconds":240,"max_pings":2,"min_prefix_tokens":20000,
+		"max_usd_per_ping":0.25,"active":true,"one_hour_on_wait":true,
+		"windows":[{"start":"00:00","end":"24:00"}],"target":{"mode":"all"}}`
+	if w, _ := f.do(t, http.MethodPost, "/api/keepalive/strategies", body, mgrJar); w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	pol, _ := f.h.keeper.applyStrategy(userID, CachePolicy{OneHourRebuildTokens: -1}, at)
+	if !pol.OneHourOnWait || pol.OneHourRebuildTokens != -1 {
+		t.Errorf("policy = onWait %v rebuild %d, want the switch on and the account's -1 kept", pol.OneHourOnWait, pol.OneHourRebuildTokens)
 	}
 }

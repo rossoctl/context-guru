@@ -8,8 +8,8 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -22,7 +22,7 @@ import (
 func caGatedCtx(session string, st store.Store, phase string, window int, exact bool, billed int) *components.Ctx {
 	c := &components.Ctx{
 		Ctx: context.Background(), Session: session, Store: st, MaxCachedIdx: -1,
-		CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed,
+		CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, PrevBilledInputThread: billed,
 	}
 	const ttl = 5 * 60 * 1000 // a bare `ephemeral` mark: five minutes
 	switch phase {
@@ -307,8 +307,10 @@ func TestCacheAwareDefersTheSideCallOnACacheState_Cold(t *testing.T) {
 	if rep.Events["cold_commission_deferred"] == 0 {
 		t.Fatalf("a cold-cache turn did not defer (gates: %v, events: %v)", rep.Gates, rep.Events)
 	}
-	// The call must NOT have been dispatched yet — give it a moment to prove a negative.
-	time.Sleep(100 * time.Millisecond)
+	// The call must NOT have been dispatched yet. The deferral is held until the hook fires.
+	if !deferralPending(ctx.Session) {
+		t.Fatal("the deferral is not held on a cold turn")
+	}
 	if model.calls != 0 {
 		t.Fatalf("the side call fired on a cold turn WITHOUT waiting for the forwarded request to "+
 			"rewrite the cache first — this is the exact double-rewrite #400 exists to prevent "+
@@ -348,11 +350,11 @@ func TestCacheAwareColdDeferralFallbackFiresWithoutTheHook(t *testing.T) {
 	if _, err := s.Offload(req, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
-	// The fallback timer has not fired yet at this instant (it was just scheduled), so there is
-	// nothing in flight for WaitForSummaryForTest to find — it would return immediately and
-	// report success vacuously. Sleep past the (shrunk) fallback window first, THEN drain
-	// whatever the timer started.
-	time.Sleep(200 * time.Millisecond)
+	// WaitForSummaryForTest first waits out the held deferral (deferralPending), then the call
+	// the fallback timer started. So it cannot return before the fallback fires.
+	if !deferralPending(ctx.Session) {
+		t.Fatal("precondition: no deferral is held, so the fallback has nothing to fire")
+	}
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the fallback never fired the deferred summary")
 	}

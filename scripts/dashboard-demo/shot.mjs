@@ -11,10 +11,12 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 await send('Emulation.setDeviceMetricsOverride',{width:W,height:900,deviceScaleFactor:1,mobile:W<600});
 await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:theme}]});
 await send('Page.enable');
-for (const [name,hash,wait] of pages){
+for (const [name,hash,wait,setup] of pages){
   await send('Page.navigate',{url:BASE+hash});
   await send('Runtime.evaluate',{expression:'location.reload()'});
   await sleep(wait||7000);
+  // An optional expression run before the shot, e.g. to open a disclosure.
+  if (setup) { await send('Runtime.evaluate',{expression:setup}); await sleep(600); }
   const m=(await send('Page.getLayoutMetrics')).result;
   const h=Math.min(Math.ceil(m.cssContentSize.height),4500);
   await send('Emulation.setDeviceMetricsOverride',{width:W,height:h,deviceScaleFactor:1,mobile:W<600});

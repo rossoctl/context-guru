@@ -8,10 +8,13 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +28,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 func scriptsDir(t *testing.T) string {
@@ -88,7 +94,8 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "settings.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home,
+		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t)) // the strategy table comes from the proxy binary
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -221,8 +228,11 @@ func TestSettingsAddPreservesEverythingElse(t *testing.T) {
 	if env["SOME_OTHER_VAR"] != "keep me" || env["ANTHROPIC_SMALL_FAST"] != "also keep me" {
 		t.Errorf("the user's own env vars were lost: %v", env)
 	}
-	if len(env) != 3 {
+	if len(env) != 4 { // the 2 originals, the base URL, and the manual-ping opt-in header
 		t.Errorf("env has %d keys, want the 2 originals plus ours: %v", len(env), env)
+	}
+	if env["ANTHROPIC_CUSTOM_HEADERS"] != "x-context-guru-ping: 1" {
+		t.Errorf("env.ANTHROPIC_CUSTOM_HEADERS = %q, want the manual-ping opt-in", env["ANTHROPIC_CUSTOM_HEADERS"])
 	}
 }
 
@@ -332,9 +342,16 @@ func TestSettingsRefusesToRewriteABrokenFile(t *testing.T) {
 // CONTEXT_GURU_BIN points at a sentinel script: if the hook decides to launch a proxy, the
 // sentinel file appears. That is how "did it start something?" is asserted, rather than by
 // looking for a process.
+//
+// Bounded at one minute (#297): a start-proxy.sh that hangs (a stuck child holding the output
+// pipe, a port wedged by leftovers from an earlier killed run on the shared box) used to hang the
+// test binary until its own 10-minute timeout, ending the whole run with a panic and no result for
+// any test after this one. A deadline turns that into a fast failure with the output so far.
 func runStart(t *testing.T, env map[string]string) (out string, code int, startedSentinel string) {
 	t.Helper()
 	requireTool(t, "bash")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "started")
 	fake := filepath.Join(dir, "fake-proxy")
@@ -342,7 +359,7 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_BIN="+fake, "TMPDIR="+dir)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -355,6 +372,23 @@ func runStart(t *testing.T, env map[string]string) (out string, code int, starte
 	}
 	t.Logf("start-proxy.sh env=%v -> exit %d, output:\n%s", env, code, b)
 	return string(b), code, sentinel
+}
+
+// waitWritten polls until a background fake proxy has published `path` (its argv, or a sentinel),
+// and returns the content. start-proxy.sh returns on ITS own clock — the health budget — and under
+// load that can beat the fork of the fake that writes the file, so reading the file once races that
+// fork (#314). A fake that holds the port answers /healthz only after its write, which orders the
+// write before the script's return; the fakes that never answer give no such order, and theirs are
+// the files this must wait for. Returns ("", false) after ~10 s so the caller fails with its own
+// diagnosis of WHY nothing was launched.
+func waitWritten(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b), true
+		}
+	}
+	return "", false
 }
 
 // TestHookIsSilentAndInertWhereRoutingIsNotConfigured is the property that makes a user-scope
@@ -406,11 +440,12 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 			if code != 0 {
 				t.Errorf("exit %d; the hook must never fail a session", code)
 			}
-			_, started := os.Stat(sentinel)
 			if c.routed {
-				if started != nil {
+				// The sentinel is touched by the background fake, which under load can trail this
+				// script's return (#314) — so the control waits for it rather than reading once.
+				if _, ok := waitWritten(t, sentinel); !ok {
 					t.Errorf("the hook did NOT start a proxy in a routed project — so every "+
-						"silent row above proves nothing: %v\noutput:\n%s", started, out)
+						"silent row above proves nothing\noutput:\n%s", out)
 				}
 				if strings.TrimSpace(out) == "" {
 					t.Errorf("the hook said nothing in a routed project where the proxy never " +
@@ -421,7 +456,7 @@ func TestHookIsSilentAndInertWhereRoutingIsNotConfigured(t *testing.T) {
 			if strings.TrimSpace(out) != "" {
 				t.Errorf("the hook printed output in an unrouted project: %q", out)
 			}
-			if started == nil {
+			if _, err := os.Stat(sentinel); err == nil {
 				t.Error("the hook started a proxy in a project that is not routed to it")
 			}
 		})
@@ -522,7 +557,11 @@ func TestHookStartsTheProxyAndWaitsForHealthz(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	// Bounded (#297): this test once hung to the binary's own 10-minute timeout on the shared box,
+	// taking the whole run's result with it; a deadline turns that into a fast failure.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Env = append(sandboxEnv(t),
 		"CLAUDE_PLUGIN_OPTION_PORT="+port,
 		"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
@@ -536,8 +575,11 @@ func TestHookStartsTheProxyAndWaitsForHealthz(t *testing.T) {
 	if !strings.Contains(string(b), "proxy up on 127.0.0.1:"+port) {
 		t.Fatalf("the hook returned without reporting a healthy proxy:\n%s", b)
 	}
-	// The claim is that it returned only AFTER /healthz answered, so it must answer now.
-	resp, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+	// The claim is that it returned only AFTER /healthz answered, so it must answer now. Bounded
+	// (#297): an unbounded Get against a port left half-open by an earlier killed run hangs this
+	// test to the binary timeout; a short client timeout fails it with the connection state named.
+	probe := &http.Client{Timeout: 5 * time.Second}
+	resp, err := probe.Get("http://127.0.0.1:" + port + "/healthz")
 	if err != nil {
 		t.Fatalf("the hook reported the proxy up, but /healthz does not answer: %v", err)
 	}
@@ -769,8 +811,13 @@ func TestInstallRefusesAnUnverifiedDownload(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest")
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "install.sh"))
+	// A hermetic PATH, not the ambient one (#235): install.sh short-circuits with result=present
+	// when it finds context-guru-proxy already on PATH, and a machine with the product installed
+	// (a shared eval box, a developer laptop) has one — the stub curl shadows nothing there, so the
+	// download-and-verify path this test exists to guard was silently never reached. /usr/bin and
+	// /bin carry the coreutils the script needs and no install of ours.
 	cmd.Env = append(sandboxEnv(t),
-		"PATH="+bin+":"+os.Getenv("PATH"),
+		"PATH="+bin+":/usr/bin:/bin",
 		"CONTEXT_GURU_DEST="+dest,
 		"HOME="+dir,
 	)
@@ -1006,6 +1053,7 @@ func runCheck(t *testing.T, port, binBody string) (out string, code int, elapsed
 // check that fails on a loaded CI runner, and a flaky test here would get muted, which is how the
 // property would be lost a second time.
 func TestCheckHookFinishesInsideItsOwnTimeout(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -1158,6 +1206,7 @@ func TestCheckHookRecoversSilently(t *testing.T) {
 // port is one of the likeliest reasons to need that block, and it was the one case that never
 // produced it.
 func TestStartHookBudgetsOnWallClockNotIterations(t *testing.T) {
+	testutil.RequireTiming(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hook is POSIX-only")
 	}
@@ -1283,7 +1332,10 @@ func TestInstallReportsPATHFromTheSourceFallbackToo(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest")
 	run := func(pathHasDest bool) map[string]string {
-		path := bin + ":" + os.Getenv("PATH")
+		// Hermetic for the same reason as TestInstallRefusesAnUnverifiedDownload (#235): an ambient
+		// PATH can hold a real context-guru-proxy, and result=present would bypass the source
+		// fallback this test is about. $DEST is prepended only in the on_path=true row, by design.
+		path := bin + ":/usr/bin:/bin"
 		if pathHasDest {
 			path = dest + ":" + path
 		}
@@ -1790,12 +1842,17 @@ func TestStartProxyReportsArgumentsItCannotUse(t *testing.T) {
 			} else if !strings.Contains(said, c.wantSaid) {
 				t.Errorf("did not report the discarded argument (want %q):\n%s", c.wantSaid, said)
 			}
-			launched, _ := os.ReadFile(argv)
+			// The fake never answers /healthz, so the script returns on its 1 s budget — which under
+			// load can beat the fake's fork. Wait for the file instead of reading it once (#314).
+			launched, ok := waitWritten(t, argv)
+			if !ok {
+				t.Fatalf("the proxy was never launched, so its argv says nothing:\n%s", out)
+			}
 			if c.wantUp == "" {
-				if strings.Contains(string(launched), "--anthropic-upstream") {
+				if strings.Contains(launched, "--anthropic-upstream") {
 					t.Errorf("an upstream reached argv from a malformed argument: %s", launched)
 				}
-			} else if !strings.Contains(string(launched), "--anthropic-upstream "+c.wantUp) {
+			} else if !strings.Contains(launched, "--anthropic-upstream "+c.wantUp) {
 				t.Errorf("argv missing the upstream: %s", launched)
 			}
 		})
@@ -1849,9 +1906,11 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 	}
 	t.Logf("output:\n%s", out)
 
-	// The positive: --bin was honoured, so the proxy actually started from that path.
-	launched, _ := os.ReadFile(argv)
-	if len(launched) == 0 {
+	// The positive: --bin was honoured, so the proxy actually started from that path. Waited for,
+	// not read once: the fake never answers /healthz, so the script's return does not order the
+	// fake's write (#314), and the absence of the file is itself the finding below.
+	launched, ok := waitWritten(t, argv)
+	if !ok {
 		t.Errorf("--bin was eaten as --upstream's rejected value, so the binary fell back to name "+
 			"resolution and nothing started. Output was:\n%s", out)
 	}
@@ -1864,7 +1923,7 @@ func TestRejectingAValueDoesNotEatTheNextFlag(t *testing.T) {
 		t.Errorf("the path after --bin was treated as a stray argument, which means --bin was "+
 			"consumed by the rejected --upstream:\n%s", out)
 	}
-	if strings.Contains(string(launched), "--anthropic-upstream") {
+	if strings.Contains(launched, "--anthropic-upstream") {
 		t.Errorf("an upstream reached argv from a rejected value: %s", launched)
 	}
 }
@@ -1899,6 +1958,17 @@ func TestSettingsStatuslineRoundTrips(t *testing.T) {
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("re-adding the same statusline should be unchanged: exit %d, %v", code, facts)
 	}
+	// It still records that the line is asked for: a line installed before 0.6.1 carries no record, and the
+	// SessionStart migration would otherwise remove it (a GLM round-2 point on #735).
+	data := readJSON(t, path)
+	delete(data["$context-guru"].(map[string]any), "statusline_asked")
+	writeJSON(t, path, data)
+	if facts, _ = settings(t, "add", "--file", path, "--url", ourURL, "--statusline", cmdPath); facts["result"] != "unchanged" {
+		t.Fatalf("re-add: %v", facts)
+	}
+	if m, _ := readJSON(t, path)["$context-guru"].(map[string]any); m["statusline_asked"] != true {
+		t.Errorf("a re-ask with --url on a complete install did not record statusline_asked: %v", m)
+	}
 
 	facts, code = settings(t, "remove", "--file", path, "--url", ourURL)
 	if code != 0 || facts["result"] != "removed" {
@@ -1909,6 +1979,18 @@ func TestSettingsStatuslineRoundTrips(t *testing.T) {
 	}
 	if readJSON(t, path)["theme"] != "dark" {
 		t.Error("removal took more than its own keys")
+	}
+	if meta, still := readJSON(t, path)["$context-guru"]; still {
+		t.Errorf("our bookkeeping outlived the uninstall: %v", meta)
+	}
+
+	// A file context-guru created holds nothing of the user's: uninstall deletes it.
+	fresh := filepath.Join(dir, "fresh.json")
+	if _, code := settings(t, "add", "--file", fresh, "--url", ourURL, "--statusline", cmdPath); code != 0 {
+		t.Fatal("add on a new file failed")
+	}
+	if facts, _ := settings(t, "remove", "--file", fresh, "--url", ourURL); facts["file_deleted"] != "true" {
+		t.Errorf("remove left a file context-guru created: %v", facts)
 	}
 }
 
@@ -2079,7 +2161,7 @@ func runStatusline(t *testing.T, env map[string]string, stdin string, args ...st
 	t.Helper()
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "statusline.py")}, args...)...)
-	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
+	cmd.Env = append(sandboxEnv(t), "TMPDIR="+t.TempDir(), "XDG_CACHE_HOME="+t.TempDir(), "NO_COLOR=1", "CG_STATUSLINE_COLUMNS=200")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2239,7 +2321,7 @@ func TestStatuslineReportsLoadingNotDownOnATimeout(t *testing.T) {
 		t.Errorf("got %q, want the loading indicator %q (NOT the down indicator — the proxy may be "+
 			"perfectly healthy and merely slow)", strings.TrimSpace(out), "cg: stats loading…")
 	}
-	if elapsed > 2*time.Second {
+	if testutil.TimingEnabled() && elapsed > 2*time.Second {
 		t.Errorf("took %v against a stalling port; the HTTP fetch carries its own ~0.6s timeout, "+
 			"so this should return in well under the script's own 2s backstop", elapsed)
 	}
@@ -2260,7 +2342,7 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2278,12 +2360,12 @@ func TestStatuslineServesStaleStatsOnATimeoutRatherThanLoading(t *testing.T) {
 		t.Fatalf("priming call: got %q, want the live savings figure", got)
 	}
 
-	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (2s) so the next call actually
+	// Backdate the cache file past STATS_CACHE_TTL_SECONDS (30s) so the next call actually
 	// attempts a fresh fetch instead of serving the just-written in-TTL copy — but still well
 	// inside STALE_STATS_MAX_AGE_SECONDS (600s), matching "a cache a few renders old", not "a
 	// cache from an hour ago".
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
-	old := time.Now().Add(-5 * time.Second)
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-stale.json", port))
+	old := time.Now().Add(-40 * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
 	}
@@ -2318,7 +2400,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	py := requireTool(t, "python3")
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp)
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp)
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -2337,7 +2419,7 @@ func TestStatuslineReportsNotRespondingOnceAStaleFetchHangsTooLong(t *testing.T)
 	// Backdate well past STALE_STATS_MAX_AGE_SECONDS (read from the script itself, not retyped
 	// here, so the two cannot silently drift apart).
 	maxAge := statslineConstInt(t, "STALE_STATS_MAX_AGE_SECONDS")
-	cachePath := filepath.Join(tmp, fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
+	cachePath := filepath.Join(tmp, "context-guru", fmt.Sprintf("context-guru-statusline-%s-sess-hung.json", port))
 	old := time.Now().Add(-time.Duration(maxAge+60) * time.Second)
 	if err := os.Chtimes(cachePath, old, old); err != nil {
 		t.Fatalf("backdating the stats cache file: %v", err)
@@ -2496,16 +2578,20 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 		{"clock skew: far in the past", -100000, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			expiresAt := time.Now().Add(time.Duration(c.remainingSec * float64(time.Second))).Unix()
+			// The script's clock is pinned to now, so the render is exact however long python takes to start.
+			now := time.Now().Unix()
+			expiresAt := now + int64(c.remainingSec)
 			stdin := fmt.Sprintf(`{"prompt_cache": {"warm": true, "expires_at": %d}}`, expiresAt)
-			out, code, _ := runStatusline(t, routedEnv(port), stdin, "--cache")
+			env := routedEnv(port)
+			env["CG_TEST_NOW"] = fmt.Sprint(now)
+			out, code, _ := runStatusline(t, env, stdin, "--cache")
 			if code != 0 {
 				t.Fatalf("exit %d", code)
 			}
 			got := strings.SplitN(strings.TrimSpace(out), " │ ", 2)[0]
-			if c.wantCold {
-				if got != "cache ○ ░░░░░░ cold" {
-					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ ░░░░░░ cold")
+			if c.wantCold { // cold is drawn, dim: `cache ○ cold` (a client-only answer does not know since when)
+				if got != "cache ○ cold" {
+					t.Errorf("remaining=%.0fs: got %q, want %q", c.remainingSec, got, "cache ○ cold")
 				}
 				return
 			}
@@ -2513,17 +2599,15 @@ func TestStatuslineCacheCountdownMath(t *testing.T) {
 				t.Fatalf("remaining=%.0fs: reported cold while still positive", c.remainingSec)
 			}
 			gotSec := parseCacheSeconds(t, got)
-			// Truncation only ever rounds DOWN (never up, never negative here), so the tolerance
-			// is asymmetric: at most the subprocess's own wall-clock overhead behind the expected
-			// value, never ahead of it.
-			// Minutes are shown whole above EXPIRING_SECONDS (a calm, non-ticking figure), so the
-			// tolerance there is a whole minute, rounded down.
-			tol := 2
+			// The clock is pinned, so the figure is exact. Minutes are shown whole above
+			// EXPIRING_SECONDS (a calm, non-ticking figure), so the tolerance there is a whole
+			// minute, rounded down.
+			tol := 0
 			if c.remainingSec > 60 {
 				tol = 60
 			}
 			if gotSec > int(c.remainingSec) || gotSec < int(c.remainingSec)-tol {
-				t.Errorf("remaining=%.0fs: got %q (%ds), want within 2s below that", c.remainingSec, got, gotSec)
+				t.Errorf("remaining=%.0fs: got %q (%ds), want within %ds below that", c.remainingSec, got, gotSec, tol)
 			}
 		})
 	}
@@ -2548,7 +2632,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.time.time = lambda: 1_700_000_000.0
 seg = lambda e: m._cache_segment(m._cache_view({"prompt_cache": {"expires_at": e}}, None, 0))
-print(seg(1_700_000_000.0))        # remaining == 0
+print(seg(1_700_000_000.0))        # remaining == 0: cold, drawn dim
 print(seg(1_700_000_000.5))        # remaining +0.5s
 print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 `
@@ -2559,7 +2643,7 @@ print(seg(1_700_000_000.0 - 0.5))  # remaining -0.5s
 		t.Fatalf("running the boundary check: %v\n%s", err, out)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	want := []string{"cache ○ ░░░░░░ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ ░░░░░░ cold"}
+	want := []string{"cache ○ cold", "cache ◐ ░░░░░░ 0:00!", "cache ○ cold"} // cold is drawn (dim; NO_COLOR here)
 	if len(lines) != len(want) {
 		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), out)
 	}
@@ -2640,8 +2724,8 @@ func TestStatuslineDefaultShowsOnlySavings(t *testing.T) {
 	if strings.Contains(got, "proxy:") || strings.Contains(got, "upstream") {
 		t.Errorf("got %q — a detailed-layout/opt-in segment appeared in the balanced layout", got)
 	}
-	if !strings.Contains(got, "ka 4 pings") {
-		t.Errorf("got %q, want the session's keep-alive pings in the balanced layout", got)
+	if strings.Contains(got, "ka ") || strings.Contains(got, "keep-alive") {
+		t.Errorf("got %q, want no keep-alive count in the balanced layout (users did not understand it)", got)
 	}
 }
 
@@ -2685,8 +2769,8 @@ func TestStatuslineExtrasShownWhenEnabled(t *testing.T) {
 		t.Errorf("got %q, want a rendered cache countdown with --cache passed", out)
 	}
 	// The keep-alive segment is this session's ping count and ping spend — see _keepalive_segment.
-	if !strings.Contains(out, "ka 4 pings $0.02") {
-		t.Errorf("got %q, want %q with --keepalive passed", out, "ka 4 pings $0.02")
+	if !strings.Contains(out, "keep-alive 4 pings · $0.02") {
+		t.Errorf("got %q, want %q with --keepalive passed", out, "keep-alive 4 pings · $0.02")
 	}
 	if !strings.Contains(out, "saved $0.03") {
 		t.Errorf("got %q, want the default segment to keep rendering alongside the extras", out)
@@ -2829,7 +2913,7 @@ func TestStatuslineCachesPerSession(t *testing.T) {
 	tmp := t.TempDir() // shared TMPDIR on purpose: this is what could let the cache files collide
 	run := func(sessionID string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
 			"CLAUDE_PLUGIN_OPTION_PORT="+port)
 		cmd.Stdin = strings.NewReader(statuslinePayload(sessionID, 1.00, 10000, 1000))
@@ -2876,11 +2960,13 @@ func TestStatuslineCachesStatsAcrossQuickRenders(t *testing.T) {
 	// isolation between different tests), so this test drives the script directly instead.
 	py := requireTool(t, "python3")
 	tmp := t.TempDir()
+	pinned := fmt.Sprint(time.Now().Unix())
 	run := func() string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "statusline.py"))
-		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp,
+		// The script's clock is pinned, so no render can outlive the 30 s TTL however slow python starts.
+		cmd.Env = append(sandboxEnv(t), "TMPDIR="+tmp, "XDG_CACHE_HOME="+tmp,
 			"ANTHROPIC_BASE_URL=http://127.0.0.1:"+port+"/anthropic",
-			"CLAUDE_PLUGIN_OPTION_PORT="+port)
+			"CLAUDE_PLUGIN_OPTION_PORT="+port, "CG_TEST_NOW="+pinned)
 		cmd.Stdin = strings.NewReader(`{"session_id":"sess-cache"}`)
 		b, err := cmd.CombinedOutput()
 		if err != nil {
@@ -2933,23 +3019,23 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["default"] != "5-min-ping" {
-		t.Errorf("default strategy is %q, want 5-min-ping: this is the value the install writes, and "+
+	if facts["default"] != "auto" {
+		t.Errorf("default strategy is %q, want auto: this is the value the install writes, and "+
 			"plugin.json's cache_strategy default has to agree with it", facts["default"])
 	}
-	for _, k := range []string{"strategy_none", "strategy_5_min_ping", "strategy_1_hour_head"} {
+	for _, k := range []string{"strategy_none", "strategy_auto", "strategy_1_ping", "strategy_2_ping", "strategy_1_hour_head"} {
 		if facts[k] == "" {
 			t.Errorf("`strategy list` does not describe %s; a name the picker offers but list omits "+
 				"cannot be discovered", k)
 		}
 	}
 	// The honesty that matters most: exactly one strategy spends the caller's money, and it must be
-	// the one that says so. A `spends=false` on 5-min-ping would make the install's one-line
+	// the one that says so. A `spends=false` on auto would make the install's one-line
 	// disclosure wrong.
-	if facts["spends_5_min_ping"] != "true" {
-		t.Errorf("5-min-ping reports spends=%q; it pings on idle turns with the caller's own "+
+	if facts["spends_auto"] != "true" || facts["spends_1_ping"] != "true" || facts["spends_2_ping"] != "true" {
+		t.Errorf("auto reports spends=%q; it pings on idle turns with the caller's own "+
 			"credential, and the install's disclosure is generated from this",
-			facts["spends_5_min_ping"])
+			facts["spends_auto"])
 	}
 	for _, k := range []string{"spends_none", "spends_1_hour_head"} {
 		if facts[k] != "false" {
@@ -2959,19 +3045,246 @@ func TestStrategyListIsTheAuthoritativeSetAndNamesItsDefault(t *testing.T) {
 	}
 }
 
+// TestOldStrategyNamesStillResolve. `5-min-ping` was the default name before strategies were named by
+// ping count. An existing install, a saved plugin option and a marker already on disk all carry it.
+// Set stores the new name, show and sync read an old marker under the new name, and the written file
+// gains the 1-hour keys, so a pre-rename install picks up the per-TTL schedule on its next start.
+func TestOldStrategyNamesStillResolve(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	list, code := settingsIn(t, state, home, "strategy", "list")
+	if code != 0 || !strings.Contains(list["aliases"], "5-min-ping:auto") {
+		t.Fatalf("strategy list does not publish the alias map: %v", list)
+	}
+	facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+		"--port", keepalivePort, "--preset", "off")
+	if code != 0 || facts["strategy"] != "auto" {
+		t.Fatalf("set --name 5-min-ping: exit %d, %v; want it stored as auto", code, facts)
+	}
+	body, err := os.ReadFile(facts["file"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The file names the strategy; the proxy owns the keys.
+	for _, want := range []string{"strategy=auto", "cache:\n  strategy: auto\n"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("auto config lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(string(body), "keepalive") {
+		t.Errorf("auto config carries keys the proxy owns:\n%s", body)
+	}
+	// A marker written by the old version.
+	old := strings.Replace(string(body), "strategy=auto", "strategy=5-min-ping", 1)
+	if err := os.WriteFile(facts["file"], []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort)
+	if show["strategy"] != "auto" {
+		t.Errorf("show reports %q for an old 5-min-ping marker, want auto: %v", show["strategy"], show)
+	}
+}
+
+// oldTwoPingFile is what a plugin older than the proxy-owned table wrote for `2-ping`: the keys
+// themselves, with the one non-default 1-hour key. Such files are on users' machines and must keep
+// working, so the legacy recovery below still applies to them.
+const oldTwoPingFile = "# context-guru: strategy=2-ping written by /context-guru:cache-strategy-picker\n" +
+	"preset: off\ncache:\n  keepalive: true\n  keepalive_idle_seconds: 240\n  keepalive_max_pings: 2\n" +
+	"  keepalive_max_usd_per_ping: 0.5\n  keepalive_min_prefix_tokens: 80000\n  keepalive_max_pings_1h: 2\n"
+
+func writeOldTwoPing(t *testing.T, state, port string) string {
+	t.Helper()
+	path := filepath.Join(state, "keepalive-"+port+".yaml")
+	if err := os.WriteFile(path, []byte(oldTwoPingFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestLegacyOneHourKeysAreDroppedForAnOldKeysFile. A file with its own keys that an old proxy binary
+// rejected: `--legacy-binary` (what start-proxy.sh uses after the rejection) drops the 1-hour key, and
+// `strategy sync` keeps it dropped on later starts.
+func TestLegacyOneHourKeysAreDroppedForAnOldKeysFile(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	file := writeOldTwoPing(t, state, keepalivePort)
+	sync, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if sync["result"] != "synced" {
+		t.Fatalf("legacy sync: %v", sync)
+	}
+	body := readFileString(t, file)
+	if strings.Contains(body, "_1h:") || !strings.Contains(body, "1h-keys-omitted") {
+		t.Fatalf("legacy render still carries a 1-hour key, or lacks its marker:\n%s", body)
+	}
+	again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	if again["result"] != "unchanged" {
+		t.Errorf("a plain sync undid the legacy render: %v", again)
+	}
+	if show, _ := settingsIn(t, state, home, "strategy", "show", "--port", keepalivePort); show["strategy"] != "2-ping" {
+		t.Errorf("the legacy marker line hid the strategy name: %v", show)
+	}
+}
+
+// TestTheLegacyMarkerEndsWhenTheProxyIsUpdated. The marker means "this proxy version rejected the
+// 1-hour key". After an update to a proxy that owns the table (v0.7.1 or later), a plain sync moves the
+// file to the new form, so `2-ping` is whole again. An update to a version that cannot (older than
+// v0.7.1) leaves the file as it is.
+func TestTheLegacyMarkerEndsWhenTheProxyIsUpdated(t *testing.T) {
+	state, home := t.TempDir(), t.TempDir()
+	file := writeOldTwoPing(t, state, keepalivePort)
+	version := func(v string) {
+		if err := os.WriteFile(filepath.Join(state, "proxy-version"), []byte(v+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	version("v0.4.2")
+	settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off", "--legacy-binary")
+	if again, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off"); again["result"] != "unchanged" {
+		t.Fatalf("the same binary lost the legacy render: %v", again)
+	}
+	version("v0.5.0")
+	if up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off"); up["result"] != "unchanged" {
+		t.Errorf("an update to a proxy that cannot own the table changed the file: %v", up)
+	}
+	version("v0.7.1")
+	up, _ := settingsIn(t, state, home, "strategy", "sync", "--port", keepalivePort, "--preset", "off")
+	body := readFileString(t, file)
+	if up["result"] != "synced" || strings.Contains(body, "1h-keys-omitted") ||
+		!strings.HasSuffix(body, "cache:\n  strategy: 2-ping\n") {
+		t.Fatalf("after the update to v0.7.1 the file did not move to the new form (%v):\n%s", up, body)
+	}
+}
+
+// TestAStaleLogLineDoesNotTriggerTheOneHourRecovery. The proxy log is append-only across starts. A
+// rejection logged by an earlier run must not make this run drop the keys; only this attempt's own
+// output counts.
+func TestAStaleLogLineDoesNotTriggerTheOneHourRecovery(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writeOldTwoPing(t, state, port)
+	// The log now lives in the state directory start-proxy.sh itself resolves (#251), so the stale
+	// line is planted there: the test must forge what the run will actually read.
+	logPath := filepath.Join(state, "proxy-"+port+".log")
+	stale := "level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "broken-proxy")
+	script := "#!/usr/bin/env bash\nif [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.5.0'; exit 0; fi\n" +
+		"echo 'level=ERROR msg=\"listen failed for an unrelated reason\"' >&2; exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("a rejection from an earlier run triggered the recovery:\n%s", out)
+	}
+	cfg := readFileString(t, filepath.Join(state, "keepalive-"+port+".yaml"))
+	if !strings.Contains(cfg, "keepalive_max_pings_1h: 2") {
+		t.Errorf("the keys were dropped on the strength of a stale line:\n%s", cfg)
+	}
+}
+
+// TestAFailureReportShowsOnlyThisRunsLogLines (#251). The log is append-only across starts, and the
+// failure report used to `tail -n 5` the whole file from TMPDIR — a location no state dir scoping
+// reaches — so a fresh failure with nothing written yet reported whatever an earlier run left, worst
+// case a previous SUCCESSFUL run's lines read as "the proxy is fine" during a failure.
+func TestAFailureReportShowsOnlyThisRunsLogLines(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	// The stale evidence an earlier run left behind, including the base URL that made #251 a
+	// disclosure and not just a misleading report. The preset and strategy rejections are there so
+	// this test also holds the two whole-log reads that used to sit beside the tail: an earlier
+	// run's "unknown preset"/"unknown strategy" must not make this run fall back to preset off or
+	// name a cause this run never hit, which is why this run asks for a preset other than off.
+	logPath := filepath.Join(state, "proxy-"+port+".log")
+	stale := "STALE LINE from a previous run, ANTHROPIC_BASE_URL=https://user:secret@gateway.corp.example/v1\n" +
+		"2026-01-01T00:00:00Z error msg=\"unknown preset \\\"house\\\"\" from an earlier run\n" +
+		"2026-01-01T00:00:00Z error msg=\"unknown strategy \\\"ghost\\\"\" from an earlier run\n"
+	if err := os.WriteFile(logPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A proxy that exits at once: the failure report is the path under test, and nothing of this
+	// run's own is written to the log, which is exactly the state that used to print the stale tail.
+	bin := filepath.Join(dir, "fails-at-once")
+	if err := os.WriteFile(bin, []byte("#!/usr/bin/env bash\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := startProxyIn(t, state, bin, port, "TMPDIR="+dir, "CLAUDE_PLUGIN_OPTION_PRESET=medium")
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if !strings.Contains(out, "the proxy did not come up") {
+		t.Fatalf("the failure report never ran, so this test asserted nothing:\n%s", out)
+	}
+	if strings.Contains(out, "STALE LINE") || strings.Contains(out, "gateway.corp.example") {
+		t.Errorf("the failure report showed an earlier run's lines as this run's evidence:\n%s", out)
+	}
+	// The two whole-log reads the report sits between: a stale preset rejection must not fall this
+	// run back to `off` (this run asked for medium), and a stale strategy rejection must not name a
+	// cause this run never hit.
+	for _, stale := range []string{"house", "ghost", "does not know preset", "rejected the configuration"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("an earlier run's rejection reached this run's diagnosis (%q):\n%s", stale, out)
+		}
+	}
+	// The report points at the log where this run actually writes it: the state directory, so
+	// CONTEXT_GURU_STATE isolates it (the TMPDIR pin above is the location it must NOT name).
+	if !strings.Contains(out, logPath) {
+		t.Errorf("the report does not name the state-dir log %s:\n%s", logPath, out)
+	}
+	if strings.Contains(out, filepath.Join(dir, "context-guru-proxy-"+port+".log")) {
+		t.Errorf("the report still names a TMPDIR log:\n%s", out)
+	}
+}
+
+// TestAnOldProxyThatRejectsTheOneHourKeysStillStarts. A new plugin with an old binary: the binary's
+// strict loader exits on `keepalive_max_pings_1h`. start-proxy.sh must re-render without it and retry.
+func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
+	requireTool(t, "python3")
+	dir, state := t.TempDir(), t.TempDir()
+	port := freePort(t)
+	writeOldTwoPing(t, state, port)
+	sentinel := filepath.Join(dir, "started")
+	// Behaves like an old binary: a config naming a 1-hour key is a parse error; any other serves.
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy v0.4.2 (commit none)'; exit 0; fi\n" +
+		"cfg=; while [ $# -gt 0 ]; do [ \"$1\" = --config ] && cfg=$2; shift; done\n" +
+		"if [ -n \"$cfg\" ] && grep -q '_1h:' \"$cfg\"; then\n" +
+		"  echo 'level=ERROR msg=\"config: yaml: unmarshal errors: field keepalive_max_pings_1h not found in type config.CacheConfig\"' >&2; exit 1; fi\n" +
+		"touch \"" + sentinel + "\"\n" +
+		"exec python3 -c '\nimport sys, http.server\n" +
+		"class H(http.server.BaseHTTPRequestHandler):\n" +
+		"    def do_GET(self):\n        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
+		"    def log_message(self, *a): pass\n" +
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' " + port + "\n"
+	bin := filepath.Join(dir, "old-proxy")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, code := startProxyIn(t, state, bin, port, "TMPDIR="+dir)
+	t.Cleanup(func() { stopByPidfile(filepath.Join(state, "proxy-"+port+".pid")) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("the old proxy never came up after the 1-hour keys were dropped: %s", out)
+	}
+	if !strings.Contains(out, "does not know the one-hour keep-alive keys") {
+		t.Errorf("the fallback did not say what it did: %s", out)
+	}
+}
+
 // TestStrategySetWritesTheStatedPresetAndRecordsTheName is the old
 // TestKeepaliveEnableWritesAPresetPreservingConfig, moved to the script. --config REPLACES --preset
-// entirely (loadConfig in cmd/context-guru-proxy/main.go reads --preset only when --config is
+// entirely (loadConfig in proxyapp/main_run.go reads --preset only when --config is
 // ABSENT), so a strategy file that omitted its own `preset:` line would silently turn compaction off
 // at the moment a cache strategy was armed — the opposite of the intent.
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "codesmart")
+		"--name", "auto", "--port", keepalivePort, "--preset", "codesmart")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
-	if facts["strategy"] != "5-min-ping" || facts["spends"] != "true" {
+	if facts["strategy"] != "auto" || facts["spends"] != "true" {
 		t.Errorf("set reported strategy=%q spends=%q; the caller reports both to the user",
 			facts["strategy"], facts["spends"])
 	}
@@ -2984,12 +3297,12 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 		t.Errorf("the CONFIGURED preset did not survive into the file, which silently drops "+
 			"compaction the moment --config is passed:\n%s", body)
 	}
-	if !strings.Contains(body, "keepalive: true") {
-		t.Errorf("cache.keepalive: true is missing, so the strategy would not actually ping:\n%s", body)
+	if !strings.HasSuffix(body, "cache:\n  strategy: auto\n") {
+		t.Errorf("cache.strategy: auto is missing, so the proxy would not fill the ping keys:\n%s", body)
 	}
 	// The name has to be IN the file, not merely in the command that wrote it: `strategy show` and
 	// start-proxy.sh both read it back, and the whole point of a name is that it survives.
-	if !strings.Contains(body, "strategy=5-min-ping") {
+	if !strings.Contains(body, "strategy=auto") {
 		t.Errorf("the strategy name was not recorded in the file, so nothing can report it back and "+
 			"the user cannot be told what to switch back to:\n%s", body)
 	}
@@ -3007,7 +3320,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 func TestStrategySplitIsTheAbsenceOfAConfig(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	if _, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache"); code != 0 {
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache"); code != 0 {
 		t.Fatal("could not arm the strategy this test then switches away from")
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
@@ -3048,7 +3361,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 			}
 			args := []string{"strategy", op, "--port", keepalivePort}
 			if op == "set" {
-				args = append(args, "--name", "5-min-ping", "--preset", "cache")
+				args = append(args, "--name", "auto", "--preset", "cache")
 			}
 			facts, code := settingsIn(t, state, home, args...)
 			if code != 2 {
@@ -3092,7 +3405,7 @@ func TestStrategyNeverTouchesAFileItDidNotWrite(t *testing.T) {
 func TestStrategySetRefusesAnEmptyPreset(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "")
+		"--name", "auto", "--port", keepalivePort, "--preset", "")
 	if code == 0 {
 		t.Errorf("an unresolved preset was accepted; that writes `preset:` empty, which turns "+
 			"compaction off while the strategy keeps paying for pings: %v", facts)
@@ -3130,7 +3443,7 @@ func TestStrategySetRefusesAnUnknownName(t *testing.T) {
 func TestStrategyRequiresThePortRatherThanDefaultingIt(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	for _, op := range [][]string{
-		{"strategy", "set", "--name", "5-min-ping", "--preset", "cache"},
+		{"strategy", "set", "--name", "auto", "--preset", "cache"},
 		{"strategy", "show"},
 		{"strategy", "clear"},
 	} {
@@ -3163,13 +3476,13 @@ func TestStrategyStillRecognisesTheOldKeepaliveMarker(t *testing.T) {
 			"it carries no name, and inventing one would misreport what is armed", shown["strategy"])
 	}
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "5-min-ping", "--port", keepalivePort, "--preset", "cache")
+		"--name", "auto", "--port", keepalivePort, "--preset", "cache")
 	if code != 0 {
 		t.Fatalf("a pre-rename config could not be re-set, which strands its owner: exit %d %v",
 			code, facts)
 	}
 	b, _ := os.ReadFile(strategyCfg(state))
-	if !strings.Contains(string(b), "strategy=5-min-ping") {
+	if !strings.Contains(string(b), "strategy=auto") {
 		t.Errorf("re-setting a pre-rename config did not give it a name:\n%s", b)
 	}
 }
@@ -3223,41 +3536,36 @@ func TestPluginJSONCacheStrategyAgreesWithTheScript(t *testing.T) {
 	}
 }
 
-// TestPickerSkillOffersOnlyRealStrategies is a docdrift guard: the picker's table is what a model
-// reads before choosing a --name, so a name that exists only in prose becomes an
-// `unknown_strategy` at the worst moment, and a strategy missing from the table is undiscoverable.
-func TestPickerSkillOffersOnlyRealStrategies(t *testing.T) {
+// TestPickerSkillHoldsNoStrategyList. The proxy owns the names and the texts. The picker skill tells
+// the model to read them with `settings.py strategy list`, and holds no list of its own. Any strategy
+// shaped token it does name must be one the proxy offers, and it must send the reader to the list.
+func TestPickerSkillHoldsNoStrategyList(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("skills", "cache-strategy-picker", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(b)
+	if !strings.Contains(body, "settings.py\" strategy list") {
+		t.Error("the picker skill never tells the model to run `settings.py strategy list`")
+	}
+	if strings.Contains(body, "| Name | ELI5 | Cost |") {
+		t.Error("the picker skill holds a table of strategies again; the proxy owns that text")
+	}
 	state, home := t.TempDir(), t.TempDir()
 	facts, _ := settingsIn(t, state, home, "strategy", "list")
 	real := map[string]bool{}
-	for k := range facts {
-		if name, ok := strings.CutPrefix(k, "strategy_"); ok {
-			real[name] = true
-		}
+	for _, n := range strings.Split(facts["names"], ",") {
+		real[n] = true
 	}
-	if len(real) == 0 {
+	if len(real) == 0 || !real["auto"] {
 		t.Fatal("no strategies were discovered, so this guard proved nothing")
 	}
-	for name := range real {
-		// The skill spells names with hyphens; `strategy list` keys use underscores.
-		spelled := strings.ReplaceAll(name, "_", "-")
-		if !strings.Contains(body, "`"+spelled+"`") {
-			t.Errorf("the picker skill never mentions the strategy %q, so a user cannot discover it",
-				spelled)
-		}
-	}
-	// Every backticked hyphenated token that LOOKS like a strategy must be one.
 	for _, m := range regexp.MustCompile("`([a-z0-9]+(?:-[a-z0-9]+){1,3})`").FindAllStringSubmatch(body, -1) {
 		tok := m[1]
-		if strings.Contains(tok, ".") || strings.HasSuffix(tok, ".py") {
-			continue
+		if strings.Contains(strings.ReplaceAll(","+facts["aliases"], ":", ","), ","+tok+",") {
+			continue // an alias is a real name the script accepts
 		}
-		if !real[strings.ReplaceAll(tok, "-", "_")] && isStrategyShaped(tok) {
+		if !real[tok] && isStrategyShaped(tok) {
 			t.Errorf("the picker skill offers %q, which `strategy list` does not know: a model that "+
 				"passes it gets reason=unknown_strategy", tok)
 		}
@@ -3887,7 +4195,7 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// The NAME is the whole reason strategies are named: it is the only thing a user can say
 			// back to us. It has to survive from the file into the note, or "switch it back to
-			// 5-min-ping" is not a sentence anybody can act on.
+			// auto" is not a sentence anybody can act on.
 			//
 			// THE PRESET HALF OF THIS ROW FLIPPED, deliberately. It used to assert that the file's
 			// `preset: house` was reported and the plugin option was NOT — the file being the source
@@ -3928,11 +4236,11 @@ func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
 		{
 			// A config we own but that predates named strategies, or one we do not own at all: report
 			// it as unnamed rather than guessing. Naming the DEFAULT here would be the worst answer —
-			// it would tell the user 5-min-ping is armed when the file might say anything.
+			// it would tell the user auto is armed when the file might say anything.
 			name:     "a config with no strategy marker is unnamed, never guessed",
 			writeCfg: true, cfg: "preset: house\ncache:\n  keepalive: true\n",
 			wantIn:    []string{"cache strategy unnamed"},
-			wantNotIn: []string{"cache strategy 5-min-ping", "cache strategy none"},
+			wantNotIn: []string{"cache strategy auto", "cache strategy none"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -4093,8 +4401,13 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		if err != nil {
 			t.Fatalf("must never fail a session: %v\n%s", err, out)
 		}
-		launched, _ := os.ReadFile(argv)
-		if !strings.Contains(string(launched), "--listen 127.0.0.1:"+port) {
+		// The fake never answers /healthz, so the script returns on its 1 s budget, which under load
+		// can beat the fake's write — wait for the file instead of reading it once (#314).
+		launched, ok := waitWritten(t, argv)
+		if !ok {
+			t.Fatalf("the proxy was never launched, so --port was never honoured:\n%s", out)
+		}
+		if !strings.Contains(launched, "--listen 127.0.0.1:"+port) {
 			t.Errorf("the proxy did not listen on the port passed as an argument: %s\n%s", launched, out)
 		}
 		// The pidfile is what uninstall uses, and it is named after the port — so a port that reached
@@ -4102,8 +4415,11 @@ func TestTheConfiguredPortCanActuallyBeHonoured(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); err != nil {
 			t.Errorf("no pidfile for the configured port, so uninstall could not find this proxy: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "context-guru-proxy-"+port+".log")); err != nil {
-			t.Errorf("the log is not named after the configured port: %v", err)
+		// The log is named after the port and scoped to the state directory, like the pidfile (#251):
+		// a log in TMPDIR is shared by every run on the machine, so a failure report can show
+		// another run's lines as this one's evidence.
+		if _, err := os.Stat(filepath.Join(state, "context-guru", "proxy-"+port+".log")); err != nil {
+			t.Errorf("the log is not in the state dir, named after the configured port: %v", err)
 		}
 	})
 
@@ -4262,7 +4578,7 @@ func runHatch(t *testing.T, state, home, cwd string, args ...string) (string, in
 // skill can tell the user, and a recovery copy of the file that was edited exists BESIDE it — not
 // in a shared, hashed ledger under the state directory. See recovery_dir_for() in settings.py.
 func TestInstallLeavesAWayBackOutsideThePlugin(t *testing.T) {
-	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	path := filepath.Join(proj, "settings.json")
 	writeJSON(t, path, map[string]any{"theme": "dark"})
 
@@ -4828,9 +5144,12 @@ func TestAnAlreadyRoutedProjectStillGetsAHatch(t *testing.T) {
 	const relPath = "./.claude/settings.local.json"
 	// Routed already, by a version of the plugin that kept no record — which is what an absent
 	// recovery folder represents now (no `settings.py add` has ever run against this file).
-	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL}})
+	// The opt-out is already on record: this test is about the hatch, and an install with no ping record
+	// gets its header (or its opt-out) written on a re-run.
+	writeJSON(t, path, map[string]any{"env": map[string]any{"ANTHROPIC_BASE_URL": ourURL},
+		"$context-guru": map[string]any{"ping_header_opt_out": true}})
 
-	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL)
+	facts, code := settingsIn(t, state, home, "add", "--file", path, "--url", ourURL, "--no-ping-header")
 	if code != 0 || facts["result"] != "unchanged" {
 		t.Fatalf("fixture: wanted result=unchanged exit 0, got %v exit %d", facts, code)
 	}
@@ -5023,7 +5342,7 @@ func TestStatuslineRefusesMachineWideWithoutTheFlag(t *testing.T) {
 // in a later, separate invocation reads it back — this is the mechanism the statusline skill and
 // `preset`'s fallback are supposed to consume instead of hardcoding or re-deriving scope.
 func TestResolveInstallScopeRoundTrips(t *testing.T) {
-	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
 	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
 		t.Fatal(err)
@@ -5064,7 +5383,7 @@ func TestResolveInstallScopeRoundTrips(t *testing.T) {
 
 	// A second, unrelated project directory that was never routed at all still says "ask" — the
 	// record is per-project, not global.
-	otherProj := t.TempDir()
+	otherProj := realTempDir(t)
 	cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "resolve-scope")
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
 	cmd.Dir = otherProj
@@ -5343,7 +5662,7 @@ func TestProjectKeyFailsOpenWithoutGitBinary(t *testing.T) {
 // is actually routing the project must win, not the one that was resolved first.
 func TestMigrationTiebreakPrefersTheStillRoutingWorktree(t *testing.T) {
 	requireTool(t, "git")
-	state, home, root := t.TempDir(), t.TempDir(), t.TempDir()
+	state, home, root := realTempDir(t), realTempDir(t), realTempDir(t)
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
@@ -6062,6 +6381,61 @@ print(ns["PORT_SCAN_START"])
 	}
 }
 
+// Picking ultrahigh asks the routed proxy to run tool deferral's provider check (#485), and reports
+// it. Any other preset sends nothing.
+func TestPresetUltrahighAsksForAProbe(t *testing.T) {
+	asks := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stats" { // the proxy runs the preset being picked: the probe goes to it
+			w.Write([]byte(`{"preset":"ultrahigh"}`)) //nolint:errcheck
+			return
+		}
+		asks <- r.Method + " " + r.URL.Path + " " + r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	url := "http://127.0.0.1:" + port + "/anthropic"
+	state, home, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	projLocal := filepath.Join(proj, ".claude", "settings.local.json")
+	if err := os.MkdirAll(filepath.Dir(projLocal), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := settingsInDir(t, state, home, proj, "add", "--file", projLocal, "--url", url); code != 0 {
+		t.Fatal("fixture: routing add failed")
+	}
+	py := requireTool(t, "python3")
+	run := func(name string) string {
+		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", name)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url,
+			"CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
+		cmd.Dir = proj
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("preset set %s: %v\n%s", name, err, out)
+		}
+		return string(out)
+	}
+	// (the stub's /stats says ultrahigh, so `high` sees a gap; it still must send no probe)
+	if out := run("high"); strings.Contains(out, "probe=") {
+		t.Fatalf("high asked for a probe:\n%s", out)
+	}
+	if out := run("ultrahigh"); !strings.Contains(out, "probe=asked") {
+		t.Fatalf("ultrahigh did not ask for a probe:\n%s", out)
+	}
+	select {
+	case got := <-asks:
+		if got != "POST /tool-defer/probe application/json" {
+			t.Fatalf("ask = %q", got)
+		}
+	default:
+		t.Fatal("no ask reached the proxy")
+	}
+	if len(asks) != 0 {
+		t.Fatalf("%d extra requests", len(asks))
+	}
+}
+
 // TestPresetFallbackInheritsRoutingScope: with nothing configured yet anywhere, `preset set`'s
 // fallback used to guess project-local independently of what routing actually chose. It must
 // instead land wherever THIS project's routing already lives.
@@ -6078,7 +6452,7 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 
 		py := requireTool(t, "python3")
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "conservative")
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -6110,7 +6484,7 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 
 		py := requireTool(t, "python3")
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "conservative")
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home)
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -6324,9 +6698,9 @@ func TestDryRunAgreesWithARealRunAboutWhatIsLeft(t *testing.T) {
 // recovery_original despite `reset_hatch=unavailable`, which the old, single-state-dir design could
 // not have claimed.
 func TestAnUnusableStateDirectoryNeverFailsTheInstall(t *testing.T) {
-	home, proj := t.TempDir(), t.TempDir()
+	home, proj := realTempDir(t), realTempDir(t)
 	// A FILE where the state directory should be, so every path inside it is unusable.
-	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	blocked := filepath.Join(realTempDir(t), "not-a-dir")
 	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -6917,6 +7291,11 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 		env = append(env, kv)
 	}
 	path := os.Getenv("PATH")
+	if extraPath == "" {
+		// The plugin asks the proxy binary for its strategies. Without a stub first on PATH, a test
+		// would depend on whatever proxy the machine has installed (an old one cannot answer).
+		extraPath = filepath.Dir(fakeStrategiesBin(t))
+	}
 	if extraPath != "" {
 		path = extraPath + string(os.PathListSeparator) + path
 		// A proxy that never answers fails the health check whatever the wait: wait 1 s, not the
@@ -7227,16 +7606,19 @@ func fakeProxyDir(t *testing.T, port string, listen bool) string {
 		}
 	}
 	if listen {
+		// The trailing context-guru-proxy argument keeps the name in this process's command line,
+		// as in fakeProxyDirAnyPort: install.sh checks it before it stops a proxy by PID (#1217).
 		body = "exec " + py + " -c '\n" +
 			"import http.server\n" +
 			"class H(http.server.BaseHTTPRequestHandler):\n" +
 			"    def do_GET(self):\n" +
 			"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
 			"    def log_message(self, *a): pass\n" +
-			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n'\n"
+			"http.server.HTTPServer((\"127.0.0.1\", " + port + "), H).serve_forever()\n' context-guru-proxy\n"
 	}
 	script := "#!/usr/bin/env bash\n" +
 		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
+		strategiesStubSnippet(t) +
 		body
 	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -7302,21 +7684,41 @@ func TestRouteWritesRoutingOnlyAfterSomethingAnswers(t *testing.T) {
 	})
 }
 
-// TestRouteInstallsStatuslineByDefault: the status line install now rides along with a successful
-// route, IN WHATEVER FILE ROUTING ITSELF JUST USED — not unconditionally at user scope. That
-// scope-following is the fix for the reported incident: a default (project-scope) install used to
-// write and back up the user's machine-wide ~/.claude/settings.json as a side effect, every time.
-// --no-statusline is still the opt-out, and a statusline write failure never turns a successful
-// route into a reported failure — `statusline=skipped` alongside `result=routed`, not
-// `result=error`.
+// TestRouteInstallsStatuslineByDefault (the name kept for history): since 0.6.1 the install writes NO status line by
+// default, because the mod's band draws it. `--statusline` asks for it, IN WHATEVER FILE ROUTING ITSELF JUST USED —
+// not unconditionally at user scope (the fix for a default project-scope install that wrote and backed up the user's
+// machine-wide ~/.claude/settings.json). A statusline write failure never turns a successful route into a reported
+// failure — `statusline=skipped` alongside `result=routed`, not `result=error`.
 func TestRouteInstallsStatuslineByDefault(t *testing.T) {
-	t.Run("default scope (project): the status line follows routing into the project, "+
-		"the machine-wide file is never created", func(t *testing.T) {
+	t.Run("default: routing succeeds and no statusLine is written (the mod's band draws it)", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, consentOK()...)
+		t.Cleanup(func() {
+			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
+				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
+			}
+		})
+		if code != 0 || facts["result"] != "routed" {
+			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
+		}
+		if facts["statusline"] != "off" {
+			t.Fatalf("statusline=%q, want off: %v", facts["statusline"], facts)
+		}
+		if got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json")); got["statusLine"] != nil {
+			t.Errorf("a default install wrote a statusLine: %v", got["statusLine"])
+		}
+	})
+
+	t.Run("--statusline, default scope (project): the status line follows routing into the project, "+
+		"the machine-wide file is never created", func(t *testing.T) {
+		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+		port := freePort(t)
+		writePluginOptions(t, home, map[string]any{"port": port})
+		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
+		facts, code := runRoute(t, proj, env, consentOK("--statusline")...)
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7378,7 +7780,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		writePluginOptions(t, home, map[string]any{"port": port})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
 		facts, code := runRoute(t, proj, env, "--scope", "user", "--i-understand-machine-wide",
-			"--i-consent-to-traffic-interception")
+			"--i-consent-to-traffic-interception", "--statusline")
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7403,7 +7805,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		}
 	})
 
-	t.Run("--no-statusline: routing succeeds, nothing is written to statusLine", func(t *testing.T) {
+	t.Run("--no-statusline (now the default, still accepted): routing succeeds, nothing is written to statusLine", func(t *testing.T) {
 		home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
 		port := freePort(t)
 		writePluginOptions(t, home, map[string]any{"port": port})
@@ -7417,8 +7819,8 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 		if code != 0 || facts["result"] != "routed" {
 			t.Fatalf("exit %d result=%q: %v", code, facts["result"], facts)
 		}
-		if facts["statusline"] != "skipped" {
-			t.Fatalf("statusline=%q, want skipped: %v", facts["statusline"], facts)
+		if facts["statusline"] != "off" {
+			t.Fatalf("statusline=%q, want off: %v", facts["statusline"], facts)
 		}
 		got := readJSON(t, filepath.Join(proj, ".claude", "settings.local.json"))
 		if _, has := got["statusLine"]; has {
@@ -7439,7 +7841,7 @@ func TestRouteInstallsStatuslineByDefault(t *testing.T) {
 			"statusLine": map[string]any{"type": "command", "command": "my-own-thing"},
 		})
 		env := routeEnv(t, home, state, fakeProxyDir(t, port, true))
-		facts, code := runRoute(t, proj, env, consentOK()...)
+		facts, code := runRoute(t, proj, env, consentOK("--statusline")...)
 		t.Cleanup(func() {
 			if b, e := os.ReadFile(filepath.Join(state, "context-guru", "proxy-"+port+".pid")); e == nil {
 				exec.Command("kill", strings.TrimSpace(string(b))).Run() //nolint:errcheck
@@ -7622,6 +8024,8 @@ func TestInstallSkillDelegatesRatherThanReimplementing(t *testing.T) {
 	//
 	// Raised 235 -> 238 for `plugin_enabled=` (#318): a machine-wide install's outcome for the plugin's
 	// own enablement, which the skill relays and never decides.
+	//
+	// (Raised to 242 for `history_import=` and lowered back to 238 when the history import was removed.)
 	if n := strings.Count(body, "\n"); n > 238 {
 		t.Errorf("the install skill is %d lines; it delegates the mechanism now, so it should be "+
 			"well under 238", n)
@@ -7816,11 +8220,12 @@ func TestRouteConfirmCommandCarriesEveryDecision(t *testing.T) {
 	facts, code := runRoute(t, proj, env, "--plan", "--scope", "user",
 		"--i-understand-machine-wide", "--on-conflict", "chain", "--cache-strategy", "none",
 		"--upstream", "https://gw.example/v1", "--health-url", "http://127.0.0.1:9/healthz",
-		"--no-health-check")
+		"--no-health-check", "--no-ping-header")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	for _, want := range []string{
+		"--no-ping-header", // the opt-out is a decision, so it travels in the printed command
 		"--scope user",
 		"--on-conflict chain",
 		"--i-understand-machine-wide",
@@ -7881,7 +8286,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	requireTool(t, "git")
 
 	t.Run("not a git repo: skipped, nothing written", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		path := filepath.Join(dir, ".claude", "settings.local.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -7897,7 +8302,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("a git repo with no .gitignore: the entry is added", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -7943,7 +8348,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("already covered by an existing .gitignore: reported unchanged, file untouched", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -7970,7 +8375,7 @@ func TestGitignoreEnsure(t *testing.T) {
 	})
 
 	t.Run("unwritable directory: skipped, never fails the caller", func(t *testing.T) {
-		state, home, dir := t.TempDir(), t.TempDir(), t.TempDir()
+		state, home, dir := realTempDir(t), realTempDir(t), realTempDir(t)
 		if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
@@ -8187,7 +8592,7 @@ func TestRouteRefusesAnUnknownStrategyBeforeTouchingAnything(t *testing.T) {
 	}
 	// The names have to be in the refusal, or the model guesses — and the names differ in whether they
 	// spend the user's money, which is not a thing to guess at.
-	if !strings.Contains(facts["note"], "5-min-ping") {
+	if !strings.Contains(facts["note"], "auto") {
 		t.Errorf("the refusal does not list the real strategy names: note=%q", facts["note"])
 	}
 }
@@ -8406,7 +8811,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	const port = "9391"
 
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 || facts["result"] != "set" {
 		t.Fatalf("arming a real strategy: exit %d %v", code, facts)
 	}
@@ -8433,7 +8838,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 	// And `clear`, invoked as itself, keeps its own vocabulary — the fix must not have flattened the
 	// distinction, only stopped one op borrowing the other's word.
-	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	if facts, code := settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", port, "--preset", "cache"); code != 0 {
 		t.Fatalf("re-arming: exit %d %v", code, facts)
 	}
@@ -8450,7 +8855,7 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 
 // TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed.
 //
-// `1-hour-head` ships `head_ttl_min_tokens: 50000`, and that number is the difference between the
+// `1-hour-head` ships `head_ttl_min_tokens: 50000` (the deprecated key, on purpose: see settings.py), and that number is the difference between the
 // strategy doing something and doing nothing. It was disclosed in none of the three places a user
 // reads before choosing it.
 //
@@ -8462,19 +8867,26 @@ func TestStrategySetSplitAnswersTheOperationTheCallerAsked(t *testing.T) {
 // second, undisclosed reason. The threshold is defensible (it is what makes the strategy pay at all);
 // advertising a measurement while hiding the gate that measurement would not have passed is not.
 func TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed(t *testing.T) {
-	// The gate as actually shipped. If this changes, every description below has to change with it,
-	// which is the coupling this test exists to enforce.
-	gate, err := os.ReadFile(filepath.Join("scripts", "settings.py"))
-	if err != nil {
-		t.Fatal(err)
+	// The gate as actually shipped, in the proxy's table. If this changes, every description below has
+	// to change with it, which is the coupling this test exists to enforce.
+	head, ok := config.LookupStrategy("1-hour-head")
+	if !ok {
+		t.Fatal("the proxy has no 1-hour-head strategy")
 	}
-	if !strings.Contains(string(gate), `head_ttl_min_tokens": 50000`) {
+	gate := false
+	for _, k := range head.Cache {
+		if k.Key == "head_ttl_min_tokens" && k.Value == 50000 {
+			gate = true
+		}
+	}
+	if !gate {
 		t.Skip("the 1-hour-head size gate is no longer 50000; re-anchor this test on the new value")
+	}
+	if !strings.Contains(head.Desc, "50k") {
+		t.Errorf("the proxy's own 1-hour-head description does not state the >=50k-token gate: %s", head.Desc)
 	}
 
 	for _, f := range []struct{ what, path string }{
-		{"the strategy's own description, printed by `strategy list`",
-			filepath.Join("scripts", "settings.py")},
 		{"plugin.json, where the option is actually chosen",
 			filepath.Join(".claude-plugin", "plugin.json")},
 		{"the picker skill, which is what a user reads to decide",
@@ -8485,8 +8897,11 @@ func TestOneHourHeadDisclosesItsSizeGateEverywhereItIsDescribed(t *testing.T) {
 			t.Fatal(err)
 		}
 		body := string(b)
-		// Only the text that talks about this strategy matters, but every one of these files mentions it
-		// exactly once in prose, so a whole-file check is honest and stays readable.
+		// The picker skill no longer names the strategies: it shows the proxy's text, which the check
+		// above covers. plugin.json still names 1-hour-head and must state the gate.
+		if f.path != filepath.Join(".claude-plugin", "plugin.json") {
+			continue
+		}
 		if !strings.Contains(body, "1-hour-head") && !strings.Contains(body, "1-hour tier") {
 			t.Errorf("%s (%s) does not describe 1-hour-head at all", f.what, f.path)
 			continue
@@ -8590,7 +9005,7 @@ func stopFakeProxy2(t *testing.T, pidfile string) {
 
 // TestRouteDistinguishesAnUnreadableStrategyListFromABadName. An empty strategy list is not an unknown
 // name, and conflating them made the script state a false thing about the caller's input: with
-// settings.py unavailable, `--cache-strategy 5-min-ping` — the default, and obviously a strategy — came
+// settings.py unavailable, `--cache-strategy auto` — the default, and obviously a strategy — came
 // back as "is not a strategy. Known: unavailable", burying the one fault the user could act on inside a
 // sentence about a typo. The skill's next move is to ask which name they meant, about a correct name.
 func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
@@ -8616,7 +9031,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	}
 
 	cmd := exec.Command("bash", filepath.Join(broken, "install.sh"), "--route", "--plan",
-		"--cache-strategy", "5-min-ping")
+		"--cache-strategy", "auto")
 	cmd.Dir = proj
 	cmd.Env = routeEnv(t, home, t.TempDir(), "")
 	out, _ := cmd.CombinedOutput()
@@ -8624,7 +9039,7 @@ func TestRouteDistinguishesAnUnreadableStrategyListFromABadName(t *testing.T) {
 	body := string(out)
 
 	if strings.Contains(body, "is not a strategy") {
-		t.Errorf("`5-min-ping` is the default strategy and was reported as not being one, because the "+
+		t.Errorf("`auto` is the default strategy and was reported as not being one, because the "+
 			"LIST could not be read. A false statement about the caller's input:\n%s", body)
 	}
 	if !strings.Contains(body, "strategy_list_unavailable") {
@@ -8667,7 +9082,7 @@ func TestConsentQuestionReadsWhetherAStrategySpendsFromTheStrategyList(t *testin
 			warns := questionWarnsAboutSpend(q)
 			if warns != (spends == "true") {
 				t.Errorf("strategy list says spends=%s for %q, and the consent question %s warn about "+
-					"spending. The sentence a user agrees to has to agree with STRATEGIES:\n  %s",
+					"spending. The sentence a user agrees to has to agree with the proxy's strategy table:\n  %s",
 					spends, name, map[bool]string{true: "does", false: "does not"}[warns], q)
 			}
 		})
@@ -8914,7 +9329,7 @@ func TestStrategySetSplitNeedsNoPreset(t *testing.T) {
 
 	// The control, because the guard is right where it applies: a strategy that DOES write a file must
 	// still refuse an empty preset, or compaction is silently off while pings keep being paid for.
-	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "5-min-ping",
+	facts, code = settingsIn(t, state, home, "strategy", "set", "--name", "auto",
 		"--port", keepalivePort, "--preset", "")
 	if code == 0 || facts["reason"] != "empty_preset" {
 		t.Errorf("the empty-preset guard was lost where it matters: exit %d %v", code, facts)
@@ -9734,7 +10149,7 @@ func TestUserScopeAdoptUnroutesTheProjectsItAdopts(t *testing.T) {
 	// survived adopt's teardown while .owner/.fingerprint were correctly removed, so the next
 	// project handed this port silently inherited a dead install's cache strategy.
 	otherKeepalive := filepath.Join(state, "context-guru", "keepalive-"+otherPort+".yaml")
-	if err := os.WriteFile(otherKeepalive, []byte("strategy=5-min-ping\n"), 0o600); err != nil {
+	if err := os.WriteFile(otherKeepalive, []byte("strategy=auto\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -10091,19 +10506,21 @@ func fakeProxyDirAnyPort(t *testing.T) string {
 	dir := t.TempDir()
 	script := "#!/usr/bin/env bash\n" +
 		"if [ \"$1\" = --version ]; then echo 'context-guru-proxy vfake (commit none)'; exit 0; fi\n" +
+		strategiesStubSnippet(t) +
 		"addr=\"\"\n" +
 		"while [ $# -gt 0 ]; do case \"$1\" in --listen) addr=$2; shift 2;; *) shift;; esac; done\n" +
 		"port=${addr##*:}\n" +
-		// `exec -a`, so the process this leaves behind still has context-guru-proxy in its command
-		// line. Everything that signals a proxy in this plugin checks that first and kills by PID -
-		// never by pattern - so a fake that execs away its own name is a fake nothing will ever stop.
-		"exec -a context-guru-proxy " + py + " -c '\n" +
+		// The name context-guru-proxy is also passed as an ARGUMENT, so the process this leaves behind
+		// has it in its command line. Everything that signals a proxy in this plugin checks that first
+		// and kills by PID - never by pattern. `exec -a` is not enough: on macOS Python re-launches
+		// itself and `ps` shows the Python.app path, not the name (#1217).
+		"exec " + py + " -c '\n" +
 		"import http.server, sys\n" +
 		"class H(http.server.BaseHTTPRequestHandler):\n" +
 		"    def do_GET(self):\n" +
 		"        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n" +
 		"    def log_message(self, *a): pass\n" +
-		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\"\n"
+		"http.server.HTTPServer((\"127.0.0.1\", int(sys.argv[1])), H).serve_forever()\n' \"$port\" context-guru-proxy\n"
 	if err := os.WriteFile(filepath.Join(dir, "context-guru-proxy"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -10261,19 +10678,18 @@ func projectPortOption(t *testing.T, file string) string {
 	return fmt.Sprint(opts["port"])
 }
 
-// waitPortClosed is the negative of waitForHealthz: nothing accepts a connection there any more.
+// waitPortClosed is the negative of waitForHealthz: the port refuses connections. Only a refused
+// connection counts: a dial that timed out under load says nothing about the listener.
 func waitPortClosed(t *testing.T, port string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 200*time.Millisecond)
-		if err != nil {
-			return
+	testutil.WaitFor(t, "port "+port+" to refuse connections", func() bool {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+		if err == nil {
+			_ = c.Close()
+			return false
 		}
-		_ = c.Close()
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Errorf("something is still listening on port %s", port)
+		return errors.Is(err, syscall.ECONNREFUSED)
+	})
 }
 
 // TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo.
@@ -10298,7 +10714,7 @@ func waitPortClosed(t *testing.T, port string) {
 // legitimately share one port and the proxy-stop guard fires instead, is
 // TestUserScopeAdoptFromAWorktreeKeepsItsOwnRecordAndProxy.
 func TestUserScopeAdoptFoldsInTheProjectItIsRunFromToo(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	env := routeEnv(t, home, state, fakeProxyDirAnyPort(t))
 	sd := filepath.Join(state, "context-guru")
 
@@ -10898,13 +11314,7 @@ func TestResettingAProjectFallsBackToTheMachineWideInstall(t *testing.T) {
 	// "declined silently" and "already healthy, nothing to do" are the same observation, and the
 	// first version of this test could not tell them apart.
 	stopFakeProxy(t, state, port2)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := net.DialTimeout("tcp", "127.0.0.1:"+port2, 200*time.Millisecond); err != nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitPortClosed(t, port2)
 	logs := t.TempDir()
 	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"))
 	cmd.Dir = proj
@@ -11034,7 +11444,7 @@ func TestUserScopeThenProjectKeepsTwoPorts(t *testing.T) {
 //
 // `scope` is the discriminator, in whatever row carries it, which is what install.sh already uses.
 func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
-	home, state, proj := t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj := realTempDir(t), realTempDir(t), realTempDir(t)
 	sd := filepath.Join(state, "context-guru")
 	userFile := filepath.Join(home, ".claude", "settings.json")
 	projReal, err := filepath.EvalSymlinks(proj)
@@ -11106,7 +11516,7 @@ func TestProjectInstallIgnoresALegacyMachineWideRow(t *testing.T) {
 
 	// And the symptom that makes losing the row worse than sharing a port: a SECOND project, which
 	// has no legacy row of its own and only ever sees the machine-wide `options.port`.
-	other := t.TempDir()
+	other := realTempDir(t)
 	f2, c2 := settingsInDir(t, sd, home, other, "port", "alloc", "--dry-run")
 	if c2 != 0 {
 		t.Fatalf("second project alloc exit %d %v", c2, f2)
@@ -11183,7 +11593,7 @@ func TestAddWithoutAllocDoesNotAdoptTheMachineWidePort(t *testing.T) {
 // project whose only routing IS the machine-wide one (`adopt` folded it in, or the machine never had
 // any other install) with the reason that says so; allow from anywhere when asked for explicitly.
 func TestRemoveRefusesAnotherInstallsRouting(t *testing.T) {
-	home, state, proj, folded := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	home, state, proj, folded := realTempDir(t), realTempDir(t), realTempDir(t), realTempDir(t)
 	sd := filepath.Join(state, "context-guru")
 	userFile := filepath.Join(home, ".claude", "settings.json")
 	projFile := filepath.Join(proj, ".claude", "settings.local.json")
@@ -11645,7 +12055,7 @@ func TestTheSpendClauseIsAnswerableByAPersonWhoDoesNotKnowWhatACacheStrategyIs(t
 		t.Fatalf("exit %d: %v", code, facts)
 	}
 	q := facts["consent_question"]
-	for _, want := range []string{spendClauseMarker, "5-min-ping", "keep-alive"} {
+	for _, want := range []string{spendClauseMarker, "auto", "keep-alive"} {
 		if !strings.Contains(q, want) {
 			t.Errorf("the question drops %q, so what it costs is no longer in it: %q", want, q)
 		}
@@ -11910,10 +12320,7 @@ func TestTheTwoMachineWideAnswersGetTwoDifferentConsentQuestions(t *testing.T) {
 func portRoutedProject(t *testing.T, port string) (dir string, env []string) {
 	t.Helper()
 	dir = t.TempDir()
-	real, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	real := evalSymlinks(t, dir)
 	claude := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claude, 0o755); err != nil {
 		t.Fatal(err)
@@ -12081,12 +12488,105 @@ func TestTheHooksResolveThePortWithoutTheOptionEnv(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
 	}
-	log := filepath.Join(os.TempDir(), "context-guru-proxy-8841.log")
+	// The decline breadcrumb now lands in the state dir this fixture pins (#251), so that is where
+	// "declined" would be read from — and must not be.
+	log := filepath.Join(dir, "state", "proxy-8841.log")
 	if b, err := os.ReadFile(log); err == nil && strings.Contains(string(b), "declined") {
 		t.Errorf("declined a project it is routed to: %s", b)
 	}
-	if strings.Contains(out, "8787") {
+	// The output also carries the fixture's t.TempDir() path, whose random digits can hold "8787"
+	// (#1214: a suffix 2672248787 failed CI), and a pid that can be 8787. So take the path out
+	// first, in both spellings, and match 8787 only where start-proxy.sh names a port.
+	scrubbed := out
+	for _, p := range []string{evalSymlinks(t, dir), dir} {
+		scrubbed = strings.ReplaceAll(scrubbed, p, "<dir>")
+	}
+	if defaultPortInOutput.MatchString(scrubbed) {
 		t.Errorf("output names 8787 for a project routed to 8841: %s", out)
+	}
+}
+
+// defaultPortInOutput matches 8787 where start-proxy.sh names a port: "port=8787", "port 8787",
+// ":8787" in a URL and "proxy-8787.log". Not in a pid, and not as digits inside a longer number.
+var defaultPortInOutput = regexp.MustCompile(`(port[= ]|:|proxy-)8787([^0-9]|$)`)
+
+func evalSymlinks(t *testing.T, p string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
+// realTempDir is t.TempDir() with symlinks resolved. On macOS t.TempDir() is under /var, a link to
+// /private/var, and settings.py reports the resolved spelling. A test that compares a path from the
+// script with a path it built itself must use one spelling for both (#1217). On Linux the result is
+// the same as t.TempDir().
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	return evalSymlinks(t, t.TempDir())
+}
+
+// TestDefaultPortInOutputIgnoresLongerNumbers pins the matcher of
+// TestTheHooksResolveThePortWithoutTheOptionEnv (#1214).
+func TestDefaultPortInOutputIgnoresLongerNumbers(t *testing.T) {
+	for s, want := range map[string]bool{
+		"routed to http://127.0.0.1:8787/anthropic":   true,
+		"does not name port 8787; pass --force":       true,
+		"run start: pid=4321 port=8787 preset=medium": true,
+		"log: /state/proxy-8787.log":                  true,
+		"run start: pid=8787 port=8841 preset=medium": false,
+		"/tmp/TestX2672248787/001/state":              false,
+		"http://127.0.0.1:87871/anthropic":            false,
+		"routed to 8841":                              false,
+	} {
+		if got := defaultPortInOutput.MatchString(s); got != want {
+			t.Errorf("MatchString(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// TestTheDeclineBreadcrumbCarriesNoCredentials (#251, review round 1). The gate's decline branch
+// logs ANTHROPIC_BASE_URL so a silent decline stays diagnosable — but the URL can carry credentials
+// in its userinfo and in its query, and this log is the file a user pastes into an issue. The
+// breadcrumb must keep the diagnostic part (the host and port that explain the mismatch) and drop
+// everything that can carry a credential.
+func TestTheDeclineBreadcrumbCarriesNoCredentials(t *testing.T) {
+	requireTool(t, "bash")
+	requireTool(t, "python3")
+	dir, env := portRoutedProject(t, "8841")
+	// This session points somewhere else, with credentials in both places a URL can hide them: the
+	// userinfo and a query value. CLAUDE_PLUGIN_OPTION_PORT stays pinned so PORT resolves to 8841 —
+	// a URL this foreign leaves the delegate with no port to confirm, which declines one branch
+	// earlier ("no install routes this directory") and never logs a URL at all.
+	env = append(env,
+		"CLAUDE_PLUGIN_OPTION_PORT=8841",
+		"ANTHROPIC_BASE_URL=https://user:hunter2@gw.example.com:9443/v1?api_key=TOPSECRET&trace=1")
+	out, code := runIn(t, dir, env, "", filepath.Join(scriptsDir(t), "start-proxy.sh"))
+	if code != 0 {
+		t.Errorf("exit %d: every exit from this hook is 0 by design", code)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("the decline must stay silent on stdout, got %q", out)
+	}
+	log := filepath.Join(dir, "state", "proxy-8841.log")
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the decline left no breadcrumb in %s: %v", log, err)
+	}
+	if !strings.Contains(string(b), "declined:") {
+		t.Fatalf("the decline left no breadcrumb:\n%s", b)
+	}
+	// What must survive: the endpoint that explains the mismatch.
+	if !strings.Contains(string(b), "gw.example.com:9443") {
+		t.Errorf("the breadcrumb lost the diagnostic host and port:\n%s", b)
+	}
+	// What must not: the credentials, from either place the URL carried them.
+	for _, secret := range []string{"user:hunter2", "hunter2", "TOPSECRET", "api_key"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("the breadcrumb logged the credential %q:\n%s", secret, b)
+		}
 	}
 }
 
@@ -12455,5 +12955,58 @@ func TestUpdateCheckSkipAndAlwaysAnswersCoexist(t *testing.T) {
 	if facts["answer"] != "auto" || facts["skipped"] != "v0.3.1-testupdate1" {
 		t.Errorf("update-check show reports answer=%q skipped=%q, want auto / v0.3.1-testupdate1 — "+
 			"both preferences must survive on disk together", facts["answer"], facts["skipped"])
+	}
+}
+
+// #1243. After a free 1-hour keep-alive ping the proxy reports ttl_s 3600, anchored at the ping, and
+// ttl_unproven while the route is not yet proven to grant the tier. The status line counts the hour and
+// draws "1h?" after the clock while it is unproven (the band's cacheClock draws the same text). A proven
+// route and an ordinary 5-minute entry carry no mark.
+func TestStatuslineDrawsAnHourClockAndMarksItWhileUnproven(t *testing.T) {
+	py := requireTool(t, "python3")
+	script := `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("statusline", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+now = 1_700_000_000_000
+def cs(extra, main_extra=None):
+    d = {"last_ts": now - 200_000, "end_ts": now - 199_000, "now_ms": now, "ttl_s": 3600, "model": "m",
+         "prefix_tokens": 486000, "keepalive": True}
+    d.update(extra)
+    return d
+def seg(c):
+    return m._cache_segment(m._cache_view({}, c, 0))
+print(seg(cs({"ttl_unproven": True})))   # unproven: an hour counted from the ping, marked
+print(seg(cs({})))                       # proven: a plain hour clock
+print(seg(cs({"ttl_s": 300, "last_ts": now - 100_000, "end_ts": now - 99_000})))  # an ordinary 5-minute entry
+# The main thread's own entry decides: a subagent's mark must not leak onto it, and the main's must show.
+sess = cs({"ttl_s": 300, "ttl_unproven": True, "last_ts": now - 1000, "end_ts": now - 1000})
+sess["threads"] = [{"id": "", "main": True, "model": "m", "last_ts": now - 200_000, "end_ts": now - 199_000, "ttl_s": 3600}]
+print(m._cache_view({}, m._main_cs(sess), 0)["unproven"])
+sess["threads"][0]["ttl_unproven"] = True
+print(m._cache_view({}, m._main_cs(sess), 0)["unproven"])
+`
+	cmd := exec.Command(py, "-c", script, filepath.Join(scriptsDir(t), "statusline.py"))
+	cmd.Env = append(sandboxEnv(t), "NO_COLOR=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the check: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("got %d lines:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "56:") || !strings.HasSuffix(strings.TrimSpace(strings.TrimSuffix(lines[0], "↻")), "1h?") {
+		t.Errorf("unproven hour: %q, want a clock near 56:40 then 1h?", lines[0])
+	}
+	if !strings.Contains(lines[1], "56:") || strings.Contains(lines[1], "1h?") {
+		t.Errorf("proven hour: %q, want a plain clock with no mark", lines[1])
+	}
+	if strings.Contains(lines[2], "1h?") || !strings.Contains(lines[2], "3:") {
+		t.Errorf("a 5-minute entry: %q, want its own short clock and no mark", lines[2])
+	}
+	if lines[3] != "False" || lines[4] != "True" {
+		t.Errorf("the mark must follow the main thread's own entry: got %q then %q, want False then True", lines[3], lines[4])
 	}
 }

@@ -25,6 +25,6 @@ When something fails, the first line names the first fix and each failing check 
 | The proxy answers | `/context-guru:update`, or see [troubleshooting](configuration.md) |
 | Dashboard API is on | start the proxy with `--dashboard` |
 | Prices are loaded | point `MODEL_PRICES` at your gateway's price file; otherwise dollars show as zero |
-| Context Guru status line is installed | `/context-guru:statusline` |
+| Context Guru status line is installed (shown only when it is: since 0.6.1 the band above the prompt shows its figures) | `/context-guru:statusline` |
 | Status line refreshes on a timer | set `"refreshInterval"` on `statusLine` (see [Status line](statusline.md#refresh)) |
 | Cache mode is set | `/context-guru:cache-strategy-picker` |

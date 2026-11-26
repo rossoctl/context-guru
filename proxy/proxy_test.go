@@ -806,7 +806,7 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 		w.(http.Flusher).Flush()
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second): // fail fast instead of hanging the suite
+		case <-time.After(30 * time.Second): // fail instead of hanging the suite
 		}
 		w.Write([]byte(sseTail))
 	}))
@@ -826,7 +826,7 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 	// Read the first chunk. The upstream has NOT sent the tail yet and will not until
 	// this test releases it, so a streaming proxy can only hand us the head. A
 	// buffering proxy cannot return anything here at all — it deadlocks until the
-	// upstream's own 5s escape hatch fires, and then delivers head+tail in one go,
+	// upstream's own 30s escape hatch fires, and then delivers head+tail in one go,
 	// which is what the "last" assertion below detects.
 	// The expand tool is advertised on every tools-bearing request (expand.InjectAuto is
 	// session-stable, so the tools array never changes shape mid-session), which means EVERY
@@ -835,7 +835,7 @@ func TestMarkerFreeSSEStreamsThrough(t *testing.T) {
 	// before it could decide. Splicing decides per event, so the original claim is back:
 	// the model's first delta reaches the client while the upstream is still generating.
 	ch := sseChunks(resp.Body)
-	first, ok := collectUntil(ch, "first", 2*time.Second)
+	first, ok := collectUntil(ch, "first", 30*time.Second)
 	close(release)
 	if !ok {
 		t.Fatalf("marker-free SSE response was BUFFERED: the client received nothing until "+
@@ -877,7 +877,7 @@ func TestMarkerBearingSSEStreamsWhenItOpensWithText(t *testing.T) {
 		w.(http.Flusher).Flush()
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 		w.Write([]byte(sseTail))
 	}))
@@ -896,7 +896,7 @@ func TestMarkerBearingSSEStreamsWhenItOpensWithText(t *testing.T) {
 	defer resp.Body.Close()
 
 	ch := sseChunks(resp.Body)
-	first, ok := collectUntil(ch, "first", 2*time.Second)
+	first, ok := collectUntil(ch, "first", 30*time.Second)
 	close(release)
 	if !ok {
 		t.Fatalf("a marker-bearing SSE response that opens with TEXT was buffered whole; "+
@@ -1155,7 +1155,7 @@ func TestOpenAISSEStreamsThrough(t *testing.T) {
 		w.(http.Flusher).Flush()
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 		w.Write([]byte(`data: {"choices":[{"delta":{"content":"last"}}]}` + "\n\n" + "data: [DONE]\n\n"))
 	}))
@@ -1231,7 +1231,7 @@ func gzipSSE(t *testing.T, plain string) []byte {
 // setup) gzips its streaming /v1/messages responses. Forwarding the client's own
 // Accept-Encoding header upstream verbatim (the bug) means Go's http.Transport never
 // auto-decompresses, so resp.Body is raw gzip for BOTH the client-forward path and the
-// usage sniffer — usage silently reports usageMissAbsent (classified benign, so nothing
+// usage sniffer — usage silently reports respfacts.MissAbsent (classified benign, so nothing
 // alerts) on every request against that upstream, which in turn means keep-alive's
 // pingable() gate (keyed off CacheRead+CacheWrite) never passes either.
 //

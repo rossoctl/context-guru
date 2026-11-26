@@ -35,7 +35,7 @@ A C compiler is needed for exactly one thing: `make test` (the race detector req
 2. Run it. It listens on `:4000`; set `LISTEN_ADDR` to change that.
 
     ```sh
-    ./bin/context-guru-proxy       # default preset: house
+    ./bin/context-guru-proxy       # default preset: conservative
     ```
 
 3. Point your agent at it:

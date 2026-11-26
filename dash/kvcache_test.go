@@ -2,6 +2,7 @@ package dash
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -737,4 +738,65 @@ func near2(t *testing.T, what string, got, want float64) {
 	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("%s = %.12f, want %.12f", what, got, want)
 	}
+}
+
+// ByThread links a request to the next one on its own thread: a subagent's request in between is not the main thread's successor.
+func TestKVCacheDatasetByThreadLinksWithinTheThread(t *testing.T) {
+	main1, sub, main2 := kvEvent("t", "s", "m", kvBase, 1000, 0), kvEvent("t", "s", "m", kvBase+10_000, 1000, 0), kvEvent("t", "s", "m", kvBase+600_000, 1000, 0)
+	sub.ThreadID = "a:sub"
+	db := seedKV(t, main1, sub, main2)
+	for _, c := range []struct {
+		by   bool
+		want time.Duration
+	}{{false, 10 * time.Second}, {true, 600 * time.Second}} {
+		rows, _, err := db.KVCacheDataset(allTenants(), KVCacheOptions{ByThread: c.by})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r.TS == kvBase {
+				if idle, _ := r.Idle(); idle != c.want {
+					t.Errorf("ByThread %v: the main thread's first gap = %v, want %v", c.by, idle, c.want)
+				}
+			}
+			if r.TS == kvBase+10_000 && r.ThreadID != "a:sub" {
+				t.Errorf("thread id not read: %q", r.ThreadID)
+			}
+		}
+	}
+}
+
+// Both dataset reads, the single one and the sharded one, carry the row's stored wait cause
+// (requests.waiting_for) to kvcache.Request.WaitingFor. The campaign replay reads it for the prefix floor.
+func TestKVDatasetCarriesTheStoredWaitCause(t *testing.T) {
+	causes := []string{"background", "teammate", "human", ""}
+	var evs []*Event
+	for i, c := range causes {
+		e := kvEvent("t", fmt.Sprintf("s%d", i), "m", kvBase+int64(i)*1000, 1000, 0)
+		e.WaitingFor = c
+		evs = append(evs, e)
+	}
+	db := seedKV(t, evs...)
+	check := func(name string, rows []*kvcache.Request) {
+		t.Helper()
+		got := map[string]string{}
+		for _, r := range rows {
+			got[r.ConversationID] = r.WaitingFor
+		}
+		for i, c := range causes {
+			if got[fmt.Sprintf("s%d", i)] != c {
+				t.Errorf("%s: session s%d WaitingFor %q, want %q", name, i, got[fmt.Sprintf("s%d", i)], c)
+			}
+		}
+	}
+	one, _, err := db.kvCacheDatasetOne(allTenants(), KVCacheOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("single read", one)
+	sh, ok, err := db.kvCacheDatasetSharded(allTenants(), KVCacheOptions{})
+	if err != nil || !ok {
+		t.Fatalf("sharded read: ok=%v err=%v", ok, err)
+	}
+	check("sharded read", sh)
 }

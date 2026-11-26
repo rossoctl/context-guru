@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // runSignal pipes a hook payload into scripts/signal.sh the way Claude Code does.
@@ -24,6 +27,19 @@ func runSignal(t *testing.T, env []string, payload string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("signal.sh must always exit 0: %v", err)
 	}
+}
+
+// runSignalDone runs the hook and waits for its n detached senders to end. signal.sh appends one line to
+// CG_TEST_SIGNAL_DONE_FILE as each of them ends (the variable is read by nothing else), so a test knows
+// the sends are over without a sleep, and can assert that nothing more arrives.
+func runSignalDone(t *testing.T, env []string, payload string, n int) {
+	t.Helper()
+	done := filepath.Join(t.TempDir(), "done")
+	runSignal(t, append(append([]string{}, env...), "CG_TEST_SIGNAL_DONE_FILE="+done), payload)
+	testutil.WaitFor(t, "the detached senders of signal.sh to end", func() bool {
+		b, _ := os.ReadFile(done)
+		return strings.Count(string(b), "done\n") >= n
+	})
 }
 
 // The event is content-free: of the whole hook payload only the session id, the event name and the
@@ -97,9 +113,50 @@ func TestSignalHookSendsSessionStartSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	ss := cfg.Hooks["SessionStart"]
-	if len(ss) != 2 || !strings.Contains(ss[0].Hooks[0].Command, "start-proxy.sh") || ss[1].Matcher != "compact|resume|clear" ||
-		!strings.Contains(ss[1].Hooks[0].Command, "signal.sh") {
+	if len(ss) != 3 || !strings.Contains(ss[0].Hooks[0].Command, "start-proxy.sh") || ss[1].Matcher != "compact|resume|clear" ||
+		!strings.Contains(ss[1].Hooks[0].Command, "signal.sh") || ss[2].Matcher != "startup|fork" ||
+		!strings.Contains(ss[2].Hooks[0].Command, "signal.sh") {
 		t.Errorf("SessionStart hooks = %+v", ss)
+	}
+}
+
+// A plain session start sends nothing, unless the user set ENABLE_TOOL_SEARCH=false: then the hook
+// sends the session id and the raw value to /tool-search, so the proxy turns tool deferral off for the
+// session (#485). Nothing else of the payload goes.
+func TestSignalHookSendsToolSearchFalseOnStartup(t *testing.T) {
+	ch := make(chan map[string]any, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got map[string]any
+		json.NewDecoder(r.Body).Decode(&got)
+		got["path"] = r.URL.Path
+		ch <- got
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	payload := `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"startup"}`
+	base := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k"}
+	// These three send nothing, and start no detached sender: the script has ended when runSignal returns.
+	for _, v := range []string{"", "ENABLE_TOOL_SEARCH=auto", "ENABLE_TOOL_SEARCH=true"} {
+		env := base
+		if v != "" {
+			env = append(append([]string{}, base...), v)
+		}
+		runSignal(t, env, payload)
+	}
+	runSignalDone(t, append(append([]string{}, base...), "ENABLE_TOOL_SEARCH=FALSE"), payload, 1)
+	select {
+	case got := <-ch:
+		if len(got) != 3 || got["session"] != "abc-123" || got["enable_tool_search"] != "FALSE" || got["path"] != "/tool-search" {
+			t.Errorf("body = %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ENABLE_TOOL_SEARCH=false did not reach the server")
+	}
+	// The one sender has ended, so a second event would be in the channel by now.
+	select {
+	case got := <-ch:
+		t.Errorf("a second event was sent: %v", got)
+	default:
 	}
 }
 
@@ -111,9 +168,30 @@ func TestSignalHookRetriesAProxyThatIsNotUpYet(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	ln.Close() // nothing listens until the hook has already run
-	env := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=http://" + addr, "ANTHROPIC_API_KEY=k"}
-	runSignal(t, env, `{"session_id":"abc-123","hook_event_name":"SessionStart","source":"compact"}`)
-	time.Sleep(300 * time.Millisecond)
+	// A curl wrapper logs the exit code of each attempt, after the attempt. The test starts the proxy
+	// once a failed attempt is logged, so the first send is known to have met a closed port.
+	real, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skipf("no curl: %v", err)
+	}
+	bin, attempts := t.TempDir(), filepath.Join(t.TempDir(), "attempts")
+	wrapper := "#!/bin/sh\n'" + real + "' \"$@\"\nrc=$?\necho \"$rc\" >> '" + attempts + "'\nexit $rc\n"
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := filepath.Join(t.TempDir(), "done")
+	env := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=http://" + addr, "ANTHROPIC_API_KEY=k",
+		"CG_TEST_SIGNAL_DONE_FILE=" + done}
+	cmd := exec.Command("bash", filepath.Join(scriptsDir(t), "signal.sh"))
+	cmd.Env = append([]string{"PATH=" + bin + ":/usr/bin:/bin:/usr/local/bin"}, env...)
+	cmd.Stdin = strings.NewReader(`{"session_id":"abc-123","hook_event_name":"SessionStart","source":"compact"}`)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("signal.sh must always exit 0: %v", err)
+	}
+	testutil.WaitFor(t, "the first send to fail on the closed port", func() bool {
+		b, _ := os.ReadFile(attempts)
+		return strings.Contains(string(b), "7\n") // curl: connection refused
+	})
 	ln, err = net.Listen("tcp", addr)
 	if err != nil {
 		t.Skipf("port taken meanwhile: %v", err)
@@ -122,9 +200,10 @@ func TestSignalHookRetriesAProxyThatIsNotUpYet(t *testing.T) {
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(http.StatusNoContent) })}
 	go srv.Serve(ln)
 	defer srv.Close()
-	for deadline := time.Now().Add(4 * time.Second); hits.Load() == 0 && time.Now().Before(deadline); {
-		time.Sleep(50 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the retry to reach the late proxy and the sender to end", func() bool {
+		b, _ := os.ReadFile(done)
+		return strings.Contains(string(b), "done\n")
+	})
 	if hits.Load() != 1 {
 		t.Errorf("%d events reached the late proxy, want 1", hits.Load())
 	}
@@ -144,7 +223,8 @@ func TestSignalHookIsInertOffAndFailsOpen(t *testing.T) {
 	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `not json`)                                                      // garbage
 	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"../x","hook_event_name":"SessionEnd"}`)          // unusable id
 	runSignal(t, append([]string{"CONTEXT_GURU_CLIENT_SIGNALS=on"}, base...), `{"session_id":"s","hook_event_name":"PreToolUse"}`)             // not an event we send
-	time.Sleep(100 * time.Millisecond)
+	// Every run above ended before any send, or sent in the foreground (SessionEnd), so no detached
+	// sender is left and the count is final.
 	if n := hits.Load(); n != 0 {
 		t.Errorf("%d requests sent when none should be", n)
 	}
@@ -198,5 +278,70 @@ func TestSignalHookAutoSendsToARemoteURLOnlyWithTheHostedToken(t *testing.T) {
 	runSignal(t, []string{base, "ANTHROPIC_API_KEY=sk-ant-x", "ANTHROPIC_CUSTOM_HEADERS=x-context-guru-token: cg_live_abc"}, end)
 	if n := hits.Load(); n != 1 {
 		t.Errorf("%d hosted sends, want 1 (only the one with the token header)", n)
+	}
+}
+
+// Every SessionStart source that can start a new session id carries the opt-out to /tool-search, so
+// a resume, fork or clear does not lose it. resume and clear still send their keep-alive event to
+// /signal too; startup and fork send only the opt-out. Without the opt-out, startup and fork send
+// nothing.
+func TestSignalHookSendsToolSearchOffOnEverySessionStart(t *testing.T) {
+	for _, tc := range []struct {
+		source   string
+		wantPath []string // sorted
+	}{
+		{"startup", []string{"/tool-search"}},
+		{"fork", []string{"/tool-search"}},
+		{"resume", []string{"/signal", "/tool-search"}},
+		{"clear", []string{"/signal", "/tool-search"}},
+		{"compact", []string{"/signal"}}, // compaction keeps the session id
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			ch := make(chan map[string]any, 8)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var got map[string]any
+				json.NewDecoder(r.Body).Decode(&got)
+				got["path"] = r.URL.Path
+				ch <- got
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			payload := `{"session_id":"sid-` + tc.source + `","hook_event_name":"SessionStart","source":"` + tc.source + `"}`
+			env := []string{"CONTEXT_GURU_CLIENT_SIGNALS=on", "ANTHROPIC_BASE_URL=" + srv.URL, "ANTHROPIC_API_KEY=k", "ENABLE_TOOL_SEARCH=off"}
+			runSignalDone(t, env, payload, len(tc.wantPath)) // one detached sender per route
+			var paths []string
+			for range tc.wantPath {
+				select {
+				case got := <-ch:
+					p := got["path"].(string)
+					paths = append(paths, p)
+					if p == "/tool-search" && (got["session"] != "sid-"+tc.source || got["enable_tool_search"] != "off" || len(got) != 3) {
+						t.Errorf("/tool-search body = %v", got)
+					}
+					if p == "/signal" && got["kind"] != tc.source {
+						t.Errorf("/signal body = %v", got)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("got %v, want %v", paths, tc.wantPath)
+				}
+			}
+			select { // every sender has ended, so an extra request would be here already
+			case got := <-ch:
+				t.Errorf("an extra request: %v", got)
+			default:
+			}
+			sort.Strings(paths)
+			if strings.Join(paths, ",") != strings.Join(tc.wantPath, ",") {
+				t.Errorf("paths = %v, want %v", paths, tc.wantPath)
+			}
+			if tc.source == "startup" || tc.source == "fork" {
+				runSignal(t, env[:3], payload) // no opt-out: no sender starts, so nothing at all
+				select {
+				case got := <-ch:
+					t.Errorf("%s without the opt-out sent %v", tc.source, got)
+				default:
+				}
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 ---
 name: timeline
-description: A timeline of this session: turns, pauses, cache misses with what each cost, pings and compactions, plus the three most expensive moments.
+description: A timeline of this session (turns, pauses, cache misses with what each cost, pings and compactions), plus the three most expensive moments.
+disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tv.py" timeline:*)
 ---
 

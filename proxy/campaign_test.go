@@ -3,10 +3,12 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/campaign"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/kvcache"
 	"github.com/rossoctl/context-guru/tenant"
@@ -14,7 +16,7 @@ import (
 
 // Every activatable, non-baseline arm's own live parameters must actually clear
 // validStrategyBounds — a static safety net for the hardcoded constants in
-// campaignArmFor, so a future edit that pushes one out of band fails a test instead of
+// campaign.ArmFor, so a future edit that pushes one out of band fails a test instead of
 // failing a manager's create call.
 func TestCampaignArmForStaysWithinValidStrategyBounds(t *testing.T) {
 	arms := []string{
@@ -22,242 +24,14 @@ func TestCampaignArmForStaysWithinValidStrategyBounds(t *testing.T) {
 		kvcache.StrategyStopReasonGated, kvcache.StrategyKeepAlive1h, kvcache.StrategyKeepAlive1hOnce,
 	}
 	for _, arm := range arms {
-		a := campaignArmFor(arm)
-		if !a.activatable || a.baseline {
+		a := campaign.ArmFor(arm)
+		if !a.Activatable || a.Baseline {
 			t.Fatalf("%s: expected activatable, non-baseline", arm)
 		}
-		idle := time.Duration(a.idleSeconds) * time.Second
-		if err := validStrategyBounds(idle, a.maxPings, campaignDefaultMinPrefixTokens, 0,
-			a.headTTL1h, a.headTTLMinTokens); err != nil {
+		idle := time.Duration(a.IdleSeconds) * time.Second
+		if err := validStrategyBounds(idle, a.MaxPings, config.DefaultKeepAliveMinPrefix, 0,
+			a.HeadTTL1h, a.HeadTTLMinTokens); err != nil {
 			t.Errorf("%s: %+v fails validStrategyBounds: %v", arm, a, err)
-		}
-	}
-}
-
-// The 1h-tier arms must carry a POSITIVE headTTLMinTokens, not just a non-negative one:
-// 0 paired with HeadTTL1h=true silently disables the head-TTL upgrade downstream
-// (apply.Opts' own gate is `HeadTTL1h && HeadTTLMinTokens > 0`) while the ping schedule
-// still runs on the 1-hour cadence — paying for a tier that can never actually apply.
-func TestCampaignArmForKeepAlive1hArmsHaveAPositiveHeadTTLMinTokens(t *testing.T) {
-	for _, arm := range []string{kvcache.StrategyKeepAlive1h, kvcache.StrategyKeepAlive1hOnce} {
-		a := campaignArmFor(arm)
-		if !a.headTTL1h {
-			t.Fatalf("%s: expected headTTL1h true", arm)
-		}
-		if a.headTTLMinTokens <= 0 {
-			t.Errorf("%s: headTTLMinTokens = %d, want a positive value", arm, a.headTTLMinTokens)
-		}
-	}
-}
-
-// Baseline arms mean "change nothing" and create no strategy; unknown arms are refused
-// with a reason, never silently treated as a baseline.
-func TestCampaignArmForBaselineAndUnknown(t *testing.T) {
-	for _, arm := range []string{kvcache.StrategyNoCache, kvcache.StrategyFixed5m, kvcache.StrategyFixed1h} {
-		a := campaignArmFor(arm)
-		if !a.activatable || !a.baseline {
-			t.Errorf("%s: got %+v, want activatable baseline", arm, a)
-		}
-	}
-	for _, arm := range []string{
-		kvcache.StrategyHistorical, kvcache.StrategyStickySession1h, kvcache.StrategyObserved,
-		kvcache.StrategyExtend1h, kvcache.StrategyOptimal, kvcache.StrategyReplay, "nonsense-arm",
-	} {
-		a := campaignArmFor(arm)
-		if a.activatable || a.reason == "" {
-			t.Errorf("%s: got %+v, want not activatable with a reason", arm, a)
-		}
-	}
-}
-
-func TestResolveCampaignCellUserExclusionIsTheCallersJob(t *testing.T) {
-	// resolveCampaignCell itself does not special-case an empty user — the create
-	// handler filters those out before ever calling it. This test documents that the
-	// function still resolves such a cell like any other, so a reviewer does not go
-	// looking for a guard inside it that was deliberately placed one level up.
-	cell := dash.KVCacheSuggestion{User: "", HourUTC: 9, BestStrategy: kvcache.StrategyKeepAlive5m}
-	got := resolveCampaignCell(cell, func(string) bool { return true })
-	if got.tenantID != "" || !got.activatable {
-		t.Errorf("got %+v, want an activatable cell for the empty tenant (exclusion happens elsewhere)", got)
-	}
-}
-
-func TestResolveCampaignCellNonActivatableArmRecordsAReason(t *testing.T) {
-	cell := dash.KVCacheSuggestion{User: "t1", HourUTC: 9, BestStrategy: kvcache.StrategyHistorical}
-	got := resolveCampaignCell(cell, func(string) bool { return true })
-	if got.activatable || got.skipReason == "" {
-		t.Errorf("got %+v, want not activatable with a reason", got)
-	}
-}
-
-func TestResolveCampaignCellGatesThe1hTierPerTenantModel(t *testing.T) {
-	cell := dash.KVCacheSuggestion{User: "t1", HourUTC: 9, BestStrategy: kvcache.StrategyKeepAlive1h}
-	honored := resolveCampaignCell(cell, func(tenantID string) bool { return tenantID == "t1" })
-	if !honored.activatable {
-		t.Errorf("got %+v, want activatable when the tenant's model honors the 1h tier", honored)
-	}
-	notHonored := resolveCampaignCell(cell, func(tenantID string) bool { return false })
-	if notHonored.activatable || notHonored.skipReason == "" {
-		t.Errorf("got %+v, want not activatable with a reason when the model gate fails", notHonored)
-	}
-}
-
-// A cell whose winner was picked on a subset of its own traffic must not activate a live
-// schedule. BestStrategy is an argmax over the PRICED requests only, so unpriced traffic in the
-// cell means the arm about to be enforced won a comparison the rest of that cell never entered.
-// This gate is the one dash.KVCacheSuggestion.UnpricedRequests exists to make possible: before
-// that field, nothing on this path could see the condition at all.
-func TestResolveCampaignCellRefusesACellWhoseArmWasPickedOnPricedRowsOnly(t *testing.T) {
-	partial := dash.KVCacheSuggestion{User: "t1", HourUTC: 9, Requests: 36,
-		UnpricedRequests: 20, BestStrategy: kvcache.StrategyStopReasonGated}
-	got := resolveCampaignCell(partial, func(string) bool { return true })
-	if got.activatable || got.skipReason == "" {
-		t.Errorf("got %+v, want not activatable with a reason: 20 of 36 requests unpriced means "+
-			"stop-reason-gated (which buys pings) won on 16 of them", got)
-	}
-	// Fully priced, everything else equal: still activatable, so the gate narrows rather than
-	// closes the path.
-	full := partial
-	full.UnpricedRequests = 0
-	if got := resolveCampaignCell(full, func(string) bool { return true }); !got.activatable {
-		t.Errorf("got %+v, want activatable once every request in the cell is priced", got)
-	}
-	// Baseline arms are exempt for the same reason InsufficientData exempts them: enforcing
-	// "change nothing" needs no evidence about which arm won.
-	base := partial
-	base.BestStrategy = kvcache.StrategyFixed5m
-	if got := resolveCampaignCell(base, func(string) bool { return true }); !got.activatable {
-		t.Errorf("got %+v, want a baseline arm to stay activatable regardless of coverage", got)
-	}
-}
-
-func TestResolveCampaignCellBaselineArmIsActivatableWithNoConfig(t *testing.T) {
-	cell := dash.KVCacheSuggestion{User: "t1", HourUTC: 9, BestStrategy: kvcache.StrategyFixed5m}
-	got := resolveCampaignCell(cell, func(string) bool { return true })
-	if !got.activatable || !got.config.baseline {
-		t.Errorf("got %+v, want an activatable baseline cell", got)
-	}
-}
-
-// An (tenant, hour) an active campaign already enforces must not be enforced a second
-// time: only one of the two strategies can win the resolution chain, so the loser's
-// campaign would report a prediction for a policy that never actually ran.
-func TestMarkCampaignOverlapsSkipsHoursAnActiveCampaignAlreadyHolds(t *testing.T) {
-	held := []tenant.CampaignCellOwner{
-		{TenantID: "t1", HourUTC: 9, CampaignID: "c-old", CampaignName: "morning push"},
-	}
-	taken := &resolvedCampaignCell{tenantID: "t1", hourUTC: 9, activatable: true,
-		config: campaignArmFor(kvcache.StrategyKeepAlive5m)}
-	// Same hour, different tenant — no conflict: a strategy's Target names accounts, so
-	// t2's hour 9 is not the hour t1's strategy holds.
-	otherTenant := &resolvedCampaignCell{tenantID: "t2", hourUTC: 9, activatable: true,
-		config: campaignArmFor(kvcache.StrategyKeepAlive5m)}
-	// Same tenant, different hour — no conflict either.
-	otherHour := &resolvedCampaignCell{tenantID: "t1", hourUTC: 10, activatable: true,
-		config: campaignArmFor(kvcache.StrategyKeepAlive5m)}
-	// A baseline cell creates no strategy, so it cannot collide with one.
-	baseline := &resolvedCampaignCell{tenantID: "t1", hourUTC: 9, activatable: true,
-		config: campaignArmFor(kvcache.StrategyFixed5m)}
-
-	markCampaignOverlaps([]*resolvedCampaignCell{taken, otherTenant, otherHour, baseline}, held)
-
-	if taken.activatable || taken.skipReason == "" {
-		t.Errorf("held cell = %+v, want not activatable with a reason", taken)
-	}
-	if !strings.Contains(taken.skipReason, "morning push") {
-		t.Errorf("skip reason %q does not name the campaign holding the hour", taken.skipReason)
-	}
-	for _, c := range []*resolvedCampaignCell{otherTenant, otherHour, baseline} {
-		if !c.activatable {
-			t.Errorf("cell %+v was skipped, want still activatable", c)
-		}
-	}
-}
-
-// A DIFFERENT arm for an already-held hour is still a conflict, not a refinement — see
-// markCampaignOverlaps' own doc comment. Pinned because "the arms differ, so let it
-// through" is the plausible-looking relaxation that would silently restore two competing
-// strategies for one hour.
-func TestMarkCampaignOverlapsIsBlindToTheArm(t *testing.T) {
-	held := []tenant.CampaignCellOwner{
-		{TenantID: "t1", HourUTC: 9, CampaignID: "c-old", CampaignName: "old"},
-	}
-	differentArm := &resolvedCampaignCell{tenantID: "t1", hourUTC: 9, activatable: true,
-		arm: kvcache.StrategyStopReasonGated, config: campaignArmFor(kvcache.StrategyStopReasonGated)}
-	markCampaignOverlaps([]*resolvedCampaignCell{differentArm}, held)
-	if differentArm.activatable {
-		t.Errorf("got %+v, want not activatable: a different arm for a held hour is still a conflict",
-			differentArm)
-	}
-}
-
-// An out-of-range HourUTC must never reach tileHours: the live source can never
-// produce one (always time.Time.UTC().Hour()), but the upload source accepts a
-// hand-edited payload verbatim, and tileHours would otherwise build an invalid Window
-// string ("24:00", "-1:00") that gets persisted successfully but can never match
-// anything — a strategy that silently pings and saves nothing forever with no error
-// anywhere. Checked BEFORE the arm is even resolved, so it applies no matter how
-// enforceable the recommended arm would otherwise be.
-func TestResolveCampaignCellRejectsOutOfRangeHourUTC(t *testing.T) {
-	for _, hour := range []int{-1, 24, 30, 100} {
-		cell := dash.KVCacheSuggestion{User: "t1", HourUTC: hour, BestStrategy: kvcache.StrategyKeepAlive5m}
-		got := resolveCampaignCell(cell, func(string) bool { return true })
-		if got.activatable || got.skipReason == "" {
-			t.Errorf("hour %d: got %+v, want not activatable with a reason", hour, got)
-		}
-	}
-	// The boundary values must still work.
-	for _, hour := range []int{0, 23} {
-		cell := dash.KVCacheSuggestion{User: "t1", HourUTC: hour, BestStrategy: kvcache.StrategyKeepAlive5m}
-		got := resolveCampaignCell(cell, func(string) bool { return true })
-		if !got.activatable {
-			t.Errorf("hour %d: got %+v, want activatable", hour, got)
-		}
-	}
-}
-
-// A thin cell (too few requests to trust its winning arm as a pattern) must not become
-// a real, live strategy for a non-baseline arm — the suggest engine's own
-// InsufficientData flag exists specifically to warn against acting on it.
-func TestResolveCampaignCellInsufficientDataBlocksActivationForNonBaselineArms(t *testing.T) {
-	cell := dash.KVCacheSuggestion{
-		User: "t1", HourUTC: 9, BestStrategy: kvcache.StrategyKeepAlive5m, InsufficientData: true,
-	}
-	got := resolveCampaignCell(cell, func(string) bool { return true })
-	if got.activatable || got.skipReason == "" {
-		t.Errorf("got %+v, want not activatable with a reason", got)
-	}
-}
-
-// A baseline arm ("change nothing") is exempt from the insufficient-data gate: doing
-// nothing carries no risk regardless of sample size, unlike committing to a real
-// ping/write-tier schedule off a thin backtest.
-func TestResolveCampaignCellInsufficientDataDoesNotBlockBaselineArms(t *testing.T) {
-	cell := dash.KVCacheSuggestion{
-		User: "t1", HourUTC: 9, BestStrategy: kvcache.StrategyFixed5m, InsufficientData: true,
-	}
-	got := resolveCampaignCell(cell, func(string) bool { return true })
-	if !got.activatable || !got.config.baseline {
-		t.Errorf("got %+v, want an activatable baseline cell despite insufficient data", got)
-	}
-}
-
-// weekdaysFromNames must never silently produce an empty slice: tenant.Window treats
-// an empty Days as "every day matches," not "no day restricted," and PredictedUSD is
-// always backtested against Sunday-Thursday only — an omitted or fully-unparseable
-// Weekdays list must fall back to that canonical set, never to "every day."
-func TestWeekdaysFromNamesFallsBackToCanonicalWeekWhenNothingIsRecognized(t *testing.T) {
-	for _, names := range [][]string{nil, {}, {"Someday", "Otherday"}} {
-		got := weekdaysFromNames(names)
-		if len(got) != len(campaignDefaultWeekdays) {
-			t.Errorf("weekdaysFromNames(%v) = %v, want the canonical %v", names, got, campaignDefaultWeekdays)
-			continue
-		}
-		for i, d := range campaignDefaultWeekdays {
-			if got[i] != d {
-				t.Errorf("weekdaysFromNames(%v) = %v, want the canonical %v", names, got, campaignDefaultWeekdays)
-				break
-			}
 		}
 	}
 }
@@ -295,95 +69,14 @@ func TestCtlCreateCampaignRejectsDuplicateCellBeforeCreatingAnyStrategy(t *testi
 	}
 }
 
-// tileHours must cover exactly the given hours — no gap inside a merged run, no
-// overlap or false coverage between separate runs, and hour 23 must never merge past
-// midnight into hour 0 (tenant.Window has no overnight span).
-func TestTileHoursCoversExactlyItsHoursNoGapNoOverlap(t *testing.T) {
-	days := []time.Weekday{time.Sunday}
-	windows := tileHours([]int{9, 10, 14, 23}, days)
-	if len(windows) != 3 {
-		t.Fatalf("got %d windows, want 3 (9-10 merged, 14 alone, 23 alone): %+v", len(windows), windows)
-	}
-	byStart := map[string]struct{ start, end string }{}
-	for _, w := range windows {
-		byStart[w.Start] = struct{ start, end string }{w.Start, w.End}
-	}
-	if w, ok := byStart["09:00"]; !ok || w.end != "11:00" {
-		t.Errorf("hours 9-10 = %+v, want [09:00,11:00)", byStart["09:00"])
-	}
-	if w, ok := byStart["14:00"]; !ok || w.end != "15:00" {
-		t.Errorf("hour 14 = %+v, want [14:00,15:00)", byStart["14:00"])
-	}
-	// Hour 23 ends at the END-OF-DAY sentinel, so the hour it tiles is covered in full. It used
-	// to end at "23:59", which as an exclusive end left 23:59:00-23:59:59 covered by nothing —
-	// this test asserted that gap as though it were a requirement, and it was only a limitation.
-	w23, ok := byStart["23:00"]
-	if !ok || w23.end != "24:00" {
-		t.Fatalf("hour 23 = %+v, want [23:00,24:00) so the hour is covered in full", w23)
-	}
-
-	// Every window must itself be valid, and coverage must match exactly: every
-	// minute inside a tiled hour is covered, the hole at 11:00-13:59 is covered by
-	// NEITHER window, and no window reaches past its own hour into the next.
-	loc, _ := time.LoadLocation("UTC")
-	for _, w := range windows {
-		w.TZ = "UTC"
-		if err := w.Validate(); err != nil {
-			t.Errorf("generated window %+v is invalid: %v", w, err)
-		}
-	}
-	// Window.contains is unexported; go through Strategy.InWindow (exported) instead,
-	// wrapping each generated window on its own in an always-active, all-target
-	// strategy so only the window's OWN time span is under test.
-	check := func(hour, minute int, wantCovered bool) {
-		now := time.Date(2026, 6, 7, hour, minute, 0, 0, loc) // a Sunday
-		covered := false
-		for _, w := range windows {
-			w.TZ, w.Days = "UTC", nil // isolate the time check from the day check
-			s := tenant.Strategy{Active: true, Windows: []tenant.Window{w},
-				Target: tenant.Target{Mode: tenant.TargetAll}}
-			if s.InWindow(now) {
-				covered = true
-			}
-		}
-		if covered != wantCovered {
-			t.Errorf("%02d:%02d covered=%v, want %v", hour, minute, covered, wantCovered)
-		}
-	}
-	check(9, 0, true)
-	check(10, 59, true)
-	check(11, 0, false) // the hole between the merged run and hour 14
-	check(13, 59, false)
-	check(14, 0, true)
-	check(14, 59, true)
-	check(15, 0, false)
-	check(23, 0, true)
-	check(23, 59, true) // hour 23 means all of hour 23, 23:59 included
-	check(0, 0, false)  // hour 23 must not wrap into hour 0
-}
-
-func TestTileHoursSingleHourEndingTheDay(t *testing.T) {
-	windows := tileHours([]int{23}, nil)
-	if len(windows) != 1 || windows[0].Start != "23:00" || windows[0].End != "24:00" {
-		t.Errorf("got %+v, want a single [23:00,24:00) window — the whole of hour 23", windows)
-	}
-	// And it must actually cover the final minute, which is the point of the sentinel.
-	s := tenant.Strategy{Active: true, Windows: []tenant.Window{{
-		Start: windows[0].Start, End: windows[0].End, TZ: "UTC"}},
-		Target: tenant.Target{Mode: tenant.TargetAll}}
-	if !s.InWindow(time.Date(2026, 6, 7, 23, 59, 30, 0, time.UTC)) {
-		t.Error("a [23:00,24:00) window does not cover 23:59; the end-of-day sentinel is broken")
-	}
-}
-
 // validateGroupStrategy is defense in depth for ctlCreateCampaign's group-creation
-// loop: a strategyForGroup result built from valid inputs must pass; one built from a
-// deliberately-broken window (bypassing tileHours entirely, the way a future bug in
+// loop: a campaign.StrategyForGroup result built from valid inputs must pass; one built from a
+// deliberately-broken window (bypassing campaign.TileHours entirely, the way a future bug in
 // this package's own logic might) must be caught here rather than persisted.
 func TestValidateGroupStrategyCatchesAnInvalidWindow(t *testing.T) {
-	valid := strategyForGroup("camp", &campaignGroup{
-		arm: kvcache.StrategyKeepAlive5m, config: campaignArmFor(kvcache.StrategyKeepAlive5m),
-		hourSet: []int{9}, tenantIDs: []string{"t1"},
+	valid := campaign.StrategyForGroup("camp", &campaign.Group{
+		Arm: kvcache.StrategyKeepAlive5m, Config: campaign.ArmFor(kvcache.StrategyKeepAlive5m),
+		HourSet: []int{9}, TenantIDs: []string{"t1"},
 	}, nil)
 	if err := validateGroupStrategy(valid); err != nil {
 		t.Errorf("a normally-built strategy failed validation: %v", err)
@@ -399,48 +92,6 @@ func TestValidateGroupStrategyCatchesAnInvalidWindow(t *testing.T) {
 	noTarget.Target = tenant.Target{Mode: tenant.TargetList}
 	if err := validateGroupStrategy(noTarget); err == nil {
 		t.Error("a strategy with an empty list-target passed validation")
-	}
-}
-
-func TestWeekdaysFromNamesDropsUnrecognizedNamesRatherThanErroring(t *testing.T) {
-	got := weekdaysFromNames([]string{"Sunday", "Monday", "Someday"})
-	if len(got) != 2 || got[0] != time.Sunday || got[1] != time.Monday {
-		t.Errorf("got %v, want [Sunday, Monday]", got)
-	}
-}
-
-// Two tenants sharing the same arm and the SAME hour set coalesce into one group; two
-// tenants sharing the same arm but a DIFFERENT hour set must NOT be merged — a
-// strategy's Target and Windows both apply to the whole strategy, so merging them
-// would activate an hour for a tenant that was never recommended for it.
-func TestCoalesceCampaignCellsGroupsOnlyIdenticalHourSets(t *testing.T) {
-	arm5m := campaignArmFor(kvcache.StrategyKeepAlive5m)
-	mk := func(tenantID string, hour int) *resolvedCampaignCell {
-		return &resolvedCampaignCell{tenantID: tenantID, hourUTC: hour, arm: kvcache.StrategyKeepAlive5m,
-			activatable: true, config: arm5m}
-	}
-	cells := []*resolvedCampaignCell{
-		mk("t1", 9), mk("t2", 9), // t1 and t2 share the exact same hour set {9}
-		mk("t3", 9), mk("t3", 14), // t3 has a DIFFERENT hour set {9,14}
-	}
-	groups := coalesceCampaignCells(cells)
-	if len(groups) != 2 {
-		t.Fatalf("got %d groups, want 2 (t1+t2 together, t3 alone): %+v", len(groups), groups)
-	}
-	var sharedGroup, soloGroup *campaignGroup
-	for _, g := range groups {
-		if len(g.tenantIDs) == 2 {
-			sharedGroup = g
-		} else {
-			soloGroup = g
-		}
-	}
-	if sharedGroup == nil || sharedGroup.tenantIDs[0] != "t1" || sharedGroup.tenantIDs[1] != "t2" {
-		t.Errorf("shared group = %+v, want t1 and t2", sharedGroup)
-	}
-	if soloGroup == nil || len(soloGroup.tenantIDs) != 1 || soloGroup.tenantIDs[0] != "t3" ||
-		len(soloGroup.hourSet) != 2 {
-		t.Errorf("solo group = %+v, want t3 alone with 2 hours", soloGroup)
 	}
 }
 
@@ -491,8 +142,8 @@ func TestCtlCreateCampaignEndToEnd(t *testing.T) {
 		t.Fatalf("got %d strategies, want 1 (coalesced): %+v", len(strategies), strategies)
 	}
 	s := strategies[0]
-	if s.IdleSeconds != 270 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
-		t.Errorf("strategy = %+v, want idle 270s, 80k floor, targeting both tenants", s)
+	if s.IdleSeconds != 240 || s.MinPrefixTokens != 80000 || len(s.Target.TenantIDs) != 2 || s.Target.Mode != tenant.TargetList {
+		t.Errorf("strategy = %+v, want idle 240s, 80k floor, targeting both tenants", s)
 	}
 
 	if w, _ := f.do(t, "GET", "/api/keepalive/campaigns", "", mgrJar); w.Code != http.StatusOK {
@@ -535,7 +186,7 @@ func TestCtlCreateCampaignEndToEnd(t *testing.T) {
 }
 
 // rollbackCampaignStrategies must reload the keeper after deleting, not only the
-// registry's own row: strategyForGroup marks a created strategy Active immediately, so
+// registry's own row: campaign.StrategyForGroup marks a created strategy Active immediately, so
 // it is already matchable to live traffic the instant it exists in the keeper's
 // in-memory list — deleting it from SQLite without evicting that in-memory copy would
 // leave it pinging/toggling real traffic until some unrelated strategy mutation
@@ -647,10 +298,7 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 		Model: "aws/claude-sonnet-5", TokenAccounting: dash.AccountingComplete,
 	})
 
-	w, out := f.do(t, "GET", "/api/keepalive/campaigns/"+campaignID, "", mgrJar)
-	if w.Code != http.StatusOK {
-		t.Fatalf("get = %d %s", w.Code, w.Body)
-	}
+	out := f.waitForCampaignRealSaved(t, mgrJar, campaignID, tenantA)
 	tenants, _ := out["tenants"].([]any)
 	if len(tenants) != 1 {
 		t.Fatalf("got %d tenant summaries, want 1: %v", len(tenants), tenants)
@@ -671,6 +319,41 @@ func TestCtlGetCampaignAggregatesPredictedAndRealPerTenant(t *testing.T) {
 	}
 	if out["caveat"] == "" || out["caveat"] == nil {
 		t.Error("the attribution caveat was not carried onto the response")
+	}
+}
+
+// waitForCampaignRealSaved polls the campaign detail route until the tenant's aggregate
+// reports a real saving, and returns that response. The record helper waits for each ROW
+// to persist; real_saved_usd is computed over several of them at read time, and #163
+// caught it reading 0 on a starved 2-core CI runner with every row persisted. Waiting for
+// the answer the assertion needs, with a loud timeout, keeps the assertion meaningful — a
+// wrong value still fails it — while removing the load sensitivity.
+func (f *mgrFixture) waitForCampaignRealSaved(t *testing.T, jar []*http.Cookie, campaignID, tenantID string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w, out := f.do(t, "GET", "/api/keepalive/campaigns/"+campaignID, "", jar)
+		if w.Code != http.StatusOK {
+			t.Fatalf("get = %d %s", w.Code, w.Body)
+		}
+		tenants, _ := out["tenants"].([]any)
+		var row map[string]any
+		for _, tn := range tenants {
+			if r, _ := tn.(map[string]any); r["tenant_id"] == tenantID {
+				row = r
+			}
+		}
+		if row == nil {
+			t.Fatalf("campaign %s has no summary for %s: %v", campaignID, tenantID, tenants)
+		}
+		if s, _ := row["real_saved_usd"].(float64); s != 0 {
+			return out
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("real_saved_usd for %s stayed 0 for 5s — the aggregate never saw the "+
+				"credited row:\n%v", tenantID, out)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -731,7 +414,7 @@ func TestCtlGetCampaignTenantDrilldownRendersAGenuineZeroRateNotAnOmittedOne(t *
 
 // The 1h-tier model-honoring gate must work with the REAL, DB-backed check
 // (tenantHonorsHeadTTL1h), not just the fake closures every other test injects directly
-// into resolveCampaignCell. This is the actual mechanism that decides whether a
+// into campaign.ResolveCell. This is the actual mechanism that decides whether a
 // keepalive-1h/1h-once cell is safe to activate for a given tenant's real traffic.
 func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 	f := newMgrFixture(t)
@@ -740,7 +423,7 @@ func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 	_, downgradedTenant := f.signUpJar(t, "sonnet@ibm.com")
 
 	// aws/claude-haiku-4-5 is the one model this deployment has measured actually
-	// honoring the 1h cache tier (see headTTL1hHonoredModels); aws/claude-sonnet-5 is
+	// honoring the 1h cache tier (see campaign.HeadTTL1hHonored); aws/claude-sonnet-5 is
 	// silently downgraded to 5m.
 	f.record(t, honoredTenant, "s1", &dash.Event{Model: "aws/claude-haiku-4-5"})
 	f.record(t, downgradedTenant, "s1", &dash.Event{Model: "aws/claude-sonnet-5"})
@@ -798,7 +481,7 @@ func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 }
 
 // keepalive-5m-once, stop-reason-gated, and keepalive-1h-once were, until now, only
-// ever driven through campaignArmFor/resolveCampaignCell directly in unit tests, never
+// ever driven through campaign.ArmFor/campaign.ResolveCell directly in unit tests, never
 // through the real create-campaign HTTP route with an assertion on every field of the
 // resulting tenant.Strategy — precisely the gap that let stop-reason-gated ship with no
 // PredictorThreshold at all (a silent zero value that makes predictorFor's gate a
@@ -809,7 +492,7 @@ func TestCtlCreateCampaignGatesThe1hTierByRealTenantTrafficModel(t *testing.T) {
 // registration is rate-limited to 3/minute per client address (registrationsPerMinute)
 // and this fixture has no way to vary the address per signUpJar call; a single tenant
 // with cells at different hours resolves into separate, uncoalesced strategies just as
-// well, since coalesceCampaignCells groups by (tenant, arm) before ever looking at hours.
+// well, since campaign.Coalesce groups by (tenant, arm) before ever looking at hours.
 func TestCtlCreateCampaignEveryArmCarriesItsOwnLiveParameters(t *testing.T) {
 	f := newMgrFixture(t)
 	mgrJar, _ := f.signUpJar(t, "boss@ibm.com")
@@ -870,9 +553,9 @@ func TestCtlCreateCampaignEveryArmCarriesItsOwnLiveParameters(t *testing.T) {
 	if once5m.MaxPings != 1 {
 		t.Errorf("keepalive-5m-once strategy = %+v, want idle 280s, max 1 ping", once5m)
 	}
-	if gated.MaxPings != campaignDefaultMaxPings {
+	if gated.MaxPings != config.DefaultKeepAliveMaxPings {
 		t.Errorf("stop-reason-gated strategy = %+v, want idle 280s, max %d pings",
-			gated, campaignDefaultMaxPings)
+			gated, config.DefaultKeepAliveMaxPings)
 	}
 	if gated.PredictorID != "stop-reason-gated" {
 		t.Errorf("stop-reason-gated strategy PredictorID = %q, want %q",
@@ -949,7 +632,7 @@ func TestCampaignTenantSummariesOnlyCountsPredictedUSDForActivatedCells(t *testi
 }
 
 // An out-of-range hour_utc in an uploaded payload must never become a real, live-but-
-// dead strategy: resolveCampaignCell's bounds check should catch it before it's ever
+// dead strategy: campaign.ResolveCell's bounds check should catch it before it's ever
 // coalesced, and validateGroupStrategy is defense in depth in case it somehow weren't.
 // End to end, through the real route, on top of the unit tests for each layer.
 func TestCtlCreateCampaignOutOfRangeHourIsNotActivatedAsADeadStrategy(t *testing.T) {
@@ -1155,95 +838,23 @@ func TestCampaignRealSavingsOnlyCoversTenantsThisCampaignActivated(t *testing.T)
 	}
 }
 
-func TestCoalesceCampaignCellsExcludesBaselineAndNonActivatable(t *testing.T) {
-	cells := []*resolvedCampaignCell{
-		{tenantID: "t1", hourUTC: 9, arm: kvcache.StrategyFixed5m, activatable: true,
-			config: campaignArm{baseline: true}},
-		{tenantID: "t1", hourUTC: 10, arm: kvcache.StrategyHistorical, activatable: false},
-	}
-	groups := coalesceCampaignCells(cells)
-	if len(groups) != 0 {
-		t.Errorf("got %d groups, want 0 (nothing here is activatable-and-non-baseline)", len(groups))
-	}
-}
-
-// keepalive-5m carries the recommended policy (270 s, K=2, 80k floor); the K=1 and gated arms
-// stay at 280 because the 270 s evidence covers K>=2 only.
-func TestCampaignKeepAlive5mIsTheRecommendedPolicy(t *testing.T) {
-	a := campaignArmFor(kvcache.StrategyKeepAlive5m)
-	if a.idleSeconds != 270 || a.maxPings != 2 || campaignDefaultMinPrefixTokens != 80000 {
-		t.Errorf("keepalive-5m = idle %d, K %d, floor %d; want 270, 2, 80000",
-			a.idleSeconds, a.maxPings, campaignDefaultMinPrefixTokens)
-	}
-	if got := campaignArmFor(kvcache.StrategyKeepAlive5mOnce).idleSeconds; got != 280 {
-		t.Errorf("keepalive-5m-once idle = %d, want 280", got)
-	}
-}
-
-// once, stop-reason-gated and the 1h arms keep 280 s / the old 20k floor: the 270 s / 80k
-// evidence is K=2 ping-everyone only.
-func TestCampaignNonRecommendedArmsKeepTheirOldFloor(t *testing.T) {
-	for _, arm := range []string{kvcache.StrategyKeepAlive5mOnce, kvcache.StrategyStopReasonGated} {
-		a := campaignArmFor(arm)
-		if a.idleSeconds != 280 || a.minPrefixTokens != 20000 {
-			t.Errorf("%s = idle %d floor %d, want 280 / 20000", arm, a.idleSeconds, a.minPrefixTokens)
+// A K-PING ARM BECOMES A LIVE STRATEGY WITH K PINGS. The campaign must enforce exactly the budget the
+// cell was scored at; a strategy left at the default of 2 would run a schedule nobody simulated.
+func TestCampaignEnforcesTheKPingArmsBudget(t *testing.T) {
+	for k := 1; k <= kvcache.MaxKeepAlivePings; k++ {
+		arm := kvcache.StrategyKeepAlive5mPingsPrefix + strconv.Itoa(k)
+		a := campaign.ArmFor(arm)
+		if !a.Activatable || a.Baseline {
+			t.Fatalf("%s: activatable=%v baseline=%v, want a live non-baseline arm", arm, a.Activatable, a.Baseline)
+		}
+		if a.MaxPings != k {
+			t.Errorf("%s enforces %d pings, want %d", arm, a.MaxPings, k)
+		}
+		if err := validStrategyBounds(time.Duration(a.IdleSeconds)*time.Second, a.MaxPings, a.MinPrefixTokens, 0, false, 0); err != nil {
+			t.Errorf("%s builds a strategy the live bounds refuse: %v", arm, err)
 		}
 	}
-	if a := campaignArmFor(kvcache.StrategyKeepAlive5m); a.minPrefixTokens != 80000 {
-		t.Errorf("keepalive-5m floor = %d, want 80000", a.minPrefixTokens)
-	}
-}
-
-// The suggester's cells are UTC hours on UTC weekdays, so the generated windows must say so:
-// left unset, Window.TZ resolves to DefaultStrategyTZ (Asia/Jerusalem) and the campaign
-// enforces every cell 2-3 hours early. This is the generated windows UNMODIFIED, unlike the
-// tests above that overwrite TZ before checking.
-func TestTileHoursWindowsAreUTC(t *testing.T) {
-	days := []time.Weekday{time.Sunday}
-	s := tenant.Strategy{Active: true, Windows: tileHours([]int{8}, days),
-		Target: tenant.Target{Mode: tenant.TargetAll}}
-	at := func(h int) bool { return s.InWindow(time.Date(2026, 6, 7, h, 30, 0, 0, time.UTC)) } // a Sunday
-	if !at(8) {
-		t.Error("08:30 UTC is inside cell hour 8 but not covered")
-	}
-	if at(5) {
-		t.Error("05:30 UTC (08:30 Asia/Jerusalem in summer) must not be covered by cell hour 8")
-	}
-	// Late-evening cell: UTC Sunday 22h must stay on UTC Sunday, not roll to Jerusalem Monday.
-	s.Windows = tileHours([]int{22}, days)
-	if !s.InWindow(time.Date(2026, 6, 7, 22, 30, 0, 0, time.UTC)) ||
-		s.InWindow(time.Date(2026, 6, 8, 22, 30, 0, 0, time.UTC)) {
-		t.Error("cell hour 22 on UTC Sunday must cover Sunday 22:30Z and not Monday 22:30Z")
-	}
-}
-
-// The zone survives the JSON round trip the strategy takes through storage, validates, and a
-// UTC cell hour is covered at the same UTC instant on both sides of Asia/Jerusalem's DST changes.
-func TestTileHoursWindowsUTCSurviveStorageAndDST(t *testing.T) {
-	days := []time.Weekday{time.Friday, time.Saturday, time.Sunday, time.Monday, time.Tuesday}
-	raw, err := json.Marshal(tileHours([]int{8}, days))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ws []tenant.Window
-	if err := json.Unmarshal(raw, &ws); err != nil {
-		t.Fatal(err)
-	}
-	s := tenant.Strategy{Active: true, Windows: ws, Target: tenant.Target{Mode: tenant.TargetAll}}
-	for _, w := range ws {
-		if w.TZ != "UTC" || w.Validate() != nil {
-			t.Fatalf("window after round trip = %+v (err %v), want TZ UTC and valid", w, w.Validate())
-		}
-	}
-	// Asia/Jerusalem DST: 2026-03-27 (spring forward) and 2026-10-25 (fall back); dates are Fri/Sun.
-	for _, d := range []time.Time{
-		time.Date(2026, 3, 27, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 12, 20, 0, 0, 0, 0, time.UTC),
-	} {
-		if !s.InWindow(d.Add(8*time.Hour+30*time.Minute)) || s.InWindow(d.Add(7*time.Hour+30*time.Minute)) ||
-			s.InWindow(d.Add(9*time.Hour+30*time.Minute)) {
-			t.Errorf("%s: cell hour 8 must cover exactly 08:00-09:00 UTC", d.Format("2006-01-02"))
-		}
+	if a := campaign.ArmFor("keepalive-5m-x12"); a.Activatable {
+		t.Error("x12 is above the live bound and must not be enforceable")
 	}
 }

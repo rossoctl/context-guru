@@ -61,6 +61,8 @@ func TestCacheAwareUsesPrefixAskWhenNoMessagesModelIsAvailable(t *testing.T) {
 	if _, err := s.Offload(t1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the commissioned summary never landed")
 	}
@@ -110,6 +112,8 @@ func TestCacheAwarePrefixAskNoPrefixIsNotAFailure(t *testing.T) {
 	if _, err := s.Offload(t1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the detached call never resolved")
 	}
@@ -140,6 +144,8 @@ func TestCacheAwarePrefixAskFailureFailsOpenAndCounts(t *testing.T) {
 	if _, err := s.Offload(t1, &rep, ctx); err != nil {
 		t.Fatalf("Offload must fail open: %v", err)
 	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
 	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) {
 		t.Fatal("the detached call never resolved")
 	}
@@ -207,5 +213,33 @@ func TestCacheAwareKeepAliveCandidateWorksViaPrefixAsk(t *testing.T) {
 	}
 	if _, ok := loadCheckpoint(ctx); !ok {
 		t.Error("the substitute dispatch committed nothing to the checkpoint")
+	}
+}
+
+// A model PROMOTED to the system channel must still get the USER prompt on the PrefixAsk path,
+// because that path can only append a trailing user message. The role is overridden at the call
+// site, so only a test through the call site can catch a wrong channel there.
+func TestCacheAwarePrefixAskSendsTheUserPromptEvenForAPromotedModel(t *testing.T) {
+	path := caWriteProfiles(t, "qwen3")
+	s := newCacheAware(t, caBaseCfg+"instruction_role: auto\nmodel_id: \"Qwen/Qwen3.6-27B\"\nprofiles_path: "+path+"\n")
+	asker := &fakePrefixAsker{out: "<summary>ok</summary>"}
+	ctx := caCtxNoModel("ca-prefixask-promoted", asker)
+	var rep components.Report
+	req := &bschemas.BifrostChatRequest{Input: append([]bschemas.ChatMessage(nil), caFixture()...)}
+	if _, err := s.Offload(req, &rep, ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The host's hook: this turn's body is stashed, the request ends (#722).
+	ResolveDeferredCacheAwareSummary(ctx.Session, ctx.Thread)
+	if !WaitForSummaryForTest(ctx.Session, 5*time.Second) || atomic.LoadInt64(&asker.calls) != 1 {
+		t.Fatalf("no ask was made, so the assertion below is vacuous (gates: %v)", rep.Gates)
+	}
+	// Precondition: the registry really does promote this model on the MessagesModel channel.
+	p, _ := loadSummarizerProfiles([]byte(strings.Replace(string(summarizerProfilesYAML), "system_models: []", `system_models: ["qwen3"]`, 1)))
+	if r, _ := p.roleFor("Qwen/Qwen3.6-27B"); r != bschemas.ChatMessageRoleSystem {
+		t.Fatalf("fixture does not promote the model (role %q), so the test proves nothing", r)
+	}
+	if !strings.HasPrefix(asker.got, askOpeningLine) {
+		t.Errorf("PrefixAsk path did not send the user prompt: %.80q", asker.got)
 	}
 }

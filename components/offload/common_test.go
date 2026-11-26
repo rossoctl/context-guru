@@ -1,9 +1,15 @@
 package offload
 
 import (
+	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
 )
 
 // The deterministic reducer must drop ONLY obvious noise (repeated blocks, blank
@@ -90,4 +96,64 @@ func TestCollapseObviousNoiseNoop(t *testing.T) {
 	if changed || out != in {
 		t.Fatalf("clean content must be left verbatim, changed=%v\n%s", changed, out)
 	}
+}
+
+// parkingModel parks in Complete until the test closes release, then returns reply.
+// Only the single-flight LEADER reaches Complete, so parking it holds the in-flight key
+// open and every other candidate for the same content joins as a follower — the state
+// the follower-path tests exist to exercise. See offloadWithParkedLeader for how the
+// release is ordered so that the followers are a fact rather than scheduling luck.
+// A reply of "" gives silentModel's shape (no compaction), so a test can assert purely
+// on gates and call counts.
+type parkingModel struct {
+	reply   string
+	release chan struct{}
+	calls   int64
+}
+
+func (m *parkingModel) Complete(_ context.Context, _ string) (string, error) {
+	atomic.AddInt64(&m.calls, 1)
+	<-m.release
+	return m.reply, nil
+}
+
+// offloadWithParkedLeader runs e.Offload on a goroutine against a parkingModel and
+// returns its error. It waits until want candidates have reached the single-flight join
+// (beforeInflightJoinForTest) before closing release, so by the time the leader can
+// finish, every other candidate is at the join behind a key that is still held — the
+// followers exist because the test arranged them, not because the scheduler happened to
+// interleave the goroutines that way. want is the candidate count the fixture expects to
+// reach phase 2; fewer arrivals than that means a gate or cap trimmed the batch, and the
+// test fails on that rather than passing vacuously.
+//
+// The hook is a package global without a lock, like betweenTakeAndStartForTest: the tests
+// that use it must stay sequential. No test in this package calls t.Parallel(), and a test
+// that went parallel would signal another test's arrivals channel — the same hazard
+// summarize_anygate_test.go notes about its session-keyed single-flight.
+func offloadWithParkedLeader(t *testing.T, e *ExtractLLM, req *bschemas.BifrostChatRequest,
+	rep *components.Report, c *components.Ctx, release chan struct{}, want int) error {
+	t.Helper()
+	arrived := make(chan struct{}, want)
+	beforeInflightJoinForTest = func() { arrived <- struct{}{} }
+	t.Cleanup(func() { beforeInflightJoinForTest = nil })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.Offload(req, rep, c)
+		done <- err
+	}()
+	for i := 0; i < want; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			// Unblock Offload before failing, so the goroutine and the hook cannot race
+			// the cleanup that nils the hook.
+			close(release)
+			<-done
+			t.Fatalf("only %d of %d candidates reached the single-flight join within 10s — "+
+				"a gate or cap trimmed the batch, so this fixture exercises no followers", i, want)
+		}
+	}
+	close(release)
+	return <-done
 }

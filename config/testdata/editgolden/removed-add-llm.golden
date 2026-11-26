@@ -1,0 +1,12 @@
+cache:
+  head_ttl_1h: false
+  keepalive: false
+components:
+  toolfilter:
+    remove:
+      - mcp__new
+pipeline:
+  - cachesplit
+  - format
+  - extract_llm
+  - toolfilter

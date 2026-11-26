@@ -12,9 +12,10 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/rossoctl/context-guru/adjudicate"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/dispatch/dispatchtest"
 	"github.com/rossoctl/context-guru/internal/extract"
 )
 
@@ -82,7 +83,8 @@ const prefixBodyFixture = `{"model":"claude-sonnet-5","stream":true,` +
 // this whole mechanism exists for.
 func TestCompletePrefixedAppendsWithoutDisturbingThePrefix(t *testing.T) {
 	srv := newCapturePrefixed(t, 19595)
-	cli := cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "claude-sonnet-5", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	reply, u, err := cli.CompletePrefixed(context.Background(), []byte(prefixBodyFixture), "ASK-TEXT")
 	if err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
@@ -174,7 +176,8 @@ func TestCompletePrefixedPrefersOurToolInputOverText(t *testing.T) {
 			`"cache_read_input_tokens":8268}}`))
 	}))
 	t.Cleanup(srv.Close)
-	cli := cheapmodel.Anthropic{BaseURL: srv.URL, Model: "claude-sonnet-5", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}
 	reply, u, err := cli.CompletePrefixed(context.Background(), []byte(prefixBodyFixture), "ASK")
 	if err != nil {
 		t.Fatalf("CompletePrefixed: %v", err)
@@ -208,7 +211,8 @@ func TestCompletePrefixedPrefersOurToolInputOverText(t *testing.T) {
 // untouched by this change, and a model that answers in prose anyway is read exactly as before.
 func TestCompletePrefixedStillReadsTextWhenNoToolWasCalled(t *testing.T) {
 	srv := newCapturePrefixed(t, 8268)
-	cli := cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "m"}
 	reply, u, err := cli.CompletePrefixed(context.Background(), []byte(prefixBodyFixture), "ASK")
 	// And the shape is reported as PROSE, so the two counters cannot both be inflated by the same
 	// reply. A ViaTool that defaulted to true would make every prose answer look like a tool answer,
@@ -228,7 +232,8 @@ func TestCompletePrefixedStillReadsTextWhenNoToolWasCalled(t *testing.T) {
 // sending something that reads no cache.
 func TestCompletePrefixedRefusesABodyWithNoMessages(t *testing.T) {
 	srv := newCapturePrefixed(t, 0)
-	cli := cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "m", APIKey: "k"}
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
+	cli := cheapmodel.Anthropic{D: d, Ref: ref, Model: "m"}
 	if _, _, err := cli.CompletePrefixed(context.Background(), []byte(`{"model":"m"}`), "ask"); err == nil {
 		t.Fatal("a body with no messages array was accepted")
 	}
@@ -260,8 +265,9 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 	srv := newCapturePrefixed(t, 4242)
 	h := &Handler{sent: newSentStash()}
 	h.sent.put("scoped-session-1", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
+	d, ref := dispatchtest.HTTP(srv.srv.URL, dispatchtest.AnthropicAuth("k", ""))
 	a := prefixAsker{stash: h.sent,
-		cli: cheapmodel.Anthropic{BaseURL: srv.srv.URL, Model: "claude-sonnet-5", APIKey: "k"}}
+		cli: cheapmodel.Anthropic{D: d, Ref: ref, Model: "claude-sonnet-5"}}
 	_, u, err := a.Ask(context.Background(), "scoped-session-1", "THE-ASK")
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
@@ -286,9 +292,14 @@ func TestAskUsesTheStashedBodyForThatSession(t *testing.T) {
 // over the per-body cap is not stashed at all.
 func TestAnOversizedBodyIsNotStashed(t *testing.T) {
 	s := newSentStash()
+	before := PrefixStashOversized()
 	s.put("sess", bschemas.Anthropic, []byte(strings.Repeat("x", maxSentBody+1)), []byte(strings.Repeat("x", maxSentBody+1)))
 	if got := s.get("sess"); got != nil {
 		t.Fatalf("a %d-byte body was stashed past the %d cap", len(got), maxSentBody)
+	}
+	// #703: the refusal must show in /stats, or a no_prefix it causes reads as a first turn.
+	if got := PrefixStashOversized() - before; got != 1 {
+		t.Fatalf("prefix_stash_oversized rose by %d, want 1", got)
 	}
 	// Under the cap it is held.
 	s.put("sess", bschemas.Anthropic, []byte(prefixBodyFixture), []byte(prefixBodyFixture))
@@ -322,9 +333,66 @@ func TestResponsesPrefixAskerUsesIncomingOpenAIClient(t *testing.T) {
 	if h.prefixAskerForAPI(bschemas.OpenAI, "responses", models) == nil {
 		t.Fatal("Responses did not get a cached-prefix asker")
 	}
-	if h.prefixAskerForAPI(bschemas.OpenAI, "", models) != nil ||
-		h.prefixAskerForAPI(bschemas.OpenAI, "responses", components.ModelSpec{}) != nil {
-		t.Fatal("prefix asker escaped Responses or was built without incoming credentials")
+	if h.prefixAskerForAPI(bschemas.OpenAI, "responses", components.ModelSpec{}) != nil {
+		t.Fatal("prefix asker was built without incoming credentials")
+	}
+	if _, ok := h.prefixAskerForAPI(bschemas.OpenAI, "responses", models).(responsesPrefixAsker); !ok {
+		t.Fatal("a Responses route did not keep the Responses asker")
+	}
+}
+
+func TestChatPrefixAskerRouting(t *testing.T) {
+	h := &Handler{sent: newSentStash()}
+	models := components.ModelSpec{Incoming: cheapmodel.OpenAI{Model: "gpt-5.6"}}
+	if _, ok := h.prefixAskerForAPI(bschemas.OpenAI, "", models).(chatPrefixAsker); !ok {
+		t.Fatal("a Chat Completions route got no chat asker")
+	}
+	if h.prefixAskerForAPI(bschemas.OpenAI, "", components.ModelSpec{}) != nil {
+		t.Fatal("chat asker built without an incoming client")
+	}
+	// Other providers are unchanged: an Anthropic route still gets the Anthropic asker only.
+	am := components.ModelSpec{Incoming: cheapmodel.Anthropic{Model: "claude"}}
+	if _, ok := h.prefixAskerForAPI(bschemas.Anthropic, "", am).(prefixAsker); !ok {
+		t.Fatal("Anthropic route lost its asker")
+	}
+	if h.prefixAskerForAPI(bschemas.Anthropic, "", models) != nil {
+		t.Fatal("Anthropic route accepted an OpenAI client")
+	}
+}
+
+func TestChatPrefixAskerAsksOverStashedSession(t *testing.T) {
+	var mu sync.Mutex
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		captured = b
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"verdict"}}],` +
+			`"usage":{"prompt_tokens":1200,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1100}}}`))
+	}))
+	defer srv.Close()
+	got := func() []byte { mu.Lock(); defer mu.Unlock(); return captured }
+	stash := newSentStash()
+	b := []byte(`{"model":"m","messages":[{"role":"user","content":"ONLY-ONE"}]}`)
+	stash.put("one", bschemas.OpenAI, b, b)
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.BearerAuth("k"))
+	a := chatPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{D: d, Ref: ref, Model: "m"}}
+	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got() != nil {
+		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got())
+	}
+	reply, usage, err := a.Ask(context.Background(), "one", "ASK-ONE")
+	if err != nil || reply != "verdict" || usage.CacheRead != 1100 ||
+		!strings.Contains(string(got()), "ONLY-ONE") || !strings.Contains(string(got()), "ASK-ONE") {
+		t.Fatalf("chat ask failed: reply=%q usage=%+v err=%v body=%s", reply, usage, err, got())
+	}
+	// A stale span is refused before any call.
+	mu.Lock()
+	captured = nil
+	mu.Unlock()
+	if _, _, err := a.AskCovered(context.Background(), "one", 5, "nothash", "x"); err != components.ErrStalePrefix || got() != nil {
+		t.Fatalf("stale span was asked: err=%v", err)
 	}
 }
 
@@ -339,7 +407,8 @@ func TestResponsesPrefixAskerUsesOnlyItsSessionAndReportsMissingPrefix(t *testin
 	defer srv.Close()
 	stash := newSentStash()
 	stash.put("one", bschemas.OpenAI, []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`), []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"ONLY-ONE"}]}`))
-	a := responsesPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{BaseURL: srv.URL, Model: "gpt-5.6", APIKey: "k"}}
+	d, ref := dispatchtest.HTTP(srv.URL, dispatchtest.BearerAuth("k"))
+	a := responsesPrefixAsker{stash: stash, cli: cheapmodel.OpenAI{D: d, Ref: ref, Model: "gpt-5.6"}}
 	if _, _, err := a.Ask(context.Background(), "two", "ask"); err != components.ErrNoPrefix || got != nil {
 		t.Fatalf("missing session used another prefix: err=%v body=%s", err, got)
 	}
@@ -347,5 +416,18 @@ func TestResponsesPrefixAskerUsesOnlyItsSessionAndReportsMissingPrefix(t *testin
 	if err != nil || reply != "verdict" || usage.CacheRead != 1100 ||
 		!strings.Contains(string(got), "ONLY-ONE") || !strings.Contains(string(got), "ASK-ONE") {
 		t.Fatalf("stashed Responses ask failed: reply=%q usage=%+v err=%v body=%s", reply, usage, err, got)
+	}
+}
+
+// #703: a body from a thread near a 1M-token window (about 4 MB of request JSON) must be stashed,
+// or every prefix ask at the summarizer's own 0.9 trigger ends as ErrNoPrefix. At the old 1.5 MB cap
+// it was refused, and 30 of 30 live summaries failed.
+func TestAFullWindowBodyIsStashed(t *testing.T) {
+	const fullWindowBody = 4_500_000
+	s := newSentStash()
+	body := []byte(strings.Repeat("x", fullWindowBody))
+	s.put("sess", bschemas.Anthropic, body, body)
+	if got := s.get("sess"); len(got) != fullWindowBody {
+		t.Fatalf("a %d-byte full-window body was not stashed (cap %d)", fullWindowBody, maxSentBody)
 	}
 }

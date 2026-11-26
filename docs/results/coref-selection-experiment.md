@@ -323,8 +323,8 @@ sandboxed filter, not free-text; selection cannot replace a summarizer.
 **Not settled — and each needs a different instrument:** whether any of this improves *reward*;
 whether recovery via `expand` actually fires often enough to make a 30% recoverable false-drop
 preferable to a 20% permanent one; how often the agent's own compaction is reachable at all
-(`modes.Tracker` reset detection, free, still not run); ~~and whether a floor-symmetric comparison
-narrows the gap between the index and the bulk arm~~ — **answered: it does not**
+(`modes.Tracker` reset detection, free, still not run); and whether a floor-symmetric comparison
+narrows the gap between the index and the bulk arm — **answered: it does not**
 (iteration 009).
 
 See also: [co-reference density](coref-density.md) · the proposal (`docs/proposals/coref-compaction.md`)

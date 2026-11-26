@@ -85,9 +85,17 @@ validation:
 # refuted it — useful in review, actively confusing on a page a user reaches looking for how to
 # configure something. Excluded rather than added to the nav so `mkdocs build --strict` stays
 # green without publishing internal argument, and so a proposal can be added without a nav edit.
+# docs/metrics/ is the same category: the metrics reporting spec and its design record,
+# addressed to whoever builds the reporting path, with mockups and a generator script beside them.
+# docs/data-dependence/ holds the row files and the template that cmd/gen-datadep turns into
+# docs/data-dependence.md (the page the site shows).
 exclude_docs: |
   superpowers/
+  img/readme/savings-figure.html
   proposals/
+  plans/
+  data-dependence/
+  metrics/
 
 # Nav mirrors how people arrive: install it the easy way and see what it saves
 # (Get started) → run it yourself instead of the plugin (Advanced /
@@ -99,10 +107,13 @@ nav:
   - Home: index.md
   - Get started:
       - Install the Claude Code plugin: how-to/install-plugin.md
+      - Install the OpenCode plugin: how-to/install-opencode-plugin.md
+      - Install the Pi package: how-to/install-pi-package.md
       - The plugin's recovery files: how-to/plugin-recovery-files.md
       - Use with Claude Code: how-to/use-with-claude-code.md
       - Claude Code plugin:
           - Overview and install: plugin/index.md
+          - Commands: plugin/commands.md
           - Home and status: plugin/status.md
           - Insights: plugin/insights.md
           - Insights savings: plugin/savings.md
@@ -112,9 +123,12 @@ nav:
           - Doctor: plugin/doctor.md
           - Save more: plugin/save-more.md
           - Remove MCP servers and skills: plugin/remove-mcp-and-skills.md
+          - Cache campaign: plugin/cache-campaign.md
           - Terminal views: plugin/terminal-views.md
           - Status line: plugin/statusline.md
           - Configuration and troubleshooting: plugin/configuration.md
+      - Pi package and Claude Code plugin compared: reference/pi-vs-claude-code.md
+      - Plugins, providers and settings: reference/plugins-matrix.md
       - Test a subscription login in a sandbox: how-to/test-subscription-sandbox.md
       - How it saves money: get-started/how-it-saves.md
       - Technical overview: get-started/overview.md
@@ -122,14 +136,18 @@ nav:
   - Concepts:
       - Architecture: design.md
       - Reversibility & recovery: how-to/recover-context.md
+      - Data dependence & storage off: data-dependence.md
+      - Client coverage: client-coverage.md
       - When your agent compacts: how-to/agent-compaction.md
       - Measuring savings: how-to/measure-savings.md
       - Keep an idle prompt cache warm: how-to/cache-keepalive.md
+      - Choose a cache strategy: how-to/cache-strategies.md
       - Choose a cache TTL: how-to/kv-cache-ttl.md
       - Budget keep-alive pings: how-to/kv-cache-keepalive-budget.md
   - Components:
       - Overview: components.md
       - Choose a preset: reference/presets.md
+      - Tool search matrix: tool-search-matrix.md
       - Reformat components: components/reformat.md
       - Prompt caching: components/caching.md
       - "Offload: deterministic reducers": components/offload-reducers.md
@@ -142,8 +160,11 @@ nav:
   - Modes:
       - Sync & observe: how-to/operating-modes.md
       - Config & routes reference: reference/reference.md
+      - Session recorder (cg_record build): reference/session-recorder.md
+      - 'Hosted and local: where they differ, and why': reference/hosted-vs-local.md
       - Settings form & field descriptors: how-to/settings-form.md
   - Dashboard: dashboard.md
+  - "The dashboard, tab by tab": how-to/dashboard-guide.md
   - Hosted service: hosted.md
   - Results:
       - Overview: RESULTS.md
@@ -159,6 +180,8 @@ nav:
       - Rule-based and learned TTL arms, scored: results/kv-ttl-predictor-arms.md
       - TTL predictors compared, pooled and per tenant: results/kv-ttl-predictor-comparison.md
       - "Strategies vs Overview: reconciling keep-alive savings": results/kv-ttl-savings-reconciliation.md
+      - "Accountant: where cg's saving differs from the expected figure": accountant/cg-differences.md
+      - "Accountant: root causes of the differences": accountant/cg-differences-root-causes.md
       - "The keep-alive reuse model: features, fit, and what it is worth": results/kv-cache-keepalive-reusemodel.md
       - "SWE-bench Verified: per-arm detail": results/swebench-arms.md
       - "Terminal-Bench 2.0":
@@ -172,6 +195,7 @@ nav:
       - "What can and cannot be measured": results/measurement-limits.md
       - "What actually fires (component gating)": results/component-gating.md
       - "The floor and the economic gate": results/min-tokens-vs-economic-gate.md
+      - "Compaction: client-side vs. server-side": research/compaction-client-vs-server.md
   - Integrations:
       - Host adapters: integrations.md
       - bifrost plugin: how-to/bifrost-plugin.md

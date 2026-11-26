@@ -5,8 +5,8 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Opts is BodyOpts' input: everything the positional BodyFull takes, plus the operating
@@ -18,14 +18,50 @@ type Opts struct {
 	Provider bschemas.ModelProvider
 	Body     []byte
 	// API identifies the wire envelope. Empty means Chat Completions / Messages;
-	// "responses" selects OpenAI's native Responses instructions+input shape.
+	// "responses" (or the upstream path "/v1/responses") selects OpenAI's native Responses
+	// instructions+input shape. schema.WireFor reads it.
 	API string
 	// Session is the host-supplied session id ("" => content hash).
 	Session string
 	// ThreadOf, when set, finds the thread of the session this request belongs to (see
-	// internal/thread). It is called once, as soon as the session id is resolved and BEFORE the
+	// package thread). It is called once, as soon as the session id is resolved and BEFORE the
 	// pipeline runs, so components see the thread on Ctx.Thread; the result rides on
 	// Trace.Thread. nil leaves every request on the primary thread.
+	//
+	// A host builds it with thread.ResolveSession, the rule the proxy uses too (proxy/thread.go
+	// threadFor). ResolveSession gives the primary thread for an empty session and recovers a
+	// panic. Keep one thread.Tracker per process, because it holds per-session state:
+	//
+	//	orig := body // the request as the agent sent it, saved before the pipeline runs
+	//	agentID, _ := thread.HeaderAgentID(agent.Identify(req.Header).SubagentID())
+	//	opts.ThreadOf = func(session string) thread.Result {
+	//		// agentall is github.com/rossoctl/context-guru/agent/all. With no headers, pass nil.
+	//		res, _ := tracker.ResolveSession(tenant, session, agentID, orig, agentall.IsClientCompaction(req.Header, orig))
+	//		return res
+	//	}
+	//
+	// Call ThreadOf (and so Resolve) once per request: each call records the request as its
+	// thread's newest turn. If Trace.ThreadResolved is false after the call, apply returned
+	// before it called ThreadOf (no message list, or no message it can use). Then call the same
+	// function yourself with Trace.Session, so the finish side below still has a thread.
+	// Trace.Session is "" in that case, so the result is the primary thread.
+	//
+	// lifecycle.Prepare runs the request-side steps in their order, lifecycle.Request.Opts builds the
+	// shared options, and lifecycle.Finish runs the finish-side steps below.
+	//
+	// Host contract. Once ThreadOf is set, components key their state by
+	// thread.Key(session, threadID). Make the finish-side calls with the same thread
+	// (threadID = Trace.Thread.ID, session = Trace.Session), or state is written under one key
+	// and read under another:
+	//
+	//   - lifecycle.Prepare calls offload.ClearStaleKeepAliveCandidate(thread.Key(session, threadID),
+	//     startedAt) for the host, after the pipeline and after the keep-alive arrival.
+	//   - lifecycle.Finish calls, for the host, RecordBilledInput and RecordBilledInputThread (only when
+	//     usage is OK, and in observe mode for the shadow store too), offload.ResolveDeferredCacheAwareSummary
+	//     and offload.ResolveWarmQuestion, all with the same session and threadID.
+	//   - The host keeps every keepalive.Keeper call (ArriveAt, Depart, WaitingFor, RaiseWaitPlan and the
+	//     others) with keepalive.Key{Tenant: tenant, Session: session, Thread: threadID}. It passes them
+	//     to Prepare (Arrive) and Finish (Touch) as function values, so they run in the right order.
 	ThreadOf func(session string) thread.Result
 	// Tenant namespaces the session id in a hosted, multi-tenant deployment. Empty
 	// in single-tenant use, which leaves session keys byte-identical to before this
@@ -50,9 +86,9 @@ type Opts struct {
 	WindowExact bool
 	// CompactionPoint is C in provider-billed tokens: where the conversation's own compaction
 	// mechanism acts. 0 = unknown, and components fall back to Window. See
-	// internal/compactionpoint for the definition and why it is not the window.
+	// compactionpoint for the definition and why it is not the window.
 	CompactionPoint int
-	// CompactionPointSource is "measured" | "assumed" | "window_fallback".
+	// CompactionPointSource is "measured" | "assumed" | "configured" | "client_default" | "operator" | "window_fallback".
 	CompactionPointSource string
 	// CacheMode is "auto" (default) | "on" | "off" — see resolveCacheAware.
 	CacheMode string
@@ -83,15 +119,36 @@ type Opts struct {
 	// cannot affect anything today because this is off, but it is the one way this field
 	// touches shared behaviour.
 	HeadTTL1h bool
-	// HeadTTLMinTokens is the size gate on HeadTTL1h, in estimated tokens. 0 disables the
+	// OneHourFirst asks the host whether THIS request must carry the 1-hour tier on EVERY existing cache
+	// breakpoint (tools, system and messages): the 1-hour-on-wait strategy on a route where the switch from 5
+	// minutes costs a rewrite, so the main thread writes at 1 hour from its first request (#1261). It is
+	// asked at the end of apply, once the thread and the session are known, with the model of the FINAL
+	// body (the one the keeper keys its route state by) and whether the body declares tools. It adds no breakpoint and changes no other request. nil never relabels.
+	OneHourFirst func(session, threadID, model string, toolsDeclared bool) bool
+	// HeadTTLMinBytes is the size gate on HeadTTL1h, in bytes of the request body. 0 disables the
 	// upgrade entirely rather than defaulting, so a host that forgets to resolve its
 	// configuration asks for nothing instead of asking on every request.
-	HeadTTLMinTokens int
+	HeadTTLMinBytes int
 	// PrefixAsk, when set, lets a component put a question to the request's own model with the
 	// previous turn's SENT body as the cached prefix. See components.PrefixAsker. nil => a component
 	// that wants one gets none and decides for itself; today's behaviour for every caller that does
 	// not set it.
 	PrefixAsk components.PrefixAsker
+	// CanKeepAlive, when set, tells a component whether the host's keep-alive can ping the thread of
+	// the session this request belongs to. See components.Ctx.CanKeepAlive. nil => it cannot.
+	CanKeepAlive func(session, thread string) bool
+	// FreePing asks the host for the free 1-hour ping that was the last touch of a conversation: its start time in
+	// milliseconds, and whether one stands. It is the host's fact for ONE case: the store keeps nothing
+	// (store.Keeps is false: storage off, or no store), so the ping's clock was never written and the cold check
+	// has nothing to read (#1350). apply asks it ONLY then. With a real store the stored clock stays the one record
+	// and this is never called. It can only make a cold verdict warm, and only inside the entry lifetime of the
+	// ping (EntryLifetime). nil asks for nothing, and so does a panic (fail open, as CanKeepAlive).
+	//
+	// It is asked by the cold clock's ALIAS (Trace.TouchAlias, from the body), not by session id and thread: the
+	// stored clock is keyed by the alias, and the same conversation may arrive under two session ids (with and
+	// without the client's session header). Asking by alias makes the store-off answer as id-independent as the
+	// stored one.
+	FreePing func(alias string) (atMs int64, ok bool)
 	// Tracker, when set, owns the per-session cached-prefix boundary. Supplying it also
 	// removes the concurrent-turn race in the legacy read-then-deferred-write of prevLen.
 	// nil => the legacy store-backed path, unchanged for library callers and /compact.
@@ -120,6 +177,38 @@ func (o Opts) nowMs() int64 {
 		return time.Now().UnixMilli()
 	}
 	return o.Now.UnixMilli()
+}
+
+// canKeepAliveFor binds the host's keep-alive check to one request's session and thread. nil in, nil
+// out: a component then reads "cannot". A panic in the hook reads "cannot" as well (fail open: the
+// thread keeps nothing extra and is pinged as before).
+func canKeepAliveFor(f func(session, thread string) bool, session, thread string) func() bool {
+	if f == nil {
+		return nil
+	}
+	return func() (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return f(session, thread)
+	}
+}
+
+// freePingFor asks the host's FreePing hook for one request's alias. nil in, nothing out. A panic in the hook reads
+// "no ping" (fail open: the cold check then decides without it, as before).
+func (o Opts) freePingFor(alias string) (atMs int64, ok bool) {
+	if o.FreePing == nil {
+		return 0, false
+	}
+	defer func() {
+		if recover() != nil {
+			atMs, ok = 0, false
+		}
+	}()
+	atMs, ok = o.FreePing(alias)
+	return atMs, ok && atMs > 0
 }
 
 // resolveThread runs ThreadOf once for the resolved session id. Fails open: a panic in the hook

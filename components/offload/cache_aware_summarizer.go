@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -14,9 +15,9 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"gopkg.in/yaml.v3"
 )
 
@@ -116,9 +117,13 @@ type CacheAwareSummarizer struct {
 	maxRequestTokens  int
 	resummarizeTokens int
 	modelSource       string
-	modelClient       components.Model
-	trigger           components.Trigger
-	mode              markerMode
+	// modelClient is a test-injection seam only; see AgentDiet.modelClient.
+	modelClient components.Model
+	trigger     components.Trigger
+	mode        markerMode
+	// refreshFullCost is true when refresh_cost is "full": the keep-alive refresh test then weighs
+	// the saving against the whole summary call, as it did before #1144.
+	refreshFullCost bool
 	// overrideProfiles caches the on-disk registry after the first successful read.
 	overrideProfiles atomic.Value
 }
@@ -168,10 +173,14 @@ type cacheAwareSummarizerConfig struct {
 	// on every turn and the request carrying the agent's answer never gets a hit past it — the
 	// component would invalidate the cache it exists to protect, and pay a synchronous model call
 	// per turn to do it.
-	ResummarizeTokens int                `yaml:"resummarize_tokens"`
-	MarkerMode        string             `yaml:"marker_mode"` // full (default) | summary | off
-	Model             modelConfig        `yaml:"model"`
-	Trigger           components.Trigger `yaml:"trigger"`
+	ResummarizeTokens int    `yaml:"resummarize_tokens"`
+	MarkerMode        string `yaml:"marker_mode"` // full (default) | summary | off
+	// RefreshCost picks the cost the keep-alive refresh test weighs the saving against: "extra"
+	// (default, the cost over the ping the refresh replaces) or "full" (the whole call, the test
+	// before #1144). Read only with trigger.cache_state: pre_expiry and keep-alive on.
+	RefreshCost string             `yaml:"refresh_cost"`
+	Model       modelConfig        `yaml:"model"`
+	Trigger     components.Trigger `yaml:"trigger"`
 }
 
 // summarizerProfiles is summarizer_model_profiles.yaml; see that file for the provenance of
@@ -213,15 +222,8 @@ type summarizerProfiles struct {
 // that can re-grant `system` to every unmatched model at once is the opposite of an allow-list,
 // so an unmatched model is now unconditionally `user`.
 func (p *summarizerProfiles) roleFor(modelID string) (role bschemas.ChatMessageRole, matched bool) {
-	id := strings.ToLower(strings.TrimSpace(modelID))
-	if id != "" {
-		for _, m := range p.SystemModels {
-			if m != "" && strings.Contains(id, strings.ToLower(strings.TrimSpace(m))) {
-				return bschemas.ChatMessageRoleSystem, true
-			}
-		}
-	}
-	return bschemas.ChatMessageRoleUser, false
+	a := resolveAsk(p.SystemModels, modelID, askViaMessages)
+	return a.Role, a.SystemAllowed
 }
 
 // thinkingLastTurnOnly reports whether modelID is one documented to keep only the LAST turn's
@@ -245,16 +247,7 @@ func (p *summarizerProfiles) roleFor(modelID string) (role bschemas.ChatMessageR
 // summarizer_model_profiles.yaml's thinking_last_turn_models) also names Claude 3.7 Sonnet,
 // bare Opus 4 and Opus 4.1, and bare Sonnet 4 and Sonnet 4.5, per the same doc page's cutoffs.
 func (p *summarizerProfiles) thinkingLastTurnOnly(modelID string) bool {
-	id := strings.ToLower(strings.TrimSpace(modelID))
-	if id == "" {
-		return false
-	}
-	for _, m := range p.ThinkingLastTurnModels {
-		if m != "" && strings.Contains(id, strings.ToLower(strings.TrimSpace(m))) {
-			return true
-		}
-	}
-	return false
+	return matchesModelList(p.ThinkingLastTurnModels, modelID)
 }
 
 // prompt returns the instruction text for a role. The two differ by more than tone: the user
@@ -341,6 +334,13 @@ var (
 	// dropped for being oversized, or a race against this session's own concurrent turn) —
 	// caught before paying for the call rather than after.
 	cacheAwareStalePrefix int64
+	// cacheAwareCoordsShifted counts a decline because an EARLIER COMPONENT changed the message
+	// count, so the span to verify against the host's stash could not be located (rawSpanForHash
+	// !ok — see components.ErrCoordsShifted). Not a stash defect at all: the stash can be
+	// perfectly current, and on a `high`/`xhigh` pipeline, where `summarize` compacts before this
+	// guard runs, it is the expected decline of every compacted turn (#452). Counted apart from
+	// cacheAwareStalePrefix so that counter keeps meaning "the stashed body was the wrong one".
+	cacheAwareCoordsShifted int64
 	// cacheAwarePrefixAskUsed counts turns that reached the model step via components.PrefixAsker
 	// rather than a components.MessagesModel — i.e. every turn that activated on a route whose
 	// client has no MessagesModel at all, which on this deployment IS the Anthropic
@@ -378,6 +378,9 @@ func CacheAwareSummarizerErrors() int64   { return atomic.LoadInt64(&cacheAwareE
 func CacheAwareSummarizerNoPrefix() int64 { return atomic.LoadInt64(&cacheAwareNoPrefix) }
 func CacheAwareSummarizerStalePrefix() int64 {
 	return atomic.LoadInt64(&cacheAwareStalePrefix)
+}
+func CacheAwareSummarizerCoordsShifted() int64 {
+	return atomic.LoadInt64(&cacheAwareCoordsShifted)
 }
 func CacheAwareSummarizerPrefixAskUsed() int64 {
 	return atomic.LoadInt64(&cacheAwarePrefixAskUsed)
@@ -461,6 +464,15 @@ func init() {
 				"which changes the forwarded prefix every turn and forfeits the cache stability " +
 				"this component exists for."},
 		markerModeField(),
+		{Key: "refresh_cost", Type: components.FieldEnum, Default: RefreshCostExtra,
+			Options: []string{RefreshCostExtra, RefreshCostFull},
+			Hint: "What a keep-alive refresh of a pre_expiry reserve must earn back. extra = only the " +
+				"cost over the ping it replaces (the reply, about $0.02), so a refresh pays after " +
+				"about 8,000 new tokens on Sonnet 5. full = the whole call, the read of the " +
+				"conversation too (the rule before #1144), about 80,000 new tokens at a 900k prompt. " +
+				"extra applies only where the refresh replaces a planned ping and the call reads the ping's own " +
+				"prefix (prefix_ask); the extra slot, the messages path and model.source: config use the whole call. " +
+				"Read only with trigger.cache_state: pre_expiry and keep-alive on."},
 	}
 	f = append(f, modelFields("model")...)
 	// The shared trigger descriptors, with the two defaults this component's constructor
@@ -542,7 +554,7 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	cfg := cacheAwareSummarizerConfig{
 		KeepLastTurns: 10, MinTokens: 500, ResummarizeTokens: 6000, InstructionRole: "auto",
 	}
-	if err := components.Decode(raw, &cfg); err != nil {
+	if err := decodeWithModelHint("cache_aware_summarizer", raw, &cfg); err != nil {
 		return nil, err
 	}
 	if cfg.KeepLastTurns < 0 {
@@ -558,6 +570,12 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	}
 	if cfg.ResummarizeTokens < 0 {
 		return nil, errors.New("cache_aware_summarizer: resummarize_tokens must be >= 0")
+	}
+	switch cfg.RefreshCost {
+	case "", RefreshCostExtra, RefreshCostFull:
+	default:
+		return nil, fmt.Errorf("cache_aware_summarizer: refresh_cost %q is not one of [%s %s]",
+			cfg.RefreshCost, RefreshCostExtra, RefreshCostFull)
 	}
 	// Installs min_request_frac: 0.9 / cache_state: any for keys the operator did not write, and
 	// validates cache_state — see applyCacheAwareTriggerDefaults.
@@ -580,8 +598,9 @@ func newCacheAwareSummarizer(raw []byte) (components.Component, error) {
 	c := &CacheAwareSummarizer{
 		keepLastTurns: cfg.KeepLastTurns, modelID: cfg.ModelID, profilesPath: cfg.ProfilesPath,
 		profiles: profiles, minTokens: cfg.MinTokens, maxRequestTokens: cfg.MaxRequestTokens, resummarizeTokens: cfg.ResummarizeTokens,
-		modelSource: cfg.Model.Source, modelClient: cfg.Model.Client(),
-		trigger: cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode),
+		modelSource: cfg.Model.Source,
+		trigger:     cfg.Trigger, mode: parseMarkerMode(cfg.MarkerMode),
+		refreshFullCost: cfg.RefreshCost == RefreshCostFull,
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.InstructionRole)) {
 	case "", "auto":
@@ -614,6 +633,10 @@ func (CacheAwareSummarizer) Name() string                 { return "cache_aware_
 func (CacheAwareSummarizer) Enabled(*components.Ctx) bool { return true }
 func (*CacheAwareSummarizer) NeedsModel() bool            { return true }
 
+// CutFrac is the trigger fraction of the window at which this component cuts the conversation
+// (components.CutFracProvider).
+func (s *CacheAwareSummarizer) CutFrac() float64 { return s.trigger.MinRequestFrac }
+
 // InstructionRole exposes the resolved role so /stats and a probe can report which channel this
 // arm actually used; with `auto` it cannot be read off the config alone.
 func (s *CacheAwareSummarizer) InstructionRole() string { return string(s.instructionRole) }
@@ -622,34 +645,6 @@ func (s *CacheAwareSummarizer) InstructionRole() string { return string(s.instru
 // built as [the whole conversation] + [instruction], and is REUSED across turns until the tail
 // grows past resummarize_tokens — without that reuse the forwarded prefix would change every
 // turn and this component would invalidate the cache it exists to protect.
-// hasThinkingBlock reports whether an assistant message carries a thinking block — plain
-// (`Reasoning`/a `reasoning.text` detail, bifrost's normalized form of Anthropic's `thinking`)
-// or encrypted (`reasoning.encrypted`, bifrost's form of `redacted_thinking`). Either shape is
-// what Anthropic's own preservation rule keys on; this component does not need to tell them
-// apart; strips/keeps the whole block together.
-func hasThinkingBlock(m bschemas.ChatMessage) bool {
-	return m.ChatAssistantMessage != nil &&
-		(m.Reasoning != nil || len(m.ReasoningDetails) > 0)
-}
-
-// thinkingWouldBeStripped reports whether appending a non-tool-result message to msgs would,
-// on a last-turn-only model, strip every thinking block before the LAST message from the
-// backend's own cached context — see summarizerProfiles.thinkingLastTurnOnly for the citation
-// and the live-measured gap this check exists to close. The last message itself is excluded:
-// appending AFTER it is exactly the turn whose thinking (if any) survives on either kind of
-// model, so it carries no risk of its own.
-func thinkingWouldBeStripped(msgs []bschemas.ChatMessage) bool {
-	if len(msgs) == 0 {
-		return false
-	}
-	for _, m := range msgs[:len(msgs)-1] {
-		if hasThinkingBlock(m) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) ([]string, error) {
 	msgs := req.Input
 	// Attribute any spend a DETACHED summarizer call incurred since this session's last turn.
@@ -668,15 +663,26 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		return nil, nil
 	}
 	if end <= start {
+		// Named for the same reason summarize names it: a transcript too short for keep_last_turns
+		// is a shape this component can never act on, and an unnamed skip reads as "not big
+		// enough yet" in /stats (#703).
+		rep.Gate("summary_span_empty")
 		rep.Skipped = true
 		return nil, nil
 	}
 	// Never summarize away content the agent just expanded: that is the bounce loop cg:keep:
 	// exists to prevent, and it falsifies expand.RestoredInPlace's "present above" pointer.
+	//
+	// KEPT-VERBATIM ONLY, exactly as summarize asks it — never skipReduce's other half,
+	// expand.HasPlaceholder. That half stopped the span at the first message whose TEXT holds
+	// `<<cg:...>>`, and a session that reads this repo's own docs or code carries that text from
+	// its first tool result on. Live, every commission on a 900k-token, 2,200-message thread
+	// covered 4 messages (#703). A real marker inside the span is safe to summarize: the span is
+	// stashed whole under the summary's own marker, so it stays reversible.
 	if trimmed := trimSpanForKeptVerbatim(msgs, start, end, func(content string) bool {
-		_, skip := skipReduce(c, content)
-		return skip || restoredSpanGuard(c, content)
+		return isKeptVerbatim(c, contentKey(content)) || restoredSpanGuard(c, content)
 	}); trimmed <= start {
+		rep.Gate("summary_span_empty_after_expand_trim")
 		rep.Skipped = true
 		return nil, nil
 	} else {
@@ -709,6 +715,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			rep.Irreversible = true // reused a non-full checkpoint (nothing stashed)
 		}
 		req.Input = out
+		c.CacheAnchorToolID = lastKeptToolResultID(out, headCount+1)
 		return keys, nil
 	}
 	// declineButReplayStale is every later decline's fallback: a checkpoint whose covered hash
@@ -724,6 +731,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 					rep.Irreversible = true
 				}
 				req.Input = out
+				c.CacheAnchorToolID = lastKeptToolResultID(out, headCount+1)
 				return keys, nil
 			}
 		}
@@ -763,8 +771,21 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		rep.Gate("cache_state_declined_" + phase.String())
 	}
 
+	// KEEP THE LAST TOOL EXCHANGE OUT OF A FRESH SPAN (#723). The provider never reads a cache entry
+	// that ends at a text turn on the next request; it reads one that ends at a tool_result. A splice
+	// that folded every tool exchange away left the kept history as text turns only, so every later
+	// turn re-wrote all of it (measured: read 12,939, write 2,029 on the turn after a splice). Kept
+	// verbatim, and marked by the host (CacheAnchorToolID), that exchange gives the next turn an
+	// entry to read (measured: read 21,563, write 98). The cut is frozen in the checkpoint's
+	// CoveredCount, so later turns keep the same exchange without recomputing it.
+	// Only where the host can write the mark (#730): on OpenAI the exchange would stay unsummarized
+	// for nothing.
+	if !c.NoCacheBreakpoint {
+		end = retreatPastLastToolExchange(msgs, c.WireGroup, start, end)
+	}
 	span := msgs[start:end]
 	if schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: span}) < s.minTokens {
+		rep.Gate("summary_span_below_min_tokens")
 		return declineButReplayStale()
 	}
 	// The bill is set by the WHOLE conversation, because that is what gets sent. Checked before the
@@ -775,9 +796,10 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		rep.Gate("request_over_max_tokens")
 		return declineButReplayStale()
 	}
-	model := s.modelClient
+	model := s.modelClient // test-injection seam; nil in production
+	usedSource := ""
 	if model == nil {
-		model = c.Model.For(s.modelSource)
+		model, usedSource = c.Model.ForSource(s.modelSource)
 	}
 	var mm components.MessagesModel
 	if model != nil {
@@ -795,6 +817,8 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// client's own capability gap, distinct from "nothing configured at all".
 			atomic.AddInt64(&cacheAwareDeclined, 1)
 			rep.Gate("no_messages_model")
+		} else {
+			rep.Gate("no_model")
 		}
 		return declineButReplayStale()
 	}
@@ -805,7 +829,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// the dashboard's own numbers would suggest — silently, which is worse than not compacting
 	// at all. c.ModelName is the ACTUAL model this request targets, not s.modelID (the
 	// operator's pinned model for the system-role check below, a different question).
-	if profiles.thinkingLastTurnOnly(c.ModelName) && thinkingWouldBeStripped(msgs) {
+	if askStripsThinking(profiles.ThinkingLastTurnModels, c.ModelName, msgs) {
 		atomic.AddInt64(&cacheAwareThinkingWouldStrip, 1)
 		rep.Gate("thinking_would_be_stripped")
 		logging.From(c.Ctx).Debug("cg.cache_aware_summarizer.thinking_would_be_stripped",
@@ -838,7 +862,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 		// Overridden HERE rather than at `role`'s own resolution above, because that resolution
 		// also has to stay correct for a deployment that later gets a MessagesModel on the same
 		// config.
-		role = bschemas.ChatMessageRoleUser
+		role = resolveAsk(profiles.SystemModels, s.modelID, askViaPrefix).Role
 	}
 	instruction := bschemas.ChatMessage{Role: role}
 	schema.SetMessageText(&instruction, profiles.prompt(role))
@@ -895,8 +919,24 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 			// asker's own reported coverage (components.PrefixCoverage); an asker that does not
 			// implement it is trusted as before — this guard exists to catch a NEW failure
 			// mode, not to narrow who may answer.
+			// Check and ask on ONE read of the stash when the asker can: this call runs detached,
+			// and the thread's next request can replace the stashed body between a separate
+			// CoversSpan and Ask.
+			//
+			// !rawOK is reported as ErrCoordsShifted, NOT ErrStalePrefix: the count change is in
+			// the pipeline geometry, not the stash, and the stash can be perfectly current. On a
+			// `high`/`xhigh` pipeline this is the expected decline of every compacted turn, so
+			// folding it into the stale-prefix counter reported stash defects that did not
+			// happen (#452).
+			if !rawOK {
+				return "", components.ErrCoordsShifted
+			}
+			if ca, ok := asker.(components.PrefixCoveredAsker); ok {
+				reply, _, err := ca.AskCovered(ctx, session, requiredCount, requiredHash, instructionText)
+				return reply, err
+			}
 			if pc, ok := asker.(components.PrefixCoverage); ok &&
-				(!rawOK || !pc.CoversSpan(session, requiredCount, requiredHash)) {
+				!pc.CoversSpan(session, requiredCount, requiredHash) {
 				return "", components.ErrStalePrefix
 			}
 			reply, _, err := asker.Ask(ctx, session, instructionText)
@@ -925,7 +965,11 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// fired (so the registry's own single-flight check in commissionSummary refuses a second
 	// dispatch and the keeper falls back to an ordinary ping) or deferred for cold (same check).
 	// See cache_aware_keepalive.go.
-	s.registerKeepAliveCandidate(c, call, path, span, end-start)
+	// ownCredential: the call goes out with the user's own credential (the PrefixAsk path, or the
+	// incoming client). Only then may its answer's headers reach the user's ping row (#1016). An
+	// answer from the operator's configured model carries the OPERATOR's limit headers.
+	ownCredential := usePrefixAsk || usedSource == "incoming"
+	s.registerKeepAliveCandidate(c, call, path, span, end-start, ownCredential)
 
 	// Don't pay for a summary the store cannot keep: a full marker promises the span is
 	// restorable, so check the room before the call rather than discovering it after.
@@ -967,7 +1011,7 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// double-rewrite to avoid guarding against; Warm and PreExpiry mean the prefix the forwarded
 	// request is about to send is itself still live, so the side call already reads it.
 	if phase == components.CachePhaseCold {
-		s.deferColdSummary(c, call, path, span, end-start)
+		s.deferSummary(c, call, path, "cold_deferred", false, false, span, end-start)
 		rep.Event("cold_commission_deferred")
 		rep.Skipped = true
 		return nil, nil
@@ -983,12 +1027,27 @@ func (s *CacheAwareSummarizer) Offload(req *bschemas.BifrostChatRequest, rep *co
 	// always Unknown, so Unknown applies immediately instead, exactly like `any`.
 	reserved := s.trigger.CacheState == components.CacheStatePreExpiry && phase == components.CachePhasePreExpiry
 
+	// A PREFIX-ASK COMMISSION WAITS FOR THIS TURN'S STASH (#722). Its call reads the host's stash of
+	// this thread's last forwarded body, which holds this turn's body only once its upstream answers
+	// 200. Started now, it ran against the previous turn's body and its coverage check refused it
+	// every time. So it is held in the deferral registry the cold path uses, and the host's hook
+	// dispatches it after that put. This turn still replays any stale summary, below.
+	if path == "prefix_ask" {
+		s.deferSummary(c, call, path, "turn", reserved, true, span, end-start)
+		rep.Event(EventSummaryDeferredToStash)
+		return declineButReplayStale()
+	}
+
 	// COMMISSION, do not block. The call covers most of the transcript against a 300 s budget, so
 	// running it inline would stall the triggering turn by minutes — billed against the agent's own
 	// timeout. summarize_async.go exists for exactly this reason. So this turn forwards UNTOUCHED
 	// and the next eligible turn finds the checkpoint and splices; see cache_aware_async.go.
 	if gate := s.startAsyncSummary(c, call, path, "turn", reserved, span, end-start); gate != "" {
 		rep.Gate(gate)
+	} else {
+		// The call's outcome lands later, off this turn, in the async counters. Without this
+		// event the turn that paid for it reads as a skip with no reason (#703).
+		rep.Event(EventSummaryStarted)
 	}
 	// A fresh summary is now on its way (or already was), but THIS turn still has the stale one:
 	// send it. Returning the full transcript here was the same cache flip replayStale exists to
@@ -1073,7 +1132,7 @@ func (s *CacheAwareSummarizer) tryReuse(c *components.Ctx, msgs []bschemas.ChatM
 		return nil, nil, false, false
 	}
 	covered := msgs[start:boundary]
-	if spanHash(covered) != cp.CoveredHash {
+	if !spanHashMatches(covered, cp.CoveredHash) {
 		return nil, nil, false, false // prefix diverged (different session / edited) → fresh
 	}
 	// RESERVE GATING. Only ever true for a checkpoint commissioned under THIS component's
@@ -1177,7 +1236,7 @@ func (s *CacheAwareSummarizer) replayStale(c *components.Ctx, msgs []bschemas.Ch
 }
 
 func cacheAwareSummaryWrapper(summary, key string, mode markerMode) string {
-	body := "=== Compacted Context (cache-aware summary) ===\n" +
+	body := schema.CacheAwareSummaryHeader + "\n" +
 		"The earlier part of this conversation has been compacted into the summary below. " +
 		"The messages before this one, and the messages after it, are verbatim originals.\n\n" +
 		summary + "\n\n" +

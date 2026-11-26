@@ -1,29 +1,26 @@
-# Config 2 — LLM code extraction (the extract component, strategy: code).
+# Config 2 — LLM code extraction (the extract_llm component, strategy: code).
 #
 # A cheap LLM writes a sandboxed Starlark filter that deletes irrelevant lines
 # from large tool outputs, keeping only what the current goal needs. The output
 # is verified to be a deletion-only subsequence of the input (rewrite: false), so
 # it never hallucinates content. Irreversible here: marker_mode "off" drops the
 # removed lines with no <<cg:…>> marker and no stash, and the store is disabled.
-pipeline: [extract]
+pipeline: [extract_llm]
 
 components:
-  extract:
+  extract_llm:
     strategy: code
     marker_mode: "off"        # no markers; irreversible drop (pairs with store off)
     rewrite: false            # keep the verified deletion-only guarantee
     trigger:
       min_request_tokens: 20000   # only spend an LLM call on genuinely large requests
       min_output_tokens: 2000     # …and only on genuinely large individual tool outputs
-    # Model endpoint + credentials live here (source: config). Point base_url at
-    # your LLM (e.g. the llm-d gateway or any OpenAI-compatible endpoint). Leave
-    # api_key empty to fall back to OPENAI_API_KEY / ANTHROPIC_API_KEY from env.
+    # source: config uses the host's configured model. The endpoint and credential are
+    # not set here: set them on the proxy with CHEAP_MODEL / CHEAP_MODEL_PROVIDER /
+    # CHEAP_MODEL_BASE / CHEAP_MODEL_KEY (see the README, §5).
     model:
       source: config
-      provider: openai
-      base_url: http://your-llm-endpoint:8000
       model: gpt-4o-mini
-      api_key: ""
 
 store:
   enabled: false

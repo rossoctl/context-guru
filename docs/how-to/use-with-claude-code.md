@@ -20,7 +20,7 @@ the *proxy* holding the key, not Claude Code.
 1. Start the proxy:
 
     ```sh
-    context-guru-proxy --preset codesmart
+    context-guru-proxy --preset conservative
     ```
 
 2. Point Claude Code at it:
@@ -65,7 +65,7 @@ Give the proxy the real key and hand Claude Code a placeholder; the proxy inject
 credential on forward:
 
 ```sh
-ANTHROPIC_API_KEY=sk-ant-real... context-guru-proxy --preset codesmart
+ANTHROPIC_API_KEY=sk-ant-real... context-guru-proxy --preset conservative
 
 ANTHROPIC_BASE_URL=http://localhost:4000/anthropic \
 ANTHROPIC_AUTH_TOKEN=placeholder \
@@ -102,9 +102,7 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
   claude -p 'say PONG' --max-turns 1     # must FAIL
 ```
 
-**Which preset?** `codesmart` is the recommended pipeline and the cheapest arm in the
-[benchmarks](../RESULTS.md) at the highest reward. See
-[Choose a preset](../reference/presets.md).
+**Which preset?** `conservative` is the safe start: no model calls. Step up to `medium`, `high` or `xhigh` when you want more cut. See [Choose a preset](../reference/presets.md).
 
 **Pinning the model.** context-guru forwards whatever `model` Claude Code sends. Set
 `FORCE_MODEL` on the proxy to override it (useful in eval harnesses).
@@ -114,7 +112,7 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
 does both:
 
 ```sh
-scripts/with-guru.sh codesmart -- claude
+scripts/with-guru.sh conservative -- claude
 ```
 
 </details>

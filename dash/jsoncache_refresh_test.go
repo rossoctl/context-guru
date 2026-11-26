@@ -86,28 +86,12 @@ func TestServeJSONSingleFlightsStaleRefresh(t *testing.T) {
 		}()
 	}
 	for i := 0; i < n; i++ {
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("a concurrent stale-cache reader blocked instead of being served the cached body immediately")
-		}
+		awaitSignal(t, "a concurrent stale-cache reader to be served the cached body (it must not block)", done)
 	}
 	close(release)
 
-	// Give the single refresh goroutine a moment to finish and release its claim.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		c.mu.Lock()
-		refreshing := c.refreshing["k"]
-		c.mu.Unlock()
-		if !refreshing {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("refresh never released its claim on the key")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// The single refresh goroutine finishes and releases its claim.
+	awaitUnclaimed(t, c, "k")
 
 	if got := atomic.LoadInt32(&computes); got != 1 {
 		t.Errorf("compute ran %d times for %d concurrent stale readers of the same key; want exactly 1", got, n)

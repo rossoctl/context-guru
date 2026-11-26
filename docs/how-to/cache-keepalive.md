@@ -27,10 +27,10 @@ Two sentences from the provider's documentation make this fixable:
 > **The lifetime is measured from the start of the request that writes or reads the cache
 > entry, not from the end of its response.**
 
-So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input where
+So a cache *read* refreshes the lifetime, and a read costs `0.1x` base input (less on Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1) where
 re-creating the prefix costs `1.25x`. After a session has been idle for `X` seconds, the
 proxy re-sends that session's last Anthropic request with `max_tokens: 1` — a pure cache read, which
-refreshes the entry. **One ping buys back about 11.5 of itself.**
+refreshes the entry. **One ping buys back about 11.5 times its own cost at a `0.1x` read rate.** The ratio is higher on a lower tier: about 24 times at `0.05x` (Opus 5.5, Sonnet 5.5) and about 49 times at `0.025x` (Fable 5.1, Mythos 5.1).
 
 Nothing else about the request changes. The prefix hash is cumulative over
 `tools` → `system` → `messages`, so a ping that altered any of it would *create* an entry
@@ -57,15 +57,133 @@ configuration document:
 ```yaml
 cache:
   keepalive: true
-  keepalive_idle_seconds: 270          # X — must be under 300
+  keepalive_idle_seconds: 240          # X — must be under 300
   keepalive_openai_idle_seconds: 1680  # GPT-5.6+ Responses; must be under 1730
   keepalive_max_pings: 2               # K
-  keepalive_min_prefix_tokens: 80000   # the gate
-  keepalive_max_usd_per_ping: 0.50
+  keepalive_min_prefix_tokens: 80000   # the gate for a main thread that waits for a person or for an unknown cause
+  # keepalive_max_usd_per_ping: 0.50  # OPT-IN flat cap per ping; unset by default (#1420). The value rule always applies.
+  keepalive_max_body_bytes: 33554432   # largest request body held per thread (memory guard); 8388608 restores the limit before #1100
+  keepalive_idle_seconds_1h: 3540      # X for a 1-hour cache (59 min); must be under 3600
+  keepalive_max_pings_1h: 1            # K for a 1-hour cache
+  keepalive_terminal_tools: [StructuredOutput]  # default; [] sends pings after the final answer, as before #857
+  keepalive_wait_plan: true            # false: one fixed K for every wait, as before #858
+  keepalive_tool_wait_max_pings: 8     # a tool wait: ping until the result comes, at most this many
+  keepalive_tool_wait_min_prefix_tokens: 20000  # the gate for a tool wait, background work, a teammate, and every wait of a subagent
+  keepalive_background_extra_pings: 3  # end_turn, waiting for background work: K + 3
+  keepalive_human_extra_pings: 1       # end_turn, waiting for a person: K + 1
 ```
 
-The 270-second Anthropic interval is chosen for robustness to where the cache cliff sits (it ties
-280 on the full replay window; counterfactual, see #435), not as a measured optimum; the 1680-second
+### The ping value rule
+
+A ping must be worth its cost (#1420). At record time the proxy compares two figures, both priced at the tier of the prompt size:
+
+- **The chain.** The planned pings of one idle span, each at its projected cost (the prefix at the cache-read rate, plus the output).
+- **The miss.** What the next request pays extra when the cache is gone: the prefix at the write rate of the entry (5 minutes, or 1 hour for an entry billed at 1 hour), minus the read it would have had. On OpenAI the write rate is the input rate before GPT-5.6, and 1.25x input from GPT-5.6.
+
+The proxy pings when the chain costs less than one miss. It refuses with the reason `not worth it` otherwise. An unpriced model is pinged, as before.
+Example: a GPT-5.5 ping at 600K tokens costs about $0.60 and protects a miss of about $5.40.
+
+`keepalive_max_usd_per_ping` is an opt-in flat cap on top of this rule. No default and no strategy sets it. A ping over it is refused with the reason `over budget`.
+Summary and sweep calls that replace a ping follow the same rule. With no cap set, a call is allowed when its cost is below the miss it protects. An explicit cap still applies.
+The rule weighs each substitute call against the miss alone, so one idle span can cost more than one miss in total. That is the floor.
+The counters `keepalive_summary_substitute_over_budget` and `keepalive_sweep_over_budget` count both refusals, over the cap and not worth it.
+
+### A named strategy
+
+`cache.strategy` sets several keys at once from a built-in table: `none`, `auto`, `1-ping`,
+`2-ping`, `1-hour-head`, `1-hour-on-wait`, `1-hour-always`, `30-min-ping` (the Codex name). The alias `5-min-ping` means `auto`.
+
+```yaml
+cache:
+  strategy: 2-ping
+  keepalive_max_usd_per_ping: 0.25   # an opt-in flat cap on top of the value rule; no strategy sets it
+```
+
+- `1-hour-head` asks for the 1-hour cache on `tools` and `system` only, and turns the pings off.
+  The message history stays on the 5-minute cache, so it goes cold after 5 idle minutes.
+- `1-hour-on-wait` is `auto`, but on a long wait of the **main agent** the first ping moves the entry to 1 hour and is
+  the only ping. On a route where that switch costs a rewrite, it stops the 1-hour pings there instead. A main thread then switches to 1
+  hour at its first cold rebuild of a prefix of at least `keepalive_one_hour_rebuild_tokens` (150,000; `-1` turns it off), with no pings
+  after. A manager's stored strategy can switch it on too (`one_hour_on_wait`). Opt-in; no default changes.
+- `1-hour-always` writes at 1 hour from the first request of the main agent, with no pings on it.
+  **On most users it does not pay off:** hosted, 97 main sessions, +22% cost against `auto`, 77 worse, the premium 39% of
+  the cost; the owner's laptop -25%. It is an explicit opt-in (`keepalive_one_hour_always`), never a default. A manager's stored strategy can set it too (`one_hour_always`), for local and hosted installs alike, with the same warning: a manager sets it knowingly, and it only turns the mode on.
+- Every strategy, for the main agent and for subagents, with the numbers: [Choose a cache strategy](cache-strategies.md).
+- A key in your file always wins. The strategy fills only the keys you left out. A key with no value (`keepalive_max_pings:`) counts as set, so the strategy does not fill it.
+- No `strategy` key: nothing changes.
+- An unknown name stops the proxy with a config error.
+- `context-guru-proxy strategies` prints the table as JSON. Plugins read it from there.
+
+### The ping count follows what the thread waits for
+
+When a turn ends, the proxy picks the ping count from what the thread waits for (#858). "K" is
+`keepalive_max_pings` (2 by default). It reads only metadata: the stop reason, the tool names, the
+open-task counts, and whether the thread id starts with `a:` (a subagent).
+
+| The thread waits for | Pings | Time windows apply? |
+|---|---|---|
+| Its own tool (main or subagent) | until the result comes, at most 8 | No |
+| Main, `end_turn`, background work | K + 3 | No |
+| Main, `end_turn`, a teammate | K | No |
+| Subagent, `end_turn` or `SubagentHandback` (its main agent) | K | No |
+| Main, `end_turn`, a person | K + 1 | **Yes, only this row** |
+| Finished (`done`, #857), or **no tool call yet on the thread** | 0 | - |
+
+- **Time windows** (manager strategies) describe when a person answers. They gate only a wait for a
+  person. For any other wait, the highest-priority active strategy that targets the tenant applies at any
+  hour. With no such strategy, the account config applies, as before.
+- **The sweep question** is not asked while a thread waits for its own tool. That span stays warm until
+  the result comes back, so a cut can never follow. It is asked on a span that began with `end_turn`.
+  The rule "keep-alive never shortens the cache strategy" is unchanged.
+- **The hold limit** is still `(K+1) x X` with the plan at most 11 pings (unless K itself is higher) and X under 300 s, so at most 60 minutes. A
+  tool wait of 8 pings at 240 to 280 s holds at most 42 minutes. The plan never goes above 11 pings, unless
+  K itself is higher, and it never lowers K.
+- **Not covered:** a 1-hour thread keeps its own schedule. A session override or an active learned
+  campaign sets its own count, and the plan does not change it.
+- **One switch:** `keepalive_wait_plan: false` brings back one fixed K for every wait, time windows for
+  every wait, sweep questions as before, and pings for a thread with no tool call yet. It also brings back
+  one prefix floor for every wait: `keepalive_min_prefix_tokens` (80,000).
+- **The prefix floor follows the wait.** A tool wait, a wait for background work and a wait for a teammate
+  need a prefix of 20,000 tokens (`keepalive_tool_wait_min_prefix_tokens`). A subagent thread needs 20,000
+  for every wait. A main thread that waits for a person, or for an unknown cause, needs 80,000
+  (`keepalive_min_prefix_tokens`). Reason: for a main thread that waits for a person, a prefix under 50k never
+  paid; for a subagent tool wait, a 20k floor cut misses from 65 to 31 (#858). The tool-wait floor never
+  raises the general one. The dashboard replay uses the same two floors.
+
+### No pings after the final answer
+
+A response whose **last** tool call is a terminal tool (default: `StructuredOutput`) ends the agent.
+No tool result comes back. The wait cause reads `done`, and the proxy plans no pings for that thread.
+Set `keepalive_terminal_tools: []` to turn this off. The key is **host configuration only**: it applies to the whole proxy, and a hosted tenant document that sets it is refused. A `SubagentHandback` call reads as `human`
+(the subagent waits for its main agent), as an `end_turn` does.
+
+### Each session follows its own cache lifetime
+
+The proxy reads the lifetime from the traffic, per session (per thread). It does not use one
+proxy-wide setting.
+
+- A thread is a **1-hour** thread when every cache breakpoint in its request asks `ttl: "1h"` **and**
+  the response billed the 1-hour tier (`ephemeral_1h_input_tokens` equals the whole cache write). A
+  turn that only reads the cache bills no write, so it keeps the thread's last billed tier.
+- The billed tier decides. A gateway can downgrade a requested `1h` to `5m` (#330), and the proxy then
+  uses the 5-minute schedule.
+- Anything else is a **5-minute** thread. That includes a mixed request (1-hour head, 5-minute tail).
+
+| Cache lifetime | `auto` (default) | `1-ping` | `2-ping` |
+|---|---|---|---|
+| 5 minutes | first ping at 240 s, at most 2 | 1 ping at 240 s | same as `auto` |
+| 1 hour | 1 ping at 59 minutes | 1 ping at 59 minutes | 2 pings, 59 minutes apart |
+
+One proxy can serve a 1-hour subscription session and a 5-minute subagent or API-key session at once.
+Each follows its own row. The 59-minute time is one constant, `AnthropicDefaultKeepAliveIdle1h` in
+`internal/modelinfo/cachefrac.go`, or `keepalive_idle_seconds_1h` in the config. The credential hold for
+a 1-hour thread is `(K+1) x 59 min`: 118 min at K=1, and at most 236 min, because `keepalive_max_pings_1h` is capped at 3. A 5-minute thread holds about 12 min. An armed session override does not change a 1-hour thread's schedule; it enables the session and sets its prefix floor. If the installed proxy binary is older than the plugin and rejects the `_1h` keys, `start-proxy.sh` re-renders the config without them and a 1-hour cache is pinged on the 5-minute schedule until the proxy is updated. The re-render is tied to the installed proxy version, so the keys come back after an update.
+
+The 240-second Anthropic interval leaves room for a ping and its whole 60-second timeout inside the
+5-minute cache: 240 + 60 = 300 s. On a live proxy, 92 of 95 failed pings were 60-second timeouts, and at
+the earlier 270 s a ping that timed out came back after the cache had expired (#707). 240 s lowers that
+risk; it does not remove it, because a ping that runs to its timeout still leaves no time to retry. It is
+being measured (#716). The earlier 270 s was chosen for robustness to where the cache cliff sits (#435); the 1680-second
 OpenAI interval is a safety margin below the documented minimum, not an
 optimized value from a production replay. Replayed through the shipped
 decision function over the production window, the earlier gated policy (X=280, K=2, 20k floor; replaced by the defaults above, #435) nets **+$125.08**
@@ -95,11 +213,14 @@ and at 10 to $54.04. The guard that works is the per-*ping* cost budget above.
   quarter of the rate and concurrency budget is reserved — and is skipped rather than
   queued when there is none.
 - **It will not retry.** A failed ping is logged and forgotten. A `4xx`, or a ping whose
-  usage reports more written than read, stops that session being pinged again.
+  usage reports more written than read, stops that session being pinged again. A ping that
+  runs to its 60 s timeout is the one failure that is still booked: the provider probably
+  billed it, so it gets a row at the keeper's projected cost, marked `timeout_estimated`,
+  with no tokens.
 
 ## Where the money shows up
 
-Every ping is a dashboard row marked `keepalive`, with its own tokens, its own cost, and
+With the dashboard on, every ping is a dashboard row marked `keepalive`, with its own tokens, its own cost, and
 its own session — so an account can audit what was spent on its behalf while nobody was at
 the keyboard. The Overview ledger carries both halves:
 
@@ -149,7 +270,8 @@ CONTEXT_GURU_KEEPALIVE=off
 
 Set in the environment, read at startup. An environment variable rather than a control-plane
 route on purpose: the thing an operator needs at 3am is one that works when the control
-plane is what is broken. `/stats` publishes `keepalive` with `pings`, `skipped`, `failed`,
+plane is what is broken. `/stats` publishes `keepalive` with `pings`, `skipped`, `failed`, `timed_out` (the part of
+`failed` that ran to the timeout and was booked at its projected cost),
 `wrote_instead_of_read` and `spend_usd`; `wrote_instead_of_read` above zero is a bug, not an
 expense.
 
@@ -182,21 +304,21 @@ it or supply the byte-identical prefix a cache read requires, and pinging on the
 key would bill the wrong party.
 
 **The body is conversation content, and enabling the keep-alive is what consents to holding
-it.** It is up to 8 MiB of that session's last request — system prompt, tools, and the
+it.** It is up to 32 MiB (`keepalive_max_body_bytes`) of that session's last request — system prompt, tools, and the
 message history — held for the length of the idle gap. This is deliberately *not* covered by
 the transcript-storage consent, which is a different promise about a different thing: that
 one governs writing content to **disk**, where a manager can read it and a retention window
 applies. This is memory only, masked, overwritten on release, never persisted, and gone
-within about 14 minutes. It cannot be reduced further — the prefix hash covers the whole
+within about 12 minutes. It cannot be reduced further — the prefix hash covers the whole
 `tools` → `system` → `messages` sequence, so a ping that trimmed the body would miss the
-cache and cost 12.5x instead of saving 11.5x, which is the mechanism inverted.
+cache and cost 12.5x instead of saving 11.5x (at a `0.1x` read rate), which is the mechanism inverted.
 
 Controls, because this is the one place the service holds a caller's credential beyond the life
 of a request:
 
 | control | what it does |
 |---|---|
-| **Hard deadline** | released at `(K+1) × X` ≈ 14 min regardless of traffic. |
+| **Hard deadline** | released at `(K+1) × X` ≈ 12 min regardless of traffic. |
 | **Eager release** | dropped the moment the next request arrives, the gate refuses, or the process shuts down — whichever comes first. |
 | **Zeroized** | the bytes are overwritten, not just dereferenced. |
 | **Masked at rest** | the credential and the body are XORed under a random per-process key, so a leaked snapshot doesn't leak a working credential or a readable transcript. |
@@ -206,10 +328,10 @@ of a request:
 | **Kill switch** | `CONTEXT_GURU_KEEPALIVE=off` stops *retention*, not merely pinging. |
 | **No ping mid-request** | a due ping waits while a request of the same thread is in flight. Other threads are not held back: a subagent's slow request never delays the main thread's ping. |
 | **Failed pings stop** | a 401 is about the key: it stops every session pinging with that credential, and only those (a teammate on the same account pings on), for an hour; a 403 (often a per-model permission or a gateway policy) does the same for that credential on that model only. A ping refused with any other non-retryable 4xx or answered 2xx with no usage at all (a translating gateway that hid an error) is counted `failed` and stops that session; 3 in a row for the same account, upstream and model switch the keep-alive off for that route, for that account only, for an hour (`route_trips` in `/stats`). A 429 or 5xx (an overload) is transient: counted `skipped`, and the next ping slot retries. A ping that lands after expiry and reads nothing is a real miss (`missed`): it re-wrote the prefix, so pinging goes on; a second miss in a row is a prefix that does not match and stops the session. |
-| **Claude models only through a relay** | native Anthropic, Bedrock and Vertex upstreams are eligible by type, whatever the deployment is called. The Anthropic route forwarded to anything else (LiteLLM, a corporate gateway) may serve another family (an OpenAI or Azure model, with no explicit cache control), so there the model name must contain `claude`, `opus`, `sonnet` or `haiku`; `CONTEXT_GURU_KEEPALIVE_MODELS=alias1,alias2` adds names for aliases that do not. |
+| **Claude models only through a relay** | native Anthropic, Bedrock, Bedrock Mantle and Vertex upstreams are eligible by type, whatever the deployment is called. The Anthropic route forwarded to anything else (LiteLLM, a corporate gateway) may serve another family (an OpenAI or Azure model, with no explicit cache control), so there the model name must contain `claude`, `opus`, `sonnet` or `haiku`; `CONTEXT_GURU_KEEPALIVE_MODELS=alias1,alias2` adds names for aliases that do not. |
 
-Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 8 MiB is not
-held. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
+Bounded on volume too: 128 MiB across at most 512 sessions, and a single body over 32 MiB
+(`keepalive_max_body_bytes`) is not held. For a model with no price the limit stays 8 MiB. The masking is obfuscation at rest against an accidental-capture read (a crash dump, a
 `/proc` read) — it does not stop an attacker with code execution in this process.
 
 ## Gating pings on stop_reason (opt-in, per strategy)
@@ -269,6 +391,48 @@ daily. A campaign runs in `shadow` (scores live decisions, changes nothing) or `
 ping count of a keep-alive the tenant already has on). `active` is refused unless the build's own
 held-out comparison recommended it. Routes, settings and safety properties:
 `predictive/README.md` in the repository.
+
+## A breakpoint at the end of the request (on by default)
+
+`cache.tail_breakpoint` is a separate switch. It sends no extra request and spends nothing between
+turns.
+
+- **The problem.** With `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, Claude Code puts its last cache
+  breakpoint on the user's text. Then it adds the environment as a `system` message after it, about
+  3k tokens. The provider caches only up to a breakpoint, so it bills that message as plain input.
+- **What the proxy does.** When more than about 1k tokens (4 KiB) follow the client's last breakpoint
+  in `messages`, the proxy adds one breakpoint on the last block. It copies the client's TTL. It
+  never adds a 5th breakpoint. A client with no breakpoint in `messages` gets none.
+- **Measured.** Claude Code 2.1.316, Sonnet 5.5, 3 runs each way: $0.0574 a run without, $0.0424
+  with (-26%). With default Claude Code settings the proxy added nothing.
+- **Turn it off** with `tail_breakpoint: false`. The `off` preset never adds it. The switch is
+  there mainly to debug a cache-cost problem. We know no reason today to turn it off as a rule.
+- **Counters** on `/stats`: `cache_tail_bp_added`, `_no_slot`, `_not_needed`, `_no_mark`,
+  `_not_found`. `_not_needed` is the sum of `_at_end` (the client's mark is already at the end,
+  or the last block already holds a mark) and `_short_tail` (4 KiB or less follow it).
+
+```yaml
+cache:
+  tail_breakpoint: false
+```
+
+## The size gate of the 1-hour head
+
+`cache.head_ttl_1h` asks for the 1-hour tier on the head breakpoints. It does so only on a large
+request.
+
+- **The gate is in bytes.** `cache.head_ttl_min_bytes` is the smallest request body that gets the
+  1-hour tier. The default is `200000`.
+- **Deprecated key.** `cache.head_ttl_min_tokens` still works. The gate was always the body size
+  divided by 4, not a token count. When `head_ttl_min_bytes` is not set, the proxy uses
+  `head_ttl_min_tokens` x 4 bytes. `50000` tokens is the same gate as `200000` bytes.
+- **Both set.** `head_ttl_min_bytes` wins.
+
+```yaml
+cache:
+  head_ttl_1h: true
+  head_ttl_min_bytes: 200000
+```
 
 ## Related
 

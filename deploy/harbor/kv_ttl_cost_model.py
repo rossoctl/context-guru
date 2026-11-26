@@ -237,7 +237,9 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -273,8 +275,9 @@ HORIZON_5M_MS = 5 * 60 * 1000
 HORIZON_1H_MS = 60 * 60 * 1000
 
 # A miss with one of these recorded reasons could not have been prevented by any TTL: the
-# content moved, or there was no entry to begin with.
-UNRESCUABLE = frozenset({"prefix_change", "cold_start"})
+# content moved, there was no entry to begin with, or the dashboard could not explain the miss
+# (an unexplained miss is never counted as rescuable).
+UNRESCUABLE = frozenset({"prefix_change", "cold_start", "unknown"})
 
 
 def tier_of(action: str) -> str:
@@ -320,9 +323,62 @@ def normalize_action(value: Any) -> str:
 
 PER_MTOK = 1e6
 DEFAULT_CACHE_READ_MULTIPLE = 0.1
+# Per-model cache-read tiers: port of internal/modelinfo.CacheReadFracFor. Source: the official
+# pricing page, https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02.
+_CACHE_READ_TIERS = (("fable", 5, 1, 0.025), ("mythos", 5, 1, 0.025),
+                     ("opus", 5, 5, 0.05), ("sonnet", 5, 5, 0.05))
+
+
+def _tier_version(full: str, tier: str) -> tuple[int, int] | None:
+    i = full.rfind(tier)
+    if i < 0:
+        return None
+    m = re.match(r"[-._](\d{1,9})(?:[-._](\d{1,9}))?", full[i + len(tier):])
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)) if m.group(2) else -1
+
+
+def cache_read_frac_for(model: str) -> float:
+    """The cache-READ multiple of base input for a model (Go: modelinfo.CacheReadFracFor)."""
+    full = re.sub(r"\[[^\]]*\]$", "", (model or "").strip().lower())
+    for tier, major, minor, frac in _CACHE_READ_TIERS:
+        if _tier_version(full, tier) == (major, minor):
+            return frac
+    return DEFAULT_CACHE_READ_MULTIPLE
 DEFAULT_WRITE_5M_MULTIPLE = 1.25
+
+
+def _gpt_56_or_later(model: str) -> bool:
+    """Go: modelinfo.GPT56OrLater. The last "gpt-" token picks the model."""
+    m = (model or "").lower()
+    i = m.rfind("gpt-")
+    if i < 0:
+        return False
+    mt = re.match(r"(\d+)(.*)", m[i + 4:])
+    if not mt:
+        return False
+    major, rest = int(mt.group(1)), mt.group(2)
+    if major != 5:
+        return major > 5
+    mm = re.match(r"\.(\d+)", rest)
+    return bool(mm) and int(mm.group(1)) >= 6
+
+
+def charges_cache_write_premium(model: str) -> bool:
+    """Go: modelinfo.chargesCacheWritePremium. Only Claude/Anthropic and GPT-5.6+ bill a
+    cache-creation premium. Every other family writes at the fresh input rate."""
+    full = re.sub(r"\[[^\]]*\]$", "", (model or "").strip().lower())
+    return "claude" in full or "anthropic" in full or _gpt_56_or_later(model)
+
+
+def cache_write_frac_for(model: str, file_frac: float = DEFAULT_WRITE_5M_MULTIPLE) -> float:
+    """The 5-minute cache-WRITE multiple of base input for a model (Go: CacheWriteFracFor, with
+    the operator's cache_write_frac in place of 1.25 for a family that charges a premium)."""
+    return file_frac if charges_cache_write_premium(model) else 1.0
 DEFAULT_WRITE_1H_MULTIPLE = 2.0
-DEFAULT_PING_INPUT_TOKENS = 1
+# Mirrors kvcache.DefaultPingInputTokens (Go): the one constant for a ping's own fresh input.
+DEFAULT_PING_INPUT_TOKENS = 7
 DEFAULT_PING_OUTPUT_TOKENS = 1
 
 SOURCE_PRICE_LIST = "price_list"
@@ -342,6 +398,9 @@ class ModelPricing:
     ping_output_tokens: int = DEFAULT_PING_OUTPUT_TOKENS
     source: str = ""
     known: bool = False
+    # True when cache_read was left blank and the file sets no cache_read_frac. _lookup then
+    # fills it from the QUERIED model, as Go's Table.Price does.
+    read_derived: bool = False
 
     def write_rate(self, tier: str) -> float:
         """The creation rate for one tier. TTL_NONE creates nothing, so it is 0 — the
@@ -441,6 +500,7 @@ class PriceBook:
                  ping_input_tokens: int = DEFAULT_PING_INPUT_TOKENS,
                  ping_output_tokens: int = DEFAULT_PING_OUTPUT_TOKENS):
         self._entries = list(entries or ())
+        self._bare_tails: dict[str, ModelPricing] = {}
         self.write_1h_multiple = float(write_1h_multiple)
         self.ping_input_tokens = int(ping_input_tokens)
         self.ping_output_tokens = int(ping_output_tokens)
@@ -461,19 +521,41 @@ class PriceBook:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if not isinstance(raw, Mapping):
             raise ValueError(f"{path}: not a mapping")
-        read_frac = float(raw.get("cache_read_frac") or DEFAULT_CACHE_READ_MULTIPLE)
+        # Unset means "per model"; a value is the operator's own gateway multiple and wins.
+        file_read_frac = None
+        if raw.get("cache_read_frac") is not None:
+            file_read_frac = float(raw["cache_read_frac"])
+            if file_read_frac <= 0:
+                raise ValueError(f"{path}: cache_read_frac must be above 0")
         write_frac = float(raw.get("cache_write_frac") or DEFAULT_WRITE_5M_MULTIPLE)
+        if write_frac < 0:
+            raise ValueError(f"{path}: cache_write_frac must not be negative")
         book = cls(**kwargs)
         entries: list[tuple[str, bool, bool, ModelPricing]] = []
+        # Each entry's window and compaction point. Nothing here prices with them; the
+        # bare-tail ambiguity rule compares them, as table.go's does.
+        meta: dict[str, tuple[int, int]] = {}
+        seen: set[str] = set()  # the match as written, `*` included, as Go's seen map keys it
         for i, m in enumerate(raw.get("models") or ()):
             match = str(m.get("match", "")).strip().lower()
             if not match:
                 raise ValueError(f"{path}: entry {i} has no match")
+            if match in seen:
+                raise ValueError(f"{path}: {match!r} appears more than once")
+            seen.add(match)
             prefix = match.endswith("*")
-            match = match.rstrip("*")
+            match = match[:-1] if prefix else match  # one `*`, as Go's TrimSuffix
+            window, compaction = int(m.get("window") or 0), int(m.get("compaction_point") or 0)
+            if window < 0 or compaction < 0:
+                raise ValueError(f"{path}: {match!r} has a negative window or compaction_point")
+            if window > 0 and compaction > window:
+                raise ValueError(f"{path}: {match!r} states compaction_point {compaction} "
+                                 f"above its window {window}")
             in_r, out_r = float(m.get("in") or 0.0), float(m.get("out") or 0.0)
             cr, cw = float(m.get("cache_read") or 0.0), float(m.get("cache_write") or 0.0)
-            if min(in_r, out_r, cr, cw) < 0:
+            # The entry's 1-hour write as a multiple of `in` (table.go cache_write_1h_frac).
+            w1h_frac = float(m.get("cache_write_1h_frac") or 0.0)
+            if min(in_r, out_r, cr, cw, w1h_frac) < 0:
                 raise ValueError(f"{path}: {match!r} has a negative rate")
             if in_r == 0 and out_r == 0:
                 raise ValueError(
@@ -481,27 +563,36 @@ class PriceBook:
                     f"it free")
             price = ModelPricing(
                 model=match, input=in_r / PER_MTOK, output=out_r / PER_MTOK,
-                cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * read_frac,
-                write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * write_frac,
+                cache_read=(cr / PER_MTOK) or (in_r / PER_MTOK) * (
+                    file_read_frac if file_read_frac is not None else cache_read_frac_for(match)),
+                read_derived=(not cr) and file_read_frac is None,
+                write_5m=(cw / PER_MTOK) or (in_r / PER_MTOK) * cache_write_frac_for(match, write_frac),
                 ping_input_tokens=book.ping_input_tokens,
                 ping_output_tokens=book.ping_output_tokens,
                 source=SOURCE_PRICE_LIST, known=True)
-            price = replace(price, write_1h=book._derive_write_1h(price))
+            price = replace(price, write_1h=book._derive_write_1h(price, w1h_frac))
             qualified = ("/" in match) or ("." in match)
             entries.append((match, prefix, qualified, price))
+            if not prefix:  # a family shares its trimmed match with an exact entry; it must not overwrite it
+                meta[match] = (window, compaction)
         # Longest match first: specificity is a property of the match, not of the file's
         # ordering or of the KIND of match.
         entries.sort(key=lambda e: len(e[0]), reverse=True)
         book._entries = entries
+        book._bare_tails = _derive_bare_tails(entries, meta)
         return book
 
-    def _derive_write_1h(self, p: ModelPricing) -> float:
+    def _derive_write_1h(self, p: ModelPricing, entry_frac: float = 0.0) -> float:
         """The 1-hour creation rate, the one rate no price list publishes.
 
         Derived from the multiplier against base INPUT, because that is how the provider
         documents it, and never allowed below the 5-minute rate: a list that implied
         otherwise would be a typo, and honouring it would make every 1h arm look free.
+        An entry's own cache_write_1h_frac wins over the book's multiple, as in Go's
+        Price.CacheWrite1hFor.
         """
+        if entry_frac > 0:
+            return max(p.input * entry_frac, p.write_5m)
         if p.input > 0:
             w = p.input * self.write_1h_multiple
         elif p.write_5m > 0:
@@ -542,19 +633,68 @@ class PriceBook:
 
     def _lookup(self, model: str) -> ModelPricing:
         full = (model or "").strip().lower()
+        # modelinfo.stripVariant: one trailing "[...]", unless the id is only that group.
+        if full.endswith("]") and full.rfind("[") > 0:
+            full = full[:full.rfind("[")]
         tail = full.rsplit("/", 1)[-1]
+        def hit(price: ModelPricing) -> ModelPricing:
+            if price.read_derived:
+                price = replace(price, cache_read=price.input * cache_read_frac_for(model))
+            return replace(price, model=model)
+
         for match, _prefix, _qual, price in self._entries:
             if match == full or match == tail:
-                return replace(price, model=model)
+                return hit(price)
+        # A bare id resolves to the one qualified entry it is the tail of (#324), before any
+        # family is consulted — table.go's lookup, same gate: no provider prefix on the request.
+        if full == tail and tail in self._bare_tails:
+            return hit(self._bare_tails[tail])
         for match, prefix, qualified, price in self._entries:  # longest first
             if prefix:
                 if full.startswith(match) or tail.startswith(match):
-                    return replace(price, model=model)
+                    return hit(price)
                 continue
             if qualified and match in full:
-                return replace(price, model=model)
+                return hit(price)
         return ModelPricing(model=model, ping_input_tokens=self.ping_input_tokens,
                             ping_output_tokens=self.ping_output_tokens)
+
+
+def _derive_bare_tails(entries: list[tuple[str, bool, bool, ModelPricing]],
+                       meta: Mapping[str, tuple[int, int]]) -> dict[str, ModelPricing]:
+    """Index each qualified, non-family entry by its bare tail — table.go's deriveBareTails.
+
+    An entry the operator wrote bare wins on its own, and a tail two providers price
+    differently is dropped with a warning rather than guessed.
+    """
+    def rates(match: str, p: ModelPricing) -> tuple[ModelPricing, tuple[int, int]]:
+        # The entry's own id and a read rate derived from that id are not part of its rate.
+        # The window and compaction point are: the entry serves them too.
+        return (replace(p, model="", cache_read=0.0 if p.read_derived else p.cache_read),
+                meta.get(match, (0, 0)))
+
+    literal = {e[0] for e in entries}
+    tails: dict[str, tuple[str, ModelPricing]] = {}
+    ambiguous: set[str] = set()
+    for match, prefix, qualified, price in entries:
+        if prefix or not qualified or "/" not in match:
+            continue
+        tail = match.rsplit("/", 1)[-1]
+        if not tail or tail in literal:
+            continue
+        prev = tails.get(tail)
+        if prev is not None and prev[0] != match:
+            if rates(prev[0], prev[1]) != rates(match, price):
+                ambiguous.add(tail)
+            continue
+        tails[tail] = (match, price)
+    if ambiguous:
+        for tail in ambiguous:
+            del tails[tail]
+        warnings.warn(f"model price list: bare id is ambiguous between two qualified entries that "
+                      f"differ in rate, window or compaction point; not indexing it: "
+                      f"{sorted(ambiguous)}")
+    return {tail: price for tail, (_m, price) in tails.items()}
 
 
 # ── the trajectory ─────────────────────────────────────────────────────────

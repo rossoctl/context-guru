@@ -22,28 +22,15 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | [`extract`](components/offload-reducers.md#extract) | Offload | obvious noise (repeated lines/blocks, blank runs, progress bars) | via expand | any large output | `min_tokens` (300), `trigger` |
 | [`extract_llm`](components/extract_llm.md) | Offload (LLM) | query-irrelevant content via an LLM-written sandboxed filter | via expand | large output in a large request | `strategy` (code), `model.source`, `trigger`, `rewrite`, `skip_file_reads` |
 | [`summarize`](components/summarize.md) | Offload (LLM) | the middle of the transcript → one summary | via expand | long trajectories | `summary_level` (regular), `keep_last` (3), `min_tokens` (500), `resummarize_tokens` (6000), `model.source`, `trigger` |
-| [`cache_aware_summarizer`](components/advanced-offload.md#cache_aware_summarizer) | Offload (LLM) | the middle of the transcript → one summary, but the summarizer CALL reuses the conversation's own prefix instead of rebuilding a prompt. [Two ways to use `trigger.cache_state`](components/advanced-offload.md#two-ways-to-use-cache_state) | via expand | long trajectories on a prefix-caching backend; needs a `MessagesModel` or (Anthropic traffic) a prior request to reuse, and **declines without either** | `keep_last_turns` (10), `instruction_role` (auto), `model_id`, `min_tokens` (500), `resummarize_tokens` (6000), `profiles_path`, `model.source`, `trigger` |
+| [`cache_aware_summarizer`](components/advanced-offload.md#cache_aware_summarizer) | Offload (LLM) | the middle of the transcript → one summary, but the summarizer CALL reuses the conversation's own prefix instead of rebuilding a prompt. [Two ways to use `trigger.cache_state`](components/advanced-offload.md#two-ways-to-use-cache_state) | via expand | long trajectories on a prefix-caching backend; needs a `MessagesModel` or (Anthropic traffic) a prior request to reuse, and **declines without either** | `keep_last_turns` (10), `instruction_role` (auto), `model_id`, `min_tokens` (500), `resummarize_tokens` (6000), `refresh_cost` (extra), `profiles_path`, `model.source`, `trigger` |
 
-Presets (`config/config.go`), verbatim: **`house`** (the proxy default), **`codesmart`** (the SWE-bench arm)
-`[format, textclean, searchfold, dedup, cmdfilter, extract_llm, extract, cachesplit]` ·
-**`codesafe`** `[format, textclean, searchfold, dedup, cmdfilter, extract, cachesplit]`
-(deterministic-only) · `off` `[]` · `safe` `[format, textclean, searchfold, cachesplit]` · `balanced`
-`[format, textclean, searchfold, dedup, cmdfilter, cachesplit]` · `aggressive`
-`[format, textclean, searchfold, dedup, cmdfilter, extract, extract_llm, cachesplit]` ·
-`coding` `[format, textclean, searchfold, dedup, cmdfilter, extract, cachesplit]` ·
-`mcp` `[format, textclean, cachesplit]` ·
-**`agent`** `[format, textclean, searchfold, dedup, extract, extract_llm, cachesplit]` — long
-agentic sessions · **`general`**
-`[format, textclean, searchfold, dedup, cmdfilter, extract, extract_llm, cachesplit]` — the
-all-round pipeline ·
-`summarize` `[summarize]` (run alone — it restructures the whole transcript).
+Six presets are current: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. The other 14 are obsolete. They still load, and the [preset reference](reference/presets.md) lists every pipeline, verbatim.
 
-**The lossless trio leads every working preset** (`mcp` takes only `format` + `textclean` — it
-serves JSON list endpoints with no search output to fold). `format`, `textclean` and `searchfold` all
+**The lossless trio leads the older presets that run it** (`safe`, `balanced`, `aggressive`, `coding`, `agent`, `general`, `codesmart`, `codesafe`). `mcp` takes only `format` + `textclean`, because it serves JSON list endpoints with no search output to fold. `cache`, `summarize`, `summarizer1509` and `agentdiet` run little or none of it. The `house` family does not follow this rule: `house`, `housellm`, and the current presets `conservative` and up run `dedup`, `toon` and `cmdfilter` first, and `toolfilter` comes last. See the [preset reference](reference/presets.md). `format`, `textclean` and `searchfold` all
 verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every
 downstream token count honest. Two of the three used to be missing: `textclean` shipped in `general`
 alone while 49.6% of corpus messages carry ANSI, and `searchfold` shipped in NO preset at all.
-`toon` is retired from all of them — it acted 0 times on 5,752 production requests.
+`toon` is absent from the older presets — it acted 0 times on 5,752 production requests.
 
 **Cold turns sweep at depth.** A component that opts in to `cold_cache` may act on content already in
 the prefix on a turn whose prompt cache has provably expired, because there is no cached prefix left

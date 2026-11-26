@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // Filter is the server-side filter set every list/aggregate query accepts. Every
@@ -35,11 +37,32 @@ type Filter struct {
 	// query per session. Mutually exclusive with Session in practice; if both are set, both
 	// apply (AND), which is never useful, so callers should pick one.
 	SessionIn []string
-	Model     string
-	Provider  string
-	Agent     string
-	Preset    string
-	Mode      string
+	// ProjectIn selects rows in ANY of these folders, which is how a project root is scoped.
+	//
+	// A PROJECT IS SEVERAL FOLDERS. Claude Code records a working directory per request, and one
+	// project produces many -- measured, one produced 14 -- so matching the root path alone would
+	// return a fraction of its traffic and selecting a project would show LESS than the pooled
+	// view. Set by ExpandProjectFilter from Project; callers set Project and let that expand it.
+	ProjectIn []string
+	// PerSession asks the tool inventory to keep its per-session cost attribution instead of
+	// collapsing it to totals. Not a row predicate — it changes the SHAPE of the response, not
+	// which rows are in it — and off by default because the breakdown is a per-row array that
+	// most readers of /api/tools do not use.
+	PerSession bool
+	Model      string
+	Provider   string
+	Agent      string
+	// Project scopes to one launch directory. Unset means EVERY project, which is the view the
+	// dashboard opens on — not "the unattributed ones", since absence is not a value.
+	Project string
+	// ProjectNone selects the rows that state NO project. Separate from an empty Project for the
+	// same reason TenantAll is separate from an empty Tenant: "" is a legitimate stored value
+	// here (it is what every pre-migration row and every client that does not state a directory
+	// records), so absence could not also mean "only those" without making one of the two
+	// meanings unreachable.
+	ProjectNone bool
+	Preset      string
+	Mode        string
 	// Component selects requests on which this component RAN.
 	Component string
 	// Reason selects requests by their uncompressed reason bucket; the sentinel
@@ -95,7 +118,7 @@ func (f Filter) where() (string, []any) {
 	}
 	for col, v := range map[string]string{
 		"r.session_id": f.Session, "r.model": f.Model, "r.provider": f.Provider,
-		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode,
+		"r.agent": f.Agent, "r.preset": f.Preset, "r.mode": f.Mode, "r.project": f.Project,
 		"r.token_accounting": f.Accounting,
 		"r.reasoning_effort": f.Effort, "r.thinking_mode": f.Thinking,
 		"r.stop_reason": f.StopReason,
@@ -120,8 +143,23 @@ func (f Filter) where() (string, []any) {
 		}
 		add("r.session_id IN ("+strings.Join(placeholders, ",")+")", vals...)
 	}
+	if len(f.ProjectIn) > 0 {
+		placeholders := make([]string, len(f.ProjectIn))
+		vals := make([]any, len(f.ProjectIn))
+		for i, p := range f.ProjectIn {
+			placeholders[i] = "?"
+			vals[i] = p
+		}
+		add("r.project IN ("+strings.Join(placeholders, ",")+")", vals...)
+	}
 	if f.Component != "" {
 		add("EXISTS (SELECT 1 FROM request_components c WHERE c.request_id = r.id AND c.component = ?)", f.Component)
+	}
+	// The rows that state no project. A predicate of its own rather than a value in the map
+	// above, because the value it matches is "" — which in the map would be indistinguishable
+	// from the field being unset, and so would silently mean "every project".
+	if f.ProjectNone {
+		add("r.project = ''")
 	}
 	if f.Q != "" {
 		like := "%" + f.Q + "%"
@@ -149,17 +187,34 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
 	r.reasoning_effort, r.thinking_mode, r.thinking_budget, r.temperature, r.top_p,
 	r.max_tokens, r.stream, r.tool_choice, r.tools, r.system_blocks,
-	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.stop_reason,
+	r.cache_bp_system, r.cache_bp_tools, r.cache_bp_messages, r.cache_bp_blocks, r.cache_bp_root, r.stop_reason,
 	r.thread_id,
-	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms`
+	r.waiting_for, r.wait_tool, r.wake_cause, r.open_background, r.open_teammate, r.monitor_expiry_ms,
+	r.agent_compaction, r.cache_miss_cause, r.manual_ping, r.manual_saved_usd,
+	r.project, r.source,
+	r.sweep_expands, r.sweep_expand_tokens, r.sweep_false_expands, r.sweep_answer_usd,
+	r.session_alias, r.price_estimated, r.acc_priced, r.estimated_saved_usd, r.estimate_held, r.estimated_saved_low_usd,
+	r.defer_tokens, r.defer_list_tokens, r.defer_searches, r.defer_loaded, r.defer_wrong_guesses,
+	r.defer_gross_usd, r.defer_net_usd, r.defer_dropped_searches,
+	r.compaction_point, r.compaction_point_source, r.defer_cost_usd,
+	r.limit_5h_utilization, r.limit_5h_reset, r.limit_5h_status,
+	r.limit_7d_utilization, r.limit_7d_reset, r.limit_7d_status, r.auth_subscription, r.sweep_false_expands_warm, r.restored_tokens, r.currency, ` + requestTokenSelect + `, r.backend, r.client_compaction, r.acc_fallback,
+	r.wait_tool_timeout_ms, r.wait_tool_background, r.wait_prompt, r.tz_offset_min, r.turn, r.active_threads,
+	r.ka_planned_pings, r.ka_min_prefix_tokens, r.ka_idle_s,
+	r.client_entrypoint, r.permission_mode, r.subagent_type, r.parent_fanout`
 
 func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 	var e Event
-	var byp, ca, stream, keepAlive int
+	var byp, ca, stream, keepAlive, agentComp, manual, estimated, accPriced, held int
 	var temp, topP sql.NullFloat64
 	var waitingFor, waitTool, wakeCause sql.NullString
 	var openBackground, openTeammate, monitorExpiryMs sql.NullInt64
-	err := rows.Scan(&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
+	var u5, u7 sql.NullFloat64
+	var r5, r7 sql.NullInt64
+	var s5, s7, compVerdict sql.NullString
+	var authSub int
+	var sm strategyMetaScan
+	dest := append([]any{&e.ID, &e.TS, &e.TenantID, &e.SessionID, &e.Model, &e.Provider, &e.Agent, &e.Preset, &e.Mode, &e.Route,
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
@@ -169,14 +224,35 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
 		&e.ReasoningEffort, &e.ThinkingMode, &e.ThinkingBudget, &temp, &topP,
 		&e.MaxTokens, &stream, &e.ToolChoice, &e.Tools, &e.SystemBlocks,
-		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.StopReason,
+		&e.CacheBPSystem, &e.CacheBPTools, &e.CacheBPMessages, &e.CacheBPBlocks, &e.CacheBPRoot, &e.StopReason,
 		&e.ThreadID,
-		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs)
+		&waitingFor, &waitTool, &wakeCause, &openBackground, &openTeammate, &monitorExpiryMs,
+		&agentComp, &e.CacheMissCause, &manual, &e.ManualSavedUSD,
+		&e.Project, &e.Source,
+		&e.SweepExpands, &e.SweepExpandTokens, &e.SweepFalseExpands, &e.SweepAnswerUSD,
+		&e.SessionAlias, &estimated, &accPriced, &e.EstimatedSavedUSD, &held, &e.EstimatedSavedLowUSD,
+		&e.DeferTokens, &e.DeferListTokens, &e.DeferSearches, &e.DeferLoaded, &e.DeferWrongGuesses,
+		&e.DeferGrossUSD, &e.DeferNetUSD, &e.DeferDroppedSearches,
+		&e.CompactionPoint, &e.CompactionPointSource, &e.DeferCostUSD,
+		&u5, &r5, &s5, &u7, &r7, &s7, &authSub, &e.SweepFalseExpandsWarm, &e.RestoredTokens, &e.Currency}, requestTokenDest(&e.AccTokens)...)
+	dest = append(dest, &e.Backend, &compVerdict, &e.AccFallback)
+	dest = append(dest, sm.dest()...)
+	err := rows.Scan(dest...)
+	e.AuthSubscription = authSub != 0
+	sm.into(&e)
+	if l := (Limits{FiveHour: limitWindow(u5, r5, s5), SevenDay: limitWindow(u7, r7, s7)}); !l.Empty() {
+		e.Limits = &l
+	}
+	e.PriceEstimated, e.AccountantPriced = estimated != 0, accPriced != 0
+	e.EstimateHeld = held != 0
 	e.WaitingFor, e.WaitTool, e.WakeCause = waitingFor.String, waitTool.String, wakeCause.String
 	e.OpenBackground, e.OpenTeammate = int(openBackground.Int64), int(openTeammate.Int64)
 	e.MonitorExpiryMs = monitorExpiryMs.Int64
 	e.Bypassed, e.CacheAware, e.Stream = byp != 0, ca != 0, stream != 0
+	e.AgentCompaction = agentComp != 0
+	e.ClientCompaction, e.ClientCompactionKnown = compVerdict.String, compVerdict.Valid
 	e.KeepAlive = keepAlive != 0
+	e.ManualPing = manual != 0
 	// NULL stays absent rather than becoming 0: a request that set temperature=0 and one
 	// that set nothing must not read the same on the row.
 	if temp.Valid {
@@ -256,7 +332,8 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		return nil, err
 	}
 	crows, err := d.sql.QueryContext(d.readCtx(), `SELECT component, kind, acted, mutated, reverted, skipped,
-		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events FROM request_components
+		saved_gross, saved_unique, saved_usd, duration_ms, err, gates, events,
+		saved_first_usd, saved_replay_usd, priced_by, `+strings.Join(compTokenColumns, ", ")+` FROM request_components
 		WHERE request_id = ? ORDER BY rowid`, id)
 	if err != nil {
 		return nil, err
@@ -266,9 +343,9 @@ func (d *DB) Request(id int64, withContent bool) (*Event, error) {
 		var c CompRow
 		var a, m, rv, sk int
 		var gates, events string
-		if err := crows.Scan(&c.Component, &c.Kind, &a, &m, &rv, &sk,
+		if err := crows.Scan(append([]any{&c.Component, &c.Kind, &a, &m, &rv, &sk,
 			&c.SavedGross, &c.SavedUnique, &c.SavedUSD, &c.DurationMs, &c.Err,
-			&gates, &events); err != nil {
+			&gates, &events, &c.SavedFirstUSD, &c.SavedReplayUSD, &c.PricedBy}, c.Tokens.dest()...)...); err != nil {
 			return nil, err
 		}
 		c.Acted, c.Mutated, c.Reverted, c.Skipped = a != 0, m != 0, rv != 0, sk != 0
@@ -539,6 +616,79 @@ type SessionRow struct {
 	KeepAlivePingUSD  float64 `json:"keepalive_ping_usd"`
 	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
+	// The same session in tokens, for a Claude subscription (#1023). See sessionTokens.
+	SessionTokens
+}
+
+// SessionTokens is one session's figures in tokens, by tier (#1023). A subscription is limited in
+// tokens, so the Sessions tab shows these there in place of the dollars. The tiers are never added.
+//
+//   - Tokens is the accountant's figure for the session, less the keep-alive rescue: the token form of
+//     saved_usd. It also has the split, the 1-hour head and the ended-change break, which the dollar
+//     row has no column for.
+//   - KeepAliveTokens is the accountant's own keep-alive rescue figure (the tok_ka columns). It is a
+//     different measurement from keepalive_saved_usd, which is the legacy credit gated on read
+//     (kaSavedSince): the two can disagree on a row. Tokens and KeepAliveTokens add up to the
+//     tok_total columns.
+//   - KeepAlivePingTokens is what the cache strategy's pings paid, in billed tokens: the token form of
+//     keepalive_ping_usd. It is never added into a cost: the view shows it on its own line.
+//   - UsedTokens is the session's agent requests' billed input tokens: the token form of cost_usd.
+//     context-guru's own model calls (cg_llm_cost_usd) have no token form here.
+//   - TokensUnmeasured counts the agent requests the library did not price (acc_priced = 0).
+type SessionTokens struct {
+	Tokens              TokenFlow  `json:"tokens"`
+	KeepAliveTokens     TokenFlow  `json:"keepalive_tokens"`
+	KeepAlivePingTokens TierTokens `json:"keepalive_ping_tokens"`
+	UsedTokens          TierTokens `json:"used_tokens"`
+	TokensUnmeasured    int64      `json:"tokens_unmeasured_requests"`
+}
+
+// sessionTokensQuery sums the token figures of the given sessions, over the same filter as the
+// session list, with the pings in scope. It does not widen the list's own aggregate: it reads only
+// the rows of the sessions on the page (r.session_id IN, on idx_requests_session or
+// idx_requests_tenant_session), so its cost follows one page of sessions, not the window.
+func sessionTokensQuery(f Filter, ids []string) (string, []any) {
+	f = withKeepAlive(f)
+	f.SessionIn = ids
+	cond, args := f.where()
+	agent := func(expr string) string {
+		return `COALESCE(SUM(CASE WHEN r.keepalive = 0 THEN ` + expr + ` ELSE 0 END),0)`
+	}
+	return `SELECT r.tenant_id, r.session_id, ` + tokenSumTerms(totalColumns) + `, ` + tokenSumTerms(flowColumns("tok_ka")) + `,
+		` + accTokenTailTerms + `,
+		` + agent("r.fresh_input") + `, ` + agent("r.cache_read") + `,
+		` + agent("MAX(r.cache_write - r.cache_write_1h, 0)") + `, ` + agent("r.cache_write_1h") + `
+		FROM requests r WHERE ` + cond + ` GROUP BY 1, 2`, args
+}
+
+// sessionTokens answers SessionTokens for each of the given sessions, keyed by tenant and session id.
+func (d *DB) sessionTokens(f Filter, ids []string) (map[sessKey]SessionTokens, error) {
+	q, args := sessionTokensQuery(f, ids)
+	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[sessKey]SessionTokens{}
+	for rows.Next() {
+		var id sessKey
+		var agg accTokensAgg
+		var used TierTokens
+		dest := append([]any{&id.tenant, &id.session}, agg.dest(16)...)
+		dest = append(dest, &used.Input, &used.CacheRead, &used.CacheWrite5m, &used.CacheWrite1h)
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		total, ka := flowOf(agg.sums[:8]), flowOf(agg.sums[8:])
+		out[id] = SessionTokens{
+			Tokens:              total.less(ka),
+			KeepAliveTokens:     ka,
+			KeepAlivePingTokens: agg.ping,
+			UsedTokens:          used,
+			TokensUnmeasured:    agg.unmeasured,
+		}
+	}
+	return out, rows.Err()
 }
 
 // cacheTTLMs is one provider prompt-cache TTL, the horizon inside which a session's next
@@ -546,7 +696,22 @@ type SessionRow struct {
 // five minutes (the extended beta is an hour, which would only widen the "still counting"
 // window — under-claiming the in-flight state is the safe direction, since it never labels a
 // settled session as provisional).
-const cacheTTLMs int64 = 5 * 60 * 1000
+const cacheTTLMs int64 = int64(modelinfo.AnthropicCacheTTL5m / time.Millisecond)
+
+// inFlightMs is cacheTTLMs for one session: the OpenAI minimum when every provider the session
+// used is OpenAI and every model is GPT-5.6+, else the Anthropic default. A mixed session keeps
+// the shorter horizon, the safe direction named above.
+func inFlightMs(providers, models string) int64 {
+	if providers != "openai" || models == "" {
+		return cacheTTLMs
+	}
+	for _, m := range strings.Split(models, ",") {
+		if _, ok := modelinfo.FixedCacheLifetime(providers, m); !ok {
+			return cacheTTLMs
+		}
+	}
+	return modelinfo.OpenAIMinimumCacheTTL.Milliseconds()
+}
 
 // Sessions returns the session list, most-recently-active first, filtered and
 // paginated server-side.
@@ -565,13 +730,13 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 	if byCost {
 		order = "SUM(r.cost_usd) DESC, MAX(r.ts) DESC"
 	}
-	q := `SELECT r.session_id, GROUP_CONCAT(DISTINCT r.tenant_id), COUNT(*), MIN(r.ts), MAX(r.ts),
+	q := `SELECT r.session_id, r.tenant_id, COUNT(*), MIN(r.ts), MAX(r.ts),
 		GROUP_CONCAT(DISTINCT r.model), GROUP_CONCAT(DISTINCT r.provider),
 		GROUP_CONCAT(DISTINCT r.agent), GROUP_CONCAT(DISTINCT r.preset),
 		-- The model with the most output_tokens for this session, picked by the same
 		-- correlated subquery pattern as pingsBySession's second query, but cheap enough
 		-- (one session's own rows) to inline rather than join.
-		(SELECT r2.model FROM requests r2 WHERE r2.session_id = r.session_id
+		(SELECT r2.model FROM requests r2 WHERE r2.tenant_id = r.tenant_id AND r2.session_id = r.session_id
 			GROUP BY r2.model ORDER BY SUM(r2.output_tokens) DESC, r2.model LIMIT 1),
 		SUM(r.tokens_before), SUM(r.tokens_after), SUM(r.saved_unique),
 		SUM(r.attempted_tokens), SUM(r.frozen_tokens),
@@ -583,9 +748,11 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		-- The keep-alive's SAVING half, which lives on the real request that benefited. The COST
 		-- half cannot be summed here: this query excludes ping rows, and that exclusion is what
 		-- keeps Turns and every average on the row agent-only. It has its own query below.
-		COALESCE(SUM(` + kaSaved("r.") + `),0)
+		-- kaSavedSince stops the credit's ping half at the window start, because that cost half
+		-- is summed inside the window: both halves of the net must span the same pings (#678).
+		COALESCE(SUM(` + kaSavedSince("r.", f.Since) + `),0)
 		FROM requests r WHERE ` + cond + `
-		GROUP BY r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
+		GROUP BY r.tenant_id, r.session_id ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -611,7 +778,7 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 		s.PrimaryModel = primaryModel.String
 		s.Saved = s.TokensBefore - s.TokensAfter
 		s.SavedUSD = s.BaselineCostUSD - s.CostUSD - s.CGLLMCostUSD
-		s.InFlight = now-s.End < cacheTTLMs
+		s.InFlight = now-s.End < inFlightMs(s.Providers, s.Models)
 		out = append(out, &s)
 	}
 	if err := rows.Err(); err != nil {
@@ -627,14 +794,25 @@ func (d *DB) SessionsOrdered(f Filter, limit, offset int, byCost bool) ([]*Sessi
 			return nil, 0, err
 		}
 		for _, s := range out {
-			if p, ok := pings[s.SessionID]; ok {
+			if p, ok := pings[sessKey{s.TenantID, s.SessionID}]; ok {
 				s.KeepAlivePings, s.KeepAlivePingUSD = p.n, p.usd
 			}
 			s.KeepAliveNetUSD = s.KeepAliveSavedUSD - s.KeepAlivePingUSD
 		}
+		ids := make([]string, len(out))
+		for i, s := range out {
+			ids[i] = s.SessionID
+		}
+		toks, err := d.sessionTokens(f, ids)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, s := range out {
+			s.SessionTokens = toks[sessKey{s.TenantID, s.SessionID}]
+		}
 	}
 	var total int64
-	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(DISTINCT r.session_id) FROM requests r WHERE `+cond, args...).Scan(&total)
+	err = d.sql.QueryRowContext(d.readCtx(), `SELECT COUNT(*) FROM (SELECT DISTINCT r.tenant_id, r.session_id FROM requests r WHERE `+cond+`)`, args...).Scan(&total)
 	return out, total, err
 }
 
@@ -645,21 +823,21 @@ type pingCount struct {
 }
 
 // pingsBySession groups the ping rows by session. The caller passes a filter that INCLUDES them.
-func (d *DB) pingsBySession(cond string, args []any) (map[string]pingCount, error) {
-	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
-		FROM requests r WHERE `+cond+` AND r.keepalive = 1 GROUP BY 1`, args...)
+func (d *DB) pingsBySession(cond string, args []any) (map[sessKey]pingCount, error) {
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, COUNT(*), COALESCE(SUM(r.cost_usd),0)
+		FROM requests r WHERE `+cond+` AND `+autoPing+` GROUP BY 1, 2`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]pingCount{}
+	out := map[sessKey]pingCount{}
 	for rows.Next() {
-		var s string
+		var k sessKey
 		var p pingCount
-		if err := rows.Scan(&s, &p.n, &p.usd); err != nil {
+		if err := rows.Scan(&k.tenant, &k.session, &p.n, &p.usd); err != nil {
 			return nil, err
 		}
-		out[s] = p
+		out[k] = p
 	}
 	return out, rows.Err()
 }
@@ -737,6 +915,10 @@ type ComponentRow struct {
 	// runs the identical formula, so agreement is arithmetic. The UI prints the covered
 	// fraction rather than presenting the whole comparison as evidence.
 	SavedUSDDecomposedStored float64 `json:"saved_usd_decomposed_stored"`
+	// SavedUSDCosts is the costs the accountant library netted into saved_usd on the rows it
+	// priced: added tokens and the breaks a component caused. Negative. It is the third term of
+	// SavedUSDDecomposed on those rows (first removal + replay + costs = saved_usd); 0 before them.
+	SavedUSDCosts float64 `json:"saved_usd_costs,omitempty"`
 	// UniqueUnkeyed marks a component whose saved_unique is not a dedup measurement, because
 	// it reports no content keys and MarkUnique therefore returns its saving in full every
 	// turn. True for every reformatter. See DecomposeComponentSavedUSD for why this is
@@ -762,9 +944,38 @@ type ComponentRow struct {
 	// component, which is the point: only the components that SPEND can be net-negative,
 	// and until now the components view had no dollars in it at all, so it judged an
 	// expensive component on tokens and latency and could never say "underwater".
-	LLMCalls     int64 `json:"llm_calls"`
-	LLMCallsCold int64 `json:"llm_calls_cold"`
-	LLMCallsAcc  int64 `json:"llm_calls_accepted"`
+	LLMCalls int64 `json:"llm_calls"`
+	// SummarizeCreditPastSpanUSD / SummarizeCreditPrefixChangeUSD are stored summarize credit the
+	// attribution ledger took out of SavedUSD (see SummarizeLedger). Set on the summarize row only.
+	SummarizeCreditPastSpanUSD     float64 `json:"summarize_credit_past_span_usd,omitempty"`
+	SummarizeCreditPrefixChangeUSD float64 `json:"summarize_credit_prefix_change_usd,omitempty"`
+	// The sweep's ledger (#404 PR C), set on the extract_llm_sweep row only. SweepExpandChargeUSD is the
+	// cost of the sweep's expands, already taken off SavedUSD and NetUSD. SweepAnswerUSD is what the
+	// answers cost beyond the pings' own reads: its own column, NOT subtracted again (the component's
+	// model spend already carries it). The false-drop rate is the number to pull the sweep on.
+	SweepApplied         int64   `json:"sweep_applied,omitempty"`
+	SweepFalseDrops      int64   `json:"sweep_false_drops,omitempty"`
+	SweepFalseDropRate   float64 `json:"sweep_false_drop_rate,omitempty"`
+	SweepExpands         int64   `json:"sweep_expands,omitempty"`
+	SweepExpandTokens    int64   `json:"sweep_expand_tokens,omitempty"`
+	SweepExpandChargeUSD float64 `json:"sweep_expand_charge_usd,omitempty"`
+	SweepAnswerUSD       float64 `json:"sweep_answer_usd,omitempty"`
+	// L1: the sweep's net saving by the provider's usage (credit - expand charge - answer cost). C2: the
+	// provider's cache tiers on the cold-apply requests, and on the first warm request after each.
+	SweepNetUSD              float64 `json:"sweep_net_usd,omitempty"`
+	SweepColdApplyRequests   int64   `json:"sweep_cold_apply_requests,omitempty"`
+	SweepColdApplyCacheRead  int64   `json:"sweep_cold_apply_cache_read,omitempty"`
+	SweepColdApplyCacheWrite int64   `json:"sweep_cold_apply_cache_write,omitempty"`
+	SweepNextWarmRequests    int64   `json:"sweep_next_warm_requests,omitempty"`
+	SweepNextWarmCacheRead   int64   `json:"sweep_next_warm_cache_read,omitempty"`
+	// ReplayCreditPastCapUSD is stored credit the replay ledger took out of SavedUSD: turns after
+	// the counterfactual (or a real) client compaction. Set on the capped components' rows.
+	ReplayCreditPastCapUSD float64 `json:"replay_credit_past_cap_usd,omitempty"`
+	// ReplayWindowAssumed marks a row whose cap used an assumed context window for some
+	// conversations (the model's window is not exactly published).
+	ReplayWindowAssumed bool  `json:"replay_window_assumed,omitempty"`
+	LLMCallsCold        int64 `json:"llm_calls_cold"`
+	LLMCallsAcc         int64 `json:"llm_calls_accepted"`
 	// LLMCostUSD is the figure every verdict on this row is computed from, and it is the
 	// GATEWAY-priced one — see the query for why the dashboard used to carry two.
 	// LLMCostGatewayUSD and LLMCostReportedUSD are the two sources kept separable so the UI
@@ -981,6 +1192,21 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 	if err := irows.Err(); err != nil {
 		return nil, nil, err
 	}
+	// A summarizer's own spend. It records no extraction_calls rows, so the loops above left it at
+	// zero calls and zero dollars while its cost sat unowned in requests.cg_llm_cost_usd.
+	for _, name := range SummarizerComponents {
+		sc, ok := byName[name]
+		if !ok {
+			continue
+		}
+		calls, usd, err := d.summarizerOwnCost(cond, args, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		sc.LLMCalls += calls
+		sc.LLMCostUSD += usd
+		sc.LLMCostGatewayUSD += usd
+	}
 	// The verdict, once both halves are in. A deterministic component spends nothing, so its
 	// net is just its saving; only a component that calls a model can come out negative.
 	for _, c := range out {
@@ -1032,6 +1258,13 @@ func (d *DB) components(f Filter) ([]*ComponentRow, map[compGroupKey]*compGroup,
 type compGroupKey struct {
 	comp, model, tier    string
 	usd, gross, complete bool
+	// acc is a group of rows the accountant library priced (priced_by): their dollar split is
+	// stored (firstUSD, replayUSD), and no read-time formula re-prices them.
+	acc bool
+	// fallback is a group of rows of a request the accountant path handled and could not price
+	// (priced_by 'none'). They are also acc: no read-time formula values them. They book no saving, and the
+	// reader must be told that, because a stored 0 here is not a measured 0 (context-guru#768 B8).
+	fallback bool
 }
 
 // compGroup is one cell of that pass. uClamp and rClamp are the decomposition's unique and replay
@@ -1042,6 +1275,7 @@ type compGroup struct {
 	runs, acted, mutated, reverted, skipped, gross, unique int64
 	errs, uClamp, rClamp, nDiff                            int64
 	usd, dur                                               float64
+	firstUSD, replayUSD                                    float64 // the stored split, on an acc group
 }
 
 func sortedCompKeys(groups map[compGroupKey]*compGroup) []compGroupKey {
@@ -1081,13 +1315,14 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 		CASE WHEN r.cache_read > 0 THEN 'read'
 		     WHEN r.cache_write > 0 AND r.cache_write >= r.fresh_input THEN 'write'
 		     ELSE 'fresh' END,
-		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete',
+		c.saved_usd <> 0, c.saved_gross > 0, r.token_accounting = 'complete', c.priced_by <> '', c.priced_by = 'none',
 		MAX(c.kind), COUNT(*), SUM(c.acted), SUM(c.mutated), SUM(c.reverted), SUM(c.skipped),
 		SUM(c.saved_gross), SUM(c.saved_unique), SUM(c.saved_usd), SUM(c.duration_ms),
 		SUM(CASE WHEN c.err <> '' THEN 1 ELSE 0 END),
-		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END)
+		SUM(`+uniq+`), SUM(`+gross+` - `+uniq+`), SUM(CASE WHEN c.saved_gross <> c.saved_unique THEN 1 ELSE 0 END),
+		SUM(c.saved_first_usd), SUM(c.saved_replay_usd)
 		FROM request_components c JOIN requests r ON r.id = c.request_id
-		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6`,
+		WHERE `+cond+pred+` GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`,
 			append(append([]any(nil), args...), bounds...)...)
 		if err != nil {
 			return err
@@ -1097,9 +1332,9 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 			var k compGroupKey
 			var g compGroup
 			var usd sql.NullFloat64
-			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete,
+			if err := rows.Scan(&k.comp, &k.model, &k.tier, &k.usd, &k.gross, &k.complete, &k.acc, &k.fallback,
 				&g.kind, &g.runs, &g.acted, &g.mutated, &g.reverted, &g.skipped, &g.gross, &g.unique,
-				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff); err != nil {
+				&usd, &g.dur, &g.errs, &g.uClamp, &g.rClamp, &g.nDiff, &g.firstUSD, &g.replayUSD); err != nil {
 				return err
 			}
 			g.usd = usd.Float64
@@ -1123,6 +1358,8 @@ func (d *DB) componentGroups(cond string, args []any) (map[compGroupKey]*compGro
 				m.nDiff += g.nDiff
 				m.usd += g.usd
 				m.dur += g.dur
+				m.firstUSD += g.firstUSD
+				m.replayUSD += g.replayUSD
 			}
 			mu.Unlock()
 		}
@@ -1296,6 +1533,9 @@ type Bucket struct {
 	Expands            int64   `json:"expands"`
 	ExpandTokens       int64   `json:"expand_tokens"`
 	Misses             int64   `json:"cache_misses"`
+	// DeferNetUSD is tool deferral's net saving in this bucket: its own series, left out of the
+	// JSON when 0 so an account that never deferred has no deferral series.
+	DeferNetUSD float64 `json:"defer_net_usd,omitempty"`
 }
 
 // DayMs is one day of buckets. Per-DAY usage bars are Series with this bucket — the
@@ -1358,8 +1598,9 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd), SUM(r.cachesplit_saved_usd),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		SUM(r.expands), SUM(r.expand_tokens),
-		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END)
-		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, cond)
+		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END),
+		%s
+		FROM requests r WHERE %s GROUP BY b ORDER BY b`, bucketMs, bucketMs, deferNetSum, cond)
 	rows, err := d.sql.QueryContext(d.readCtx(), q, args...)
 	if err != nil {
 		return nil, err
@@ -1372,7 +1613,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		if err := rows.Scan(&b.TS, &b.Requests, &b.TokensBefore, &b.TokensAfter, &b.SavedUnique,
 			&b.AttemptedTokens, &b.FrozenTokens, &b.FreshInput, &b.CacheRead, &b.CacheWrite,
 			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD, &b.CachesplitSavedUSD,
-			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses); err != nil {
+			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses, &b.DeferNetUSD); err != nil {
 			return nil, err
 		}
 		b.CGLatencyMs, b.UpstreamMs = cgAvg.Float64, upAvg.Float64
@@ -1458,15 +1699,15 @@ var breakdownDims = map[string]string{
 	"tool_choice":       "r.tool_choice",
 	"cache_miss_reason": "r.cache_miss_reason",
 	"cache_breakpoints": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
-		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks AS TEXT) END",
-	// The same four columns as a PLACEMENT rather than a count, because the count collapses
+		"CAST(r.cache_bp_system + r.cache_bp_tools + r.cache_bp_messages + r.cache_bp_blocks + r.cache_bp_root AS TEXT) END",
+	// The same five columns as a PLACEMENT rather than a count, because the count collapses
 	// the only interesting thing about them. "3 breakpoints" is one group whether they sit in
 	// the system block (protecting the whole prompt after it) or scattered through the
 	// messages (protecting almost nothing), and those are opposite prompts with opposite cache
 	// economics. Same observe-mode guard as above and for the same reason.
 	"cache_bp_location": "CASE WHEN r.mode = '" + ModeObserve + "' THEN '' ELSE " +
 		"'system=' || r.cache_bp_system || ' tools=' || r.cache_bp_tools || " +
-		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks END",
+		"' messages=' || r.cache_bp_messages || ' blocks=' || r.cache_bp_blocks || ' top-level=' || r.cache_bp_root END",
 	// Which cache lifetime the request asked for. '' is a real third answer (no cache_control
 	// at all) and, on rows written before the column existed, also the default — which is why
 	// Overview reports a coverage count beside every TTL figure.
@@ -1549,6 +1790,10 @@ var facetQueries = map[string]string{
 	"effort":      "reasoning_effort",
 	"thinking":    "thinking_mode",
 	"stop_reason": "stop_reason",
+	// The projects seen in the window, so a picker populates itself and a folder the user starts
+	// working in appears without a UI change. Facets already exclude '' — the unattributed rows
+	// are the UI's own option with its own wording, not a folder named "".
+	"project": "project",
 }
 
 // selfBlanked returns f with ONE dimension's own value cleared.
@@ -1587,8 +1832,68 @@ func selfBlanked(f Filter, dim string) Filter {
 		f.Thinking = ""
 	case "stop_reason":
 		f.StopReason = ""
+	case "project":
+		// Without this the project list is scoped by the project already chosen, so it would
+		// contain exactly one entry — the one selected — and switching projects would be
+		// impossible. A one-way door, which is what this whole function exists to prevent.
+		f.Project = ""
+		// ProjectIn is the expanded form of the same choice and shuts the same door.
+		f.ProjectIn = nil
 	}
 	return f
+}
+
+// ExpandProjectFilter turns a selected project ROOT into the set of folders that roll up to it.
+//
+// A project is several folders -- Claude Code records a working directory per request and one
+// project produced 14 of them on a measured machine -- so a query matching the root path alone
+// returns a fraction of its traffic. The picker folds subdirectories into the root, and without
+// this the query would not, which means selecting a project shows LESS than the pooled view did.
+//
+// A root the transcripts do not recognise expands to itself, so a folder with no transcript is
+// still reachable rather than silently empty.
+func ExpandProjectFilter(f Filter, g *ProjectGroup) Filter {
+	if f.Project == "" || g == nil {
+		return f
+	}
+	folders := g.FoldersOf(f.Project)
+	if len(folders) <= 1 {
+		return f // just itself: the plain Project predicate already matches it
+	}
+	f.ProjectIn = folders
+	f.Project = ""
+	return f
+}
+
+// FacetsFor is Facets with the project dimension rolled up to project roots.
+//
+// WHY A SEPARATE ENTRY POINT. Facets reads raw columns, and the project column holds every
+// working directory a session was launched in: on a real machine, 40 folders for six projects,
+// the rest being subdirectories of the same repositories and eighteen throwaway /private/tmp
+// directories. Reported as "I don't understand why I saw so many projects".
+//
+// `home` overrides the home directory, for tests. An empty transcript directory -- the normal
+// state of a hosted proxy, which cannot see the user's disk -- leaves the list unrolled, which
+// degrades to the raw folders rather than to an empty picker.
+func (d *DB) FacetsFor(f Filter, home string) (map[string][]string, error) {
+	out, err := d.Facets(f)
+	if err != nil {
+		return nil, err
+	}
+	groups := ProjectGroups(home)
+	seen := map[string]bool{}
+	var roots []string
+	for _, p := range out["project"] {
+		r := groups.Project(p)
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		roots = append(roots, r)
+	}
+	sort.Strings(roots)
+	out["project"] = roots
+	return out, nil
 }
 
 // Facets returns the distinct values available for each filter dimension, so the

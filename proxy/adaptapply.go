@@ -294,6 +294,11 @@ func (h *Handler) reloadLocal(doc string) error {
 	t := *cur
 	t.Pipe, t.Preset = built.Pipe, built.Preset
 	h.static.Store(&t)
+	// A single-tenant proxy has no registry to announce the change, so say it here: the removal list in
+	// the running pipeline just changed, and a cached dashboard read of it is now wrong.
+	if h.api != nil {
+		h.api.InvalidateStateCaches(tenant.ChangeAccount)
+	}
 	return nil
 }
 

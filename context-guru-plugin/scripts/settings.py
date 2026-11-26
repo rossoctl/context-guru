@@ -55,6 +55,36 @@ BIN_KEY = "CONTEXT_GURU_BIN"
 # keys where the user owned 1, and /context-guru:status repeated the wrong number back to them.
 OURS = (KEY, UPSTREAM_KEY, BIN_KEY)
 
+# The header that opts a session in to MANUAL pings (the Ping button) when keep-alive is
+# off: the proxy holds that session's cache request for a manual ping only: at most 300 s on a 5-minute cache, at most 59 min on a 1-hour cache. It rides in
+# ANTHROPIC_CUSTOM_HEADERS, which Claude Code reads as `Name: Value` lines separated by NEWLINES (verified on
+# 2.1.307: a comma-joined value arrives as one corrupted header). The user's own headers, a hosted install's
+# `x-context-guru-token` included, share that variable, so the line is appended and removed, never overwritten.
+HEADERS_KEY = "ANTHROPIC_CUSTOM_HEADERS"
+PING_HEADER = "x-context-guru-ping: 1"
+PING_HEADER_META = "installed_ping_header"   # the line we added; absent when it was already there or is not ours to remove
+PING_OPT_OUT_META = "ping_header_opt_out"    # true when the install was made with --no-ping-header: SessionStart must not heal it
+
+
+def _ping_line(line: str) -> bool:
+    return line.strip().lower().startswith("x-context-guru-ping")
+
+
+def with_ping_header(value: object) -> tuple[str, bool]:
+    """(the headers with our line in, whether WE added it). An existing x-context-guru-ping line, whatever its
+    value, is the user's to keep: nothing is added or changed, and the second item is False."""
+    text = value if isinstance(value, str) else ""
+    lines = [ln for ln in text.replace("\r", "").split("\n") if ln.strip()]
+    if any(_ping_line(ln) for ln in lines):
+        return text, False
+    return "\n".join([*lines, PING_HEADER]), True
+
+
+def without_ping_header(value: object) -> str:
+    """The headers with the line we added taken out and every other line kept. "" when nothing else is left."""
+    text = value if isinstance(value, str) else ""
+    return "\n".join(ln for ln in text.replace("\r", "").split("\n") if ln.strip() and ln.strip() != PING_HEADER)
+
 # statusLine is a TOP-LEVEL settings key — a sibling of `env`, not a member of it — so it needs its
 # own record rather than fitting into OURS/env above. --statusline is optional on `add`: most
 # installs never pass it, and every add/remove call that omits it must behave exactly as it did
@@ -64,6 +94,8 @@ STATUSLINE_META = "installed_statusline"      # the command string we wrote, so 
                                                # recognises its own work even if it is about to
                                                # write a DIFFERENT command (the plugin moved).
 STATUSLINE_PREV_META = "previous_statusline"  # what we replaced, so uninstall can hand it back.
+STATUSLINE_ASKED_META = "statusline_asked"     # true when the user asked for the line by name (0.6.1+); the
+                                               # SessionStart migration then leaves it, see retire_statusline.
 
 # enabledPlugins is the THIRD surface, and the one that decides whether this plugin's commands, skills
 # and hooks exist in a session at all (#318). `/plugin` writes it, into whichever scope the user
@@ -78,6 +110,46 @@ PLUGIN_ID = "context-guru@context-guru"
 
 # Where this script records what it did, so a later run can tell its own work from the user's.
 META = "$context-guru"
+
+
+def user_env_keys(env: dict) -> int:
+    """How many env keys are the USER's: not ours, and not ANTHROPIC_CUSTOM_HEADERS when our line is all it holds."""
+    return len([k for k in env if k not in OURS and not (k == HEADERS_KEY and without_ping_header(env[k]) == "")])
+
+
+def add_ping_header(env: dict, meta: dict) -> bool:
+    """Put our line into env's ANTHROPIC_CUSTOM_HEADERS and record that we did. True when it changed."""
+    new, added = with_ping_header(env.get(HEADERS_KEY))
+    if not added:
+        return False
+    env[HEADERS_KEY] = new
+    meta[PING_HEADER_META] = PING_HEADER
+    return True
+
+
+def record_ping_choice(env: dict, meta: dict, ping_on: bool) -> bool:
+    """Remember an install made with --no-ping-header, so the SessionStart self-heal leaves it alone.
+    An opt-out also takes back the line WE added earlier (an install or a heal): the opt-out text promises
+    that a re-run with --no-ping-header stops the header. True when a line was removed."""
+    if ping_on:
+        meta.pop(PING_OPT_OUT_META, None)
+        return False
+    meta[PING_OPT_OUT_META] = True
+    removed = remove_ping_header(env, meta)
+    meta.pop(PING_HEADER_META, None)
+    return removed
+
+
+def remove_ping_header(env: dict, meta: object) -> bool:
+    """Take back the line WE added (and only that one); the user's other headers stay. True when it changed."""
+    if not isinstance(meta, dict) or meta.get(PING_HEADER_META) != PING_HEADER or HEADERS_KEY not in env:
+        return False
+    rest = without_ping_header(env[HEADERS_KEY])
+    if rest:
+        env[HEADERS_KEY] = rest
+    else:
+        del env[HEADERS_KEY]
+    return True
 
 
 def is_ours(data: dict, url: str) -> bool:
@@ -135,12 +207,17 @@ def apply_statusline(data: dict, command: str) -> None:
     if is_ours_statusline(data, current) and isinstance(current, dict) and "refreshInterval" in current:
         desired["refreshInterval"] = current["refreshInterval"]  # keep a value the user tuned
     if current == desired:
+        if is_ours_statusline(data, current):
+            data.setdefault(META, {})[STATUSLINE_ASKED_META] = True  # asked again for the same line: keep it
         return
     meta = data.setdefault(META, {})
     if current is not None and not is_ours_statusline(data, current):
         meta[STATUSLINE_PREV_META] = current
     data[STATUSLINE_KEY] = desired
     meta[STATUSLINE_META] = command
+    # Since 0.6.1 nothing writes the line unless the user asked for it (the install's default is off), so a line
+    # written now is wanted: the SessionStart migration (retire_statusline) must leave it.
+    meta[STATUSLINE_ASKED_META] = True
 
 
 # The path of a plugin's statusline.py inside Claude Code's plugin cache: `.../plugins/cache/
@@ -189,6 +266,44 @@ def repoint_statusline(data: dict, running: str) -> bool:
     return True
 
 
+def mark_statusline_asked(data: dict) -> bool:
+    """Record that OUR current statusLine was asked for by name, in place. True if it changed.
+
+    A line installed before 0.6.1 carries no record, so the SessionStart migration (retire_statusline) would remove it.
+    A call that asks for the same line again changes nothing else, and must still record that the line is wanted."""
+    meta = data.get(META)
+    if not isinstance(meta, dict) or meta.get(STATUSLINE_ASKED_META) is True \
+            or not is_ours_statusline(data, data.get(STATUSLINE_KEY)):
+        return False
+    meta[STATUSLINE_ASKED_META] = True
+    return True
+
+
+# The one command the 0.4.x to 0.6.0 install wrote by default (install.sh: `python3 "<scripts>/statusline.py"`).
+_DEFAULT_STATUSLINE = re.compile(r'python3 "[^"]*/scripts/statusline\.py"')
+
+
+def retire_statusline(data: dict) -> bool:
+    """Remove OUR statusLine that an install wrote by default (0.4.x to 0.6.0), in place. True if it changed.
+
+    The mod's band draws what the line drew since 0.6.1, so the default line is retired once. Before 0.6.1 nothing
+    recorded whether the user asked for a line, so only the exact DEFAULT form is retired: the bare command install.sh
+    wrote, no flags, refreshInterval 1. A line with flags (a layout the user picked) or a tuned interval was chosen:
+    it is kept, and marked asked so it is never looked at again. Never a line asked for since 0.6.1
+    (STATUSLINE_ASKED_META), and never one that is not ours by record. A line we replaced comes back, as `off` does."""
+    meta = data.get(META)
+    if isinstance(meta, dict) and meta.get(STATUSLINE_ASKED_META) is True:
+        return False
+    current = data.get(STATUSLINE_KEY)
+    if not is_ours_statusline(data, current):
+        return False
+    if not _DEFAULT_STATUSLINE.fullmatch(current.get("command", "")) or current.get("refreshInterval", 1) != 1:
+        meta[STATUSLINE_ASKED_META] = True
+        return True  # changed: the record is written, the line stays
+    changed, _ = remove_statusline_only(data)
+    return changed
+
+
 def remove_statusline_only(data: dict) -> tuple[bool, str]:
     """Undo exactly what apply_statusline wrote, and nothing else — never touches `env`/routing.
     Returns (changed, restored_json). Shared by `off` (always this, regardless of whether routing
@@ -205,6 +320,7 @@ def remove_statusline_only(data: dict) -> tuple[bool, str]:
         restored = json.dumps(meta[STATUSLINE_PREV_META], sort_keys=True)
     meta.pop(STATUSLINE_META, None)
     meta.pop(STATUSLINE_PREV_META, None)
+    meta.pop(STATUSLINE_ASKED_META, None)
     if not meta:
         data.pop(META, None)
     return True, restored
@@ -2611,7 +2727,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         file=args.file,
         exists=str(existed).lower(),
         base_url=current if current else "(unset)",
-        other_env_keys=len([k for k in (data.get("env") or {}) if k not in OURS]),
+        other_env_keys=user_env_keys(data.get("env") or {}),
         top_level_keys=len(data),
         statusline=json.dumps(sl, sort_keys=True) if sl else "(unset)",
         # Provenance, from the record rather than the URL's shape. install.sh decided "already
@@ -2810,6 +2926,10 @@ def cmd_add(args: argparse.Namespace) -> int:
     # with an empty string neither the user nor this call asked to set.
     if not args.url:
         if sl_unchanged:
+            # The same line, asked for again by name: record that it is wanted, or the SessionStart migration
+            # (retire_statusline) would remove a line installed before 0.6.1 that the user just asked to keep.
+            if sl_command and existed and mark_statusline_asked(data):
+                save(args.file, data)
             emit(result="unchanged", file=args.file,
                  note="statusline already installed, nothing to add")
             return 0
@@ -2829,7 +2949,15 @@ def cmd_add(args: argparse.Namespace) -> int:
         return 0
 
     current = env.get(KEY)
-    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged:
+    ping_on = not getattr(args, "no_ping_header", False)
+    if current == args.url and all(env.get(k) == v for k, v in desired.items()) and sl_unchanged \
+            and (not ping_on or any(_ping_line(ln) for ln in str(env.get(HEADERS_KEY, "")).split("\n"))) \
+            and (ping_on or ((data.get(META) or {}).get(PING_OPT_OUT_META) is True
+                             and (data.get(META) or {}).get(PING_HEADER_META) != PING_HEADER)):
+        # The same line asked for again by name, on a complete install: record that it is wanted (see
+        # mark_statusline_asked), as the statusline-only path above does.
+        if sl_command and existed and mark_statusline_asked(data):
+            save(args.file, data)
         record_install_scope(args.file, url=args.url)
         emit(result="unchanged", file=args.file, base_url=current,
              upstream=env.get(UPSTREAM_KEY, ""), bin=env.get(BIN_KEY, ""),
@@ -2845,6 +2973,10 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on and add_ping_header(env, meta):
+            changed.append(HEADERS_KEY)
+        if record_ping_choice(env, meta, ping_on):
+            changed.append(HEADERS_KEY)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2865,6 +2997,9 @@ def cmd_add(args: argparse.Namespace) -> int:
         env.update(desired)   # the whole set: a port change must not drop the chaining keys
         data["env"] = env
         meta = data.setdefault(META, {})
+        if ping_on:
+            add_ping_header(env, meta)
+        record_ping_choice(env, meta, ping_on)
         meta["installed_base_url"] = args.url
         if getattr(args, "upstream", ""):
             meta["installed_upstream"] = args.upstream
@@ -2929,6 +3064,9 @@ def cmd_add(args: argparse.Namespace) -> int:
     # Record what we wrote, so a re-run can recognise its own work, and what we took over, so
     # uninstall can hand it back.
     meta = data.setdefault(META, {})
+    if ping_on:
+        add_ping_header(env, meta)
+    record_ping_choice(env, meta, ping_on)
     meta["installed_base_url"] = args.url
     if getattr(args, "upstream", ""):
         meta["installed_upstream"] = args.upstream
@@ -2941,12 +3079,13 @@ def cmd_add(args: argparse.Namespace) -> int:
     record_install_scope(args.file, url=args.url)
     emit(result="added", file=args.file, base_url=args.url,
          replaced=current if current else "", backup=saved or "(new file)",
-         other_env_keys=len([k for k in env if k not in OURS]))
+         other_env_keys=user_env_keys(env))
     return 0
 
 
 def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
-    """SessionStart step: point a status line we installed at the plugin that is running now (#551).
+    """SessionStart step: retire the status line an install wrote by default (the mod's band draws it since 0.6.1),
+    else point one the user asked for at the plugin that is running now (#551).
 
     Looks at the three scopes the plugin installs into, but only at files that already hold our
     ownership record, and rewrites only that record and the command. Never fails: a file that is
@@ -2974,12 +3113,174 @@ def cmd_statusline_repoint(_args: argparse.Namespace) -> int:
         try:
             with open(real, encoding="utf-8") as fh:
                 data = json.load(fh)
-            if not isinstance(data, dict) or not repoint_statusline(data, running):
+            if not isinstance(data, dict):
+                continue
+            kept = data.get(STATUSLINE_KEY)
+            if retire_statusline(data):
+                if data.get(STATUSLINE_KEY) is kept:
+                    # A line the user customised: kept, now marked as asked for, and repointed in the same run.
+                    repoint_statusline(data, running)
+                    save(real, data)
+                    continue
+                backup(real)  # as `off` does before the same removal
+                save(real, data)
+                if data.get(STATUSLINE_KEY) is not None:
+                    # remove_statusline_only gave back the status line the install had replaced.
+                    print("context-guru: your own status line is back; the Context Guru figures are now in the band "
+                          f"above the prompt ({real})")
+                else:
+                    print("context-guru: the status line moved into the Context Guru band above the prompt; "
+                          f"/context-guru:statusline brings the line back too ({real})")
+                continue
+            if not repoint_statusline(data, running):
                 continue
             save(real, data)
             print(f"context-guru: status line updated to this plugin version ({real})")
         except Exception:
             continue
+    return 0
+
+
+# The first build that could write --no-ping-header (#667, 328064e3, 2026-10-22 16:58:53 +0300). An install
+# made with that flag on such a build left no record of the choice. A file is healed only when the
+# install-scope row for it was recorded BEFORE this moment: every `add` rewrites the row, so a row older than
+# the cutoff proves nobody ran a flagged install since. Anything else gets a note, never a write.
+PING_FLAG_SHIPPED = "2026-10-22T13:58:53+00:00"
+PING_NOTE_SEEN = "ping-header-note.json"
+
+
+def predates_ping_flag(real: str) -> bool:
+    """True only when EVERY install-scope row that names this file was recorded before --no-ping-header existed.
+    One newer row (a flagged re-run under another key, say a machine-wide row beside a legacy project row)
+    or one row that cannot be read means the install may be an opt-out: then the answer is False."""
+    try:
+        cutoff = _dt.datetime.fromisoformat(PING_FLAG_SHIPPED)
+        found = False
+        for row in _read_install_scopes().values():
+            if not (isinstance(row, dict) and isinstance(row.get("file"), str)
+                    and os.path.realpath(row["file"]) == real):
+                continue
+            found = True
+            when = _dt.datetime.fromisoformat(row.get("recorded_at"))
+            if when.tzinfo is None or when >= cutoff:
+                return False
+        return found
+    except Exception:
+        return False
+
+
+def _note_seen_path() -> str:
+    return os.path.join(state_dir(), PING_NOTE_SEEN)
+
+
+def ping_note_seen(real: str) -> bool:
+    try:
+        with open(_note_seen_path(), encoding="utf-8") as fh:
+            return real in json.load(fh)
+    except Exception:
+        return False
+
+
+def mark_ping_note_seen(real: str) -> None:
+    try:
+        try:
+            with open(_note_seen_path(), encoding="utf-8") as fh:
+                seen = json.load(fh)
+        except Exception:
+            seen = []
+        if real not in seen:
+            ensure_state_dir(state_dir())
+            _write_atomic(_note_seen_path(), (json.dumps([*seen, real]) + "\n").encode("utf-8"), mode=0o600)
+    except Exception:
+        pass
+
+
+def ping_header_state(data: dict) -> str:
+    """Where one settings file stands on the ping header: "not-ours" (no routing record of ours),
+    "opted-out" (--no-ping-header), "removed" (we added the line and the user took it out), "present",
+    "user-off" (the user's own x-context-guru-ping line is not 1) or "missing". Only "missing" can be healed."""
+    env = data.get("env")
+    meta = data.get(META)
+    if not isinstance(env, dict) or not isinstance(meta, dict):
+        return "not-ours"
+    url = meta.get("installed_base_url")
+    if not url or env.get(KEY) != url:
+        return "not-ours"
+    if meta.get(PING_OPT_OUT_META) is True:
+        return "opted-out"
+    lines = [ln.strip() for ln in str(env.get(HEADERS_KEY, "")).replace("\r", "").split("\n") if _ping_line(ln)]
+    if lines:
+        return "present" if any(ln == PING_HEADER for ln in lines) else "user-off"
+    if meta.get(PING_HEADER_META) == PING_HEADER:
+        return "removed"
+    return "missing"
+
+
+PING_CONSENT = ("Ping enabled for this install; it works from your next session. The Context Guru server keeps your "
+                "latest request and key in memory so the Ping button can work: for 5 minutes "
+                "after your last request on a 5-minute cache, and for up to 59 minutes on a 1-hour cache. It never "
+                "pings automatically for it, and drops the copy at that time. A press never extends it. To opt out, "
+                "re-run the install with --no-ping-header.")
+PING_OFF_NOTE = "Ping is off for this install. Run /context-guru:install to turn it on."
+
+
+def cmd_ensure_ping_header(args: argparse.Namespace) -> int:
+    """SessionStart step (#685): an install from before the header existed never got
+    `x-context-guru-ping: 1`, so the Ping button cannot work and a restart cannot change that.
+
+    The header makes the server keep the latest request and key in memory, so it is never written without
+    consent. It is written only for a file with our routing record AND an install-scope row older than
+    --no-ping-header (so no opt-out can exist). Any other install without a record gets `note=1` once and
+    no write. An opt-out, a line the user removed and a ping line the user set are left alone. Never fails:
+    exit code is 0. With --check it only reports.
+    """
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    files = [args.file] if args.file else [
+        user_scope_files()[0],
+        os.path.join(base, ".claude", "settings.json"),
+        os.path.join(base, ".claude", "settings.local.json")]
+    if not args.file:
+        try:
+            scopes = _read_install_scopes()
+            for key in (user_scope_key(), project_key(base)):
+                row = scopes.get(key)
+                if isinstance(row, dict) and isinstance(row.get("file"), str):
+                    files.append(row["file"])
+        except Exception:
+            pass
+    rank = {"not-ours": 0, "opted-out": 1, "removed": 1, "user-off": 2, "present": 2, "missing": 3, "healed": 4}
+    seen: set = set()
+    state, where, notify = "not-ours", "", False
+    for path in files:
+        real = os.path.realpath(path)
+        if real in seen or not os.path.isfile(real):
+            continue
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                continue
+            st = ping_header_state(data)
+            if st == "not-ours":
+                continue
+            if st == "missing" and not args.check:
+                if predates_ping_flag(real):
+                    if add_ping_header(data["env"], data[META]):
+                        save(real, data)
+                        st = "healed"
+                elif not ping_note_seen(real):
+                    notify = True
+                    mark_ping_note_seen(real)
+            if rank[st] >= rank[state]:
+                state, where = st, real
+        except Exception:
+            continue
+    emit(result=state, file=where)
+    if state == "healed":
+        emit(note=PING_CONSENT)
+    elif notify:
+        emit(note=PING_OFF_NOTE)
     return 0
 
 
@@ -3140,6 +3441,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
         recorded_upstream = _meta.get("installed_upstream") or ""
     if recorded_upstream and env.get(UPSTREAM_KEY) == recorded_upstream:
         del env[UPSTREAM_KEY]
+    remove_ping_header(env, _meta)
     recorded_bin = ""
     if isinstance(_meta, dict):
         recorded_bin = _meta.get("installed_bin") or ""
@@ -3175,8 +3477,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
         meta.pop("installed_base_url", None)
         meta.pop("installed_upstream", None)
         meta.pop("installed_bin", None)
+        meta.pop(PING_HEADER_META, None)
+        meta.pop(PING_OPT_OUT_META, None)
         meta.pop(STATUSLINE_META, None)
         meta.pop(STATUSLINE_PREV_META, None)
+        meta.pop(STATUSLINE_ASKED_META, None)
         if not meta:
             data.pop(META, None)
     # Leave no litter: an `env: {}` we created is removed with the key. An env block that
@@ -3306,7 +3611,158 @@ def cmd_config(args: argparse.Namespace) -> int:
 STRATEGY_MARKER_PREFIX = "# context-guru:"
 STRATEGY_MARKER_TAIL = "written by"
 
-DEFAULT_STRATEGY = "5-min-ping"
+# THE TABLE LIVES IN THE PROXY. `context-guru-proxy strategies` prints it as JSON: each strategy's
+# name, the providers it fits, whether it spends, its description, and the `cache:` keys it sets,
+# plus the alias map, the default name and every preset the proxy registers (config/strategy.go).
+# This plugin keeps no copy. A copy is what drifted: the plugin and the proxy ship separately.
+#
+# Strategies are named by PING COUNT, never by minutes: the proxy reads each session's cache lifetime
+# (5 minutes or 1 hour) from the traffic, so a name that says "5-min" would be wrong for half the
+# sessions it governs. The proxy picks the timing; the strategy picks how many pings.
+#
+# NO FALLBACK for a proxy older than v0.7.1. A binary without the `strategies`
+# subcommand is told so, clearly, and the command stops. Do not add a table "just in case".
+STRATEGY_MIN_PROXY = "v0.7.1"
+STRATEGIES_TIMEOUT_ENV = "CONTEXT_GURU_STRATEGIES_TIMEOUT"
+STRATEGIES_TIMEOUT = 5.0
+# The picker offers only what the Claude Code plugin can route: it routes Anthropic only.
+PLUGIN_PROVIDERS = ("anthropic", "any")
+
+
+class StrategyTableError(Exception):
+    """The proxy binary could not give its strategy table. `reason` is a short code:
+    no_proxy_binary (none found), proxy_too_old (no valid JSON), proxy_unrunnable."""
+
+    def __init__(self, message: str, reason: str = "proxy_too_old"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def find_proxy_binary(explicit: str = "") -> str:
+    """The proxy binary, found the way the plugin finds it everywhere else: an explicit path, then
+    CONTEXT_GURU_BIN (what the install writes into the settings env block), then the bare name on
+    PATH, then install.sh's own destination. "" when none exists."""
+    for cand in (explicit, os.environ.get(BIN_KEY, "")):
+        if cand:
+            path = shutil.which(cand) or ""
+            if path:
+                return path
+            if os.path.exists(cand):
+                # Named on purpose, so another binary on PATH must not answer in its place.
+                raise StrategyTableError(f"{cand} exists but is not an executable file",
+                                         "proxy_unrunnable")
+    path = shutil.which("context-guru-proxy") or ""
+    if path:
+        return path
+    dest = os.environ.get("CONTEXT_GURU_DEST") or os.path.join(os.path.expanduser("~"), ".local", "bin")
+    cand = os.path.join(dest, "context-guru-proxy")
+    return cand if os.access(cand, os.X_OK) else ""
+
+
+def _update_hint() -> str:
+    return (f"update the proxy to {STRATEGY_MIN_PROXY} or later (/context-guru:update); "
+            f"nothing was changed")
+
+
+_TABLE_CACHE: dict[tuple[str, int], dict | Exception] = {}
+
+# Settings of the proxy that open files or switch on hosted mode. The probe must not inherit them.
+_PROBE_DROP = re.compile(r"^(DASHBOARD.*|SESSION_STATE.*|CONTROL_DB|UPSTREAMS|CG_RECORD.*|ARCHIVE_.*|STORE|IDLE_EXIT)$")
+
+# The one alias the plugin names itself, for display only (`strategy show`, marker rename) when no
+# proxy can be asked. The proxy's own `aliases` stay the authority everywhere else.
+LEGACY_NAME_ALIASES = {"5-min-ping": "auto"}
+
+
+def load_strategy_table(explicit_bin: str = "") -> dict:
+    """The strategy table the proxy binary prints. Raises StrategyTableError with a plain reason.
+
+    The trap this guards (#483): a binary older than v0.7.1 does NOT fail on `strategies`. It ignores
+    the word and starts serving. So the command runs with a short time limit, on a loopback port that
+    cannot collide (LISTEN_ADDR 127.0.0.1:0), and "no valid JSON" means an old binary. The result is
+    kept for the life of this process, keyed by binary path and mtime."""
+    binary = find_proxy_binary(explicit_bin)
+    if not binary:
+        raise StrategyTableError(
+            "no context-guru-proxy binary was found, so the cache strategies cannot be read; "
+            "run /context-guru:install", "no_proxy_binary")
+    try:
+        key = (binary, os.stat(binary).st_mtime_ns)
+    except OSError as exc:
+        raise StrategyTableError(f"cannot read {binary}: {exc}", "proxy_unrunnable") from exc
+    if key in _TABLE_CACHE:
+        hit = _TABLE_CACHE[key]
+        if isinstance(hit, Exception):
+            raise hit
+        return hit
+    try:
+        limit = float(os.environ.get(STRATEGIES_TIMEOUT_ENV, "") or STRATEGIES_TIMEOUT)
+    except ValueError:
+        limit = STRATEGIES_TIMEOUT
+    # An old binary ignores `strategies` and serves until the limit. It must write nothing: the
+    # probe env drops every setting that turns on a database, a record dir or hosted mode, and the
+    # probe runs in a fresh empty directory so a relative default path cannot land in a project.
+    env = {k: v for k, v in os.environ.items() if not _PROBE_DROP.match(k)}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as cwd:
+            run = subprocess.run([binary, "strategies"], capture_output=True, timeout=limit,
+                                 env=env, stdin=subprocess.DEVNULL, cwd=cwd)
+        out, code = run.stdout.decode("utf-8", errors="replace"), run.returncode
+    except subprocess.TimeoutExpired:
+        out, code = "", -1     # run() has already killed it: an old binary that started serving
+    except OSError as exc:
+        raise StrategyTableError(f"cannot run {binary}: {exc}", "proxy_unrunnable") from exc
+    try:
+        table = json.loads(out)
+    except ValueError:
+        table = None
+    rows = table.get("strategies") if isinstance(table, dict) else None
+    ok = (code == 0 and isinstance(table, dict) and isinstance(table.get("default"), str)
+          and isinstance(rows, list) and rows
+          and isinstance(table.get("aliases", {}), dict)
+          and all(isinstance(k, str) and isinstance(v, str) for k, v in table.get("aliases", {}).items())
+          and isinstance(table.get("presets", []), list)
+          and all(isinstance(x, str) for x in table.get("presets", []))
+          and all(isinstance(r, dict) and isinstance(r.get("name"), str)
+                  and isinstance(r.get("providers"), list) and isinstance(r.get("spends"), bool)
+                  and isinstance(r.get("desc"), str) for r in rows))
+    if not ok:
+        err = StrategyTableError(f"{binary} cannot list cache strategies; {_update_hint()}")
+        _TABLE_CACHE[key] = err    # an old binary costs its time limit once per process, not per call
+        raise err
+    table.setdefault("aliases", {})
+    table.setdefault("presets", [])
+    _TABLE_CACHE[key] = table
+    return table
+
+
+def offered_strategies(table: dict) -> list[dict]:
+    """The rows the Claude Code plugin may offer: those whose providers include anthropic or any."""
+    return [r for r in table["strategies"] if any(p in PLUGIN_PROVIDERS for p in r["providers"])]
+
+
+def canonical_strategy(name: str, table: dict | None = None) -> str:
+    """The current name for `name`: itself, or what an alias maps to. With no table to read (no
+    binary, or an old one) the name comes back as it was written."""
+    if table is None:
+        try:
+            table = load_strategy_table()
+        except StrategyTableError:
+            return LEGACY_NAME_ALIASES.get(name, name)
+    return table["aliases"].get(name, name)
+
+
+def default_strategy(table: dict | None = None) -> str:
+    """The proxy's default strategy name. Display only: `auto` when no table can be read, which is
+    the default plugin.json declares for the option."""
+    if table is None:
+        try:
+            table = load_strategy_table()
+        except StrategyTableError:
+            return "auto"
+    return table["default"]
+
 
 # The default PRESET, in the one place that decides it. It is `off` - the passthrough pipeline, no
 # components at all - and that is a deliberate product claim rather than a conservative guess:
@@ -3315,7 +3771,8 @@ DEFAULT_STRATEGY = "5-min-ping"
 #   byte-for-byte, and the only thing that happens is that your prompt cache is kept warm.
 #
 # It used to be `cache`, i.e. cachesplit alone, on the strength of a -34.1% figure that came from
-# SWE-bench CLI traffic and does not describe interactive use (#263). The measurements that do:
+# a Terminal-Bench task on Claude Code CLI traffic and does not describe interactive use (#263).
+# The measurements that do:
 # with cachesplit OFF a real session's first request still read 45,805 tokens from cache and only
 # 8,499 more moved when it was on (apply/prefixsplit_test.go), and its production credit over the
 # measured window was $0.03 against keep-alive's +$125. So the component that earns the install is
@@ -3332,59 +3789,9 @@ DEFAULT_STRATEGY = "5-min-ping"
 # check-proxy.sh, and the empty-preset note below). A drift test now fails if they disagree.
 DEFAULT_PRESET = "off"
 
-# `split` was the old name for `none`. It was named after `cachesplit`, which stopped being the
-# default, so the name referred to a component that is not running - the defect shape #263 is about.
-# Renamed outright rather than aliased: the plugin is unreleased, so there is no install in the wild
-# to keep working, and an alias would be a second name for one thing living in the code forever to
-# serve nobody. A file can never carry `strategy=split` either, because `split` WAS the absence of a
-# file - so there is no stored state to migrate.
-# Each entry: the `cache:` keys it sets, and one line of honest description.
-#
 # `none` writes NO FILE AT ALL, deliberately. --config REPLACES --preset rather than layering over
 # it, so the way to express "just the preset, nothing else" is the absence of a config, not a
-# config that says keepalive: false. That also means switching to `none` is a removal, which is
-# why it cannot be expressed as a dict here.
-STRATEGIES: dict[str, dict] = {
-    "none": {
-        "cache": {},
-        "spends": False,
-        "desc": "no cache strategy: the preset runs and nothing else. No pings, no model calls, "
-                "no spend. Written as the ABSENCE of a config file.",
-    },
-    DEFAULT_STRATEGY: {
-        # Explicit rather than relying on the library defaults, for two reasons: the file becomes
-        # self-documenting for anyone who opens it, and a later change to a default in config.go
-        # cannot silently re-tune an already-armed install.
-        "cache": {
-            "keepalive": True,
-            "keepalive_idle_seconds": 270,
-            "keepalive_max_pings": 2,
-            "keepalive_max_usd_per_ping": 0.50,
-            "keepalive_min_prefix_tokens": 80000,
-        },
-        "spends": True,
-        "desc": "an idle ping just under the provider's 5-minute TTL (270s, at most 2 per "
-                "idle span, >=80k-token prefix, <=$0.50/ping). SPENDS THE CALLER'S CREDENTIAL "
-                "while nobody is at the keyboard.",
-    },
-    "1-hour-head": {
-        "cache": {"head_ttl_1h": True, "head_ttl_min_tokens": 50000},
-        "spends": False,
-        # The >=50k gate is disclosed HERE, in plugin.json and in the picker's table, because it is
-        # the difference between this strategy doing something and doing nothing - and because both
-        # measurements quoted as its evidence are BELOW it (36,574 on Haiku, 48,212 on Sonnet). A
-        # strategy that advertises a measurement has to state the threshold that measurement would
-        # not have passed, or "verify with Usage.CacheWrite1h" reads zero for an undisclosed second
-        # reason and the user concludes the tier was refused.
-        "desc": "asks for the 1-hour tier on the tools/system breakpoints, and ONLY on "
-                "requests with a >=50k-token prefix (below that it does nothing at all; the "
-                "size gate is what makes it pay, +$48.81 against -$18.34 applied blanket). No "
-                "pings. Measured GRANTED on Haiku 4.5 and SILENTLY DOWNGRADED on Sonnet 5 (zero "
-                "1h writes in 19,805 production requests), so on Opus/Sonnet the honest projection "
-                "is $0 - verify with Usage.CacheWrite1h before believing otherwise, and note both "
-                "of those measurements were on prefixes UNDER the 50k gate this ships with.",
-    },
-}
+# config that says keepalive: false. That also means switching to `none` is a removal.
 
 
 def strategy_path(port: str) -> str:
@@ -3408,8 +3815,55 @@ def _strategy_name_in(text: str) -> str:
     return m.group(1) if m else ""
 
 
+# FILES WRITTEN BEFORE THE PROXY OWNED THE TABLE carry the `cache:` keys themselves, and `2-ping`
+# carries `keepalive_max_pings_1h`. A proxy binary older than the 1-hour keys rejects that key (strict
+# YAML) and exits. start-proxy.sh then asks `strategy sync --legacy-binary`, which drops the `_1h`
+# lines from such a file and marks it, so the next start does not fail and recover again. The marker
+# records the proxy version it was written for; after a proxy update the keys are not put back by
+# sync, because sync no longer owns the numbers: `strategy set` writes the new form.
+LEGACY_BINARY_MARKER_PREFIX = "# context-guru: 1h-keys-omitted for proxy "
+_ONE_HOUR_KEY = re.compile(r"^  keepalive_(idle_seconds|max_pings)_1h:.*\n?", re.M)
+
+
+def _installed_proxy_version() -> str:
+    """The version install.sh recorded for the proxy binary, or "" when none is recorded."""
+    try:
+        with open(os.path.join(state_dir(), "proxy-version"), encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
+def _version_tuple(v: str) -> tuple[int, ...] | None:
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", v.strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _proxy_version_at_least(minimum: str) -> bool:
+    """Does the version install.sh recorded meet `minimum`? False when none is recorded."""
+    have, need = _version_tuple(_installed_proxy_version()), _version_tuple(minimum)
+    return bool(have and need and have >= need)
+
+
+def _legacy_marker() -> str:
+    return LEGACY_BINARY_MARKER_PREFIX + _installed_proxy_version()
+
+
+def _without_one_hour_keys(text: str) -> str:
+    """An old-form file with its `_1h` keys removed and the legacy marker on line 2."""
+    body = _ONE_HOUR_KEY.sub("", "\n".join(l for l in text.split("\n")
+                                           if not l.startswith(LEGACY_BINARY_MARKER_PREFIX)))
+    lines = body.split("\n")
+    lines.insert(1, _legacy_marker())
+    return "\n".join(lines)
+
+
 def _render_strategy(name: str, preset: str) -> str:
-    spec = STRATEGIES[name]
+    """The per-port config file. The proxy owns the keys: the file names the strategy and the proxy
+    fills `cache:` from its table (a key the file sets itself would win, and this file sets none).
+
+    Files written before v0.7.1 carry the keys themselves. They keep working: the proxy reads
+    them as they are, and `strategy sync` leaves their keys alone (see cmd_strategy)."""
     lines = [
         f"{STRATEGY_MARKER_PREFIX} strategy={name} {STRATEGY_MARKER_TAIL} "
         f"/context-guru:cache-strategy-picker",
@@ -3425,13 +3879,16 @@ def _render_strategy(name: str, preset: str) -> str:
         "# changed the option saw it stick in the config UI and kept running the preset that was",
         "# recorded here when the strategy was first armed - indefinitely, and with no way to tell.",
         f"preset: {preset}",
+        "# The proxy fills the cache keys of this strategy (`context-guru-proxy strategies`).",
+        "cache:",
+        f"  strategy: {name}",
     ]
-    cache = spec["cache"]
-    if cache:
-        lines.append("cache:")
-        for k, v in cache.items():
-            lines.append(f"  {k}: {json.dumps(v)}")
     return "\n".join(lines) + "\n"
+
+
+def _set_preset_line(text: str, preset: str) -> str:
+    """`text` with its top-level `preset:` line set to `preset`; unchanged when it has none."""
+    return re.sub(r"(?m)^preset:.*$", lambda _m: f"preset: {preset}", text, count=1)
 
 
 def valid_base_url(url: str) -> str:
@@ -3523,19 +3980,151 @@ def cmd_check_url(args: argparse.Namespace) -> int:
     return 0
 
 
+def _table_for(args):
+    """(table, 0) or (None, exit code) after printing why the proxy gave no table."""
+    try:
+        return load_strategy_table(getattr(args, "bin", "")), 0
+    except StrategyTableError as exc:
+        emit(result="error", reason=exc.reason, note=str(exc))
+        return None, 3
+
+
+def _names(rows) -> str:
+    return ",".join(r["name"] for r in rows)
+
+
+_STRATEGY_KEY = re.compile(r"^[ \t]+strategy:[ \t]*[^ \t#]")
+
+
+# A `strategy` key at the top level of a flow mapping (the text kept by `_flow_top_level`).
+_FLOW_STRATEGY_KEY = re.compile(r"(?:^|[,{\s])[\"']?strategy[\"']?[ \t]*:[ \t]*[^ \t,}]")
+
+
+def _flow_top_level(lines: list, start: int, first: str) -> str:
+    """The text of a flow mapping that begins with `first` (which starts with `{`) on lines[start],
+    up to its matching `}` and across lines, with everything inside a nested `{...}` dropped. Quotes are
+    not parsed: a `strategy:` inside a quoted string can count, which only sends the file to the table
+    check (the safe direction)."""
+    kept, depth, i, text = [], 0, start, first
+    while True:
+        for ch in text.split("#")[0]:
+            if ch == "{":
+                depth += 1
+                if depth == 1:
+                    kept.append(ch)
+            elif ch == "}":
+                depth -= 1
+                if depth <= 0:
+                    return "".join(kept)
+            elif depth == 1:
+                kept.append(ch)
+        kept.append("\n")
+        i += 1
+        if i >= len(lines):
+            return "".join(kept)
+        text = lines[i]
+
+
+def _file_sets_strategy_key(text: str) -> bool:
+    """Does the file set `strategy:` as a direct child of `cache:`? Other nested keys (such as
+    `components.extract_llm.strategy`) are not a cache strategy name. Block style and flow style (on
+    the `cache:` line, on the next line, or across several lines) both count."""
+    lines = text.split("\n")[1:]
+    in_cache, indent = False, 0
+    for n, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        width = len(line) - len(line.lstrip(" \t"))
+        if width == 0:
+            code = line.split("#")[0].strip()
+            in_cache, indent = code.startswith("cache:"), 0
+            if in_cache:
+                value = code[len("cache:"):].strip()
+                if value.startswith("{"):
+                    return bool(_FLOW_STRATEGY_KEY.search(_flow_top_level(lines, n, value)))
+                if value:
+                    in_cache = False
+        elif in_cache:
+            if not indent and line.strip().startswith("{"):
+                return bool(_FLOW_STRATEGY_KEY.search(_flow_top_level(lines, n, line.strip())))
+            indent = indent or width
+            if width == indent and _STRATEGY_KEY.match(line):
+                return True
+    return False
+
+
+def _is_new_form(text: str, name: str) -> bool:
+    """Is `text` the file this version renders for `name`, apart from its preset line?"""
+    return _set_preset_line(text, "x") == _render_strategy(name, "x")
+
+
 def cmd_strategy(args) -> int:
     if args.op == "list":
+        table, rc = _table_for(args)
+        if table is None:
+            return rc
+        rows = offered_strategies(table)
         # `names=` is the machine-readable list. The per-strategy keys below mangle `-` to `_` to be
-        # valid fact keys, so they cannot be parsed back into names — install.sh needs to validate a
-        # `--cache-strategy` value BEFORE it downloads a binary, and this is what it reads.
-        emit(result="ok", default=DEFAULT_STRATEGY, names=",".join(STRATEGIES))
-        for name, spec in STRATEGIES.items():
-            emit(**{f"strategy_{name.replace('-', '_')}": spec["desc"],
-                    f"spends_{name.replace('-', '_')}": "true" if spec["spends"] else "false"})
+        # valid fact keys, so they cannot be parsed back into names - install.sh needs to validate a
+        # `--cache-strategy` value, and this is what it reads. Only strategies the Claude Code plugin
+        # can route are listed: it routes Anthropic only, so `30-min-ping` is not offered.
+        emit(result="ok", default=table["default"], names=_names(rows),
+             aliases=",".join(f"{old}:{new}" for old, new in table["aliases"].items()),
+             presets=",".join(table["presets"]))
+        for r in rows:
+            emit(**{f"strategy_{r['name'].replace('-', '_')}": r["desc"],
+                    f"spends_{r['name'].replace('-', '_')}": "true" if r["spends"] else "false"})
         return 0
 
     port = args.port
     path = strategy_path(port)
+
+    if args.op == "known":
+        # start-proxy.sh asks this BEFORE it restarts or starts a proxy for a strategy name: does the
+        # proxy binary it is about to run know `--name`? The plugin holds no table (the proxy owns it),
+        # so a name from a newer release reaches an older binary, which exits on it and leaves the
+        # session with no proxy (#1383). `known` is the only answer that keeps the config. For
+        # `unknown` the caller starts without it, with preset off. For `unchecked` a cold caller does
+        # the same, and a warm caller keeps the running proxy as it is. Never an error exit.
+        name = args.name.strip()
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            text = ""
+        if text and _strategy_is_ours(text) and not _file_sets_strategy_key(text):
+            # A file written before the proxy owned the table carries its own keys and sets no
+            # `strategy:` key, so there is nothing for the proxy to reject. A file that sets the key
+            # always goes to the table check below, however it was edited.
+            emit(result="known", strategy=name, reason="own_keys")
+            return 0
+        # A record that names a version below the minimum means that binary answers `strategies` by
+        # serving until the time limit: do not run it. NO record is not a reason to refuse (a binary
+        # put in place by hand has none, and nobody runs a proxy older than the minimum): ask the
+        # binary, and let the time limit protect the check.
+        have = _version_tuple(_installed_proxy_version())
+        need = _version_tuple(STRATEGY_MIN_PROXY)
+        if have and need and have < need:
+            emit(result="unchecked", strategy=name, reason="proxy_too_old")
+            return 0
+        explicit = getattr(args, "bin", "") or ""
+        # A bare name is looked up on PATH. A name that holds a `/` is a path: check that file itself.
+        # (start-proxy.sh also accepts `[ -x "$BIN" ]` for a bare name, which is relative to its working
+        # directory. The check does not: it runs the binary from another directory.)
+        runnable = shutil.which(explicit) if "/" not in explicit else os.access(explicit, os.X_OK)
+        if explicit and not runnable:
+            # The caller named the binary it will launch. Another one must not answer for it.
+            emit(result="unchecked", strategy=name, reason="table_unavailable",
+                 detail=f"{explicit} cannot be run")
+            return 0
+        try:
+            table = load_strategy_table(explicit)
+        except StrategyTableError as exc:
+            emit(result="unchecked", strategy=name, reason="table_unavailable", detail=f"{exc}")
+            return 0
+        names = {r["name"] for r in table["strategies"]} | set(table["aliases"])
+        emit(result="known" if name in names else "unknown", strategy=name,
+             known=_names(table["strategies"]))
+        return 0
 
     if args.op == "show":
         if not os.path.exists(path):
@@ -3552,18 +4141,24 @@ def cmd_strategy(args) -> int:
             emit(result="ok", strategy="(foreign)", file=path, port=port,
                  note="a config exists at our path that we did not write; left alone")
             return 0
-        name = _strategy_name_in(text)
+        # Read-only, so it asks the proxy when it can and reports the name as recorded when it cannot.
+        try:
+            table = load_strategy_table(getattr(args, "bin", ""))
+        except StrategyTableError:
+            table = None
+        name = canonical_strategy(_strategy_name_in(text), table)
         # A name we do not recognise is reported AS RECORDED, with a note saying so. Two wrong
         # answers were available here and both were worse: mapping it to a current name would claim
         # the file does something it does not, and reporting "(unnamed)" would hide that the file
         # names a strategy at all. `split` is the realistic case - it was removed rather than
         # aliased, so a hand-written file can still carry it - and the file EXISTS and arms pings,
         # which is exactly what the reader needs to know.
-        if name and name not in STRATEGIES:
+        if table is not None and name and name not in [r["name"] for r in table["strategies"]]:
             emit(result="ok", strategy=name, file=path, port=port,
-                 note=f"this config names `{name}`, which is not a strategy this version knows "
-                      f"({','.join(STRATEGIES)}). The file is still what the proxy loads; re-set it "
-                      f"with `strategy set --name <known>` to bring it back under a name")
+                 note=f"this config names `{name}`, which is not a strategy this proxy knows "
+                      f"({_names(offered_strategies(table))}). The file is still "
+                      f"what the proxy loads; re-set it with `strategy set --name <known>` to bring "
+                      f"it back under a name")
             return 0
         emit(result="ok", strategy=name or "(unnamed)", file=path, port=port,
              note="" if name else "written before strategies had names; re-set it to name it")
@@ -3583,6 +4178,15 @@ def cmd_strategy(args) -> int:
         # the preset line in place: the name is the durable choice, the preset is the option, and
         # rendering the pair through the one function that writes these files keeps a synced file
         # byte-identical to a freshly-set one. Anything else is a second encoding of the same rule.
+        #
+        # MIGRATION: none, on purpose. A file armed before the proxy owned the table carries the
+        # `cache:` keys itself. The proxy loads those exactly as they are, and the effective config
+        # is the same as `strategy: <name>` (TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys).
+        # Sync leaves the keys alone and brings only the `preset:` line in line. Re-rendering would
+        # need the proxy's table on every session start, and a proxy older than v0.7.1 answers
+        # `strategies` by starting to serve, so each start would wait for the time limit. A file with
+        # explicit keys also cannot drift when the proxy changes a default. A deliberate
+        # `strategy set` writes the new form.
         if not args.preset.strip():
             emit(result="error", reason="empty_preset",
                  note="sync needs the preset to write; nothing was changed")
@@ -3605,25 +4209,36 @@ def cmd_strategy(args) -> int:
             emit(result="skipped", reason="not_ours", file=path,
                  note="a config we did not write is at this path; its preset is its owner's business")
             return 0
-        name = _strategy_name_in(text)
-        if not name:
+        recorded = _strategy_name_in(text)
+        if not recorded:
             emit(result="skipped", reason="unnamed", file=path,
                  note="written before strategies had names, so there is no name to re-render from; "
                       "`strategy set --name <name>` names it")
             return 0
-        if name not in STRATEGIES:
-            # A file naming a strategy this version does not know. Re-rendering it would silently
-            # change what it does; reporting it is the honest move.
-            emit(result="skipped", reason="unknown_strategy", file=path, requested=name,
-                 known=",".join(STRATEGIES))
-            return 0
-        if name == "none":
+        if recorded == "none":
             # A file that names the absence of a file. Contradictory, so do not act on it.
             emit(result="skipped", reason="none_has_no_file", file=path,
                  note="this config names `none`, which is expressed as no config at all; "
                       "`strategy set --name none` removes it")
             return 0
-        want = _render_strategy(name, args.preset)
+        # The new form is re-rendered whole (byte-identical to a fresh `set`); the old form keeps its
+        # keys and gets only the preset line.
+        name = LEGACY_NAME_ALIASES.get(recorded, recorded)
+        lines = text.splitlines()
+        stale_marker = (any(l.startswith(LEGACY_BINARY_MARKER_PREFIX) for l in lines)
+                        and _legacy_marker() not in lines)
+        if _is_new_form(text, recorded):
+            want = _render_strategy(name, args.preset)
+        elif stale_marker and _proxy_version_at_least(STRATEGY_MIN_PROXY):
+            # The proxy was updated since the `_1h` keys were dropped, and the recorded version knows
+            # the `strategy` key. Move the file to the new form: the proxy owns the keys again.
+            want = _render_strategy(name, args.preset)
+        else:
+            want = _set_preset_line(text, args.preset)
+            if args.legacy_binary or _legacy_marker() in lines:
+                want = _without_one_hour_keys(want)
+            if name != recorded:     # the marker name only, so the status line shows the current name
+                want = want.replace(f"strategy={recorded} ", f"strategy={name} ", 1)
         if want == text:
             emit(result="unchanged", strategy=name, file=path, port=port, preset=args.preset)
             return 0
@@ -3671,18 +4286,30 @@ def cmd_strategy(args) -> int:
         return 0
 
     # op == "set"
-    name = args.name
-    if name not in STRATEGIES:
-        emit(result="error", reason="unknown_strategy", requested=name,
-             known=",".join(STRATEGIES))
-        return 2
+    table = None
+    if args.name == "none":
+        name = "none"       # needs no table: switching pings OFF must work with any proxy binary
+    else:
+        table, rc = _table_for(args)
+        if table is None:
+            return rc
+        name = canonical_strategy(args.name, table)
+        offered = offered_strategies(table)
+        if name not in [r["name"] for r in offered]:
+            if name in [r["name"] for r in table["strategies"]]:
+                emit(result="error", reason="not_offered", requested=args.name, known=_names(offered),
+                     note=f"`{name}` is not for this plugin: Claude Code is routed to Anthropic only")
+            else:
+                emit(result="error", reason="unknown_strategy", requested=args.name,
+                     known=_names(offered))
+            return 2
     # `none` writes NO FILE, so it reaches `clear` and never touches the preset - checking the preset
     # first refused `strategy set --name split` (with no --preset, which the parser does not require)
     # as `empty_preset`, whose note about silently disabling compaction describes a file that would
     # never be written. It also regressed the old keep-alive-off path, which was `rm -f "$CFG"` and
     # required no preset at all. Ordered before the guard for that reason.
     if name == "none":
-        # Expressed as a removal, per the STRATEGIES comment - but reported as a `set`, because that is
+        # Expressed as a removal, see the note above strategy_path - but reported as a `set`, because that is
         # the operation the caller asked for. See the clear branch.
         return cmd_strategy(argparse.Namespace(op="clear", port=port, as_set=True))
 
@@ -3710,7 +4337,8 @@ def cmd_strategy(args) -> int:
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     _write_atomic(path, _render_strategy(name, args.preset).encode("utf-8"), mode=0o600)
     emit(result="set", strategy=name, file=path, port=port, preset=args.preset,
-         spends="true" if STRATEGIES[name]["spends"] else "false",
+         spends="true" if table and next(r for r in table["strategies"] if r["name"] == name)["spends"]
+         else "false",
          note="takes effect the next time the proxy starts; a proxy already running keeps its "
               "current config until it is stopped and started again")
     return 0
@@ -3734,30 +4362,99 @@ PRESETS: dict[str, str] = {
     "high": "medium, but the summary of older turns is used as soon as the context window is "
             "nearly full",
     "xhigh": "high plus a periodic deep-adjudication sweep over turns whose prompt cache has "
-             "already gone cold — the deepest cut this picker offers",
+             "already gone cold",
+    "ultrahigh": "xhigh plus tool deferral: tools your own last sessions never used are sent as "
+                 "names only and loaded through search when needed — experimental, opt-in",
 }
 DEFAULT_PRESET = "off"
 
 
+def saved_preset(plugin: str = "context-guru@context-guru") -> tuple[str, str]:
+    """(preset, file) as saved in the first settings file that names one; ("", "") when none does."""
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        data, _ = load(path)
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and "preset" in opts:
+            return str(opts["preset"]), path
+    return "", ""
+
+
+def running_preset(port: str) -> str | None:
+    """The preset the proxy on `port` runs, from its /stats. None when nothing answers; "" when it
+    answers without a `preset` key (a proxy from before that field existed)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as resp:
+            doc = json.loads(resp.read())
+    except Exception:  # noqa: BLE001 - no proxy, or an unreadable answer: unknown, not an error
+        return None
+    got = doc.get("preset") if isinstance(doc, dict) else ""
+    return got if isinstance(got, str) else ""
+
+
+def preset_gap_note(saved: str, running: str | None) -> str:
+    """`preset: xhigh (ultrahigh after a restart)` when the saved preset differs from the running
+    one, else "". Nothing when the running preset is unknown: a guess would show a false gap."""
+    if not saved or not running or saved == running:
+        return ""
+    return f"preset: {running} ({saved} after a restart)"
+
+
+def _gap_facts(saved: str) -> dict:
+    port, _src = resolve_routed_port()
+    running = running_preset(port) if port else None
+    facts: dict = {"running": running if running is not None else "no_proxy"}
+    note = preset_gap_note(saved, running)
+    if note:
+        facts["gap"] = note
+    return facts
+
+
+def _presets_known_to_proxy(args) -> int:
+    """0 when the proxy registers every preset of the picker list (PRESETS), or when no proxy can be
+    asked. Then it prints a warning and the choice is saved unchecked, as before this check existed.
+    A proxy that answers and lacks a preset is an error. The short list stays here."""
+    try:
+        table = load_strategy_table(getattr(args, "bin", ""))
+    except StrategyTableError as exc:
+        why = str(exc)
+        if why.endswith("; nothing was changed"):
+            why = why[: -len("; nothing was changed")]
+        emit(warning="preset_unchecked",
+             warning_note=f"the preset name is not checked against the proxy: {why}")
+        return 0
+    missing = [n for n in PRESETS if n not in table["presets"]]
+    if missing:
+        emit(result="error", reason="preset_unknown_to_proxy", missing=",".join(missing),
+             note=f"this proxy does not register the preset(s) {', '.join(missing)}; "
+                  f"{_update_hint()}")
+        return 3
+    return 0
+
+
 def cmd_preset(args: argparse.Namespace) -> int:
     if args.op == "list":
+        rc = _presets_known_to_proxy(args)
+        if rc:
+            return rc
         emit(result="ok", default=DEFAULT_PRESET, names=",".join(PRESETS))
         for name, desc in PRESETS.items():
             emit(**{f"preset_{name}": desc})
         return 0
 
     if args.op == "show":
-        for path in _option_file_candidates(args.plugin):
-            if not os.path.exists(path):
-                continue
-            data, _ = load(path)
-            opts = (((data.get("pluginConfigs") or {}).get(args.plugin) or {}).get("options") or {})
-            if isinstance(opts, dict) and "preset" in opts:
-                emit(result="ok", preset=opts["preset"], file=path)
-                return 0
-        emit(result="ok", preset=DEFAULT_PRESET, file="(none)",
+        saved, path = saved_preset(args.plugin)
+        if path:
+            emit(result="ok", preset=saved, file=path, **_gap_facts(saved))
+            return 0
+        emit(result="ok", preset=DEFAULT_PRESET, file="(none)", **_gap_facts(DEFAULT_PRESET),
              note="no preset configured; the plugin default applies")
         return 0
+
+    if args.op == "restart":
+        return _preset_restart(args)
 
     # op == "set"
     name = args.name
@@ -3765,6 +4462,9 @@ def cmd_preset(args: argparse.Namespace) -> int:
         emit(result="error", reason="unknown_preset", requested=name,
              known=",".join(PRESETS))
         return 2
+    rc = _presets_known_to_proxy(args)
+    if rc:
+        return rc
 
     target = None
     for path in _option_file_candidates(args.plugin):
@@ -3805,17 +4505,112 @@ def cmd_preset(args: argparse.Namespace) -> int:
         return 3
 
     if options.get("preset") == name:
-        emit(result="unchanged", preset=name, file=target)
+        facts = _gap_facts(name)
+        # The probe goes only to a proxy that runs the preset already.
+        emit(result="unchanged", preset=name, file=target, **facts,
+             **(_ask_defer_probe(name) if facts["running"] == name else {}))
         return 0
 
     if existed:
         backup(target)
     options["preset"] = name
     save(target, data)
-    emit(result="set", preset=name, file=target,
-         note="takes effect the next time the proxy starts, not this session — stop and restart "
-              "it, or start a new session, to pick it up")
+    facts = _gap_facts(name)
+    if facts["running"] == name:
+        emit(result="set", preset=name, file=target, **facts, **_ask_defer_probe(name))
+    elif facts["running"] == "no_proxy":
+        emit(result="set", preset=name, file=target, **facts, restart_needed="false",
+             note="no proxy answers on this port; the next proxy start runs this preset")
+    else:
+        # The probe waits: the running proxy would take it and do nothing with it (#887).
+        emit(result="set", preset=name, file=target, **facts, restart_needed="true",
+             note="saved, but the running proxy does not run it yet. A restart applies it, and every "
+                  "open session on this port then pays one cache rewrite. Ask the user. On yes run "
+                  f"`preset restart --name {name}`. On no, the old preset runs until the next session start.")
     return 0
+
+
+def _preset_restart(args: argparse.Namespace) -> int:
+    """Restart the proxy on this directory's port with preset `--name`, through start-proxy.sh.
+
+    There is ONE restart path: start-proxy.sh runs `strategy sync`, compares the fingerprint, stops
+    the proxy by its pidfile and starts a new one. This only hands it the values a Bash call does not
+    carry (`CLAUDE_PLUGIN_OPTION_*` reaches hooks only), then reads /stats to confirm. Call it only
+    after the user said yes: every open session on the port pays one cache rewrite.
+    """
+    name = args.name
+    if name not in PRESETS:
+        emit(result="error", reason="unknown_preset", requested=name, known=",".join(PRESETS))
+        return 2
+    rc = _presets_known_to_proxy(args)
+    if rc:
+        return rc
+    port, why = resolve_routed_port(plugin=args.plugin)
+    if not port:
+        emit(result="error", reason="not_routed", why=why)
+        return 3
+    # --unrouted: the port was resolved just above, so start-proxy.sh's own routing gate (which reads
+    # ANTHROPIC_BASE_URL, absent from some Bash calls) has nothing left to check.
+    cmd = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "start-proxy.sh"),
+           "--unrouted", "--no-update-check", "--port", port, "--preset", name]
+    for flag, key in (("--upstream", "upstream"), ("--idle-exit", "idle_exit")):
+        value = _configured_option(args.plugin, key)
+        if value:
+            cmd += [flag, value]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=90).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        emit(result="error", reason="start_failed", detail=str(exc))
+        return 4
+    for line in out.splitlines():
+        if line.strip():
+            emit(starter=line.strip())
+    running = running_preset(port)
+    if running == name:
+        emit(result="restarted", preset=name, port=port, running=running, **_ask_defer_probe(name))
+        return 0
+    emit(result="not_applied", preset=name, port=port, running=running if running is not None else "no_proxy",
+         note="the proxy does not run the new preset yet; the lines above say why. The saved preset "
+              "applies at the next session start.")
+    return 5
+
+
+def _configured_option(plugin: str, key: str) -> str:
+    for path in _option_file_candidates(plugin):
+        if not os.path.exists(path):
+            continue
+        data, _ = load(path)
+        opts = (((data.get("pluginConfigs") or {}).get(plugin) or {}).get("options") or {})
+        if isinstance(opts, dict) and opts:
+            return str(opts.get(key) or "")
+    return ""
+
+
+def _ask_defer_probe(preset: str) -> dict:
+    """For `ultrahigh`: ask the routed proxy to run tool deferral's provider check (#485).
+
+    POST /tool-defer/probe. The proxy runs the check in the background at this account's next
+    request, with that request's own model and credential, so it has a verdict before the first
+    session that could be deferred. Returns at once (1 s ceiling); any failure is reported as
+    `probe=<reason>`, never raised. {} (no output line) for every other preset.
+    """
+    if preset != "ultrahigh":
+        return {}
+    return {"probe": _post_defer_probe()}
+
+
+def _post_defer_probe() -> str:
+    port, _src = resolve_routed_port()
+    if not port:
+        return "not_routed"
+    import urllib.request
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/tool-defer/probe", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            return "asked" if resp.status == 202 else f"status_{resp.status}"
+    except Exception:  # noqa: BLE001 - an older proxy, or none running: the probe runs later anyway
+        return "unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -3917,6 +4712,37 @@ def installed_proxy_version() -> str:
         return ""
 
 
+_SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+
+
+def _semver_key(text: str) -> tuple | None:
+    """Sort key for a release tag in semantic-version order, or None if it does not parse.
+
+    A leading `v` is allowed. A prerelease sorts below its release (`0.7.5-beta.1 < 0.7.5`).
+    Prerelease parts compare as in semver: numbers by value, below words; fewer parts is lower."""
+    m = _SEMVER.match((text or "").strip())
+    if not m:
+        return None
+    core = tuple(int(x) for x in m.groups()[:3])
+    pre = m.group(4)
+    if pre is None:
+        return core, (1,)
+    parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+    return core, (0, parts)
+
+
+def update_is_newer(latest: str, installed: str) -> bool:
+    """Is release `latest` strictly newer than the installed `installed`?
+
+    `releases/latest` never names a prerelease, so "different" is not "newer": an installed beta
+    differs from the older stable (#1254). If either side does not parse, fall back to the old
+    test (the tags differ, ignoring a leading `v`), so an odd version string still fails open."""
+    a, b = _semver_key(latest), _semver_key(installed)
+    if a is None or b is None:
+        return (latest or "").strip().removeprefix("v") != (installed or "").strip().removeprefix("v")
+    return a > b
+
+
 def cmd_update_check(args) -> int:
     if args.op == "show":
         fields, reason = _read_update_check()
@@ -3930,6 +4756,11 @@ def cmd_update_check(args) -> int:
         emit(result="ok", answer=fields["answer"], skipped=fields["skipped"],
              notified=fields["notified"], latest=fields["latest"],
              installed=installed_proxy_version() or "unknown")
+        return 0
+
+    if args.op == "newer":
+        # Pure: reads no file. start-proxy.sh asks it before it updates or tells the user.
+        emit(result="ok", newer="true" if update_is_newer(args.latest, args.installed) else "false")
         return 0
 
     if args.op == "stamp":
@@ -4013,6 +4844,9 @@ def main() -> int:
         p.add_argument("--bin", default="",
                        help="also write env.CONTEXT_GURU_BIN (absolute path to the proxy), for "
                             "machines where its directory is not on PATH")
+        p.add_argument("--no-ping-header", action="store_true",
+                       help="do not add `x-context-guru-ping: 1` to env.ANTHROPIC_CUSTOM_HEADERS (the opt-in "
+                            "for manual pings when keep-alive is off)")
         p.add_argument("--upstream", default="",
                        help="also write env.ANTHROPIC_UPSTREAM, so the proxy chains behind an "
                             "existing gateway in LATER sessions too (the hook reads this block)")
@@ -4037,6 +4871,12 @@ def main() -> int:
              "--statusline`, for when both were installed together and only the statusline "
              "should come back off")
     off.add_argument("--file", required=True)
+
+    ep = sub.add_parser("ensure-ping-header",
+        help="SessionStart: add the ping header to the settings file that holds our routing when an older "
+             "install left it out. Skips --no-ping-header installs and files that are not ours.")
+    ep.add_argument("--file", default="", help="check this file only, instead of the three scopes")
+    ep.add_argument("--check", action="store_true", help="report only; write nothing")
 
     en = sub.add_parser("enable-plugin",
         help="set enabledPlugins[<plugin>] = true in --file when it is absent, recorded so `remove` "
@@ -4085,9 +4925,9 @@ def main() -> int:
                    help="SessionStart: point a status line we installed at the running plugin version")
 
     st = sub.add_parser("strategy")
-    st.add_argument("op", choices=("list", "show", "set", "clear", "sync"))
+    st.add_argument("op", choices=("list", "show", "set", "clear", "sync", "known"))
     st.add_argument("--name", default="",
-                    help="strategy name for `set`; one of " + ", ".join(STRATEGIES))
+                    help="strategy name for `set`; `strategy list` prints the names the proxy offers")
     st.add_argument("--port", default="",
                     help="the CONFIGURED port. Required for show/set/clear: the config file is "
                          "named after it, so a defaulted port writes a file nothing reads.")
@@ -4095,11 +4935,19 @@ def main() -> int:
                     help="the preset to state in the file. Required for `set` and `sync`, because "
                          "--config REPLACES --preset rather than layering over it.")
 
+    st.add_argument("--legacy-binary", action="store_true",
+                    help="`sync` only: drop the `_1h` keys from a file that carries its own keys, "
+                         "for a proxy binary that rejected them")
+    st.add_argument("--bin", default="",
+                    help="the proxy binary that prints the strategy table; default: CONTEXT_GURU_BIN, "
+                         "then context-guru-proxy on PATH, then ~/.local/bin")
+
     pr = sub.add_parser("preset")
-    pr.add_argument("op", choices=("list", "show", "set"))
+    pr.add_argument("op", choices=("list", "show", "set", "restart"))
     pr.add_argument("--plugin", default="context-guru@context-guru")
+    pr.add_argument("--bin", default="", help="the proxy binary that prints its preset list")
     pr.add_argument("--name", default="",
-                    help="preset name for `set`; one of " + ", ".join(PRESETS))
+                    help="preset name for `set` and `restart`; one of " + ", ".join(PRESETS))
     pr.add_argument("--user-scope", action="store_true",
                     help="only used when no options file exists yet: write the machine-wide "
                          "settings file (~/.claude/settings.json) instead of the project-local "
@@ -4158,8 +5006,9 @@ def main() -> int:
     rr.add_argument("name", choices=RECORDED_COMMANDS)
 
     uc = sub.add_parser("update-check")
-    uc.add_argument("op", choices=("show", "stamp", "notify", "answer"))
-    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp`")
+    uc.add_argument("op", choices=("show", "stamp", "notify", "answer", "newer"))
+    uc.add_argument("--latest", default="", help="tag the redirect resolved; for `stamp` and `newer`")
+    uc.add_argument("--installed", default="", help="the installed tag; for `newer`")
     uc.add_argument("--answer", default="",
                     help="for `answer`: one of " + ", ".join(UPDATE_ANSWERS))
     uc.add_argument("--version", default="",
@@ -4173,11 +5022,11 @@ def main() -> int:
             ap.error("strategy " + args.op + " needs --port: the config file is named after the "
                      "port, so a defaulted one writes a file nothing ever reads")
         if args.op == "set" and not args.name:
-            ap.error("strategy set needs --name; one of " + ", ".join(STRATEGIES))
+            ap.error("strategy set needs --name; `strategy list` prints the names")
     if args.cmd == "preset" and args.op == "set" and not args.name:
         ap.error("preset set needs --name; one of " + ", ".join(PRESETS))
     rc = {"statusline-repoint": cmd_statusline_repoint, "add": cmd_add, "remove": cmd_remove, "off": cmd_off, "show": cmd_show,
-          "enable-plugin": cmd_enable_plugin,
+          "enable-plugin": cmd_enable_plugin, "ensure-ping-header": cmd_ensure_ping_header,
           "config": cmd_config, "resolve-scope": cmd_resolve_scope,
           "project-key": cmd_project_key, "scopes": cmd_scopes,
           "strategy": cmd_strategy, "preset": cmd_preset, "port": cmd_port,

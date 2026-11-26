@@ -9,6 +9,8 @@
 | `/context-guru:save-more` | both reports, a combined summary, one question at the end |
 | `/context-guru:save-more config` | every shipped preset; `--custom` also searches single components, their combinations and their order |
 | `/context-guru:save-more cache` | every keep-alive strategy, with the savings by day of week and hour |
+| `/context-guru:save-more settings` | only the "Settings that cost you money" card |
+| `/context-guru:save-more tools` | every tool, MCP server and skill: its state under tool deferral, its use, what carrying it cost, and why (see [Tools](#tools)) |
 | `/context-guru:save-more apply <config\|cache> <option>@<basis>` | make a change the screen offered (after a yes) |
 | `/context-guru:save-more revert <config\|cache>` | undo the last change made here |
 
@@ -17,9 +19,6 @@ Add `details` for every option and the held-out comparison, and `--days N` for t
 Codex: `$context-guru-save-more`, with the same words.
 
 ## The screen
-
-![/context-guru:save-more](img/save-more-dark.svg#only-dark)
-![/context-guru:save-more](img/save-more-light.svg#only-light)
 
 Each report opens with a card that answers two questions in plain words: what your **current** setting saved so far, and what the **recommended** change would have saved per week over the same past sessions, with its range. Then a ranked table of every option, and the caveats.
 
@@ -218,6 +217,88 @@ Apply anyway, although that check failed: /context-guru:save-more apply cache by
 
 The words may come in either order (`apply cache X` or `apply X cache`). A change typed under a read command (`save-more revert config`, `config revert`) is not run; the command prints the exact one to run instead.
 
+## Tools
+
+`/context-guru:save-more tools` lists each tool, MCP server and skill you carry, most costly first (#485, decision D3). It replaces `/context-guru:remove-mcp-and-skills` once the owner agrees to remove that command.
+
+| Column | What it says |
+|---|---|
+| state | `loaded`, `deferred by CG` (your own history says Context Guru defers it in new threads), `deferred by Claude Code` (Claude Code sends only its name), or `removed` (on your removal list) |
+| used | the sessions that used it, of the sessions that carried it. A tool loaded through search counts as used |
+| cost | what carrying it cost over the window, used or not; `n/a` when a model had no price |
+
+`deferred by CG` checks your last 3 sessions only. A thread still sends the tool in full when this project used it in its last 10 sessions, or when it weighs under 200 tokens; the reason says so. `details` adds the reason for each state. There is no recommendation: deferral decides per tool, and this view is for overriding it. Each change is one command, run after a yes:
+
+| Change | Command |
+|---|---|
+| keep a tool loaded (never defer it) | `/context-guru:save-more apply deferral keep:<name>@<basis>` |
+| take it off the keep list | `/context-guru:save-more apply deferral unkeep:<name>@<basis>` |
+| always defer a tool, whatever your history says | `/context-guru:save-more apply deferral defer:<name>@<basis>` |
+| take it off the always-defer list | `/context-guru:save-more apply deferral undefer:<name>@<basis>` |
+| tool search on or off for your account | `/context-guru:save-more apply deferral search_on@<basis>` (or `search_off`) |
+| undo the last of these changes | `/context-guru:save-more revert deferral` |
+
+A tool on the always-defer list (#878) is deferred in every new thread, also without 3 sessions of history and also when this project used it. It still stays loaded when the thread uses it, when `tool_choice` forces it, when it weighs under 200 tokens (a server: all its tools together), when it is a core tool (Bash, Read, Edit, Write, Agent, Skill, ToolSearch, AskUserQuestion, Context Guru's own tools), and when it is on the keep list: the keep list wins. The screen marks a listed row `(always deferred)`. It does not offer `defer` for a core tool, a kept tool, a removed tool or a tool Claude Code defers itself. With tool search off, nothing is deferred.
+
+A change reaches new threads only: a thread keeps the set of tools it decided at its first request, so its cached prefix stays the same. The keep list is toolfilter's `keep`, the always-defer list is toolfilter's `always_defer`, and search is toolfilter's `defer: auto` or `off`. The routes are `GET /api/save-more/tools` and `POST /api/save-more/tools/apply`, with the same token and loopback rules as the other reports.
+
+## Settings that cost you money
+
+The default `save-more` also checks your own Claude Code settings for ones that make you pay for something you could get free. It shows a card only for the checks that fire. `save-more settings` shows just that card.
+
+```text
+╭─ Settings that cost you money ──────────────────────────────────────────────────────────────────╮
+│ CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 turns off the free server-side check in auto mode, so  │
+│ Claude Code sends its own classifier requests and you pay for them.                             │
+│   Set in: your user settings, ~/.claude/settings.json                                           │
+│   Cost: about $249.52 over the last 30 days (6,016 requests)                                    │
+│         also, classifier stage 2 (probably): $3.50, 12 requests, not added to the figure above  │
+│   Fix: remove it. Do not add CLAUDE_CODE_AUTO_MODE_SERVER: the default already asks the server. │
+│   Takes effect at the next Claude Code session.                                                 │
+│   Risk: A gateway that rejects beta fields may return 400 errors. Claude Code 2.1.304 and later │
+│   retries some of them itself. If errors start, undo this and run /context-guru:doctor.         │
+│   Also changes: Tool search halves the tools field (58.5 KB to 28.6 KB), and context_management │
+│   turns on.                                                                                     │
+│                                                                                                 │
+│ Session recap (awaySummaryEnabled) makes a model call for a one-line summary each time you come │
+│ back after a few minutes away.                                                                  │
+│   Set in: not set anywhere (on by default)                                                      │
+│   Saves: one small model call each time you come back after a few minutes away.                 │
+│   Fix: set "awaySummaryEnabled": false. Takes effect at the next Claude Code session.           │
+│   Risk: You no longer see the recap line when you come back.                                    │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+Apply it? Say yes, or run: /context-guru:save-more apply settings disable-experimental-betas
+Apply it? Say yes, or run: /context-guru:save-more apply settings session-recap
+```
+
+Each check shows the setting, **where it is set**, what it cost in hindsight, the fix and the risk.
+
+| Check | Fires when | Fix | Cost comes from |
+|---|---|---|---|
+| `disable-experimental-betas` | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` is `1` or `true` in the environment or in a settings `env` block | remove the key from the file it is in | proxy rows with the classifier shape (Sonnet, no tools, 3 system blocks, `max_tokens` 64, not streamed, 2 messages). A second shape (`max_tokens` 2112) shows apart as "probably classifier stage 2" and is not added |
+| `small-model-rejects-server-check` | `ANTHROPIC_SMALL_FAST_MODEL` or `ANTHROPIC_DEFAULT_HAIKU_MODEL`, at its effective value, names a Haiku older than 5.5 (for example `claude-haiku-4-5`, `claude-3-5-haiku-...`). Other models and ids it cannot read never fire. A key that is not set is not judged. It fires with the betas setting on or off. The card says it matters once that setting is off | set each key that holds the old Haiku to `claude-haiku-5-5`, in the file that sets it | proxy rows with the classifier shape, only in sessions that also have a Haiku request with status 400. These rows are also counted under `disable-experimental-betas` while it is on. The plugin does not ask the gateway whether it serves `claude-haiku-5-5`: the risk line tells you to check |
+| `session-recap` | `awaySummaryEnabled` is unset or true, and `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` is not `0` or `false` | set `"awaySummaryEnabled": false` in `~/.claude/settings.json` | not priced: the fix stops one small side call each time you come back, so the card says what it saves ("Saves: ..."), not a dollar figure |
+
+How it works:
+
+- **The plugin reads your settings on your machine.** It reads `~/.claude/settings.json`, `~/.claude/settings.local.json`, the project's `.claude/settings.json` and `.claude/settings.local.json`, managed settings, and the process environment. It reads only the keys a check names. It prints no other value and reads no secret.
+- **The proxy prices them.** `GET /api/adapt/settings?since=&until=` returns, per check, the request count and summed `cost_usd` of your rows with that check's request shape. It uses columns only (model, tool count, system blocks, `max_tokens`, stream, message count, upstream status). One check also asks whether the same session has a row of another shape. That test uses the same columns, tenant and time window. It reads no request text. A check with no known shape returns `null`.
+- **An old proxy still works.** If the route answers 404, the settings still show, with "not measured yet".
+- **The list of checks is one file**, `context-guru-plugin/scripts/costly_settings.json`. A Go test keeps the proxy's price shapes equal to it.
+
+Apply and undo use the same two commands as the other changes, and only after a yes:
+
+```text
+/context-guru:save-more apply settings disable-experimental-betas
+/context-guru:save-more revert settings disable-experimental-betas
+```
+
+- **Apply backs up first.** It writes `settings.json.<timestamp>.bak` next to the file, edits only that one key, keeps the file mode (0600 stays 0600) and writes atomically.
+- **Revert restores the exact previous value** from a record the apply wrote. It refuses, and writes nothing, if that key in the file is not what the apply wrote.
+- **Some values cannot be changed here.** A value from managed settings or from your shell environment shows "Cannot change" or an administrator note, and has no `Apply it?` line.
+- **Changes take effect at the next Claude Code session.**
+- A read never writes. The skill pre-approves reads only.
+
 ## When it cannot run
 
 | What you see | What to do |
@@ -228,17 +309,6 @@ The words may come in either order (`apply cache X` or `apply X cache`). A chang
 | `The analysis took longer than 5 minutes` | a shorter window: `--days 7` |
 | `This proxy needs a sign-in for this` | on the hosted service, set `CG_TOKEN` to your context-guru token (taken from the agent's own `cg_live_` key when there is one), or change it in the dashboard |
 | any other sentence | the proxy's own reason (for example, too many reports at once); act on it |
-
-## Moved from `/context-guru:adapt`
-
-| Before | Now |
-|---|---|
-| `/context-guru:adapt compaction` | `/context-guru:save-more config` |
-| `/context-guru:adapt cache` | `/context-guru:save-more cache` |
-| `/context-guru:adapt tools` | `/context-guru:remove-mcp-and-skills` |
-| `/context-guru:adapt` | `/context-guru:save-more` |
-
-`/context-guru:adapt` still works for one release: it says where the command moved and shows the new screen.
 
 ## The report format
 

@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 360" width="980" height="360" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1d6fb8"/></marker>
+  </defs>
+  <rect width="980" height="360" fill="#ffffff"/>
+  <text x="490" y="24" text-anchor="middle" font-size="17" font-weight="bold">What exists today: one proxy, two readers</text>
+  <rect x="20" y="50" width="940" height="290" rx="8" fill="#f4f7fb" stroke="#7a8ca5" stroke-dasharray="5,4"/>
+  <text x="30" y="68" font-size="12" fill="#555">One machine (no data leaves it)</text>
+
+  <rect x="40" y="150" width="90" height="50" rx="5" fill="#fff" stroke="#333"/>
+  <text x="85" y="180" text-anchor="middle">Request</text>
+  <rect x="170" y="150" width="90" height="50" rx="5" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="215" y="180" text-anchor="middle">Proxy</text>
+  <path d="M130,175 L170,175" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="320" y="90" width="150" height="56" rx="5" fill="#fff" stroke="#333"/>
+  <text x="395" y="114" text-anchor="middle">SQL store</text>
+  <text x="395" y="132" text-anchor="middle" font-size="11" fill="#555">SQLite, one row per request</text>
+  <rect x="320" y="206" width="150" height="56" rx="5" fill="#fff" stroke="#333"/>
+  <text x="395" y="230" text-anchor="middle">In-memory counters</text>
+  <text x="395" y="248" text-anchor="middle" font-size="11" fill="#555">reset at restart</text>
+  <path d="M260,165 L320,125" stroke="#1d6fb8" stroke-width="1.5" fill="none" marker-end="url(#arrowBlue)"/>
+  <path d="M260,185 L320,230" stroke="#333" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="540" y="90" width="150" height="56" rx="5" fill="#fff" stroke="#333"/>
+  <text x="615" y="114" text-anchor="middle">Dashboard UI</text>
+  <text x="615" y="132" text-anchor="middle" font-size="11" fill="#555">reads /api/*</text>
+  <path d="M470,118 L540,118" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="540" y="160" width="150" height="56" rx="5" fill="#e3f0fb" stroke="#1d6fb8" stroke-width="1.5"/>
+  <text x="615" y="184" text-anchor="middle">/metrics</text>
+  <text x="615" y="202" text-anchor="middle" font-size="11" fill="#555">cg_tenant_* and cg_*</text>
+  <path d="M470,134 L540,175" stroke="#1d6fb8" stroke-width="1.5" fill="none" marker-end="url(#arrowBlue)"/>
+  <path d="M470,230 L540,200" stroke="#333" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="760" y="160" width="170" height="56" rx="5" fill="#fff" stroke="#333"/>
+  <text x="845" y="184" text-anchor="middle">Local Prometheus</text>
+  <text x="845" y="202" text-anchor="middle" font-size="11" fill="#555">scrapes every 15 s</text>
+  <path d="M760,188 L690,188" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="725" y="180" text-anchor="middle" font-size="11" fill="#555">pull</text>
+
+  <rect x="760" y="260" width="170" height="56" rx="5" fill="#fff" stroke="#333"/>
+  <text x="845" y="284" text-anchor="middle">Grafana</text>
+  <text x="845" y="302" text-anchor="middle" font-size="11" fill="#555">4 dashboards, 3 alert rules</text>
+  <path d="M845,216 L845,260" stroke="#333" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <text x="40" y="320" font-size="12" fill="#555">The UI and /metrics do not read each other. Both read the store or process memory.</text>
+</svg>

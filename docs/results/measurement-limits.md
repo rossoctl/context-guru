@@ -332,7 +332,7 @@ buy more pairs at 64k or to move the agent to a larger model.
 
 ### Two properties of LOCA that cap what any reward arm here can conclude
 
-**~~`group_by_seed` silently divides your n by five.~~ FALSE — and the real trap is the opposite one.**
+**`group_by_seed` silently divides your n by five — FALSE, and the real trap is the opposite one.**
 It defaults to `True` and is genuinely not exposed as a CLI flag, but it groups for *reporting* only:
 **all 75 configs execute either way.** The actual trap is on the reading side — `state0`…`state4` are
 the 5 seeds, so globbing `tasks/*/state0/eval.json` silently reads 15 of 75 completed runs and

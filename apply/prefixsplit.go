@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -57,10 +58,6 @@ var volatileTailMarkers = []string{
 	"\nHere is a snapshot of the current directory",
 }
 
-// minSplitTokens keeps this from firing on small blocks, where the extra breakpoint
-// slot costs more optionality than the split can recover.
-const minSplitTokens = 1024
-
 // splitVolatileTail splits the FIRST system block large enough to matter that ends
 // in an environment snapshot into [stable][volatile], moving that block's
 // cache_control onto the stable half so the provider's hash stops covering the
@@ -87,6 +84,8 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 	if !explicitBreakpointProvider(provider) {
 		return body, false, 0, 0, 0, 0
 	}
+	// The floor depends on the model family; an unnamed model gets the larger (haiku) floor.
+	floor := modelinfo.MinCacheableO200k(gjson.GetBytes(body, "model").String())
 	sys := gjson.GetBytes(body, "system")
 	if !sys.Exists() || !sys.IsArray() {
 		return body, false, 0, 0, 0, 0 // a string system prompt carries no block to split
@@ -97,19 +96,30 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 	}
 
 	sysOut := make([]json.RawMessage, 0, len(blocks)+1)
-	for _, b := range blocks {
+	for i := 0; i < len(blocks); i++ {
+		b := blocks[i]
 		txt := b.Get("text").String()
 		at := -1
-		if !split && len(txt)/4 >= minSplitTokens {
+		// A block never holds more tokens than bytes, so a block under floor bytes cannot pass
+		// the real count below. This cheap test keeps the tokenizer off every block that
+		// cannot split.
+		if !split && len(txt) >= floor {
 			for _, mk := range volatileTailMarkers {
 				if i := strings.Index(txt, mk); i >= 0 && (at < 0 || i < at) {
 					at = i + 1 // keep the newline with the stable half
 				}
 			}
 		}
-		// Require both halves to be non-trivial: a split that leaves a ~0-token
-		// stable half buys nothing and burns one of the four breakpoint slots.
-		if at <= 0 || at/4 < minSplitTokens || at >= len(txt) {
+		// The stable half must reach the provider's minimum cacheable prefix, or the provider
+		// ignores the breakpoint and the split only burns one of the four slots. That floor
+		// is modelinfo's one rule (per family, in o200k units), shared with cheapmodel. It is
+		// counted with the tokenizer, and only for the one block that has a marker.
+		if at <= 0 || at >= len(txt) || at < floor {
+			sysOut = append(sysOut, json.RawMessage(b.Raw))
+			continue
+		}
+		stableCount := tokens.Count(txt[:at])
+		if stableCount < floor {
 			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
@@ -146,9 +156,18 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 			sysOut = append(sysOut, json.RawMessage(b.Raw))
 			continue
 		}
-		sysOut = append(sysOut, sb, vb)
+		sysOut = append(sysOut, sb)
+		// Bedrock Converse spells a breakpoint as its OWN entry right after the block it
+		// ends: [{"text":...},{"cachePoint":...}]. That entry must stay directly after the
+		// stable half, and the volatile half goes after it. Inserting the volatile half
+		// before it leaves the breakpoint covering the churn while still reporting a split.
+		if i+1 < len(blocks) && isStandaloneCachePoint(blocks[i+1]) {
+			sysOut = append(sysOut, json.RawMessage(blocks[i+1].Raw))
+			i++
+		}
+		sysOut = append(sysOut, vb)
 		split = true
-		stableTokens = tokens.Count(txt[:at])
+		stableTokens = stableCount
 		// The tail's identity, so the dashboard can tell a turn where the snapshot MOVED from
 		// one where it did not. That distinction is the whole saving: only on a turn whose
 		// tail changed would the unsplit block have been re-created, and without it the
@@ -175,6 +194,12 @@ func splitVolatileTail(body []byte, provider bschemas.ModelProvider) (out []byte
 	return next, true, sys.Index + len(sys.Raw), len(next) - len(body), stableTokens, tailHash
 }
 
+// isStandaloneCachePoint reports whether a system entry is only a Converse breakpoint
+// (`{"cachePoint":{...}}`), not a content block that carries one as a field.
+func isStandaloneCachePoint(e gjson.Result) bool {
+	return e.IsObject() && e.Get("cachePoint").Exists() && !e.Get("text").Exists()
+}
+
 // hashString identifies a volatile tail. FNV-1a, not a cryptographic hash: this compares a
 // value to its own previous value within one session, so all it has to do is not collide by
 // accident. Never zero for non-empty input, so 0 can mean "no split" everywhere else.
@@ -192,9 +217,5 @@ func hashString(s string) uint64 {
 // Gemini-shaped wires cache an implicit longest prefix and stop at the divergence on
 // their own, so there is nothing for a block boundary to add there.
 func explicitBreakpointProvider(p bschemas.ModelProvider) bool {
-	switch p {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
-		return true
-	}
-	return false
+	return modelinfo.HonoursCacheControl(p)
 }

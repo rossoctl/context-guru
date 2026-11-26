@@ -138,7 +138,7 @@ func TestArchiveThroughRealRclone(t *testing.T) {
 	if got := countRows(t, rec.db, "requests"); got != 0 {
 		t.Errorf("%d rows survived the archive", got)
 	}
-	evs, err := rec.FetchArchived(context.Background(), "sess-live")
+	evs, err := rec.FetchArchived(context.Background(), "t-live", "sess-live")
 	if err != nil {
 		t.Fatalf("FetchArchived: %v", err)
 	}

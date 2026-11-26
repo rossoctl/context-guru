@@ -101,7 +101,7 @@ gateway** for exactly this shape — enable it with `BOB_UPSTREAM` (or `--bob-up
 
 ```sh
 BOB_UPSTREAM=https://api.us-east.bob.ibm.com \
-  context-guru-proxy --preset balanced        # any deterministic preset/config
+  context-guru-proxy --preset conservative        # any deterministic preset/config
 ```
 
 Then point Bob at the proxy and let it use its own key:

@@ -13,12 +13,13 @@ import (
 	"strings"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/skills"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -92,33 +93,36 @@ func (responsesEnvelopeAdapter) pendingCallFor(body []byte, names, servers map[s
 }
 
 func (responsesEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
-	if !bytes.Contains(body, []byte(skills.Header)) {
-		return "", ""
-	}
-	if instructions := gjson.GetBytes(body, "instructions"); instructions.Type == gjson.String && strings.Contains(instructions.String(), skills.Header) {
-		return "instructions", instructions.String()
-	}
-	path, text := "", ""
-	gjson.GetBytes(body, "input").ForEach(func(idx, item gjson.Result) bool {
-		if role := item.Get("role").String(); role != "system" && role != "developer" {
-			return true
+	return skills.LocateResponses(body) // the one rule, shared with dash's reader
+}
+
+// responsesWire is wireGroups for the Responses wire: for each slot, the index of its input item, which is
+// the accountant's message position (accwire.Responses). A string input is one position, index 0. The
+// instructions slot is the system section, not an input item, and gets -1: no message operation may be
+// placed there.
+func responsesWire(slots []responseSlot) []int {
+	wire := make([]int, len(slots))
+	for i, s := range slots {
+		if idx, ok := accwire.Responses.WireIndex(s.path); ok {
+			wire[i] = idx
+		} else {
+			wire[i] = -1
 		}
-		content := item.Get("content")
-		if content.Type == gjson.String && strings.Contains(content.String(), skills.Header) {
-			path, text = "input."+idx.String()+".content", content.String()
-			return false
-		}
-		content.ForEach(func(bidx, block gjson.Result) bool {
-			v := block.Get("text")
-			if v.Type == gjson.String && strings.Contains(v.String(), skills.Header) {
-				path, text = "input."+idx.String()+".content."+bidx.String()+".text", v.String()
-				return false
-			}
-			return true
-		})
-		return path == ""
-	})
-	return path, text
+	}
+	return wire
+}
+
+// responsesItems is the accountant's message positions of a Responses body: the items of input, or the
+// string input as one position.
+func responsesItems(body []byte) []gjson.Result {
+	in := gjson.GetBytes(body, "input")
+	switch {
+	case in.IsArray():
+		return in.Array()
+	case in.Type == gjson.String:
+		return []gjson.Result{in}
+	}
+	return nil
 }
 
 // responseInputIndex resolves a normalized slot to its containing wire item.
@@ -285,12 +289,13 @@ func rebuildResponsesCountChanged(body []byte, norm []bschemas.ChatMessage, slot
 	if len(out) > len(norm) || len(out) <= start {
 		return body, false
 	}
-	// Only summarize currently changes count, and its wrapper identifies the
-	// inserted message without relying on retained text staying unchanged.
+	// A summarizer's header identifies the inserted message without relying on
+	// retained text staying unchanged. The same test as the equal-count gate
+	// (isSummaryHeader), so the gate never sends a splice here that cannot be found.
 	head := -1
 	for i := start; i < len(out); i++ {
 		text := schema.MessageText(out[i])
-		if strings.HasPrefix(text, "=== History Summary ===") {
+		if isSummaryHeader(text) {
 			if head >= 0 {
 				return body, false
 			}
@@ -515,16 +520,25 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		return res
 	}
 	sys, first := schema.SessionHead(norm)
-	res.Session = session.Scoped(o.Tenant, explicitSession(o.Session, o.Body), sys, first)
+	res.Session = session.Scoped(o.Tenant, ExplicitSession(o.Session, o.Body), sys, first)
+	// The cold clock's key (the bare content hash), derived once. It is also the Trace's TouchAlias,
+	// so a keep-alive ping touches the key this request reads even when our own tool search puts
+	// the names list at the head afterwards (#902).
+	alias := session.Scoped(o.Tenant, "", sys, first)
+	res.TouchAlias = alias
+	loadSessionState(st, res.Session)
 	o.resolveThread(&res.Trace, res.Session)
 	threadParent, threadInherits := res.Thread.InheritsFrom()
 	cacheAware := resolveCacheAware(o.CacheMode, bschemas.OpenAI, o.Body)
-	// A previous_response_id request contains only this turn's delta, not a
+	// A server-held-history request (schema.ServerHeldHistory) contains only this turn's delta, not a
 	// cumulatively growing transcript. Boundary/TurnAt would interpret a smaller
 	// delta as agent compaction and report a cached prefix we cannot see. Keep
 	// cache awareness for provider pricing/lifetime, but leave the visible input
 	// entirely eligible and its idle phase unknown.
-	serverHeldHistory := gjson.GetBytes(o.Body, "previous_response_id").String() != ""
+	serverHeldHistory := schema.ServerHeldHistory(o.Body)
+	// Read ONCE, used twice: the restart grace the boundary consults and the Ctx's cache
+	// lifetime below are one fact — this request's cache lifetime.
+	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	maxCachedIdx, idleMs := -1, int64(-1)
 	if cacheAware && !serverHeldHistory {
 		nowMs := o.nowMs()
@@ -532,11 +546,30 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		parentKey := inheritKey(res.Session, threadParent, threadInherits)
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
+			// The alias session id (the headerless twin of res.Session, see apply.go's clock
+			// note): the restart grace asks the lookup for the thread's keys under BOTH ids,
+			// because a refresh under either one kept the provider's single entry warm (#766).
+			// graceAlias is the ONE rule the record side also derives (graceAliasID): the
+			// metadata id when the body carries one, else the content hash. alias below stays
+			// the bare content hash for the cold decision's own clock (aliasSeenState).
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeenState reads. Kept on the bare-hash alias, as #770
+			// wrote it — the store's alias keys use that id.
+			if alias != res.Session {
+				loadSessionState(st, alias)
+			}
+			graceAlias := graceAliasID(o.Tenant, o.Body, norm)
+			graceAliasKey := thread.Key(graceAlias, res.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
+				len(norm), nowMs, restartGrace(bschemas.OpenAI, ttl, ttlKind))
 			maxCachedIdx--
-			alias := session.Scoped(o.Tenant, "", sys, first)
-			if at := aliasSeen(st, alias, nowMs); at > prevAt {
-				prevAt = at
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 {
+				res.TouchAtMs, res.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
+			if seen.at > prevAt {
+				prevAt = seen.at
 			}
 			if prevAt > 0 && nowMs >= prevAt {
 				idleMs = nowMs - prevAt
@@ -554,7 +587,6 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	if mode == "" {
 		mode = components.ModeSync
 	}
-	ttl, ttlKind := CacheLifetime(bschemas.OpenAI, gjson.GetBytes(o.Body, "model").String(), o.Body)
 	if !cacheAware {
 		ttl, ttlKind = 0, CacheLifetimeUnknown
 	}
@@ -567,9 +599,11 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	c := &components.Ctx{Ctx: ctx, Session: res.Session, Thread: res.Thread.ID, ThreadParent: threadParent, ThreadInherits: threadInherits,
 		DeclaresTools: gjson.GetBytes(o.Body, "tools.#").Int() > 0, Store: st, Model: o.Models,
 		RawInput: rawInput,
+		// No explicit breakpoint on this route, and no anchor write (#730).
+		NoCacheBreakpoint: !explicitBreakpointProvider(bschemas.OpenAI),
 		// OpenAI's 30m is a minimum, never proof of expiry. ColdCache stays
 		// false even after a long idle gap, matching the Chat Completions path.
-		// A previous_response_id points to upstream-held history that this
+		// Server-held history (schema.ServerHeldHistory) is upstream-held history that this
 		// request cannot inspect or replace. Summarizing only the visible tail
 		// would claim to compact a history that remains in the provider's state.
 		DisallowCountChange: !gjson.GetBytes(o.Body, "input").IsArray() || serverHeldHistory,
@@ -583,9 +617,10 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		CtxWindow: o.Window, CtxWindowExact: o.WindowExact, CompactionPoint: o.CompactionPoint,
 		CompactionPointSource: o.CompactionPointSource, ModelName: gjson.GetBytes(o.Body, "model").String(),
 		Mode: mode, CacheAware: cacheAware, MaxCachedIdx: maxCachedIdx, IdleMs: idleMs,
-		PrefixAsk:  o.PrefixAsk,
-		CacheTTLMs: ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
-		PrevBilledInput: prevBilledInput(st, res.Session), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
+		PrefixAsk:    o.PrefixAsk,
+		CanKeepAlive: canKeepAliveFor(o.CanKeepAlive, res.Session, res.Thread.ID),
+		CacheTTLMs:   ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
+		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	res.Run = pipe.Run(chat, c)
 	start := 0
@@ -594,14 +629,33 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	}
 	res.AttemptedTokens = schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm[start:]})
 	res.FrozenTokens = schema.MessagesTokens(&bschemas.BifrostChatRequest{Input: norm[:start]})
+	// The accountant's operations, as on the Messages route: a req.Input index is mapped to its input
+	// item (responsesWire), and the sizes are the items' wire bytes (wireSizes). applied is false in
+	// observe mode, whose operations are computed and never sent.
+	wire, applied := responsesWire(slots), mode != components.ModeObserve
+	giveUp := func() {
+		ops, d := opsFromRun(*res.Run, wire, applied, nil)
+		res.Ops, res.OpsDropped = nil, len(ops)+d
+	}
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		if next, ok := rebuildResponsesCountChanged(o.Body, norm, slots, chat.Input); ok {
 			res.Body, res.Changed = next, true
-			res = finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array())
+			if res.Run != nil {
+				res.Ops, res.OpsDropped = OpsFromRun(*res.Run, wire, applied)
+				in, out := responsesItems(o.Body), responsesItems(next)
+				if !wireSizes(res.Ops, rawLen(in), rawLen(out), rawTotal(in), rawTotal(out)) {
+					giveUp()
+				}
+			}
+			res = finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array(), mode == components.ModeObserve)
+		} else if res.Run != nil {
+			giveUp()
 		}
 		return res
 	}
 	body := o.Body
+	// written: the req.Input indices whose text really went onto the wire. Only those become operations.
+	written := map[int]bool{}
 	for i := range chat.Input {
 		now, err := json.Marshal(chat.Input[i])
 		if err != nil || bytes.Equal(now, slots[i].pre) {
@@ -616,10 +670,23 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		}
 		next, err := sjson.SetBytes(body, slots[i].path, text)
 		if err != nil {
+			// The original body goes upstream: no change is real, so the run's changes count as dropped.
+			if res.Run != nil {
+				giveUp()
+			}
 			return Result{Body: o.Body, Trace: res.Trace}
 		}
 		body, res.Changed = next, true
+		written[i] = true
 	}
 	res.Body = body
-	return finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array())
+	if res.Run != nil {
+		// An instructions change has no input item (wire -1): keep rejects it, so it is dropped, not misplaced.
+		res.Ops, res.OpsDropped = opsFromRun(*res.Run, wire, applied, func(idx int) bool { return written[idx] && wire[idx] >= 0 })
+		in, out := responsesItems(o.Body), responsesItems(body)
+		if len(in) != len(out) || shiftingSplice(res.Ops) || !wireSizes(res.Ops, rawLen(in), rawLen(out), rawTotal(in), rawTotal(out)) {
+			giveUp()
+		}
+	}
+	return finishRestore(res, restore, "responses", o.Body, gjson.GetBytes(o.Body, "input").Array(), mode == components.ModeObserve)
 }

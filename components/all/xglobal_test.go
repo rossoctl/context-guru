@@ -2,12 +2,16 @@ package all_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -225,7 +229,7 @@ func housellmExtractLLM(t *testing.T) string { return housellmBlock(t, "extract_
 // 3000, and at 3000 production recorded `below_output_floor` on all 36 sweeping turns and zero
 // extractions across 3,437 requests — the component was configured into a no-op while looking fully
 // enabled. A candidate of ~1,500 tokens is the size that regression turned away, so that is what this
-// asserts on: the preset, not a copy of it, must ask on a turn inside the pre-expiry window.
+// asserts on: the preset, not a copy of it, must ask AT THE KEEP-ALIVE PING (#404) for it.
 //
 // It drives the sweep through a PREFIX ASKER rather than a Model, because that is the only way the
 // component reaches a model at all: it asks the REQUEST's own model over that model's prompt cache. A
@@ -235,7 +239,13 @@ func housellmExtractLLM(t *testing.T) string { return housellmBlock(t, "extract_
 // Raising the preset's floor above ~1,500 fails this; re-adding allow_on_caching_backend fails the
 // warm guard above. The pair pins the economics from both sides.
 func TestHousellmSweepActuallyFires(t *testing.T) {
-	off := newComp(t, "extract_llm_sweep", housellmBlock(t, "extract_llm_sweep"))
+	block := housellmBlock(t, "extract_llm_sweep")
+	// SHADOW MODE IS NOT IN ANY PRESET (#404 point 7): it is the measurement switch, and a preset that
+	// shipped it on would silently turn every deployment on that preset into an experiment.
+	if strings.Contains(block, "shadow") {
+		t.Fatalf("the housellm preset sets shadow mode:\n%s", block)
+	}
+	shipped := newComp(t, "extract_llm_sweep", block)
 	// ~1,500 tokens of the noise the sweep is meant to remove.
 	body := `[`
 	for i := 0; i < 120; i++ {
@@ -249,34 +259,41 @@ func TestHousellmSweepActuallyFires(t *testing.T) {
 	req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
 		userMsg("summarize the records"),
 	}}
-	// ENOUGH CANDIDATES TO CLEAR THE PRESET'S INVENTORY FLOOR, which is part of what this guard pins.
-	// A single candidate is the per-output shape the design refutes at 6% live-kept, and the shipped
-	// component now declines it rather than asking — so a one-output fixture would assert that the
-	// preset does something it is deliberately unwilling to do, and would read as "configured into a
-	// no-op" for the wrong reason. Ten is the shipped default, so this fixture is the smallest
-	// transcript the preset will actually act on.
-	for i := 0; i < 10; i++ {
-		req.Input = append(req.Input, toolMsg(body))
-	}
-	// INSIDE THE PRE-EXPIRY WINDOW: the cache still exists (idle below the TTL) and is within a minute
-	// of expiring, which is where the ask can still read it and what it invalidates is nearly
-	// worthless. A bare `ephemeral` mark buys the 5-minute TTL this uses.
+	// ONE candidate is enough: the minimum of ten is gone (#404 point 2).
+	id := "toolu_housellm_1"
+	m := toolMsg(body)
+	m.ChatToolMessage = &bschemas.ChatToolMessage{ToolCallID: &id}
+	req.Input = append(req.Input, m)
+	st := store.NewMemory(store.Options{})
 	c := &components.Ctx{Ctx: context.Background(), Session: "prexp1",
-		Store: store.NewMemory(store.Options{}), CacheAware: true, MaxCachedIdx: -1,
+		Store: st, CacheAware: true, MaxCachedIdx: -1,
 		CtxWindow: 1_000_000, ColdCache: false,
-		IdleMs: 4 * 60 * 1000, CacheTTLMs: 5 * 60 * 1000, PrefixAsk: asker}
+		IdleMs: 20 * 1000, CacheTTLMs: 5 * 60 * 1000, PrefixAsk: asker,
+		CanKeepAlive: func() bool { return true }}
 	var rep components.Report
-	if _, err := off.Offload(req, &rep, c); err != nil {
+	if _, err := shipped.Offload(req, &rep, c); err != nil {
 		t.Fatal(err)
 	}
-	if asker.calls == 0 {
-		t.Fatalf("the housellm preset made NO ask in the pre-expiry window with a ~1.5k-token "+
-			"candidate — the component is configured into a no-op. gates=%v", rep.Gates)
+	if asker.calls != 0 {
+		t.Fatalf("the request asked %d times; the question belongs to the keep-alive ping", asker.calls)
 	}
-	// AND IT ACTED ON THE VERDICT. An ask that removes nothing is the same no-op from the operator's
-	// side, and it is what a floor regression one layer down would look like.
-	if rep.Events["sweep_dropped"] == 0 {
-		t.Fatalf("the sweep asked and removed nothing. gates=%v", rep.Gates)
+	t.Cleanup(func() { offload.ClearKeepAliveCandidate("prexp1") })
+	dispatch, info, reason, ok := offload.SweepPingSubstitute("prexp1")
+	if !ok {
+		t.Fatalf("the housellm preset registered nothing for the ping (%s) with a ~1.5k-token "+
+			"candidate — the component is configured into a no-op. gates=%v", reason, rep.Gates)
+	}
+	if info.Offered != 1 {
+		t.Fatalf("offered %d candidates, want 1", info.Offered)
+	}
+	dispatch(10*time.Second, offload.SweepPingWait{})
+	if asker.calls == 0 {
+		t.Fatal("the ping made NO ask — the component is configured into a no-op")
+	}
+	// AND IT HELD THE VERDICT. An ask that holds nothing is the same no-op from the operator's side,
+	// and it is what a floor regression one layer down would look like.
+	if _, proposed, _, ok := offload.HeldSweepAnswerForTest(st, "prexp1"); !ok || proposed == 0 {
+		t.Fatalf("the sweep asked and held no drop (held ok=%v proposed=%d)", ok, proposed)
 	}
 }
 
@@ -340,5 +357,29 @@ func TestHousellmDoesNotAttemptTheTailBelowBreakEven(t *testing.T) {
 	if rep.Gates["below_output_floor"] == 0 {
 		t.Fatalf("expected below_output_floor to be what refused it — anything else means the "+
 			"exploration budget could still spend here. gates=%v", rep.Gates)
+	}
+}
+
+// The recorded benchmark configs still hold settings the sweep retired (econ_trigger, reward_premium,
+// min_pressure, ...). They must still load and build: a retired key is ignored with a warning, never an
+// error (#404).
+func TestRecordedBenchmarkConfigsWithRetiredSweepKeysStillLoad(t *testing.T) {
+	files, err := filepath.Glob("../../deploy/harbor/cfg-iter02*.yaml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no recorded configs found (%v)", err)
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadBytes(b)
+		if err != nil {
+			t.Errorf("%s did not load: %v", f, err)
+			continue
+		}
+		if _, err := cfg.Build(nil); err != nil {
+			t.Errorf("%s did not build: %v", f, err)
+		}
 	}
 }

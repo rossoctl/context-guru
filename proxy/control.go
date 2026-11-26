@@ -259,6 +259,19 @@ func (h *Handler) DashWhoami() func(*http.Request) any {
 	}
 }
 
+// LocalWhoami returns the body for /api/whoami on a single-tenant proxy. There are no accounts,
+// so nobody is signed in. It adds the preset the proxy runs now, the same value /stats reports,
+// so the Overview names the live preset and not only the one the window's requests ran under.
+func (h *Handler) LocalWhoami() func(*http.Request) any {
+	return func(*http.Request) any {
+		out := map[string]any{"hosted": false, "authenticated": false}
+		if tn := h.static.Load(); tn != nil && tn.Preset != "" {
+			out["preset"] = tn.Preset
+		}
+		return out
+	}
+}
+
 // DashAuth returns the authenticator to hand dash.API.SetAuth, so the dashboard's
 // read routes and these write routes agree on who the caller is. One resolver, so
 // there is no way for the two halves to disagree about identity.
@@ -430,6 +443,7 @@ type tenantView struct {
 	UpOpenAI        string       `json:"up_openai"`
 	UpBob           string       `json:"up_bob"`
 	CaptureContent  bool         `json:"capture_content"`
+	RecordTraces    bool         `json:"record_traces"`
 	MaxRows         int64        `json:"max_rows"`
 	Disabled        bool         `json:"disabled"`
 	// DisabledReason is the manager's note, shown to the account's owner as well as to a
@@ -457,8 +471,8 @@ func (h *Handler) view(t *tenant.Tenant) tenantView {
 		EffectiveConfigYAML: h.registry().Config(t),
 		ConfigInherited:     t.TracksDefault(),
 		UpAnthropic:         t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
-		CaptureContent: t.CaptureContent,
-		MaxRows:        t.MaxRows, Disabled: t.Disabled,
+		CaptureContent: t.CaptureContent, RecordTraces: t.RecordTraces,
+		MaxRows: t.MaxRows, Disabled: t.Disabled,
 		DisabledReason: t.DisabledReason, Variant: t.Variant, HasPassword: t.HasPassword,
 		CreatedAt: msOrZero(t.CreatedAt), LastSeenAt: msOrZero(t.LastSeenAt),
 	}
@@ -1249,6 +1263,9 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		UpOpenAI       *string      `json:"up_openai"`
 		UpBob          *string      `json:"up_bob"`
 		CaptureContent *bool        `json:"capture_content"`
+		// RecordTraces is settable HERE ONLY. PATCH /api/tenants/{id} has no such field,
+		// and the registry refuses it from anyone but the account's owner.
+		RecordTraces *bool `json:"record_traces"`
 	}
 	if err := readJSON(w, r, &in); err != nil {
 		readErr(w, err)
@@ -1319,7 +1336,7 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 	patch := tenant.Patch{Label: in.Label, ConfigYAML: in.ConfigYAML,
 		UpAnthropic: in.UpAnthropic, UpOpenAI: in.UpOpenAI, UpBob: in.UpBob,
-		CaptureContent: in.CaptureContent}
+		CaptureContent: in.CaptureContent, RecordTraces: in.RecordTraces}
 	if err := h.registry().Update(t, t.ID, patch); err != nil {
 		if errors.Is(err, tenant.ErrForbidden) {
 			ctlErr(w, http.StatusForbidden, "not permitted")
@@ -2072,12 +2089,21 @@ func (h *Handler) destructiveTarget(w http.ResponseWriter, r *http.Request) (*te
 func (h *Handler) purgeTenantData(tenantID string) (dash.PurgeResult, error) {
 	if h.rec == nil {
 		// No dashboard on this deployment: there is no stored traffic to purge, which is a
-		// complete success rather than a failure.
-		return dash.PurgeResult{}, nil
+		// complete success rather than a failure. Tool deferral may still hold state of its own.
+		ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
+		defer cancel()
+		n, err := h.purgeToolDefer(ctx, tenantID)
+		return dash.PurgeResult{ToolDefer: n}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
 	defer cancel()
-	return h.rec.PurgeTenant(ctx, tenantID)
+	res, err := h.rec.PurgeTenant(ctx, tenantID)
+	n, terr := h.purgeToolDefer(ctx, tenantID)
+	res.ToolDefer += n
+	if err == nil {
+		err = terr
+	}
+	return res, err
 }
 
 // --- A/B variants ----------------------------------------------------------

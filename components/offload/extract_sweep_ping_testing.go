@@ -1,0 +1,59 @@
+package offload
+
+import (
+	"context"
+
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/store"
+)
+
+// RegisterSweepPingForTest runs the sweep's own Offload once over msgs, as the request path does, so
+// the thread registers its ping-time question exactly the way production registers it. For the
+// keeper's tests in another package, which cannot reach the unexported constructor.
+//
+// cfgYAML is the component's config block ("" is the shipped defaults). model is the request's model
+// id. The registry is a package global keyed by thread.Key(session, threadID); a test must call
+// ClearKeepAliveCandidate for it when done.
+func RegisterSweepPingForTest(session, threadID string, st store.Store, asker components.PrefixAsker,
+	model string, msgs []bschemas.ChatMessage, cfgYAML string) error {
+
+	built, err := newExtractSweep([]byte(cfgYAML))
+	if err != nil {
+		return err
+	}
+	c := &components.Ctx{Ctx: context.Background(), Session: session, Thread: threadID, Store: st,
+		PrefixAsk: asker, ModelName: model, CtxWindow: 1_000_000, MaxCachedIdx: -1,
+		CanKeepAlive: func() bool { return true }} // the keeper under test can ping this thread
+	_, err = built.(*ExtractSweep).Offload(&bschemas.BifrostChatRequest{Input: msgs},
+		&components.Report{Component: "extract_llm_sweep"}, c)
+	return err
+}
+
+// HeldSweepAnswerForTest reports a thread's held answer in the shape a test can assert on, without
+// exporting the record: how many outputs the question judged, how many it proposed to drop, and the
+// wait cause stored with it.
+func HeldSweepAnswerForTest(st store.Store, threadKey string) (asked, proposed int, waitingFor string, ok bool) {
+	h, ok := getHeld(st, threadKey)
+	if !ok {
+		return 0, 0, "", false
+	}
+	n, _ := h.proposed()
+	return len(h.Outputs), n, h.WaitingFor, true
+}
+
+// SweepSlotsInUseForTest reports how many sweep slots are held right now.
+func SweepSlotsInUseForTest() int { return len(sweepSlots) }
+
+// ResetSweepBatchForTest clears the batching ledger. For the host's tests, which drive a whole sweep and
+// read the counters.
+func ResetSweepBatchForTest() { resetSweepBatchForTest() }
+
+// NoteSweepBatchSkippedForTest books n skipped batches in the ledger, so the host's tests can check that
+// /stats publishes the counter without staging a sweep that runs out of time.
+func NoteSweepBatchSkippedForTest(n int) { sweepBatchSkipped.Add(int64(n)) }
+
+// sweepPanicAfterCallHook, set only by a test, runs after the model call returned and before the reply is
+// processed. A test makes it panic to model a bug in the code AFTER a paid call.
+var sweepPanicAfterCallHook func()

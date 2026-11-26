@@ -1,0 +1,11 @@
+cache:
+  head_ttl_1h: false
+  keepalive: false
+components:
+  toolfilter:
+    remove: []
+pipeline:
+  - cachesplit
+  - format
+  - extract_llm
+  - toolfilter
