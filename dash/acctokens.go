@@ -42,7 +42,7 @@ func tiersOf(t accountant.TierTokens) TierTokens {
 }
 
 // TokenFlow is a figure in tokens: what it saved and what it caused, each by tier. Its dollar
-// value is tierUSD(Saved) - tierUSD(Caused), the library's own sign convention.
+// value is the library's figure for the same tokens (Saved minus Caused, each at its rate).
 type TokenFlow struct {
 	Saved  TierTokens `json:"saved"`
 	Caused TierTokens `json:"caused"`

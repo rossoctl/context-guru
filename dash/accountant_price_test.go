@@ -137,7 +137,7 @@ func TestFigure_TTLRescueIsAPositiveSaving(t *testing.T) {
 
 func TestFigure_UnknownEffectKindIsUnpriced(t *testing.T) {
 	f := figOf(accountant.Result{CacheEffects: []accountant.CacheEffect{{Kind: "future", Saved: accountant.TierTokens{Input: 1}}}})
-	if !reflect.DeepEqual(f.Unpriced, []string{"effect:future:unknown_kind"}) || f.DeltaUSD != 0 {
+	if !reflect.DeepEqual(f.Unpriced, []string{":effect_future_unknown_kind"}) || f.DeltaUSD != 0 {
 		t.Fatalf("%+v", f)
 	}
 }
