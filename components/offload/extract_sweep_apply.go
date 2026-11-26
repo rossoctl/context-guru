@@ -869,6 +869,8 @@ type warmApply struct {
 	ruleD map[string]int
 	// Sweep v3 dry run: how many drops the apply decided and did not make (the would-be cut's size).
 	dryDrops int
+	// Sweep v3 tier target: set by the v3 gate when the cut aims below a price-tier line. nil = today's gate.
+	tier *tierPlan
 	// Sweep v3 experiment premium: what the gate added to the saving, and whether the cost alone passed.
 	premium      float64
 	passedOnCost bool

@@ -91,6 +91,7 @@ type v3Config struct {
 	ruleUnrefMinAge      int
 	premiumUSD           float64
 	dryRun               bool
+	tierTarget           bool
 }
 
 // parseSweepV3 reads the v3 settings. A value outside its range reads as its default, as the other warm
@@ -134,6 +135,7 @@ func parseSweepV3(cfg extractSweepConfig) (v3Config, error) {
 		}
 	}
 	out.dryRun = cfg.DryRun
+	out.tierTarget = cfg.TierTarget
 	if cfg.CompactionPremiumUSD > 0 {
 		out.premiumUSD = cfg.CompactionPremiumUSD
 	}
@@ -686,12 +688,20 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 	if paced {
 		noteV3CSource(cSource)
 	}
+	var tier *tierPlan
 	if float64(P) < v3Fill(C, e.fillSmall, e.fillLarge)*float64(C) {
-		if paced {
-			noteV3Refuse("not_in_sweet_spot")
-			noteV3Refusal(tkey, "not_in_sweet_spot", P, C, cSource)
+		// Below the sweet spot. A request above a price-tier line may still be cut, to just below the line.
+		// The tier payback gate decides when the next cut may happen, so the growth wait (min_drop_frac x C,
+		// 150k at C = 1M) does not hold a thread above the line.
+		if tier = e.tierGoal(c, P, in.growthFrom, in.growthTurns); tier != nil {
+			waiting = false
+		} else {
+			if paced {
+				noteV3Refuse("not_in_sweet_spot")
+				noteV3Refusal(tkey, "not_in_sweet_spot", P, C, cSource)
+			}
+			return nil, 0
 		}
-		return nil, 0
 	}
 	if waiting {
 		noteV3Refuse("waiting_for_growth")
@@ -705,7 +715,7 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 	plan := e.v3Plan(c, req)
 	apply := func(useMem bool) ([]string, int) {
 		src := e.newV3Held(c, tkey, plan, raw, useMem)
-		return e.v3Apply(src, req, rep, c, tkey, in, P, C, cSource)
+		return e.v3Apply(src, req, rep, c, tkey, in, P, C, cSource, tier)
 	}
 	resetCount := func() {
 		warmMu.Lock()
@@ -728,6 +738,13 @@ func (e *ExtractSweep) v3Step(req *bschemas.BifrostChatRequest, rep *components.
 			sum := 0
 			for _, h := range plan.rules {
 				sum += h.saves
+			}
+			if tier != nil && float64(sum)*content >= e.minDropFrac*float64(P) && float64(P)-float64(sum)*content > float64(tier.goal) {
+				if paced {
+					noteV3Refuse("tier_line_not_reached")
+					noteV3SizeRefusal(tkey, "rule_select", "tier_line_not_reached", P, C, cSource, int(float64(sum)*content), plan.ruleTokens(content))
+				}
+				return nil, 0
 			}
 			if float64(sum)*content < e.minDropFrac*float64(P) {
 				if paced {
@@ -795,8 +812,8 @@ type v3CutRec struct {
 }
 
 func (e *ExtractSweep) v3Apply(src *v3Held, req *bschemas.BifrostChatRequest, rep *components.Report, c *components.Ctx,
-	tkey string, in v3In, P, C int, cSource string) (keys []string, changed int) {
-	wa := &warmApply{}
+	tkey string, in v3In, P, C int, cSource string, tier *tierPlan) (keys []string, changed int) {
+	wa := &warmApply{tier: tier}
 	inner := e.warmGate(c, req, in.run, in.growthFrom, in.growthTurns, in.prevLocal, wa)
 	var cut v3CutRec
 	wa.gate = e.v3Gate(inner, wa, c, tkey, in.prevLocal, P, C, cSource, src, &cut)
@@ -867,6 +884,14 @@ func (e *ExtractSweep) v3Gate(inner func(recheckResult, []bschemas.ChatMessage) 
 					DShareP: wa.dShareP, PShareC: wa.pShareC, CutPoint: C, CSource: cSource, RuleD: ruleD})
 				return false, "drop_too_small"
 			}
+		}
+		if wa.tier != nil && measured && float64(P-dBilled) > float64(wa.tier.goal) {
+			// The cut does not reach the goal below the tier line: today's target stands, which is no cut here.
+			noteV3Refuse("tier_line_not_reached")
+			noteWarmDecision(tkey, WarmDecision{Stage: "apply", Accept: false, Reason: "tier_line_not_reached", Weight: 1,
+				RemovedLocal: res.validTokens(), RemovedBilled: dBilled, Proposed: res.proposed, Dropped: res.reasonCounts(),
+				DShareP: wa.dShareP, PShareC: wa.pShareC, CutPoint: C, CSource: cSource, RuleD: wa.ruleD})
+			return false, "tier_line_not_reached"
 		}
 		ok, reason := inner(res, raw)
 		if !ok {
