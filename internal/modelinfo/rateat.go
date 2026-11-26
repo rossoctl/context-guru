@@ -71,3 +71,40 @@ func ChainRates(p Pricer) Rates {
 	}
 	return Rates{Lookup: func(m string) (Price, bool) { return p.Price(context.Background(), m) }}
 }
+
+// FlatRates is a fixed rate table: every model and every prompt size gets the same rate. A rate of 0 is
+// unknown and an estimate.
+type FlatRates struct{ Input, Output, CacheRead, Write5m, Write1h float64 }
+
+// PriceAt is accountant.SizedPricer.
+func (f FlatRates) PriceAt(_ string, _ time.Time, t accountant.Tier, _ int64) (float64, bool) {
+	var r float64
+	switch t {
+	case accountant.TierInput:
+		r = f.Input
+	case accountant.TierOutput:
+		r = f.Output
+	case accountant.TierCacheRead:
+		r = f.CacheRead
+	case accountant.TierCacheWrite5m:
+		r = f.Write5m
+	case accountant.TierCacheWrite1h:
+		r = f.Write1h
+	}
+	return r, r <= 0
+}
+
+// OnePrice is OneModel as a plain value: it prices the one model it holds and gives 0 and an estimate for
+// any other. It has no closure, so it does not allocate on a hot path.
+type OnePrice struct {
+	Model string
+	Price Price
+}
+
+// PriceAt is accountant.SizedPricer.
+func (o OnePrice) PriceAt(model string, _ time.Time, t accountant.Tier, promptTokens int64) (float64, bool) {
+	if model != o.Model {
+		return 0, true
+	}
+	return o.Price.RateAt(model, t, promptTokens)
+}
