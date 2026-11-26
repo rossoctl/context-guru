@@ -9,7 +9,6 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/kvcache"
 )
 
 // CacheState is the SERVER's view of one session's prompt cache: what the provider last billed us
@@ -445,12 +444,81 @@ func (d *DB) CacheStateFor(f Filter) (*CacheState, error) {
 	return &s, nil
 }
 
+const (
+	// NextInputWindow is how many of a session's last billed requests set its next-request size.
+	NextInputWindow = 10
+	// DefaultNextInputTokens is the new input of a next request when the session has no history.
+	// It is a user turn plus a tool result, not a ping. The value, 1,000 tokens, is the rounded
+	// median of fresh_input + cache_write over a local dashboard sample of billed requests (pings
+	// excluded), mostly Anthropic. No OpenAI sample yet.
+	DefaultNextInputTokens = 1000
+)
+
+// NextInputTokens is the new input to expect on the next real request of a model in the session:
+// the median of fresh_input + cache_write (the tokens not read from the cache; on Anthropic a new
+// turn is billed as cache write) of the last NextInputWindow billed requests of that model (pings
+// and non-2xx rows excluded). With none, the same median over the whole session. With none either,
+// or on a read error, DefaultNextInputTokens. It reads token counts only. DefaultNextInputTokens
+// lives here because only the dashboard's own database can measure it.
+func (d *DB) NextInputTokens(f Filter, model string) int64 {
+	f.WithKeepAlive = false
+	if model != "" {
+		f.Model = model
+		if v, ok := d.nextInputSizes(f); !ok {
+			return DefaultNextInputTokens
+		} else if len(v) > 0 {
+			return medianNextInput(v)
+		}
+		f.Model = ""
+	}
+	v, _ := d.nextInputSizes(f)
+	return medianNextInput(v)
+}
+
+// nextInputSizes reads the sizes of the last NextInputWindow billed requests of f. ok is false on
+// any read error: a partial list is never returned.
+func (d *DB) nextInputSizes(f Filter) (v []int64, ok bool) {
+	cond, args := f.where()
+	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.fresh_input + r.cache_write FROM requests r WHERE `+cond+
+		` AND r.status BETWEEN 200 AND 299 AND r.cache_read + r.cache_write + r.fresh_input > 0
+		ORDER BY r.ts DESC LIMIT ?`, append(args, NextInputWindow)...)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n int64
+		if err := rows.Scan(&n); err != nil {
+			return nil, false
+		}
+		v = append(v, n)
+	}
+	if rows.Err() != nil {
+		return nil, false
+	}
+	return v, true
+}
+
+// medianNextInput is the median of v (the mean of the two middle values for an even count), or
+// the default for no values.
+func medianNextInput(v []int64) int64 {
+	if len(v) == 0 {
+		return DefaultNextInputTokens
+	}
+	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	if len(v)%2 == 1 {
+		return v[len(v)/2]
+	}
+	return (v[len(v)/2-1] + v[len(v)/2]) / 2
+}
+
 // NextRequestUSD prices a cached prefix of `tokens` for the next request: warm is a cache read, cold
 // is a rewrite at the write rate of the tier the cache was written at (2.0x input on the 1h tier;
-// same derivation as CostWithCacheWrite1h). One definition for /api/cachestate and the manual ping,
-// so the "kept warm" credit is the cold figure the status line already showed.
-func NextRequestUSD(p modelinfo.Price, tokens, ttlS int64) (warm, cold float64) {
-	p = p.At(tokens + kvcache.DefaultPingInputTokens) // the next request sends this prefix plus new input: its tier's rates
+// same derivation as CostWithCacheWrite1h). nextIn is the new input that request adds to the
+// prefix (NextInputTokens); it picks the price tier. One definition for /api/cachestate and the
+// manual ping, so the "kept warm" credit is the cold figure the status line already showed.
+func NextRequestUSD(p modelinfo.Price, tokens, nextIn, ttlS int64) (warm, cold float64) {
+	p = p.At(tokens + nextIn) // the next request sends this prefix plus new input: its tier's rates
 	if ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second) {
 		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
 	}
@@ -504,6 +572,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 	pf := a.priceFn(r)
 	// next prices a cached prefix of `tokens` for the NEXT request: cold is the rewrite (the cache
 	// write rate, 2.0x input on the 1h tier), warm is the cache-read rate.
+	sizes := map[string]int64{} // the next-request size of each model, read once
 	next := func(model string, tokens, ttl int64) (warm, cold float64, ok bool) {
 		if pf == nil {
 			return 0, 0, false
@@ -512,7 +581,12 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return 0, 0, false
 		}
-		warm, cold = NextRequestUSD(p, tokens, ttl)
+		nextIn, seen := sizes[model]
+		if !seen { // only a priced model reads the database
+			nextIn = a.db(r).NextInputTokens(f, model)
+			sizes[model] = nextIn
+		}
+		warm, cold = NextRequestUSD(p, tokens, nextIn, ttl)
 		return warm, cold, true
 	}
 	s.RewriteUSD, s.Priced = rewrite(next, s.Model, s.PrefixTokens, s.TTLSeconds)

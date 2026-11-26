@@ -82,12 +82,18 @@ func TestStartMetricsPushOffMakesNoConnection(t *testing.T) {
 	}
 }
 
-// No dashboard means no accountant, so no sink and no connection.
-func TestStartMetricsPushWithoutDashboardIsOff(t *testing.T) {
+// No dashboard: the savings sink still runs, because the accountant does (#1451). The inference set reads a dashboard
+// event, so it stays off.
+func TestStartMetricsPushWithoutDashboardKeepsTheSavingsSink(t *testing.T) {
 	s := settings(t, "http://127.0.0.1:1", false)
 	s.dashboard = false
-	if got, _ := startMetricsPush(s, onePrice{}, "x"); got.savings != nil || got.inference != nil {
-		t.Fatal("a run with no dashboard built a sink")
+	got, stop := startMetricsPush(s, onePrice{}, "x")
+	defer stop()
+	if got.savings == nil {
+		t.Fatal("a run with no dashboard built no savings sink")
+	}
+	if got.inference != nil {
+		t.Fatal("a run with no dashboard built the inference set")
 	}
 }
 

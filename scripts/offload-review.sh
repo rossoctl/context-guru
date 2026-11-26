@@ -64,9 +64,10 @@ trap 'echo "offload-review: line $LINENO failed (exit $?)" >&2' ERR
 script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=offload-review/lib.sh
 . "$script_root/scripts/offload-review/lib.sh"
+require_bash4 || exit 1
 skipdir=
 # One EXIT trap for the whole script: it removes the skip folder and any lock this process holds.
-trap '[ -z "$skipdir" ] || rm -rf -- "$skipdir"; unlock_if_held' EXIT
+trap '[ -z "$skipdir" ] || rm -rf -- "$skipdir"; unlock' EXIT
 
 usage="usage: offload-review.sh <pr> [--backend <name>] [--no-fallback] [--live-tests <rules-file>] [--same-head] | <pr> --cleanup"
 pr=${1:?$usage}

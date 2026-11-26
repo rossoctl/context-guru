@@ -27,7 +27,8 @@ import (
 //
 // There is no default collector URL. With no URL, or with the push off, it logs one line and returns
 // a nil sink: no machine-ID file is made, no provider starts, and no request pays for a sink. The
-// push needs the accountant, which needs the dashboard, so a run with no dashboard has no sink.
+// push needs the accountant, which runs on every request with or without the dashboard (#1451). So the savings sink
+// works without the dashboard. The inference set reads a dashboard event, so it needs the dashboard.
 func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset string) (metricsSinks, func()) {
 	nop := func() {}
 	switch {
@@ -38,9 +39,6 @@ func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset s
 		// No default URL: nothing is sent unless the operator names a collector.
 		slog.Warn("context-guru: no collector URL is set (--metrics-push-url or METRICS_PUSH_URL); " +
 			"no metrics are reported")
-		return metricsSinks{}, nop
-	case !cfg.dashboard:
-		slog.Warn("context-guru: metrics need --dashboard, which is off; no metrics are reported")
 		return metricsSinks{}, nop
 	}
 	// The flags already read the environment (METRICS_PUSH_*), so there is one reader, and an explicit
@@ -66,11 +64,14 @@ func startMetricsPush(cfg metricsPushSettings, prices modelinfo.Pricer, preset s
 		stopProvider(shutdown)
 		return metricsSinks{}, nop
 	}
-	inf, err := proxy.NewInferenceMetrics(provider.Meter("context-guru"), prices, components.Names()...)
-	if err != nil {
-		slog.Warn("context-guru: metrics are off; could not build the inference set", "err", err)
-		stopProvider(shutdown)
-		return metricsSinks{}, nop
+	var inf *proxy.InferenceMetrics
+	if cfg.dashboard {
+		inf, err = proxy.NewInferenceMetrics(provider.Meter("context-guru"), prices, components.Names()...)
+		if err != nil {
+			slog.Warn("context-guru: metrics are off; could not build the inference set", "err", err)
+			stopProvider(shutdown)
+			return metricsSinks{}, nop
+		}
 	}
 	if err := registerProxyInfo(provider.Meter("context-guru"), buildinfo.Version, preset); err != nil {
 		slog.Warn("context-guru: the llm_proxy_info gauge is off", "err", err)

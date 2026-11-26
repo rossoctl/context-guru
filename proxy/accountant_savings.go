@@ -17,6 +17,8 @@ type savingsTracker struct {
 	clients  *sync.Map
 	// onEnd, when set, is called with each record after EndRequest. Tests only.
 	onEnd func(*accountant.Request, endRecord)
+	// onFinish, when set, is called with each finished chat request's capture, after the accountant priced it. Tests only.
+	onFinish func(c *capture, u Usage, usageOK bool)
 	// written is the last state file's bytes, for save to skip an unchanged write.
 	written lastSaved
 }
@@ -83,4 +85,11 @@ func (s *savingsTracker) computeSafe(req *accountant.Request, u Usage) (accounta
 
 func (s *savingsTracker) compute(req *accountant.Request, u Usage) accountant.Result {
 	return s.Recorder.Compute(req, u.accrec())
+}
+
+// finished tells the test hook (onFinish) that a request ended. Nil-safe.
+func (s *savingsTracker) finished(c *capture, u Usage, usageOK bool) {
+	if s != nil && s.onFinish != nil {
+		s.onFinish(c, u, usageOK)
+	}
 }

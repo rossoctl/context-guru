@@ -248,15 +248,15 @@ func TestAbsurdUsageBooksNoSaving(t *testing.T) {
 	}
 }
 
-// The tracker needs a dashboard: the Result is attached to the recorded event, so without a
-// recorder there is nowhere to put it and nothing is built.
-func TestNoDashboardBuildsNoTracker(t *testing.T) {
+// The tracker does not need a dashboard (#1451): the accountant runs on every request, and the dashboard only stores
+// and shows the Result.
+func TestNoDashboardStillBuildsTheTracker(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
 	h := New(nil, store.NewMemory(store.Options{}), nil, Options{AnthropicUpstream: up.URL, Prices: fixedPricer{}})
 	defer h.Close()
-	if h.savings != nil {
-		t.Error("a handler without a dashboard built a savings tracker")
+	if h.savings == nil {
+		t.Error("a handler without a dashboard built no savings tracker")
 	}
 	hd, _, _ := accHandler(t, up.URL)
 	if hd.savings == nil {

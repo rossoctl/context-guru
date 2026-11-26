@@ -10,7 +10,7 @@ process.env.CONTEXT_GURU_STATE = mkdtempSync(join(tmpdir(), "context-guru-failop
 process.env.CONTEXT_GURU_PORT_START = "9200"
 
 import plugin, { routeProviders, stateDirectory } from "../index.js"
-import { stubProxyBinary, waitUntilUnhealthy, timingOnly, timingEnabled } from "./helpers.mjs"
+import { stubProxyBinary, waitUntilUnhealthy, timingOnly, timingEnabled, waitFor } from "./helpers.mjs"
 
 // Ports only this file uses. 9263 stays closed: nothing listens there.
 const UPSTREAM_PORT = 9260
@@ -432,14 +432,6 @@ async function routedProject(directory) {
     record,
     ask: () => hooks["chat.headers"]({ sessionID: "session-back", provider: { info: { id: "anthropic" } } }, { headers: {} }),
     send: () => config.provider.anthropic.options.fetch(`${baseURL}/messages`, requestInit()),
-  }
-}
-
-async function waitFor(condition, what, timeoutMs = 25000) {
-  const deadline = Date.now() + timeoutMs
-  while (!(await condition())) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
-    await new Promise((resolve) => setTimeout(resolve, 100))
   }
 }
 
