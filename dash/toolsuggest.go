@@ -78,6 +78,9 @@ type Suggestion struct {
 	// `skill__<name>`, because the two are removed by different mechanisms and a bare name
 	// cannot say which is meant. See internal/skills.RemovePrefix.
 	RemoveAs string `json:"remove_as"`
+	// ClientOnly: the proxy filter cannot remove it (a deferred MCP tool), so RemoveAs is empty
+	// and only the user's own change applies.
+	ClientOnly bool `json:"client_only,omitempty"`
 	// Tokens is what carrying this costs on ONE request.
 	Tokens int `json:"tokens"`
 	// Sessions is how many captured sessions declared it; Days is the span they cover.
@@ -129,6 +132,9 @@ type DeclFilterSaving struct {
 	// "unpriced" mark rather than a dollar.
 	USD    float64 `json:"usd"`
 	Priced bool    `json:"priced"`
+	// FallbackUSD is the part of USD on requests the accountant could not price (requests.acc_fallback).
+	// The Overview share leaves those requests out, their saving with them (#1004).
+	FallbackUSD float64 `json:"fallback_usd,omitempty"`
 }
 
 // ExcludedDecl is one declaration the account has opted out of, in the shape the inventory
@@ -173,11 +179,15 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	sessions := map[string]bool{}
 	for rows.Next() {
 		var session, model string
-		var tok, cacheRead, cacheWrite, ts int64
-		if err := rows.Scan(&session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+		var tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
+		var fallback bool
+		if err := rows.Scan(&session, &model, &tok, &fresh, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline, &fallback); err != nil {
 			return nil, err
 		}
-		accumulateDeclFilterRow(out, sessions, session, model, tok, cacheRead, cacheWrite, ts, price)
+		usd := accumulateDeclFilterRow(out, sessions, session, model, tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
+		if fallback {
+			out.FallbackUSD += usd
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -186,6 +196,21 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 	return out, nil
 }
 
+// declFilterInBaseline is a SELECT column: 1 when the accountant library priced this request's toolfilter
+// removal. The proxy reports each removal to the library, so on such a request the removal is already in
+// baseline_cost_usd and in the net saving. Adding the measured dollar credit on top counts the same tokens
+// twice (context-guru#768 B2), so those rows add no USD. They still add their requests, tokens and dates:
+// those are facts about what the filter did, not dollars (context-guru#911). A request the library could
+// not price (priced_by='none') or one written before the switch has nothing in the baseline, so its
+// measured credit stays the only place its filter saving appears.
+//
+// A request whose figure was held out (r.estimate_held = 1, #915) is NOT in the baseline: the books hold the
+// whole estimated figure out, the filter part included, so the measured credit is the one place that
+// request's filter saving appears, in dollars. The measured credit owns it (it is measured from the rate
+// card and the tier, and it does not depend on the unknown cache state), and the totals never count it.
+const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM request_components c
+		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = '` + PricedByAccountant + `'))`
+
 // declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
 // #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
 // Bounded by `cond` directly: a session's own index for session scope, the ts range for a
@@ -193,16 +218,17 @@ func (d *DB) DeclFilterSavings(f Filter, price func(string) (modelinfo.Price, bo
 func declFilterSavingsQuery(f Filter) (string, []any) {
 	where, args := f.where()
 	return `SELECT r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
+		r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.ts, ` + declFilterInBaseline + `, r.acc_fallback <> '' FROM requests r
 		WHERE ` + where + ` AND r.filtered_decl_tokens > 0`, args
 }
 
 // accumulateDeclFilterRow folds one filtered_decl_tokens>0 row into a running total — the one
 // piece of DeclFilterSavings that has to run in Go rather than SQL, since each row prices at
 // ITS OWN model's rate and cache tier. Shared with DeclFilterSavingsByTenant so the two never
-// drift on how a row is priced.
+// drift on how a row is priced. skipUSD keeps the row's requests, tokens and dates and adds no dollars:
+// the accountant already booked them (declFilterInBaseline).
 func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
-	session, model string, tok, cacheRead, cacheWrite, ts int64, price func(string) (modelinfo.Price, bool)) {
+	session, model string, tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts int64, skipUSD bool, price func(string) (modelinfo.Price, bool)) float64 {
 	out.Requests++
 	sessions[session] = true
 	out.Reads += tok
@@ -213,6 +239,9 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 	p, priced := modelinfo.Price{}, false
 	if price != nil && model != "" {
 		p, priced = price(model)
+		// The request bills at the rates of ITS prompt size (#1407). A row from before fresh_input
+		// was stored has 0 there: its size is then too small, so its tier is never too dear.
+		p = p.At(modelinfo.PromptTokens(fresh, cacheRead, cacheWrite) + tok) // the size WITHOUT the filter: sent plus removed
 	}
 	switch {
 	case cacheRead > 0:
@@ -227,15 +256,24 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		// have cost the creation rate (1.25x fresh).
 		out.CacheWriteTokens += tok
 		rate = p.CacheWrite
+		// A one-hour breakpoint precedes every 5-minute one, so a request that wrote any 1h tokens
+		// wrote the declarations at the head at the 1h rate: 2x input. (The same rule as carriedCost.)
+		if cacheWrite1h > 0 {
+			rate = p.CacheWrite1h()
+		}
 	default:
 		out.FreshTokens += tok
 		rate = p.Input
 	}
-	if priced {
-		out.USD += float64(tok) * rate
-	} else {
-		out.Priced = false
+	if skipUSD {
+		return 0
 	}
+	if !priced {
+		out.Priced = false
+		return 0
+	}
+	out.USD += float64(tok) * rate
+	return float64(tok) * rate
 }
 
 // DeclFilterSavingsByTenant is DeclFilterSavings for every tenant since a given time, in one
@@ -244,7 +282,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,
-		r.cache_read, r.cache_write, r.ts FROM requests r
+		r.fresh_input, r.cache_read, r.cache_write, r.cache_write_1h, r.ts, `+declFilterInBaseline+` FROM requests r
 		WHERE `+cond+` AND r.filtered_decl_tokens > 0`, args...)
 	if err != nil {
 		return nil, err
@@ -254,8 +292,8 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 	sessions := map[string]map[string]bool{}
 	for rows.Next() {
 		var tenant, session, model string
-		var tok, cacheRead, cacheWrite, ts int64
-		if err := rows.Scan(&tenant, &session, &model, &tok, &cacheRead, &cacheWrite, &ts); err != nil {
+		var tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline int64
+		if err := rows.Scan(&tenant, &session, &model, &tok, &fresh, &cacheRead, &cacheWrite, &cacheWrite1h, &ts, &inBaseline); err != nil {
 			return nil, err
 		}
 		s, ok := out[tenant]
@@ -264,7 +302,7 @@ func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinf
 			out[tenant] = s
 			sessions[tenant] = map[string]bool{}
 		}
-		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, cacheRead, cacheWrite, ts, price)
+		accumulateDeclFilterRow(s, sessions[tenant], session, model, tok, fresh, cacheRead, cacheWrite, cacheWrite1h, ts, inBaseline != 0, price)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -299,8 +337,9 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		}
 		seen := map[statKey]map[string]bool{}
 		out := map[statKey]declWindow{}
+		stale := scan.staleRules(func(s string) bool { return sessions[s] }, true)
 		for k, v := range scan.facts {
-			if !sessions[k.session] {
+			if !sessions[k.session] || stale.stale(k.tenant, k.session, k.kind, k.name, k.server, v.last) {
 				continue
 			}
 			sk := statKey{k.kind, k.name}
@@ -324,7 +363,9 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		}
 		return out, nil
 	}
-	q := `SELECT d.kind, d.name, COUNT(DISTINCT d.session_id), MIN(d.ts), MAX(d.ts)
+	// Per (session, kind, name), so the stale-kind rule (stalekind.go) can run on the facts; the
+	// window and the session count are folded in Go, as the broad branch above does.
+	q := `SELECT d.tenant_id, d.session_id, d.kind, d.name, d.server, MIN(d.ts), MAX(d.ts)
 		FROM tool_declarations d WHERE d.session_id IN
 		  (SELECT r.session_id FROM requests r WHERE ` + where + ` AND r.tools > 0)`
 	a := append([]any{}, args...)
@@ -332,22 +373,53 @@ func (d *DB) declWindows(f Filter, h *declScanOnce) (map[statKey]declWindow, err
 		q += ` AND d.tenant_id = ?`
 		a = append(a, f.Tenant)
 	}
-	q += ` GROUP BY 1, 2`
+	q += ` GROUP BY 1, 2, 3, 4, 5`
 	rows, err := d.sql.QueryContext(d.readCtx(), q, a...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[statKey]declWindow{}
+	type fact struct {
+		tenant, session, kind, name, server string
+		first, last                         int64
+	}
+	var facts []fact
 	for rows.Next() {
-		var k statKey
-		var w declWindow
-		if err := rows.Scan(&k.kind, &k.name, &w.sessions, &w.first, &w.last); err != nil {
+		var f fact
+		if err := rows.Scan(&f.tenant, &f.session, &f.kind, &f.name, &f.server, &f.first, &f.last); err != nil {
 			return nil, err
 		}
-		out[k] = w
+		facts = append(facts, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	facts = dropStale(facts, func(f *fact) (string, string, string, string, string, int64) {
+		return f.tenant, f.session, f.kind, f.name, f.server, f.last
+	})
+	seen := map[statKey]map[string]bool{}
+	out := map[statKey]declWindow{}
+	for _, f := range facts {
+		sk := statKey{f.kind, f.name}
+		if seen[sk] == nil {
+			seen[sk] = map[string]bool{}
+		}
+		seen[sk][f.session] = true
+		w, ok := out[sk]
+		if !ok || f.first < w.first {
+			w.first = f.first
+		}
+		if !ok || f.last > w.last {
+			w.last = f.last
+		}
+		out[sk] = w
+	}
+	for sk, set := range seen {
+		w := out[sk]
+		w.sessions = len(set)
+		out[sk] = w
+	}
+	return out, nil
 }
 
 // ToolFilterDoc is the whole opt-in surface for one scope: what is currently excluded, what
@@ -434,7 +506,7 @@ func (d *DB) ToolFilterDocFor(f Filter, price func(string) (modelinfo.Price, boo
 		}
 		if s, ok := suggest(st, win[statKey{st.Kind, st.Name}]); ok {
 			out.Suggestions = append(out.Suggestions, s)
-		} else if st.SessionsUsed == 0 && st.Tokens > 0 {
+		} else if st.SessionsUsed == 0 && st.Calls == 0 && st.Tokens > 0 { // never used, below the bar
 			out.Withheld++
 		}
 	}
@@ -480,8 +552,8 @@ func excludedFrom(names []string, since int64) []ExcludedDecl {
 // config stores `skill__dataviz` and `mcp__plan`; a report row is named `dataviz` with kind skill,
 // or `mcp__plan__make_plan` with server `plan`. So `filtered[row.Name]` never matched a skill and
 // `filtered[row.Server]` never matched a whole MCP server — the overlap exclusion could not fire
-// for either, which made three user-facing statements false: the field's own doc, the
-// `self_removed` waterfall description, and the tile's overlap count.
+// for either, which made user-facing statements false: the field's own doc and the overlap
+// count of the savings-since-removal estimate.
 //
 // Built from excludedFrom rather than with a second mapping, because that function already knows
 // how a config name becomes a report row and a second copy is how the two drift apart. Taking the
@@ -505,7 +577,7 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	// by a `type` the provider resolves, not by a schema we can drop from the array without
 	// changing what the request IS. Never offered. Nor is the skills LISTING: it is one
 	// indivisible block of prose, and it shrinks by removing the skills inside it.
-	if st.Kind == KindServerTool || st.Kind == KindSkillListing {
+	if st.Kind == KindServerTool || st.Kind == KindSkillListing || st.Kind == KindDeferredListing {
 		return Suggestion{}, false
 	}
 	// A built-in is never offered either, and this is the second gate on that rather than the
@@ -517,7 +589,9 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	}
 	// Positive, sufficient observation, and every clause is required.
 	span := time.Duration(w.last-w.first) * time.Millisecond
-	if st.SessionsUsed > 0 || st.Tokens <= 0 ||
+	// Calls as well as SessionsUsed: a tool called in a session with no declaration row for it has
+	// SessionsUsed 0 and was still used, and suggesting its removal is the worst advice this gives.
+	if st.SessionsUsed > 0 || st.Calls > 0 || st.Tokens <= 0 ||
 		w.sessions < suggestMinSessions || span < suggestMinSpan {
 		return Suggestion{}, false
 	}
@@ -526,8 +600,13 @@ func suggest(st ToolStat, w declWindow) (Suggestion, bool) {
 	if st.Kind == KindSkill {
 		removeAs = skills.RemovePrefix + st.Name
 	}
+	// A deferred tool stays a suggestion (it is the evidence behind the insights verdict), but the
+	// filter cannot remove it, so it names no filter entry.
+	if st.Deferred {
+		removeAs = ""
+	}
 	return Suggestion{
-		Kind: st.Kind, Name: st.Name, Server: st.Server, RemoveAs: removeAs,
+		Kind: st.Kind, Name: st.Name, Server: st.Server, RemoveAs: removeAs, ClientOnly: st.Deferred,
 		Tokens: st.Tokens, Sessions: w.sessions, Days: days, Since: w.first,
 		UnusedReads: st.UnusedReads, ProjectedUSD: st.UnusedUSD, Priced: st.Priced,
 		Basis: fmt.Sprintf("declared but never invoked across %d of your sessions since %s (%.0f days)",

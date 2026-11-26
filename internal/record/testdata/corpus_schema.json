@@ -1,0 +1,94 @@
+{
+  "_comment": "Ground truth extracted from the real claude-record corpus (output/*.otel.json). Do not hand-edit.",
+  "attribute_keys": {
+    "gen_ai.input.messages": 5663,
+    "gen_ai.operation.name": 5680,
+    "gen_ai.output.messages": 5154,
+    "gen_ai.output.type": 5663,
+    "gen_ai.request.effort": 5663,
+    "gen_ai.request.max_tokens": 5663,
+    "gen_ai.request.model": 5680,
+    "gen_ai.request.output_schema": 504,
+    "gen_ai.system": 5680,
+    "gen_ai.tool.definitions": 5037,
+    "gen_ai.usage.input_tokens": 5680,
+    "gen_ai.usage.output_tokens": 5680
+  },
+  "attribute_types": {
+    "gen_ai.input.messages": {
+      "str": 5663
+    },
+    "gen_ai.operation.name": {
+      "str": 5680
+    },
+    "gen_ai.output.messages": {
+      "str": 5154
+    },
+    "gen_ai.output.type": {
+      "str": 5663
+    },
+    "gen_ai.request.effort": {
+      "str": 5663
+    },
+    "gen_ai.request.max_tokens": {
+      "int": 5663
+    },
+    "gen_ai.request.model": {
+      "str": 5680
+    },
+    "gen_ai.request.output_schema": {
+      "str": 504
+    },
+    "gen_ai.system": {
+      "str": 5680
+    },
+    "gen_ai.tool.definitions": {
+      "str": 5037
+    },
+    "gen_ai.usage.input_tokens": {
+      "int": 5680
+    },
+    "gen_ai.usage.output_tokens": {
+      "int": 5680
+    }
+  },
+  "chat_spans": 5680,
+  "files_scanned": 67,
+  "kinds": {
+    "SPAN_KIND_CLIENT": 5680
+  },
+  "resource_attributes": {
+    "service.name": 5680
+  },
+  "span_keys": {
+    "attributes": 5680,
+    "end_time": 5680,
+    "kind": 5680,
+    "name": 5680,
+    "parent_span_id": 5680,
+    "resource_attributes": 5680,
+    "span_id": 5680,
+    "start_time": 5680,
+    "status": 5680,
+    "trace_id": 5680
+  },
+  "status_keys": {
+    "code": 5680,
+    "message": 5680
+  },
+  "timestamp_samples": [
+    "2026-09-10T07:18:20.896000+00:00",
+    "2026-09-10T07:18:21.096000+00:00",
+    "2026-09-10T07:19:03.164000+00:00",
+    "2026-09-10T07:19:19.747000+00:00",
+    "2026-09-10T07:19:22.639000+00:00",
+    "2026-09-10T07:19:24.884000+00:00"
+  ],
+  "top_level_keys": {
+    "collected_at": 67,
+    "collector_version": 31,
+    "span_count": 67,
+    "spans": 67,
+    "trace_id": 67
+  }
+}

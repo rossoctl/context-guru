@@ -6,16 +6,19 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/context-guru/adjudicate"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/expand"
-	"github.com/rossoctl/context-guru/internal/adjudicate"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/metrics"
+	"github.com/rossoctl/context-guru/respfacts"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -531,7 +534,7 @@ func (h *Handler) renderMetrics() string {
 		// declines the removal, whichever store instance refused the payload. This is the
 		// LEADING indicator for cg_expand_unresolved_total{cause="missing"}, which cannot move
 		// until the agent happens to call expand.
-		unparsedUsage, unreadableUsage := UsageGaps()
+		unparsedUsage, unreadableUsage := respfacts.UsageGaps()
 		// The two accounting-outage counters (#200). Process-wide, so outside the store cast for
 		// the same reason the stash pair is: the parser is package-level.
 		promHeaderProc(&b, "cg_usage_unparsed_total",
@@ -579,6 +582,16 @@ func (h *Handler) renderMetrics() string {
 			promHeaderProc(&b, "cg_model_info_unresolved_total",
 				"Failed attempts to load the configured model-window document. Non-zero means context windows are resolving from a built-in fallback, so every fraction-based trigger (summarize's request fraction, the sweep's pressure floor, the economic trigger's turn horizon) is evaluated against a window nobody configured. Alert on any increase: the pipeline keeps working and every other counter stays healthy.", "counter")
 			promLine(&b, "cg_model_info_unresolved_total", "", float64(n))
+		}
+
+		// Client-search mode (#898) disabled, by reason. The production monitor alerts on a rise:
+		// every event means a Claude Code format change, or a break, and the proxy has stopped
+		// deferring for that client version.
+		if _, g := h.deferPeek(); g != nil {
+			promHeaderProc(&b, "cg_tooldefer_client_disabled_total",
+				"Times tool deferral through Claude Code's ToolSearch was disabled, by reason. unknown_description: the ToolSearch description hash was not verified. break: a deferred tool's own result said it is not loaded. unknown_description counts once per tenant and hash per 24 h; break counts every time.", "counter")
+			promLine(&b, "cg_tooldefer_client_disabled_total", `reason="unknown_description"`, float64(g.DisabledUnknown.Load()))
+			promLine(&b, "cg_tooldefer_client_disabled_total", `reason="break"`, float64(g.DisabledBreak.Load()))
 		}
 
 		promHeaderProc(&b, "cg_sse_streams_total", "Responses by streaming path.", "counter")
@@ -681,6 +694,25 @@ func (h *Handler) renderMetrics() string {
 		}
 	}
 
+	// --- the early wait-cause scan (#1225, #1227) -----------------------------
+	promHeaderProc(&b, "cg_waitcause_early_scan_total",
+		"What the keeper did with the early wait-cause scan at response end, for every recorded request that has a scan (the dashboard on), whether or not its keep-alive is on: used (its counts joined the plan), not_ready (still running, today's plan), unknown (it could not say: work bound, server-held history, panic, cancelled; today's plan). A high not_ready or unknown share means the plan is often today's.", "counter")
+	promLine(&b, "cg_waitcause_early_scan_total", `result="used"`, float64(h.scan.used.Load()))
+	promLine(&b, "cg_waitcause_early_scan_total", `result="not_ready"`, float64(h.scan.notReady.Load()))
+	promLine(&b, "cg_waitcause_early_scan_total", `result="unknown"`, float64(h.scan.unknown.Load()))
+	promHeaderProc(&b, "cg_waitcause_writer_scan_total",
+		"How the dashboard writer got the normalized body for its tracker update: early (reused the scan) or own (normalized it itself).", "counter")
+	promLine(&b, "cg_waitcause_writer_scan_total", `source="early"`, float64(h.scan.writerEarly.Load()))
+	promLine(&b, "cg_waitcause_writer_scan_total", `source="own"`, float64(h.scan.writerOwn.Load()))
+
+	// --- keep-alive credit wiring --------------------------------------------
+	promHeaderProc(&b, "cg_keepalive_rescue_facts_missing_total",
+		"Requests that followed keep-alive pings but found no ping facts, so keep-alive credit was lost on that return. Also counts a return after an unpriced ping (non-2xx or no usage), after an eviction, or after a pricing panic. If it keeps rising while cg_keepalive_pings_priced_total stays 0, the host does not wire the ping side or its pings keep failing (compare the keeper counters pings, failed and skipped in /stats). Moves only with the dashboard on.", "counter")
+	promLine(&b, "cg_keepalive_rescue_facts_missing_total", "", float64(h.savings.RescueFactsMissing()))
+	promHeaderProc(&b, "cg_keepalive_pings_priced_total",
+		"Keep-alive pings the host priced (each PingSavings call that returned ok). Read it together with cg_keepalive_rescue_facts_missing_total.", "counter")
+	promLine(&b, "cg_keepalive_pings_priced_total", "", float64(h.opts.Pings.Priced()))
+
 	// --- refusals -----------------------------------------------------------
 	//
 	// Outside the h.agg guard: a refused request never reaches the aggregator, and these
@@ -721,6 +753,48 @@ func (h *Handler) renderMetrics() string {
 		}
 	}
 
+	// --- manual holds (issue #1103) ----------------------------------------
+	//
+	// Counts and byte sizes only. The counters and the histogram are process-wide, like every other
+	// cg_keepalive_* series, so they carry no tenant. The gauge is per tenant, labelled like
+	// cg_tenant_refused_requests_total: /metrics is loopback or token only on a hosted proxy.
+	if h.keeper != nil {
+		mh := h.keeper.ManualHoldSnapshot()
+		promHeader(&b, "cg_keepalive_manual_hold_evicted_total",
+			"Manual holds the keeper released early because a tenant went over its cap. reason=bytes: the tenant's held bytes passed the per-tenant byte cap. reason=count: it passed the per-tenant entry cap. The oldest hold of that tenant goes first.", "counter")
+		promLine(&b, "cg_keepalive_manual_hold_evicted_total", `reason="bytes"`, float64(mh.EvictedBytes))
+		promLine(&b, "cg_keepalive_manual_hold_evicted_total", `reason="count"`, float64(mh.EvictedCount))
+		promHeader(&b, "cg_keepalive_refused_total",
+			"Requests the keeper refused to hold, by reason. too_large: the body was over the per-body limit. Counts a refusal whether or not the request asked for the Ping button.", "counter")
+		promLine(&b, "cg_keepalive_refused_total", `reason="too_large"`, float64(mh.TooLarge))
+		promHeader(&b, "cg_keepalive_manual_hold_body_bytes",
+			"Size of each body at the moment a manual hold started, in bytes. Buckets are 1, 4, 8, 16 and 32 MiB.", "histogram")
+		var cum int64
+		for i, mib := range keepalive.ManualHoldBucketsMiB {
+			cum += mh.Buckets[i]
+			promLine(&b, "cg_keepalive_manual_hold_body_bytes_bucket", `le="`+strconv.FormatInt(mib<<20, 10)+`"`, float64(cum))
+		}
+		promLine(&b, "cg_keepalive_manual_hold_body_bytes_bucket", `le="+Inf"`, float64(mh.SizeCount))
+		promLine(&b, "cg_keepalive_manual_hold_body_bytes_sum", "", float64(mh.SizeSum))
+		promLine(&b, "cg_keepalive_manual_hold_body_bytes_count", "", float64(mh.SizeCount))
+		if len(mh.Tenants) > 0 {
+			byID := map[string]string{}
+			if reg := h.registry(); reg != nil {
+				if all, err := reg.List(); err == nil {
+					for _, t := range all {
+						byID[t.ID] = t.Label
+					}
+				}
+			}
+			promHeader(&b, "cg_tenant_keepalive_manual_hold_bytes",
+				"Bytes this tenant holds in manual holds right now. Compare with the per-tenant cap (32 MiB): a tenant near it loses its oldest hold when the next one starts. Only tenants that hold something are present.", "gauge")
+			for _, t := range mh.Tenants {
+				promLine(&b, "cg_tenant_keepalive_manual_hold_bytes",
+					`tenant="`+escapeLabel(t.Tenant)+`",label="`+escapeLabel(byID[t.Tenant])+`"`, float64(t.Bytes))
+			}
+		}
+	}
+
 	// context-guru's own compaction-model spend. Separate from the agent's cost because
 	// conflating them makes it impossible to see whether the tool pays for itself.
 	calls, in, out := cheapmodel.Usage()
@@ -732,6 +806,19 @@ func (h *Handler) renderMetrics() string {
 	promHeader(&b, "cg_llm_failures_total", "Compaction-model calls that timed out or errored.", "counter")
 	promLine(&b, "cg_llm_failures_total", `kind="timeout"`, float64(offload.LLMTimeouts()))
 	promLine(&b, "cg_llm_failures_total", `kind="error"`, float64(offload.LLMErrors()))
+
+	// The silence guard (upstreamsilence.go). Exported rather than absorbed: a resend that
+	// succeeds is invisible to the client, so without these a gateway hanging one request in
+	// ten would look exactly like a healthy one.
+	promHeader(&b, "cg_upstream_silent_resends_total",
+		"Streaming upstream requests the upstream accepted but never answered within the silence timeout, and that were therefore resent once on a new connection.", "counter")
+	promLine(&b, "cg_upstream_silent_resends_total", "", float64(upstreamSilenceResends.Load()))
+	promHeader(&b, "cg_upstream_silent_failures_total",
+		"Streaming upstream requests whose resend was silent too; these became a 502.", "counter")
+	promLine(&b, "cg_upstream_silent_failures_total", "", float64(upstreamSilenceFailures.Load()))
+	promHeader(&b, "cg_upstream_dropped_reuse_resends_total",
+		"Upstream requests resent on a new connection because the upstream closed their reused keep-alive connection without sending a byte of response (Go reports this as EOF; it used to be a 502).", "counter")
+	promLine(&b, "cg_upstream_dropped_reuse_resends_total", "", float64(upstreamDroppedReuseResends.Load()))
 
 	// extract_llm economics. The one component that SPENDS money, so gross savings can look
 	// impressive while it is underwater — measured live at a NET of -$0.7085, and until these
@@ -784,6 +871,9 @@ func (h *Handler) renderMetrics() string {
 		// Dropped events mean the capture queue filled — observability degrading under
 		// load, which is exactly when it is most wanted. Worth an alert.
 		promLine(&b, "cg_dash_events_total", `disposition="dropped"`, float64(st.Dropped))
+		promHeader(&b, "cg_bypass_count_dropped_total",
+			"Bypassed requests whose token count was skipped because the count worker's queue was full; their rows keep tokens_before 0.", "counter")
+		promLine(&b, "cg_bypass_count_dropped_total", "", float64(st.CountsDropped))
 		promHeader(&b, "cg_dash_db_bytes", "Size of the local dashboard database, write-ahead log included.", "gauge")
 		promLine(&b, "cg_dash_db_bytes", "", float64(h.rec.DBSizeBytes()))
 		promHeader(&b, "cg_dash_disk_used_ratio",
@@ -810,13 +900,13 @@ func (h *Handler) renderMetrics() string {
 				"err", err)
 		} else {
 			promHeader(&b, "cg_baseline_cost_usd", monthToDateCaveat(
-				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill. The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
+				"What this month's traffic would have cost with nothing removed: the billed cost plus the removed tokens priced at the tier each request actually paid. Subtract cg_saved_usd to get the bill. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586). The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
 			promLine(&b, "cg_baseline_cost_usd", "", v.BaselineUSD)
 			promHeader(&b, "cg_saved_usd", monthToDateCaveat(
-				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict. The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
+				"Provider spend compaction avoided this month: baseline minus billed. BEFORE context-guru's own model spend — use cg_net_saved_usd for the verdict. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586). The removed-token counts behind this are our own estimate scaled to the provider's own count of the same content (issue #240): a measured per-model-family factor, ~1.37x on haiku-4-5 and ~1.69x on the sonnet-5/opus-5 tokenizer. Rows written before that correction are NOT re-priced, so a window spanning the fix mixes two definitions and the older half is the understated one."), "gauge")
 			promLine(&b, "cg_saved_usd", "", v.SavedUSD)
 			promHeader(&b, "cg_net_saved_usd", monthToDateCaveat(
-				"cg_saved_usd minus what context-guru's own compaction models cost. GOES NEGATIVE when a configuration spends more than it saves; that is a real outcome and this series reports it rather than clamping at zero. This is the number to alert on."), "gauge")
+				"cg_saved_usd minus what context-guru's own compaction models cost. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586). GOES NEGATIVE when a configuration spends more than it saves; that is a real outcome and this series reports it rather than clamping at zero. This is the number to alert on."), "gauge")
 			promLine(&b, "cg_net_saved_usd", "", v.NetSavedUSD)
 			promHeader(&b, "cg_frozen_tokens_total", monthToDateCaveat(
 				"Content tokens cache-aware compaction deliberately left alone because they sat inside the provider's already-cached prefix. The headroom, and usually the explanation for a small cg_saved_usd: rewriting a cached prefix costs more than the tokens it removes, so this is a cost paid on purpose. DO NOT read a low value as \"the cache is cold, it is safe to rewrite deep history\". Zero has TWO causes and they call for opposite actions. (1) OUR OWN prefix tracker was reset (a restart, an evicted entry) while the provider's cache was still warm: measured, 3,092 such requests still cache-HIT for 404,376,878 cache-read tokens, and acting on that reading was worth about -$708 on sonnet-5 against +$0.62 of upside. (2) The turn was a CONFIRMED cold one and the cold sweep already acted, which is free by construction. Tell them apart by the request's cache_miss_reason: a swept turn reads ttl_expiry/cold_start, a reset tracker reads hit. Ctx.ColdCache cannot confuse the two -- it demands a RECORDED previous turn plus the provider TTL and a one-minute margin, so a missing record reads warm, which is case (1) declining itself."), "gauge")
@@ -875,7 +965,7 @@ func (h *Handler) renderMetrics() string {
 				promLine(&b, "cg_tenant_cost_usd", tenantLabels(t), t.CostUSD)
 			}
 			promHeader(&b, "cg_tenant_baseline_cost_usd",
-				"What this tenant's traffic would have cost without compaction. Subtract cg_tenant_cost_usd for the saving.", "gauge")
+				"What this tenant's traffic would have cost without compaction. Subtract cg_tenant_cost_usd for the saving. UNCAPPED: it sums the stored per-request credit, so replay credit past the client's compaction point is still counted. The dashboard headline caps it and can read lower for the same traffic (issue #586).", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_baseline_cost_usd", tenantLabels(t), t.BaselineUSD)
 			}

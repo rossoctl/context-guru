@@ -31,7 +31,7 @@ func TestTheTwoSkipReasonsAreReportedApart(t *testing.T) {
 			return "head\n" + expand.Marker("aaaaaaaaaaaaaaaa") + "\n"
 		}, GateAlreadyMarked},
 		{"content the agent expanded", func(st *store.Memory) string {
-			MarkKeptVerbatim(st, body)
+			MarkKeptVerbatim(st, "s", body)
 			return body
 		}, GateKeptVerbatim},
 	} {
@@ -97,7 +97,7 @@ func TestTheOffloadersWithNoReplayPathAlsoReportExpansion(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := store.NewMemory(store.Options{})
-			MarkKeptVerbatim(st, body)
+			MarkKeptVerbatim(st, "s", body)
 			off := tc.make(t)
 			// Two identical outputs, so dedup has a duplicate to consider as well.
 			req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{
@@ -127,7 +127,7 @@ func TestOnlyAnAbandonedEstablishedCompactionCountsAsAFlip(t *testing.T) {
 
 	t.Run("never compacted, so nothing flips", func(t *testing.T) {
 		st := store.NewMemory(store.Options{})
-		MarkKeptVerbatim(st, body) // expanded, but this session never froze a decision for it
+		MarkKeptVerbatim(st, "s", body) // expanded, but this session never froze a decision for it
 		m := maskFor(t)
 		before := ExpandPrefixFlips()
 		req := &bschemas.BifrostChatRequest{Input: []bschemas.ChatMessage{tool(body), tool("tail")}}
@@ -156,7 +156,7 @@ func TestOnlyAnAbandonedEstablishedCompactionCountsAsAFlip(t *testing.T) {
 			t.Fatal("turn 1 did not compact, so there is no established compaction to abandon")
 		}
 		// The agent expands it.
-		MarkKeptVerbatim(st, body)
+		MarkKeptVerbatim(st, "s", body)
 
 		before := ExpandPrefixFlips()
 		// Turn 2: the output is now inside the cached prefix, and the replay declines.
@@ -197,7 +197,7 @@ func TestTheFlipProbeDoesNotRenewTheDecisionItAsksAbout(t *testing.T) {
 	if _, err := m.Offload(req, &rep, c); err != nil {
 		t.Fatal(err)
 	}
-	MarkKeptVerbatim(st, body)
+	MarkKeptVerbatim(st, "s", body)
 	key := frozenKey("s", m.Name(), contentKey(body))
 	if !st.Peek(key) {
 		t.Fatal("no frozen decision after turn 1; the fixture is not exercising the probe")

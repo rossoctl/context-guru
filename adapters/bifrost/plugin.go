@@ -16,8 +16,8 @@ import (
 )
 
 // SessionContextKey is the BifrostContext value key the transport sets from the
-// x-context-guru-session header (or Anthropic metadata.user_id). Absent -> the
-// plugin falls back to a content hash.
+// x-context-guru-session header. Absent -> the plugin reads the agent's own id from the
+// request metadata (session.ExplicitStrict), then falls back to a content hash.
 const SessionContextKey bschemas.BifrostContextKey = "context-guru-session"
 
 // Plugin runs the context-guru pipeline in PreRequestHook. It implements
@@ -54,6 +54,8 @@ func (p *Plugin) PreRequestHook(ctx *bschemas.BifrostContext, req *bschemas.Bifr
 		Store:   p.store,
 		Model:   components.ModelSpec{Static: p.CheapModel},
 		Bypass:  bypassed(ctx),
+		// This adapter runs the pipeline in place and never writes the CacheAnchorToolID mark (#730).
+		NoCacheBreakpoint: true,
 	}
 	p.pipe.Run(chat, c)
 	return nil
@@ -71,7 +73,8 @@ func (p *Plugin) PostLLMHook(_ *bschemas.BifrostContext, resp *bschemas.BifrostR
 }
 
 // resolveSession prefers an explicit id set on the context (from a header),
-// falling back to a hash of the system prompt + first user message.
+// then the agent's own id in the request metadata (session.ExplicitStrict: the proxy's rule
+// without a plain per-user user_id), falling back to a hash of the system prompt + first user message.
 func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.BifrostChatRequest) string {
 	explicit := ""
 	if v := ctx.Value(SessionContextKey); v != nil {
@@ -80,7 +83,14 @@ func (p *Plugin) resolveSession(ctx *bschemas.BifrostContext, chat *bschemas.Bif
 		}
 	}
 	sys, firstUser := schema.SessionHead(chat.Input)
-	return session.Resolve(explicit, sys, firstUser)
+	var meta func(string) (string, bool)
+	if chat.Params != nil && chat.Params.Metadata != nil {
+		meta = func(k string) (string, bool) {
+			s, ok := (*chat.Params.Metadata)[k].(string)
+			return s, ok
+		}
+	}
+	return session.Resolve(session.ExplicitStrict(explicit, meta), sys, firstUser)
 }
 
 // BypassContextKey lets a caller disable the pipeline for one request

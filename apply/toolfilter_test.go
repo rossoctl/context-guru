@@ -322,7 +322,7 @@ func TestFilterProseSetStableOverCapture(t *testing.T) {
 			continue
 		}
 		decided++
-		sid := explicitSession("", rec.Body)
+		sid := ExplicitSession("", rec.Body)
 		s := sessions[sid]
 		if s == nil {
 			sessions[sid] = &seen{first: dec, region: proseRegion(rec.Body), at: i}

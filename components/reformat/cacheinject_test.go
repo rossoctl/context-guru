@@ -5,6 +5,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
 
@@ -35,7 +36,7 @@ func convo(n int) []schemas.ChatMessage {
 func marked(msgs []schemas.ChatMessage) []int {
 	var out []int
 	for i := range msgs {
-		if hasBreakpoint(&msgs[i]) {
+		if schema.HasBlockBreakpoint(&msgs[i]) {
 			out = append(out, i)
 		}
 	}
@@ -183,6 +184,21 @@ func TestAnchorsAreTurnStable(t *testing.T) {
 	for i := range a {
 		if i < len(b) && a[i] != b[i] {
 			t.Fatalf("anchor drifted with length: %v vs %v", a, b)
+		}
+	}
+}
+
+// Bedrock Mantle serves Claude on the native Anthropic surface, so cacheinject must place
+// breakpoints there as it does on Bedrock (#809). Before the fix it skipped the request.
+func TestPlacesBreakpointsOnEveryCacheControlProvider(t *testing.T) {
+	for _, p := range []schemas.ModelProvider{schemas.Anthropic, schemas.Bedrock, schemas.BedrockMantle, schemas.Vertex} {
+		req := &schemas.BifrostChatRequest{Provider: p, Input: convo(30)}
+		rep := &components.Report{}
+		if err := (Cacheinject{}).Reformat(req, rep, ctx()); err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if rep.Skipped || len(marked(req.Input)) == 0 {
+			t.Errorf("%s: want breakpoints, got skipped=%v marked=%v", p, rep.Skipped, marked(req.Input))
 		}
 	}
 }

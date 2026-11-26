@@ -1,0 +1,1333 @@
+#!/usr/bin/env python3
+"""Install and operate context-guru for Pi.
+
+The Pi extension calls this script for every action that writes or starts something. Output is one
+`key=value` fact per line, so the extension (and a person in a shell) can read each fact on its own.
+
+Design, in short:
+  * Routing is one key per provider in Pi's models.json (`providers.<name>.baseUrl`). Nothing is
+    checked per session: Pi reads the file, and the request goes to the proxy.
+  * The proxy runs as a user service (launchd on macOS, systemd --user on Linux), so it is up before
+    Pi starts and restarts by itself after a crash or a login. At session start the extension checks
+    /healthz once, and if the proxy does not answer it calls `restart` here once.
+  * Every file it writes carries an ownership marker or a routing record, and uninstall and the reset
+    hatch remove only what they own.
+"""
+
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import plistlib
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import models_route  # noqa: E402
+
+MARKER = "# Managed by the context-guru Pi package."
+RELEASE_REPO = "rossoctl/context-guru"
+MINIMUM_RELEASE = (0, 4, 0)
+SERVICE = "context-guru-pi"
+LAUNCHD_LABEL = "io.rossoctl.context-guru-pi"
+# Pi's built-in providers this package routes, and where each one forwards. `openai-codex` (ChatGPT
+# login through chatgpt.com/backend-api) is not here: the proxy has no route for that backend.
+PROVIDERS = ("anthropic", "openai")
+UPSTREAMS = {"anthropic": "api.anthropic.com", "openai": "api.openai.com"}
+# The proxy flag that sends a provider's route to another upstream (chain mode). The proxy config YAML
+# has no upstream key, so the upstream goes on the service command line. The proxy appends
+# `/v1/messages` (Anthropic) or `/v1/responses` and `/v1/chat/completions` (OpenAI) to it.
+UPSTREAM_FLAGS = {"anthropic": "--anthropic-upstream", "openai": "--openai-upstream"}
+CONFLICT_CHOICES = ("chain", "replace", "abort")
+NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
+PRESETS = ("off", "conservative", "medium", "high", "xhigh", "ultrahigh")
+DEFAULT_PRESET = "off"
+DEFAULT_STRATEGY = "auto"
+# The proxy owns the cache strategy table (#987). This package keeps no copy of it: it asks the proxy
+# binary (`context-guru-proxy strategies`) and writes `cache: strategy: <name>` in the proxy config.
+# A proxy older than STRATEGY_MIN_PROXY cannot list a strategy, and its strict config refuses the
+# `strategy` key. So on that proxy only `none` works, and `none` needs no table.
+NONE_STRATEGY = "none"
+NAMED_STRATEGY_RELEASE = (0, 7, 1)
+STRATEGY_MIN_PROXY = "v0.7.1"
+STRATEGIES_TIMEOUT = 5.0
+STRATEGY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# Settings of the proxy that open files or switch on hosted mode. The probe must not inherit them.
+PROBE_SCRUBBED_PREFIXES = ("DASHBOARD_", "SESSION_STATE", "CG_RECORD_", "ARCHIVE_")
+PROBE_SCRUBBED_NAMES = {"CONTROL_DB", "UPSTREAMS", "STORE", "IDLE_EXIT"}
+
+
+# ---------------------------------------------------------------------------------------------- paths
+
+def agent_dir():
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi/agent")
+
+
+def models_path():
+    return agent_dir() / "models.json"
+
+
+def state_dir():
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    return base / "context-guru-pi"
+
+
+def record_path():
+    return state_dir() / "install.json"
+
+
+def routing_state():
+    return state_dir() / "routing.json"
+
+
+def proxy_config():
+    return state_dir() / "proxy.yaml"
+
+
+def managed_binary():
+    return state_dir() / "bin/context-guru-proxy"
+
+
+def reset_hatch():
+    return state_dir() / "context-guru-reset"
+
+
+def systemd_unit():
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / f"systemd/user/{SERVICE}.service"
+
+
+def launchd_plist():
+    return Path.home() / f"Library/LaunchAgents/{LAUNCHD_LABEL}.plist"
+
+
+def service_kind():
+    return {"Linux": "systemd", "Darwin": "launchd"}.get(platform.system())
+
+
+# -------------------------------------------------------------------------------------------- helpers
+
+def facts(**values):
+    for key, value in values.items():
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, separators=(",", ":"))
+        # One fact per line: an error text with a newline must not start a second, false fact.
+        print(f"{key}=" + " ".join(str(value).split("\n")).replace("\r", " "))
+
+
+# The time limit of the extension's session-start check. `restart` uses the same limit before it
+# restarts, so a proxy that is slow but alive is not killed.
+START_CHECK_SECONDS = 5
+
+# The longest a command waits for another one's restart lock. A restart usually holds it for a few
+# seconds. Slow service commands can make it hold the lock for longer (the launchd path has about
+# 2 minutes of command time limits in the worst case, and setup holds it across start_service). A caller that waits 40 s
+# reports `busy` and still finishes inside the extension's 60 s limit.
+LOCK_WAIT_SECONDS = 40
+
+
+def healthy(port, timeout=1):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+# How long a start waits for /healthz. A warm start (restart, configure) keeps 5 s, so a restart or configure
+# that waited for the lock still ends inside the extension's 60 s limit. A cold start (setup, update: a new
+# binary) waits up to 20 s: the first start of a freshly downloaded binary can take more than 5 s (#1288).
+WARM_START_SECONDS = 5
+COLD_START_SECONDS = 20
+
+
+def wait_healthy(port, seconds=None, clock=None, sleep=None):
+    """True once /healthz answers, checking every 0.1 s until a deadline. Each check gets at most the time
+    that is left, so a proxy that accepts but does not answer cannot stretch the wait. A proxy that answers at
+    once adds no wait. `clock` and `sleep` are for tests."""
+    clock, sleep = clock or time.monotonic, sleep or time.sleep
+    deadline = clock() + (WARM_START_SECONDS if seconds is None else seconds)
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        if healthy(port, timeout=min(1, remaining)):
+            return True
+        sleep(min(0.1, max(0, deadline - clock())))
+
+
+def first_free_port():
+    for port in range(8787, 8888):
+        if port_free(port):
+            return port
+    raise RuntimeError("no free port in 8787..8887")
+
+
+def port_free(port):
+    """True when the proxy can bind the port and no program listens on it.
+
+    The bind uses SO_REUSEADDR, as the proxy does: without it, the TIME_WAIT connections a stopped proxy
+    leaves make the port look taken for about 30 s (#1232). On macOS that bind also succeeds next to
+    another program's 0.0.0.0 or [::] listener, and the proxy would then take that program's local
+    traffic. So a port where a connection to 127.0.0.1 is accepted is taken."""
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return False  # someone accepted: a live listener
+    except OSError:
+        return True  # refused (or nothing answered): nobody listens
+
+
+def choose_port(record):
+    """The recorded port while it is ours to use (our proxy answers there, or nothing holds it).
+    Another program on it means a new port, so setup does not fail on every retry."""
+    port = int(record.get("port") or 0)
+    if port and (healthy(port) or port_free(port)):
+        return port
+    return first_free_port()
+
+
+def read_record():
+    try:
+        return json.loads(record_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_record(record):
+    path = record_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record, indent=2) + "\n")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def owned(path):
+    try:
+        return path.read_text().startswith(MARKER)
+    except OSError:
+        return False
+
+
+def plist_owned(path):
+    """True when the LaunchAgent at `path` carries our ownership key."""
+    try:
+        with open(path, "rb") as handle:
+            return plistlib.load(handle).get("ContextGuruManaged") is True
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+
+
+# --------------------------------------------------------------------------------------------- binary
+
+def find_binary():
+    """CONTEXT_GURU_BIN, else the binary that setup downloaded. Never a context-guru-proxy on PATH: another
+    tool owns that one, and it can be too old, or change when that tool updates it (#1152)."""
+    named = os.environ.get("CONTEXT_GURU_BIN")
+    found = shutil.which(named) if named else None
+    if found:
+        return str(Path(found).resolve())
+    if managed_binary().is_file() and os.access(managed_binary(), os.X_OK):
+        return str(managed_binary().resolve())
+    return None
+
+
+def release_platform():
+    systems = {"Darwin": "darwin", "Linux": "linux"}
+    machines = {"x86_64": "amd64", "AMD64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+    try:
+        return systems[platform.system()], machines[platform.machine()]
+    except KeyError as error:
+        raise RuntimeError(f"unsupported release platform: {platform.system()}/{platform.machine()}") from error
+
+
+def latest_release_tag():
+    request = urllib.request.Request(f"https://github.com/{RELEASE_REPO}/releases/latest", method="HEAD")
+    with urllib.request.urlopen(request, timeout=15) as response:
+        tag = response.geturl().rstrip("/").rsplit("/", 1)[-1]
+    if not tag or tag == "latest":
+        raise RuntimeError("could not resolve the latest context-guru release")
+    return tag
+
+
+_SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def _semver_key(text):
+    """Sort key in semantic-version order (a prerelease sorts below its release), or None."""
+    match = _SEMVER.fullmatch((text or "").strip())
+    if not match:
+        return None
+    core = tuple(int(part) for part in match.groups()[:3])
+    if match.group(4) is None:
+        return core, (1,)
+    return core, (0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in match.group(4).split(".")))
+
+
+def release_is_newer(latest, installed):
+    """True when `latest` is strictly newer than `installed`. `releases/latest` never names a
+    prerelease, so an installed beta is not behind it (#1254). An unparsable side falls back to
+    "the tags differ"."""
+    left, right = _semver_key(latest), _semver_key(installed)
+    if left is None or right is None:
+        return (latest or "").strip().removeprefix("v") != (installed or "").strip().removeprefix("v")
+    return left > right
+
+
+def fetch(url):
+    with urllib.request.urlopen(url, timeout=60) as response:
+        return response.read()
+
+
+def release_version(tag):
+    value = tag.removeprefix("v").split("-", 1)[0]
+    try:
+        parts = tuple(int(part) for part in value.split("."))
+    except ValueError as error:
+        raise RuntimeError(f"unrecognized context-guru release tag: {tag}") from error
+    if len(parts) != 3:
+        raise RuntimeError(f"unrecognized context-guru release tag: {tag}")
+    return parts
+
+
+def binary_version_text(executable):
+    """The version that `<binary> --version` prints (for example `0.7.1`), or None. `--version` exits
+    before the proxy opens a port, and a binary without the flag exits on an unknown flag, so this
+    never starts a proxy. The time limit is for a binary that hangs."""
+    try:
+        out = subprocess.run([executable, "--version"], text=True, capture_output=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out[1] if len(out) >= 2 and out[0] == "context-guru-proxy" else None
+
+
+def proxy_version_state(executable):
+    """`named` (v0.7.1 or later: it reads `cache: strategy: <name>`), `older` (a release before that), or
+    `unknown` (no readable version, or a dev build). A pre-release (`0.7.1-rc1`) counts as older than its
+    release: it may have been cut before #987."""
+    text = binary_version_text(executable) if executable else None
+    if text is None:
+        return "unknown"
+    try:
+        version = release_version(text)
+    except RuntimeError:  # a dev build, for example
+        return "unknown"
+    prerelease = "-" in text.removeprefix("v")
+    return "named" if version > NAMED_STRATEGY_RELEASE or (version == NAMED_STRATEGY_RELEASE and not prerelease) \
+        else "older"
+
+
+def names_strategies(executable):
+    """True only when the binary is known to read `cache: strategy: <name>`. A version we cannot read is
+    False, so a config that is already on disk stays as it is."""
+    return proxy_version_state(executable) == "named"
+
+
+class StrategyError(RuntimeError):
+    def __init__(self, message, reason="strategy_unavailable"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def update_hint():
+    return f"update the proxy to {STRATEGY_MIN_PROXY} or later (/context-guru update); nothing was changed"
+
+
+_TABLES = {}
+
+
+def load_strategy_table(executable):
+    """The strategy table the proxy binary prints. Raises StrategyError with a plain reason.
+
+    The trap (#483): a binary older than v0.7.1 does NOT fail on `strategies`. It ignores the word and
+    starts serving. So the probe has a short time limit, a loopback port 0, and no config, and "no valid
+    JSON" means an old binary. It must write nothing: the env drops every setting that opens a database,
+    a record dir or hosted mode, and it runs in a fresh empty directory so a relative default path cannot
+    land in the user's folder. The result is kept for this process, by binary path and mtime."""
+    if not executable:
+        raise StrategyError("no context-guru-proxy binary was found, so the cache strategies cannot be "
+                            "read; run /context-guru setup", "no_proxy_binary")
+    try:
+        key = (executable, os.stat(executable).st_mtime_ns)
+    except OSError as error:
+        raise StrategyError(f"cannot read {executable}: {error}", "proxy_unrunnable") from error
+    if key in _TABLES:
+        return _TABLES[key]
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(PROBE_SCRUBBED_PREFIXES) and k not in PROBE_SCRUBBED_NAMES}
+    env.update(LISTEN_ADDR="127.0.0.1:0", CONFIG="", DASHBOARD="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cg-strategies-") as scratch:
+            run = subprocess.run([executable, "strategies"], capture_output=True, timeout=STRATEGIES_TIMEOUT,
+                                 env=env, cwd=scratch, stdin=subprocess.DEVNULL)
+        table, code = json.loads(run.stdout.decode("utf-8")), run.returncode
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError includes UnicodeDecodeError from output that is not UTF-8. A time-out is an old
+        # binary that started serving; subprocess has killed it.
+        table, code = None, 1
+    rows = table.get("strategies") if isinstance(table, dict) else None
+    aliases = table.get("aliases", {}) if isinstance(table, dict) else None
+    valid = (code == 0 and isinstance(rows, list) and rows and isinstance(aliases, dict)
+             and all(isinstance(k, str) and isinstance(v, str) for k, v in aliases.items())
+             and all(isinstance(r, dict) and isinstance(r.get("name"), str)
+                     and STRATEGY_NAME.match(r["name"]) and isinstance(r.get("providers"), list)
+                     and all(isinstance(x, str) for x in r["providers"]) and isinstance(r.get("spends"), bool)
+                     and isinstance(r.get("desc"), str) for r in rows))
+    if not valid:
+        raise StrategyError(f"{executable} cannot list cache strategies; {update_hint()}", "proxy_too_old")
+    table["aliases"] = aliases
+    _TABLES[key] = table
+    return table
+
+
+def offered_strategies(table):
+    """The rows Pi may offer. One strategy drives every provider Pi routes, so a row is offered only when
+    it serves all of them: it is tagged `any`, or names each of PROVIDERS."""
+    return [row for row in table["strategies"]
+            if "any" in row["providers"] or all(p in row["providers"] for p in PROVIDERS)]
+
+
+def resolve_strategy(name, executable):
+    """(canonical name, table row or None) for a strategy name, or raise StrategyError.
+
+    `none` always works and needs no table, so a person can turn pings off on any proxy. Any other name
+    needs a proxy of STRATEGY_MIN_PROXY or later."""
+    if name == NONE_STRATEGY:
+        return NONE_STRATEGY, None
+    if executable and proxy_version_state(executable) == "older":
+        raise StrategyError(f"cache strategy {name} needs a newer proxy: {update_hint()}", "proxy_too_old")
+    table = load_strategy_table(executable)
+    name = table["aliases"].get(name, name)
+    offered = offered_strategies(table)
+    for row in offered:
+        if row["name"] == name:
+            return name, row
+    raise StrategyError(f"cache strategy {name!r} is not offered for Pi (offered: "
+                        f"{', '.join(r['name'] for r in offered)})", "unknown_strategy")
+
+
+def pick_strategy(name, executable, named_by_person):
+    """resolve_strategy, plus a note. A name the person gave is refused as before. A name setup picked
+    itself (the default, or the recorded one) that this proxy does not offer for Pi becomes `none`, so
+    setup does not refuse its own default (#1148). The note says why. Every other error (an old proxy,
+    a probe that failed) is refused as before."""
+    try:
+        return (*resolve_strategy(name, executable), {})
+    except StrategyError as error:
+        if named_by_person or error.reason != "unknown_strategy":
+            raise
+        return NONE_STRATEGY, None, {"cache_strategy_note": f"cache strategy {name} is not offered for Pi, so setup uses none"}
+
+
+def install_release_binary(version=None):
+    """Download the release for this platform, check it against the release's SHA-256 list, and
+    install it into the private state directory. A checksum problem is a hard stop: the binary
+    carries all of the user's model traffic."""
+    version = version or os.environ.get("CONTEXT_GURU_VERSION") or latest_release_tag()
+    if release_version(version) < MINIMUM_RELEASE:
+        raise RuntimeError(f"release {version} is too old; v0.4.0 or newer is required")
+    os_name, arch = release_platform()
+    archive_name = f"context-guru_{version.removeprefix('v')}_{os_name}_{arch}.tar.gz"
+    base = f"https://github.com/{RELEASE_REPO}/releases/download/{version}"
+    archive = fetch(f"{base}/{archive_name}")
+    checksums = fetch(f"{base}/checksums.txt").decode("utf-8")
+    expected = None
+    for line in checksums.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[-1].lstrip("*") == archive_name:
+            expected = fields[0].lower()
+            break
+    if not expected:
+        raise RuntimeError(f"checksum_absent: the release checksums do not list {archive_name}")
+    if hashlib.sha256(archive).hexdigest() != expected:
+        raise RuntimeError(f"checksum_mismatch for {archive_name}")
+    destination = managed_binary()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+        matches = [m for m in bundle.getmembers() if m.isfile() and Path(m.name).name == "context-guru-proxy"]
+        if len(matches) != 1:
+            raise RuntimeError("release archive does not contain exactly one context-guru-proxy")
+        source = bundle.extractfile(matches[0])
+        if source is None:
+            raise RuntimeError("could not read context-guru-proxy from the release archive")
+        fd, temporary_name = tempfile.mkstemp(prefix="context-guru-proxy.", dir=destination.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "wb") as output:
+                shutil.copyfileobj(source, output)
+            temporary.chmod(0o755)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return str(destination.resolve()), version
+
+
+# --------------------------------------------------------------------------------------- proxy config
+
+def render_config(preset, strategy, upstreams=None):
+    """The proxy config. A strategy other than `none` is written by name: the proxy fills its cache keys
+    from its own table. `none` writes no cache block."""
+    lines = [MARKER, f"# strategy={strategy}. Change it with /context-guru preset or /context-guru cache-strategy."]
+    # The proxy config has no upstream key (and refuses an unknown one), so a chained upstream is
+    # written here as a comment for a person, and passed to the proxy as a flag on the service command.
+    for provider, upstream in sorted((upstreams or {}).items()):
+        lines.append(f"# chained: {provider} -> proxy -> {upstream} ({UPSTREAM_FLAGS[provider]} on the service command)")
+    lines.append(f"preset: {preset}")
+    if strategy != NONE_STRATEGY:
+        lines += ["# The proxy fills the cache keys of this strategy from its own table.", "cache:",
+                  f"  strategy: {strategy}"]
+    return "\n".join(lines) + "\n"
+
+
+def write_proxy_config(preset, strategy, upstreams=None):
+    if preset not in PRESETS:
+        raise RuntimeError(f"unknown preset: {preset}")
+    if not STRATEGY_NAME.match(strategy):
+        raise RuntimeError(f"unknown cache strategy: {strategy}")
+    path = proxy_config()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and not owned(path):
+        raise RuntimeError(f"refusing to overwrite a proxy config we did not write: {path}")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(render_config(preset, strategy, upstreams))
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+    return path
+
+
+def rerender_config(record, executable):
+    """Re-render the proxy config from the install record before a start, the same rule as the Claude
+    Code plugin's `strategy sync`. Only a file with our marker is written; a hand-written file stays.
+    Never raises: on a problem the proxy starts with the file as it is. Returns rendered | unchanged |
+    missing | not_owned | invalid_record | old_proxy | failed. A missing file is not created here: setup and
+    configure write it, after a yes."""
+    path = proxy_config()
+    if not path.exists():
+        return "missing"
+    if not owned(path):
+        return "not_owned"
+    preset = record.get("preset", DEFAULT_PRESET)
+    strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
+    if preset not in PRESETS or not isinstance(strategy, str) or not STRATEGY_NAME.match(strategy):
+        return "invalid_record"
+    try:
+        if strategy != NONE_STRATEGY:
+            # Only a proxy that reads the name gets the name. An older one keeps the file as it is.
+            if not names_strategies(executable):
+                return "old_proxy"
+            strategy, _ = resolve_strategy(strategy, executable)
+        upstreams = recorded_upstreams(record)
+        if path.read_text() == render_config(preset, strategy, upstreams):
+            return "unchanged"
+        write_proxy_config(preset, strategy, upstreams)
+    except Exception:
+        return "failed"
+    return "rendered"
+
+
+def proxy_command(executable, port, upstreams=None):
+    command = [executable, "--listen", f"127.0.0.1:{port}", "--config", str(proxy_config()),
+               "--dashboard", "--dashboard-db", str(state_dir() / "dashboard.db")]
+    for provider, upstream in sorted((upstreams or {}).items()):
+        command += [UPSTREAM_FLAGS[provider], upstream]
+    return command
+
+
+# -------------------------------------------------------------------------------------- chain mode
+
+def chain_upstream(provider, url, port):
+    """The proxy upstream that sends a request to the same place Pi sends it now: (upstream, None),
+    or (None, reason) for a URL the proxy cannot reproduce.
+
+    Pi appends `/v1/messages` to an Anthropic baseUrl, and `/responses` to an OpenAI baseUrl. The
+    proxy appends `/v1/messages` and `/v1/responses` to its upstream. So an Anthropic baseUrl is the
+    upstream as it is, and an OpenAI baseUrl must end in `/v1`, which the upstream leaves out."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host, url_port = parts.hostname, parts.port
+    except ValueError:
+        return None, "not_an_http_url"
+    if parts.scheme not in ("http", "https") or not host or any(c.isspace() for c in url):
+        return None, "not_an_http_url"
+    if parts.username is not None or parts.password is not None:
+        return None, "credentials_in_url"  # it would be on the service command line
+    if parts.query or parts.fragment:
+        return None, "query_in_url"  # the proxy appends the path after it
+    if host in ("127.0.0.1", "localhost", "::1") and url_port == port:
+        return None, "points_at_this_proxy"  # a loop
+    upstream = url.rstrip("/")
+    if provider == "openai":
+        if not upstream.endswith("/v1"):
+            return None, "openai_path_not_v1"
+        upstream = upstream[: -len("/v1")]
+    return upstream, None
+
+
+def shown_upstream(provider, upstream):
+    """The upstream as Pi's baseUrl had it, so a person sees the URL they wrote."""
+    return upstream + ("/v1" if provider == "openai" else "")
+
+
+def recorded_upstreams(record):
+    upstreams = record.get("upstreams")
+    if not isinstance(upstreams, dict):
+        return {}
+    return {p: u for p, u in upstreams.items() if p in PROVIDERS and isinstance(u, str) and u}
+
+
+def routes_text(upstreams):
+    return "; ".join(f"{p} -> proxy -> {shown_upstream(p, upstreams[p]) if p in upstreams else UPSTREAMS[p]}"
+                     for p in PROVIDERS)
+
+
+# -------------------------------------------------------------------------------------------- service
+
+def _systemd_quote(value, exec_line=True):
+    """One double-quoted systemd argument. Quotes do not stop systemd's own expansion, so `%` (a
+    specifier, `%h` is the home directory) becomes `%%`, and on an Exec line `$` (an environment
+    variable) becomes `$$`. Other settings do not expand `$`, so there it stays as it is."""
+    value = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if exec_line:
+        value = value.replace("$", "$$")
+    return '"' + value + '"'
+
+
+def log_service_error(error):
+    """Append a failed service command and its stderr to the proxy log, which the failure facts name."""
+    stderr = (error.stderr or b"").decode("utf-8", "replace").strip()
+    try:
+        with open(state_dir() / "proxy.log", "a", encoding="utf-8") as handle:
+            handle.write(f"context-guru-pi: {error.cmd[0]} {error.cmd[1 if error.cmd[0] == 'launchctl' else 2]} "
+                         f"failed (exit {error.returncode}): {stderr}\n")
+    except OSError:
+        pass  # The failed start is still reported; only its detail is lost.
+
+
+def wait_launchd_gone(target, seconds=5.0):
+    """`launchctl bootout` returns before launchd removes the job (#1146). Wait until it is gone."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            if subprocess.run(["launchctl", "print", target], capture_output=True, timeout=seconds).returncode:
+                return
+        except subprocess.TimeoutExpired:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.1)
+
+
+def launchd_bootstrap(domain, plist):
+    """Load the plist. RunAtLoad starts the proxy, so no kickstart follows: a `kickstart -k` here kills
+    the new process, and launchd then waits its 10 s throttle. Error 5 means the old job is still being
+    removed; try again."""
+    for attempt in range(3):
+        try:
+            subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True,
+                           timeout=30)
+            return
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 5 or attempt == 2:
+                raise
+            time.sleep(0.5)
+
+
+def start_service(executable, port, upstreams=None, cold_start=False):
+    """Install and start the user service. Returns True once /healthz answers."""
+    root = state_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    command = proxy_command(executable, port, upstreams)
+    log = root / "proxy.log"
+    kind = service_kind()
+    if kind == "systemd":
+        unit = systemd_unit()
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        if unit.exists() and not owned(unit):
+            return False
+        unit.write_text(
+            f"{MARKER}\n[Unit]\nDescription=context-guru for Pi\n\n[Service]\nType=simple\n"
+            f"ExecStart={' '.join(_systemd_quote(item) for item in command)}\n"
+            "Restart=on-failure\nRestartSec=1\n"
+            f"StandardOutput={_systemd_quote('append:' + str(log), exec_line=False)}\n"
+            f"StandardError={_systemd_quote('append:' + str(log), exec_line=False)}\n\n"
+            "[Install]\nWantedBy=default.target\n")
+        unit.chmod(0o600)
+        try:
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True)
+            # `restart` starts a stopped unit too; `enable --now` before it would start the proxy twice.
+            subprocess.run(["systemctl", "--user", "enable", unit.name], check=True, capture_output=True)
+            subprocess.run(["systemctl", "--user", "restart", unit.name], check=True, capture_output=True)
+        except subprocess.CalledProcessError as error:
+            log_service_error(error)
+            return False
+        except OSError:
+            return False
+    elif kind == "launchd":
+        plist = launchd_plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        if plist.exists() and not plist_owned(plist):
+            return False
+        with open(plist, "wb") as handle:
+            plistlib.dump({"Label": LAUNCHD_LABEL, "ContextGuruManaged": True, "ProgramArguments": command,
+                           "RunAtLoad": True, "KeepAlive": True, "ProcessType": "Background",
+                           "StandardOutPath": str(log), "StandardErrorPath": str(log)}, handle)
+        plist.chmod(0o600)
+        domain = f"gui/{os.getuid()}"
+        subprocess.run(["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"], capture_output=True)
+        try:
+            wait_launchd_gone(f"{domain}/{LAUNCHD_LABEL}")
+            launchd_bootstrap(domain, plist)
+        except subprocess.CalledProcessError as error:
+            log_service_error(error)
+            return False
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    else:
+        return False
+    return wait_healthy(port, COLD_START_SECONDS if cold_start else WARM_START_SECONDS)
+
+
+def restart_service():
+    """Restart the user service we own, and nothing else. Returns restarted | no_service | not_owned |
+    failed | unsupported. A LaunchAgent that is not loaded is bootstrapped from its plist first."""
+    kind = service_kind()
+    try:
+        if kind == "systemd":
+            unit = systemd_unit()
+            if not unit.exists():
+                return "no_service"
+            if not owned(unit):
+                return "not_owned"
+            subprocess.run(["systemctl", "--user", "restart", unit.name], check=True, capture_output=True,
+                           timeout=30)
+            return "restarted"
+        if kind == "launchd":
+            plist = launchd_plist()
+            if not plist.exists():
+                return "no_service"
+            if not plist_owned(plist):
+                return "not_owned"
+            domain = f"gui/{os.getuid()}"
+            target = f"{domain}/{LAUNCHD_LABEL}"
+            kick = ["launchctl", "kickstart", "-k", target]
+            if subprocess.run(kick, capture_output=True, timeout=30).returncode != 0:
+                # Not loaded (a bootout, or a failed login start): loading the plist starts it.
+                wait_launchd_gone(target)
+                launchd_bootstrap(domain, plist)
+            return "restarted"
+    except subprocess.CalledProcessError as error:
+        log_service_error(error)
+        return "failed"
+    except (OSError, subprocess.TimeoutExpired):
+        return "failed"
+    return "unsupported"
+
+
+def stop_service():
+    """Stop and remove the user service. Returns stopped | gone | not_owned."""
+    unit, plist = systemd_unit(), launchd_plist()
+    if unit.exists():
+        if not owned(unit):
+            return "not_owned"
+        subprocess.run(["systemctl", "--user", "disable", "--now", unit.name], capture_output=True)
+        unit.unlink()
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        return "stopped"
+    if plist.exists():
+        if not plist_owned(plist):
+            return "not_owned"
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], capture_output=True)
+        # Wait, or a setup right after this finds the old proxy still on the port and picks another.
+        wait_launchd_gone(f"gui/{os.getuid()}/{LAUNCHD_LABEL}")
+        plist.unlink()
+        return "stopped"
+    return "gone"
+
+
+def install_escape_hatch():
+    """Copy the reset script and the route helper OUT of the package directory. If routing breaks,
+    Pi cannot run a command, and a package update could move the package itself."""
+    here = Path(__file__).resolve().parent
+    root = state_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    for name, target in (("reset.sh", reset_hatch()), ("models_route.py", root / "models_route.py")):
+        shutil.copyfile(here / name, target)
+        target.chmod(0o700)
+    return reset_hatch()
+
+
+# ------------------------------------------------------------------------------------------- commands
+
+def consent_question(port, strategy, upstreams=None, replaced=None, row=None):
+    """`upstreams`: {provider: chained upstream}. `replaced`: {provider: the baseUrl that replace
+    mode stops using}. `row`: the proxy's table row of the strategy (None for `none`)."""
+    upstreams, replaced = upstreams or {}, replaced or {}
+    row = row or {}
+
+    def route(p):
+        text = f"{NAMES[p]} at {models_route.base_url(port, p)}, forwarding to "
+        if p in upstreams:
+            return text + (f"{shown_upstream(p, upstreams[p])} (the endpoint Pi uses now; its headers and "
+                           "key in models.json stay as they are)")
+        if p in replaced:
+            return text + f"{UPSTREAMS[p]} in place of {replaced[p]}"
+        return text + UPSTREAMS[p]
+
+    question = (f"Route Pi's {' and '.join(NAMES[p] for p in PROVIDERS)} models through a local "
+                f"context-guru proxy: {'; '.join(route(p) for p in PROVIDERS)}. This changes {models_path()} "
+                f"for every Pi session on this machine, and installs the proxy as a user service that "
+                f"starts at login.")
+    if replaced:
+        question += (f" Replace usually breaks the auth of {', '.join(replaced.values())}: that endpoint's "
+                     f"key or headers go to {', '.join(UPSTREAMS[p] for p in replaced)} instead.")
+    if upstreams or replaced:
+        question += " Uninstall puts the old baseUrl back."
+    if row.get("spends"):
+        chained = " and ".join(NAMES[p] for p in PROVIDERS if p in upstreams)
+        spends = (f"using quota where each request goes (for {chained}, at the endpoint it is chained to)"
+                  if upstreams else "using your own quota on each provider")
+        question += (f" Cache strategy {strategy} sends small keep-alive requests while you are idle, "
+                     f"{spends}.{' What it does, from the proxy: ' + row['desc'] if row['desc'] else ''} "
+                     "Pi's own cache warming stops for routed models.")
+        headered = [p for p in PROVIDERS if p in upstreams and has_headers(p)]
+        if headered:
+            names = " and ".join(NAMES[p] for p in headered)
+            verb = "sets" if len(headered) == 1 else "set"
+            question += (f" {names} {verb} headers in models.json. A keep-alive ping carries only the "
+                         "standard auth headers (Authorization, x-api-key), not those headers, so the "
+                         f"endpoint may refuse it and keep-alive may stop for {names}. If so, run "
+                         "/context-guru cache-strategy none.")
+    if row.get("unchecked"):
+        question += (f" If the proxy that setup downloads does not offer {strategy} for Pi, setup uses none, "
+                     "which sends no keep-alive requests.")
+    return question
+
+
+def has_headers(provider):
+    """True when the provider's models.json entry sets custom headers (a gateway may need them)."""
+    try:
+        entry = models_route._load(models_path()).get("providers", {}).get(provider)
+    except (OSError, ValueError):
+        return False
+    return isinstance(entry, dict) and bool(entry.get("headers"))
+
+
+def confirm_command(choice, extra=()):
+    """The exact command that carries out one answer to the conflict question."""
+    return shlex.join(["python3", str(Path(__file__).resolve()), "setup", "--i-consent-to-traffic-interception",
+                       "--on-conflict", choice, *extra])
+
+
+def own_urls(record):
+    """{provider: url} an earlier setup wrote, on any port. A clash with a provider's own entry is our
+    own route; a clash with another provider's entry is not."""
+    urls = record.get("base_urls")
+    return {p: url for p, url in urls.items() if isinstance(url, str)} if isinstance(urls, dict) else {}
+
+
+def setup(args):
+    record = read_record()
+    # Read before the record changes: a recorded port someone else now holds moves the route to a new
+    # port, and the old URLs must still count as ours, not as a foreign gateway.
+    earlier = own_urls(record)
+    port = choose_port(record)
+    named = bool(args.cache_strategy)
+    strategy = args.cache_strategy or record.get("cache_strategy") or DEFAULT_STRATEGY
+    note = {}
+    preset = record.get("preset") or DEFAULT_PRESET
+    named_binary = os.environ.get("CONTEXT_GURU_BIN")
+    executable = find_binary()
+    if named_binary and not shutil.which(named_binary):
+        # The person named a binary. Setup does not swap in another one.
+        facts(result="refused", reason="binary_named_missing",
+              detail=f"CONTEXT_GURU_BIN names {named_binary}, which is not an executable file; nothing was changed")
+        return 2
+    if executable and not named_binary and not record.get("binary") and Path(executable) == managed_binary().resolve():
+        # A download with no install record is left by a failed setup and can be older than the latest
+        # release (#1157). Setup downloads again.
+        executable = None
+    try:
+        # No binary yet: setup downloads the latest release, which has the table. The name is checked
+        # again below, once that binary exists.
+        if executable or strategy == NONE_STRATEGY:
+            strategy, row, note = pick_strategy(strategy, executable, named)
+        elif STRATEGY_NAME.match(strategy):
+            row = {"spends": True, "desc": "", "unchecked": not named}
+        else:
+            raise StrategyError(f"cache strategy {strategy!r} is not a valid name", "unknown_strategy")
+    except StrategyError as error:
+        facts(result="refused", reason=error.reason, detail=error)
+        return 2
+    try:
+        clash = models_route.conflicts(models_path(), port, PROVIDERS, earlier)
+    except Exception as error:  # an unreadable models.json
+        facts(result="error", reason="models_unreadable", models=models_path(), detail=error)
+        return 2
+    # Only a hatch that exists is named: it undoes a route an earlier install left behind.
+    hatch = {"reset_hatch": reset_hatch()} if reset_hatch().exists() else {}
+    # A provider chained by an earlier setup keeps its upstream: its baseUrl is ours now, not a clash.
+    upstreams = recorded_upstreams(record)
+    chains = {p: chain_upstream(p, url, port) for p, url in clash.items()}
+    unchainable = {p: reason for p, (_, reason) in chains.items() if reason}
+    if args.plan:
+        uses = (f" Setup uses the proxy at {executable}." if executable
+                else " Setup downloads the latest context-guru-proxy release.")
+        if clash:
+            # Two paired answers, never one plain question: a person picks chain or replace.
+            extra = ["--cache-strategy", strategy] if args.cache_strategy else []
+            pairs = {}
+            if not unchainable:
+                pairs.update(consent_question_chain=consent_question(
+                    port, strategy, {**upstreams, **{p: up for p, (up, _) in chains.items()}}, row=row) + uses,
+                    confirm_command_chain=confirm_command("chain", extra))
+            else:
+                pairs["chain_refused"] = ",".join(f"{p}:{r}" for p, r in sorted(unchainable.items()))
+            others = {p: u for p, u in upstreams.items() if p not in clash}
+            pairs.update(consent_question_replace=consent_question(port, strategy, others, clash, row=row) + uses,
+                         confirm_command_replace=confirm_command("replace", extra))
+            facts(result="needs_decision", reason="base_url_already_set", models=models_path(),
+                  existing_base_url=clash, conflicts=",".join(sorted(clash)), port=port, preset=preset,
+                  cache_strategy=strategy, binary=executable or "download", **note, **pairs, **hatch)
+            return 0
+        facts(result="planned", models=models_path(), port=port, preset=preset, cache_strategy=strategy, **note,
+              service=service_kind() or "unsupported", already_routed=str(
+                  all(models_route.is_routed(models_path(), port, p) for p in PROVIDERS)).lower(),
+              binary=executable or "download", consent_question=consent_question(port, strategy, upstreams, row=row) + uses)
+        return 0
+    if not args.i_consent_to_traffic_interception:
+        facts(result="refused", reason="consent_required")
+        return 2
+    if clash:
+        if args.on_conflict is None:
+            facts(result="refused", reason="base_url_already_set", existing_base_url=clash,
+                  note="run setup --plan, ask the person, then pass --on-conflict chain or replace", **hatch)
+            return 2
+        if args.on_conflict == "abort":
+            facts(result="unchanged", reason="aborted", existing_base_url=clash)
+            return 0
+        if args.on_conflict == "chain":
+            if unchainable:
+                facts(result="refused", reason="base_url_not_chainable", existing_base_url=clash,
+                      chain_refused=",".join(f"{p}:{r}" for p, r in sorted(unchainable.items())))
+                return 2
+            upstreams.update({p: up for p, (up, _) in chains.items()})
+        else:  # replace: the provider's public API
+            for p in clash:
+                upstreams.pop(p, None)
+    if service_kind() is None:
+        facts(result="error", reason="unsupported_platform", detail=platform.system())
+        return 2
+    # A hand-written config is refused before anything is downloaded.
+    if proxy_config().exists() and not owned(proxy_config()):
+        facts(result="error", reason="config_conflict", config=proxy_config(),
+              detail=f"refusing to overwrite a proxy config we did not write: {proxy_config()}")
+        return 2
+    downloaded = False
+    if not executable:
+        try:
+            executable, version = install_release_binary()
+            downloaded = True
+            facts(binary="installed", binary_version=version, binary_path=executable)
+        except Exception as error:
+            facts(result="error", reason="binary_install_failed", detail=error)
+            return 2
+
+    def drop_download():
+        """A setup that stops under the lock and before the start leaves no binary behind: the next
+        setup would use it, even when a newer release exists (#1157). After a failed start the binary
+        stays: the service names it, or, after a failed first setup, the next setup downloads again (#1157)."""
+        if downloaded:
+            managed_binary().unlink(missing_ok=True)
+            facts(binary="removed")
+
+    try:
+        strategy, _, more = pick_strategy(strategy, executable, named)
+        note.update(more)
+    except StrategyError as error:
+        drop_download()
+        facts(result="refused", reason=error.reason, detail=error)
+        return 2
+    # The config, the start and the record happen under the restart lock: a session-start restart
+    # cannot re-render an older record over the new config between them.
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        # The binary stays: the setup that holds the lock may have downloaded the same file.
+        facts(result="error", reason="busy", detail=error)
+        return 2
+    with lock:
+        # Read again under the lock, so the fields setup does not set are not an old copy. The preset
+        # and the strategy stay the ones the consent question named.
+        record = read_record()
+        try:
+            write_proxy_config(preset, strategy, upstreams)
+        except Exception as error:
+            drop_download()
+            facts(result="error", reason="config_conflict", config=proxy_config(), detail=error)
+            return 2
+        # Proxy first, routing second: a route written while nothing answers makes every request fail.
+        if not start_service(executable, port, upstreams, cold_start=True):
+            extra = {}
+            if not record.get("port"):
+                # A first setup: remove the service it just started, so nothing is left running with no
+                # record (#1288). A re-run keeps the service of the earlier install.
+                extra["service"] = stop_service()
+            facts(result="error", reason="health_check_failed", log=state_dir() / "proxy.log",
+                  routing_written="false", **extra)
+            return 1
+        record.update(port=port, binary=executable, service=service_kind(), preset=preset,
+                      cache_strategy=strategy, upstreams=upstreams,
+                      base_urls={p: models_route.base_url(port, p) for p in PROVIDERS})
+        write_record(record)
+    try:
+        models_route.install(models_path(), routing_state(), port, PROVIDERS, earlier)
+        hatch = install_escape_hatch()
+    except Exception as error:
+        facts(result="error", reason="routing_write_failed", detail=error, proxy_running="true")
+        return 1
+    facts(result="routed", port=port, models=models_path(), preset=preset, cache_strategy=strategy, **note,
+          routes=routes_text(upstreams), dashboard=f"http://127.0.0.1:{port}/dashboard/", reset_hatch=hatch)
+    return 0
+
+
+def status(args):
+    record = read_record()
+    port = int(record.get("port") or 0)
+    if args.stats:
+        if not port:
+            print("no installed proxy", file=sys.stderr)
+            return 1
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as response:
+                body = response.read()
+            handle, path = tempfile.mkstemp(prefix=f"context-guru-pi-stats-{port}-", suffix=".json")
+            with os.fdopen(handle, "wb") as file:
+                file.write(body)
+        except Exception as error:
+            print(f"status --stats: {error}", file=sys.stderr)
+            return 1
+        print(path)
+        return 0
+    if not port:
+        facts(result="not_installed")
+        return 1
+    up = healthy(port)
+    routed = {p: models_route.is_routed(models_path(), port, p) for p in PROVIDERS}
+    values = {"result": "ok" if up and all(routed.values()) else "not_ready", "port": port,
+              "proxy_up": str(up).lower(), "routed": routed, "routes": routes_text(recorded_upstreams(record)),
+              "models": models_path(),
+              "preset": record.get("preset", DEFAULT_PRESET),
+              "cache_strategy": record.get("cache_strategy", DEFAULT_STRATEGY),
+              "dashboard": f"http://127.0.0.1:{port}/dashboard/", "reset_hatch": reset_hatch()}
+    if up:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/stats", timeout=2) as response:
+                stats = json.load(response)
+            values["running_preset"] = stats.get("preset", "unknown")
+            values["requests"] = stats.get("requests", 0)
+        except Exception as error:
+            values["stats_error"] = error
+    facts(**values)
+    return 0 if values["result"] == "ok" else 1
+
+
+class LockBusy(Exception):
+    """Another command held the restart lock for all of LOCK_WAIT_SECONDS."""
+
+
+def restart_lock(wait=None):
+    """An exclusive lock on a file in the state directory, held until the returned file is closed.
+    A second caller waits here until the first one is done, for at most `wait` seconds
+    (LOCK_WAIT_SECONDS), then raises LockBusy. On a platform without fcntl there is no service to
+    restart, so there is no lock either, and restart_service returns its own `unsupported` fact."""
+    path = state_dir() / "restart.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a")
+    try:
+        import fcntl  # Unix only, like the services this restarts.
+    except ImportError:
+        return handle
+    wait = LOCK_WAIT_SECONDS if wait is None else wait
+    deadline = time.monotonic() + wait
+    try:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockBusy(f"another context-guru command held {path} for more than "
+                                   f"{wait} seconds") from None
+                time.sleep(0.1)
+    except BaseException:
+        handle.close()
+        raise
+
+
+def restart(args):
+    """Restart the proxy service once, for the extension's session-start check. One restart runs at a
+    time (a lock file). A caller that waited for the lock checks health again first, so when two Pi
+    sessions start together, the second one finds the proxy up and does not restart it again. The
+    health check here has the extension's 5-second limit, so a slow but live proxy is left alone."""
+    record = read_record()
+    port = int(record.get("port") or 0)
+    if not port:
+        facts(result="not_installed")
+        return 2
+    where = {"port": port, "log": state_dir() / "proxy.log"}
+    # Only a hatch that exists is named, as in setup: a failed setup can leave a record without one.
+    if reset_hatch().exists():
+        where["reset_hatch"] = reset_hatch()
+    try:
+        lock = restart_lock()
+    except LockBusy:
+        facts(result="busy", **where)
+        return 1
+    with lock:
+        # Read again under the lock: a `configure` or `setup` that ran while this one waited wrote a
+        # new record, and a setup can move the port.
+        record = read_record()
+        port = int(record.get("port") or 0)
+        if not port:
+            facts(result="not_installed")
+            return 2
+        where["port"] = port
+        # Re-render first, so the next start (this one, or a later one by launchd or systemd) reads the
+        # current strategy. A proxy that answers is not restarted for it: it reads the file at its
+        # next start.
+        where["config"] = rerender_config(record, record.get("binary") or find_binary())
+        if healthy(port, timeout=START_CHECK_SECONDS):
+            facts(result="already_up", **where)
+            return 0
+        service = restart_service()
+        up = service == "restarted" and wait_healthy(port)
+    facts(result="up" if up else "down", service=service, **where)
+    return 0 if up else 1
+
+
+def configure(args):
+    record = read_record()
+    if not record.get("port"):
+        facts(result="not_installed")
+        return 2
+    preset = record.get("preset", DEFAULT_PRESET)
+    strategy = record.get("cache_strategy", DEFAULT_STRATEGY)
+    if args.list:
+        # The names and texts come from the proxy. On a proxy that cannot list them, only `none` is
+        # offered, and `strategy_error` says why.
+        executable = record.get("binary") if record.get("binary") and os.access(record["binary"], os.X_OK) else None
+        executable = executable or find_binary()
+        try:
+            if executable and proxy_version_state(executable) == "older":
+                raise StrategyError(f"this proxy cannot list cache strategies; {update_hint()}", "proxy_too_old")
+            rows = offered_strategies(load_strategy_table(executable))
+        except StrategyError as error:
+            facts(presets=",".join(PRESETS), strategies=NONE_STRATEGY, strategy_error=error)
+            return 0
+        facts(presets=",".join(PRESETS), strategies=",".join(row["name"] for row in rows),
+              **{f"strategy_{row['name'].replace('-', '_')}": row["desc"] for row in rows})
+        return 0
+    if args.show:
+        facts(result="ok", preset=preset, cache_strategy=strategy)
+        return 0
+    # The config and the record change together under the restart lock, so a session-start restart
+    # cannot re-render the old record over the new file between the two writes.
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="refused", reason="busy", detail=error)
+        return 2
+    with lock:
+        # Read again under the lock: a `setup` that ran while this one waited wrote a new record.
+        # Only the values given on the command line come from this call.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="not_installed")
+            return 2
+        preset = args.preset or record.get("preset", DEFAULT_PRESET)
+        strategy = args.cache_strategy or record.get("cache_strategy", DEFAULT_STRATEGY)
+        upstreams = recorded_upstreams(record)
+        try:
+            strategy, _ = resolve_strategy(strategy, record.get("binary"))
+            if (preset, strategy) == (record.get("preset", DEFAULT_PRESET),
+                                      record.get("cache_strategy", DEFAULT_STRATEGY)) \
+                    and not record.get("restart_pending") and proxy_config().exists():
+                # The same setting, and it is in effect: a restart would only cost a cache rewrite in
+                # every open session. After a failed restart, or with no config file, it restarts.
+                facts(result="unchanged", preset=preset, cache_strategy=strategy)
+                return 0
+            write_proxy_config(preset, strategy, upstreams)
+        except StrategyError as error:
+            facts(result="refused", reason=error.reason, detail=error)
+            return 2
+        except Exception as error:
+            facts(result="refused", detail=error)
+            return 2
+        # Pending until the start works, so a retry of the same setting restarts again.
+        record.update(preset=preset, cache_strategy=strategy, restart_pending=True)
+        write_record(record)
+    restarted = start_service(record["binary"], int(record["port"]), upstreams)
+    if restarted:
+        try:
+            with restart_lock():
+                record = read_record()
+                record.pop("restart_pending", None)
+                write_record(record)
+        except LockBusy:
+            pass  # Stays pending: the next configure of the same setting restarts once more.
+    extra = {}
+    if restarted and preset == "ultrahigh":
+        extra["probe"] = ask_defer_probe(int(record["port"]))
+    if not restarted:
+        extra["log"] = state_dir() / "proxy.log"
+    facts(result="configured" if restarted else "not_applied", preset=preset, cache_strategy=strategy,
+          proxy_restarted=str(restarted).lower(), **extra)
+    return 0 if restarted else 1
+
+
+def ask_defer_probe(port):
+    """For ultrahigh: ask the restarted proxy to run tool deferral's provider check at the next
+    request, the same way the Claude Code and Codex plugins do. Never raises."""
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/tool-defer/probe", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=1) as response:
+            return "asked" if response.status == 202 else f"status_{response.status}"
+    except Exception:
+        return "unavailable"
+
+
+def update(args):
+    try:
+        latest = latest_release_tag()
+    except Exception as error:
+        facts(result="error", reason="release_check_failed", detail=error)
+        return 1
+    record = read_record()
+    executable = record.get("binary") or find_binary()
+    installed = (binary_version_text(executable) if executable else None) or "unknown"
+    available = release_is_newer(latest, installed)
+    if args.check:
+        facts(result="checked", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
+              update_available=str(available).lower())
+        return 0
+    if executable and Path(executable).resolve() != managed_binary().resolve():
+        facts(result="refused", reason="binary_not_managed", binary=executable,
+              detail="setup did not download this proxy, so update cannot replace it. If CONTEXT_GURU_BIN is set, "
+                     "unset it, then run /context-guru setup again: setup then downloads a proxy that update can "
+                     "update")
+        return 2
+    if _semver_key(installed) is not None and not available:
+        # An update never goes backwards: an installed beta stays when latest is an older stable (#1254).
+        facts(result="current", installed_version=installed.removeprefix("v"), latest_version=latest.removeprefix("v"),
+              update_available="false")
+        return 0
+    try:
+        executable, version = install_release_binary(latest)
+    except Exception as error:
+        facts(result="error", reason="binary_install_failed", detail=error)
+        return 1
+    if not record.get("port"):
+        facts(result="updated", version=version, restart="skipped")
+        return 0
+    # The record and the config change together under the restart lock, as in configure.
+    try:
+        lock = restart_lock()
+    except LockBusy as error:
+        facts(result="error", reason="busy", version=version, detail=error, restart="skipped")
+        return 1
+    with lock:
+        # Read again under the lock. An uninstall that ran during the wait leaves no port.
+        record = read_record()
+        if not record.get("port"):
+            facts(result="updated", version=version, restart="skipped")
+            return 0
+        record["binary"] = executable
+        write_record(record)
+        # Re-render with the NEW binary: it decides whether the config names the strategy.
+        config = rerender_config(record, executable)
+    restarted = start_service(executable, int(record["port"]), recorded_upstreams(record), cold_start=True)
+    if not restarted:
+        facts(result="updated", version=version, config=config, restart="failed", log=state_dir() / "proxy.log")
+        return 1
+    facts(result="updated", version=version, config=config, restart="completed")
+    return 0
+
+
+def uninstall(args):
+    record = read_record()
+    facts(result="planned" if args.dry_run else "removing", models=models_path(),
+          port=record.get("port", "(none)"))
+    recorded = record.get("binary")
+    # A binary the person supplied (CONTEXT_GURU_BIN) is theirs: uninstall says it keeps it (#1153).
+    kept = {"binary_kept": f"{recorded} (not downloaded by setup)"} \
+        if recorded and Path(recorded).resolve() != managed_binary().resolve() else {}
+    if args.dry_run:
+        facts(**({"binary_remove": managed_binary()} if managed_binary().exists() else {}), **kept)
+        return 0
+    # Routing first, proxy second: the reverse of setup, so no moment has a route with no proxy.
+    facts(models_restore=models_route.restore(routing_state()))
+    stopped = stop_service()
+    facts(service=stopped)
+    if owned(proxy_config()):
+        proxy_config().unlink()
+    if stopped != "not_owned":
+        record_path().unlink(missing_ok=True)
+        if managed_binary().exists():
+            managed_binary().unlink()
+            facts(binary_removed="true")
+        facts(**kept)
+    facts(result="removed", kept=state_dir())
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    install = commands.add_parser("setup")
+    install.add_argument("--plan", action="store_true")
+    install.add_argument("--cache-strategy")
+    install.add_argument("--i-consent-to-traffic-interception", action="store_true")
+    install.add_argument("--on-conflict", choices=CONFLICT_CHOICES,
+                         help="when models.json already sends a provider elsewhere: chain behind it, "
+                              "replace it with the public API, or abort. Never chosen for the person.")
+    status_parser = commands.add_parser("status")
+    status_parser.add_argument("--stats", action="store_true")
+    settings = commands.add_parser("configure")
+    group = settings.add_mutually_exclusive_group()
+    group.add_argument("--show", action="store_true")
+    group.add_argument("--list", action="store_true")
+    settings.add_argument("--preset", choices=PRESETS)
+    settings.add_argument("--cache-strategy")
+    upgrade = commands.add_parser("update")
+    mode = upgrade.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--install", action="store_true")
+    commands.add_parser("restart")
+    remove = commands.add_parser("uninstall")
+    remove.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    return {"setup": setup, "status": status, "restart": restart, "configure": configure, "update": update,
+            "uninstall": uninstall}[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -151,7 +151,7 @@ func (d *DB) backfillOneKeepAliveStrategyBatch(ids []int64) (int64, error) {
 	stmt, err := tx.Prepare(`UPDATE requests SET keepalive_strategy_id = (
 			SELECT p.keepalive_strategy_id FROM requests p
 			WHERE p.tenant_id = requests.tenant_id AND p.session_id = requests.session_id
-			  AND p.keepalive = 1 AND p.keepalive_strategy_id IS NOT NULL
+			  AND p.keepalive = 1 AND p.manual_ping = 0 AND p.keepalive_strategy_id IS NOT NULL
 			  AND p.ts <= requests.ts
 			  AND p.ts > COALESCE((
 			      SELECT MAX(q.ts) FROM requests q
@@ -165,7 +165,7 @@ func (d *DB) backfillOneKeepAliveStrategyBatch(ids []int64) (int64, error) {
 		  AND EXISTS (
 			SELECT 1 FROM requests p
 			WHERE p.tenant_id = requests.tenant_id AND p.session_id = requests.session_id
-			  AND p.keepalive = 1 AND p.keepalive_strategy_id IS NOT NULL
+			  AND p.keepalive = 1 AND p.manual_ping = 0 AND p.keepalive_strategy_id IS NOT NULL
 			  AND p.ts <= requests.ts
 			  AND p.ts > COALESCE((
 			      SELECT MAX(q.ts) FROM requests q

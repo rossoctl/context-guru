@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"context"
 	"math"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/testutil/testdb"
 )
 
 // TestCaptureDropsRatherThanBlocks is the property that lets the dashboard exist
@@ -17,12 +19,41 @@ import (
 // immediately and count the loss. If this ever blocks, enabling observability
 // becomes a latency incident.
 func TestCaptureDropsRatherThanBlocks(t *testing.T) {
-	r, err := NewRecorder(Options{DBPath: ":memory:", QueueSize: 4,
-		BatchSize: 1000, FlushInterval: time.Hour}) // writer will not drain
+	// The writer must not drain the queue during the burst. A large BatchSize does not do that: the
+	// writer still moves each event from the queue into its in-memory batch, so how many drop
+	// depended on how often it got the CPU (#1241: 170 of 500 on a 10-core laptop). So hold the
+	// writer instead. It writes after every event (BatchSize 1), and a second connection holds an
+	// exclusive lock on the file, so the first insert waits on busy_timeout. Then at most 1 event is
+	// in the writer and QueueSize are in the queue: everything else must drop, on any machine.
+	path := filepath.Join(t.TempDir(), "d.db")
+	const queue = 4
+	r, err := NewRecorder(Options{DBPath: path, QueueSize: queue, BatchSize: 1, FlushInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			r.Close()
+		}
+	}()
+	lock, err := testdb.Open(t, path).Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lock.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	unlock := func() {
+		if lock != nil {
+			if _, err := lock.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+				t.Logf("release the writer lock: %v (later steps may wait on busy_timeout)", err)
+			}
+			lock.Close()
+			lock = nil
+		}
+	}
+	defer unlock()
 
 	const n = 500
 	done := make(chan struct{})
@@ -32,12 +63,13 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 		}
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Record blocked on a full queue; capture must never block a request")
-	}
+	awaitSignal(t, "500 Record calls to return (Record must not block on a full queue; capture must never block a request)", done)
 
+	// Release the writer before reading Stats. The read itself would not wait (WAL), but Stats can
+	// take a new connection from the pool, and a new connection first runs the DSN's
+	// journal_mode(WAL) pragma, which needs a lock: under the lock that took the full 5 s of
+	// busy_timeout (measured). The burst is over, so Captured and Dropped no longer change.
+	unlock()
 	s := r.Stats()
 	if s.Captured != n {
 		t.Errorf("captured = %d; want %d", s.Captured, n)
@@ -45,17 +77,28 @@ func TestCaptureDropsRatherThanBlocks(t *testing.T) {
 	if s.Dropped == 0 {
 		t.Fatal("a full queue dropped nothing; either the drop is not counted or the queue grew")
 	}
-	// With a depth-4 queue and a writer that never flushes, the overwhelming
-	// majority must be dropped — proving the queue is genuinely bounded and not
-	// quietly growing to absorb the burst.
-	if s.Dropped < int64(n)/2 {
-		t.Errorf("only %d of %d dropped through a depth-%d queue; is the queue unbounded?",
-			s.Dropped, n, s.QueueCap)
+	// With the writer held, only the queue and the one event in the writer's hands survive. Anything
+	// more means the queue grew to absorb the burst.
+	if want := int64(n - queue - 1); s.Dropped < want {
+		t.Errorf("only %d of %d dropped through a depth-%d queue with the writer held, want at least %d; "+
+			"is the queue unbounded?", s.Dropped, n, s.QueueCap, want)
 	}
 	// The drop must be VISIBLE, not merely survived — every other number depends on
 	// the viewer knowing coverage was incomplete.
-	if s.QueueCap != 4 {
-		t.Errorf("queue cap = %d; want the configured 4", s.QueueCap)
+	if s.QueueCap != queue {
+		t.Errorf("queue cap = %d; want the configured %d", s.QueueCap, queue)
+	}
+
+	// Close: every captured event is now written, counted as dropped, or counted as a write error.
+	// None is lost without a count.
+	err = r.Close()
+	closed = true // before the check: a second Close would panic on close(r.done) and hide err
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := r.Stats(); s.Written+s.Dropped+s.Errors != s.Captured {
+		t.Errorf("written %d + dropped %d + errors %d != captured %d: an event was lost without a count",
+			s.Written, s.Dropped, s.Errors, s.Captured)
 	}
 }
 
@@ -133,8 +176,8 @@ func TestAttributeCacheBuckets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := &Event{CacheRead: tc.read}
-			e.AttributeCache(tc.seenSession, tc.seenModel, tc.sinceMs, ttl, tc.prefixChanged)
+			e := &Event{CacheRead: tc.read, CacheWrite: 1000}
+			e.AttributeCache(tc.seenSession, tc.seenModel, tc.sinceMs, ttl, causeIf(tc.prefixChanged), 0)
 			if e.CacheMissReason != tc.want {
 				t.Errorf("got %q, want %q", e.CacheMissReason, tc.want)
 			}
@@ -279,10 +322,8 @@ func TestUncompressedReasonBuckets(t *testing.T) {
 func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	p := modelinfo.Price{Input: 2e-06, Output: 1e-05, CacheRead: 2e-07, CacheWrite: 2.5e-06}
 
-	// Complete accounting: cost, plus a baseline that prices the UNIQUE removed
-	// tokens at the cache-WRITE rate they would have entered as and the re-sent
-	// remainder at the cache-READ rate the provider would have served it from. Here
-	// every removed token is unique, so the whole 200 gets the write rate.
+	// Complete accounting: the cost. Price books no saving of ours (the accountant library does, in
+	// PriceMode), so the baseline is the cost.
 	e := &Event{TokensBefore: 1000, TokensAfter: 800, SavedUnique: 200, FreshInput: 10,
 		CacheRead: 5000, CacheWrite: 500, OutputTokens: 100}
 	e.Price(p, true)
@@ -303,11 +344,8 @@ func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	if math.Abs(e.CostUSD-wantCost) > eps {
 		t.Errorf("cost = %v; want %v", e.CostUSD, wantCost)
 	}
-	if math.Abs(e.BaselineCostUSD-(wantCost+200*p.CacheWrite)) > eps {
-		t.Errorf("baseline = %v; want cost + 200 unique removed tokens at the cache-write rate", e.BaselineCostUSD)
-	}
-	if e.BaselineCostUSD <= e.CostUSD {
-		t.Error("baseline must exceed actual when tokens were removed")
+	if e.BaselineCostUSD != e.CostUSD {
+		t.Errorf("baseline = %v; want the cost %v: Price books no saving", e.BaselineCostUSD, e.CostUSD)
 	}
 
 	// No usage data: partial, and NOT priced — a cost we cannot compute must read as
@@ -329,97 +367,6 @@ func TestPriceNeverReportsUnknownCostAsFree(t *testing.T) {
 	}
 }
 
-// TestDollarsDeriveFromUniqueNotGrossSavings is the regression test for the defect
-// this dashboard shipped with: `net_dollars_saved` was priced off GROSS savings, so a
-// single compaction re-sent on every later turn was paid for once per turn. The tile
-// read $7.00 beside an `overcount_ratio` of 13.1x — the dashboard displayed the
-// correction factor for its own headline and did not apply it.
-//
-// The fixture is DELIBERATELY overcounted: one 1,000-token compaction, unique on turn
-// 1, re-sent unchanged on nine further turns. Gross savings are 10,000 tokens;
-// genuinely-never-sent content is 1,000. Both pricing bugs are pinned:
-//
-//   - the denominator (unique, not gross), and
-//   - the tier (the re-sent remainder is a cache READ, not a cache WRITE; on this
-//     price table a write is 12.5x a read, so mispricing it inflates on top of the
-//     overcount).
-//
-// A gross+write implementation reports ~11.4x the correct figure here and fails.
-func TestDollarsDeriveFromUniqueNotGrossSavings(t *testing.T) {
-	p := modelinfo.Price{Input: 2e-06, Output: 1e-05, CacheRead: 2e-07, CacheWrite: 2.5e-06}
-	const turns, saved, uniqueTurn = 10, 1000, 0
-
-	db := openTestDB(t)
-	var events []*Event
-	for i := range turns {
-		e := &Event{
-			TS: int64(1000 + i), SessionID: "s1", Model: "m",
-			TokensBefore: 50_000, TokensAfter: 50_000 - saved,
-			// Unique only on the first turn: every later turn re-sends the same content,
-			// which is exactly what MarkUnique's dedup reports.
-			FreshInput: 10, CacheRead: 49_000, CacheWrite: 100, OutputTokens: 50,
-		}
-		if i == uniqueTurn {
-			e.SavedUnique = saved
-		}
-		e.Price(p, true)
-		events = append(events, e)
-	}
-	if err := db.insertBatch(events); err != nil {
-		t.Fatal(err)
-	}
-
-	o, err := db.Overview(Filter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The fixture's own overcount factor, as the dashboard computes and displays it.
-	if o.SavedGross != turns*saved || o.SavedUnique != saved {
-		t.Fatalf("fixture: gross=%d unique=%d; want %d/%d", o.SavedGross, o.SavedUnique, turns*saved, saved)
-	}
-	if o.OvercountRatio != float64(turns) {
-		t.Fatalf("overcount_ratio = %v; want %v", o.OvercountRatio, float64(turns))
-	}
-
-	// The dollar figure the tile renders, from first principles: the unique 1,000
-	// tokens would have been new input (cache-write), the 9,000 re-sent ones would
-	// have been served as cache reads.
-	wantDelta := float64(saved)*p.CacheWrite + float64((turns-1)*saved)*p.CacheRead
-	if got := o.BaselineCostUSD - o.CostUSD; math.Abs(got-wantDelta) > 1e-12 {
-		t.Errorf("baseline − actual = %.10f; want %.10f", got, wantDelta)
-	}
-	if math.Abs(o.NetSavedUSD-wantDelta) > 1e-12 {
-		t.Errorf("net_saved_usd = %.10f; want %.10f", o.NetSavedUSD, wantDelta)
-	}
-
-	// And the explicit anti-regression: the figure the old code produced. Pricing all
-	// 10,000 gross tokens at the cache-write rate is 11.36x the honest number, so a
-	// reversion cannot slip through as a rounding difference.
-	grossWritePriced := float64(turns*saved) * p.CacheWrite
-	if math.Abs(o.NetSavedUSD-grossWritePriced) < 1e-9 {
-		t.Fatal("net_saved_usd still prices GROSS savings at the cache-write rate")
-	}
-	if o.NetSavedUSD >= grossWritePriced {
-		t.Errorf("net_saved_usd %.10f should be far below the gross-priced %.10f",
-			o.NetSavedUSD, grossWritePriced)
-	}
-}
-
-// TestBaselineNeverPricesMoreThanTheRequestSaved guards the clamp: SavedUnique is
-// attributed per component and can exceed a single request's own gross saving when
-// several components stash the same content key. Without the clamp the "re-sent
-// remainder" term goes negative and the baseline inflates.
-func TestBaselineNeverPricesMoreThanTheRequestSaved(t *testing.T) {
-	p := modelinfo.Price{CacheRead: 2e-07, CacheWrite: 2.5e-06}
-	e := &Event{TokensBefore: 1000, TokensAfter: 900, SavedUnique: 5000}
-	e.Price(p, true)
-	if want := 100 * p.CacheWrite; math.Abs(e.BaselineCostUSD-e.CostUSD-want) > 1e-12 {
-		t.Errorf("baseline delta = %.12f; want %.12f (clamped to the 100 tokens actually removed)",
-			e.BaselineCostUSD-e.CostUSD, want)
-	}
-}
-
 func TestAgentClassification(t *testing.T) {
 	cases := map[string]string{
 		"claude-cli/2.0.14 (external, cli)": "claude-cli",
@@ -428,6 +375,11 @@ func TestAgentClassification(t *testing.T) {
 		"Gemini-CLI/1.0":                    "gemini-cli",
 		"":                                  "unknown",
 		"curl/8.5.0":                        "curl",
+		"codex_exec/0.160.1":                "codex",
+		// Bob's real User-Agents, seen live 2026-11-02 (IDE 2.3.0, Bob Shell 2.2.1).
+		"IBM Bob/2.3.0": "bob",
+		"ai-sdk/openai-compatible/3.0.36 ai-sdk/provider-utils/5.0.29 runtime/node.js/v24.15.0 IBM Bob/2.3.0": "bob",
+		"bob-shell/2.2.1": "bob",
 		"SomeVeryLongUnknownAgentNameWithNoDelimiterAtAllThatKeepsGoingForever": "someverylongunknownagentnamewith",
 	}
 	for ua, want := range cases {
@@ -482,5 +434,25 @@ func TestConcurrentCaptureIsRaceFree(t *testing.T) {
 	wg.Wait()
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A declined rebuild forwards the original body (#1179): the event books no saving and no component acted.
+func TestFromTraceBooksNoSavingWhenTheRebuildIsDeclined(t *testing.T) {
+	tr := apply.Trace{
+		Messages: 3, AttemptedTokens: 1000, Declined: true,
+		Run: &components.RunReport{
+			TokensBefore: 1000, TokensAfter: 100,
+			Components: []components.Report{{Component: "cache_aware_summarizer", Kind: "offload", TokensBefore: 1000, TokensAfter: 100}},
+		},
+	}
+	var e Event
+	e.FromTrace(tr, map[string]int{"cache_aware_summarizer": 900})
+	if e.TokensAfter != 1000 || e.SavedUnique != 0 || e.AttemptedTokens != 0 {
+		t.Fatalf("tokens after %d, saved unique %d, attempted %d: want 1000, 0, 0", e.TokensAfter, e.SavedUnique, e.AttemptedTokens)
+	}
+	c := e.Components[0]
+	if c.SavedGross != 0 || c.SavedUnique != 0 || c.Acted || c.Mutated {
+		t.Fatalf("component row = %+v, want no saving, not acted, not mutated", c)
 	}
 }

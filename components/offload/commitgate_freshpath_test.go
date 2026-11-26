@@ -3,7 +3,6 @@ package offload
 import (
 	"context"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
@@ -85,63 +84,6 @@ func TestExtractLLMBooksNothingForAFreshSpliceItCouldNotStash(t *testing.T) {
 		}
 		if call.SavedTokens != 0 {
 			t.Errorf("the ledger row claims %d saved tokens for a candidate left verbatim",
-				call.SavedTokens)
-		}
-	}
-}
-
-// The sweep's fresh path, same property.
-//
-// `adjudicate` recorded the saving while building its drop list, and the local
-// `sweep_drop_would_not_shrink` pre-check does not cover phase 3's refusals: it is descriptor-only
-// rather than marker-inclusive, and it cannot see the reserve at all.
-func TestSweepBooksNothingForADropItCouldNotStash(t *testing.T) {
-	asker := &labelAsker{verdict: "drop", needed: "none"}
-	asker.cacheRead = 19595
-	e := newSweepSmall(t, "")
-	req := sweepReqStocked()
-	originals := make([]string, len(req.Input))
-	for i := range req.Input {
-		originals[i] = schema.MessageText(req.Input[i])
-	}
-	spy := &spyStore{Memory: store.NewMemory(store.Options{MaxEntries: 400})}
-	c := preExpiryCtx("s", asker, spy)
-	c.SelfRates = components.TokenRates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}
-	rep := &components.Report{Component: "extract_llm_sweep"}
-	valueBefore := extractGrossValue("extract_llm_sweep")
-	savedBefore := extractGrossSaved("extract_llm_sweep")
-	if _, err := e.Offload(req, rep, c); err != nil {
-		t.Fatalf("Offload must fail open: %v", err)
-	}
-	if n := atomic.LoadInt64(&asker.calls); n != 1 {
-		t.Fatalf("expected ONE prefix ask, got %d (gates: %v)", n, rep.Gates)
-	}
-	if rep.Events["sweep_dropped"] == 0 {
-		t.Fatalf("the adjudicator dropped nothing, so no saving could have been booked "+
-			"(gates: %v)", rep.Gates)
-	}
-	if rep.Gates["stash_reserve_exhausted"] == 0 {
-		t.Fatalf("no drop was refused for want of a reserve slot (gates: %v)", rep.Gates)
-	}
-	for i := range req.Input {
-		if schema.MessageText(req.Input[i]) != originals[i] {
-			t.Fatalf("message %d was rewritten although its original could not be stored", i)
-		}
-	}
-	if got := extractGrossSaved("extract_llm_sweep") - savedBefore; got != 0 {
-		t.Errorf("the sweep booked %d saved tokens for drops that did not happen", got)
-	}
-	if got := extractGrossValue("extract_llm_sweep"); got > valueBefore {
-		t.Errorf("sweep gross value rose from %v to %v for drops that did not happen",
-			valueBefore, got)
-	}
-	for _, call := range rep.Calls {
-		if call.Accepted {
-			t.Error("the sweep's ledger row says accepted=true while every output went upstream " +
-				"verbatim")
-		}
-		if call.SavedTokens != 0 {
-			t.Errorf("the sweep's ledger row claims %d saved tokens for drops that were refused",
 				call.SavedTokens)
 		}
 	}

@@ -54,7 +54,10 @@ the other setting and restart the owned proxy. `$context-guru-insights` shows sa
 `$context-guru-save-more` replays your own history under every shipped config and keep-alive strategy and
 applies the recommended change only after you answer yes; `$context-guru-remove-mcp-and-skills` does the same for
 MCP servers and skills you never use. See [docs/plugin/save-more.md](../../../docs/plugin/save-more.md).
-`$context-guru-adapt` still works for one release and points to them.
+
+The commands you run yourself (`status`, `session`, `timeline`, `watch`, `chart`, `heatmap`, `fill`,
+`update`, `uninstall`) set `allow_implicit_invocation: false` in their `agents/openai.yaml`. Codex leaves them out
+of the model's skills list, so the model does not run them on its own; you run them as `$context-guru-<name>`.
 
 The older `$context-guru-savings`, `$context-guru-cache`, `$context-guru-waste` and
 `$context-guru-insights-capabilities`/`-components`/`-idle` still work for one release and point to `$context-guru-insights`.
@@ -77,7 +80,7 @@ recorded-process cleanup as a fallback.
 | Task | Command |
 |---|---|
 | Check routing and proxy health | `$context-guru-status` |
-| Print raw proxy statistics JSON | `$context-guru-status --stats` |
+| Save raw proxy statistics JSON to a file, print its path | `$context-guru-status --stats` |
 | Check for a proxy update | `$context-guru-update` |
 | Install a proxy update | `~/.local/state/context-guru-codex/context-guru-update` from an ordinary shell |
 | Plan removal and show instructions | `$context-guru-uninstall` |
@@ -118,3 +121,5 @@ plugin registration only; it does not remove the existing proxy routing or state
 
 Restart Codex after installing or refreshing plugin code. Routing or proxy changes made by setup
 take effect for model traffic in the next Codex process.
+
+See the [matrix of plugins, providers and settings](../../../docs/reference/plugins-matrix.md) for what each plugin offers per provider.

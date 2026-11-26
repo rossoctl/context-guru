@@ -1,0 +1,13 @@
+cache:
+  head_ttl_1h: false
+  keepalive: false
+components:
+  toolfilter:
+    always_defer:
+      - mcp__ops
+      - mcp__pw
+    defer: "off"
+    keep:
+      - Read
+pipeline:
+  - toolfilter

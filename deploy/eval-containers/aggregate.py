@@ -28,7 +28,7 @@ def main():
     # baseline-resolved task set (reward==1) for honest parity
     base_ok = {r["task"] for r in by_cfg.get("baseline", []) if num(r["reward"]) == 1}
 
-    order = ["baseline", "cg-format", "cg-dedup", "cg-cmdfilter", "cg-cacheinject", "cg-balanced"]
+    order = ["baseline", "cg-format", "cg-dedup", "cg-cmdfilter", "cg-cacheinject", "cg-conservative", "cg-balanced"]
     print(f"{'config':<16}{'cells':>6}{'reward=1':>9}{'mean_save%':>11}{'tot_saved':>10}"
           f"{'parity(base✓)':>15}")
     for cfg in order + [c for c in by_cfg if c not in order]:
@@ -46,15 +46,15 @@ def main():
         parity = f"{par_won}/{len(par)}" if par else "-"
         print(f"{cfg:<16}{cells:>6}{won:>9}{meansave:>11}{tot:>10}{parity:>15}")
 
-    print("\nPer-task within-run savings% (cg-balanced) and reward (baseline vs balanced):")
+    print("\nPer-task within-run savings% (cg-conservative, or cg-balanced in older CSVs) and reward (baseline vs preset):")
     tasks = sorted({r["task"] for r in rows})
-    bal = {r["task"]: r for r in by_cfg.get("cg-balanced", [])}
+    bal = {r["task"]: r for r in by_cfg.get("cg-conservative") or by_cfg.get("cg-balanced", [])}
     base = {r["task"]: r for r in by_cfg.get("baseline", [])}
     for t in tasks:
         b, bl = base.get(t), bal.get(t)
         print(f"  {t:<34} baseline_reward={b['reward'] if b else '-':<4} "
-              f"balanced_reward={bl['reward'] if bl else '-':<4} "
-              f"balanced_save%={bl['gw_pct'] if bl else '-'}")
+              f"preset_reward={bl['reward'] if bl else '-':<4} "
+              f"preset_save%={bl['gw_pct'] if bl else '-'}")
 
 
 if __name__ == "__main__":

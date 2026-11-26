@@ -1,6 +1,7 @@
 package expand
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -119,5 +120,60 @@ func TestResponsesSummaryExpandRestoresImageAsImage(t *testing.T) {
 		gjson.GetBytes(next, "input.2.content").String() != "what was in it?" ||
 		gjson.GetBytes(next, "input.4.output").String() != "[expand: original history restored in place above]" {
 		t.Fatalf("multimodal original was not restored in its native place: %s", next)
+	}
+}
+
+// #727 review, round 3. A cache_aware_summarizer stash holds NORMALIZED chat messages. When its span
+// held a tool exchange, those are a role=tool message and an assistant message with tool_calls,
+// which are not Responses input items: restored in place they make the Responses API return 400.
+// Such a stash must be answered as the flattened string, and the request must stay valid.
+func TestResponsesExpandOfACacheAwareToolStashStaysValid(t *testing.T) {
+	summary := "=== Compacted Context (cache-aware summary) ===\nfacts\n" + Marker("HASH")
+	body := []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"task"},{"role":"user","content":` +
+		jsonString(summary) + `},{"role":"user","content":"continue"}],"tools":[{"type":"function","name":"` + ToolName + `","parameters":{"type":"object"}}]}`)
+	resp := []byte(`{"output":[{"type":"function_call","call_id":"c1","name":"` + ToolName + `","arguments":"{\"id\":\"HASH\"}"}]}`)
+	stash := `[{"role":"assistant","content":"","tool_calls":[{"id":"t1","type":"function","function":{"name":"read","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"t1","content":"tool output"}]`
+	next, ok := Continuation("responses", body, resp, map[string]string{"c1": stash})
+	if !ok {
+		t.Fatal("continuation failed")
+	}
+	gjson.GetBytes(next, "input").ForEach(func(_, item gjson.Result) bool {
+		if r := item.Get("role").String(); r == "tool" || item.Get("tool_calls").Exists() {
+			t.Fatalf("a normalized tool message was spliced into the Responses input: %s", item.Raw)
+		}
+		return true
+	})
+	if got := gjson.GetBytes(next, "input.#(type==\"function_call_output\").output").String(); got != stash {
+		t.Fatalf("the stash did not travel as the flattened answer: %q", got)
+	}
+}
+
+func jsonString(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+// A Responses summary item whose content is an ARRAY of input_text blocks must be found by its
+// marker. String() on the array gave raw JSON, which does not start with the summary header.
+func TestResponsesSummaryWithBlockArrayContentIsRestoredInPlace(t *testing.T) {
+	req := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"=== History Summary === old <<cg:HASH>>"}]},` +
+		`{"role":"user","content":"what was in it?"}]}`)
+	resp := []byte(`{"output":[{"type":"function_call","call_id":"c1","name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"}]}`)
+	stash := `[{"role":"user","content":"the old question"},{"role":"assistant","content":"the old answer"}]`
+	next, ok := Continuation("responses", req, resp, map[string]string{"c1": stash})
+	if !ok || gjson.GetBytes(next, "input.0.content").String() != "the old question" ||
+		gjson.GetBytes(next, "input.1.content").String() != "the old answer" {
+		t.Fatalf("a block-array summary item was not restored in place: %s", next)
+	}
+}
+
+// A Responses item may carry the original split over several text blocks. CallSites joins them, so
+// responsesContentPresent must too.
+func TestResponsesRepairSeesAnOriginalSplitOverSeveralBlocks(t *testing.T) {
+	resolve := func(id string) (string, bool) { return "first half and second half", id == "HASH" }
+	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"first half"},{"type":"input_text","text":" and second half"}]},` +
+		`{"type":"function_call","call_id":"c1","name":"context_guru_expand","arguments":"{\"id\":\"HASH\"}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"No such tool"}]}`)
+	out, restored := RepairToolResults("responses", body, resolve)
+	if len(restored) != 1 || gjson.GetBytes(out, "input.2.output").String() != RestoredInPlace("HASH") {
+		t.Fatalf("repair wrote a second copy of a split original: %s", out)
 	}
 }

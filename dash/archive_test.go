@@ -70,7 +70,7 @@ func TestArchiveRoundTrip(t *testing.T) {
 	if m.puts != 1 {
 		t.Errorf("uploads = %d, want 1 object for the session", m.puts)
 	}
-	evs, err := rec.FetchArchived(context.Background(), "sess-1")
+	evs, err := rec.FetchArchived(context.Background(), "t1", "sess-1")
 	if err != nil {
 		t.Fatalf("FetchArchived: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestContentArchiveKeepsMetricsLocal(t *testing.T) {
 		t.Fatalf("metrics not queryable after content archiving: %v, %v", p, err)
 	}
 	// The transcripts are retrievable from cold storage.
-	rows, err := rec.FetchArchivedContent(context.Background(), "sess-1", p.Requests[0].ID)
+	rows, err := rec.FetchArchivedContent(context.Background(), "t1", "sess-1", p.Requests[0].ID)
 	if err != nil {
 		t.Fatalf("FetchArchivedContent: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestDiskPressureArchivesInsteadOfDeleting(t *testing.T) {
 		t.Fatal("no archive index rows after eviction")
 	}
 	for _, a := range list {
-		evs, err := rec.FetchArchived(context.Background(), a.SessionID)
+		evs, err := rec.FetchArchived(context.Background(), a.TenantID, a.SessionID)
 		if err != nil || len(evs) == 0 {
 			t.Errorf("evicted session %s is not retrievable: %v", a.SessionID, err)
 		}
@@ -352,7 +352,7 @@ func TestWithoutArchiveRequiredDiskIsStillReclaimed(t *testing.T) {
 // has to be able to tell "no such archive" from "the remote is unreachable".
 func TestFetchArchivedDistinguishesMissingFromBroken(t *testing.T) {
 	rec, m := archiveRecorder(t, Options{})
-	if _, err := rec.FetchArchived(context.Background(), "never-existed"); err == nil {
+	if _, err := rec.FetchArchived(context.Background(), "t1", "never-existed"); err == nil {
 		t.Error("fetching an unknown session succeeded")
 	}
 	seedSessionWithContent(t, rec.db, "t1", "s", 2, 48*time.Hour)
@@ -361,7 +361,7 @@ func TestFetchArchivedDistinguishesMissingFromBroken(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.failGet = errors.New("box is down")
-	_, err := rec.FetchArchived(context.Background(), "s")
+	_, err := rec.FetchArchived(context.Background(), "t1", "s")
 	if err == nil {
 		t.Fatal("fetch succeeded with a failing remote")
 	}
@@ -429,5 +429,29 @@ func TestArchiveFormatIsPlainGzippedJSONL(t *testing.T) {
 	}
 	if _, err := DecodeArchive([]byte("not gzip")); err == nil {
 		t.Error("DecodeArchive accepted non-gzip input")
+	}
+}
+
+// The size rule MIGRATES like the disk and quota rules: with cold storage configured, a session
+// leaves local disk only after it is uploaded (#1204).
+func TestSizeRuleArchivesInsteadOfDeleting(t *testing.T) {
+	rec, m := archiveRecorder(t, Options{
+		CaptureContent: true, ContentCap: 4096, RetentionAge: -1, RetentionBytes: 1,
+		RetentionFloorBytes: 1, DisableBackup: true,
+	})
+	for i := 0; i < 8; i++ {
+		seedSessionWithContent(t, rec.db, "t1",
+			"s-"+string(rune('a'+i)), 2, time.Duration(100-i)*time.Hour)
+	}
+	before := countRows(t, rec.db, "requests")
+	rec.janitorPass()
+	if countRows(t, rec.db, "requests") >= before {
+		t.Fatal("the size rule evicted nothing")
+	}
+	if m.puts == 0 {
+		t.Fatal("the size rule deleted sessions WITHOUT archiving them")
+	}
+	if _, err := rec.db.ArchivedSessionByID("s-a"); err != nil {
+		t.Errorf("the oldest session was not archived: %v", err)
 	}
 }

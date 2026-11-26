@@ -11,18 +11,19 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
 )
 
 func init() { components.Register("cacheinject", newCacheinject) }
 
 // Cache-billing constants, from the provider docs. Identical on the Anthropic
-// API, Bedrock and Vertex; see docs/components/cacheinject.md for the derivation
-// these drive.
-const (
-	maxBreakpoints = 4  // hard provider cap on cache_control blocks per request
-	lookbackBlocks = 20 // how far the provider's backward read-walk reaches
-)
+// API and the other providers that honour cache_control (modelinfo.HonoursCacheControl);
+// see docs/components/caching.md for the derivation these drive.
+const maxBreakpoints = schema.MaxBreakpoints // hard provider cap on cache_control blocks per request
+
+// LookbackBlocks is kept for importers; use schema.LookbackBlocks.
+const LookbackBlocks = schema.LookbackBlocks
 
 // Cacheinject places Anthropic-family `cache_control` breakpoints so the
 // provider's KV cache is read rather than re-processed. It is a Reformat: it adds
@@ -140,7 +141,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 	// consecutive pair always stays within the provider's backward-walk window.
 	// Counting UP from the start keeps the indices fixed as the conversation
 	// grows, which is what makes them pre-warmed and therefore readable.
-	for i := lookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += lookbackBlocks - 1 {
+	for i := schema.LookbackBlocks - 1; i < len(req.Input)-1 && len(want) < maxBreakpoints; i += schema.LookbackBlocks - 1 {
 		want[i] = struct{}{}
 	}
 
@@ -155,7 +156,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 	// of 3 free slots when 1 was free: 6 on the wire, and a 400 (issue #32).
 	visible := 0
 	for i := range req.Input {
-		if hasBreakpoint(&req.Input[i]) {
+		if schema.HasBlockBreakpoint(&req.Input[i]) {
 			visible++
 			delete(want, i)
 		}
@@ -185,7 +186,7 @@ func (ci Cacheinject) Reformat(req *schemas.BifrostChatRequest, rep *components.
 		// written, and the next-lowest markable block still captures nearly all of
 		// it — far better than writing nothing and billing the whole prefix at 1.0x.
 		for j := i - 1; j >= 0; j-- {
-			if hasBreakpoint(&req.Input[j]) {
+			if schema.HasBlockBreakpoint(&req.Input[j]) {
 				break // already covered at or below here
 			}
 			if mark(&req.Input[j], ci.ttl()) {
@@ -217,21 +218,17 @@ func mark(m *schemas.ChatMessage, ttl *string) bool {
 	return true
 }
 
-func hasBreakpoint(m *schemas.ChatMessage) bool {
-	if m.Content == nil {
-		return false
-	}
-	for i := range m.Content.ContentBlocks {
-		if m.Content.ContentBlocks[i].CacheControl != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // digests returns a per-message content digest. Truncated to 8 bytes: this only
 // ever detects inequality, and a collision costs one missed optimisation, never
 // a wrong request.
+//
+// It hashes role and text only, and does not use schema.CanonicalMessage (#787) on purpose. The text
+// already ignores cache_control and the string-or-block form, which is all the canonical form adds.
+// The gap is real: an assistant message that only calls tools has empty text, so a change in its
+// tool calls is not seen. The cost is small: the divergence point reads late, and rule 3 puts one
+// breakpoint on a changed message (one wasted cache write). Closing it would change every stored
+// digest (`cg:cidx:` has no version field) and hash whole messages on every turn. That needs a
+// human's yes (see CLAUDE.md, behavior changes).
 func digests(msgs []schemas.ChatMessage) []string {
 	out := make([]string, len(msgs))
 	for i, m := range msgs {
@@ -289,12 +286,7 @@ func sortedDesc(m map[int]struct{}) []int {
 
 // cacheAware reports whether the provider honours Anthropic-style cache_control.
 func cacheAware(p schemas.ModelProvider) bool {
-	switch p {
-	case schemas.Anthropic, schemas.Bedrock, schemas.Vertex:
-		return true
-	default:
-		return false
-	}
+	return modelinfo.HonoursCacheControl(p)
 }
 
 // --------------------------------------------------------------------------- //

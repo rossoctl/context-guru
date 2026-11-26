@@ -17,7 +17,8 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/campaign"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -28,7 +29,8 @@ import (
 //
 //	off     loaded but inert
 //	shadow  decides on live traffic, logs and scores what it WOULD have done, changes nothing
-//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings) and the 280 s spacing
+//	active  sets the number of keep-alive pings per request (CachePolicy.MaxPings). The spacing stays the tenant's own interval, or the shipped 240 s (config.DefaultKeepAliveIdle) when none is set;
+//	        kvcache.DefaultPingIdle is only the spacing the decision is scored at
 //
 // The decision costs microseconds and needs only what the proxy sees when a response ends, so it runs inline in keeper.record.
 // An active campaign acts only where the tenant's OWN policy has the keep-alive on: it can lower or shape the ping count, it never turns the mechanism on for a tenant that opted out
@@ -41,10 +43,7 @@ const (
 	campaignModeShadow = "shadow"
 	campaignModeActive = "active"
 
-	// The closed-form replay constants of scripts/campaign/cgpredict.py (plan_eval): the provider cliff, the scheduling lateness, a ping's duration, and the fitted benefit scale.
-	cfTC, cfLate, cfPingDur = 296.5, 1.0, 2.0
-	// cfScale and cfPingScale are scripts/campaign/engine_calibration.json (benefit_scale, ping_scale); a test keeps them equal.
-	cfScale, cfPingScale = 0.948, 1.346
+	// The replay constants (campaign.Cliff, campaign.BenefitScale, ...) live in the campaign library package.
 
 	predPendingMax = 4096
 	predResolveTTL = 2 * time.Hour
@@ -58,6 +57,10 @@ type campaignMeta struct {
 	Mode      string `json:"mode"`
 	CreatedAt int64  `json:"created_at"`
 	Actor     string `json:"actor"`
+	// ModeBy is who last changed the mode; Via is "adapt" for a campaign /api/adapt/cache built. A non-manager may not override a campaign a
+	// manager last set, and an adapt revert undoes only the caller's own adapt campaign.
+	ModeBy string `json:"mode_by,omitempty"`
+	Via    string `json:"via,omitempty"`
 }
 
 // shadowStats is the running score of a campaign's decisions on live traffic. Dollars are CLOSED-FORM ESTIMATES of the same kind as the build's
@@ -184,7 +187,7 @@ func (rt *predRuntime) load(id string) error {
 	}
 	if cur := rt.byTenant[m.Tenant]; cur != nil && cur.meta.ID == id {
 		cur.mu.Lock()
-		cur.meta.Mode = m.Mode
+		cur.meta.Mode, cur.meta.ModeBy = m.Mode, m.ModeBy
 		cur.mu.Unlock()
 		if m.Mode == campaignModeOff {
 			delete(rt.byTenant, m.Tenant)
@@ -270,20 +273,18 @@ func (pc *predCampaign) resolveLocked(p predPending, gap float64, returned bool)
 
 // resolveStopLocked is resolveLocked when the client ended the session stop seconds after the response ended: pings that would start later are never sent.
 func (pc *predCampaign) resolveStopLocked(p predPending, gap float64, returned bool, stop float64) {
-	fired, rescued := planOutcome(p.k, p.x, float64(p.endMs-p.startMs)/1000, gap, returned, stop)
+	sc := campaign.ScoreDecision(p.k, p.x, float64(p.endMs-p.startMs)/1000, gap, returned, stop, p.ping, p.stake)
+	fired, rescued, net := sc.Fired, sc.Rescued, sc.NetUSD
 	st := &pc.stats
 	st.Resolved++
 	st.WouldPings += int64(fired)
-	cost := cfPingScale * float64(fired) * p.ping
-	st.EstPingUSD += cost
-	net := -cost
+	st.EstPingUSD += sc.PingUSD
 	if returned {
 		st.Returned++
 	}
 	if rescued {
 		st.Rescues++
-		st.EstRescUSD += cfScale * p.stake
-		net += cfScale * p.stake
+		st.EstRescUSD += sc.RescUSD
 	}
 	st.EstNetUSD += net
 	if pc.logf != nil {
@@ -317,7 +318,7 @@ func (pc *predCampaign) sweepLocked(nowMs int64) {
 }
 
 // decide runs the campaign for one finished response. ok=false means no campaign applies (the caller proceeds exactly as before).
-func (k *keeper) predictiveDecide(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, userAgent string, u Usage) (d predDecision, ok bool) {
+func (k *keeper) predictiveDecide(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, cl agent.Client, u Usage) (d predDecision, ok bool) {
 	// A campaign must never change what the keeper does by failing: any panic in the model or the tracker means "no campaign applies" for this response.
 	defer func() {
 		if r := recover(); r != nil {
@@ -325,10 +326,10 @@ func (k *keeper) predictiveDecide(a *predictive.Arrival, optedOut bool, tenantID
 			d, ok = predDecision{}, false
 		}
 	}()
-	return k.predictiveDecideInner(a, optedOut, tenantID, session, thread, provider, startedAt, body, userAgent, u)
+	return k.predictiveDecideInner(a, optedOut, tenantID, session, thread, provider, startedAt, body, cl, u)
 }
 
-func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, userAgent string, u Usage) (predDecision, bool) {
+func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, tenantID, session, thread, provider string, startedAt time.Time, body []byte, cl agent.Client, u Usage) (predDecision, bool) {
 	pc := k.pred.forTenant(tenantID)
 	if pc == nil || u.CacheRead+u.CacheWrite <= 0 {
 		return predDecision{}, false
@@ -350,7 +351,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	if a == nil { // the request started before the campaign was loaded, or on a path that did not carry its arrival
 		a = pc.tr.Arrive(predictive.Request{Tenant: tenantID, Session: session, Thread: thread, TsMs: startedAt.UnixMilli()})
 	}
-	if pRead <= 0 || pWrite <= pRead {
+	if !campaign.Priced(pRead, pWrite) {
 		pc.mu.Lock()
 		pc.stats.NoPrice++
 		pc.mu.Unlock()
@@ -359,7 +360,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	lf := u.Live
 	if lf == nil { // a path that did not hand over the capture's facts: read what the body says
 		lf = &LiveFacts{Messages: int(gjson.GetBytes(body, "messages.#").Int()), Tools: int(gjson.GetBytes(body, "tools.#").Int()), Thinking: gjson.GetBytes(body, "thinking.type").String(),
-			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: dash.AgentFor(userAgent), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
+			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: cl.ModelAgent(provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
 	}
 	nowMs := now.UnixMilli()
 	cost := float64(u.FreshInput)*pIn + float64(u.CacheRead)*pRead + float64(u.CacheWrite)*pWrite + float64(u.Output)*pOut
@@ -372,12 +373,11 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	}
 	pc.tr.Ended(a, resp)
 	pingCost := resp.PingCost()
-	facts := predictive.Facts{Family: familyOf(model), StopReason: u.StopReason, Model: model, Agent: resp.Agent, PrefixTok: float64(resp.Prefix), PingCost: pingCost}
+	st := startedAt.UTC()
+	facts := campaign.NewFacts(model, u.StopReason, resp.Agent, int64(resp.Prefix), pingCost, st.Hour(), int(st.Weekday()))
 	pc.mu.Lock()
 	spec := pc.spec // an auto campaign's refresh swaps it (refreshAutoCampaigns)
 	pc.mu.Unlock()
-	rule := spec.RuleFor(&facts)
-	kk, idle := 0, 280.0
 	var row *predictive.Row
 	if pc.model != nil { // the tracker must see every response, whichever rule the segment applies
 		row = predictive.NewRow()
@@ -385,13 +385,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	} else {
 		pc.tr.Release(a, resp) // plan-only campaign: no features, and no history to accumulate
 	}
-	switch rule.Kind {
-	case predictive.RuleModel:
-		d := predictive.Decide(pc.model, row, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: pWrite, PRead: pRead, PingCost: pingCost})
-		kk, idle = d.K, pc.model.Rule().XS
-	case predictive.RulePlan:
-		kk, idle = spec.PlanOf(rule)
-	}
+	kk, idle := campaign.Choose(spec, pc.model, row, &facts, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: pWrite, PRead: pRead, PingCost: pingCost})
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.stats.Decisions++
@@ -406,19 +400,9 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	if pc.npend < predPendingMax {
 		pc.npend++
 		tk := session + "\x00" + thread
-		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: float64(resp.Prefix) * (pWrite - pRead), ping: pingCost})
+		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: campaign.Stake(int64(resp.Prefix), pRead, pWrite), ping: pingCost})
 	}
 	return predDecision{campaign: pc, k: kk, idleS: idle, active: pc.meta.Mode == campaignModeActive && !optedOut}, true
-}
-
-func familyOf(model string) string {
-	m := strings.ToLower(strings.TrimPrefix(model, "aws/"))
-	for _, f := range []string{"opus", "sonnet", "haiku"} {
-		if strings.Contains(m, f) {
-			return f
-		}
-	}
-	return "other"
 }
 
 // campaignStrategyID tags the pings a campaign bought on their dash rows.
@@ -426,23 +410,7 @@ func campaignStrategyID(id string) string { return "campaign:" + id }
 
 // apply writes an ACTIVE campaign's decision into the entry's policy. Account-level bounds (the per-ping dollar ceiling) are left alone.
 func (d predDecision) apply(pol CachePolicy) CachePolicy {
-	if !d.active {
-		return pol
-	}
-	if d.k <= 0 {
-		pol.KeepAlive = false
-		return pol
-	}
-	// The campaign decides HOW MANY pings, never their spacing: that stays the tenant's configured keep-alive interval (the shipped 270 s when none
-	// is configured), so a campaign never pings later than it (live, pings 275-280 s after a response miss the cache 19% of the time) nor more
-	// often than the tenant's own policy would.
-	idle := pol.Idle
-	if idle <= 0 {
-		idle = campaignKeepAlive5mIdle * time.Second
-	}
-	pol.KeepAlive, pol.Idle, pol.MaxPings = true, idle, d.k
-	pol.MinPrefixTokens, pol.PredictorID, pol.PredictorThreshold = 0, "", 0
-	return pol
+	return campaign.Apply(pol, d.k, d.active)
 }
 
 // listCampaignIDs returns campaign ids on disk, newest first.

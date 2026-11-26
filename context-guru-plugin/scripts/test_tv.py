@@ -74,8 +74,8 @@ SPEND = json.load(open(os.path.join(TD, "spend.json")))
 
 
 def stats():
-    wf = [("baseline", 898.05, True), ("compaction", -33.9, False), ("cachesplit_saved", 0, False), ("keepalive_saved", 9.4, False),
-          ("keepalive_ping", 3.1, False), ("decl_filter_saved", 7.85, False), ("self_removed", 0, False), ("cg_llm", 4.1, False)]
+    wf = [("baseline", 898.05, True), ("compaction", -33.9, False), ("cachesplit_saved", 0, False), ("keepalive_saved", -9.4, False),
+          ("keepalive_ping", 3.1, False), ("decl_filter_saved", -7.85, False), ("self_removed", 0, False), ("cg_llm", 4.1, False)]
     return {"total_saved_usd": 43.95, "cost_usd": 856.85, "baseline_cost_usd": 898.05, "waterfall": [{"key": k, "delta_usd": v} for k, v, _ in wf]}
 
 

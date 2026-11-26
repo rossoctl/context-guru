@@ -1,0 +1,10 @@
+---
+name: Metrics push to a central collector (`--metrics-push-url`, #886)
+kind: metadata
+off: 🟡 Works, metadata. It is off until the operator sets a collector URL. With no URL it logs one warning and sends nothing. `--metrics-push=false` turns it off. Since #1451 the savings set works with no dashboard, because the accountant runs on every request. The inference set still needs `--dashboard`, because it reads the dashboard's finished request.
+metadata_only: 🟡 Works, metadata. **Data leaves the machine.** It sends totals only, every 30 seconds: token counts by tier, dollar amounts, request counts by status class, the count of requests whose savings the accountant library withheld, by a reason code from a fixed list (`llm.savings.withheld`, accountant v0.10.0), times, the model and provider names, the component names, the preset, the proxy version, and one random install ID. It sends no message text, no tool output, no session id, no request id, no user name and no host name. The install ID is random and is kept in a file named `machine-id`, in the folder of the `--dashboard-db` path (default `./context-guru-dashboard.db`, so `./machine-id`). That holds with the dashboard off too: the path is only a place, and no database is made. A path in memory (`:memory:`) gives no file, and the ID then lasts for one run.
+everything: 🟡 Works, metadata. The storage level changes nothing, because the push never reads stored content.
+order: 290
+---
+
+A manager needs the savings of many machines in one place. Totals are enough for that, so the push sends no text. It holds no queue and stores nothing: a push that fails is lost, and the next push carries the new totals. The collector URL has no default, so no machine sends anything until its operator names a collector. The URL must use https. If the collector asks for a token, it travels in a header and is never logged. The central stack asks for none today (rossoctl/context-guru#1130). Decided by: David Amid, #974 (2026-11-12). He approved two points: data leaves the machine once a collector URL is set (metadata only), and the collector has no authentication yet (#1130).

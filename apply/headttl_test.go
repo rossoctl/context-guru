@@ -10,9 +10,9 @@ import (
 
 // A Claude Code-shaped request: two `system` breakpoints and one on the last content block,
 // which is the (2,0,0,1) layout carrying 86.4% of production spend and 100% of the
-// addressable TTL misses. Padded past the 50,000-token size gate.
+// addressable TTL misses. Padded past the 200,000-byte size gate.
 func headTTLBody() []byte {
-	pad := strings.Repeat("context ", 30000) // ~240 KB, comfortably over 50k estimated tokens
+	pad := strings.Repeat("context ", 30000) // ~240 KB, comfortably over the 200,000-byte gate
 	return []byte(`{"model":"aws/claude-opus-5",` +
 		`"tools":[{"name":"Bash","description":"` + pad + `","input_schema":{"type":"object"},` +
 		`"cache_control":{"type":"ephemeral"}}],` +
@@ -28,7 +28,7 @@ func headTTLBody() []byte {
 // that loses money.
 func TestHeadTTLUpgradesTheHeadAndNotTheTail(t *testing.T) {
 	body := headTTLBody()
-	out, up, head := upgradeHeadTTL(body, bschemas.Anthropic, 50000)
+	out, up, head := upgradeHeadTTL(body, bschemas.Anthropic, 200000)
 	if !up {
 		t.Fatal("upgrade did not fire on a Claude Code-shaped body over the size gate")
 	}
@@ -54,7 +54,7 @@ func TestHeadTTLUpgradesTheHeadAndNotTheTail(t *testing.T) {
 func TestHeadTTLAddsNoBreakpoint(t *testing.T) {
 	body := headTTLBody()
 	before := CountBreakpoints(body)
-	out, _, _ := upgradeHeadTTL(body, bschemas.Anthropic, 50000)
+	out, _, _ := upgradeHeadTTL(body, bschemas.Anthropic, 200000)
 	after := CountBreakpoints(out)
 	if before != after {
 		t.Fatalf("breakpoints changed: %+v -> %+v", before, after)
@@ -67,7 +67,7 @@ func TestHeadTTLAddsNoBreakpoint(t *testing.T) {
 	// request at the cap into a 400.
 	noMark := []byte(`{"model":"m","system":[{"type":"text","text":"` +
 		strings.Repeat("x", 300000) + `"}],"messages":[]}`)
-	out2, up2, _ := upgradeHeadTTL(noMark, bschemas.Anthropic, 50000)
+	out2, up2, _ := upgradeHeadTTL(noMark, bschemas.Anthropic, 200000)
 	if up2 {
 		t.Error("reported an upgrade on a head with no breakpoint to re-label")
 	}
@@ -82,7 +82,7 @@ func TestHeadTTLAddsNoBreakpoint(t *testing.T) {
 func TestHeadTTLSizeGate(t *testing.T) {
 	small := []byte(`{"model":"m","system":[{"type":"text","text":"short",` +
 		`"cache_control":{"type":"ephemeral"}}],"messages":[]}`)
-	if _, up, _ := upgradeHeadTTL(small, bschemas.Anthropic, 50000); up {
+	if _, up, _ := upgradeHeadTTL(small, bschemas.Anthropic, 200000); up {
 		t.Error("upgraded a request far below the size gate")
 	}
 	if _, up, _ := upgradeHeadTTL(headTTLBody(), bschemas.Anthropic, 1<<30); up {
@@ -94,7 +94,7 @@ func TestHeadTTLSizeGate(t *testing.T) {
 // implicit-longest-prefix backend the field is meaningless and must not be written.
 func TestHeadTTLOnlyForExplicitBreakpointProviders(t *testing.T) {
 	for _, p := range []bschemas.ModelProvider{bschemas.OpenAI, bschemas.ModelProvider("gemini")} {
-		if out, up, _ := upgradeHeadTTL(headTTLBody(), p, 50000); up || strings.Contains(string(out), `"ttl"`) {
+		if out, up, _ := upgradeHeadTTL(headTTLBody(), p, 200000); up || strings.Contains(string(out), `"ttl"`) {
 			t.Errorf("provider %s: wrote a ttl on a backend with no explicit breakpoints", p)
 		}
 	}
@@ -103,8 +103,8 @@ func TestHeadTTLOnlyForExplicitBreakpointProviders(t *testing.T) {
 // Idempotent: a body that already asks for 1h is reported as upgraded (so its head is
 // measured) and comes back unchanged rather than doubly labelled.
 func TestHeadTTLIdempotent(t *testing.T) {
-	once, _, head1 := upgradeHeadTTL(headTTLBody(), bschemas.Anthropic, 50000)
-	twice, up, head2 := upgradeHeadTTL(once, bschemas.Anthropic, 50000)
+	once, _, head1 := upgradeHeadTTL(headTTLBody(), bschemas.Anthropic, 200000)
+	twice, up, head2 := upgradeHeadTTL(once, bschemas.Anthropic, 200000)
 	if !up {
 		t.Error("a body already on 1h reported no upgrade, so its head would go unmeasured")
 	}
@@ -124,7 +124,7 @@ func TestHeadTTLIsVisibleToTheColdCacheLogic(t *testing.T) {
 	if bodyAsksExtendedTTL(body) {
 		t.Fatal("fixture already asks for the extended TTL")
 	}
-	out, _, _ := upgradeHeadTTL(body, bschemas.Anthropic, 50000)
+	out, _, _ := upgradeHeadTTL(body, bschemas.Anthropic, 200000)
 	if !bodyAsksExtendedTTL(out) {
 		t.Error("the upgraded body does not read as asking for the extended TTL")
 	}
@@ -140,12 +140,23 @@ func TestHeadTTLFailsOpen(t *testing.T) {
 		`{}`,
 	} {
 		big := in + strings.Repeat(" ", 300000) // over the size gate, so the gate is not what refuses
-		out, up, _ := upgradeHeadTTL([]byte(big), bschemas.Anthropic, 50000)
+		out, up, _ := upgradeHeadTTL([]byte(big), bschemas.Anthropic, 200000)
 		if up {
 			t.Errorf("reported an upgrade for %q", in)
 		}
 		if string(out) != big {
 			t.Errorf("body changed for %q", in)
 		}
+	}
+}
+
+// The gate is bytes of the body. A body of exactly the gate size upgrades; one byte less does not.
+func TestHeadTTLGateIsBytesOfTheBody(t *testing.T) {
+	body := headTTLBody()
+	if _, up, _ := upgradeHeadTTL(body, bschemas.Anthropic, len(body)); !up {
+		t.Error("a body of exactly the gate size did not upgrade")
+	}
+	if _, up, _ := upgradeHeadTTL(body, bschemas.Anthropic, len(body)+1); up {
+		t.Error("a body one byte under the gate upgraded")
 	}
 }

@@ -1,0 +1,1295 @@
+import { expect, mock, test } from 'claude-code/testing'
+
+import { REASON_CODES, cacheClock, showPing, signature, usd, view } from './model'
+
+const NOW = 1_800_000_000_000
+const entry = (end: number, extra = {}) => ({ end_ts: end, ttl_s: 300, prefix_tokens: 90000, rewrite_usd: 0.5, next_warm_usd: 0.06, next_cold_usd: 0.78, ...extra })
+const doc = (warm: boolean) => ({
+  ...entry(warm ? NOW - 60_000 : NOW - 900_000),
+  last_ts: warm ? NOW - 60_000 : NOW - 900_000,
+  now_ms: NOW,
+  age_s: 0,
+  stale: false,
+  money: { main: { saved_usd: 18.6, baseline_usd: 61.4 }, others: { saved_usd: 4.2, baseline_usd: 20.5 } },
+  threads: [
+    { id: 'main', main: true, ...entry(warm ? NOW - 60_000 : NOW - 900_000) },
+    { id: 'a:explorer1', name: 'Explore', main: false, saved_usd: 1.2, ...entry(NOW - 30_000), ...agentExtra },
+    { id: 'a:reviewer', name: 'code-reviewer', main: false, ...entry(NOW - 250_000) }, // last minute
+    { id: 'a:planner', name: 'planner', main: false, ...entry(NOW - 900_000) }, // cold, 15 min ago: shown dim
+    { id: 'a:ancient', name: 'Ancient', main: false, ...entry(NOW - 3 * 3_600_000) }, // cold for hours: gone
+    { id: 'a:unnamed', main: false, ...entry(NOW - 30_000) }, // no name: shown as nothing, never as a hex id
+    { id: 'p:classifier', name: 'Classifier', main: false, ...entry(NOW - 30_000) }, // a side request, not an agent
+  ],
+})
+
+const BAND = {
+  plugin: 'context-guru',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 100, scroll: { offset: 0, bodyRows: 6 } },
+} as const
+
+const PANE = {
+  plugin: 'context-guru',
+  component: 'Pane',
+  requestId: 'context-guru',
+  props: { title: 'Context Guru', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+} as const
+
+const PANE_DATA = {
+  spark: { today: 4.2, days: [1, 2, 2, 3, 4, 4, 5, 5, 6, 7, 7, 8, 8, 4.2] },
+  strip: { kinds: ['hit', 'hit', 'hit', 'hit', 'miss', 'hit', 'hit', 'part', 'part', 'hit', 'hit', 'hit', 'hit', 'hit', 'hit', 'hit', 'hit', 'hit', 'hit', 'hit'], lost: 1.4 },
+  heat: { hours: [0, 0, 1, 2, 0, 0, 6, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], now: 8, lost: 1.4 },
+  fill: { used: 412000, window: 1000000, frac: 0.412, base: 0.2, eta_s: 3480, miss_usd: 1.2 },
+}
+
+let clock: ReturnType<typeof mock.clock>
+let tipStale: string[] = []
+let paneDoc: object = PANE_DATA
+let agentExtra: object = {}
+let noAgents = false
+let toasts: string[] = []
+let docOverride: ((d: any) => object) | null = null // replaces the cachestate answer for one test
+let usage: object | null = null // what $.session.usage() answers, when a test sets it
+
+/** The drawn tree as the lines a person reads: a column Box is one line per child, anything else is one line. */
+function textOf(n: any, gap = 0): string {
+  if (n == null || typeof n === 'boolean') return ''
+  if (typeof n === 'string' || typeof n === 'number') return String(n)
+  if (Array.isArray(n)) return n.map(c => textOf(c)).join(' '.repeat(gap))
+  const kids = textOf(n.children, n.type === 'Box' ? (n.props?.columnGap ?? 0) : 0)
+  if (n.type === 'Button') return n.props?.plain ? (n.props.label ?? kids) : `[ ${n.props?.label ?? kids} ]`
+  if (n.type === 'Link') return n.props?.label ?? kids
+  return kids
+}
+function lines(n: any): string[] {
+  if (n == null || typeof n !== 'object') return []
+  // Newer engines (Claude Code 2.1.325) draw every plugin's part side by side, each tagged with `part.plugin`, and the
+  // test harness adds its own default part (`engine`). Read only this plugin's part (#1175).
+  if (n.part?.plugin !== undefined && n.part.plugin !== 'context-guru') return []
+  if (n.type === 'Box' && n.props?.flexDirection === 'column') return (n.children ?? []).flatMap(lines)
+  const t = textOf(n, n.type === 'Box' ? (n.props?.columnGap ?? 0) : 0)
+  return t.trim() === '' ? [] : [t.replace(/\s+$/, '')]
+}
+const dump = async (ui: any): Promise<string> => lines(await ui.drawn()).join('\n')
+
+async function boot($: any, on: any, warm: boolean, calls: string[][] = [], pingOut: object = { status: 200, sent: true, saving: 'pending', ping_usd: 0.04 }, mainExtra: object = {}) {
+  registered = []
+  on('command.register', (_: any, e: any) => {
+    registered.push(e.name)
+    return { value: { command: 'context-guru' } }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  if (usage) on('session.usage', () => ({ value: usage }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.toast', (_: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.status', () => {
+    statusCalls++
+    return { value: undefined }
+  })
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('process.run', (_: any, e: any) => {
+    calls.push([...e.argv])
+    const ret = (o: object) => ({ value: { exitCode: 0, stdout: JSON.stringify(o) + '\n', stderr: '' } })
+    if (e.argv.includes('tip')) return ret({ stale: tipStale, days: 7 })
+    if (e.argv.includes('panedata')) return ret(paneDoc)
+    if (e.argv.includes('ping')) return ret(pingOut ?? { status: 200, sent: true, saving: 'pending', ping_usd: 0.04 })
+    if (docOverride) {
+      const o: any = docOverride(doc(warm))
+      return { value: { exitCode: o.error ? 1 : 0, stdout: JSON.stringify(o) + '\n', stderr: '' } }
+    }
+    const base = doc(warm)
+    if (noAgents) base.threads = base.threads.filter((t: any) => t.main)
+    return ret({ ...base, ...mainExtra, threads: base.threads.map((t: any) => (t.main ? { ...t, ...mainExtra } : t)) })
+  })
+  statusCalls = 0
+  toasts = []
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000) // the first poll lands
+}
+let statusCalls = 0
+let registered: string[] = []
+
+/** Presses the band's Ping button and returns the toast it raised. */
+async function pressPing($: any): Promise<{ text: string }> {
+  toasts = []
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
+  await ui.unmount()
+  return { text: toasts.join('\n') }
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: warm band shows the next-message price warm and cold, Ping and the agent chips`, async ($, on) => {
+    await boot($, on, true)
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\$0\.06/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\$0\.78 if cold/ })).toBeDefined()
+    expect(await ui.find({ key: 'ping' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Explore/ })).toBeDefined()
+    const link = await ui.find({ type: 'Link' }) // the dashboard link is on row 1, last, and in the pane
+    expect((link as any)?.props?.href ?? (link as any)?.href).toBe('http://localhost:8787/dashboard/')
+    await ui.unmount()
+  })
+
+  test(`${surface}: the band carries the status line's row: saved of session, subagents, the cache clock and ctx`, async ($, on) => {
+    usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [] }
+    docOverride = d => ({ ...d, money: { ...d.money, others: { ...d.money.others, threads: 3 } } })
+    await boot($, on, true)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface })
+    const row = (await dump(ui)).split('\n')[1]
+    expect(row).toBe('saved $18.60 of $61.40 session · saved $4.20 of $20.50 subagents │ cache ● █████░ 3:59 │ ctx █░░░░░░░ 9%')
+    expect(await dump(ui)).not.toMatch(/Context Guru/)
+    expect(statusCalls).toBe(0) // no $.ui.status copy: the band is the one home
+    await ui.unmount()
+  })
+
+  test(`${surface}: agent chips are named user agents only, most recent first, cold ones dimmed and never a p: thread or a hex id`, async ($, on) => {
+    await boot($, on, true)
+    const ui = await $.ui.mount({ ...BAND, surface })
+    for (const gone of [/Classifier/, /Ancient/, /unnamed/, /a:/]) {
+      expect(await ui.find({ type: 'Text', text: gone })).toBeUndefined()
+    }
+    const all = await dump(ui)
+    expect(all).toMatch(/└ agents ?\s*● Explore 5m\s+◐ code-reviewer <1m\s+○ planner/)
+    const cold = await ui.find({ type: 'Text', text: /planner/ })
+    expect((cold as any)?.props?.dimColor ?? true).toBe(true)
+    await ui.unmount()
+  })
+
+  test(`${surface}: a cold main cache is drawn, dim, with the cold price and no Ping`, async ($, on) => {
+    await boot($, on, false)
+    const ui = await $.ui.mount({ ...BAND, surface })
+    const all = await dump(ui)
+    expect(all).toMatch(/○ cache cold · next message \$0\.78/)
+    expect(await ui.find({ key: 'ping' })).toBeUndefined()
+    expect(all).not.toMatch(/\$0\.06/) // the warm price no longer applies
+    await ui.unmount()
+  })
+}
+
+test('the band is one row when the band is short, and row 1 stays', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 2 }, surface: 'terminal' })
+  expect(((await dump(ui)).match(/\n/g) ?? []).length).toBe(0) // maxRows 2: row 1 only
+  expect(await dump(ui)).toMatch(/next message/)
+  await ui.unmount()
+})
+
+test('the band is never more than four rows, even with agents and a stale tip', async ($, on) => {
+  tipStale = ['save-more', 'remove-mcp-and-skills']
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 50 }, surface: 'terminal' })
+  expect(((await dump(ui)).match(/\n/g) ?? []).length).toBeLessThanOrEqual(3)
+  await ui.unmount()
+  tipStale = []
+})
+
+test('no weekly tip while every command ran this week: the last row rotates through the commands instead', async ($, on) => {
+  tipStale = []
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const last = async () => (await dump(ui)).split('\n').pop()
+  expect(await dump(ui)).not.toMatch(/tip:/)
+  const seen = new Set<string>()
+  for (let i = 0; i < 3; i++) {
+    seen.add((await last())!)
+    await clock.advance(12_000)
+  }
+  expect([...seen].sort()).toEqual([
+    'try /context-guru:insights — see where your money goes',
+    'try /context-guru:remove-mcp-and-skills — drop unused MCP and skills',
+    'try /context-guru:save-more — find a cheaper configuration',
+  ])
+  for (const l of seen) expect(l.replace(/^try \S+ — /, '').split(' ').length).toBeLessThanOrEqual(5) // 4-5 words
+  await ui.unmount()
+})
+
+test('a saving below zero (pings and requests not yet earned back) reads $0.00, never a minus', async ($, on) => {
+  docOverride = d => ({ ...d, money: { main: { saved_usd: -0.04, baseline_usd: 0.37 }, others: { saved_usd: -0.01, baseline_usd: 0.1, threads: 1 } } })
+  await boot($, on, true)
+  docOverride = null
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect(await dump(band)).toMatch(/saved \$0\.00 of \$0\.37 session/)
+  expect(await dump(band)).not.toMatch(/-\$/)
+  await band.unmount()
+  await $.command.run({ command: 'context-guru', args: '' })
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await dump(pane)).not.toMatch(/-\$/)
+  await pane.unmount()
+})
+
+test('the cache clock counts each second like the status line did, and a cold cache counts up dim', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row = async () => (await dump(ui)).split('\n')[1]
+  expect(await row()).toMatch(/cache ● █████░ 3:59/)
+  await clock.advance(1000)
+  expect(await row()).toMatch(/cache ● █████░ 3:58/)
+  await ui.unmount()
+})
+
+test('a cold main cache shows `cache ○ cold m:ss`, counting up', async ($, on) => {
+  await boot($, on, false)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[1]).toMatch(/cache ○ cold 10:01/) // ended 15 min ago, TTL 5 min, one second in
+  await ui.unmount()
+})
+
+test('the manual pings figure follows the money: `↻ $0.27 pings` once there is a ping', async ($, on) => {
+  docOverride = d => ({ ...d, money: { ...d.money, others: { ...d.money.others, threads: 3 } }, manual_pings: { count: 2, ping_usd: 0.08, saved_usd: 0.27 } })
+  await boot($, on, true)
+  docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 160 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[1]).toMatch(/subagents ↻ \$0\.27 pings │ cache/)
+  await ui.unmount()
+})
+
+test('at 60 columns the status row drops the subagents phrase, the label and the bars, never the figures', async ($, on) => {
+  usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [] }
+  await boot($, on, true)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[1]
+  expect(row.length).toBeLessThanOrEqual(56)
+  expect(row).toMatch(/^saved \$18\.60 of \$61\.40 │ cache ● 3:5\d │ ctx 9%$/)
+  await ui.unmount()
+})
+
+test('nothing ever read, and the proxy is down: the band says so, like the status line did', async ($, on) => {
+  docOverride = () => ({ error: 'no cache state for this session yet', notice: 'cg ✕ token refused · /context-guru:status' })
+  await boot($, on, true)
+  docOverride = null
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await dump(ui)).toBe('cg ✕ token refused · /context-guru:status')
+  await ui.unmount()
+})
+
+test('a release the user has not declined shows `▲ update` first on the status row, as on the status line', async ($, on) => {
+  docOverride = d => ({ ...d, update: '▲ update v0.6.1' })
+  await boot($, on, true)
+  docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[1]).toMatch(/^▲ update v0\.6\.1 │ saved \$18\.60 of \$61\.40 session/)
+  await ui.unmount()
+})
+
+test('on a Claude subscription the money gives way to the 5-hour limit and the tokens saved in it', async ($, on) => {
+  usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+  const calls: string[][] = []
+  docOverride = d => ({ ...d, window_saved: 'saved 85.0k wr · cost 40.0k rd' })
+  await boot($, on, true, calls)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[1]
+  expect(row).toMatch(/^5h 34% · this session saved 85\.0k wr · cost 40\.0k rd │ cache ● /)
+  // the next message is in tokens too, one figure for the warm cache: the 90k cached prefix is read (#1095)
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message 90\.0k rd\s/)
+  expect(await dump(ui)).not.toMatch(/\$/)
+  // the window's start (its reset less five hours) reaches the helper, which reads that window's totals
+  expect(calls.some(c => c.join(' ').includes(`--window-start-ms ${NOW + 3_600_000 - 5 * 3_600_000}`))).toBe(true)
+  await ui.unmount()
+})
+
+test('on a subscription a cold cache prices the next message as the prefix written again', async ($, on) => {
+  usage = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ ○ cache cold · next message 90\.0k wr/)
+  expect(await dump(ui)).not.toMatch(/\$/)
+  await ui.unmount()
+})
+
+const FIVE_HOUR = { startedAt: NOW, context: { tokens: 90000, window: 1_000_000, percent: 9 }, rateLimits: [{ kind: 'five_hour', percentUsed: 34, resetsAt: new Date(NOW + 3_600_000).toISOString() }] }
+
+for (const narrow of [false, true]) {
+  test(`on a subscription a warm band shows one figure, the read, in the success color (${narrow ? '60' : '140'} columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    await boot($, on, true)
+    usage = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: narrow ? 60 : 140 }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(narrow ? /^◆ next 90\.0k rd\s/ : /^◆ next message 90\.0k rd\s/)
+    expect(row1).not.toMatch(/wr|cold/) // no second figure: the read and the write are the same 90k prefix
+    const fig = await ui.find({ type: 'Text', text: /^90\.0k rd$/ })
+    expect((fig as any)?.props?.color).toBe('success')
+    await ui.unmount()
+  })
+}
+
+test('on a subscription a cold band shows one figure, the write, in the warning color', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/^◆ ○ cache cold · next message 90\.0k wr\s/)
+  expect(row1).not.toMatch(/\brd\b/)
+  const fig = await ui.find({ type: 'Text', text: /^90\.0k wr$/ })
+  expect((fig as any)?.props?.color).toBe('warning')
+  await ui.unmount()
+})
+
+test('on a subscription a cold band at 60 columns shows the write in the warning color', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, false)
+  usage = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/^◆ ○ cache cold · next message 90\.0k wr\s/)
+  const fig = await ui.find({ type: 'Text', text: /^90\.0k wr$/ })
+  expect((fig as any)?.props?.color).toBe('warning')
+  await ui.unmount()
+})
+
+test('on a subscription a warm band with no warm price shows no bare next-message label', async ($, on) => {
+  usage = FIVE_HOUR
+  const drop = (t: any) => { const { next_warm_usd, ...rest } = t; return rest }
+  docOverride = d => ({ ...drop(d), threads: d.threads?.map((t: any) => (t.main ? drop(t) : t)) })
+  await boot($, on, true)
+  usage = docOverride = null
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row1 = (await dump(band)).split('\n')[0]
+  expect(row1).not.toMatch(/next message/)
+  expect(row1).not.toMatch(/\b(rd|wr)\b/)
+  await band.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await dump(pane)).toMatch(/NEXT MESSAGE\nnext message unknown\n/)
+  await pane.unmount()
+})
+
+for (const warm of [true, false]) {
+  test(`on a subscription the pane shows one next-message figure for a ${warm ? 'warm' : 'cold'} cache`, async ($, on) => {
+    usage = FIVE_HOUR
+    await boot($, on, warm)
+    usage = null
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = await dump(ui)
+    expect(text).toMatch(warm ? /NEXT MESSAGE\nnext message 90\.0k rd\n/ : /NEXT MESSAGE\nnext message 90\.0k wr\n/)
+    expect(text).not.toMatch(/if the cache is warm|if it is cold/)
+    expect(text).not.toMatch(warm ? /90\.0k wr/ : /90\.0k rd/)
+    const fig = await ui.find({ type: 'Text', text: warm ? /^90\.0k rd$/ : /^90\.0k wr$/ })
+    expect((fig as any)?.props?.color).toBe(warm ? 'success' : 'warning')
+    await ui.unmount()
+  })
+}
+
+// The learned 5-hour weights as `cg.py cachestate` passes them (#1095). On the 90k prefix: a read is 0.09% (≈0.1%),
+// a 5-minute write 1.44% (≈1.4%), a 1-hour write 2.7%.
+const WEIGHTS = {
+  ok: true,
+  weights: { input: 2e-7, cache_read: 1e-8, cache_write_5m: 1.6e-7, cache_write_1h: 3e-7, output: 9e-7 },
+  learned: { input: false, cache_read: true, cache_write_5m: true, cache_write_1h: false, output: true },
+  requests: 1234,
+}
+const withWeights = (w: object | undefined, main: object = {}) => (d: any) => ({
+  ...d,
+  ...main,
+  threads: d.threads.map((t: any) => (t.main ? { ...t, ...main } : t)),
+  ...(w === undefined ? {} : { fivehour_weights: w }),
+})
+
+for (const cols of [140, 60]) {
+  test(`on a subscription with learned weights a warm band shows the 5-hour share, warm and cold (${cols} columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(WEIGHTS)
+    await boot($, on, true)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(cols < 80 ? /^◆ next 5h ≈0\.1% · ≈1\.4% cold\s/ : /^◆ next message ≈0\.1% of 5h · ≈1\.4% if cold\s/)
+    expect(row1).not.toMatch(/\b(rd|wr)\b|\$/)
+    expect(row1.length, row1).toBeLessThanOrEqual(cols - 4)
+    expect((await ui.find({ type: 'Text', text: /^≈0\.1%$/ }) as any)?.props?.color).toBe('success')
+    expect(await ui.find({ type: 'Text', text: /^≈1\.4%$/ })).toBeUndefined() // the cold share is in the dim text, not a figure of its own
+    await ui.unmount()
+  })
+
+  test(`on a subscription with learned weights a cold band shows the cold share in the warning color (${cols} columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(WEIGHTS)
+    await boot($, on, false)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(/^◆ ○ cache cold · next message ≈1\.4% of 5h\s/)
+    expect(row1).not.toMatch(/≈0\.1%|\b(rd|wr)\b/)
+    expect(row1.length, row1).toBeLessThanOrEqual(cols - 4)
+    expect((await ui.find({ type: 'Text', text: /^≈1\.4%$/ }) as any)?.props?.color).toBe('warning')
+    await ui.unmount()
+  })
+}
+
+test('on a subscription with learned weights row 1 fits 60 columns with the longest next-ping hint', async ($, on) => {
+  usage = FIVE_HOUR
+  // The 1-hour tier, with its write weight learned, so the cold figure is a share too (the longest form).
+  docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_1h: true } }, { pings_left: 2, next_ping_ms: NOW + 3_599_000, ttl_s: 3600, end_ts: NOW, last_ts: NOW })
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[0]
+  expect(row).toMatch(/^◆ next 5h ≈0\.1% · ≈2\.7% cold  ↻ ping 59:5\d/)
+  expect(row.length, row).toBeLessThanOrEqual(60 - 4)
+  expect(row).toMatch(/hide  dash ↗$/)
+  await ui.unmount()
+})
+
+test('a cold band whose write tier the fit did not learn shows the token figure, with no "of 5h"', async ($, on) => {
+  usage = FIVE_HOUR
+  // A 1-hour entry that expired an hour ago, so the cache is cold.
+  docOverride = withWeights(WEIGHTS, { ttl_s: 3600, end_ts: NOW - 7_200_000, last_ts: NOW - 7_200_000 })
+  await boot($, on, false)
+  usage = docOverride = null
+  for (const cols of [140, 60]) {
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const row1 = (await dump(ui)).split('\n')[0]
+    expect(row1).toMatch(/^◆ ○ cache cold · next message 90\.0k wr\s/)
+    expect(row1).not.toMatch(/of 5h|5h/)
+    const fig = await ui.find({ type: 'Text', text: /^90\.0k wr$/ })
+    expect((fig as any)?.props?.color).toBe('warning')
+    await ui.unmount()
+  }
+})
+
+test('below 80 columns a warm band with no warm price and an unlearned write tier reads "next", not "next 5h"', async ($, on) => {
+  usage = FIVE_HOUR
+  const drop = (t: any) => { const { next_warm_usd, ...rest } = t; return rest }
+  const w = withWeights(WEIGHTS, { ttl_s: 3600 })
+  docOverride = d => { const x = w(d); return { ...drop(x), threads: x.threads?.map((t: any) => (t.main ? drop(t) : t)) } }
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/^◆ next 90\.0k wr cold/)
+  expect(row1).not.toMatch(/5h/)
+  await ui.unmount()
+})
+
+test('the cold share uses only a learned write weight for the entry tier, and the learned one when the tier is unknown', async ($, on) => {
+  usage = FIVE_HOUR
+  // A 1-hour entry, and the fit did not learn the 1-hour write: the cold figure stays in tokens, the warm one is a share.
+  docOverride = withWeights(WEIGHTS, { ttl_s: 3600 })
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row1 = (await dump(ui)).split('\n')[0]
+  expect(row1).toMatch(/≈0\.1% of 5h · 90\.0k wr if cold/)
+  expect(row1).not.toMatch(/≈2\.7%|wr of 5h/) // 90k × 3e-7 is the scaled API price, not learned: never shown
+  await ui.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(pane)
+  expect(text).toMatch(/if it is cold +90\.0k wr  \(90k tokens cached\)/)
+  expect(text).not.toMatch(/wr of 5h/)
+  await pane.unmount()
+  // A 1-hour entry, and the fit learned the 1-hour write: that weight.
+  docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_1h: true } }, { ttl_s: 3600 })
+  await clock.advance(16_000)
+  const ui1 = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui1)).split('\n')[0]).toMatch(/≈0\.1% of 5h · ≈2\.7% if cold/)
+  await ui1.unmount()
+  // No tier on the entry (then no clock either: the band draws it cold), and the fit learned only the 1-hour write: that one.
+  docOverride = withWeights({ ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_5m: false, cache_write_1h: true } }, { ttl_s: undefined })
+  await clock.advance(16_000)
+  usage = docOverride = null
+  const ui2 = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui2)).split('\n')[0]).toMatch(/next message ≈2\.7% of 5h/)
+  await ui2.unmount()
+})
+
+test('with learned weights but no price for either state the pane shows one unknown line, not two', async ($, on) => {
+  usage = FIVE_HOUR
+  const drop = (t: any) => { const { next_warm_usd, next_cold_usd, rewrite_usd, ...rest } = t; return rest }
+  const w = withWeights(WEIGHTS)
+  docOverride = d => { const x = w(d); return { ...drop(x), threads: x.threads?.map((t: any) => (t.main ? drop(t) : t)) } }
+  await boot($, on, true)
+  usage = docOverride = null
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(pane)
+  expect(text).toMatch(/NEXT MESSAGE\nnext message unknown\n/)
+  expect(text).not.toMatch(/if the cache is warm|if it is cold/)
+  await pane.unmount()
+})
+
+test('a tiny share reads <0.1%, and a large one has no decimals', async ($, on) => {
+  usage = FIVE_HOUR
+  docOverride = withWeights({ ...WEIGHTS, weights: { ...WEIGHTS.weights, cache_read: 1e-10, cache_write_5m: 2e-6 } })
+  await boot($, on, true)
+  usage = docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message <0\.1% of 5h · ≈18% if cold\s/)
+  await ui.unmount()
+})
+
+for (const [name, w] of [
+  ['missing', undefined],
+  ['below the gate (ok false)', { ...WEIGHTS, ok: false }],
+  ['no learned read weight', { ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_read: false } }],
+  ['no learned write weight', { ...WEIGHTS, learned: { ...WEIGHTS.learned, cache_write_5m: false } }],
+  ['a read weight that is not a number', { ...WEIGHTS, weights: { ...WEIGHTS.weights, cache_read: 'x' } }],
+] as const) {
+  test(`on a subscription with weights ${name} the band and the pane keep the one token figure`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(w)
+    await boot($, on, true)
+    usage = docOverride = null
+    const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+    const row1 = (await dump(band)).split('\n')[0]
+    expect(row1).toMatch(/^◆ next message 90\.0k rd\s/)
+    expect(row1).not.toMatch(/%|of 5h/)
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await dump(pane)).toMatch(/NEXT MESSAGE\nnext message 90\.0k rd\n/)
+    await pane.unmount()
+  })
+}
+
+test('with an API key the weights change nothing: the band keeps the dollar pair', async ($, on) => {
+  docOverride = withWeights(WEIGHTS)
+  await boot($, on, true)
+  docOverride = null
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(band)).split('\n')[0]).toMatch(/^◆ next message \$0\.06 · \$0\.78 if cold\s/)
+  await band.unmount()
+})
+
+for (const warm of [true, false]) {
+  test(`on a subscription with learned weights the pane shows the share warm and cold (${warm ? 'warm' : 'cold'} cache, 60 columns)`, async ($, on) => {
+    usage = FIVE_HOUR
+    docOverride = withWeights(WEIGHTS)
+    await boot($, on, warm)
+    usage = docOverride = null
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = await dump(ui)
+    expect(text).toMatch(/NEXT MESSAGE\nif the cache is warm ≈0\.1% of 5h\nif it is cold +≈1\.4% of 5h  \(90k tokens cached\)\nat learned 5-hour weights \(1,234 requests\)\n/)
+    for (const l of text.split('\n')) expect(l.length, l).toBeLessThanOrEqual(60)
+    expect((await ui.find({ type: 'Text', text: /^≈1\.4%$/ }) as any)?.props?.color).toBe(warm ? undefined : 'warning')
+    await ui.unmount()
+  })
+}
+
+test('the band redraws when the learned weights arrive on a later poll', async ($, on) => {
+  usage = FIVE_HOUR
+  await boot($, on, true)
+  let ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message 90\.0k rd\s/)
+  await ui.unmount()
+  docOverride = withWeights(WEIGHTS)
+  await clock.advance(16_000)
+  usage = docOverride = null
+  ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[0]).toMatch(/^◆ next message ≈0\.1% of 5h · ≈1\.4% if cold\s/)
+  await ui.unmount()
+})
+
+test('with an API key the band and the pane keep the dollar pair, warm and cold', async ($, on) => {
+  await boot($, on, true)
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(band)).split('\n')[0]).toMatch(/^◆ next message \$0\.06 · \$0\.78 if cold\s/)
+  await band.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = await dump(pane)
+  expect(text).toMatch(/if the cache is warm \$0\.06\n/)
+  expect(text).toMatch(/if it is cold +\$0\.78  \(90k tokens in the cached prefix\)\n/)
+  await pane.unmount()
+})
+
+test('the weekly tip shows when a command is stale, never rotates, and needs room for a third row', async ($, on) => {
+  tipStale = ['save-more']
+  await boot($, on, true)
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await dump(ui)).toMatch(/tip: \/context-guru:save-more hasn't run in 7\+ days — finds a cheaper config/)
+  await clock.advance(5 * 60_000)
+  expect(await dump(ui)).toMatch(/tip: \/context-guru:save-more hasn't run in 7\+ days/) // the same words minutes later
+  expect(await dump(ui)).not.toMatch(/insights|remove-mcp/)
+  await ui.unmount()
+  ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 3 }, surface: 'terminal' })
+  expect(await dump(ui)).not.toMatch(/tip:/)
+  await ui.unmount()
+  tipStale = []
+})
+
+test('the agents row can be turned off from the pane, and stays off', async ($, on) => {
+  await boot($, on, true)
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'agents' })
+  await pane.unmount()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await dump(ui)).not.toMatch(/agents/)
+  expect(await dump(ui)).toMatch(/next message/) // row 1 stays
+  await ui.unmount()
+})
+
+test('the pane has the dashboard link http://localhost:PORT/dashboard/ on its own line under the title', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const link = await ui.find({ type: 'Link' })
+  expect((link as any)?.props?.href ?? (link as any)?.href).toBe('http://localhost:8787/dashboard/')
+  expect((await dump(ui)).split('\n').slice(0, 3)).toEqual(['◆ Context Guru', 'open dashboard ↗', 'saved $22.80 of $81.90 this session'])
+  await ui.unmount()
+})
+
+test('a pinged agent chip carries the cycle arrow', async ($, on) => {
+  agentExtra = { keepalive: true }
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await dump(ui)).toMatch(/● Explore 5m ↻/)
+  const chip = await ui.find({ type: 'Text', text: /Explore/ })
+  expect((chip as any)?.props?.color).toBe('cyan')
+  await ui.unmount()
+  agentExtra = {}
+})
+
+test('no data: the band is left to the engine', async ($, on) => {
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['engine'] }) as any)
+  on('process.run', () => ({ value: { exitCode: 1, stdout: 'nope', stderr: '' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  clock = mock.clock(on, { now: NOW }) // the band reads the clock before it knows there is no data (#1019)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'engine' })).toBeDefined() // the engine's own band is what shows
+  await ui.unmount()
+})
+
+test('hide is reversible: the pane command, or the pane button, brings the band back', async ($, on) => {
+  await boot($, on, true)
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'hide' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  await ui.unmount()
+  await $.command.run({ command: 'context-guru', args: '' })
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.press({ key: 'hide' })
+  await ui.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'show' })
+  await pane.unmount()
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('pressing Ping runs the helper with the session id and toasts the saving', async ($, on) => {
+  const calls: string[][] = []
+  await boot($, on, true, calls)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
+  const ping = calls.find(c => c.includes('ping'))
+  expect(ping).toBeDefined()
+  expect(ping).toContain('sess-1')
+  expect(toasts.join('\n')).toMatch(/kept warm .* ping cost \$0\.04\. Saving pending: counted on the next request/)
+  expect(toasts.join('\n')).not.toMatch(/saved \$/)
+  await ui.unmount()
+})
+
+test('the Ping toast keeps the old text for an older server that sends saved_usd', async ($, on) => {
+  await boot($, on, true, [], { status: 200, sent: true, saved_usd: 0.46, ping_usd: 0.04 })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
+  expect(toasts.join('\n')).toMatch(/kept warm .* saved \$0\.46 net \(ping cost \$0\.04\)/)
+  await ui.unmount()
+})
+
+test('the /ping slash command is gone: only /context-guru is registered', async ($, on) => {
+  await boot($, on, true)
+  expect(registered).toEqual(['context-guru'])
+})
+
+test('a server without the ping route is not blamed on the session', async ($, on) => {
+  // The helper reports Go's plain-text 404 as a status with no error field.
+  await boot($, on, true, [], { status: 404 })
+  const r = await pressPing($)
+  expect(r.text).toMatch(/does not support manual pings yet/)
+  expect(r.text).not.toMatch(/not known/)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'ping' })
+  expect(toasts.join('\n')).toMatch(/does not support manual pings yet/)
+  await ui.unmount()
+})
+
+test('warm but not pingable: no Ping button, a dim `ping off: <reason>` in its place', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: 'too large' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  const all = await dump(ui)
+  expect(all).toMatch(/ping off: context too large/)
+  for (const line of all.split('\n')) {
+    const m = /ping off: (.*?)(?:\s{2,}|$)/.exec(line)
+    if (m) expect(m[1].length).toBeLessThanOrEqual(40)
+  }
+  await ui.unmount()
+})
+
+for (const [reason, want] of [
+  ['not opted in', /ping off: on next session/],
+  ['too large', /ping off: context too large/],
+  ['pings used', /ping off: pings used up/],
+  ['some-future-code', /^[^p]*$|^(?!.*ping off)/s],
+  ['no entry', /^(?!.*ping off)/s],
+] as const) {
+  test(`ping off, reason ${reason}: short words (17 characters at most) or nothing, never a raw code`, async ($, on) => {
+    await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: reason })
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const all = await dump(ui)
+    expect(all).toMatch(want)
+    expect(all).not.toMatch(/some-future-code/)
+    const shown = /ping off: (.*?)(?:\s{2,}|$)/.exec(all)?.[1] ?? ''
+    expect(shown.length).toBeLessThanOrEqual(17)
+    await ui.unmount()
+  })
+}
+
+test('a server that does not say (no pingable field) still shows the Ping button', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  expect(await dump(ui)).not.toMatch(/ping off/)
+  await ui.unmount()
+})
+
+for (const [status, error, want] of [
+  [409, 'not held', /keep-alive is off/],
+  [409, 'busy', /request is running/],
+  [409, 'too costly', /per-ping limit/],
+  [409, 'something new', /ping refused: something new/],
+  [409, 'over budget', /per-ping limit, so nothing was sent/],
+  [409, 'cold', /already cold/],
+  [429, 'no spare capacity', /no spare capacity/],
+  [502, 'upstream', /upstream model refused/],
+] as const) {
+  test(`a press says the right thing for ${status} ${error}`, async ($, on) => {
+    await boot($, on, true, [], { status, error })
+    const r = await pressPing($)
+    expect(r.text).toMatch(want)
+  })
+}
+
+test('a refused press explains itself with the server\'s ping_reason', async ($, on) => {
+  await boot($, on, true, [], { status: 409, error: 'not held', ping_reason: 'too large' })
+  const r = await pressPing($)
+  expect(r.text).toMatch(/can't ping: context too large to hold for Ping/)
+})
+
+for (const [reason, want] of [
+  ['not opted in', /Ping isn't enabled for this install yet/],
+  ['below limits', /below its minimum/],
+  ['pings used', /pings have run out/],
+  ['stopped', /stopped keeping this thread warm/],
+  ['done', /agent has finished/],
+  ['no entry', /knows nothing about this session/],
+  ['unavailable', /route or credential is failing right now . try again shortly/],
+  ['over budget', /per-ping limit/],
+  ['too large', /too large to hold/],
+  ['unsupported', /Ping cannot hold this session \(extended thinking, or a route Ping does not support\)/],
+  ['expired', /already cold/],
+  ['some-future-code', /cannot ping this session right now/],
+] as const) {
+  test(`a refused press words ping_reason ${reason}`, async ($, on) => {
+    await boot($, on, true, [], { status: 409, error: 'not held', ping_reason: reason })
+    const r = await pressPing($)
+    expect(r.text).toMatch(want)
+    expect(r.text).not.toMatch(/some-future-code/)
+    expect(r.text).not.toMatch(/restart Claude Code/)
+  })
+}
+
+// ---- the pane ---------------------------------------------------------------------------------------------------
+
+test('the pane has every section, in order, when the data is there', async ($, on) => {
+  tipStale = ['save-more']
+  paneDoc = PANE_DATA
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const all = await dump(ui)
+  console.log('--- PANE (warm, 60 cols) ---\n' + all)
+  const order = ['◆ Context Guru', 'saved $22.80 of $81.90 this session', 'NEXT MESSAGE', 'AGENTS', 'SAVED LATELY', 'CACHE HITS', 'MISSES BY HOUR', 'CONTEXT', 'SAVE MORE']
+  let at = -1
+  for (const h of order) {
+    const i = all.indexOf(h)
+    expect(i, `${h} is missing`).toBeGreaterThan(at)
+    at = i
+  }
+  expect(all).toMatch(/if the cache is warm\s+\$0\.06/)
+  expect(all).toMatch(/if it is cold\s+\$0\.78/)
+  expect(all).toMatch(/\$4\.20 today · last 14 days/)
+  expect(all).toMatch(/\$1\.40 lost today/)
+  expect(all).toMatch(/^ ?\$4\.20 today/m)
+  expect(all).toMatch(/41%/)
+  expect(all).toMatch(/tip .*save-more hasn't run in 7\+ days/)
+  expect(all).not.toMatch(/gauge|█{6}.*left/) // no cache clock in the pane either
+  await ui.unmount()
+  tipStale = []
+})
+
+test('the pane omits a section whose data is missing, and shows no empty header', async ($, on) => {
+  paneDoc = { spark: PANE_DATA.spark }
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const all = await dump(ui)
+  expect(all).toMatch(/SAVED LATELY/)
+  for (const gone of ['CACHE HITS', 'MISSES BY HOUR', 'CONTEXT']) expect(all).not.toMatch(new RegExp(gone))
+  await ui.unmount()
+  paneDoc = PANE_DATA
+})
+
+test('the pane omits AGENTS when there are none, and no tip line when no command is stale', async ($, on) => {
+  tipStale = []
+  noAgents = true
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const all = await dump(ui)
+  expect(all).not.toMatch(/AGENTS/)
+  expect(all).not.toMatch(/\btip /)
+  expect(all).toMatch(/SAVE MORE/)
+  await ui.unmount()
+  noAgents = false
+})
+
+for (const cols of [140, 80, 60]) {
+  test(`render: pane and band at ${cols} columns; no "$x lost today" is split and the band is one row`, async ($, on) => {
+    tipStale = ['save-more']
+    await boot($, on, true)
+    await $.command.run({ command: 'context-guru', args: '' })
+    await clock.advance(100)
+    const pane = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: cols }, surface: 'terminal' })
+    const all = await dump(pane)
+    console.log(`--- PANE ${cols} columns ---\n` + all)
+    if (cols < 70) expect(all).toMatch(/▒ fixed \d+% · █ chat \d+% · ░ free/)
+    for (const l of all.split('\n').filter(l => /lost today/.test(l))) expect(l).toMatch(/^\$\d+\.\d\d lost today$/)
+    await pane.unmount()
+    const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: cols }, surface: 'terminal' })
+    const rows = (await dump(band)).split('\n')
+    console.log(`--- BAND ${cols} columns ---\n` + rows.join('\n'))
+    expect(rows[0].length).toBeLessThan(80) // row 1 fits one line, the dashboard link included
+    expect(rows[0]).toMatch(cols < 80 ? /hide  dash ↗$/ : /hide  dashboard ↗$/)
+    await band.unmount()
+    tipStale = []
+  })
+}
+
+test('the pane at 60 columns fits, and a cold pane shows the cold price and no Ping now', async ($, on) => {
+  await boot($, on, false)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const all = await dump(ui)
+  console.log('--- PANE (cold, 60 cols) ---\n' + all)
+  expect(all).toMatch(/○ cache cold: the next message writes it again/)
+  expect(all).toMatch(/if it is cold\s+\$0\.78/)
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  for (const l of all.split('\n')) expect(l.length, l).toBeLessThanOrEqual(110) // lines wrap in the pane; none is absurdly long
+  await ui.unmount()
+})
+
+test('the pane Ping button works and the last ping result shows', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.press({ key: 'ping' })
+  expect(toasts.join('\n')).toMatch(/kept warm/)
+  expect(await dump(ui)).toMatch(/last ping: kept warm — ping cost \$0\.04\. Saving pending/)
+  await ui.unmount()
+})
+
+test('the pane shows the ping-off reason in full words, and no Ping now', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: 'not opted in' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  expect(await dump(ui)).toMatch(/ping off: Ping isn.t enabled for this install yet; it turns on in your next session/)
+  await ui.unmount()
+})
+
+test('render: band, warm, agents, stale tip', async ($, on) => {
+  tipStale = ['save-more']
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  console.log('--- BAND warm, agents, stale tip ---\n' + (await dump(ui)))
+  await ui.unmount()
+  tipStale = []
+})
+
+test('render: band, cold', async ($, on) => {
+  await boot($, on, false)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  console.log('--- BAND cold ---\n' + (await dump(ui)))
+  await ui.unmount()
+})
+
+test('render: band, warm, ping off, short band', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: 'not opted in' })
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 2 }, surface: 'terminal' })
+  console.log('--- BAND warm, ping off, short band ---\n' + (await dump(ui)))
+  await ui.unmount()
+})
+
+// The same table as TestMoneyFormatTable in the Go suite, which holds statusline.py and cg.py to it.
+test('usd() follows the one money format', async () => {
+  const table: [number, string][] = [[0, '$0.00'], [0.004, '<$0.01'], [0.006, '<$0.01'], [0.01, '$0.01'], [0.06, '$0.06'], [0.78, '$0.78'], [1, '$1.00'], [99.99, '$99.99'], [100, '$100'], [123.4, '$123'], [1234.2, '$1234'], [-1.5, '-$1.50'], [-0.004, '$0.00'], [-123.4, '-$123']]
+  for (const [x, want] of table) expect(usd(x)).toBe(want)
+})
+
+test('the first data shows within seconds when the first document is not there yet', async ($, on) => {
+  let ready = false
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('process.run', (_: any, e: any) => {
+    const ret = (o: object) => ({ value: { exitCode: 0, stdout: JSON.stringify(o) + '\n', stderr: '' } })
+    if (e.argv.includes('tip')) return ret({ stale: [], days: 7 })
+    return ret(ready ? doc(true) : { error: 'proxy not answering' })
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next message/ })).toBeUndefined() // no document yet
+  await ui.unmount()
+  ready = true // the status line's refresher wrote the document
+  await clock.advance(3000) // far less than the 15 s poll
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
+  await ui.unmount()
+})
+
+for (const warm of [true, false]) {
+  test(`band row 1 fits the width minus 4 at 60 columns for EVERY ping reason (${warm ? 'warm' : 'cold'}); below 80 it shows only "ping off"`, async ($, on) => {
+    const extra: { v: object } = { v: {} }
+    await boot($, on, warm, [], undefined as any, extra.v)
+    for (const reason of ['', ...REASON_CODES, 'some-future-code']) {
+      Object.assign(extra.v, reason === '' ? { pingable: undefined, ping_reason: undefined } : { pingable: false, ping_reason: reason })
+      await clock.advance(16_000) // the next poll reads the new document
+      const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+      const row = (await dump(ui)).split('\n')[0]
+      expect(row.length, `${reason}: ${row}`).toBeLessThanOrEqual(60 - 4) // the band has its own padding and the terminal a margin
+      expect(row, reason).toMatch(/hide  dash ↗$/)
+      if (!warm) expect(row, reason).not.toMatch(/ping off|\[ Ping \]/)
+      else if (reason === '') expect(row).toMatch(/\[ Ping \]/)
+      else if (reason === 'no entry' || reason === 'some-future-code') expect(row, reason).not.toMatch(/ping off/)
+      else {
+        expect(row, reason).toMatch(/ping off\s+hide  dash ↗$/) // no reason below 80 columns
+        expect(row, reason).not.toMatch(/ping off:/)
+      }
+      await ui.unmount()
+    }
+  })
+}
+
+test('"$x lost today" shows once in the pane, under CACHE HITS', async ($, on) => {
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  expect(lines.filter(l => /lost today/.test(l)).length).toBe(1)
+  const hits = lines.indexOf('CACHE HITS'), heat = lines.indexOf('MISSES BY HOUR')
+  const at = lines.findIndex(l => /lost today/.test(l))
+  expect(at > hits && at < heat).toBe(true)
+  await ui.unmount()
+})
+
+test('a slow first document (about 10 s) still shows the band before the next 15 s poll', async ($, on) => {
+  let ready = false
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('process.run', (_: any, e: any) => {
+    const ret = (o: object) => ({ value: { exitCode: 0, stdout: JSON.stringify(o) + '\n', stderr: '' } })
+    if (e.argv.includes('tip')) return ret({ stale: [], days: 7 })
+    return ret(ready ? doc(true) : { error: 'proxy not answering' })
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(9_000)
+  ready = true // the document arrives about 9 s in
+  await clock.advance(3_000) // 12 s: before the poll at 15 s
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next message/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('SAVE MORE at 60 columns puts each description on its own line', async ($, on) => {
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  const i = lines.findIndex(l => l.startsWith('/context-guru:remove-mcp-and-skills'))
+  expect(lines[i]).toBe('/context-guru:remove-mcp-and-skills')
+  expect(lines[i + 1].trim()).toMatch(/^drop MCP servers/)
+  await ui.unmount()
+})
+
+test('"$x lost today" falls back to MISSES BY HOUR when CACHE HITS has no data, and shows once', async ($, on) => {
+  paneDoc = { heat: PANE_DATA.heat, spark: PANE_DATA.spark }
+  await boot($, on, true)
+  await $.command.run({ command: 'context-guru', args: '' })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const lines = (await dump(ui)).split('\n')
+  expect(lines).not.toContain('CACHE HITS')
+  expect(lines.filter(l => /lost today/.test(l))).toEqual(['$1.40 lost today'])
+  expect(lines.findIndex(l => /lost today/.test(l))).toBeGreaterThan(lines.indexOf('MISSES BY HOUR'))
+  await ui.unmount()
+  paneDoc = PANE_DATA
+})
+
+test('two turns in a row with no document run one retry loop: at most 12 helper reads, not 24', async ($, on) => {
+  const calls: string[][] = []
+  on('command.register', () => ({ value: { command: 'context-guru' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  clock = mock.clock(on, { now: NOW })
+  on('env.get', () => ({ value: 'http://127.0.0.1:8787/anthropic' }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('process.run', (_: any, e: any) => {
+    calls.push([...e.argv])
+    return { value: { exitCode: 0, stdout: JSON.stringify(e.argv.includes('tip') ? { stale: [], days: 7 } : { error: 'proxy not answering' }) + '\n', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({} as any).catch(() => undefined)
+  await $.turn.complete({} as any).catch(() => undefined)
+  await clock.advance(14_000) // under the 15 s poll, long enough for the whole loop
+  const n = calls.filter(c => c.includes('cachestate')).length
+  expect(n).toBeGreaterThan(1) // the loop ran
+  expect(n).toBeLessThanOrEqual(12)
+})
+
+test('a pinged sub-agent that is the latest touch lends the main clock neither its ↻ nor its plan nor its prices', async ($, on) => {
+  docOverride = d => ({
+    ...d,
+    last_ts: NOW - 5_000, end_ts: NOW - 5_000, keepalive: true, held_until_ms: NOW + 3_600_000, next_warm_usd: 0.01, next_cold_usd: 0.09,
+    threads: d.threads.map((t: any) => (t.main ? { ...t, last_ts: NOW - 60_000, held_until_ms: undefined, next_warm_usd: 0.06, next_cold_usd: 0.78 } : t)),
+  })
+  await boot($, on, true)
+  docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const all = await dump(ui)
+  expect(all).toMatch(/next message \$0\.06 · \$0\.78 if cold/)
+  expect(all.split('\n')[1]).toMatch(/cache ● █████░ 3:59$/) // main's own clock, not the sub-agent's hour-long plan
+  expect(all.split('\n')[1]).not.toMatch(/↻/)
+  await ui.unmount()
+})
+
+test('a newer document with the same words still moves the clock (its anchors are in the redraw check)', async ($, on) => {
+  let end = NOW - 60_000
+  docOverride = d => ({ ...d, last_ts: end, end_ts: end, threads: d.threads.map((t: any) => (t.main ? { ...t, last_ts: end, end_ts: end } : t)) })
+  await boot($, on, true)
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  expect((await dump(ui)).split('\n')[1]).toMatch(/cache ● █████░ 3:59/)
+  // A later document moves the end by 20 s. The coarse words (`5m` left) and every price, token and money figure stay
+  // the same, so only the clock's anchors tell the redraw check that it moved.
+  end = NOW - 40_000
+  await clock.advance(16_000)
+  // The fixture's now_ms stays NOW: the clock is end + TTL - (now_ms + the copy's local age), as statusline.py counts.
+  expect((await dump(ui)).split('\n')[1]).toMatch(/cache ● █████░ 4:1\d/) // 20 s more than the old anchor gives (3:5x)
+  docOverride = null
+  await ui.unmount()
+})
+
+test('the redraw check sees a moved clock even when every word and figure is the same', async () => {
+  const at = (end: number) => view({ at: NOW, url: '', doc: { ...doc(true), last_ts: end, end_ts: end, threads: [{ id: 'main', main: true, ...entry(end), last_ts: end }] } }, NOW)
+  // 59 s and 41 s into a 5-minute TTL: both read `5m` left, at the same prices, tokens and money
+  expect(at(NOW - 59_000)!.main.left).toBe(at(NOW - 41_000)!.main.left)
+  expect(signature(at(NOW - 59_000))).not.toBe(signature(at(NOW - 41_000)))
+})
+
+test('a long agent name (a general-purpose agent named by its description) is cut to 24 characters with …', async ($, on) => {
+  docOverride = d => ({ ...d, threads: d.threads.map((t: any) => (t.id === 'a:explorer1' ? { ...t, name: 'Strict main-track reviewer, rewrite round 4' } : t)) })
+  await boot($, on, true)
+  docOverride = null
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 140 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n').find(l => l.startsWith('└ agents'))!
+  expect(row).toMatch(/● Strict main-track revie… 5m/) // 23 characters and `…`
+  expect(row).not.toMatch(/rewrite round 4/)
+  await ui.unmount()
+})
+
+// #771: the Ping button shows only when no automatic ping fires before the cache expires. The warm main cache here
+// ends at NOW - 60 s with a 300 s TTL, so it expires at NOW + 240 s.
+const PLAN_CASES: [string, object, boolean][] = [
+  ['a ping fires before expiry', { pings_left: 2, next_ping_ms: NOW + 100_000 }, false],
+  ['no pings left', { pings_left: 0, next_ping_ms: NOW + 100_000 }, true],
+  ['no ping planned (keep-alive off)', {}, true],
+  ['the next ping comes after expiry', { pings_left: 2, next_ping_ms: NOW + 300_000 }, true],
+  ['next_ping_ms is 0 (no ping planned)', { pings_left: 2, next_ping_ms: 0 }, true],
+  ['a long held_until_ms does not move the choice: the next ping is after the entry\'s own expiry', { pings_left: 2, next_ping_ms: NOW + 300_000, held_until_ms: NOW + 3_600_000 }, true],
+  ['an old proxy that sends pings_left but no next_ping_ms', { pings_left: 2 }, true],
+]
+for (const [name, extra, shown] of PLAN_CASES) {
+  test(`Ping button, ${name}: band and pane agree (${shown ? 'shown' : 'hidden'})`, async ($, on) => {
+    await boot($, on, true, [], undefined as any, extra)
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const bandText = await dump(band)
+    expect(!!(await band.find({ key: 'ping' }))).toBe(shown)
+    expect(/↻ next ping \d+:\d\d/.test(bandText)).toBe(!shown)
+    await band.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const paneText = await dump(pane)
+    expect(!!(await pane.find({ key: 'ping' }))).toBe(shown)
+    expect(/↻ next ping \d+:\d\d/.test(paneText)).toBe(!shown)
+    await pane.unmount()
+  })
+}
+
+test('hidden Ping shows the time of the next ping', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await dump(ui)).toMatch(/↻ next ping 1:[34]\d/)
+  await ui.unmount()
+})
+
+test('a warm cache with a planned ping and pingable=false keeps the ping-off reason, not the next-ping words', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000, pingable: false, ping_reason: 'too large' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const all = await dump(ui)
+  expect(all).toMatch(/ping off/)
+  expect(all).not.toMatch(/next ping/)
+  await ui.unmount()
+})
+
+test('band row 1 fits 60 columns with the next-ping hint, warm', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[0]
+  expect(row).toMatch(/↻ ping \d+:\d\d/)
+  expect(row.length, row).toBeLessThanOrEqual(60 - 4)
+  expect(row).toMatch(/hide  dash ↗$/)
+  await ui.unmount()
+})
+
+// #771: a thread the keeper stopped (a miss, a refused ping, a route failure) plans no ping. While the proxy still
+// holds its copy the server says pingable, and the button shows; once the copy is released it says `stopped`.
+test('a stopped thread with a warm cache and a held copy shows the Ping button', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a stopped thread whose copy is released shows no Ping button', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pingable: false, ping_reason: 'stopped' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('band row 1 fits 60 columns with the longest hint, 59:59 on the 1-hour tier', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 3_599_000, ttl_s: 3600, end_ts: NOW, last_ts: NOW })
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 60 }, surface: 'terminal' })
+  const row = (await dump(ui)).split('\n')[0]
+  expect(row).toMatch(/↻ ping 59:5\d/)
+  expect(row.length, row).toBeLessThanOrEqual(60 - 4)
+  expect(row).toMatch(/hide  dash ↗$/)
+  await ui.unmount()
+})
+
+// #771: the server reports a stopped thread with a tripped route or a dead credential as `unavailable`. The button
+// stays hidden and the band says why; when the mark clears the server says pingable again and the button shows.
+test('unavailable (route tripped or credential dead): no Ping button, "ping off: upstream failing"; shown again once it clears', async ($, on) => {
+  const extra: { v: object } = { v: { pingable: false, ping_reason: 'unavailable' } }
+  await boot($, on, true, [], undefined as any, extra.v)
+  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeUndefined()
+  expect(await dump(ui)).toMatch(/ping off: upstream failing/)
+  await ui.unmount()
+  Object.assign(extra.v, { pingable: true, ping_reason: undefined })
+  await clock.advance(16_000)
+  ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ key: 'ping' })).toBeDefined()
+  await ui.unmount()
+})
+
+// #771: the pane's `↻ next ping` counts with the band, one tick a second.
+test('the pane next-ping hint changes after one tick, without a new mount', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW + 100_000 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const hint = async () => /↻ next ping (\d+:\d\d)/.exec(await dump(ui))?.[1]
+  const a = await hint()
+  await clock.advance(1000)
+  const b = await hint()
+  await ui.unmount()
+  expect(a).toBeDefined()
+  expect(b).toBeDefined()
+  expect(b).not.toBe(a)
+})
+
+test('a planned ping time that has passed shows "pinging…" and keeps the button hidden, in band and pane', async ($, on) => {
+  await boot($, on, true, [], undefined as any, { pings_left: 2, next_ping_ms: NOW - 2_000 })
+  for (const surface of [BAND, PANE]) {
+    const ui = await $.ui.mount({ ...surface, surface: 'terminal' })
+    const all = await dump(ui)
+    expect(all).toMatch(/↻ pinging…/)
+    expect(all).not.toMatch(/0:00/)
+    expect(await ui.find({ key: 'ping' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+// #1243: after a free 1-hour keep-alive ping the proxy reports ttl_s 3600 anchored at the ping, and ttl_unproven while
+// the route is not yet proven to grant the tier. The band counts the hour and writes `1h?` after the clock while it is
+// unproven (statusline.py `_cache_segment` writes the same text). Proven, and an ordinary entry, carry no mark.
+test('the cache clock counts an hour from a free 1-hour ping, with 1h? while the route is unproven', async () => {
+  const ping = NOW - 200_000 // the ping, 200 s ago
+  const at = (extra: object, sessionExtra: object = {}) =>
+    view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, ttl_s: 300, ...sessionExtra, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping, ttl_s: 3600, ...extra }] } }, NOW)!
+  const unproven = cacheClock(at({ ttl_unproven: true }).main)!
+  expect(unproven.time).toBe('56:40 1h?') // an hour from the ping, less the 200 s that have passed
+  expect(cacheClock(at({}).main)!.time).toBe('56:40') // proven: a plain hour clock
+  const five = cacheClock(view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping }] } }, NOW)!.main)!
+  expect(five.time).toBe('1:40') // an ordinary 5-minute entry
+  // The main thread's own entry decides: a mark on the session entry (a subagent's touch) does not reach it.
+  expect(cacheClock(at({}, { ttl_unproven: true }).main)!.time).toBe('56:40')
+  expect(at({ ttl_unproven: true }).main.isUnproven).toBe(true)
+})
+
+// #1258: an unproven hour is the clock's belief, not a write. The thread view keeps the BILLED tier (5m) so the 5-hour
+// share's cold figure uses the basis next_cold_usd is priced at, and the redraw check sees the mark flip.
+test('an unproven hour keeps the billed write tier and moves the redraw anchor when the mark flips', async () => {
+  const ping = NOW - 200_000
+  const at = (extra: object) =>
+    view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping, ttl_s: 3600, ...extra }] } }, NOW)!
+  expect(at({ ttl_unproven: true }).main.writeTier).toBe('5m')
+  expect(at({}).main.writeTier).toBe('1h')
+  expect(at({ ttl_unproven: true }).main.anchor).not.toBe(at({}).main.anchor)
+  expect(signature(at({ ttl_unproven: true }))).not.toBe(signature(at({})))
+})
+
+// #1259: while the entry is at 1 hour from a free 1-hour ping, a press would send 5-minute markers and move it back to
+// 5 minutes, so the Ping button is hidden (proven or not). The next real request brings an ordinary entry, and the
+// button returns. The status line has no Ping button, so this one rule is the whole client side.
+test('the Ping button is hidden on a 1-hour entry from a free 1-hour ping, and returns after the next request', async () => {
+  const ping = NOW - 200_000
+  const at = (extra: object) =>
+    view({ at: NOW, url: '', doc: { ...doc(true), last_ts: ping, end_ts: ping, pingable: true, threads: [{ id: 'main', main: true, ...entry(ping), last_ts: ping, ttl_s: 300, pingable: true, ...extra }] } }, NOW)!
+  expect(showPing(at({}))).toBe(true) // an ordinary 5-minute entry
+  expect(showPing(at({ ttl_s: 3600, free_hour_ping: true, ttl_unproven: true }))).toBe(false) // unproven hour
+  expect(showPing(at({ ttl_s: 3600, free_hour_ping: true }))).toBe(false) // proven hour
+  expect(showPing(at({ ttl_s: 3600 }))).toBe(true) // a real 1-hour write is not a free ping: a press does not shorten it
+  expect(showPing(at({ ttl_s: 300 }))).toBe(true) // the next real request: the flag is gone
+  // The flag moves the redraw anchor, so the band redraws when it flips.
+  expect(at({ ttl_s: 3600, free_hour_ping: true }).main.anchor).not.toBe(at({ ttl_s: 3600 }).main.anchor)
+})

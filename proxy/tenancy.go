@@ -8,8 +8,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/logging"
@@ -119,6 +121,17 @@ func (c *lru[V]) victim() *list.Element {
 	return back
 }
 
+// each walks every live entry, front (most recently used) to back, under the caller's lock.
+// Read-only: the walk must not put or remove, or the iteration order it just promised stops
+// being true. O(n), n bounded by max — the same bound victim() already scans — so a caller
+// that needs it hot wants a summary maintained on write, not this.
+func (c *lru[V]) each(fn func(k string, v V)) {
+	for el := c.ll.Front(); el != nil; el = el.Next() {
+		e := el.Value.(*lruEntry[V])
+		fn(e.k, e.v)
+	}
+}
+
 func (c *lru[V]) remove(k string) {
 	if el, ok := c.index[k]; ok {
 		c.ll.Remove(el)
@@ -151,6 +164,8 @@ type Tenancy struct {
 	Mode components.Mode
 	// CaptureContent is this tenant's consent to storing transcript text.
 	CaptureContent bool
+	// RecordTraces is this tenant's consent to --record trace recording.
+	RecordTraces bool
 	// Upstream names, by dialect, into Options.Upstreams.
 	UpAnthropic, UpOpenAI, UpBob string
 	// Cache is this tenant's host-level prompt-cache policy: the idle keep-alive and the
@@ -439,6 +454,11 @@ type TenantSource struct {
 
 	mu    sync.Mutex
 	cache *lru[*cached] // tenant id -> built tenancy
+
+	// disk is the shared session-state copy (#1104), nil when off. One Disk serves every tenant
+	// store: hosted keys carry the "tenant:<id>" prefix (session.Scoped), so tenants never meet.
+	disk     *store.Disk
+	stateTTL time.Duration
 }
 
 type cached struct {
@@ -554,9 +574,32 @@ func (s *TenantSource) ForTenant(t *tenant.Tenant) (*Tenancy, error) {
 	return s.tenancy(t)
 }
 
+// ObserveNamespaces calls fn for every tenant whose CURRENT pipeline runs observe mode. The
+// restart grace's lookup (#766) uses it to answer "no lookup" for exactly those tenants:
+// observe rows carry no session id, so the recorder knows none of their threads and a miss
+// would read every warm thread as new — the one answer worse than not asking. Only tenants
+// that have RESOLVED at least once are here, which is no gap: a request resolves its tenancy
+// before its pipeline runs, so by the time a thread's key is asked about, its tenant is in
+// the cache. A tenant that switches modes rebuilds on its next request, and this walk reads
+// the rebuilt entry.
+func (s *TenantSource) ObserveNamespaces(fn func(tenantID string)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache.each(func(id string, c *cached) {
+		if c.t.Mode == components.ModeObserve {
+			fn(id)
+		}
+	})
+}
+
 func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	cfgDoc := s.reg.Config(t)
 
+	// prev is the tenancy a config change replaces; build's result may inherit its keep marks.
+	var prev *Tenancy
 	s.mu.Lock()
 	if c, ok := s.cache.get(t.ID); ok {
 		// A configuration change must take effect on the next request, so the cache
@@ -574,6 +617,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 			tn := *c.t
 			tn.Label, tn.Manager = t.Label, t.IsManager()
 			tn.CaptureContent = t.CaptureContent
+			tn.RecordTraces = t.RecordTraces
 			tn.UpAnthropic, tn.UpOpenAI, tn.UpBob = t.UpAnthropic, t.UpOpenAI, t.UpBob
 			// Pipe/Store/Shadow are shared with the previous copy on purpose: they are
 			// internally synchronised, and per-tenant state must not be duplicated.
@@ -581,6 +625,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 			s.mu.Unlock()
 			return &tn, nil
 		}
+		prev = c.t
 		s.cache.remove(t.ID)
 		slog.Info("context-guru: tenant configuration changed; rebuilding pipeline",
 			"tenant", t.ID)
@@ -593,6 +638,7 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	if err != nil {
 		return nil, err
 	}
+	carryKeepMarks(prev, tn)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -600,12 +646,55 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	// already published so two requests never hold different stores for one tenant.
 	if c, ok := s.cache.get(t.ID); ok {
 		if c.config == cfgDoc {
+			// A concurrent request built the same config first, after this one removed the old
+			// entry, so its build had no prev and holds no marks. Carry into the published one.
+			// Put of the same keys is idempotent, and the marks are session state that the expand
+			// path already writes into a published store.
+			carryKeepMarks(prev, c.t)
 			return c.t, nil
 		}
 		s.cache.remove(t.ID)
 	}
 	s.cache.put(t.ID, &cached{config: cfgDoc, t: tn})
 	return tn, nil
+}
+
+// SetSessionState attaches d, the session-state table, to every tenant store built from now on
+// (#1104). Call it once, before serving. A hosted restart then reads a returning session's
+// metadata state back, like a local install: dedup's keep-in-full marks among it. The caller
+// opens d metadata-only, so no summary text or other content key reaches the file. stateTTL is
+// how long memory trusts a loaded session before it reads again; zero keeps the store default.
+// A nil d turns it off.
+func (s *TenantSource) SetSessionState(d *store.Disk, stateTTL time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.disk, s.stateTTL = d, stateTTL
+	s.mu.Unlock()
+}
+
+// carryKeepMarks moves the "keep in full" marks (#1097) from the tenancy a config change replaces
+// to its rebuilt one, when both run the same components in the same order. A mark says the agent
+// expanded an output, so the new pipeline must keep sending it in full: if it compacts it again,
+// the early prefix changes and the provider rewrites a warm cache. With a different component set
+// the old marks are not carried: that is a new pipeline, and it behaves as it did before #1097.
+// The names alone decide: a change to a setting that is not a component (for example
+// expand.fixed_restore) also carries the marks. That is the safe direction, because content stays in full.
+// Only the marks move. The frozen decisions and the stashed originals stay behind, which is the
+// honest cost the rebuild always had.
+// It cannot fail a request: a store that cannot carry leaves the new store empty.
+func carryKeepMarks(prev, next *Tenancy) {
+	if prev == nil || next == nil || prev.Pipe == nil || next.Pipe == nil {
+		return
+	}
+	if !slices.Equal(prev.Pipe.Names(), next.Pipe.Names()) {
+		return
+	}
+	if n := store.CarryPrefix(prev.Store, next.Store, store.KeptPrefix); n > 0 {
+		slog.Info("context-guru: kept the keep-in-full marks across the pipeline rebuild",
+			"tenant", next.ID, "marks", n)
+	}
 }
 
 // build constructs a tenancy from a configuration document. It fails OPEN in one
@@ -616,8 +705,8 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) {
 	tn := &Tenancy{
 		ID: t.ID, Label: t.Label, Manager: t.IsManager(),
-		CaptureContent: t.CaptureContent,
-		UpAnthropic:    t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
+		CaptureContent: t.CaptureContent, RecordTraces: t.RecordTraces,
+		UpAnthropic: t.UpAnthropic, UpOpenAI: t.UpOpenAI, UpBob: t.UpBob,
 		Mode: components.ModeSync,
 	}
 	built, err := s.builder([]byte(cfgDoc), s.emitter)
@@ -631,6 +720,13 @@ func (s *TenantSource) build(t *tenant.Tenant, cfgDoc string) (*Tenancy, error) 
 		return tn, nil
 	}
 	tn.Pipe, tn.Store, tn.Preset, tn.Cache = built.Pipe, built.Store, built.Preset, built.Cache
+	s.mu.Lock()
+	d, life := s.disk, s.stateTTL
+	s.mu.Unlock()
+	if mem, ok := tn.Store.(*store.Memory); ok && d != nil {
+		mem.SetStateTTL(life)
+		mem.AttachDisk(d)
+	}
 	if built.Mode != "" {
 		tn.Mode = built.Mode
 	}
@@ -774,4 +870,32 @@ func failAuth(w http.ResponseWriter, err error) {
 	// Hand-rolled rather than encoding/json: msg is one of this file's constants or
 	// an upstream name, and a marshal error here would leave a bare status.
 	fmt.Fprintf(w, "{\"error\":%q}\n", msg)
+}
+
+// tenantObserves reports whether the thread behind key belongs to a deployment the grace
+// lookup must NOT answer for (#766): the whole proxy when the operator set mode observe, or
+// one hosted tenant whose current pipeline runs observe — its namespace is the "tenant:"
+// prefix session.Scoped puts on every hosted key. Those deployments' rows carry no session
+// id, so the recorder knows none of their threads; a miss would read every warm thread as
+// new, where declining the key (have=false) lets #759's start-time fallback answer.
+//
+// A false hit is possible and tolerable: an explicit session id may itself contain ':'
+// (session.Scoped allows it), so a sync tenant's id can look like an observe tenant's
+// namespace. The cost is one turn answered by the start-time rule instead of the lookup —
+// over-protection, the safe direction. The reverse cannot happen: a hosted observe tenant's
+// keys always carry its prefix.
+func (h *Handler) tenantObserves(key string) bool {
+	if h.mode() == components.ModeObserve {
+		return true
+	}
+	if h.opts.Tenants == nil {
+		return false
+	}
+	hit := false
+	h.opts.Tenants.ObserveNamespaces(func(tenantID string) {
+		if strings.HasPrefix(key, tenantID+":") {
+			hit = true
+		}
+	})
+	return hit
 }

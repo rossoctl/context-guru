@@ -20,26 +20,35 @@ package apply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/expand"
 	"github.com/rossoctl/context-guru/internal/logging"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/thread"
 	"github.com/rossoctl/context-guru/modes"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/session"
 	"github.com/rossoctl/context-guru/store"
+	"github.com/rossoctl/context-guru/thread"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -103,10 +112,11 @@ func logDecisions(lg *slog.Logger, rr *components.RunReport) {
 			"saved", rep.Saved(), "duration_ms", rep.DurationMs,
 			"changed_msgs", len(rep.ChangedIdx),
 		}
-		// "stashed" only for an Offload: a Reformat's CacheKeys are dedup keys over
-		// content it did NOT stash (see components.reformatKeys), and labelling those
-		// "stashed" would read as a reversibility claim the fold never makes.
-		if rep.Kind == "offload" {
+		// "stashed" only for an Offload that stashed: a Reformat's CacheKeys, and an
+		// Irreversible Offload's, are dedup keys over content it did NOT stash (see
+		// components.reformatKeys), and labelling those "stashed" would read as a
+		// reversibility claim the run never makes.
+		if rep.Kind == "offload" && !rep.Irreversible {
 			attrs = append(attrs, "stashed", len(rep.CacheKeys))
 		} else {
 			attrs = append(attrs, "dedup_keys", len(rep.CacheKeys))
@@ -190,6 +200,12 @@ type slot struct {
 	path    string // sjson path: "messages.<i>" (whole) or "messages.<i>.content.<b>.content" (tool text)
 	pre     []byte // canonical marshal of the original (normalized) message
 	preText string // anthropicToolText: original tool-output text (change detection)
+	// tail is the run of trailing <system-reminder> blocks split off an anthropicToolText
+	// output before the components saw it (#556). preText still holds the WHOLE original, and
+	// writeTail rebuilds it, so preText == writeTail(text) means unchanged. The separator
+	// between the output and the run stays in the body (#752); writeTail puts it back before
+	// the tail when a component rewrote the body.
+	tail string
 	// raw is the BODY message's original bytes — for a tool-text slot, the whole user
 	// message the tool_result block lives in, so several slots can share one raw.
 	//
@@ -213,12 +229,29 @@ func (s slot) lossless() bool { return jsonEqual([]byte(s.raw), s.pre) }
 // caller instead. Purely observational: nothing on it affects the rewrite.
 type Trace struct {
 	Session string
+	// TouchAlias is the key of the cold decision's liveness clock (cg:seen:<alias>), derived from the
+	// transcript as it arrived, before the host changes it. A host that records a keep-alive passes
+	// it on, and the ping touches this key through RecordCacheTouchAlias. Re-deriving it from the
+	// body that goes upstream gives another key when the host edits the head (tool deferral).
+	// "" when apply derived none.
+	TouchAlias string
+	// TouchAtMs is the time this request wrote under TouchAlias (the cold clock, before the forward). The host
+	// hands it back to ConfirmRealTouch, so a confirm ends only the carry its OWN request wrote. 0 when this
+	// request wrote no clock (a bypassed one).
+	TouchAtMs int64
+	// TouchSeq numbers that write (the carry it makes holds it). The host hands it back with TouchAtMs.
+	TouchSeq int64
 	// Thread is the request's thread, from Opts.ThreadOf; ThreadResolved says ThreadOf ran.
 	Thread         thread.Result
 	ThreadResolved bool
 	Bypassed       bool
-	CacheAware     bool
-	MaxCachedIdx   int
+	// BypassCount, set only on a bypassed request, returns the token figures the pipeline would
+	// have reported for it: the message tokens before (and, nothing having run, after) and
+	// AttemptedTokens. It tokenizes the whole transcript, so it must never be called on the
+	// request path; the dashboard's count worker calls it.
+	BypassCount  func() (before, attempted int)
+	CacheAware   bool
+	MaxCachedIdx int
 	// Messages is the normalized message count this request carried.
 	Messages int
 	// AttemptedTokens is the token count of the messages age/supersession
@@ -274,6 +307,14 @@ type Trace struct {
 	Restored, RestoredTokens int
 	// Run is the pipeline's aggregate report (nil when the pipeline never ran).
 	Run *components.RunReport
+	// Ops are the rewrite operations of this request for the savings computation, in pipeline
+	// order, with wire positions. OpsDropped counts changes that could not be placed.
+	Ops        []accountant.Operation
+	OpsDropped int
+	// Declined says a component changed the message count, the rebuild of the shortened messages
+	// failed, and the proxy forwards the ORIGINAL body. The run report still shows what the
+	// components did, but none of it reached the provider, so no saving may be booked (#1179).
+	Declined bool
 	// Changes lists each rewritten message's before/after text (clipped).
 	Changes []Change
 }
@@ -314,44 +355,70 @@ func BodyFull(ctx context.Context, pipe *components.Pipeline, st store.Store, pr
 	return r.Body, r.Changed
 }
 
-// metaSessionKeys are the `metadata` fields carrying the agent's OWN session id,
-// in precedence order behind the header: `metadata.user_id` is Claude Code's (a JSON
-// object string, unwrapped by session.ExplicitID) and `metadata.taskId` is Bob
-// Shell's (a bare randomUUID, re-rolled only by /clear). Both survive the agent's
-// context compaction, which the derived sha256(system+firstUser) does not — see
-// session.ExplicitID for what breaks without them. A request carrying both resolves
-// to user_id, by this order.
-var metaSessionKeys = [...]string{"user_id", "taskId"}
-
-// explicitSession resolves the explicit session id for one request: the header wins,
-// then each metaSessionKeys field in order, then "" (Scoped's derived-hash fallback).
-func explicitSession(header string, body []byte) string {
-	cands := make([]string, 0, 1+len(metaSessionKeys))
-	cands = append(cands, header)
-	return session.ExplicitID(append(cands, metaSessionIDs(body)...)...)
+// ExplicitSession resolves the explicit session id for one request: the header wins,
+// then the metadata fields, then the host ids, then "" (Scoped's derived-hash fallback).
+// The rule lives in session.Explicit; this only reads the fields off the raw body.
+// The proxy's Bob route calls it with the X-Task-Id header as a host id. It passes the
+// result back as Opts.Session.
+//
+// gjson scans, so this costs no second unmarshal of the body on the request path. A
+// `metadata` that is absent, null, a scalar or an array yields a non-existent result, and a
+// value that is not gjson.String is skipped, so both fall back to the derived hash.
+//
+// `metadata` is fetched ONCE and the fields read off it, rather than a full-body query per
+// field: on a real 600 KB request `metadata` sits behind `messages`, so each query walked
+// the whole transcript to reach it.
+func ExplicitSession(header string, body []byte, host ...string) string {
+	md := gjson.GetBytes(body, "metadata")
+	return session.Explicit(header, func(k string) (string, bool) {
+		r := md.Get(k)
+		return r.Str, r.Type == gjson.String
+	}, host...)
 }
 
-// metaSessionIDs reads those fields off the raw body.
+// SessionHeader is the header a client or its plugin names the session with. It wins over every other id.
+const SessionHeader = "x-context-guru-session"
+
+// ExplicitSessionFor is the explicit session id for one request, for a host that has the request headers.
+// The order is fixed here, so every host gets the same answer:
 //
-// gjson scans, so this costs no second unmarshal of the body on the request path — the
-// same reason every other body-level read here (messages, wireBreakpoints) uses it. The
-// type check is the whole robustness story: a `metadata` that is absent, null, a scalar
-// or an array yields a non-existent result, and a value that is a number, object or
-// array is not gjson.String — all of which yield "" and fall back to the derived hash
-// rather than stringifying into a key like `map[]`.
+//  1. the SessionHeader header;
+//  2. the body's own ids (session.Explicit), when the header is empty;
+//  3. the id of the agent that owns the route (route.SessionID(h), for example Bob's X-Task-Id);
+//  4. the client's own id from its headers (cl.SessionID: Codex session-id, OpenCode x-opencode-session-id).
 //
-// `metadata` is fetched ONCE and both fields read off it, rather than a full-body query
-// per field: a gjson scan is cheap but not free, and on a real 600 KB request `metadata`
-// sits behind `messages`, so each query walked the whole transcript to reach it.
-func metaSessionIDs(body []byte) []string {
-	md := gjson.GetBytes(body, "metadata")
-	out := make([]string, 0, len(metaSessionKeys))
-	for _, k := range metaSessionKeys {
-		if r := md.Get(k); r.Type == gjson.String {
-			out = append(out, r.Str)
-		}
+// 3 and 4 come after every other id. A route with no agent id and a client with no id give the header
+// unchanged. cl is agent.Identify(h), computed once per request by the host.
+//
+// route may be nil (a host that has no route agent). A panic in route.SessionID gives no id for it:
+// the request keeps the session it has without one (fail open). In Cortex there is no route agent:
+// pass nil, and pass the host's own session id (pctx.SessionID) as the header value when it is set.
+func ExplicitSessionFor(h http.Header, route agent.Agent, cl agent.Client, body []byte) string {
+	sess := h.Get(SessionHeader)
+	id := routeSessionID(h, route)
+	if id == "" {
+		id = cl.SessionID
 	}
-	return out
+	if id == "" {
+		return sess
+	}
+	return ExplicitSession(sess, body, id)
+}
+
+// routeSessionID is route.SessionID(h), fail open.
+func routeSessionID(h http.Header, route agent.Agent) (id string) {
+	if route == nil {
+		return ""
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			// The panic's type only: its message could hold a header value.
+			slog.Error("context-guru: recovered from panic in the agent's session id; using none",
+				"agent", fmt.Sprintf("%T", route), "panic", fmt.Sprintf("%T", rec))
+			id = ""
+		}
+	}()
+	return route.SessionID(h)
 }
 
 // BodyOpts is the full entry point: everything BodyFull takes plus the operating mode
@@ -382,7 +449,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			res = Result{Body: body}
 		}
 	}()
-	if o.API == "responses" {
+	if schema.IsResponses(schema.WireFor(string(o.Provider), o.API)) {
 		return bodyResponsesOpts(ctx, pipe, st, o)
 	}
 	mode := o.Mode
@@ -398,6 +465,66 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// prevent, reproduced in the logs. cg.cache_boundary used to pass mode as an attr of
 	// its own; it does not any more, because that would now render the key twice.
 	ctx = logging.With(ctx, logging.From(ctx).With("mode", string(mode)))
+	// The 1-hour-first relabel (#1261), on the FINAL body of every return below, after the tail mark has run
+	// (this defer is registered BEFORE the tail-mark one, so it runs AFTER it): it relabels every breakpoint, the
+	// tail mark included, whatever value markTail gave it. Here and not
+	// beside the head relabel because it needs the thread and the session, known only once the session id is,
+	// and because it edits messages, whose byte offsets the pipeline's writeback has used by then. Not in
+	// observe mode, not on a bypassed request. The message changes are reported as headttl operations, so the
+	// accountant books the premium and the rescue; tools and system are found by the proxy's envelope diff.
+	var oneHourSession string
+	if mode != components.ModeObserve && !bypass && o.OneHourFirst != nil && explicitBreakpointProvider(provider) {
+		defer func() {
+			// A host that resolves threads but never reached the resolution (an early return) does not
+			// know the thread: ask for nothing.
+			if o.ThreadOf != nil && !res.Trace.ThreadResolved {
+				return
+			}
+			cur := res.Body
+			if cur == nil {
+				cur = o.Body
+			}
+			if !o.OneHourFirst(oneHourSession, res.Trace.Thread.ID, gjson.GetBytes(cur, "model").String(), gjson.GetBytes(cur, "tools.0").Exists()) {
+				return
+			}
+			out, ok := RelabelAllTTL1h(cur, provider)
+			if !ok {
+				return
+			}
+			res.Trace.HeadTTL1h = true // the request asks 1 hour
+			if bytes.Equal(out, cur) {
+				return
+			}
+			res.Trace.Ops = append(res.Trace.Ops, relabelOps(cur, out)...)
+			res.Body, res.Changed = out, true
+		}()
+	}
+	// The tail breakpoint (#795), on the FINAL body of every return below: it must count every
+	// breakpoint the other edits placed (cacheinject, the splice anchor) against the cap of 4.
+	// Deferred after the recover above, so it runs first and the recover still catches a panic in it.
+	// Not in observe mode, whose body is never sent, and not on a bypassed request, which promises
+	// a byte-identical forward.
+	if mode != components.ModeObserve && !bypass && pipe.TailBreakpoint() && explicitBreakpointProvider(provider) {
+		defer func() {
+			if res.Body == nil {
+				return
+			}
+			if out, ok := markTail(res.Body); ok {
+				// The mark makes the last message longer (a string content becomes one block, and
+				// the block carries the mark). No pipeline component reports that, so the sum check
+				// would fail on the messages section. Report it here, as the last operation. Also when
+				// the pipeline's own operations were dropped: the mark is on the wire either way, and
+				// without its operation the sum check fails by the mark's bytes (accountant#70, case C).
+				// Where a dropped change did reach the wire (a wireSizes give-up, or restore copies
+				// whose operations cannot be placed), the report is incomplete with or without the mark;
+				// OpsDropped says so, and the sum check still fails by the dropped changes' bytes.
+				if op, ok := tailOp(res.Body, out); ok {
+					res.Trace.Ops = append(res.Trace.Ops, op)
+				}
+				res.Body, res.Changed = out, true
+			}
+		}()
+	}
 	models := o.Models
 	// Tool-schema annotation strip: a top-level field the pipeline never sees (it
 	// operates on `messages`). Done FIRST, before any byte offset into the body is
@@ -424,8 +551,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// offset into the body is taken. It adds no breakpoint, so it cannot breach the
 	// provider's cap of four. See headttl.go; off unless the host asks.
 	headTTL1h, headTTLTokens := false, 0
-	if !bypass && o.HeadTTL1h && o.HeadTTLMinTokens > 0 {
-		body, headTTL1h, headTTLTokens = upgradeHeadTTL(body, provider, o.HeadTTLMinTokens)
+	if !bypass && o.HeadTTL1h && o.HeadTTLMinBytes > 0 {
+		body, headTTL1h, headTTLTokens = upgradeHeadTTL(body, provider, o.HeadTTLMinBytes)
 	}
 	tr.HeadTTL1h, tr.HeadTTLTokens = headTTL1h, headTTLTokens
 
@@ -458,8 +585,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// than re-parse the whole messages array to find each message again — that parse
 	// measured ~3x the cost of the whole-body copy it was meant to save.
 	shiftAt, shift := 0, 0
-	// splitStableTokens is what the split rescued from the cache-creation tier; the
-	// dashboard prices it (see dash.Event.cachesplitSavedUSD). 0 when nothing split.
+	// splitStableTokens is the size of the stable half the split moved the breakpoint onto, recorded
+	// on the dashboard row. The split's saving is the accountant library's split effect. 0 when
+	// nothing split.
 	splitStableTokens := 0
 	// splitTailHash identifies the volatile half, so a later turn can tell whether the
 	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.
@@ -483,6 +611,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Via the same function the response path reaches through SessionIDFor, so observe mode's
 	// billed-input record and this pipeline's checkpoints cannot key on different ids.
 	sessionID := sessionIDFrom(o.Tenant, o.Session, body, norm)
+	oneHourSession = sessionID
+	// The cold decision's clock key, derived ONCE from the transcript as it ARRIVED. It is also
+	// handed to the host on the Trace, so a keep-alive ping touches the key this request reads
+	// even when the host changes the head before sending (tool deferral, #902). With no explicit
+	// session id it IS the session id, so the head is not hashed twice.
+	alias := sessionID
+	if ExplicitSession(o.Session, body) != "" {
+		sys, firstUser := schema.SessionHead(norm)
+		alias = session.Scoped(o.Tenant, "", sys, firstUser)
+	}
+	tr.TouchAlias = alias
+	loadSessionState(st, sessionID)
 	o.resolveThread(tr, sessionID)
 	var restore restorePlan
 	if !bypass {
@@ -532,7 +672,30 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// post-compaction one.
 		if o.Tracker != nil {
 			var prevAt int64
-			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, len(norm), nowMs)
+			// Read ONCE, used twice: the restart grace the boundary consults and the cold
+			// decision below are one fact — this request's cache lifetime — and must not be
+			// derived twice (see ttlTier for the last time two readers disagreed).
+			model := gjson.GetBytes(body, "model").String()
+			ttl, lifetimeKind := CacheLifetime(provider, model, body)
+			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
+			// The alias session id: the same conversation reaches us under it when the explicit
+			// session header comes and goes (see the clock note below). The restart grace asks
+			// the lookup for the thread's keys under BOTH ids, because a refresh under either
+			// one kept the provider's single entry warm (#766).
+			//
+			// Two alias values, two jobs. graceAlias is the id a HEADERLESS turn of this body
+			// runs under — the metadata session id when the body carries one, else the content
+			// hash — and it is the ONE rule the record side also derives (graceAliasID), so
+			// the keys the grace asks for and the keys the recorder warms cannot drift apart.
+			// The Bob IDE's X-Task-Id header is an explicit id, like the session header. So the
+			// grace alias of a Bob IDE session is the content hash.
+			// alias (above) is always the bare content hash. It keys the cold decision's own
+			// clocks (aliasSeenState, sessionTTL, RecordCacheTouch).
+			graceAlias := graceAliasID(o.Tenant, body, norm)
+			graceAliasKey := thread.Key(graceAlias, tr.Thread.ID)
+			graceAliasParentKey := inheritKey(graceAlias, threadParent, threadInherits)
+			maxCachedIdx, prevAt = o.Tracker.TurnFrom(turnKey, parentKey, graceAliasKey, graceAliasParentKey,
+				len(norm), nowMs, restartGrace(provider, ttl, lifetimeKind))
 			maxCachedIdx--
 			// The idle clock is per SESSION ID; the provider's prompt cache is keyed on
 			// CONTENT. When those disagree the clock can go stale while the provider's entry
@@ -557,11 +720,46 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// timestamp sitting unread in the store. Four turns, header present on 2 and 3:
 			// ColdCache came out [false false false TRUE] with the entry 60 s old.
 			//
-			// Reading a key we also write is safe: aliasSeen reads BEFORE it writes and runs
+			// Reading a key we also write is safe: aliasSeenState reads BEFORE it writes and runs
 			// once per request, so the value is the previous turn's, never this one's.
-			sys, firstUser := schema.SessionHead(norm)
-			alias := session.Scoped(o.Tenant, "", sys, firstUser)
-			if aliasAt := aliasSeen(st, alias, nowMs); aliasAt > prevAt {
+			// #770: the alias session's own clocks (cg:seen:, cg:ttl:) may be on disk only,
+			// so load them before aliasSeenState reads. alias and sessionID are declared above,
+			// beside the grace keys — the merge keeps #770's call on the bare-hash alias.
+			if alias != sessionID {
+				loadSessionState(st, alias)
+			}
+			seen, seq := aliasSeenWrite(st, alias, nowMs)
+			if seq > 0 { // seq is 0 when the request took no clock step (bypassed)
+				tr.TouchAtMs, tr.TouchSeq = nowMs, seq // this request's own clock, as a confirm names it
+			}
+			aliasAt := seen.at
+			// A store that keeps nothing never held the ping's clock (#1350). The host's own record of the ping
+			// stands in for it, asked only then: with a real store the stored clock is the one record. It joins
+			// the clocks the way the carried ping does: it can only move prevAt later and only extend the lifetime
+			// to the ping's hour, so it makes a cold verdict warm and never the other way.
+			storeOffPingAt := int64(0)
+			if !store.Keeps(st) {
+				if at, ok := o.freePingFor(alias); ok && at <= nowMs {
+					storeOffPingAt = at
+				}
+			}
+			touchOneHour := lastTouchOneHour(seen.at, seen.oneHour, prevAt)
+			// The carried ping counts under the same guard: the alias clock must be the latest clock, or a
+			// request that wrote no alias clock (a bypassed one) has moved the entry since.
+			carriedAt := int64(0)
+			if seen.carriedAt > 0 && seen.at >= prevAt {
+				carriedAt = seen.carriedAt
+			}
+			if storeOffPingAt > 0 {
+				// Counted as a carried ping: a failed request after it touched nothing, so its hour runs on.
+				if carriedAt == 0 || storeOffPingAt > carriedAt {
+					carriedAt = storeOffPingAt
+				}
+				if storeOffPingAt > prevAt {
+					prevAt = storeOffPingAt
+				}
+			}
+			if aliasAt > prevAt {
 				prevAt = aliasAt
 			}
 			// The TTL record is read under BOTH ids too, and the two guards have to compose or
@@ -573,11 +771,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			//
 			// Under both rather than under the alias alone, because neither id is reliable by
 			// itself: the alias splits when the header comes and goes, and it ALSO changes when
-			// the agent compacts its own context (metaSessionKeys survives that, the derived
-			// sha256(system+firstUser) does not — see explicitSession). Passing the already
+			// the agent compacts its own context (session.Explicit survives that, the derived
+			// sha256(system+firstUser) does not — see ExplicitSession). Passing the already
 			// widened ttl into the second call converges the two records as a side effect.
-			ttl, lifetimeKind := CacheLifetime(provider, gjson.GetBytes(body, "model").String(), body)
-			ttlMinimum = lifetimeKind == CacheLifetimeMinimum
 			if lifetimeKind == CacheLifetimeExact {
 				// Per thread too: another thread's 1h tier says nothing about this thread's cache.
 				ttl = sessionTTL(st, turnKey, ttl)
@@ -587,7 +783,19 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 				if a := sessionTTL(st, alias, ttl); a > ttl {
 					ttl = a
 				}
-				coldCache = cacheIsCold(prevAt, nowMs, ttl)
+				// A free 1-hour ping was the last touch: the provider holds the entry for the 1-hour
+				// lifetime from it, whatever tier this thread's own request asks (#1350). The guards above
+				// are the floor; the lifetime and the verdict come from the one function.
+				facts := CacheFacts{Provider: provider, Model: model,
+					LastOneHour: touchOneHour, Floor: ttl}
+				// A free 1-hour ping stands under a real request the host has not confirmed (it failed, or
+				// nobody told us): the failed request touched nothing, so the ping's hour still runs.
+				// The same margin as the verdict (coldMargin): the carry ends where a plain tier would.
+				if carriedAt > 0 && time.Duration(nowMs-carriedAt)*time.Millisecond < EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true})+coldMargin {
+					facts.LastOneHour = true
+				}
+				ttl = EntryLifetime(facts)
+				coldCache = IsCold(facts, prevAt, nowMs)
 			}
 			// A minimum only proves warmth before its boundary; past it the
 			// entry may still exist. Never lift TailOnlyCold on that guess.
@@ -621,12 +829,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// bypass passed through as mutable tail and rewrites them, diverging from the
 		// prefix the provider just cached and forcing a full cache-write of the suffix.
 		//
-		// So the cost of a bypass is not confined to the bypassed request, which is what
-		// the anti-latching argument in proxy/agentcompaction.go used to claim. It lands
-		// on the following turn, and it is a cache-write rather than lost savings. That
-		// matters because a false-positive bypass is reachable: the detector's phrase is
-		// quoted verbatim in this repo's own docs/how-to/agent-compaction.md, so an agent
-		// that reads that page gets it into a trailing tool_result.
+		// So the cost of a bypass is not confined to the bypassed request. It lands on the
+		// following turn, and it is a cache-write rather than lost savings. A request is
+		// bypassed only by the x-context-guru-bypass header, or when it is an agent
+		// compaction body over the size ceiling (see proxy.chat).
 		//
 		// Recording is safe in both directions. On a genuine agent compaction the next
 		// turn is shorter, so modes.Boundary resets anyway and this record is discarded.
@@ -637,7 +843,10 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// session that had been bypassing for ten minutes look ten minutes IDLE, and a
 			// cold sweep would then rewrite a prefix the provider had just cached: the 1.25x
 			// suffix re-write this whole design exists to avoid.
-			o.Tracker.TurnAt(turnKey, len(norm), nowMs)
+			//
+			// The grace is 0 because the boundary this call returns is discarded: a bypassed
+			// request changes nothing, so there is nothing to protect.
+			o.Tracker.TurnAt(turnKey, len(norm), nowMs, 0)
 		} else {
 			defer putLen(st, turnKey, len(norm))
 		}
@@ -655,19 +864,20 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	rawInput := make([]bschemas.ChatMessage, len(norm))
 	copy(rawInput, norm)
 	c := &components.Ctx{
-		Ctx:            ctx,
-		Session:        sessionID,
-		Thread:         tr.Thread.ID,
-		ThreadParent:   threadParent,
-		ThreadInherits: threadInherits,
-		DeclaresTools:  gjson.GetBytes(body, "tools.#").Int() > 0,
-		Store:          st,
-		RawInput:       rawInput,
-		WireGroup:      wireGroups(slots),
-		Model:          models,
-		Bypass:         bypass,
-		CtxWindow:      o.Window,
-		CtxWindowExact: o.WindowExact,
+		Ctx:               ctx,
+		Session:           sessionID,
+		Thread:            tr.Thread.ID,
+		ThreadParent:      threadParent,
+		ThreadInherits:    threadInherits,
+		DeclaresTools:     gjson.GetBytes(body, "tools.#").Int() > 0,
+		Store:             st,
+		RawInput:          rawInput,
+		WireGroup:         wireGroups(slots),
+		NoCacheBreakpoint: !explicitBreakpointProvider(provider),
+		Model:             models,
+		Bypass:            bypass,
+		CtxWindow:         o.Window,
+		CtxWindowExact:    o.WindowExact,
 		// C, the denominator the fill fraction actually belongs over — see
 		// components.Ctx.CompactionPoint.
 		CompactionPoint:       o.CompactionPoint,
@@ -675,20 +885,22 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// Read under the SAME sessionID the host will write back under (Trace.Session), which
 		// is what keeps the fraction gate from reading a permanent zero. See
 		// RecordBilledInput.
-		PrevBilledInput: prevBilledInput(st, sessionID),
-		ModelName:       gjson.GetBytes(body, "model").String(),
-		SelfRates:       o.SelfRates,
-		RatesFor:        o.RatesFor,
-		CacheAware:      cacheAware,
-		ColdCache:       coldCache,
-		IdleMs:          idleMs,
-		MaxCachedIdx:    maxCachedIdx,
+		PrevBilledInput:       prevBilledInput(st, sessionID),
+		PrevBilledInputThread: prevBilledInputThread(st, sessionID, tr.Thread.ID),
+		ModelName:             gjson.GetBytes(body, "model").String(),
+		SelfRates:             o.SelfRates,
+		RatesFor:              o.RatesFor,
+		CacheAware:            cacheAware,
+		ColdCache:             coldCache,
+		IdleMs:                idleMs,
+		MaxCachedIdx:          maxCachedIdx,
 		// Every breakpoint already on the wire — including the ones no component can
 		// see (`system`, `tools`, and the marks our own normalize drops). The
 		// provider's cap of four counts them all (issue #32, defect 2).
 		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
 		PrefixAsk:           o.PrefixAsk,
+		CanKeepAlive:        canKeepAliveFor(o.CanKeepAlive, sessionID, tr.Thread.ID),
 		CacheTTLMs:          ttlMs,
 		CacheTTLMinimum:     ttlMinimum,
 		// Set BEFORE the run, so cachesplit's own report is right at the source and every
@@ -720,11 +932,15 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.
-	tr.AttemptedTokens = attemptedTokens(norm, c)
+	// A bypassed request is not compacted and counting its text is the slow part (see
+	// Pipeline.Run), so it is counted later, off the request path, through Trace.BypassCount.
+	if !bypass {
+		tr.AttemptedTokens = attemptedTokens(norm, c)
+	}
 
 	// From here on, everything this request logs carries the RESOLVED session. The
 	// caller (the proxy) already put tenant and route on the context logger; the session
-	// is only knowable here, after explicitSession + session.Scoped have run, which is
+	// is only knowable here, after ExplicitSession + session.Scoped have run, which is
 	// exactly why the logger travels in the context instead of being passed in whole.
 	lg := logging.From(ctx).With("session", sessionID)
 	debug := logging.Debugging(ctx)
@@ -746,8 +962,27 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// already in slot.pre, filled by normalize. Marshalling every message a second time
 	// here was pure duplicate work on every request, for a path only summarize takes.
 
+	if bypass {
+		tr.BypassCount = func() (before, attempted int) {
+			return schema.MessagesTokens(chat), attemptedTokens(norm, c)
+		}
+	}
 	rr := pipe.Run(chat, c)
 	tr.Run = rr
+	// Operations are published only once the writeback has settled and we know which rewrites
+	// reached the forwarded body (Trace.Ops never describes a rewrite that is not on the wire).
+	// applied: the rewritten body is the one forwarded, which is every mode but observe.
+	wire, applied := wireGroups(slots), mode != components.ModeObserve
+	// giveUp drops every operation. Most callers forward the original body, so no operation is real.
+	// After a wireSizes failure the rewritten body is forwarded but its sizes cannot be trusted, so no
+	// operation is published for it either; OpsDropped counts what the report leaves out.
+	giveUp := func() {
+		tr.Ops = nil
+		if rr != nil {
+			ops, d := opsFromRun(*rr, wire, applied, nil)
+			tr.OpsDropped = len(ops) + d
+		}
+	}
 	if debug && rr != nil {
 		logDecisions(lg, rr)
 	}
@@ -764,20 +999,37 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// tool_result) and marshaling only genuinely new messages (the summary).
 	if len(chat.Input) != len(norm) || summaryStructureChanged(norm, chat.Input) {
 		nb, ok := rebuildCountChanged(body, msgs, slots, chat.Input)
+		tr.Declined = !ok
+		if ok && explicitBreakpointProvider(provider) {
+			// The splicing component's kept tool_result, marked so the next turn can read the cache
+			// up to it (#723). Only on this path: nothing else sets the anchor. Only where the body
+			// carries tool_result blocks and explicit breakpoints (explicitBreakpointProvider): an
+			// OpenAI-shaped body has neither, and searching it would count every splice as not found.
+			nb = anchorCacheBreakpoint(nb, c.CacheAnchorToolID)
+		}
+		if ok && rr != nil {
+			tr.Ops, tr.OpsDropped = OpsFromRun(*rr, wire, applied)
+			outMsgs := messagesArray(nb).Array()
+			if !wireSizes(tr.Ops, rawLen(msgs), rawLen(outMsgs), rawTotal(msgs), rawTotal(outMsgs)) {
+				giveUp()
+			}
+		} else {
+			giveUp()
+		}
 		if !ok && systemSplit {
 			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
 			return res
 		}
-		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0
+		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 		if ok {
-			res = finishRestore(res, restore, string(provider), body, msgs)
+			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
 		return res
 	}
 
 	// The envelope rewrites (tail split, tool-schema strip) already rewrote `body`, so
 	// the result must be forwarded even if no component changes a message.
-	changed := systemSplit || toolSchema || filteredDecls > 0
+	changed := systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
 	// Each changed message's new bytes, keyed by its index in the body's messages array,
 	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
 	// sjson.SetBytes into the whole body per changed message, which copies the entire
@@ -789,6 +1041,18 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// Exact attribution for the diff view: which components rewrote each message, in
 	// order. Built once from the run report the pipeline already produced.
 	touched := touchedBy(rr)
+	// A message no surviving component changed re-marshals to exactly its normalized form, so the
+	// comparison below can skip it: changedIdx (reflect.DeepEqual before/after, per component) is
+	// what says "changed". It is only trusted when nothing was reverted, because a revert installs
+	// a clone of the snapshot, which is equal in content but not proven equal in bytes.
+	trustTouched := rr != nil
+	if rr != nil {
+		for _, rep := range rr.Components {
+			if rep.Reverted {
+				trustTouched = false
+			}
+		}
+	}
 	// Per-message count of changes this writeback threw away, attributed back to the
 	// components that made them once the loop is done.
 	discarded := map[int]int{}
@@ -807,6 +1071,8 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 		return bi, rel, cur, true
 	}
+	// written: the req.Input indices whose content change really went into an edit.
+	written := map[int]bool{}
 	for i := range chat.Input {
 		s := slots[i]
 		switch s.kind {
@@ -816,27 +1082,34 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// exactly as they arrived. Never written back, so never counted as a change.
 			continue
 		case anthropicToolText:
-			newText := schema.MessageText(chat.Input[i])
+			newText := s.writeTail(schema.MessageText(chat.Input[i]))
 			if newText == s.preText {
 				continue
 			}
 			bi, rel, cur, ok := editOf(s.path, s.raw)
 			if !ok {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			nb, err := sjson.SetBytes(cur, rel, newText)
 			if err != nil {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			edits[bi] = nb
 			changed = true
+			written[i] = true
 			changes = append(changes, mkChange(s.path, s.preText, newText, touched[i]))
 		default: // wholeMessage
+			if _, was := touched[i]; trustTouched && !was {
+				continue // no component changed it: keep the original bytes verbatim (I1)
+			}
 			post, err := json.Marshal(chat.Input[i])
 			if err != nil {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			if bytes.Equal(post, s.pre) {
@@ -845,6 +1118,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			bi, _, cur, ok := editOf(s.path, s.raw)
 			if !ok {
 				res.Body = body
+				giveUp()
 				return res
 			}
 			if !s.lossless() {
@@ -857,6 +1131,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 					if nb, ok := applyMetaWrites(cur, len(chat.Input[i].Content.ContentBlocks), w); ok {
 						edits[bi] = nb
 						changed = true
+						// The mark is on the wire, so the change that carries it is real. Without this the
+						// operation is dropped and the accountant's sum check fails on the added bytes (#938).
+						written[i] = true
 						continue
 					}
 				}
@@ -870,6 +1147,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 			// that splice, at the cost of copying the whole body.
 			edits[bi] = post
 			changed = true
+			written[i] = true
 			var pm bschemas.ChatMessage
 			_ = json.Unmarshal(s.pre, &pm)
 			changes = append(changes,
@@ -896,9 +1174,33 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		nb, ok := spliceMessages(body, msgs, edits, shiftAt, shift)
 		if !ok {
 			res.Body = body
+			giveUp()
 			return res
 		}
 		out = nb
+	}
+	if rr != nil {
+		tr.Ops, tr.OpsDropped = opsFromRun(*rr, wire, applied, func(idx int) bool { return written[idx] })
+		// The forwarded messages are the inbound ones with each edit swapped in (spliceMessages).
+		outLen := func(i int) (int, bool) {
+			if e, ok := edits[i]; ok {
+				return len(e), true
+			}
+			return rawLen(msgs)(i)
+		}
+		inTotal, outTotal := rawTotal(msgs), rawTotal(msgs)
+		for i, e := range edits {
+			if i >= 0 && i < len(msgs) {
+				outTotal += len(e) - len(msgs[i].Raw)
+			}
+		}
+		// outLen is keyed by the INPUT index, and wireSizes asks it for the OUTPUT index. They differ
+		// when a splice inserts a different count than it removed, which this equal-count writeback
+		// can carry when two count-changing components cancel out. Sizes taken from the wrong
+		// message would be published with no check able to catch them, so give up here.
+		if shiftingSplice(tr.Ops) || !wireSizes(tr.Ops, rawLen(msgs), outLen, inTotal, outTotal) {
+			giveUp()
+		}
 	}
 	tr.Changes = changes
 	if changed && dumpPath != "" {
@@ -919,7 +1221,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		}
 	}
 	res.Body, res.Changed = out, changed
-	return finishRestore(res, restore, string(provider), body, msgs)
+	return finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 }
 
 // resolveCacheAware decides whether cache-aware compaction is active for this
@@ -967,8 +1269,8 @@ func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	if bodyAsksExtendedTTL(body) {
 		return TTLEphemeral1h
 	}
-	switch provider {
-	case bschemas.Anthropic, bschemas.Bedrock, bschemas.BedrockMantle, bschemas.Vertex:
+	switch {
+	case modelinfo.HonoursCacheControl(provider):
 		return TTLEphemeral5m
 	default:
 		// Every other backend's cache, where it has one, is not on Anthropic's 5-minute
@@ -977,36 +1279,66 @@ func ttlTier(provider bschemas.ModelProvider, body []byte) string {
 	}
 }
 
-// bodyAsksExtendedTTL reports whether any cache_control on the wire asks for the 1h tier.
-// Structural, for the same reason hasCacheBreakpoint is: a tool output containing the text
-// "1h" must not extend our idea of the cache lifetime.
+// cacheControlPaths are the gjson paths of every block-level cache_control on the wire.
+var cacheControlPaths = [...]string{
+	"messages.#.content.#.cache_control",
+	"messages.#.cache_control",
+	"system.#.cache_control",
+	"tools.#.cache_control",
+}
+
+// wireCacheControls lists every cache_control object on the wire: the block marks in messages, system
+// and tools, and the TOP-LEVEL mark of Anthropic's automatic caching (the provider then puts one
+// breakpoint on the last cacheable block). It is the one list the TTL readers share
+// (bodyAsksExtendedTTL, AllBreakpointsAskExtendedTTL), so they cannot disagree on a body whose only
+// mark is the top-level one (issue #1279). schema.CountBreakpoints counts the cache_control spellings of the same set.
+// Structural, for the same reason hasCacheBreakpoint is: a tool output containing the text "1h" must
+// not extend our idea of the cache lifetime.
+func wireCacheControls(body []byte) []gjson.Result {
+	var marks []gjson.Result
+	var walk func(v gjson.Result)
+	walk = func(v gjson.Result) {
+		if v.IsArray() {
+			v.ForEach(func(_, vv gjson.Result) bool { walk(vv); return true })
+			return
+		}
+		if v.IsObject() {
+			marks = append(marks, v)
+		}
+	}
+	if root := gjson.GetBytes(body, "cache_control"); root.IsObject() {
+		marks = append(marks, root)
+	}
+	for _, p := range cacheControlPaths {
+		walk(gjson.GetBytes(body, p))
+	}
+	return marks
+}
+
+// bodyAsksExtendedTTL reports whether any cache_control on the wire (the top-level one included) asks
+// for the 1h tier.
 func bodyAsksExtendedTTL(body []byte) bool {
-	for _, p := range []string{
-		"messages.#.content.#.cache_control.ttl",
-		"messages.#.cache_control.ttl",
-		"system.#.cache_control.ttl",
-		"tools.#.cache_control.ttl",
-	} {
-		found := false
-		gjson.GetBytes(body, p).ForEach(func(_, v gjson.Result) bool {
-			if v.IsArray() {
-				v.ForEach(func(_, vv gjson.Result) bool {
-					if vv.String() == "1h" {
-						found = true
-					}
-					return !found
-				})
-			}
-			if v.String() == "1h" {
-				found = true
-			}
-			return !found
-		})
-		if found {
+	for _, m := range wireCacheControls(body) {
+		if m.Get("ttl").String() == "1h" {
 			return true
 		}
 	}
 	return false
+}
+
+// AllBreakpointsAskExtendedTTL reports whether the body has cache breakpoints and every one of them
+// asks for the 1h tier. A single 5m breakpoint (the default when `ttl` is absent) makes it false:
+// that segment expires in five minutes whatever the others ask. The top-level cache_control of
+// automatic caching is one of the breakpoints. The keeper uses this, with the billed tier, to pick a
+// session's keep-alive schedule.
+func AllBreakpointsAskExtendedTTL(body []byte) bool {
+	marks := wireCacheControls(body)
+	for _, m := range marks {
+		if m.Get("ttl").String() != "1h" {
+			return false
+		}
+	}
+	return len(marks) > 0
 }
 
 // cacheIsCold reports whether this session has been idle long enough that its prompt cache
@@ -1022,29 +1354,164 @@ func cacheIsCold(prevAtMs, nowMs int64, ttl time.Duration) bool {
 	return time.Duration(nowMs-prevAtMs)*time.Millisecond >= ttl+coldMargin
 }
 
-// aliasSeen records activity against a content-derived session id and returns when that id
-// was last seen, or 0 if never. It is the second clock the cold decision consults.
+// seenState is what a cg:seen: value says about the last touch.
+type seenState struct {
+	at      int64 // the time of the last touch
+	oneHour bool  // that touch left the entry at the 1-hour tier
+	// carriedAt is the time of a free 1-hour ping that still stands under a real request nobody has confirmed
+	// (ConfirmRealTouch). 0 = none.
+	carriedAt int64
+	// tag names the route that made the 1-hour ping ("" = not named). A route switch-off ends only a ping that
+	// carries its own tag (EndTouchTier), so it can never end a later ping another route made.
+	tag string
+	// seq names the request that wrote a carry (touchSeq, one per request of this process). A confirm ends only a
+	// carry with its own time AND its own seq, so two requests that wrote in the same millisecond cannot end
+	// each other's carry. 0 = none.
+	seq int64
+}
+
+// aliasSeenState records activity against a content-derived session id and returns the last touch of that id (zero
+// if never seen). It is the second clock the cold decision consults. It is deliberately NOT the Tracker: TurnAt runs
+// the transcript length through modes.Boundary, which counts a compaction reset, so recording a second key per
+// request double-counted that metric. The state is pinned against LRU (store.SeenPrefix) because losing it makes a
+// warm prefix read cold. On a store that cannot persist it degrades to zero.
 //
-// Deliberately NOT the Tracker: TurnAt runs the transcript length through modes.Boundary,
-// which counts a compaction reset, so recording a second key per request double-counted that
-// metric. This needs only a timestamp, and the store already holds per-session state.
+// The tier lives exactly until the next real request, as the clock does: a REAL request writes the plain clock,
+// with no tier, so one record carries the time and the tier of the last touch.
 //
-// Pinned against LRU (store.SeenPrefix) because losing it makes a warm prefix read cold.
-//
-// ponytail: degrades to 0 on a store that cannot persist, which just restores the old
-// single-clock behaviour. Move it into the Tracker (with a read-only accessor) if the alias
-// clock ever needs the boundary too.
-func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
-	if st == nil || nowMs <= 0 {
-		return 0
+// It reads the last touch and writes this request's own touch. The write keeps the 1-hour ping
+// that stood before it as a CARRIED tier: a real request that fails (429, 5xx, a cancel) touches nothing at the
+// provider, so the ping's hour must outlive it. The host ends the carry when it learns the request was
+// accepted (ConfirmRealTouch, the keeper's Record). The store value is the ONE record of the fact: the keeper
+// keeps no tier and no time of its own, so no failure path can leave two records apart (#1350, #1365).
+func aliasSeenState(st store.Store, alias string, nowMs int64) (prev seenState) {
+	prev, _ = aliasSeenWrite(st, alias, nowMs)
+	return prev
+}
+
+// touchSeq numbers the real requests that take the clock step in this process (with no store the step writes
+// nothing, but the request still has its number). A carry holds the number of the request that wrote it. Two processes on one store could draw the same number: that needs the same millisecond too, and
+// errs toward the old behavior (a shared confirm), not toward a new failure.
+var touchSeq atomic.Int64
+
+// aliasSeenWrite is aliasSeenState that also returns the number of this request's clock step (0 when the request
+// took none: a bypassed one). With no store the step writes nothing, but the request still has its number.
+func aliasSeenWrite(st store.Store, alias string, nowMs int64) (prev seenState, seq int64) {
+	if nowMs <= 0 {
+		return seenState{}, 0
+	}
+	seq = touchSeq.Add(1) // the request went through the clock step, also when there is no store to write to
+	if st == nil {
+		return seenState{}, seq
 	}
 	k := store.SeenPrefix + alias
-	var prev int64
 	if b, ok := st.Get(k); ok {
-		prev, _ = strconv.ParseInt(string(b), 10, 64)
+		prev = parseSeenState(b)
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
-	return prev
+	v := strconv.FormatInt(nowMs, 10)
+	switch {
+	case prev.oneHour:
+		v += seenCarrySep + strconv.FormatInt(prev.at, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
+	case prev.carriedAt > 0:
+		v += seenCarrySep + strconv.FormatInt(prev.carriedAt, 10) + seqSuffix(seq) + tagSuffix(prev.tag)
+	}
+	st.Put(k, []byte(v))
+	return prev, seq
+}
+
+// seenCarrySep marks a clock value of a real request that carries an unconfirmed 1-hour ping: "<ms>^<pingMs>".
+const seenCarrySep = "^"
+
+// ConfirmRealTouch ends the carried 1-hour ping under the alias's clock: the host learned that the real request
+// that wrote the clock at atMs was accepted, so the entry's tier is now that request's own. The time stays.
+//
+// It ends only the carry that request wrote (the value's own time is atMs). Another request on the same alias may
+// have written its clock since, over a ping that came after this request's clock: that carry is not this
+// request's to end, and if that request then fails, the ping's hour must stand (#1365). The value's request number
+// (seq) makes the match exact: two requests that wrote in one millisecond cannot end each other's carry. atMs 0
+// (this request wrote no clock) ends nothing. The keeper calls it where it ends its own index entry.
+func ConfirmRealTouch(st store.Store, alias string, atMs, seq int64) {
+	if st == nil || alias == "" || atMs <= 0 || seq <= 0 {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		// Only a carry ends. A plain 1-hour tier may belong to a LATER ping (another thread's, on the same
+		// alias), and stripping it would read a warm entry as cold. The bypass gap (a bypassed request writes no
+		// clock, so its `:1h` stays) errs warm only: no cut.
+		if v := parseSeenState(b); v.carriedAt > 0 && v.at == atMs && v.seq == seq {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
+}
+
+// seenOneHourSuffix marks a clock value whose last touch left the entry at the 1-hour tier. Written by
+// RecordCacheTouchAliasTier only.
+const seenOneHourSuffix = ":1h"
+
+// parseSeen reads a cg:seen: value: milliseconds, and the tier suffix. A value it cannot read is 0.
+func parseSeen(b []byte) (ms int64, oneHour bool) {
+	v := parseSeenState(b)
+	return v.at, v.oneHour
+}
+
+// parseSeenState reads all the shapes of a value: "<ms>", "<ms>:1h", "<ms>:1h:<tag>", "<ms>^<pingMs>" and
+// "<ms>^<pingMs>:<tag>". One it cannot read is the zero state, which is never cold. An older reader fails to
+// parse any suffixed shape and reads 0, which is never cold either.
+func parseSeenState(b []byte) (v seenState) {
+	str := string(b)
+	if i := strings.Index(str, seenCarrySep); i >= 0 {
+		rest := str[i+1:]
+		if j := strings.Index(rest, ":"); j >= 0 {
+			v.tag, rest = rest[j+1:], rest[:j]
+		}
+		if j := strings.Index(rest, seenSeqSep); j >= 0 {
+			q, err := strconv.ParseInt(rest[j+1:], 10, 64)
+			if err != nil {
+				return seenState{}
+			}
+			v.seq, rest = q, rest[:j]
+		}
+		c, err := strconv.ParseInt(rest, 10, 64)
+		if err != nil {
+			return seenState{}
+		}
+		v.carriedAt, str = c, str[:i]
+	} else if i := strings.Index(str, seenOneHourSuffix); i >= 0 {
+		v.oneHour, v.tag = true, strings.TrimPrefix(str[i+len(seenOneHourSuffix):], ":")
+		str = str[:i]
+	}
+	ms, err := strconv.ParseInt(str, 10, 64)
+	if err != nil {
+		return seenState{}
+	}
+	v.at = ms
+	return v
+}
+
+// seenSeqSep marks the number of the request that wrote a carry: "<ms>^<pingMs>#<seq>".
+const seenSeqSep = "#"
+
+func seqSuffix(seq int64) string {
+	if seq <= 0 {
+		return ""
+	}
+	return seenSeqSep + strconv.FormatInt(seq, 10)
+}
+
+// tagSuffix is the written form of a route tag: ":<tag>", or nothing when there is none.
+func tagSuffix(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return ":" + tag
+}
+
+// RouteTag is the short name of a route a 1-hour ping is stamped with. It is a hash, so the store value holds no
+// provider, endpoint or model text.
+func RouteTag(route string) string {
+	h := sha256.Sum256([]byte(route))
+	return hex.EncodeToString(h[:4])
 }
 
 // RecordCacheTouch records that something refreshed this prefix's provider cache entry at nowMs,
@@ -1088,23 +1555,125 @@ func aliasSeen(st store.Store, alias string, nowMs int64) int64 {
 // # Why the alias and not the session id
 //
 // Because the provider's entry is keyed on CONTENT, and this must land on the key apply's own
-// aliasSeen will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
+// aliasSeenState will read. Computing it here, from the same schema.SessionHead + session.Scoped pair,
 // is what makes the two impossible to drift apart — a second derivation of a cache key is how the
 // cold decision and the dashboard came to disagree once already.
 //
 // nowMs must be the time the ping's request STARTED, not its completion: the provider's lifetime runs
 // from request start, which is the same reasoning kaEntry.startedAt is anchored on.
+//
+// This form derives the alias from body. That is right only when body is the transcript the request
+// path hashed. A body the host changed after apply ran (tool deferral appends the names list to the
+// head) gives another alias, so such a host passes the one apply derived to RecordCacheTouchAlias.
 func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64) {
-	if st == nil || nowMs <= 0 || len(body) == 0 {
-		return
+	RecordCacheTouchTier(st, tenant, body, provider, nowMs, false)
+}
+
+// RecordCacheTouchAlias is RecordCacheTouch for a caller that holds the alias already: Trace.TouchAlias,
+// derived from the request as it arrived. It writes the same clock under the given key, monotone. The touch
+// carries no tier: it ends any 1-hour tier an earlier touch left.
+func RecordCacheTouchAlias(st store.Store, alias string, nowMs int64) {
+	RecordCacheTouchAliasTier(st, alias, nowMs, false)
+}
+
+// TouchAliasFor is the alias (the cold clock's key) a request body derives, "" when it derives none. It is
+// the same derivation RecordCacheTouch uses, so a caller that must find the clock again later (the keeper
+// ending a 1-hour tier) cannot drift from it.
+func TouchAliasFor(tenant string, body []byte, provider bschemas.ModelProvider) string {
+	if len(body) == 0 {
+		return ""
 	}
 	norm := normalizeSessionMessages(provider, body)
 	if len(norm) == 0 {
-		return
+		return ""
 	}
 	sys, firstUser := schema.SessionHead(norm)
-	alias := session.Scoped(tenant, "", sys, firstUser)
-	if alias == "" {
+	return session.Scoped(tenant, "", sys, firstUser)
+}
+
+// RecordCacheTouchTier is RecordCacheTouch that also says the tier the touch left the entry at.
+func RecordCacheTouchTier(st store.Store, tenant string, body []byte, provider bschemas.ModelProvider, nowMs int64, oneHour bool) {
+	if st == nil || nowMs <= 0 {
+		return
+	}
+	RecordCacheTouchAliasTier(st, TouchAliasFor(tenant, body, provider), nowMs, oneHour)
+}
+
+// EndTouchTier ends the free 1-hour ping that stands under the alias's clock, keeping the clock's time: the plain
+// value stays. It ends a plain `:1h` and a carried ping alike, and only one stamped with tag, the route that made
+// it (RouteTag). A later ping of another route, a ping with no tag and a plain value stay. The keeper calls it
+// when the route that gave the tier is switched off, so the cold check never keeps an hour for a tier
+// no route granted, and never loses one a different route granted. It is the only way the keeper ends a tier: the store record is the one record of the fact.
+func EndTouchTier(st store.Store, alias, tag string) {
+	if st == nil || alias == "" || tag == "" {
+		return
+	}
+	k := store.SeenPrefix + alias
+	if b, ok := st.Get(k); ok {
+		if v := parseSeenState(b); (v.oneHour || v.carriedAt > 0) && v.tag == tag {
+			st.Put(k, []byte(strconv.FormatInt(v.at, 10)))
+		}
+	}
+}
+
+// StandingOneHourPing reads the one record of the fact "the last touch of this entry was a free 1-hour ping":
+// the time that ping started, and whether one stands. It is the `:1h` value (the ping is the last touch) or the
+// carry under a real request nobody has confirmed (the request touched nothing yet). A plain value, a value it
+// cannot read and a missing value all say no: an unreadable record never reads as a tier. It does not slide the
+// store's TTL (store.PeekValue): asking is not a touch.
+//
+// Every reader asks this, not a copy of the fact: the dashboard's cache clock, the manual-ping refusal and the
+// probe. The cold check reads the same value through aliasSeenState, where it also writes its own clock.
+func StandingOneHourPing(st store.Store, alias string) (atMs int64, ok bool) {
+	if st == nil || alias == "" {
+		return 0, false
+	}
+	b, got := store.PeekValue(st, store.SeenPrefix+alias)
+	if !got {
+		return 0, false
+	}
+	v := parseSeenState(b)
+	switch {
+	case v.carriedAt > 0:
+		return v.carriedAt, true
+	case v.oneHour && v.at > 0:
+		return v.at, true
+	}
+	return 0, false
+}
+
+// LiveOneHourPing is StandingOneHourPing that also asks the one lifetime function: the ping counts until
+// EntryLifetime of the 1-hour tier for this provider and model has passed since it started.
+func LiveOneHourPing(st store.Store, alias string, provider bschemas.ModelProvider, model string, nowMs int64) (atMs int64, live bool) {
+	at, ok := StandingOneHourPing(st, alias)
+	if !ok {
+		return 0, false
+	}
+	if nowMs >= at+EntryLifetime(CacheFacts{Provider: provider, Model: model, LastOneHour: true}).Milliseconds() {
+		return 0, false
+	}
+	return at, true
+}
+
+// RecordCacheTouchAliasTier is RecordCacheTouchAlias with the tier of the touch.
+//
+// oneHour says the touch left the provider's entry at the 1-hour tier: a free 1-hour keep-alive ping
+// (1-hour-on-wait) read the prefix and moved the entry from 5 minutes to 1 hour. A request that carries
+// 1-hour markers does not need it: it states its own tier, and sessionTTL keeps it. Until the next touch
+// the cold decision then counts the entry's lifetime from this touch at the 1-hour lifetime
+// (lastTouchOneHour), not at the 5 minutes the thread's own requests ask for.
+//
+// A touch with oneHour false is the new LAST touch and ends the tier: a manual 5-minute ping moves a
+// 1-hour entry back to 5 minutes (#1258). The clock stays monotone: an older touch changes nothing.
+func RecordCacheTouchAliasTier(st store.Store, alias string, nowMs int64, oneHour bool) {
+	RecordCacheTouchAliasRoute(st, alias, nowMs, oneHour, "")
+}
+
+// RecordCacheTouchAliasRoute is RecordCacheTouchAliasTier that also stamps a 1-hour touch with the tag of the
+// route that made it (RouteTag), so a switch-off of that route can end it and no other. The tag is ignored for
+// a 5-minute touch. tag must come from RouteTag (hex): a tag with "^", "#" or ":" would break the value's shape.
+func RecordCacheTouchAliasRoute(st store.Store, alias string, nowMs int64, oneHour bool, tag string) {
+	if st == nil || nowMs <= 0 || alias == "" {
 		return
 	}
 	// Monotone: never move the clock BACKWARDS. A ping racing a real request must not make the
@@ -1112,11 +1681,22 @@ func RecordCacheTouch(st store.Store, tenant string, body []byte, provider bsche
 	// record is that later is warmer.
 	k := store.SeenPrefix + alias
 	if b, got := st.Get(k); got {
-		if prev, err := strconv.ParseInt(string(b), 10, 64); err == nil && prev >= nowMs {
+		if prev, _ := parseSeen(b); prev >= nowMs {
 			return
 		}
 	}
-	st.Put(k, []byte(strconv.FormatInt(nowMs, 10)))
+	v := strconv.FormatInt(nowMs, 10)
+	if oneHour {
+		v += seenOneHourSuffix + tagSuffix(tag)
+	}
+	st.Put(k, []byte(v))
+}
+
+// lastTouchOneHour reports whether the LAST touch of this prefix's entry (a real request counts) left it at
+// the 1-hour tier: the clock's own record says so, and no other clock (the thread's tracker) is later.
+// prevAt is the latest clock the caller read, before the alias's clock joined it.
+func lastTouchOneHour(aliasAt int64, aliasOneHour bool, prevAt int64) bool {
+	return aliasOneHour && aliasAt > 0 && aliasAt >= prevAt
 }
 
 // sessionTTL is cacheTTL widened to the LONGEST lifetime this PREFIX has ever asked for.
@@ -1149,47 +1729,18 @@ func sessionTTL(st store.Store, session string, ttl time.Duration) time.Duration
 	return ttl
 }
 
-// hasCacheBreakpoint reports whether the request carries a REAL prompt-cache
-// breakpoint — a structural cache_control / cachePoint field on a message, content
-// block, system block, or tool. This is deliberately structural (gjson path queries),
-// not a substring scan of the whole body: a tool output whose text merely contains the
-// string "cache_control" must NOT flip the request into cache-aware mode (that would
-// wrongly restrict offloaders to the tail on a non-caching backend). A key inside a
-// JSON string value never matches these paths.
+// hasCacheBreakpoint reports whether the request carries a REAL prompt-cache breakpoint: a
+// structural cache_control / cachePoint field on a message, content block, system block or tool, or the top-level cache_control of automatic caching.
+// It reads the one count (schema.CountBreakpointsEscaped). Only this caller accepts a key spelled
+// with a \u escape; the cap check (schema.CountBreakpoints) stays on the cheaper prefilter.
+// Structural, not a substring scan: a tool output whose text merely contains "cache_control" must
+// NOT flip the request into cache-aware mode (that would wrongly restrict offloaders to the tail
+// on a non-caching backend). The count's prefilter keeps an escaped key ("c\u0061che_control").
 func hasCacheBreakpoint(body []byte) bool {
-	paths := []string{
-		"messages.#.content.#.cache_control",
-		"messages.#.cache_control",
-		"system.#.cache_control",
-		"tools.#.cache_control",
-		"messages.#.content.#.cachePoint",
+	if !bytes.Contains(body, []byte("cache")) && !bytes.Contains(body, []byte(`\u`)) {
+		return false
 	}
-	for _, p := range paths {
-		r := gjson.GetBytes(body, p)
-		if !r.Exists() {
-			continue
-		}
-		found := false
-		r.ForEach(func(_, v gjson.Result) bool {
-			// nested arrays (content-of-messages) surface as arrays here; recurse one level
-			if v.IsArray() {
-				v.ForEach(func(_, vv gjson.Result) bool {
-					if vv.IsObject() {
-						found = true
-						return false
-					}
-					return true
-				})
-			} else if v.IsObject() {
-				found = true
-			}
-			return !found
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	return schema.CountBreakpointsEscaped(body).Total() > 0
 }
 
 // prevLen / putLen track, per session, how many normalized messages the previous
@@ -1209,6 +1760,19 @@ func prevLen(st store.Store, session string) int {
 		n = n*10 + int(ch-'0')
 	}
 	return n
+}
+
+// loadSessionState restores a session's state from the store's disk copy when memory has none
+// (after a restart, or a pause longer than the state lifetime). It runs before the pipeline reads
+// the store. A store without a disk copy does nothing. It reads one session, once per lifetime
+// (store.SessionLoader), and a disk error is absorbed there: the request goes on with memory only.
+//
+// The tenant-less alias id (the content hash that cg:seen: and cg:ttl: are also keyed by) is
+// loaded too, so a session that comes back under its other id finds its clocks.
+func loadSessionState(st store.Store, session string) {
+	if l, ok := st.(store.SessionLoader); ok {
+		l.LoadSession(session)
+	}
 }
 
 func putLen(st store.Store, session string, n int) {
@@ -1295,7 +1859,20 @@ func NormalizeMessages(provider bschemas.ModelProvider, body []byte) []bschemas.
 // implementations of it are two different sessions the moment either changes.
 func sessionIDFrom(tenant, explicitSess string, body []byte, norm []bschemas.ChatMessage) string {
 	sys, firstUser := schema.SessionHead(norm)
-	return session.Scoped(tenant, explicitSession(explicitSess, body), sys, firstUser)
+	return session.Scoped(tenant, ExplicitSession(explicitSess, body), sys, firstUser)
+}
+
+// graceAliasID is the ONE rule for the restart grace's alias id (#766): the id a turn of
+// this body runs under when no session header is present — the METADATA session id when
+// the body carries one (metadata.user_id / metadata.taskId), else the content hash of the
+// head — always derived over the TRANSFORMED body, the same input the pipeline's own turn
+// derives its id from. Both sides of the grace resolve it through here: the ask side (the
+// alias keys handed to Tracker.TurnFrom) calls it directly, and the record side reaches the
+// identical sessionIDFrom(tenant, "", ...) through EnforcedSessionIDFor's empty-explicit-id
+// path over the same transform. Two private copies of this rule drifted apart twice (#766
+// rounds 3 and 4: the pristine body, then the bare hash); one rule cannot.
+func graceAliasID(tenant string, body []byte, norm []bschemas.ChatMessage) string {
+	return sessionIDFrom(tenant, "", body, norm)
 }
 
 // SessionIDFor derives the session id apply WOULD use for a request, without running a pipeline.
@@ -1321,6 +1898,40 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 	return sessionIDFrom(tenant, explicitSess, body, norm)
 }
 
+// EnforcedSessionIDFor derives the session id BodyOpts will use for this request on an ENFORCED
+// path: it runs the same envelope transform first (toolfilter's skills half rewrites the head
+// message that the session hash reads), then derives the id exactly as BodyOpts does. A host that
+// must write state under the pipeline's session BEFORE the pipeline runs (the proxy's expand
+// repair, #175) calls this, so the two cannot disagree. It costs a transform and a re-parse, so
+// call it only when there is state to write.
+func EnforcedSessionIDFor(pipe *components.Pipeline, tenant, explicitSess, api string, provider bschemas.ModelProvider, bypass bool, body []byte) string {
+	if schema.IsResponses(schema.WireFor(string(provider), api)) {
+		out, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
+		return SessionIDFor(tenant, explicitSess, provider, out)
+	}
+	out, _, _, _ := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
+	return SessionIDFor(tenant, explicitSess, provider, out)
+}
+
+// ProjectFor returns the directory the agent was started in, as stated in the request's own
+// prompt, or "" when the request does not state one.
+//
+// Here rather than in the caller because the normalization it needs — one provider-agnostic
+// message slice out of an Anthropic or OpenAI body — is this package's job and is unexported.
+// SessionIDFor is the same shape for the same reason, and the two share
+// normalizeSessionMessages so that a body shape one accepts is a body shape the other accepts.
+//
+// It must be given the PRISTINE inbound body. A rewritten transcript may have had the
+// environment block compacted out of it, and the project would then flip to unattributed on
+// exactly the requests the pipeline acted on — the ones whose cost is most worth attributing.
+func ProjectFor(provider bschemas.ModelProvider, body []byte) string {
+	norm := normalizeSessionMessages(provider, body)
+	if len(norm) == 0 {
+		return ""
+	}
+	return schema.WorkingDirOf(norm)
+}
+
 // RecordBilledInput stores the provider's own input-token count for a finished turn, so the NEXT
 // turn of the same session can be compared against the model's context window in the units that
 // window is stated in. Call it once per response, with fresh + cache-read + cache-write.
@@ -1340,6 +1951,31 @@ func RecordBilledInput(st store.Store, session string, tokens int64) {
 		return
 	}
 	st.Put(store.BilledPrefix+session, []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// RecordBilledInputThread stores the same figure per thread, for the billed-growth horizon. Call it next
+// to RecordBilledInput, with the thread id the request was served under.
+func RecordBilledInputThread(st store.Store, session, threadID string, tokens int64) {
+	if st == nil || session == "" || tokens <= 0 {
+		return
+	}
+	st.Put(store.BilledThreadPrefix+thread.Key(session, threadID), []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// prevBilledInputThread reads back what RecordBilledInputThread stored, or 0 (unknown).
+func prevBilledInputThread(st store.Store, session, threadID string) int {
+	if st == nil {
+		return 0
+	}
+	b, ok := st.Get(store.BilledThreadPrefix + thread.Key(session, threadID))
+	if !ok || len(b) == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // prevBilledInput reads back what RecordBilledInput stored, or 0 when this session has no earlier
@@ -1545,11 +2181,12 @@ func normalize(provider bschemas.ModelProvider, arr []gjson.Result) (norm []bsch
 					case "tool_result":
 						add := func(text, path string) {
 							handled = true
-							tm := toolMessage(text, blk.Get("tool_use_id").String())
+							out, tail := splitTrailingReminders(text)
+							tm := toolMessage(out, blk.Get("tool_use_id").String())
 							pre, _ := json.Marshal(tm)
 							norm = append(norm, tm)
 							slots = append(slots, slot{
-								kind: anthropicToolText, path: path, preText: text, pre: pre, raw: m.Raw,
+								kind: anthropicToolText, path: path, preText: text, tail: tail, pre: pre, raw: m.Raw,
 							})
 						}
 						base := "messages." + strconv.Itoa(i) + ".content." + strconv.Itoa(b) + ".content"
@@ -1741,12 +2378,111 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 			toolSlotByID[id] = k
 		}
 	}
+	// keptWireOf is the wire message a kept tool message names, by its tool_call_id. A text block that sits
+	// beside a tool_result in one wire message has the same bytes on every turn ("continue"), so matching
+	// it by bytes alone takes the first turn's slot, which a splice may have removed. It would emit that
+	// turn's wire message, with its orphan tool_result, and leave the survivor's message out (#910).
+	// A sibling text is therefore matched to a slot of the wire message that its ADJACENT kept tool message
+	// names. Nothing else uses this preference: a standalone message (a wholeMessage slot) has the same
+	// bytes as a sibling text, and giving it the sibling's wire would put a tool_result before its tool_use.
+	keptWireOf := func(i int) (int, bool) {
+		if i < 0 || i >= len(out) {
+			return 0, false
+		}
+		m := out[i]
+		if m.Role != bschemas.ChatMessageRoleTool || m.ChatToolMessage == nil || m.ChatToolMessage.ToolCallID == nil {
+			return 0, false
+		}
+		k, ok := toolSlotByID[*m.ChatToolMessage.ToolCallID]
+		if !ok {
+			return 0, false
+		}
+		bi, _, ok := splitSlotPath(slots[k].path)
+		return bi, ok
+	}
+	// byteMatch[i] is the slot that kept message i matches by bytes, or -1 when no slot matches (a tool message, matched by
+	// its tool_call_id below, or a new message such as the summary). It is chosen from the END of
+	// the transcript back, each message taking the LAST unused slot with the same bytes at or before the
+	// body index of the kept message after it. A kept message therefore maps to the latest identical body
+	// message, never to an early removed one with the same bytes, and the kept order is the original
+	// order (#1179). Normalization drops a thinking block's signature, so such copies are common. A
+	// message with no slot in that range takes the last slot overall, and wireOrderValid refuses a
+	// rebuild that this breaks.
+	byteMatch := make([]int, len(out))
+	{
+		taken := make([]bool, len(slots))
+		bound := len(orig)
+		for i := len(out) - 1; i >= 0; i-- {
+			byteMatch[i] = -1
+			if out[i].Role == bschemas.ChatMessageRoleTool && out[i].ChatToolMessage != nil &&
+				out[i].ChatToolMessage.ToolCallID != nil {
+				if k, ok := toolSlotByID[*out[i].ChatToolMessage.ToolCallID]; ok && !taken[k] {
+					taken[k] = true // matched by id in the loop below; it only sets the bound here
+					if bi, _, ok := splitSlotPath(slots[k].path); ok {
+						bound = bi
+					}
+					continue
+				}
+			}
+			mb, err := json.Marshal(out[i])
+			if err != nil {
+				return body, false
+			}
+			// The wire messages of the kept tool messages next to this one: a sibling text sits before or
+			// after the tool_result block of its own wire message.
+			prevWire, hasPrev := keptWireOf(i - 1)
+			nextWire, hasNext := keptWireOf(i + 1)
+			inRange, inRangeWhole, sibling, anyK := -1, -1, -1, -1
+			for k := range slots {
+				if taken[k] || !bytes.Equal(mb, slots[k].pre) {
+					continue
+				}
+				bi, _, ok := splitSlotPath(slots[k].path)
+				if !ok {
+					continue
+				}
+				anyK = k
+				if bi > bound {
+					continue
+				}
+				inRange = k
+				if slots[k].kind == wholeMessage {
+					inRangeWhole = k
+				}
+				if slots[k].kind == anthropicSiblingText && ((hasPrev && bi == prevWire) || (hasNext && bi == nextWire)) {
+					sibling = k // the sibling text of the kept tool message beside it
+				}
+			}
+			// Without a tool message beside it, a message is a standalone one: it takes a whole-message
+			// slot. A sibling text slot would emit the wire message of a tool_result, which has the
+			// same bytes as the text beside it (#910).
+			k := sibling
+			if k < 0 {
+				k = inRangeWhole
+			}
+			if k < 0 {
+				k = inRange
+			}
+			if k < 0 {
+				k = anyK
+			}
+			if k < 0 {
+				continue
+			}
+			byteMatch[i] = k
+			taken[k] = true
+			if bi, _, ok := splitSlotPath(slots[k].path); ok {
+				bound = bi
+			}
+		}
+	}
 	var parts [][]byte
 	// emitted guards against emitting one body message TWICE: several normalized
 	// messages can share a body index (an Anthropic user message with several
 	// tool_result blocks), and a count-changing component may leave them
 	// non-contiguous — which duplicated the raw message, and with it its tool_use_id.
 	emitted := map[int]bool{}
+	var order []int // the body index of each kept message, in emitted order
 	for i := range out {
 		mb, err := json.Marshal(out[i])
 		if err != nil {
@@ -1763,12 +2499,7 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 			}
 		}
 		if matched < 0 {
-			for k := range slots {
-				if !used[k] && bytes.Equal(mb, slots[k].pre) {
-					matched = k
-					break
-				}
-			}
+			matched = byteMatch[i]
 		}
 		if matched < 0 {
 			parts = append(parts, mb) // new message (e.g. the summary) — fresh, lossless (plain text)
@@ -1784,6 +2515,12 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		}
 		emitted[bi] = true
 		parts = append(parts, []byte(orig[bi].Raw))
+		order = append(order, bi)
+	}
+	// Defence in depth: a matching mistake must never reach the provider as an invalid body.
+	if !wireOrderValid(orig, order) {
+		slog.Warn("context-guru: rebuilt messages break the wire order; forwarding the original", "kept", order)
+		return body, false
 	}
 	var buf bytes.Buffer
 	buf.WriteByte('[')
@@ -1799,6 +2536,47 @@ func rebuildCountChanged(body []byte, orig []gjson.Result, slots []slot, out []b
 		return body, false
 	}
 	return res, true
+}
+
+// wireOrderValid checks the kept body messages of a rebuild, in emitted order. Two rules must hold.
+// The kept messages keep their original relative order. A message that holds a tool_result does not
+// come before the message that holds its tool_use. If a rule fails, the caller forwards the original.
+func wireOrderValid(orig []gjson.Result, order []int) bool {
+	useAt := map[string]int{} // tool_use id -> position in order of the message that holds it
+	for pos, bi := range order {
+		if pos > 0 && bi <= order[pos-1] {
+			return false
+		}
+		for _, blk := range orig[bi].Get("content").Array() {
+			if blk.Get("type").String() == "tool_use" {
+				useAt[blk.Get("id").String()] = pos
+			}
+		}
+	}
+	// A tool_result is checked against the use in the ORIGINAL body, so a use that was removed is not blamed here.
+	origUse := map[string]int{}
+	for bi := range orig {
+		for _, blk := range orig[bi].Get("content").Array() {
+			if blk.Get("type").String() == "tool_use" {
+				origUse[blk.Get("id").String()] = bi
+			}
+		}
+	}
+	for pos, bi := range order {
+		for _, blk := range orig[bi].Get("content").Array() {
+			if blk.Get("type").String() != "tool_result" {
+				continue
+			}
+			id := blk.Get("tool_use_id").String()
+			if u, ok := origUse[id]; ok && u >= bi {
+				continue // the original body already had this order; not our change
+			}
+			if up, ok := useAt[id]; ok && up >= pos {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // toolCallIDAt reads the tool_use_id of the tool_result block a tool-text slot points at.
@@ -1846,7 +2624,7 @@ func writeBackToolText(body []byte, orig []gjson.Result, slots []slot,
 		if !ok {
 			continue
 		}
-		txt := schema.MessageText(out[i])
+		txt := slots[k].writeTail(schema.MessageText(out[i]))
 		if txt == slots[k].preText {
 			continue // unchanged; the original bytes already carry it
 		}
@@ -1880,6 +2658,25 @@ func splitSlotPath(path string) (idx int, rel string, ok bool) {
 	return i, rel, true
 }
 
+// rawLen is the wire length of message i of msgs, for wireSizes.
+func rawLen(msgs []gjson.Result) func(i int) (int, bool) {
+	return func(i int) (int, bool) {
+		if i < 0 || i >= len(msgs) {
+			return 0, false
+		}
+		return len(msgs[i].Raw), true
+	}
+}
+
+// rawTotal is the wire length of every message of msgs.
+func rawTotal(msgs []gjson.Result) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Raw)
+	}
+	return n
+}
+
 // wireGroups builds components.Ctx.WireGroup (#457): for each slot, the wire (body) message
 // index its path names — i.e. the thing that must never be split by a span boundary. A
 // wholeMessage slot's path is always "messages.<i>" for a DISTINCT i (one wholeMessage slot per
@@ -1890,7 +2687,7 @@ func splitSlotPath(path string) (idx int, rel string, ok bool) {
 func wireGroups(slots []slot) []int {
 	groups := make([]int, len(slots))
 	for i, s := range slots {
-		bi, _, ok := splitSlotPath(s.path)
+		bi, ok := accwire.Messages.WireIndex(s.path)
 		if !ok {
 			return nil
 		}
@@ -1949,16 +2746,41 @@ func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte, shif
 // pipeline's output cannot be forwarded either: it compacted the originals on the promise of a
 // copy. So it falls back to fallback, the body before the pipeline, which carries every original in
 // full at its own position.
-func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, client []gjson.Result) Result {
+func finishRestore(res Result, plan restorePlan, wire string, fallback []byte, client []gjson.Result, dryRun bool) Result {
 	if len(plan) == 0 {
 		return res
 	}
-	nb, tokens, ok := plan.insert(wire, res.Body, client)
+	pre := gjson.GetBytes(res.Body, expand.MessagesField(wire)).Array()
+	at := plan.positions(pre, client)
+	nb, tokens, ok := plan.insertAt(wire, res.Body, at)
 	if !ok {
+		// The fallback forwards the pre-pipeline body: no pipeline operation describes it, and nothing
+		// was compacted on the wire. The tail mark, added afterwards in BodyOpts, is reported there.
+		res.Trace.OpsDropped += len(res.Trace.Ops)
+		res.Trace.Ops = nil
+		if res.Trace.Run != nil {
+			res.Trace.Run.TokensAfter = res.Trace.Run.TokensBefore
+		}
 		res.Body, res.Changed = fallback, true
 		return res
 	}
 	res.Body, res.Changed = nb, true
 	res.Restored, res.RestoredTokens = len(plan), tokens
+	// The pipeline's token counts stop before the copies, so a saving read off them would credit
+	// the compaction of an output that is back on the wire in full (#481).
+	if res.Trace.Run != nil {
+		res.Trace.Run.TokensAfter += tokens
+	}
+	// The pipeline's operations stay valid: the library maps their positions through the copies'
+	// splices, which come last in pipeline order. If a copy cannot be placed, none can be trusted.
+	ro, placed := plan.ops(at, gjson.GetBytes(nb, expand.MessagesField(wire)).Array(), dryRun)
+	if !placed {
+		// Unlike the fallback above, the compaction and the copies are on the wire here, so the report
+		// (only the tail mark, added later in BodyOpts) is incomplete and OpsDropped says so.
+		res.Trace.OpsDropped += len(res.Trace.Ops)
+		res.Trace.Ops = nil
+		return res
+	}
+	res.Trace.Ops = append(res.Trace.Ops, ro...)
 	return res
 }

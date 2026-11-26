@@ -264,8 +264,8 @@ it is no, on this traffic shape. The value is real only where the safety rule is
 $0.011/turn does not buy a class of failure that ends in a bad commit. The four
 conditions below are all still open, and condition 4 in particular has never been run:
 
-1. ~~Applied only to reads the agent has demonstrably finished with, never the newest
-   read of a file.~~ **Done — and it is what makes the saving zero.**
+1. Applied only to reads the agent has demonstrably finished with, never the newest
+   read of a file. **Done — and it is what makes the saving zero.**
 2. A read is never skeletonized after the agent has edited, or announced an intent to
    edit, that path in the session. (`readlifecycle` supplies the *stale* signal; skeleton
    does not consume it, because on the measurement above there is nothing left to gain.)

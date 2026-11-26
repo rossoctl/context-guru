@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/session"
 )
 
@@ -51,35 +53,32 @@ import (
 // one-line `curl --data-binary @-` hook sends. Only those fields are read; every other field of the
 // payload (cwd, transcript_path, model) is discarded by the decoder, never logged or stored.
 
-const (
-	// maxLifecycleBody fits a raw hook payload (its cwd and transcript path are the bulk of it).
-	maxLifecycleBody = 4096
-	// lifecycleTTL is how long a SessionEnd mark is remembered: past it the mark is dead weight.
-	lifecycleTTL = 12 * time.Hour
-	// maxEndedPerTenant bounds one tenant's end marks. The cap is per tenant, not global, so
-	// one tenant's churn cannot evict another tenant's marks.
-	maxEndedPerTenant = 2000
-)
-
-// compactRaceMargin bounds how late a SessionStart compact event may arrive after the request that
-// follows the compaction started. Measured hook-to-proxy delivery is 0.2-0.8 s; the old prefix's last
-// request (the compaction call itself) started tens of seconds earlier. Known limitation: a ping also
-// moves startedAt, so an old-prefix entry pinged within the margin is not retired by the event and is
-// pinged at most once more before its next idle check stops it.
-const compactRaceMargin = 2 * time.Second
+// maxLifecycleBody fits a raw hook payload (its cwd and transcript path are the bulk of it). The
+// end marks' lifetime and per-tenant cap are package keepalive's (lifecycle.go).
+const maxLifecycleBody = 4096
 
 func clientSignalEnabled() bool {
+	return clientSignalsSwitchOn() && !keepAliveDisabled()
+}
+
+// clientSignalsSwitchOn is the operator's switch alone (CONTEXT_GURU_CLIENT_SIGNALS off/0/false
+// turns every client hook route off), without clientSignalEnabled's keep-alive half. The tool
+// deferral routes (/tool-search, /tool-defer/probe) use it: they are not about keep-alive, and must
+// still obey the operator.
+func clientSignalsSwitchOn() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CONTEXT_GURU_CLIENT_SIGNALS"))) {
 	case "off", "0", "false":
 		return false
 	}
-	return !keepAliveDisabled()
+	return true
 }
 
 // clientSessionAlias is the tenant-scoped id a client's hooks name this session by, when the proxy
 // keys the session by something else. Codex sends its session id in a session-id header (equal to
-// the hook payload's session_id and to prompt_cache_key, verified on codex-cli 0.162.1) but no id
-// the session resolver reads, so its requests key by content hash. "" when there is no usable alias.
+// the hook payload's session_id and to prompt_cache_key, verified on codex-cli 0.162.1). Since #1311
+// agent/codex reads that header as the session key, so for Codex traffic the alias equals the key and
+// this returns "". It still serves a caller that sends the header but is not known as Codex, whose
+// requests key by something else. "" when there is no usable alias.
 func clientSessionAlias(tenantID, sessionKey string, r *http.Request) string {
 	if r == nil {
 		return ""
@@ -101,14 +100,6 @@ func scopedClientID(tenantID, sid string) (string, bool) {
 	}
 	return scoped, true
 }
-
-// lifecycleEvents is the closed set of accepted events; anything else is refused, so a client
-// cannot smuggle a free-text field through this route.
-var lifecycleEvents = map[string]bool{"SessionEnd": true, "SessionStart": true, "Notification": true}
-
-// lifecycleKinds is the closed set of accepted reason / notification types.
-var lifecycleKinds = map[string]bool{"": true, "clear": true, "resume": true, "logout": true, "prompt_input_exit": true, "other": true,
-	"startup": true, "compact": true, "fork": true, "permission_prompt": true, "elicitation_dialog": true, "idle_prompt": true}
 
 // lifecycle receives one event. 204 on accept (including "accepted and ignored"), so the client
 // cannot tell, and does not need to, whether it changed anything.
@@ -144,6 +135,7 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		Reason           string `json:"reason"`
 		Source           string `json:"source"`
 		NotificationType string `json:"notification_type"`
+		PermissionMode   string `json:"permission_mode"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
@@ -153,97 +145,121 @@ func (h *Handler) clientSignal(w http.ResponseWriter, r *http.Request) {
 		in.Session, in.Event = in.SessionID, in.HookEventName
 		in.Kind = map[string]string{"SessionEnd": in.Reason, "SessionStart": in.Source, "Notification": in.NotificationType}[in.Event]
 	}
-	// A SessionEnd reason a newer client adds still means the session ended; read it as "other"
-	// rather than refuse the event and silently lose the feature.
-	if in.Event == "SessionEnd" && !lifecycleKinds[in.Kind] {
-		in.Kind = "other"
-	}
+	// The closed sets of events and kinds, and the "other" reading of a new SessionEnd reason, are keepalive.NormalizeSignal.
+	kind, kindOK := keepalive.NormalizeSignal(in.Event, in.Kind)
+	in.Kind = kind
 	scoped, ok := scopedClientID(tn.ID, strings.TrimSpace(in.Session))
-	if !ok || !lifecycleEvents[in.Event] || !lifecycleKinds[in.Kind] {
+	if !ok || !kindOK {
 		http.Error(w, "bad lifecycle event", http.StatusBadRequest)
 		return
 	}
-	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, h.keeper.now())
+	now := h.keeper.now()
+	h.keeper.signal(tn.ID, scoped, in.Event, in.Kind, now)
+	// Kept in the dashboard database too (#1198), with the dashboard's own switch: enums and ids only.
+	// A Notification that raises a prompt also marks the request it interrupted.
+	h.rec.RecordSignal(dash.ClientSignal{TS: now.UnixMilli(), TenantID: tn.ID, Session: scoped, Event: in.Event, Reason: in.Kind, PermissionMode: permissionModeOf(in.PermissionMode)})
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// signal applies one event. Returns whether it changed anything.
+// signal applies one event. Returns whether it changed anything. What each event does is
+// keepalive.Keeper.ApplyClientSignal; the host tells the campaign and counts it.
 func (k *keeper) signal(tenantID, scoped, event, kind string, now time.Time) bool {
 	if k == nil {
 		return false
 	}
-	switch event {
-	case "SessionEnd":
-		// Every end reason (even clear / resume) retires the id the event names: that id will not
-		// send its next request from this process. If it does (a resumed session) the request
-		// starts after the mark and is tracked normally; see endedAfter.
-		before := k.Stats().Live
-		k.retireSession(tenantID, scoped)
-		// The hook's id is the campaign's key: campaign decisions are never made on the OpenAI route (keeper.record), and Codex, the one client
-		// whose hook id differs from the proxy's session key, always uses that route.
-		k.pred.sessionEnded(tenantID, scoped, now, time.Time{})
-		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
-		k.mu.Lock()
-		k.markEndedLocked(tenantID, kaKey(tenantID, scoped), now)
-		k.mu.Unlock()
-		k.signalApplied.Add(1)
-		return true
-	case "SessionStart":
-		if kind != "compact" {
-			break
-		}
-		// Compaction replaced the conversation: every entry held for this session caches the old
-		// prefix, which no later request will send. The session itself goes on, so there is no end
-		// mark, and the post-compaction request is tracked as usual. The hook sends in the background,
-		// so the event can arrive after that request started (even after it was recorded): only
-		// entries whose last request started compactRaceMargin before the arrival are the old prefix.
-		before := k.Stats().Live
-		k.retireSessionStartedBefore(tenantID, scoped, now.Add(-compactRaceMargin))
-		k.pred.sessionEnded(tenantID, scoped, now, now.Add(-compactRaceMargin))
-		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", before-k.Stats().Live)
+	res := k.Keeper.ApplyClientSignal(tenantID, scoped, event, kind, now, func(r keepalive.SignalResult) {
+		// The hook's id is the campaign's key: campaign decisions are never made on the OpenAI route (keeper.record), and Codex, whose hook id now
+		// equals the proxy's session key (#1311), always uses that route. So the hook id is a safe key either way.
+		k.pred.sessionEnded(tenantID, scoped, now, r.Cutoff)
+	})
+	// The same debug line as before the move: an acted event reports what it retired, any other reports applied=false.
+	if res.Applied {
+		slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "retired", res.Retired)
 		k.signalApplied.Add(1)
 		return true
 	}
-	// Everything else is accepted and recorded, never acted on. Notification: offline, the pings
-	// sent on tool-wait rows that outlast 60 s (the nearest proxy for "blocked on a human") net
-	// positive, so a rule that stops them would lose money. SessionStart presence: see the table above.
 	slog.Debug("cg.client_signal", "event", event, "kind", kind, "session", scoped, "applied", false)
 	return false
 }
 
-// endedAfter reports whether the session was ended by a client signal at or after startedAt, i.e. the
-// request that started at startedAt was in flight when the user left. Its cache entry is not worth
-// holding. A request that starts after the mark is a resumed session and is tracked.
-func (k *keeper) endedAfter(tenantID, scoped string, startedAt time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	t, ok := k.ended[tenantID][kaKey(tenantID, scoped)]
-	return ok && !startedAt.After(t)
+// toolSearchSignal receives the raw ENABLE_TOOL_SEARCH value of one session, from the plugin's
+// session-start hook (#485). A value that turns search off (tooldefer.SearchOffValue) turns tool
+// deferral off for that session. Its own route, because /signal is off with keep-alive and this flag
+// is not about keep-alive. The same checks as /signal: the operator's CONTEXT_GURU_CLIENT_SIGNALS
+// switch, JSON only, the same authentication, the same tenant-scoped session id. 204 on accept.
+func (h *Handler) toolSearchSignal(w http.ResponseWriter, r *http.Request) {
+	if !clientSignalsSwitchOn() {
+		http.NotFound(w, r)
+		return
+	}
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "tool-search signals are application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	tn, err := h.authenticate(r)
+	if err != nil {
+		h.refuse(w, r, err)
+		return
+	}
+	release, ok := h.meter(w, r, tn)
+	defer release()
+	if !ok {
+		return
+	}
+	var in struct {
+		Session          string `json:"session"`
+		EnableToolSearch string `json:"enable_tool_search"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLifecycleBody)).Decode(&in); err != nil ||
+		len(in.EnableToolSearch) > 16 {
+		http.Error(w, "bad tool-search signal", http.StatusBadRequest)
+		return
+	}
+	scoped, ok := scopedClientID(tn.ID, strings.TrimSpace(in.Session))
+	if !ok {
+		http.Error(w, "bad tool-search signal", http.StatusBadRequest)
+		return
+	}
+	h.noteToolSearch(tn, scoped, in.EnableToolSearch)
+	w.WriteHeader(http.StatusNoContent)
 }
 
-// markEndedLocked records an end mark under the tenant's own bucket. At the cap it first drops
-// marks older than lifecycleTTL, then the oldest, and only ever from this tenant's bucket.
-func (k *keeper) markEndedLocked(tenantID, key string, now time.Time) {
-	if k.ended == nil {
-		k.ended = map[string]map[string]time.Time{}
+// toolDeferProbe is the preset picker's call when the user picks ultrahigh (#485): it asks for the
+// provider check of tool deferral to start at this account's next request, so the probe runs at once
+// instead of waiting for deferral to need it. It returns 202 at once and holds no credential: the
+// probe runs in the background through the prober, with that next request's own upstream, model and
+// credential. The same checks as /signal, the operator's switch included.
+func (h *Handler) toolDeferProbe(w http.ResponseWriter, r *http.Request) {
+	if !clientSignalsSwitchOn() {
+		http.NotFound(w, r)
+		return
 	}
-	b := k.ended[tenantID]
-	if b == nil {
-		b = map[string]time.Time{}
-		k.ended[tenantID] = b
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "tool-defer probe asks are application/json", http.StatusUnsupportedMediaType)
+		return
 	}
-	if _, ok := b[key]; !ok && len(b) >= maxEndedPerTenant {
-		oldK, oldT := "", now
-		for kk, t := range b {
-			if now.Sub(t) > lifecycleTTL {
-				delete(b, kk)
-			} else if oldK == "" || t.Before(oldT) {
-				oldK, oldT = kk, t
-			}
-		}
-		if len(b) >= maxEndedPerTenant {
-			delete(b, oldK)
-		}
+	tn, err := h.authenticate(r)
+	if err != nil {
+		h.refuse(w, r, err)
+		return
 	}
-	b[key] = now
+	release, ok := h.meter(w, r, tn)
+	defer release()
+	if !ok {
+		return
+	}
+	h.askProbe(tn.ID)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// permissionModeOf keeps the client's permission mode only from a closed set. A value a newer client
+// adds reads "other"; no value reads "".
+func permissionModeOf(v string) string {
+	switch v {
+	case "":
+		return ""
+	case "default", "acceptEdits", "plan", "bypassPermissions", "dontAsk":
+		return v
+	}
+	return "other"
 }

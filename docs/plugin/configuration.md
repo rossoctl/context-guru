@@ -46,4 +46,4 @@ No. They read the proxy's own data and never send a keep-alive ping.
 No. The commands talk to the proxy on your machine and write nothing.
 
 **Where are the old `insights` and `cost-*` commands?**
-They moved; see the [table on the overview page](index.md#moved-commands). The old names work for one release.
+They were folded into `/context-guru:insights` (`savings`, `cache`, `tools`) and `/context-guru:status`, and the old names are gone.

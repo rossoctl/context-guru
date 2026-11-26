@@ -1,7 +1,7 @@
 # Choose a cache TTL
 
 The provider sells two prompt-cache lifetimes: five minutes (`1.25x` base input to create,
-`0.1x` to read) or one hour (`2.0x` to create, `0.1x` to read). Both refresh for free on every
+`0.1x` to read) or one hour (`2.0x` to create, `0.1x` to read). Read is 0.05x on Opus 5.5 and Sonnet 5.5 and 0.025x on Fable 5.1 and Mythos 5.1. Both refresh for free on every
 hit. Picking between them is a real cost decision, not a default to leave alone.
 
 ## The short version

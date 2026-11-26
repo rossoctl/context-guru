@@ -386,7 +386,11 @@ type groupAcc struct{ g Group }
 // request's own successor. It is not mutated.
 func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 	cfg = cfg.withDefaults(reqs)
-	if pc, ok := s.(PingCapper); ok {
+	if ka, ok := s.(KeepAlive); ok && ka.Pings > 0 {
+		// An exact-budget arm runs its own K live whatever the window's MaxPings: the campaign
+		// enforces K, so scoring it at min(K, MaxPings) would price a schedule nobody runs.
+		cfg.MaxPings = ka.Pings
+	} else if pc, ok := s.(PingCapper); ok {
 		if n := pc.PingCap(); n > 0 && n < cfg.MaxPings {
 			cfg.MaxPings = n
 		}
@@ -443,7 +447,7 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 	})
 
 	for _, r := range order {
-		if r.Rejected && !r.CostKnown && r.CachedContext == 0 {
+		if r.noOp() {
 			out.NoOps++
 			continue
 		}
@@ -487,7 +491,7 @@ func Simulate(reqs []*Request, s Strategy, cfg Config) *Result {
 
 		// ── 2. hit or miss, under THIS strategy's own history ───────────────
 		alive := st.tokens > 0 && r.TS < st.expires
-		forced := r.MissReason == "prefix_change" || r.MissReason == "cold_start"
+		forced := ForcedMiss(r.MissReason)
 		if forced {
 			out.ForcedMisses++
 		}

@@ -27,9 +27,12 @@ memory on a single request. Two exceptions, both because the whole point of the 
 carrying a transcript that is, by definition, already this large:
 
 - **The agent's own compaction request** (see [agent-compaction.md](../how-to/agent-compaction.md))
-  — detected the same way it already is for the pipeline bypass — may read up to 128 MiB. It
-  must be forwarded byte-identical regardless of size, so relaxing the *read* ceiling for it
-  costs nothing extra: no pipeline component runs on it either way.
+  — may read up to 128 MiB. The proxy finds it by the opening of the agent's summary prompt
+  (`thread.IsAgentCompaction`). Up to 32 MiB it runs the full pipeline, like any other request. **Over
+  32 MiB it is bypassed**: the proxy forwards it untouched, counts it as
+  `components.agent_compaction.gates.oversize_bypass`, and still marks the dashboard row
+  `agent_compaction`. The pipeline is too slow on a body that large. A measured 40 MiB body took
+  13.7 s on the request path and allocated 5.7 GiB.
 - **`/compact`** always reads up to 128 MiB, unconditionally — every caller of this endpoint
   wants exactly this: a body already larger than 32 MiB is the normal, intended input, never a
   reason to refuse up front.
@@ -188,11 +191,14 @@ thing and is counted separately. See [when the tiers read zero](#when-the-tiers-
 |---|---|
 | `fresh_input_tokens` · `cache_read_tokens` · `cache_write_tokens` · `output_tokens` | The four billed tiers. |
 | `usage_unparsed` | Responses that carried a usage block in a **spelling this proxy does not recognise**, so the four tiers above were recorded as 0 on an otherwise healthy request. Non-zero means token accounting is offline for some route or provider. Counts **responses**, not requests — one request can drive several upstream rounds through the expand loop — so do not read it as a fraction of `requests`. |
+| `bob_backend` | Replies on Bob's model route by backend: `{A, B, other, none, id_no_usage}`. `A` and `B` count tokens differently, so compare presets on one backend only. `other` means the reply's marks match neither backend, and the proxy logs `cg.bob_backend_unknown` once per new kind of shape. A new backend whose id does not start with `chatcmpl-` and that sends no cache-write fields reads as `B`, with no alarm. `none` is a reply with no id or no usage, or one of Bob's helper calls (model `security` or `router`), with or without usage. Each request row has the same label in `backend` on `/api/requests`. `id_no_usage` counts the `none` replies that have an id but no usage block, to measure how often that happens. |
 | `usage_unreadable` | Responses whose examined bytes would not parse at all, so usage could not be sought — a spliced head+tail sniffer window rather than an unrecognised dialect. Different fix; see below. |
 | `attempted_tokens` | What compaction was **allowed** to touch this window — the uncached tail when cache-aware. |
 | `frozen_tokens` | What cache-awareness deliberately left alone. Its benefit is the cache reads that stayed cheap; this is its cost. |
 | `savings_pct_attempted` | `saved ÷ attempted`. The ratio to quote: `savings_pct`'s whole-request denominator recounts the transcript every turn and trends to ~0% on a long session. `0` when nothing was attempted. |
 | `savings_pct_new_input` | `saved ÷ (fresh + cache_write + saved)` — savings as a fraction of what would newly have entered the provider. Reported as `0`, **never 100**, when the provider reported no usage: savings must not be divided by themselves. |
+| `keepalive_pings_priced` | Keep-alive pings the host priced (each `PingSavings` call that returned ok, manual pings too). Read it together with the next field. `0` on a host with no ping store. |
+| `keepalive_rescue_facts_missing` | Priced real requests that followed keep-alive pings but found **no ping facts** for their thread. Non-zero means keep-alive credit was lost on that many returns. It also counts a return after a ping that got a non-2xx answer or no usage (such a ping is not priced), a return after the store evicted the facts, a return while a ping was still in flight, and a request whose pricing panicked. If it keeps rising while `keepalive_pings_priced` stays `0`, either the host does not wire the ping side (no `Options.Pings`, no `PingSavings` call, or `PingSavings` on a store other than `Options.Pings`), or its pings keep failing. A key mismatch inside one shared store does **not** fit this pattern: that store still prices pings, so `keepalive_pings_priced` rises too. To tell an unwired host from failing pings, read the keeper's own counters in `/stats`. `pings` rising with `failed` rising means the pings went out and failed. `failed` counts a refused ping, a ping with no usage, and a ping that never reached the provider (a transport error). `skipped` counts a ping that got a 429 or 5xx answer (it went out and was not priced), and also pings never sent (no spare rate or concurrency, a gate refusal, an eviction, a body that could not be built). So `pings` and `skipped` rising together with `failed` flat is either a 429 or 5xx storm or never-sent skips beside healthy pings. The dashboard ping rows tell them apart: a 429 or 5xx status against a 2xx with usage. `skipped` rising with `pings` flat means the keeper did not send them. The dashboard ping rows help only in part: a 429 or 5xx ping leaves a row with that status, a ping with no usage leaves a row with a 2xx status, a ping that ran to its 60 s timeout leaves a row with status 0 and `stop_reason` `timeout_estimated` (booked at its projected cost, and also counted in `/stats` `timed_out`), and a refused ping or a fast transport error leaves no row. It moves only when the dashboard is on, because the capture and the savings tracker are dashboard-bound: `0` without a dashboard means not measured. On a wired host, a span served only by a committed substitute ping does not raise it, because the substitute stores ping facts. A substitute call that reported no usage stores none, so it can raise it. Also exported as `cg_keepalive_rescue_facts_missing_total`. |
 
 ##### When the tiers read zero
 
@@ -254,7 +260,7 @@ with the expand call is withheld.
 
 `sse_expand_after_stream` is the counter that keeps that trade honest. If it is a meaningful
 fraction of `sse_streamed`, the peek is letting real expand calls through and the fix is to
-splice the continuation into the live stream instead (see `proxy/ssepeek.go`).
+splice the continuation into the live stream instead (see `inband/sse.go`).
 
 #### Freeze-replay health
 
@@ -394,6 +400,17 @@ same snapshot.
     fall as a counter reset and extrapolate a spike at exactly the moment the value went
     down. For a per-second rate use the process-wide `cg_*` counters, which are monotonic.
 
+#### Manual-hold series (keep-alive)
+
+A manual hold keeps one body for the Ping button. These series count holds and sizes only. They carry no body, key or credential.
+
+- `cg_keepalive_manual_hold_evicted_total{reason="bytes"|"count"}`: holds the keeper released early because a tenant went over its cap (32 MiB of bodies, or 16 holds). The oldest hold of that tenant goes first.
+- `cg_keepalive_refused_total{reason="too_large"}`: requests the keeper did not hold because the body was over the per-body limit.
+- `cg_keepalive_manual_hold_body_bytes`: a histogram of body size when a hold starts. The buckets are 1, 4, 8, 16 and 32 MiB.
+- `cg_tenant_keepalive_manual_hold_bytes{tenant,label}`: bytes this tenant holds now. Only tenants that hold something appear.
+
+The counters and the histogram are process-wide, like the other `cg_keepalive_*` series. The gauge is per tenant, like `cg_tenant_refused_requests_total`. On a hosted proxy `/metrics` is open to loopback and to the `METRICS_TOKEN` bearer only, so the per-tenant gauge does not show to other tenants.
+
 #### Reading `acted: 0`
 
 Three families answer "this component ran and did nothing — is it broken?":
@@ -433,12 +450,13 @@ table above is unchanged and every path below returns 404.
 | Route | Purpose |
 |---|---|
 | `GET /dashboard/` | The embedded single-page UI (HTML + CSS + JS from `go:embed`; no CDN, no build step). `/dashboard` redirects here. |
-| `GET /api/stats` | Overview aggregates: token tiers, costs, the four labelled savings denominators, the honest-savings waterfall, safety-mechanism costs, and the accounting / cache-miss / uncompressed-reason distributions. Accepts every filter parameter below. |
+| `GET /api/stats` | Overview aggregates: token tiers, costs, the four labelled savings denominators, the honest-savings waterfall, safety-mechanism costs, and the accounting / cache-miss / uncompressed-reason distributions. `tokens` is every accountant saving in tokens by tier, in total and by feature, and `tokens_unmeasured_requests` counts the requests with no token figure; `lean=1` has the token totals only (see [Savings in tokens](../dashboard.md#savings-in-tokens)). Accepts every filter parameter below. |
 | `GET /api/series?bucket=<ms>` | Time series, bucketed **at query time** (no rollup tables). One object per bucket with tokens, the four billed tiers, costs, mean latencies, restorations and cache misses. |
 | `GET /api/requests` | Paginated request list. Server-side filters + **keyset** pagination (`before=<id>`, not an offset). Returns `{requests, next_cursor, total}`. |
 | `GET /api/requests/{id}` | One request with its per-component rows and, for a permitted caller, the before/after content the diff view renders. Carries [`content_captured` and `capture_blocked_by`](#why-a-transcript-panel-is-empty) alongside `content_visible`, `content_cap_bytes` and `content_archived`. |
 | `GET /api/sessions` | Session list with per-session rollups (`limit` / `offset`). |
 | `GET /api/sessions/{session}/transcript` | One session's before/after content for the compaction-diff view, oldest first, with the component rows per request. Reports one of nine transcript states (see [dashboard](../dashboard.md)), plus [`content_captured` and `capture_blocked_by`](#why-a-transcript-panel-is-empty). **Lazy**: it touches the local database only and reports `cold` unless `?fetch=1`, so opening the view never costs an rclone round trip. |
+| `GET /api/me/limits` | The newest subscription limit values (5-hour and 7-day share, reset time, status) the proxy read from the `anthropic-ratelimit-unified-*` response headers for the caller's own account. `subscription` comes from the auth kind of the account's newest Anthropic request (an OAuth `sk-ant-oat…` bearer token); `{}` when that request used an API key or another credential. See [dashboard](../dashboard.md#subscription-limits). |
 | `GET /api/whoami` | The UI's mode probe: `{hosted, authenticated}`, plus the account, tokens, base URL and registration mode when signed in. Answers **200 in every case** — including "not signed in" — so a question with a legitimate negative answer is not asked with an error. Mounted whenever the dashboard is. |
 | `GET /api/archive` | The local, permanent cold-storage index (`limit`). Also reports `remote` (the **configured** destination name, `""` when none) and `reachable` as separate fields, so "not configured" and "configured but down right now" cannot be rendered as the same thing. |
 | `GET /api/archive/{session}` | Fetches one session back out of cold storage. The only route that does a network round trip, and **read-only** — it does not reinsert the rows. `404` for "never archived", `503` for "the remote is down". |
@@ -446,8 +464,6 @@ table above is unchanged and every path below returns 404.
 | `GET /api/breakdown?dim=<name>` | Requests, tokens and **spent vs saved** grouped by one dimension: `model`, `provider`, `agent`, `preset`, `mode`, `reasoning_effort`, `thinking_mode`, `stop_reason`, `tool_choice`, `cache_miss_reason`, `cache_breakpoints`, `stream`. `spent_usd` is billed cost plus context-guru's own model spend; `saved_usd` is the baseline counterfactual minus that. `incomplete_rows` counts rows the provider reported no usage for, so a group with no priced rows renders as **unknown** rather than as zero. The dimension is an **allowlist**: an unknown one is a `400` naming the valid set, never a chart of some other dimension's numbers. Defaults to `model`. Per-**day** usage bars need no route of their own — they are `/api/series?bucket=86400000`, since bucketing happens in SQL at query time. |
 | `GET /api/facets` | The distinct values present for each filter dimension, so a UI shows only what the data contains. |
 | `GET /api/config` | **This proxy process's** effective (resolved, key-allowlisted) configuration, wrapped in a scope envelope — see [below](#the-config-route-serves-the-servers-configuration-not-yours). Access-gated; **manager-only** in hosted mode. |
-| `GET /api/benchmarks` | Ingested harness runs with per-arm aggregates. `?refresh=1` re-scans the configured run directories. **Manager-only** in hosted mode — the runs are the operator's own eval history, and `?refresh=1` walks the filesystem and inserts rows. |
-| `GET /api/benchmarks/{id}/tasks` | Per-task rows for a run (`?arm=<name>` to restrict). **Manager-only** in hosted mode. |
 | `GET /api/capture` | The capture pipeline's own health, **including its drop count**. The counters are process-wide, so in hosted mode a non-manager gets `mode` alone (with a `description` that says so, rather than one describing counters that are not in the payload). |
 | `GET /api/events` | SSE stream of captured requests (summary rows only — never content). Honors `Last-Event-ID` (or `?last_event_id=`) so a reconnect backfills the gap. |
 | `GET /api/kvcache` | The KV-cache analysis: summary cards, the idle histogram, the survival curve, the grouped views (observed TTL, user, model, time-of-day band), the price list and the **coverage statement**. One payload, so every figure shares its denominator. `scanned` / `total` / `truncated` say whether the read was capped (`kvCacheMaxRows`, 200,000) — a silent cap would read as "this is your whole history". |
@@ -464,7 +480,7 @@ configuration is on screen:
 ```json
 {
   "scope": "server",
-  "config": { "preset": "codesmart", "pipeline": ["format", "…"], "…": "…" },
+  "config": { "preset": "conservative", "pipeline": ["format", "…"], "…": "…" },
   "description": "The configuration this proxy resolved at startup. …"
 }
 ```
@@ -558,7 +574,7 @@ question — a test walks the table and asserts every route's declared scope. Th
 |---|---|
 | Public — no principal at all | `/dashboard/`, `/api/whoami` |
 | Tenant — that principal's data only, and a manager may widen with `?tenant=<id>` or `?tenant=*` | every other `/api/*` data route |
-| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config`, `/api/benchmarks`, `/api/benchmarks/{id}/tasks`, and `/api/capture`'s counters |
+| Manager — server-wide or process-wide facts that are nobody's tenant data | `/api/config` and `/api/capture`'s counters |
 
 A manager reading another tenant sees their **metrics and their transcripts** — an
 explicit owner decision. `/api/requests/{id}`, `/api/sessions/{session}/transcript` and
@@ -671,6 +687,7 @@ block is covered in [Cache keep-alive](../how-to/cache-keepalive.md)):
 | `stash_ttl_seconds` | `1800` | The **rewind payloads'** own entry lifetime, shorter than `ttl_seconds` and capped by it (the cap is silent, so `/config` reports the **effective** value, not the configured one). A payload is re-derivable from the transcript, a frozen decision is not — see [the two horizons](#why-payloads-expire-sooner-than-decisions) below. |
 | `stash_max_bytes` | `268435456` (256 MiB) | What the **rewind reserve** may cost in memory. Entries are a poor proxy for it in this one namespace: every other exempt entry is a marker line or an integer, a rewind payload is a whole tool output. Whichever of `max_entries` and this binds first, binds. |
 | `max_sessions` | `100` | Cap on per-session sticky-id sets. |
+| `state_ttl_seconds` | `0` (= `ttl_seconds`) | Memory lifetime of the **session state** keys only (summary checkpoint, billed input, freeze decisions, sweep records). Other keys and the rewind payloads keep their own lifetime. The proxy sets `86400` (24 h) when the session state database is on and this is `0`. |
 
 ##### The two exemptions, and the floor under them
 
@@ -780,7 +797,8 @@ startup with the replacement named, rather than silently migrated to a value tha
 moment.
 
 (The agent's own compaction is a second route to the same skip — it shrinks the incoming request and
-can drop it back under `min_request_tokens` for several consecutive turns.)
+can drop it back under `min_request_tokens` for several consecutive turns. The compaction request
+itself is not skipped: it goes through the pipeline.)
 
 That is only safe because a skipped turn still **splices**. Once a checkpoint exists, every later turn
 re-emits the same summary bytes from it, with no model call, whichever gate declined and whether or
@@ -790,7 +808,7 @@ full-suffix cache-write, so under a rarely-firing trigger the component would co
 every turn to save it on a few.
 
 The exposure this leaves, stated plainly: a turn that runs **no pipeline** performs no refresh (an
-`x-context-guru-bypass` request, or the agent-compaction bypass), so an unbroken run of bypassed
+`x-context-guru-bypass` request), so an unbroken run of bypassed
 turns longer than `stash_ttl_seconds` could outlive a payload whose marker is still live. Both are
 single-request events in practice, and on the first row above the outcome is the reported one —
 `stash_missing` — not a silent loss.
@@ -829,6 +847,7 @@ Always explicit — nothing infers it from the rest of the configuration.
 | Field | Default | Purpose |
 |---|---|---|
 | `fixed_restore` | `false` | After the agent expands an offloaded output, keep the original **compacted** at its own position and give the content back as a separate message, labelled with the same `<<cg:HASH>>` marker, inserted right after the turn that expanded it — at the same index, byte-identical, on every later turn. Off is the older behaviour: the original reverts to full at its own position (kept-verbatim), a change inside the cached prefix that costs a cache-write of the whole suffix. One switch for every offloader, because the compacting component can be any of them. See [What an expand costs](../how-to/recover-context.md#fixed-restore-opt-in). |
+| `inband_breakpoint` | `false` | When the proxy answers an expand call itself and sends the follow-up request upstream, move the last `cache_control` in `messages`, whoever placed it, to the end of that follow-up. The provider then caches the tool call and the expanded original instead of billing them as plain input. The breakpoint keeps the client's TTL, and the count stays the client's count. A client with no breakpoint in `messages` gets none. Anthropic only; a no-op on other wires. Off by default: a cache write costs more than plain input, and the client's next request does not carry the in-band tool call, so it cannot read that entry. Only a later round of the same expand loop can. |
 
 !!! warning "Strict: unknown keys are rejected"
     The YAML loader runs with `KnownFields(true)`, so a typo'd key fails loudly
@@ -837,7 +856,7 @@ Always explicit — nothing infers it from the rest of the configuration.
 ### Example
 
 ```yaml
-preset: balanced
+preset: conservative
 pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
@@ -855,7 +874,7 @@ for every component's config block.
 
 | Flag / env | Default | Purpose |
 |---|---|---|
-| `--preset` / `PRESET` | `house` | Pipeline preset when no `--config`. `codesmart` is the SWE-bench arm and must be asked for by name. |
+| `--preset` / `PRESET` | `conservative` | Pipeline preset when no `--config`. The six current presets are `off`, `conservative`, `medium`, `high`, `xhigh` and `ultrahigh`. `conservative` is the default. The obsolete name `house` runs the same pipeline. Other presets are [obsolete](presets.md#obsolete-presets) but still load. |
 | `--config` / `CONFIG` | — | YAML config file (overrides preset). |
 | `--listen` / `LISTEN_ADDR` | `:4000` | Listen address. The flag exists so the port is visible in `ps` and to a supervisor; before it, the address reached the process only through the environment. |
 | `--version` | — | Print version and commit, then exit. |
@@ -870,6 +889,9 @@ for every component's config block.
 | `CACHE_MODE` | `auto` | Cache-aware compaction: `auto` (on when the agent sets its own breakpoints) \| `on` \| `off`. |
 | `MODEL_INFO_URL` / `MODEL_INFO` | LiteLLM map | Source for context-window sizes (used by the fractional triggers). `MODEL_INFO=off` disables the lookup; fractions are then ignored and absolutes apply. |
 | `MODEL_PRICES` | — | Path to an **operator price list**, consulted before the public map. See below. A file that fails to load is fatal. |
+| `--session-state` / `SESSION_STATE` | `true` | With `--dashboard`: keep the **session state** in the dashboard database (#769), in its own table `session_state`. Without it, a restart or a pause longer than `store.ttl_seconds` loses the summary checkpoint and the billed input. With it, the proxy writes each state key to the table (batched once a second, never inside the request) and keeps it 24 h in memory (`store.state_ttl_seconds`). When a request arrives for a session that has no state in memory, the proxy reads **that session's** rows once. It reads nothing at startup. The proxy opens no second file: the store uses the dashboard's own handle. `--session-state=false` keeps the memory-only store. Off without `--dashboard`, with an in-memory dashboard database, with `--store=false` and with `--upstreams` (a warning says why). The data is **not encrypted**. Any database error is logged once per kind of operation and the proxy goes on with memory only. **A failed write drops that batch (up to 1 s of writes), not only a crash.** The rewind payloads (the stash) are never written. |
+| `--session-state-metadata-only` / `SESSION_STATE_METADATA_ONLY` | `false` | With `--session-state`: write only the metadata keys (`cg:bin:`, `cg:bint:`, `cg:len:`, `cg:ttl:`, `cg:seen:`, `cg:swd:`, `cg:swk:`, `cg:swx:`, `cg:rst:`, `cg:use:`). The summary text and the other content keys stay out of the table. |
+| `--session-state-retention` / `SESSION_STATE_RETENTION` | `720h` | Delete a state row this long after its last write. The dashboard's own retention (`--dashboard-retention`) does not touch these rows. The rows of a session also go when the dashboard archives or evicts that session. |
 | `--store` / `STORE` | on | Enable/disable the state store; `--store=false` disables offload reversibility. Wins over the file's `store:` block. |
 | `--mode` / `MODE` | `sync` | Operating mode: `sync` \| `observe`. Wins over the file's `mode:`. |
 
@@ -892,7 +914,9 @@ A gateway does not have to charge that, and two things go wrong when it does not
 which carries the whole litellm-gateway table:
 
 ```yaml
-cache_read_frac: 0.1     # fills cache_read where an entry omits it
+# currency: Bobcoins     # optional: the unit of every rate in the file. Unset, USD
+# cache_read_frac: 0.1  # optional: one read multiple for every model. Unset, it follows the model
+                         # (0.1x; 0.05x Opus/Sonnet 5.5; 0.025x Fable/Mythos 5.1)
 cache_write_frac: 1.25   # …and cache_write
 models:
   - {match: "aws/claude-sonnet-5", in: 1.52, out: 7.60}
@@ -901,7 +925,12 @@ models:
 ```
 
 Rates are **dollars per million tokens**, matching every vendor's price page; they are
-converted once on load. Ids are matched case-insensitively: an exact id wins, and otherwise
+converted once on load. A file whose rates are in another unit names it with `currency` (1 to 16
+ASCII letters; any other value stops the proxy at startup). Bob's file says `currency: Bobcoins`.
+The dashboard then shows those costs in that unit. The API's money fields keep their `*_usd` names.
+Each dashboard reply that carries them also says `currency`: the unit of the rows in its filter, or
+`mixed` when they have more than one unit. `/stats` and the `cg_*_usd` metrics are in the price
+file's unit too. Needs context-guru-proxy v0.7.4 or newer. Ids are matched case-insensitively: an exact id wins, and otherwise
 the **longest** entry wins whether it matched as a family prefix or by containment — so a
 specific entry always beats the family it belongs to and order in the file decides nothing.
 Containment applies only to entries that look like a model id (one containing a `/` or a
@@ -909,6 +938,17 @@ Containment applies only to entries that look like a model id (one containing a 
 `azure/gpt-5.2-fast` and pricing it ten times under with `ok=true`, where a miss would have
 let the public map answer. `window:` optionally supplies a context window for a model the
 public map does not list either.
+
+`cache_write_1h_frac:` optionally sets an entry's 1-hour cache-write rate as a multiple of
+`in`. Unset or 0, it is 2.0x (Anthropic's rate). Set it when a gateway bills the 1-hour write at
+another rate, for example `1.0` for the input rate. A 1-hour write never costs less than a
+5-minute write, so a value below the entry's 5-minute rate gives the 5-minute rate.
+
+`flat: true` turns the built-in prompt-size tiers off for one entry. Some models bill every token
+at higher rates when the prompt is large (for example gpt-5.5 above 272,000 tokens, Claude Haiku 5.5
+above 100,000). The proxy adds these tiers to a price-file entry by default. Set `flat: true` when
+your gateway bills one flat rate. The key is per entry. It does not pass to another entry. Absent,
+or `false`, the built-in tiers apply. A value that is not `true` or `false` stops the load.
 
 These are list prices, not credentials, and the file holds no secret. A malformed one is a
 **startup error** rather than a fallback: a price list that silently failed to load is
@@ -922,6 +962,9 @@ indistinguishable from "every model is free".
     dollar figure for those rows — baseline, compaction savings, prefix-cache savings and the
     "total avoided" headline. It does not touch the before/after **ratio**, where a uniform
     rate error cancels.
+
+    The Bob tiers set `cache_write_1h_frac: 1.0`: Bob bills a 1-hour cache write at the input
+    rate (measured 2026-11-04).
 
 #### Extraction-model pricing
 
@@ -964,7 +1007,7 @@ The [dashboard](../dashboard.md) is **off by default**. Enabling it adds `/dashb
 | `--dashboard-lifecycle-signals` / `DASHBOARD_LIFECYCLE_SIGNALS` | `true` | Write one `request_lifecycle` row per request (and per keep-alive ping) with the signals no other column holds: gap from the previous response's end to this request's start on the same thread (proxy clock), granted cache TTL tier (`5m`/`1h`/`mixed`), incoming tool_result count, bytes and error flag, and the ping ordinal. Counts and sizes only. Thread id, previous stop reason and tool names are already `requests` columns. Set to `false` to turn it off. |
 | `--dashboard-queue` / `DASHBOARD_QUEUE` | `4096` | Capture-channel depth. A full channel **drops** events (counted, and shown in the UI) rather than delaying a request. |
 | `--dashboard-trusted-cidrs` / `DASHBOARD_TRUSTED_CIDRS` | — | Comma-separated CIDRs allowed to view per-request **content**, prompt text (tool schemas and the system prompt) and the effective config. Loopback always is; aggregates and token weights are open to everyone. |
-| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Comma-separated directories of benchmark runs (each with `summary.json` + `rows-*.json`) to ingest at startup. Re-ingesting replaces a run rather than duplicating it. |
+| `--dashboard-bench-dirs` / `DASHBOARD_BENCH_DIRS` | — | Deprecated and ignored. The Benchmarks tab and its routes were removed; the flag is accepted so existing command lines keep working. |
 
 !!! note "Retention is bounded by age AND size"
     Age alone cannot bound a burst of traffic; size alone silently erases a quiet week.
@@ -983,7 +1026,7 @@ DASHBOARD_DB=/var/lib/context-guru/dashboard.db \
 DASHBOARD_RETENTION=720h \
 DASHBOARD_MAX_BYTES=2147483648 \
 DASHBOARD_TRUSTED_CIDRS=10.0.0.0/8,192.168.0.0/16 \
-context-guru-proxy --preset codesmart
+context-guru-proxy --preset conservative
 ```
 
 ### Hosted mode, cold storage, and disk pressure

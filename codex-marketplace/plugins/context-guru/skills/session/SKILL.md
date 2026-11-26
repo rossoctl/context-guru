@@ -1,6 +1,6 @@
 ---
 name: context-guru-session
-description: One-line timeline of the current session: turns, pauses, misses, pings, compactions.
+description: One-line timeline of the current session (turns, pauses, misses, pings, compactions).
 ---
 
 Run this from this skill directory, then print its output exactly as it is in one code block. Add nothing before or after it.

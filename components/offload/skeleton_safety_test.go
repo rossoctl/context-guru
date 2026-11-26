@@ -425,7 +425,7 @@ func TestSkeletonDumpRoundTripsThroughComponent(t *testing.T) {
 		t.Fatalf("round-trip is not byte-for-byte:\n want %q\n  got %q", dump, orig)
 	}
 	// And after the agent expands it, it is never re-reduced (the bounce loop).
-	MarkKeptVerbatim(st, orig)
+	MarkKeptVerbatim(st, "s", orig)
 	again := readReq("/w/adder.go", dump, "newest\n")
 	rep2, _ := runReq(t, skeletonFor(t, "min_tokens: 5\n"), st, again)
 	if !rep2.Skipped || schema.MessageText(again.Input[1]) != dump {

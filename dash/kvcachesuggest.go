@@ -83,6 +83,26 @@ func kvSuggestCandidates() []string {
 	return out
 }
 
+// kvSuggestCandidatesFor is cfg.Strategies when the caller names arms, else every arm the sweep may
+// pick. A named arm the sweep may not pick (optimal, replay, custom) or does not know is an error:
+// a typo must fail the request, not silently shrink the comparison.
+func kvSuggestCandidatesFor(cfg KVCacheSimConfig) ([]string, error) {
+	all := kvSuggestCandidates()
+	if len(cfg.Strategies) == 0 {
+		return all, nil
+	}
+	out := make([]string, 0, len(cfg.Strategies))
+	for _, name := range cfg.Strategies {
+		if !slices.Contains(all, name) {
+			return nil, fmt.Errorf("dash: %q is not an arm the suggester can pick; have %v", name, all)
+		}
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
 // KVCacheSuggestion is one (user, hour-of-day) cell's winner, decided from exactly that
 // account's own Sunday–Thursday requests in that hour — nothing else.
 type KVCacheSuggestion struct {
@@ -223,7 +243,10 @@ func (d *DB) KVCacheSuggest(f Filter, o KVCacheOptions, p modelinfo.Pricer,
 	// against the true ceiling. Without this a cell could report a "best" that costs MORE than
 	// a baseline that was never in its own comparison, which is the one thing SavingUSD must
 	// never do.
-	candidates := kvSuggestCandidates()
+	candidates, err := kvSuggestCandidatesFor(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if !slices.Contains(candidates, baseName) {
 		candidates = append(candidates, baseName)
 	}
@@ -292,6 +315,93 @@ func (d *DB) KVCacheSuggest(f Filter, o KVCacheOptions, p modelinfo.Pricer,
 		"A cell below min_requests still reports every candidate's own numbers; " +
 			"insufficient_data says not to act on it as a pattern.",
 	}
+	return out, nil
+}
+
+// Segmenter places one request in a segment for KVCacheSuggestBy. ok=false leaves the request out
+// of the analysis entirely.
+type Segmenter func(r *kvcache.Request) (segment string, ok bool)
+
+// KVCacheSegmentCell is one (user, hour, segment) cell: the same decision KVCacheSuggest makes for a
+// (user, hour) cell, over that segment's rows only.
+type KVCacheSegmentCell struct {
+	Segment string `json:"segment"`
+	KVCacheSuggestion
+}
+
+// KVCacheSegments is KVCacheSuggestBy's result.
+type KVCacheSegments struct {
+	Baseline  string               `json:"baseline"`
+	Cells     []KVCacheSegmentCell `json:"cells"`
+	Scanned   int64                `json:"scanned"`
+	Total     int64                `json:"total"`
+	Truncated bool                 `json:"truncated"`
+}
+
+// KVCacheSuggestBy is KVCacheSuggest with one more key on every cell: (user, hour, segment) instead
+// of (user, hour), and seg instead of the Sunday-Thursday filter.
+//
+// It answers "would a policy that ALSO knew the weekday (or the model, or the agent) have done
+// better?" with the SAME per-cell decision KVCacheSuggest makes — kvSuggestCell, unchanged — so the
+// two are comparable cell for cell. The campaign upload format has no segment field; this is for
+// analysis, not for enforcement.
+func (d *DB) KVCacheSuggestBy(f Filter, o KVCacheOptions, p modelinfo.Pricer, cfg KVCacheSimConfig,
+	seg Segmenter) (*KVCacheSegments, error) {
+	if seg == nil {
+		return nil, fmt.Errorf("dash: KVCacheSuggestBy needs a segmenter")
+	}
+	baseName := cfg.Baseline
+	if baseName == "" {
+		baseName = kvCacheDefaultBaseline()
+	}
+	if buildStrategy(baseName, nil, cfg, kvcache.Config{}) == nil {
+		return nil, fmt.Errorf("dash: unknown baseline strategy %q", cfg.Baseline)
+	}
+	rows, total, err := d.KVCacheDataset(f, o)
+	if err != nil {
+		return nil, err
+	}
+	type cellKey struct {
+		user, segment string
+		hour          int
+	}
+	groups := map[cellKey][]*kvcache.Request{}
+	var keys []cellKey
+	kept := make([]*kvcache.Request, 0, len(rows))
+	for _, r := range rows {
+		s, ok := seg(r)
+		if !ok {
+			continue
+		}
+		kept = append(kept, r)
+		k := cellKey{r.User, s, r.HourUTC}
+		if _, seen := groups[k]; !seen {
+			keys = append(keys, k)
+		}
+		groups[k] = append(groups[k], r)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.user != b.user {
+			return a.user < b.user
+		}
+		if a.hour != b.hour {
+			return a.hour < b.hour
+		}
+		return a.segment < b.segment
+	})
+	candidates := kvSuggestCandidates()
+	if !slices.Contains(candidates, baseName) {
+		candidates = append(candidates, baseName)
+	}
+	prices := kvcache.NewPriceList(context.Background(), modelsOf(kept), p, cfg.Multipliers, cfg.Overrides)
+	out := &KVCacheSegments{Baseline: baseName, Cells: make([]KVCacheSegmentCell, len(keys)),
+		Scanned: int64(len(rows)), Total: total, Truncated: int64(len(rows)) < total}
+	parallelFor(len(keys), func(i int) {
+		k := keys[i]
+		out.Cells[i] = KVCacheSegmentCell{Segment: k.segment,
+			KVCacheSuggestion: kvSuggestCell(k.user, k.hour, groups[k], candidates, baseName, prices, cfg)}
+	})
 	return out, nil
 }
 

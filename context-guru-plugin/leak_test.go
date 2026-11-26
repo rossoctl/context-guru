@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // Processes this suite starts and must stop.
@@ -140,21 +142,11 @@ func TestLeakGuardStopsWhatATestStarted(t *testing.T) {
 			t.Skip("setsid unavailable: ", err)
 		}
 		pid = cmd.Process.Pid
-		go cmd.Wait()                                      //nolint:errcheck
-		for i := 0; len(markedProcs(t.Name())) == 0; i++ { // its environ reads empty until execve is done
-			if i == 50 {
-				t.Fatal("the started process does not carry the test's mark")
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
+		go cmd.Wait() //nolint:errcheck
+		// Its environ reads empty until execve is done.
+		testutil.WaitFor(t, "the started process to carry the test's mark", func() bool { return len(markedProcs(t.Name())) > 0 })
 	})
-	for i := 0; i < 50; i++ {
-		if syscall.Kill(pid, 0) != nil {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Errorf("pid %d outlived the subtest that started it", pid)
+	testutil.WaitFor(t, fmt.Sprintf("pid %d to end with the subtest that started it", pid), func() bool { return syscall.Kill(pid, 0) != nil })
 }
 
 // The 15 s the installer waits for a proxy it just started is the product's default; the tests above

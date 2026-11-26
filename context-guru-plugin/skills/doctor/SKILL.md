@@ -1,6 +1,7 @@
 ---
 name: doctor
 description: Check the setup (routing, proxy, prices, status line) and say what to fix.
+disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cg.py" doctor:*)
 ---
 

@@ -140,7 +140,9 @@ func TestSpliceRewritesEveryMessageAtItsOwnSpan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"model":"claude-x","system":` + string(sysEnc) +
+	// A named Sonnet model: an unnamed one gets the larger Haiku cache floor, and this fixture's
+	// stable half is sized for the split.
+	body := []byte(`{"model":"claude-sonnet-5","system":` + string(sysEnc) +
 		`,"messages":` + string(msgsEnc) + `}`)
 
 	out, changed := apply.Body(context.Background(), p, store.NewMemory(store.Options{}),

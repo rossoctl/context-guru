@@ -192,6 +192,25 @@ func (h *declScanOnce) get() (*declScan, error) {
 	return h.scan, h.err
 }
 
+// staleRules builds the stale-kind rule (stalekind.go) from the facts of the sessions in scope.
+// byTenant false pools the tenants, as the report's own grouping does (it keys by session alone).
+func (s *declScan) staleRules(inScope func(string) bool, byTenant bool) *staleRules {
+	r := newStaleRules()
+	for k, v := range s.facts {
+		if inScope(k.session) {
+			r.observe(ruleTenant(k.tenant, byTenant), k.session, k.kind, k.name, v.last)
+		}
+	}
+	return r
+}
+
+func ruleTenant(tenant string, byTenant bool) string {
+	if byTenant {
+		return tenant
+	}
+	return ""
+}
+
 // scopedDeclsScan is scopedDecls from one pass over the table: one row per
 // (session, kind, name, server) for the sessions in scope, in the order GROUP BY would give them.
 func (d *DB) scopedDeclsScan(h *declScanOnce, sessions func(string) bool) ([]declRow, error) {
@@ -201,19 +220,21 @@ func (d *DB) scopedDeclsScan(h *declScanOnce, sessions func(string) bool) ([]dec
 	}
 	type key struct{ session, kind, name, server string }
 	merged := map[key]*declRow{}
+	stale := scan.staleRules(sessions, false)
 	for k, v := range scan.facts {
-		if !sessions(k.session) {
+		if !sessions(k.session) || stale.stale("", k.session, k.kind, k.name, k.server, v.last) {
 			continue
 		}
 		kk := key{k.session, k.kind, k.name, k.server}
 		if r := merged[kk]; r == nil {
 			merged[kk] = &declRow{session: k.session, kind: k.kind, name: k.name, server: k.server,
-				tokens: v.tokens, hasText: v.hasText}
+				tokens: v.tokens, hasText: v.hasText, ts: v.last}
 		} else {
 			if v.tokens > r.tokens {
 				r.tokens = v.tokens
 			}
 			r.hasText = r.hasText || v.hasText
+			r.ts = max64(r.ts, v.last)
 		}
 	}
 	out := make([]declRow, 0, len(merged))

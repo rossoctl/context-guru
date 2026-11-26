@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,12 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
+	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/config"
-	"github.com/rossoctl/context-guru/internal/cheapmodel"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/rossoctl/context-guru/tenant"
 )
@@ -106,6 +110,11 @@ func newHostedFixtureOpts(t *testing.T, upstreamName, dialect, keyEnv string, tw
 	}
 	f.h = New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, opts)
 	t.Cleanup(f.h.Close)
+	// Registered after the sink's t.Setenv, so it runs before it (cleanups are LIFO): by
+	// the time the env points anywhere else, no feedback send is still in flight to read
+	// it. Without this, a straggler from this test's own POST lands in the next test's
+	// sink (issue #213).
+	t.Cleanup(f.h.waitMailForTest)
 	f.mux = f.h.Mux()
 	return f
 }
@@ -881,26 +890,39 @@ func TestServerKeyStillSupportedAsExplicitFallback(t *testing.T) {
 // (nil client, component degrades) when there is none — never fall back to a server
 // key that would bill one account for everyone's compaction.
 func TestIncomingModelUsesCallerCredential(t *testing.T) {
+	var seenKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer srv.Close()
 	h := New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil, Options{})
 	defer h.Close()
 	body := []byte(`{"model":"claude-haiku-4-5"}`)
-	up := upstream{base: "https://upstream.invalid"}
+	up := upstream{base: srv.URL}
 
 	r := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("x-api-key", "caller-own-key")
-	m, ok := h.incomingModel("anthropic", up, body, r).(cheapmodel.Anthropic)
-	if !ok || m.APIKey != "caller-own-key" {
-		t.Errorf("anthropic client key = %q, want the caller's", m.APIKey)
+	m, ok := h.incomingModel(bschemas.Anthropic, up, body, r).(cheapmodel.Anthropic)
+	if !ok {
+		t.Fatal("anthropic client not built")
+	}
+	if _, err := m.Complete(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if seenKey != "caller-own-key" {
+		t.Errorf("upstream saw x-api-key %q, want the caller's", seenKey)
 	}
 
 	// Our own token is not a provider credential: it must not be handed to the model
 	// client, and with nothing else available the component gets nil.
 	r = httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
 	r.Header.Set("Authorization", "Bearer "+tenant.TokenPrefix+strings.Repeat("C", 26))
-	if got := h.incomingModel("anthropic", up, body, r); got != nil {
+	if got := h.incomingModel(bschemas.Anthropic, up, body, r); got != nil {
 		t.Errorf("a bare context-guru token produced a model client: %#v", got)
 	}
-	if got := h.incomingModel("anthropic", up, body, httptest.NewRequest(http.MethodPost, "/", nil)); got != nil {
+	if got := h.incomingModel(bschemas.Anthropic, up, body, httptest.NewRequest(http.MethodPost, "/", nil)); got != nil {
 		t.Errorf("no credential produced a model client: %#v", got)
 	}
 }
@@ -908,9 +930,8 @@ func TestIncomingModelUsesCallerCredential(t *testing.T) {
 // The static "config"-source cheap model authenticates with a SERVER credential, so it
 // is withheld in hosted mode. Single-tenant keeps it.
 func TestStaticModelWithheldWhenHosted(t *testing.T) {
-	cm := cheapmodel.Anthropic{Model: "m", APIKey: "server-side"}
 	h := New(components.NewPipeline(nil, nil), store.NewMemory(store.Options{}), nil,
-		Options{CheapModel: cm})
+		Options{CheapModel: &CheapModelConfig{Model: "m", APIKey: "server-side"}})
 	defer h.Close()
 	if h.staticModel() == nil {
 		t.Error("single-tenant lost its configured cheap model")
@@ -1106,4 +1127,135 @@ func TestUnsetKeyEnvRefusesInsteadOfForwardingAPlaceholder(t *testing.T) {
 			t.Errorf("caller's own credential did not reach the upstream: %q", got)
 		}
 	})
+}
+
+// #1097: a config change rebuilds the tenant pipeline. The "keep in full" marks must survive it
+// when the component set is the same, or dedup compacts an expanded output again and the warm
+// cache is rewritten.
+func keepMarkFixture(t *testing.T) (*hostedFixture, *tenant.Tenant) {
+	t.Helper()
+	f := newHostedFixture(t, "up", "openai")
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		cfg, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		pipe, err := cfg.Build(e)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		return BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Preset: "test"}, nil
+	}, 0)
+	a, _ := f.register(t, "a@ibm.com")
+	return f, a
+}
+
+func setTenantConfig(t *testing.T, f *hostedFixture, a *tenant.Tenant, doc string) *tenant.Tenant {
+	t.Helper()
+	if err := f.reg.Update(a, a.ID, tenant.Patch{ConfigYAML: &doc}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := f.reg.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestKeepMarksSurviveARebuildWithTheSameComponents(t *testing.T) {
+	f, a := keepMarkFixture(t)
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 5\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 9\n")
+	second, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Store == first.Store {
+		t.Fatal("the config change did not rebuild the tenancy")
+	}
+	if !offload.KeptVerbatim(second.Store, "sess", "the expanded output") {
+		t.Fatal("the keep mark was lost in the rebuild")
+	}
+	if offload.KeptVerbatim(second.Store, "other", "the expanded output") {
+		t.Fatal("the mark must stay session-scoped")
+	}
+}
+
+func TestKeepMarksDoNotSurviveARebuildWithDifferentComponents(t *testing.T) {
+	f, a := keepMarkFixture(t)
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup, extract]\n")
+	second, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offload.KeptVerbatim(second.Store, "sess", "the expanded output") {
+		t.Fatal("a different component set must start clean, as before #1097")
+	}
+}
+
+// #1097, review round 1: two requests race a config change. A removes the old entry and builds
+// slowly. B arrives after the remove, so it has no prev, and it publishes first. A must still
+// return a tenancy that holds the marks.
+func TestKeepMarksSurviveTwoConcurrentRebuilds(t *testing.T) {
+	f := newHostedFixture(t, "up", "openai")
+	var calls atomic.Int32
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.h.opts.Tenants = NewTenantSource(f.reg, nil, func(doc []byte, e components.Emitter) (BuiltConfig, error) {
+		cfg, err := config.LoadBytes(doc)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		pipe, err := cfg.Build(e)
+		if err != nil {
+			return BuiltConfig{}, err
+		}
+		// Call 1 is the first build. Call 2 is request A, which blocks. Call 3 is request B.
+		if calls.Add(1) == 2 {
+			close(entered)
+			<-release
+		}
+		return BuiltConfig{Pipe: pipe, Store: cfg.NewStore(), Preset: "test"}, nil
+	}, 0)
+	a, _ := f.register(t, "a@ibm.com")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 5\n")
+	first, err := f.h.opts.Tenants.ForTenant(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload.MarkKeptVerbatim(first.Store, "sess", "the expanded output")
+	a = setTenantConfig(t, f, a, "pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokens: 9\n")
+
+	type res struct {
+		tn  *Tenancy
+		err error
+	}
+	done := make(chan res)
+	go func() { tn, err := f.h.opts.Tenants.ForTenant(a); done <- res{tn, err} }()
+	<-entered
+	b, err := f.h.opts.Tenants.ForTenant(a) // publishes while A still builds
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.tn != b {
+		t.Fatal("A did not return the tenancy B published; the test no longer forces the interleaving")
+	}
+	if !offload.KeptVerbatim(r.tn.Store, "sess", "the expanded output") {
+		t.Fatal("the keep mark was lost when a second request published the rebuild first")
+	}
 }

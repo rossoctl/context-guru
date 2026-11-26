@@ -153,19 +153,20 @@ func TestCostFormulas(t *testing.T) {
 	// prefix as fresh input instead.
 	near(t, "no tier has no write rate", p.RequestCost(0, 0, 100_000, 0, TTLNone), 0)
 
-	// keep_alive_cost = cached×0.3e-6 + 1×3e-6 + 1×15e-6
+	// keep_alive_cost = cached×0.3e-6 + DefaultPingInputTokens×3e-6 + 1×15e-6
+	const pingIn = DefaultPingInputTokens * 3e-6
 	near(t, "one keep-alive on a 100k prefix", p.KeepAliveCost(100_000, sem),
-		100_000*0.3e-6+3e-6+15e-6)
+		100_000*0.3e-6+pingIn+15e-6)
 	// A provider that accepts a zero-generation request drops the output token.
 	near(t, "one keep-alive with zero generation",
 		p.KeepAliveCost(100_000, Semantics{ZeroGeneration: true}),
-		100_000*0.3e-6+3e-6)
+		100_000*0.3e-6+pingIn)
 
 	// recreate_cost pays the WRITE rate, which is where the 12.5x and 20x live.
 	near(t, "a late keep-alive at the 5m tier", p.RecreateCost(100_000, TTL5m, sem),
-		100_000*3.75e-6+3e-6+15e-6)
+		100_000*3.75e-6+pingIn+15e-6)
 	near(t, "a late keep-alive at the 1h tier", p.RecreateCost(100_000, TTL1h, sem),
-		100_000*6e-6+3e-6+15e-6)
+		100_000*6e-6+pingIn+15e-6)
 	// The ratio the whole mechanism rests on: a refresh against a re-creation.
 	if r := (100_000 * 3.75e-6) / (100_000 * 0.3e-6); math.Abs(r-12.5) > 1e-9 {
 		t.Errorf("a 5m re-creation is %.3fx a read, want 12.5x", r)
@@ -177,7 +178,7 @@ func TestCostFormulas(t *testing.T) {
 
 	// hold_cost = creation + pings×keep_alive
 	near(t, "holding 100k at 5m with two refreshes", p.HoldCost(100_000, TTL5m, 2, sem),
-		100_000*3.75e-6+2*(100_000*0.3e-6+3e-6+15e-6))
+		100_000*3.75e-6+2*(100_000*0.3e-6+pingIn+15e-6))
 	near(t, "holding 100k at 1h with no refresh", p.HoldCost(100_000, TTL1h, 0, sem),
 		100_000*6e-6)
 }
@@ -194,5 +195,56 @@ func TestMultiplierDefaults(t *testing.T) {
 	}
 	if d := DefaultMultipliers(); d.CacheRead != 0.1 || d.Write5m != 1.25 || d.Write1h != 2.0 {
 		t.Errorf("the shipped multiples moved: %+v", d)
+	}
+}
+
+// A blank cache_read follows the model's tier; Multipliers.CacheRead, when set, wins for all.
+func TestFromPriceBlankReadFollowsTheModelTier(t *testing.T) {
+	in := modelinfo.Price{Input: 10e-6, Output: 50e-6}
+	for model, frac := range map[string]float64{
+		"claude-opus-5-5": 0.05, "claude-sonnet-5-5": 0.05, "claude-fable-5-1": 0.025,
+		"claude-mythos-5-1": 0.025, "claude-opus-5": 0.1, "claude-fable-5": 0.1, "m": 0.1,
+	} {
+		got := FromPrice(model, in, Multipliers{}, SourcePriceList).CacheRead
+		if want := in.Input * frac; math.Abs(got-want) > 1e-15 {
+			t.Errorf("%s: cache_read = %v, want %v", model, got, want)
+		}
+		if got := FromPrice(model, in, Multipliers{CacheRead: 0.2}, SourcePriceList).CacheRead; math.Abs(got-in.Input*0.2) > 1e-15 {
+			t.Errorf("%s: an explicit multiple must win, got %v", model, got)
+		}
+	}
+	l := NewPriceList(context.Background(), []string{"claude-opus-5-5"}, stubPricer{"claude-opus-5-5": in}, Multipliers{}, nil)
+	if got := l.Models[0].CacheRead; math.Abs(got-in.Input*0.05) > 1e-15 {
+		t.Errorf("NewPriceList cache_read = %v, want 0.05x", got)
+	}
+}
+
+// PriceList.Multipliers states the read multiple as set (0 = per model), never a 0.1 that the
+// rows contradict.
+func TestPriceListStatesTheReadMultipleAsSet(t *testing.T) {
+	in := modelinfo.Price{Input: 10e-6, Output: 50e-6}
+	l := NewPriceList(context.Background(), []string{"claude-opus-5-5"}, stubPricer{"claude-opus-5-5": in}, Multipliers{}, nil)
+	if l.Multipliers.CacheRead != 0 || l.Multipliers.Write5m != 1.25 || l.Multipliers.Write1h != 2.0 {
+		t.Errorf("multipliers = %+v", l.Multipliers)
+	}
+	l = NewPriceList(context.Background(), []string{"m"}, stubPricer{"m": in}, Multipliers{CacheRead: 0.2}, nil)
+	if l.Multipliers.CacheRead != 0.2 {
+		t.Errorf("a set read multiple was lost: %+v", l.Multipliers)
+	}
+}
+
+// The simulator prices a 1-hour write at the entry's own multiple when the caller set none.
+func TestFromPriceKeepsTheEntryOneHourFrac(t *testing.T) {
+	tb, err := modelinfo.ParseTable([]byte("models:\n  - {match: acme/flat-1, in: 3, out: 15, cache_write_1h_frac: 1.0}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := tb.Price(context.Background(), "acme/flat-1")
+	if got := FromPrice("acme/flat-1", p, Multipliers{}, "table").Write1h; math.Abs(got-3e-6) > 1e-18 {
+		t.Fatalf("Write1h = %v, want 3e-6 (the entry's 1.0x)", got)
+	}
+	// A multiple the caller sets still wins over the entry's.
+	if got := FromPrice("acme/flat-1", p, Multipliers{Write1h: 2.0}, "table").Write1h; math.Abs(got-6e-6) > 1e-18 {
+		t.Fatalf("Write1h with the caller's 2.0x = %v, want 6e-6", got)
 	}
 }

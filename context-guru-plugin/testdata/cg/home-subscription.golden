@@ -1,0 +1,16 @@
+This session:       saved 42.0k wr · 610.0k rd
+This 5-hour window: saved 85.0k wr · 1.2M rd · cost 9.0k rd
+                    ≈ 3% of the 5-hour limit (estimate at API-price weights)
+
+Today:              saved 31.0k wr · 240.0k rd · cost 15.0k rd
+Yesterday:          saved 26.0k wr · 190.0k rd
+7 days:             saved 214.0k wr · 1.6M rd · 12.0k in · cost 3.0k wr · 96.0k rd
+                    3 requests not measured in tokens
+
+≈ Estimated   (waste you could still avoid; rows overlap)
+  1. You paused longer than the cache lasts, 214 times: run /compact before a long break
+  2. Add-ons you never use: remove them, /context-guru:insights tools lists them
+  3. Settings or tools changed mid-session: pick MCP servers and edit CLAUDE.md before you start
+
+/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills
+/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill

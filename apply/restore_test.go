@@ -90,3 +90,48 @@ func TestRestoreInsertFollowsTheAnchorThroughACountChange(t *testing.T) {
 		t.Fatalf("an unprovable mapping must append the copy, not guess: %s", nb)
 	}
 }
+
+// The repair path skips an anchor when the client's answer IS the original. That answer can be an
+// array of text blocks; compared as raw JSON it never matched, and an anchor was recorded.
+func TestPlanRestoreSkipsAnArrayAnswerThatIsTheOriginal(t *testing.T) {
+	body := []byte(`{"model":"claude-x","messages":[{"role":"user","content":"go"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"tu","name":"` + expand.ToolName + `","input":{"id":"H"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu","content":[{"type":"text","text":"ORIGINAL OUTPUT"}]}]}]}`)
+	msgs := gjson.GetBytes(body, "messages").Array()
+	pipe := components.NewPipeline(nil, nil)
+	pipe.SetFixedRestore(true)
+	st := store.NewMemory(store.Options{})
+	st.Put("H", []byte("ORIGINAL OUTPUT"))
+	planRestore(pipe, st, "sess", "anthropic", body, msgs)
+	if a := expand.Anchors(st, "sess"); len(a) != 0 {
+		t.Fatalf("an anchor was recorded for an answer that is the original: %+v", a)
+	}
+}
+
+// A Responses request whose history the server holds shows only a delta. No anchor is stated in it.
+func TestPlanRestoreSkipsResponsesHistoryTheServerHolds(t *testing.T) {
+	for _, c := range []struct{ name, extra string }{
+		{"none", ``},
+		{"previous_response_id", `"previous_response_id":"r1",`},
+		{"conversation", `"conversation":"conv_1",`},
+		{"item_reference", ``},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			input := `[{"role":"user","content":"a"},{"role":"user","content":"b"}]`
+			if c.name == "item_reference" {
+				input = `[{"type":"item_reference","id":"i1"},{"role":"user","content":"b"}]`
+			}
+			body := []byte(`{"model":"gpt-5.6",` + c.extra + `"input":` + input + `}`)
+			msgs := gjson.GetBytes(body, "input").Array()
+			pipe := components.NewPipeline(nil, nil)
+			pipe.SetFixedRestore(true)
+			st := store.NewMemory(store.Options{})
+			st.Put("H1", []byte("ORIGINAL OUTPUT"))
+			expand.RecordAnchor(st, "sess", expand.Anchor{ID: "H1", At: 2, Fp: expand.Fingerprint(msgs[1])})
+			got := planRestore(pipe, st, "sess", "responses", body, msgs)
+			if want := c.name == "none"; (len(got) > 0) != want {
+				t.Fatalf("plan has %d items, want a plan: %v", len(got), want)
+			}
+		})
+	}
+}

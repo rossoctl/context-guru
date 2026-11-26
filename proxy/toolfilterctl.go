@@ -21,17 +21,14 @@ package proxy
 import (
 	"errors"
 	"net/http"
-	"sort"
-	"strings"
 
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/dash"
-	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/tenant"
 )
 
 // toolFilterComponent is the pipeline name that carries the list.
-const toolFilterComponent = "toolfilter"
+const toolFilterComponent = config.ToolfilterComponent
 
 // DashToolFilter is the dashboard's READ hook for an account's removal list: the inventory
 // page needs to draw a switch per declaration, and dash holds no tenant configuration of its
@@ -66,25 +63,7 @@ func (h *Handler) DashToolFilter() func(string) dash.ToolFilterState {
 
 // removedFrom reads the removal list out of a stored configuration document.
 func removedFrom(doc string) (names []string, ok bool, reason string) {
-	f, err := config.ParseForm(doc)
-	if err != nil || f.ParseError != "" {
-		return nil, false, "your stored configuration does not load, so it cannot be edited " +
-			"as fields; a manager must repair it on the account page"
-	}
-	// The Form holds a stated key as `any`, and yaml.v3 decodes a sequence into []any — so
-	// both shapes are read rather than only the one a Go caller would have set.
-	switch list := f.Components[toolFilterComponent]["remove"].(type) {
-	case []string:
-		names = append(names, list...)
-	case []any:
-		for _, v := range list {
-			if str, isStr := v.(string); isStr && str != "" {
-				names = append(names, str)
-			}
-		}
-	}
-	sort.Strings(names)
-	return names, true, ""
+	return config.ToolfilterRemoved(doc)
 }
 
 // ctlToolFilter excludes or re-includes ONE declaration and answers with the same document
@@ -136,6 +115,21 @@ func (h *Handler) ctlToolFilter(w http.ResponseWriter, r *http.Request) {
 			"agent rather than saving you anything, so a manager has to make that change")
 		return
 	}
+	// A deferred MCP tool is a name in a message, not a `tools` element, so the filter cannot
+	// remove it: storing the exclusion would save nothing and hide the item from the report.
+	// Fail closed when the lookup itself fails, for the same reason. An include is never refused.
+	if exclude && h.rec != nil {
+		deferred, err := h.rec.DB().WithContext(r.Context()).IsDeferredDecl(t.ID, name)
+		if err != nil {
+			ctlErr(w, http.StatusServiceUnavailable, "could not check whether this tool is deferred; try again")
+			return
+		}
+		if deferred {
+			ctlErr(w, http.StatusConflict, "Claude Code sends this as a deferred tool, which the proxy "+
+				"filter cannot remove; use the client command shown beside it instead")
+			return
+		}
+	}
 	if code, msg := h.updateRemoved(t, func(names []string) []string {
 		return withDecl(names, name, exclude)
 	}); code != 0 {
@@ -164,43 +158,22 @@ func (h *Handler) updateRemoved(t *tenant.Tenant, edit func([]string) []string) 
 
 // editRemoved is a configuration document with its toolfilter removal list rewritten by edit:
 // the one place that edit is made, for the Inventory switch and for /context-guru:adapt tools.
+// The edit itself is config.EditToolfilterRemoved; this adds the HTTP status.
 func editRemoved(current string, edit func([]string) []string) (string, error) {
-	f, perr := config.ParseForm(current)
-	if perr != nil || f.ParseError != "" {
-		return "", statusError{http.StatusConflict, "your stored configuration does not load, so it cannot " +
-			"be edited as fields; a manager must repair it on the account page"}
+	doc, err := config.EditToolfilterRemoved(current, edit)
+	return doc, editStatus(err)
+}
+
+// editStatus gives a config editor's error the HTTP status the host answers with: 409 for a
+// document that does not load, 400 for an invalid value.
+func editStatus(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, config.ErrUnloadable):
+		return statusError{http.StatusConflict, err.Error()}
 	}
-	names, _, _ := removedFrom(current)
-	names = edit(names)
-	if f.Components == nil {
-		f.Components = map[string]map[string]any{}
-	}
-	if f.Components[toolFilterComponent] == nil {
-		f.Components[toolFilterComponent] = map[string]any{}
-	}
-	f.Components[toolFilterComponent]["remove"] = names
-	// ADDED when absent, and never REMOVED. `toolfilter` now ships in the default pipeline with
-	// an empty removal list, so naming a tool is a settings change and not a pipeline change —
-	// and an emptied list that took the component back out would write an explicit pipeline
-	// DIVERGING from the default, for no gain: a component with nothing to remove already does
-	// nothing. The add stays because an account whose stored pipeline predates that default does
-	// not have it, and without the add that account's first exclusion would save nothing and
-	// report success.
-	//
-	// Position is meaningless here either way: the rewrite lives in apply, not in the component,
-	// because `tools` is a top-level field the message pipeline never sees.
-	f.Pipeline = withComponent(f.Pipeline, toolFilterComponent, true)
-	// This route models exactly one component, so it claims exactly one. Without the claim
-	// ApplyForm preserves anything the stored pipeline runs and this omission is not sent —
-	// which is the rule that stops a stale settings page dropping a component it cannot see,
-	// and would here stop an emptied removal list from taking toolfilter back out.
-	f.PipelineKnown = []string{toolFilterComponent}
-	doc, err := config.ApplyForm(current, f)
-	if err != nil {
-		// The message names the offending value; showing it beats "invalid".
-		return "", statusError{http.StatusBadRequest, err.Error()}
-	}
-	return doc, nil
+	return statusError{http.StatusBadRequest, err.Error()}
 }
 
 // writeToolFilterDoc answers with the read route's document, so one shape serves both.
@@ -229,77 +202,17 @@ func (h *Handler) writeToolFilterDoc(w http.ResponseWriter, r *http.Request, id 
 	})
 }
 
-// declConfigName maps an inventory row to the string the removal list holds, and refuses the
-// kinds that are not removable — a suggestion never offers them, and a hand-crafted POST
-// should get a reason rather than a configuration the filter will silently decline.
+// declConfigName maps an inventory row to the string the removal list holds (config.DeclConfigName).
 func declConfigName(kind, name, server string) (string, error) {
-	switch kind {
-	case "mcp_server":
-		if server == "" {
-			return "", errors.New("an MCP server needs a server name")
-		}
-		return "mcp__" + server, nil
-	case dash.KindServerTool:
-		return "", errors.New("a provider-side tool is resolved by the provider from its " +
-			"type, not by a schema we send, so it cannot be removed here")
-	case dash.KindSkill:
-		if name == "" {
-			return "", errors.New("no skill name")
-		}
-		if !skills.ValidName(name) {
-			// The listing is the authority for what may be cut out of a real request, so a name
-			// that could not have come from one is refused rather than written into a config that
-			// would match nothing forever.
-			return "", errors.New("that is not a skill name")
-		}
-		return skills.RemovePrefix + name, nil
-	case dash.KindSkillListing:
-		return "", errors.New("the skills listing is one indivisible block of prose — remove the " +
-			"individual skills instead, and the listing shrinks with them")
-	case dash.KindTool, dash.KindMCPTool, "":
-		if name == "" {
-			return "", errors.New("no declaration name")
-		}
-		return name, nil
-	}
-	return "", errors.New("unknown declaration kind " + kind)
+	return config.DeclConfigName(kind, name, server)
 }
 
-// withDecl adds or removes one name, keeping the list sorted and duplicate-free so the stored
-// document does not churn on a no-op change.
+// withDecl adds or removes one name, keeping the list sorted and duplicate-free.
 func withDecl(names []string, name string, add bool) []string {
-	out := make([]string, 0, len(names)+1)
-	for _, n := range names {
-		if n != name {
-			out = append(out, n)
-		}
-	}
-	if add {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
+	return config.WithName(names, name, add)
 }
 
 // withComponent ensures a component is present (appended last) or absent from a pipeline.
-// A present component keeps its position: pipeline order decides what the components produce
-// and so what is cached, and adding a name to the list must not reorder anything.
 func withComponent(pipeline []string, name string, want bool) []string {
-	if want {
-		for _, n := range pipeline {
-			if strings.TrimSpace(n) == name {
-				return pipeline
-			}
-		}
-	}
-	out := make([]string, 0, len(pipeline)+1)
-	for _, n := range pipeline {
-		if strings.TrimSpace(n) != name {
-			out = append(out, n)
-		}
-	}
-	if want {
-		out = append(out, name)
-	}
-	return out
+	return config.WithComponent(pipeline, name, want)
 }

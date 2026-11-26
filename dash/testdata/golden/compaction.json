@@ -27,9 +27,18 @@
   "window_unknown": 60,
   "with_episode": 0
  },
+ "currency": "USD",
  "episodes": null,
  "first_ts": 1767603620000,
  "last_ts": 1768249460000,
+ "ledger": {
+  "first_removal_usd": 0,
+  "past_span_usd": 0,
+  "prefix_change_usd": 0,
+  "replay_usd": 0,
+  "rows": 0,
+  "stored_usd": 0
+ },
  "pricing": {
   "models": [
    {
@@ -38,7 +47,7 @@
     "known": true,
     "model": "m-opus",
     "output": 0.000075,
-    "ping_input_tokens": 1,
+    "ping_input_tokens": 7,
     "ping_output_tokens": 1,
     "source": "price_list",
     "write_1h": 0.00003,
@@ -50,7 +59,7 @@
     "known": true,
     "model": "m-sonnet",
     "output": 0.000015,
-    "ping_input_tokens": 1,
+    "ping_input_tokens": 7,
     "ping_output_tokens": 1,
     "source": "price_list",
     "write_1h": 0.000006,
@@ -62,7 +71,7 @@
     "known": false,
     "model": "m-unpriced",
     "output": 0,
-    "ping_input_tokens": 1,
+    "ping_input_tokens": 7,
     "ping_output_tokens": 1,
     "source": "",
     "write_1h": 0,
@@ -70,10 +79,20 @@
    }
   ],
   "multipliers": {
-   "cache_read": 0.1,
+   "cache_read": 0,
    "write_1h": 2,
    "write_5m": 1.25
   }
+ },
+ "replay_ledger": {
+  "avoided_compaction_usd": 0,
+  "by_component": {},
+  "closed_client_compaction": 0,
+  "closed_counterfactual": 0,
+  "conversations": 0,
+  "reopened_epochs": 0,
+  "summary_assumed": false,
+  "window_unknown_conversations": 0
  },
  "scanned": 591
 }

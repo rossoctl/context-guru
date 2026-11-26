@@ -1,0 +1,43 @@
+# Timing patterns in test files, per file and kind. See timingguard_test.go.
+# This file only shrinks. Regenerate: go test ./internal/timingguard -run TestTestTiming -update
+components/offload/common_test.go after=1
+components/offload/extract_econ_test.go after=1
+components/offload/extract_sweep_apply_test.go sleep=4 after=1
+components/offload/extract_sweep_ping_test.go sleep=1
+components/offload/extract_sweep_warm_test.go sleep=1
+context-guru-plugin/beep_test.go sleep=1 poll=1
+context-guru-plugin/leak_test.go sleep=1
+context-guru-plugin/plugin_test.go sleep=3 poll=3
+context-guru-plugin/signal_test.go after=5
+context-guru-plugin/statusline_golden_test.go sleep=1 poll=1 after=4
+dash/contentgate_test.go sleep=2 poll=2
+dash/dedupetext_test.go sleep=2 poll=2
+dash/janitor_checkpoint_test.go after=2
+dash/prompttext_test.go sleep=4 poll=3
+dash/sse_test.go sleep=2 after=1
+internal/modelinfo/litellm/zz_price_live_test.go sleep=1
+modes/modes_test.go after=3
+proxy/accountant_async_test.go sleep=2 after=3
+proxy/adaptcache_test.go sleep=1 poll=1
+proxy/adapttoolsctl_test.go sleep=1
+proxy/bypasstokens_test.go sleep=1
+proxy/campaign_test.go sleep=1 poll=1
+proxy/campaignbuild_test.go sleep=2 poll=2
+proxy/conformance_test.go after=1
+proxy/dash_test.go after=1
+proxy/entryage_test.go sleep=2 poll=2
+proxy/expandsplice_test.go after=1
+proxy/manager_test.go sleep=1 poll=1
+proxy/metricsink_test.go after=1
+proxy/modes_test.go sleep=2 poll=1
+proxy/proxy_test.go after=3
+proxy/rejected_savings_test.go sleep=1 poll=1
+proxy/tooldefer_866_test.go after=1
+proxy/upstreamsilence_test.go sleep=6
+proxy/upstreamtimeout_test.go sleep=2
+proxyapp/idleexit_test.go after=2
+proxyapp/metricspush/central_e2e_test.go sleep=2
+proxyapp/metricspush/central_load_test.go sleep=1 poll=1
+proxyapp/metricspush/central_rules_test.go sleep=1 poll=1
+proxyapp/metricspush/metricspush_test.go sleep=2
+tooldefer/support_test.go after=3

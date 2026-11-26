@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/apply"
@@ -72,7 +73,9 @@ func TestCompactionRestartsPrefix(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			st := store.NewMemory(store.Options{})
-			o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on"}
+			// A clock from before the tracker started: this test models steady-state traffic,
+			// not the first hour after a restart, where a first request reads all-cached (#496).
+			o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on", Now: time.Unix(1_700_000_000, 0)}
 			if withTracker {
 				o.Tracker = modes.NewTracker(0)
 			}
@@ -153,7 +156,10 @@ func TestCompactionResetIsCounted(t *testing.T) {
 // this test is what keeps them that way.
 func TestPreCompactionContentStaysReadable(t *testing.T) {
 	st := store.NewMemory(store.Options{})
-	o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on", Tracker: modes.NewTracker(0)}
+	// A clock from before the tracker started, so the first request is not inside the
+	// restart grace (#496) and the boundary starts unknown, as this test models.
+	o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on", Tracker: modes.NewTracker(0),
+		Now: time.Unix(1_700_000_000, 0)}
 
 	r1 := runTurn(t, o, st, compactBody(t, "pre", 50))
 	keys := markerKeys(t, r1.Body)
@@ -190,7 +196,10 @@ func TestPreCompactionContentStaysReadable(t *testing.T) {
 // being re-derived.
 func TestCompactionKeepsFrozenDecisions(t *testing.T) {
 	st := store.NewMemory(store.Options{})
-	o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on", Tracker: modes.NewTracker(0)}
+	// A clock from before the tracker started, so the first request is not inside the
+	// restart grace (#496) and the boundary starts unknown, as this test models.
+	o := apply.Opts{Provider: bschemas.Anthropic, CacheMode: "on", Tracker: modes.NewTracker(0),
+		Now: time.Unix(1_700_000_000, 0)}
 
 	r1 := runTurn(t, o, st, compactBody(t, "pre", 50))
 	was := maskedTexts(t, r1.Body)

@@ -1,6 +1,6 @@
 package tokens
 
-import "strings"
+import "github.com/rossoctl/context-guru/internal/modelinfo"
 
 // BilledDeltaFactor is the measured ratio of the PROVIDER's token count to this package's
 // count, over content a compaction component REMOVED. It is the correction `saved_usd`
@@ -58,13 +58,12 @@ import "strings"
 // measured reports whether this model's family was actually measured. false returns 1.0 —
 // an unmeasured family gets no correction rather than another family's constant.
 func BilledDeltaFactor(model string) (factor float64, measured bool) {
-	m := strings.ToLower(model)
-	switch {
-	// Order matters: haiku before the generic claude fallthrough.
-	case strings.Contains(m, "haiku"):
+	switch modelinfo.Family(model) {
+	case modelinfo.FamilyHaiku:
 		return 1.3686, true
-	case strings.Contains(m, "sonnet"), strings.Contains(m, "opus"):
+	case modelinfo.FamilySonnet, modelinfo.FamilyOpus:
 		return 1.6857, true
 	}
+	// Fable was not measured: it stays unmeasured (1.0) until someone measures it.
 	return 1.0, false
 }

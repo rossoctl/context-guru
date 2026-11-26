@@ -36,7 +36,7 @@ func TestSavingKeepAliveOnADocumentWithNoCacheBlockKeepsIt(t *testing.T) {
 	full := CacheForm{
 		KeepAlive: true, KeepAliveIdleSeconds: 280, KeepAliveMaxPings: 2,
 		KeepAliveMaxUSDPerPing: 0.05, KeepAliveMinPrefixTokens: 20000,
-		HeadTTL1h: true, HeadTTLMinTokens: 50000,
+		HeadTTL1h: true, HeadTTLMinBytes: 200000, HeadTTLMinTokens: 50000,
 	}
 	rt := reflect.TypeOf(full)
 	for i := 0; i < rt.NumField(); i++ {
@@ -57,7 +57,7 @@ func TestSavingKeepAliveOnADocumentWithNoCacheBlockKeepsIt(t *testing.T) {
 			if got.Cache == nil {
 				t.Fatalf("the whole cache block was discarded; the saved document is:\n%s", out)
 			}
-			if *got.Cache != one {
+			if !reflect.DeepEqual(*got.Cache, one) {
 				t.Errorf("%s did not round-trip: sent %+v, read back %+v\nsaved document:\n%s",
 					name, one, *got.Cache, out)
 			}

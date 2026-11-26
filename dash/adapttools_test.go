@@ -1,6 +1,8 @@
 package dash
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -194,7 +196,11 @@ func TestAdaptToolsEnvelope(t *testing.T) {
 	doc.finish(ToolFilterState{Removed: []string{"mcp__old", "Workflow"}})
 	if doc.Best != "remove-sufficient" || doc.Current != "keep" || doc.Recommendation == nil ||
 		doc.Recommendation.PerMonthUSD != 3 || doc.Recommendation.NetDeltaUSD != 2 ||
-		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil {
+		doc.Options[1].SpendUSD != 1 || doc.Options[1].NetUSD != 2 || doc.Items[0].LastUsedMS != nil ||
+		doc.WouldAddUSD != 2 || doc.Recommendation.SavedToDateUSD != 3 || doc.Recommendation.RewriteUSD != 1 ||
+		math.Abs(doc.Recommendation.SavedPerWeekUSD-0.7) > 1e-9 ||
+		doc.Recommendation.Question != "Remove 1 item (a)? Over the last 30 days they would have saved about $0.70 a week. The one-off cache rewrite costs about $1.00, so it pays back in about 2 weeks." ||
+		doc.PaybackWeeks == nil || math.Abs(*doc.PaybackWeeks-1/0.7) > 1e-9 || doc.Recommendation.ItemsN != 1 {
 		t.Fatalf("doc %+v rec %+v", doc, doc.Recommendation)
 	}
 	remove := map[string]string{}
@@ -237,5 +243,279 @@ func TestAdaptToolsPricesAFiveMinuteWriteAtTheWriteRate(t *testing.T) {
 	}
 	if len(doc.Items) != 1 || math.Abs(doc.Items[0].USDCacheWrite-100*1.25) > 1e-9 {
 		t.Fatalf("items %+v", doc.Items)
+	}
+}
+
+// A request waiting for the carried-pricing slot gives up when it is cancelled, instead of
+// queueing behind whatever pass holds the slot.
+func TestCarriedSetsStopsWaitingWhenCancelled(t *testing.T) {
+	db := openTestDB(t)
+	carriedSlot <- struct{}{} // another pass holds the slot
+	defer func() { <-carriedSlot }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// A call that waited on the slot would never return, so the wait has a bound, not a clock check.
+	res := make(chan error, 1)
+	go func() {
+		_, _, err := db.WithContext(ctx).carriedSets(Filter{TenantAll: true},
+			map[string][]adaptToolsReq{"x": nil}, func(string, string, string, string) string { return "" })
+		res <- err
+	}()
+	if err := awaitSignal(t, "carriedSets to return once cancelled (it must not wait on the slot)", res); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v; want context.Canceled", err)
+	}
+	if len(carriedSlot) != 1 {
+		t.Fatal("the cancelled request took or released the slot")
+	}
+}
+
+// Built-in tools are never listed, whichever agent's they are, even when never used.
+func TestAdaptToolsNeverListsBuiltins(t *testing.T) {
+	db := openTestDB(t)
+	e := mkEvent(day(0), "s", "opus", 100, 100)
+	e.TenantID, e.Tools, e.CacheRead, e.DeclDigest = "t1", 5, 1000, "d"
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	var decls []Decl
+	for _, n := range []string{"Read", "Grep", "WebFetch", "shell", "apply_patch"} { // Claude Code's, Codex's
+		decls = append(decls, Decl{Kind: KindTool, Name: n, Tokens: 500})
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1, Decls: decls}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Items) != 0 || doc.Recommendation != nil {
+		t.Fatalf("built-in tools listed: %+v", doc.Items)
+	}
+}
+
+// After a removal, the saving is measured from the rows: the requests the filter acted on carry
+// the removed declaration in the set the client sent and record the tokens not forwarded. Rows
+// from before the removal count for nothing.
+func TestAdaptToolsMeasuresWhatARemovalSaved(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	for i := 0; i < 4; i++ {
+		e := mkEvent(day(i), "s", "opus", 100, 100)
+		e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.DeclDigest = "t1", 2, 1000, 0, "d"
+		if i >= 2 { // removed from here on: the filter stripped the server's 100 tokens
+			e.FilteredDeclTokens = 100
+		}
+		evs = append(evs, e)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1,
+		Decls: []Decl{{Kind: KindTool, Name: "Read", Tokens: 50}, {Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 2 * 100 * 0.1 // two filtered requests, cache read at opus's 0.1
+	sv := doc.SavedSoFar.Filter
+	if math.Abs(sv.USD-want) > 1e-9 || sv.Requests != 2 || len(sv.Items) != 1 ||
+		sv.Items[0].RemoveAs != "mcp__srv" || math.Abs(sv.Items[0].USD-want) > 1e-9 || sv.Items[0].Requests != 2 {
+		t.Fatalf("saved so far %+v, want $%v on 2 requests for mcp__srv", doc.SavedSoFar, want)
+	}
+	if td := doc.ToDate; td == nil || td.Class != "observed" || td.Items != 1 || math.Abs(td.SavedUSD-want) > 1e-9 ||
+		len(doc.Removed) != 1 || doc.Removed[0].Name != "srv" || doc.Removed[0].Requests != 2 || doc.Removed[0].SinceMS != day(0) {
+		t.Fatalf("to_date %+v removed %+v", doc.ToDate, doc.Removed)
+	}
+	if math.Abs(doc.SavedSoFar.TotalUSD-want) > 1e-9 || len(doc.Items) != 0 || doc.WouldAddUSD != 0 {
+		t.Fatalf("doc %+v", doc)
+	}
+}
+
+// Payback: a rewrite under a week of saving goes unmentioned; one beyond the whole window means
+// keep as is, and the payback is still reported.
+func TestAdaptToolsPayback(t *testing.T) {
+	item := func(usd float64) []AdaptToolsItem {
+		return []AdaptToolsItem{{Name: "a", RemoveAs: "mcp__a", USD: usd, Sufficient: true}}
+	}
+	quick := &AdaptToolsDoc{RewriteUSD: 0.1, Window: AdaptToolsWindow{Since: day(0), Until: day(28)}, Items: item(4)} // $1/week
+	quick.finish(ToolFilterState{})
+	if quick.Recommendation == nil || strings.Contains(quick.Recommendation.Question, "pays back") ||
+		math.Abs(*quick.PaybackWeeks-0.1) > 1e-9 {
+		t.Fatalf("quick payback: %+v", quick.Recommendation)
+	}
+	slow := &AdaptToolsDoc{RewriteUSD: 5, Window: AdaptToolsWindow{Since: day(0), Until: day(28)}, Items: item(4)} // 5 weeks > 4
+	slow.finish(ToolFilterState{})
+	if slow.Recommendation != nil || slow.Best != "keep" || math.Abs(*slow.PaybackWeeks-5) > 1e-9 {
+		t.Fatalf("payback beyond the window must keep as is: best %s rec %+v", slow.Best, slow.Recommendation)
+	}
+}
+
+// A declaration removed in the client is priced per later request that still carried MCP tools,
+// at that request's rate, and reported as an estimate apart from the measured saving.
+func TestAdaptToolsEstimatesAClientSideRemovalPerRequest(t *testing.T) {
+	db := openTestDB(t)
+	var evs []*Event
+	add := func(session, digest string, ts int64, n, tools int) {
+		for i := 0; i < n; i++ {
+			e := mkEvent(ts+int64(i), session, "opus", 100, 100)
+			e.TenantID, e.Tools, e.CacheRead, e.CacheWrite, e.DeclDigest = "t1", tools, 1000, 0, digest
+			evs = append(evs, e)
+		}
+	}
+	add("before", "both", day(0), 2, 2)
+	for i, sess := range []string{"after1", "after2", "after3"} { // detection needs 3 later sessions
+		add(sess, "b-only", day(1+i), 1+i%2, 1)
+	}
+	if err := db.insertBatch(evs); err != nil {
+		t.Fatal(err)
+	}
+	a := Decl{Kind: KindMCPTool, Name: "mcp__a__x", Server: "a", Tokens: 200}
+	b := Decl{Kind: KindMCPTool, Name: "mcp__b__y", Server: "b", Tokens: 50}
+	w := &invWriter{db: db, seen: map[string]*invSession{}}
+	if err := w.write([]invMsg{
+		{tenant: "t1", session: "before", ts: day(0), inv: &Inventory{Digest: "both", UseFingerprint: 1, Decls: []Decl{a, b}}},
+		{tenant: "t1", session: "after1", ts: day(1), inv: &Inventory{Digest: "b-only", UseFingerprint: 2, Decls: []Decl{b}}},
+		{tenant: "t1", session: "after2", ts: day(2), inv: &Inventory{Digest: "b-only", UseFingerprint: 3, Decls: []Decl{b}}},
+		{tenant: "t1", session: "after3", ts: day(3), inv: &Inventory{Digest: "b-only", UseFingerprint: 4, Decls: []Decl{b}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := db.AdaptTools(Filter{Tenant: "t1"}, adaptPrice, ToolFilterState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := doc.SavedSoFar.Client
+	want := 4 * 200 * 0.1 // four requests in later sessions that still carried MCP tools, cache read at opus's rate
+	if cl.Class != "estimated" || cl.Label != "estimated (removed in the client)" || len(cl.Items) != 1 ||
+		cl.Items[0].Name != "mcp__a__x" || cl.Items[0].Requests != 4 || math.Abs(cl.Items[0].USD-want) > 1e-9 {
+		t.Fatalf("client %+v, want mcp__a__x at $%v over 4 requests", cl, want)
+	}
+	// Never summed into the measured figure.
+	if doc.SavedSoFar.TotalUSD != 0 || doc.ToDate.SavedUSD != 0 || doc.ToDate.Items != 0 ||
+		len(doc.Removed) != 1 || doc.Removed[0].Class != "estimated" {
+		t.Fatalf("measured %v, to_date %+v, removed %+v", doc.SavedSoFar.TotalUSD, doc.ToDate, doc.Removed)
+	}
+}
+
+// The filter's measured total and its per-item rows price a one-hour write the same way (2x
+// input), and when the filter's own token count differs from the items', the difference is a row
+// of its own instead of a silent gap.
+func TestAdaptToolsSavedItemsAndTotalAgree(t *testing.T) {
+	seedAt := func(filtered int, price func(string) (modelinfo.Price, bool)) *AdaptToolsDoc {
+		db := openTestDB(t)
+		read := mkEvent(day(0), "s", "opus", 100, 100)
+		read.TenantID, read.Tools, read.CacheRead, read.CacheWrite, read.DeclDigest, read.FilteredDeclTokens = "t1", 2, 1000, 0, "d", filtered
+		hour := mkEvent(day(0)+1, "s", "opus", 100, 100)
+		hour.TenantID, hour.Tools, hour.CacheRead, hour.CacheWrite, hour.CacheWrite1h, hour.DeclDigest, hour.FilteredDeclTokens =
+			"t1", 2, 0, 5000, 5000, "d", filtered
+		if err := db.insertBatch([]*Event{read, hour}); err != nil {
+			t.Fatal(err)
+		}
+		w := &invWriter{db: db, seen: map[string]*invSession{}}
+		if err := w.write([]invMsg{{tenant: "t1", session: "s", ts: day(0), inv: &Inventory{Digest: "d", UseFingerprint: 1,
+			Decls: []Decl{{Kind: KindTool, Name: "Read", Tokens: 50}, {Kind: KindMCPTool, Name: "mcp__srv__q", Server: "srv", Tokens: 100}}}}}); err != nil {
+			t.Fatal(err)
+		}
+		doc, err := db.AdaptTools(Filter{Tenant: "t1"}, price, ToolFilterState{Enabled: true, Removed: []string{"mcp__srv"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	seed := func(filtered int) *AdaptToolsDoc { return seedAt(filtered, adaptPrice) }
+	// A tiered price: above 5,050 tokens every rate is 2x (the one-hour request is 5,010 sent, with FreshInput 10 from mkEvent: base without the removed tokens). The read request is 1,000 + 100 removed: base.
+	// The one-hour request is 5,000 + 100 removed: 2x. Items, total and unattributed still agree.
+	tiered := func(m string) (modelinfo.Price, bool) {
+		p, ok := adaptPrice(m)
+		p.Tiers[0] = modelinfo.PriceTier{AbovePromptTokens: 5050, InputMult: 2, ReadMult: 2, WriteMult: 2}
+		return p, ok
+	}
+	tw := 100*0.1 + 100*2.0*2
+	for _, f := range []int{100, 150} {
+		part := seedAt(f, tiered).SavedSoFar.Filter
+		sum := 0.0
+		for _, it := range part.Items {
+			sum += it.USD
+		}
+		if math.Abs(sum-part.USD) > 1e-9 {
+			t.Fatalf("tiered, filtered %d: rows sum to $%v, total $%v", f, sum, part.USD)
+		}
+		if f == 100 && (math.Abs(part.USD-tw) > 1e-9 || len(part.Items) != 1) {
+			t.Fatalf("tiered filter %+v, want total and the one item both $%v", part, tw)
+		}
+	}
+	// 100 tokens read at 0.1, plus 100 tokens in a one-hour write at 2x input.
+	want := 100*0.1 + 100*2.0
+	same := seed(100).SavedSoFar.Filter
+	if math.Abs(same.USD-want) > 1e-9 || len(same.Items) != 1 || math.Abs(same.Items[0].USD-want) > 1e-9 {
+		t.Fatalf("filter %+v, want total and the one item both $%v", same, want)
+	}
+	// The filter counted 150 tokens where the set says the item is 100: a 50-token gap per request.
+	gap := seed(150).SavedSoFar.Filter
+	if len(gap.Items) != 2 || gap.Items[1].Kind != "unattributed" || math.Abs(gap.Items[1].USD-50*(0.1+2.0)) > 1e-9 {
+		t.Fatalf("filter %+v, want an unattributed row of the gap", gap)
+	}
+	// One basis: the rows, unattributed included, always add up to the total.
+	for _, p := range []AdaptToolsSavedPart{same, gap} {
+		sum := 0.0
+		for _, it := range p.Items {
+			sum += it.USD
+		}
+		if math.Abs(sum-p.USD) > 1e-9 || math.Abs(p.USD-150*(0.1+2.0)) > 1e-9 && p.USD != want {
+			t.Fatalf("rows sum to $%v, total $%v", sum, p.USD)
+		}
+	}
+}
+
+// carry_* is priced on the SAME per-request path as unused_*: each request at its own model and
+// tier, and only on requests whose declaration set carried the item. seedAdapt has two models and
+// a subagent set that omits every MCP tool, so a per-session basis would overstate.
+func TestToolReportCarryIsPricedPerRequestLikeUnused(t *testing.T) {
+	rep, err := seedAdapt(t).ToolReportFor(Filter{Tenant: "t1"}, adaptPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]ToolStat{}
+	for _, s := range rep.Tools {
+		by[s.Name] = s
+	}
+	y, x := by["mcp__used__y"], by["mcp__used__x"]
+	// Never used: carry IS unused, to the cent and the read.
+	if y.UnusedReads == 0 || y.CarryReads != y.UnusedReads || math.Abs(y.CarryUSD-y.UnusedUSD) > 1e-9 {
+		t.Errorf("a never-used tool: carry %d/%v != unused %d/%v", y.CarryReads, y.CarryUSD, y.UnusedReads, y.UnusedUSD)
+	}
+	// Used: it wasted nothing, and carried on the same requests as y at 200 tokens against 300.
+	if x.UnusedUSD != 0 || x.CarryReads*3 != y.CarryReads*2 || math.Abs(x.CarryUSD*3-y.CarryUSD*2) > 1e-9 {
+		t.Errorf("a used tool: x %+v, y carry %d/%v", x, y.CarryReads, y.CarryUSD)
+	}
+	// The subagent request (3 of 7) carried no MCP tool: a per-session basis would count it.
+	if y.CarryReads != 300*4 { // r1, r2, r4 and r7 carried the main set
+		t.Errorf("y carry reads = %d, want 300 x 4 carrying requests", y.CarryReads)
+	}
+	// The mystery-model request has no rates: carry says so, on the used tool too.
+	if x.CarryPriced || y.CarryPriced {
+		t.Errorf("carry_priced = %v/%v, want false (one carrying request has no rates)", x.CarryPriced, y.CarryPriced)
+	}
+	for _, sv := range rep.Servers {
+		if sv.Server == "used" && (sv.CarryReads != x.CarryReads+y.CarryReads || sv.CarryPriced) {
+			t.Errorf("server rollup %+v is not the sum of its tools", sv)
+		}
+	}
+}
+
+// Priced carry says so.
+func TestToolReportCarryPricedWhenEveryCarryingRequestHasRates(t *testing.T) {
+	rep, err := seedReport(t).ToolReportFor(Filter{Tenant: "t1"}, flatPrice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range append(append([]ToolStat{}, rep.Tools...), rep.Aside...) {
+		if !s.CarryPriced {
+			t.Errorf("%s: carry_priced false with every model priced", s.Name)
+		}
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // A streaming turn that keeps producing must not be cut off for taking a while.
@@ -23,6 +25,7 @@ import (
 // pointed at a server whose stream outlives a deliberately tiny header timeout. Slow FIRST
 // byte must still fail (a dead upstream is still caught); slow to FINISH must not.
 func TestAStreamIsNotCutOffForLasting(t *testing.T) {
+	testutil.RequireTiming(t)
 	t.Parallel()
 	body := func(w http.ResponseWriter, firstByteAfter, betweenChunks time.Duration) {
 		w.Header().Set("Content-Type", "text/event-stream")

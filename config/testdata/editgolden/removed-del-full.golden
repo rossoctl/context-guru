@@ -1,0 +1,17 @@
+cache:
+  head_ttl_1h: false
+  keepalive: true
+components:
+  extract:
+    min_tokens: 400
+  toolfilter:
+    defer: auto
+    keep:
+      - WebFetch
+    remove: []
+pipeline:
+  - format
+  - dedup
+  - cachesplit
+  - extract
+  - toolfilter

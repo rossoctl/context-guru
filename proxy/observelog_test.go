@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // syncBuf is a Writer a slog handler can share with the test goroutine.
@@ -87,20 +87,15 @@ func TestObserveOffPathLinesCarryTenantAndMode(t *testing.T) {
 	// The observation is off-path by construction, so the response says nothing about it.
 	// Wait for its run summary, which is the last line it writes.
 	var recs []map[string]any
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testutil.WaitFor(t, "the cg.run summary line", func() bool {
 		recs = buf.records(t)
-		done := false
 		for _, r := range recs {
 			if r["msg"] == "cg.run" {
-				done = true
+				return true
 			}
 		}
-		if done {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return false
+	})
 
 	var seen int
 	for _, r := range recs {

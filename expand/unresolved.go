@@ -49,6 +49,15 @@ func noteUnresolved(id string) {
 	atomic.AddInt64(&unresolvedMalformed, 1)
 }
 
+// ResetUnresolvedForTest zeroes both counters. They are process-global, and the proxy's
+// test binary records real failures into them (TestExpandUnresolvedSeriesRender does, on
+// purpose) — so a `-count>1` run would see iteration 2 start from iteration 1's counts and
+// fail on its at-zero assertions.
+func ResetUnresolvedForTest() {
+	atomic.StoreInt64(&unresolvedMalformed, 0)
+	atomic.StoreInt64(&unresolvedMissing, 0)
+}
+
 // idHexLens are the marker-id lengths this proxy mints. Every stash key that reaches a
 // <<cg:HASH>> marker is a lowercase-hex prefix of a sha256, and there are exactly two lengths in
 // use: 16 (components/offload.hashKey, which summarize's span stash uses) and 24

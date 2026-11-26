@@ -1,0 +1,15 @@
+# Data source for the central Prometheus. The uid is pinned because the dashboards name it; change it
+# here and every panel loses its data. The uid differs from the hosted box's `cg-prom` on purpose, so
+# the two can live in one Grafana without colliding.
+
+apiVersion: 1
+
+datasources:
+  - name: central-prometheus
+    uid: central-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 30s

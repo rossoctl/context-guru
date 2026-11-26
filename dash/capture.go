@@ -7,13 +7,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rossoctl/context-guru/internal/thread"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/thread"
 )
 
 // Options configures the dashboard. The zero value is usable: an in-memory
 // database, content capture on, 7-day / 512 MiB retention, loopback-only access
 // to per-request content and effective config.
 type Options struct {
+	// Tap, when non-nil, is called on the writer goroutine with each event once it is stored,
+	// before the live feed gets its summary copy. It must not block or keep the event after
+	// it returns. It is the SOLE test seam for the in-memory fields the store does not keep
+	// (the accountant Result, read through Event.AccountantResult): the database drops them
+	// and the Hub's subscribe is unexported, so no other route reaches them. No production
+	// code sets it.
+	Tap func(*Event)
 	// DBPath is the SQLite file. "" or ":memory:" keeps everything in RAM (the
 	// no-persistence mode), which is also the automatic fallback when the path
 	// cannot be opened — the proxy must never fail to start over a dashboard.
@@ -23,7 +31,8 @@ type Options struct {
 	RetentionAge   time.Duration
 	RetentionBytes int64
 	// CaptureContent enables the before/after content capture the diff view needs.
-	// Opt-OUT: it is the headline feature, so it defaults on. ContentCap bounds each
+	// Opt-IN: the zero value is off, and so is --dashboard-content, because capture writes
+	// arbitrary agent output to disk through a best-effort redactor. ContentCap bounds each
 	// captured blob (default 16 KiB); ContentMaxPerRequest bounds how many
 	// rewritten messages are captured per request (default 24).
 	CaptureContent       bool
@@ -35,6 +44,9 @@ type Options struct {
 	// BatchSize / FlushInterval control how the writer batches inserts.
 	BatchSize     int
 	FlushInterval time.Duration
+	// PromptGrace is how long a permission-prompt mark waits for the row it interrupted to reach the
+	// writer before it marks the latest stored row. Default 2s.
+	PromptGrace time.Duration
 	// TrustedCIDRs are the networks allowed to see per-request CONTENT and the
 	// effective configuration. Loopback is always allowed. Aggregates are open to
 	// everyone (a proxy people bind to 0.0.0.0 still wants its numbers visible).
@@ -50,9 +62,6 @@ type Options struct {
 	// /api/config. It is redacted before serving; nothing sensitive should be in
 	// here in the first place.
 	Effective map[string]any
-	// BenchDirs are directories scanned for harbor benchmark runs (summary.json +
-	// rows-*.json) at startup and on demand.
-	BenchDirs []string
 
 	// DiskHighWatermark is the fraction of the FILESYSTEM in use at which the
 	// janitor starts evicting the oldest sessions; DiskLowWatermark is where it
@@ -70,6 +79,14 @@ type Options struct {
 	// else, deleting our last megabyte does not help anyone and the dashboard going
 	// blank hides the problem instead of showing it.
 	MinKeepBytes int64
+	// RetentionFloorBytes is the floor of the SIZE rule (RetentionBytes): it never makes the
+	// database smaller than this, even when the database is still over its limit. 0 = a quarter
+	// of RetentionBytes. It is not MinKeepBytes: that floor (1 GiB) is above the default size
+	// limit (512 MiB), so it cannot serve the size rule.
+	RetentionFloorBytes int64
+	// DisableBackup turns off the backup copy (`<db>.bak`) the janitor makes before the age,
+	// size and quota rules delete rows. The zero value keeps the backup on.
+	DisableBackup bool
 	// MaxRowsPerTenant caps one tenant's retained request rows. Applied BEFORE the
 	// disk rule, so a heavy user is trimmed to its own quota before anyone else's
 	// history is touched. 0 = no per-tenant cap.
@@ -107,8 +124,15 @@ type Options struct {
 	// loudly what was lost.
 	ArchiveRequired bool
 	// LifecycleSignals records the per-request lifecycle signals into request_lifecycle
-	// (dash/lifecycle.go). Off by default.
+	// (dash/lifecycle.go). The zero value is off, but --dashboard-lifecycle-signals defaults
+	// to on: the rows hold only counts and sizes, never content.
 	LifecycleSignals bool
+	// Prices, when set, lets the recorder price a request it booked at $0 because the host's price
+	// map had not loaded yet (issue #920). Rows this process wrote with billed tokens and no price
+	// are priced once Prices knows the model. nil turns the pass off.
+	Prices modelinfo.Pricer
+	// RepriceInterval is how often that pass runs. 0 = defaultRepriceInterval.
+	RepriceInterval time.Duration
 }
 
 const (
@@ -135,6 +159,9 @@ func (o *Options) withDefaults() {
 	}
 	if o.BatchSize <= 0 {
 		o.BatchSize = defaultBatchSize
+	}
+	if o.PromptGrace <= 0 {
+		o.PromptGrace = 2 * time.Second
 	}
 	if o.FlushInterval <= 0 {
 		o.FlushInterval = defaultFlushInterval
@@ -170,6 +197,11 @@ type Recorder struct {
 	done chan struct{}
 	wg   sync.WaitGroup
 
+	// sigCh carries the client lifecycle signals to the writer (RecordSignal); sm is the writer's
+	// history for the strategy metadata (strategymeta.go).
+	sigCh chan ClientSignal
+	sm    *strategyMeta
+
 	captured atomic.Int64
 	dropped  atomic.Int64
 	written  atomic.Int64
@@ -179,13 +211,32 @@ type Recorder struct {
 	// sync mode. A func rather than a value so the counters are read at serve time.
 	observeQueue atomic.Pointer[func() QueueStats]
 
+	// startMu orders a goroutine started on first use (the inventory writer) against Close: it is
+	// added to wg only while the recorder is open, so Close's wg.Wait covers it and never races an Add.
+	startMu sync.Mutex
+	closed  bool
+
 	// Cache-attribution state: the last time we saw each session and whether we
 	// have seen each model, so a cold start is never reported as a bust.
 	mu        sync.Mutex
-	life      *lifecycle        // nil unless Options.LifecycleSignals
-	lastSeen  map[string]int64  // thread.Key(session, thread) -> epoch ms of previous request
-	lastTail  map[string]uint64 // thread.Key(session, thread) -> previous request's volatile-tail hash
+	life      *lifecycle             // nil unless Options.LifecycleSignals
+	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
+	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
+	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
+	// seedTier holds, per thread.Key(session, thread) + "\x00" + model, when that thread last
+	// wrote a cache entry at the billed one-hour tier on that model, before a restart
+	// (SeedSessions). The value is the write's epoch ms, so the age prune can drop it. ObservePrefix
+	// reads it only while the thread has no lastFacts, and only for the request's own model.
+	// Absent means unknown, which keeps the five-minute lifetime.
+	seedTier  map[string]int64
 	seenModel map[string]bool
+	// graceSeen holds, per thread.Key(session, thread), when that thread's cached prefix was
+	// last REFRESHED: by its own last request or by a keep-alive ping that read the cache. It
+	// is the restart grace's clock (#766), and it is SEPARATE from lastSeen on purpose:
+	// lastSeen answers cache ATTRIBUTION, where a ping must never re-date a thread (see
+	// SeedSessions), while the grace must count a ping that kept the entry warm. Seeded from
+	// the requests table at startup (SeedGraceSessions) and kept current at runtime.
+	graceSeen map[string]int64
 	// perComp accumulates unique-savings dedup keys so a per-request unique figure
 	// exists at capture time. Bounded; see markUnique.
 	seenKeys map[string]struct{}
@@ -194,10 +245,24 @@ type Recorder struct {
 	diskProbe func(dir string) (float64, bool)
 	// remote is cold storage, or nil.
 	remote Remote
+	// counts feeds the bypass count worker (see countLoop). Small and bounded on purpose.
+	counts chan countJob
+	// queuedCountBytes is the total body size of the jobs in counts plus the one being counted.
+	queuedCountBytes atomic.Int64
+	// countsDropped counts rows whose token count was skipped because the queue was full.
+	countsDropped atomic.Int64
+	// migrationsDone is closed when the one-time background migrations have finished or been
+	// stopped. They read and write the requests table, so a test that measures the WAL waits for
+	// it first.
+	migrationsDone chan struct{}
 	// tenantQuota reads a tenant's own row quota from the control plane (see
 	// SetTenantQuota). A func rather than a value because a manager can change it at
 	// any time, and a pointer because it is wired after the recorder starts.
 	tenantQuota atomic.Pointer[func(tenantID string) int64]
+	// unpriced holds the rows this process wrote partial at $0 with billed tokens, waiting for a
+	// price (see reprice.go). Touched by the writer and the reprice goroutine, under unpricedMu.
+	unpricedMu sync.Mutex
+	unpriced   []*Event
 }
 
 // NewRecorder opens the store and starts the writer goroutine. It never returns a
@@ -219,18 +284,28 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		opts:      opts,
 		hub:       NewHub(),
 		ch:        make(chan *Event, opts.QueueSize),
+		sigCh:     make(chan ClientSignal, 256),
+		sm:        newStrategyMeta(),
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
 		lastTail:  map[string]uint64{},
+		lastFacts: map[string]PrefixFacts{},
+		seedTier:  map[string]int64{},
 		seenModel: map[string]bool{},
+		graceSeen: map[string]int64{},
 		seenKeys:  map[string]struct{}{},
 		remote:    opts.Remote,
+		counts:    make(chan countJob, countQueue),
+
+		migrationsDone: make(chan struct{}),
 	}
 	if opts.LifecycleSignals {
 		r.life = newLifecycle()
 	}
 	r.wg.Add(1)
 	go r.run()
+	r.wg.Add(1)
+	go r.countLoop()
 	// The archiver gets its OWN goroutine. It must never share the writer's, because
 	// an rclone round trip takes seconds and the writer owes the request path a fast
 	// insert — a blocked writer means a full queue means dropped events, which is
@@ -245,6 +320,10 @@ func NewRecorder(opts Options) (*Recorder, error) {
 	// backgroundMigrations for why they share ONE goroutine rather than one each.
 	r.wg.Add(1)
 	go r.backgroundMigrations()
+	if opts.Prices != nil {
+		r.wg.Add(1)
+		go r.repriceLoop()
+	}
 	return r, nil
 }
 
@@ -264,6 +343,7 @@ func NewRecorder(opts Options) (*Recorder, error) {
 // both at once still finishes well inside the time a single one used to take alone.
 func (r *Recorder) backgroundMigrations() {
 	defer r.wg.Done()
+	defer close(r.migrationsDone)
 	r.dedupeLoop()
 	r.keepAliveStrategyBackfillLoop()
 }
@@ -310,6 +390,19 @@ func (r *Recorder) Record(e *Event) {
 	if e.TS == 0 {
 		e.TS = time.Now().UnixMilli()
 	}
+	// A keep-alive ping that READ or WROTE the cache touched the provider's entry, so it counts
+	// on the restart grace's clock (#766) — this is the one dash write a ping produces, since
+	// pings never run ObserveThread. A write re-created the entry and started a fresh lifetime
+	// (#580). A ping that billed neither, or that the upstream rejected, is not counted: the same
+	// rules the keeper's refresh bookkeeping and SeedGraceSessions use. Status 0 is an event
+	// that carries none. Recorded here, before the queue, so ThreadRefreshedAt answers at once even
+	// if the row is still in flight (the row is the restart's recovery path).
+	if e.KeepAlive && (e.CacheRead > 0 || e.CacheWrite > 0) && (e.Status == 0 || (e.Status >= 200 && e.Status < 300)) && e.SessionID != "" {
+		key := thread.Key(e.SessionID, e.ThreadID)
+		r.mu.Lock()
+		r.touchGraceLocked(key, e.TS)
+		r.mu.Unlock()
+	}
 	r.captured.Add(1)
 	select {
 	case r.ch <- e:
@@ -319,10 +412,26 @@ func (r *Recorder) Record(e *Event) {
 }
 
 // Close stops the writer after draining what is already queued.
+// startInBackground runs fn on its own goroutine counted in r.wg, so Close waits for it, unless the
+// recorder is already closing, in which case it starts nothing and returns false.
+func (r *Recorder) startInBackground(fn func()) bool {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+	if r.closed {
+		return false
+	}
+	r.wg.Add(1)
+	go func() { defer r.wg.Done(); fn() }()
+	return true
+}
+
 func (r *Recorder) Close() error {
 	if r == nil {
 		return nil
 	}
+	r.startMu.Lock()
+	r.closed = true
+	r.startMu.Unlock()
 	close(r.done)
 	r.wg.Wait()
 	r.hub.Close()
@@ -332,15 +441,18 @@ func (r *Recorder) Close() error {
 // Stats reports the capture pipeline's own health — including its drops, which is
 // the number that keeps every other number honest.
 type Stats struct {
-	Captured int64  `json:"captured"`
-	Written  int64  `json:"written"`
-	Dropped  int64  `json:"dropped"`
-	Errors   int64  `json:"errors"`
-	Queued   int    `json:"queued"`
-	QueueCap int    `json:"queue_cap"`
-	Clients  int    `json:"sse_clients"`
-	DBPath   string `json:"db_path"`
-	DBBytes  int64  `json:"db_bytes"`
+	Captured int64 `json:"captured"`
+	Written  int64 `json:"written"`
+	Dropped  int64 `json:"dropped"`
+	// CountsDropped is the number of bypassed requests whose token count was skipped because the
+	// count worker's queue was full; their rows keep tokens_before 0.
+	CountsDropped int64  `json:"counts_dropped"`
+	Errors        int64  `json:"errors"`
+	Queued        int    `json:"queued"`
+	QueueCap      int    `json:"queue_cap"`
+	Clients       int    `json:"sse_clients"`
+	DBPath        string `json:"db_path"`
+	DBBytes       int64  `json:"db_bytes"`
 	// Mode is the proxy's operating mode ("active" | "observe"). The UI renders an
 	// unmissable banner in observe mode: every request was forwarded UNTOUCHED, so a
 	// reader who mistakes these figures for enforced savings has drawn exactly the wrong
@@ -380,7 +492,7 @@ func (r *Recorder) Stats() Stats {
 	size, _ := r.db.sizeBytes()
 	s := Stats{
 		Captured: r.captured.Load(), Written: r.written.Load(),
-		Dropped: r.dropped.Load(), Errors: r.errors.Load(),
+		Dropped: r.dropped.Load(), Errors: r.errors.Load(), CountsDropped: r.countsDropped.Load(),
 		Queued: len(r.ch), QueueCap: cap(r.ch),
 		Clients: r.hub.Clients(), DBPath: r.db.Path(), DBBytes: size,
 		Mode: r.opts.Mode,
@@ -396,7 +508,8 @@ func (r *Recorder) Stats() Stats {
 }
 
 // run is the single writer goroutine: batch, insert in one transaction, fan out,
-// and prune on a timer. Nothing else writes to the database.
+// and prune on a timer. It is the only writer of new rows; countLoop and repriceLoop later update
+// rows it wrote.
 func (r *Recorder) run() {
 	defer r.wg.Done()
 	batch := make([]*Event, 0, r.opts.BatchSize)
@@ -404,6 +517,8 @@ func (r *Recorder) run() {
 	defer flush.Stop()
 	prune := time.NewTicker(pruneInterval)
 	defer prune.Stop()
+	settle := time.NewTicker(100 * time.Millisecond)
+	defer settle.Stop()
 
 	write := func() {
 		if len(batch) == 0 {
@@ -416,7 +531,9 @@ func (r *Recorder) run() {
 		// a keep-alive client's next request wait on it (~53 ms measured, ~25% of a
 		// request). Nothing reaches the database unredacted either way — the security
 		// property is the ordering against the INSERT, which this preserves.
+		r.markPending(batch)
 		for _, e := range batch {
+			userKey := ""
 			// Issue #424's RECORD half: the body rescan (waitcause.Tracker.Observe, ~11ms on
 			// a 783 KB body) runs HERE too, on this goroutine, for the exact reason Redact
 			// does — finish() runs on the handler's own defer, before the handler returns,
@@ -429,9 +546,31 @@ func (r *Recorder) run() {
 				wc := e.WaitCause()
 				e.WaitingFor, e.WaitTool, e.WakeCause = wc.WaitingFor, wc.WaitTool, wc.WakeCause
 				e.OpenBackground, e.OpenTeammate, e.MonitorExpiryMs = wc.OpenBackground, wc.OpenTeammate, wc.MonitorExpiryMs
+				e.WaitToolTimeoutMs, e.WaitToolBackground, e.WaitPrompt = wc.WaitToolTimeoutMs, wc.WaitToolBackground, wc.WaitPrompt
+				userKey = wc.UserKey
+				e.spawnRaw, e.ParentFanout = wc.SpawnType, wc.Fanout
 			}
+			// The turn, the session's concurrency, a permission prompt that arrived first and the
+			// person's hash (#1198): history the writer holds. After the wait cause, which sets
+			// WaitPrompt and hands over the person's key.
+			r.fillStrategyMeta(e, userKey)
 			if e.LifecycleFn != nil {
 				e.Lifecycle = e.LifecycleFn()
+			}
+			// The session's ALIAS id, for the restart grace (#766): a request under an
+			// explicit header id also refreshes the one provider entry its conversation's
+			// headerless turns read, so the grace clock must learn the alias key too —
+			// and the row must carry the alias, or the seed after a restart could reload
+			// only the header id's warmth. Runs here for the same reason WaitCause does:
+			// the derivation normalizes the whole body, and finish() is the handler's own
+			// defer. Observe()'s own-key touch already ran inline; this is the second key.
+			if e.AliasFn != nil {
+				if alias := e.AliasFn(); alias != "" {
+					e.SessionAlias = alias
+					r.mu.Lock()
+					r.touchGraceLocked(thread.Key(alias, e.ThreadID), e.TS)
+					r.mu.Unlock()
+				}
 			}
 			e.Redact()
 		}
@@ -446,7 +585,12 @@ func (r *Recorder) run() {
 			slog.Debug("dash: wrote a batch of captured requests", "n", len(batch),
 				"written_total", r.written.Load(), "dropped_total", r.dropped.Load())
 			for _, e := range batch {
+				r.noteUnpriced(e)
+				if r.opts.Tap != nil {
+					r.opts.Tap(e)
+				}
 				r.hub.Publish(e)
+				r.enqueueCount(e)
 			}
 		}
 		batch = batch[:0]
@@ -461,6 +605,22 @@ func (r *Recorder) run() {
 			}
 		case <-flush.C:
 			write()
+		case sig := <-r.sigCh:
+			// Store every row queued before the signal first, so the settled mark (settlePending) sees
+			// the row the prompt interrupted and not the one before it.
+		drain:
+			for {
+				select {
+				case e := <-r.ch:
+					batch = append(batch, e)
+				default:
+					break drain
+				}
+			}
+			write()
+			r.writeSignal(sig)
+		case <-settle.C:
+			r.settlePending(false)
 		case <-prune.C:
 			r.janitorPass()
 		case <-r.done:
@@ -478,6 +638,16 @@ func (r *Recorder) run() {
 				break
 			}
 			write()
+			for {
+				select {
+				case sig := <-r.sigCh:
+					r.writeSignal(sig)
+					continue
+				default:
+				}
+				break
+			}
+			r.settlePending(true)
 			return
 		}
 	}
@@ -498,7 +668,7 @@ func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSessio
 
 // ObserveSplit is Observe plus the volatile-tail comparison: tailChanged reports whether this
 // request's tail differs from the previous request's in the same session, which is the turn on
-// which the split is worth money (see dash.Event.cachesplitSavedUSD). A session's FIRST request
+// which the split is worth money (the accountant library prices it). A session's FIRST request
 // counts as changed — there was nothing there to match.
 //
 // tailHash 0 means nothing split, and then tailChanged is false: there is no split to credit.
@@ -549,12 +719,12 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	//
 	// By AGE, not by clearing the map. The old code emptied lastSeen entirely at 20,000
 	// entries, which made every live session's next turn report a cold start at once —
-	// and `seenSession` is no longer only a label: it decides whether a cache hit is
-	// credited as ours (see Event.cachesplitSavedUSD), so a wholesale reset was a
-	// wholesale over-claim. Dropping entries by age cannot do that: a session with no
+	// and under the legacy rule `seenSession` decided whether a cache hit was credited
+	// as ours, so a wholesale reset was a wholesale over-claim. It is still the cache
+	// verdict's input. Dropping entries by age cannot do that: a session with no
 	// request for staleSession really has lost its provider cache, so treating its next
 	// turn as a cold start is not a guess, it is correct.
-	if len(r.lastSeen) > 20000 {
+	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
 		r.pruneSessionsLocked(now)
 	}
 	if len(r.seenModel) > 1000 {
@@ -583,7 +753,29 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	}
 	r.lastSeen[key] = now
 	r.seenModel[mk] = true
+	// A real request refreshes the provider's cache entry, so it counts on the grace clock
+	// too (#766). Guarded on the session id: an observe-mode row carries none (its trace is
+	// zeroed), and the empty key would say every sessionless row warmed one shared entry.
+	if session != "" {
+		r.touchGraceLocked(key, now)
+	}
 	return seenSession, seenModel, sinceLastMs, tailChanged
+}
+
+// touchGraceLocked records a cache refresh on the restart grace's clock: ts only ever moves a
+// key FORWARD (a later refresh is the only new fact), and the map is created lazily so a
+// Recorder built as a bare struct literal — a test fixture, or observe() reached before any
+// seed — does not panic on a nil map. Caller holds r.mu.
+func (r *Recorder) touchGraceLocked(key string, ts int64) {
+	if key == "" || ts <= 0 {
+		return
+	}
+	if r.graceSeen == nil {
+		r.graceSeen = map[string]int64{}
+	}
+	if ts > r.graceSeen[key] {
+		r.graceSeen[key] = ts
+	}
 }
 
 // staleSession is how long a session must be silent before its state is forgettable. Well
@@ -603,8 +795,31 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 			delete(r.lastTail, k)
 		}
 	}
-	if len(r.lastSeen) > 20000 {
+	// seedTier is keyed per thread and model, so it ages by its own write time.
+	for k, ts := range r.seedTier {
+		if now-ts > staleSession {
+			delete(r.seedTier, k)
+		}
+	}
+	// The grace clock ages by the same rule: a thread silent for two hours has lost its
+	// provider cache whatever refreshed it last, so forgetting it only makes the grace stop
+	// protecting something that is already cold.
+	for k, ts := range r.graceSeen {
+		if now-ts > staleSession {
+			delete(r.graceSeen, k)
+		}
+	}
+	// lastFacts holds two entries per thread and model; they age out by their own request time.
+	for k, f := range r.lastFacts {
+		if now-f.TS > staleSession {
+			delete(r.lastFacts, k)
+		}
+	}
+	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
 		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
+		r.lastFacts = map[string]PrefixFacts{}
+		r.seedTier = map[string]int64{}
+		r.graceSeen = map[string]int64{}
 	}
 }
 
@@ -617,7 +832,8 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 // over-claim the prefix-cache figure exists to avoid. It also fixes cache_miss_reason, which
 // reported a cold start for every session in flight across a restart.
 //
-// One indexed group-by at startup, bounded to sessions young enough to still matter.
+// Three queries at startup (recency and tail, tiers, models), bounded to sessions young enough to
+// still matter.
 func (r *Recorder) SeedSessions(now int64) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
@@ -634,9 +850,16 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	//
 	// Per THREAD (#423), the key ObserveThread reads: the latest row of each thread, not of each
 	// session, or a restart would re-date the main thread with a subagent's last request.
+	//
+	// 2xx only (#994), as SeedGraceSessions does and as the live path does for the gap that
+	// matters (ObservePrefix commits a request only when it succeeded). A failed request wrote no
+	// cache entry, so counting it makes the entry look younger than it is and turns a ttl_expiry
+	// into a prefix_change or unknown. A thread with no 2xx row is not seeded: it has no entry.
 	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
-		WHERE r.ts >= ? AND r.keepalive = 0 AND r.id = (SELECT r2.id FROM requests r2
+		WHERE r.ts >= ? AND r.keepalive = 0 AND r.status >= 200 AND r.status < 300
+			AND r.id = (SELECT r2.id FROM requests r2
 			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
+				AND r2.status >= 200 AND r2.status < 300
 			ORDER BY r2.ts DESC, r2.id DESC LIMIT 1)`,
 		now-staleSession)
 	if err != nil {
@@ -665,6 +888,14 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	oneHour, err := r.seedOneHourTiers(now - staleSession)
+	if err != nil {
+		return 0, err
+	}
+	models, err := r.seedModels(now - staleSession)
+	if err != nil {
+		return 0, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, ts := range seeded {
@@ -677,7 +908,191 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 			}
 		}
 	}
+	// A tier belongs to a thread and a model. It is not tied to the thread's recency, so a thread
+	// whose latest 2xx row is a read still gets the tier of its latest write.
+	for k, ts := range oneHour {
+		if r.seedTier == nil {
+			r.seedTier = map[string]int64{}
+		}
+		if _, ok := r.lastFacts[k]; !ok {
+			r.seedTier[k] = ts
+		}
+	}
+	if r.seenModel == nil {
+		r.seenModel = map[string]bool{}
+	}
+	for _, mk := range models {
+		r.seenModel[mk] = true
+	}
 	return len(seeded), nil
+}
+
+// seedModels returns the tenant+model keys (the keys observe() uses) of every real request in the
+// window, so the first request on a known model after a restart is not a cold start (#994). Only
+// 2xx rows count: a failed request wrote no entry, and the live path labels the next request on a
+// model with only failed rows first_on_model (cold_start) through a marker that a restart clears.
+// A model never seen in the window stays unseeded.
+func (r *Recorder) seedModels(since int64) ([]string, error) {
+	rows, err := r.db.sql.Query(`SELECT DISTINCT tenant_id, model FROM requests
+		WHERE ts >= ? AND keepalive = 0 AND model != '' AND status >= 200 AND status < 300`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tenant, model string
+		if err := rows.Scan(&tenant, &model); err != nil {
+			return nil, err
+		}
+		out = append(out, tenant+"\x00"+model)
+	}
+	return out, rows.Err()
+}
+
+// seedOneHourTiers returns, per thread and model (the key is thread.Key + "\x00" + model), the
+// time of the write when the thread's latest successful, non-ping WRITE on that model was billed at
+// the one-hour tier. A failed request writes no entry, and a full hit leaves the tier of the
+// earlier write as it was. This is the live rule (ObservePrefix keeps the tier over a read-only
+// turn; only a 2xx request commits). The FactsOf rule decides the tier: the write is all one-hour.
+// An entry belongs to one model, so the tier does too (#994).
+func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
+	rows, err := r.db.sql.Query(`SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h FROM (
+			SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h,
+				ROW_NUMBER() OVER (PARTITION BY tenant_id, session_id, thread_id, model ORDER BY ts DESC, id DESC) AS rn
+			FROM requests
+			WHERE ts >= ? AND keepalive = 0 AND cache_write > 0 AND status >= 200 AND status < 300)
+		WHERE rn = 1`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var sid, tid, model string
+		var ts, write, write1h int64
+		if err := rows.Scan(&sid, &tid, &model, &ts, &write, &write1h); err != nil {
+			return nil, err
+		}
+		if write1h >= write {
+			// The key carries no tenant: the session id already does, as `tenant:base`
+			// (session.Scoped). The ranking above is per tenant all the same (#1071), so one
+			// tenant's later write cannot hide another's; on a key two rows still share, the
+			// newer qualifying write stands.
+			k := thread.Key(sid, tid) + "\x00" + model
+			if ts > out[k] {
+				out[k] = ts
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// SeedGraceSessions primes the restart grace's clock (graceSeen) from the database, the same
+// startup recovery SeedSessions gives cache attribution (#766). One grouped query: per thread,
+// the newest row that refreshed the provider's cache entry — a real request (keepalive = 0,
+// whatever it read, because it wrote the entry) or a keep-alive ping that READ or WROTE the
+// cache (keepalive = 1 AND cache_read + cache_write > 0: a read kept the entry warm, a write
+// re-created it, #580). Only rows the
+// upstream accepted (2xx): a failed request wrote no cache entry, and counting it would
+// protect a prefix nothing kept warm.
+//
+// Each row seeds BOTH its own key and, when it stored one, its session's ALIAS key: a request
+// under an explicit header id refreshed the one provider entry its conversation's headerless
+// turns read, and after a restart those turns ask for the alias key alone (their own id IS
+// the alias), so the header id's warmth alone cannot reach them. The alias is a column
+// because the body it was derived from is not stored — metadata only, the same kind of id
+// session_id is. Two limits, both documented in docs/design.md: a row written before the
+// column existed has no alias to seed, and a keep-alive ping carries no body to derive one
+// from, so a ping refreshes only the id it ran under.
+//
+// A SEPARATE map from SeedSessions' recency, and a SEPARATE query, because the two clocks
+// answer different questions and must not re-date each other: attribution asks "when was this
+// thread's last real request?", where a ping must never win (see SeedSessions), while the
+// grace asks "when was its cached prefix last refreshed?", where a cache-reading ping is
+// exactly the fact.
+//
+// Rows without a session id are skipped: an observe-mode row carries none, and the empty key
+// would say one shared entry warmed every sessionless thread.
+func (r *Recorder) SeedGraceSessions(now int64) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.session_alias, MAX(r.ts) FROM requests r
+		WHERE r.ts >= ? AND r.session_id != ''
+			AND r.status >= 200 AND r.status < 300
+			AND (r.keepalive = 0 OR (r.keepalive = 1 AND (r.cache_read > 0 OR r.cache_write > 0)))
+		GROUP BY r.tenant_id, r.session_id, r.thread_id, r.session_alias`,
+		now-staleSession)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	seeded := map[string]int64{}
+	for rows.Next() {
+		var sid, tid, alias string
+		var ts int64
+		if err := rows.Scan(&sid, &tid, &alias, &ts); err != nil {
+			return 0, err
+		}
+		// Grouped per tenant (#1071). The key has no tenant, so a key two groups share keeps the
+		// newer clock.
+		keys := []string{thread.Key(sid, tid)}
+		if alias != "" && alias != sid {
+			keys = append(keys, thread.Key(alias, tid))
+		}
+		for _, k := range keys {
+			if ts > seeded[k] {
+				seeded[k] = ts
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, ts := range seeded {
+		r.touchGraceLocked(id, ts)
+	}
+	return len(seeded), nil
+}
+
+// SeedGrace merges per-thread refresh timestamps into the grace clock by hand. For hosts and
+// tests that know the clock exactly and want the grace seeded without the database round
+// trip. Like the runtime paths, a timestamp only ever moves a key forward.
+func (r *Recorder) SeedGrace(refresh map[string]int64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, ts := range refresh {
+		r.touchGraceLocked(id, ts)
+	}
+}
+
+// ThreadRefreshedAt answers the restart grace's question (modes.Tracker.SetLastSeen): when was
+// this thread's cached prefix last refreshed, as far as this recorder knows? key is the shape
+// SeedGraceSessions and ObserveThread use — thread.Key(session, thread) — which is also the key
+// the tracker records its turns under, so the proxy can hand this method to the tracker
+// verbatim.
+//
+// Metadata only: a timestamp per thread, no content. After a restart it comes from
+// SeedGraceSessions' reload of the requests table; in a live process ObserveThread (real
+// requests) and Record (cache-reading pings) keep it current. A thread this recorder has never
+// seen reads as unknown, which the grace treats as a new thread. Pruning runs only once the
+// map passes 20,000 entries, and only by age (two silent hours — a thread that quiet has lost
+// its provider cache anyway); if even that frees nothing, the last resort empties the map
+// wholesale, and every thread then reads as new until its next request refreshes it again.
+func (r *Recorder) ThreadRefreshedAt(key string) (atMs int64, ok bool) {
+	if r == nil {
+		return 0, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ts, ok := r.graceSeen[key]
+	return ts, ok
 }
 
 // MarkUnique attributes a component's savings to NEW content only, deduping by
@@ -714,4 +1129,72 @@ func (r *Recorder) MarkUnique(tenant, component string, keys []string, saved int
 		return 0
 	}
 	return saved * newKeys / len(keys)
+}
+
+// countQueue bounds the bypass token counts waiting for the count worker. A bypassed 33 MiB
+// request takes ~12 s to count, so a deeper queue would only hold transcripts in memory.
+const countQueue = 8
+
+// countMaxBytes bounds the total request-body size queued for counting. A queued job pins its
+// parsed request, a small multiple of the body, so this is what bounds the memory the worker can
+// hold. A job is always accepted when nothing is queued, so one transcript larger than this is
+// still counted.
+//
+// ponytail: the multiple (parsed request vs body) is not measured; queue the raw bytes and parse
+// in the worker if the ceiling ever needs to be exact.
+const countMaxBytes = 64 << 20
+
+type countJob struct {
+	size       int64
+	id         int64
+	accounting string
+	count      func() (before, attempted int)
+}
+
+// enqueueCount hands a just-inserted bypassed row to the count worker. Never blocks: when the
+// queue is full the row keeps tokens_before 0, which the accounting already reads as unknown.
+func (r *Recorder) enqueueCount(e *Event) {
+	if e.BypassCount == nil || e.ID == 0 {
+		return
+	}
+	size := int64(e.BypassBytes)
+	if q := r.queuedCountBytes.Load(); q > 0 && q+size > countMaxBytes {
+		r.countsDropped.Add(1)
+		return
+	}
+	r.queuedCountBytes.Add(size)
+	select {
+	case r.counts <- countJob{size, e.ID, e.TokenAccounting, e.BypassCount}:
+	default:
+		r.queuedCountBytes.Add(-size)
+		r.countsDropped.Add(1)
+	}
+}
+
+// countLoop is the ONE goroutine that counts the tokens of bypassed requests and updates their
+// rows. It is separate from the writer on purpose: the writer owes every account a fast insert,
+// and a single large count holds a goroutine for seconds.
+//
+// ponytail: one worker, so rows of big bypassed requests lag behind their request by the
+// queue's total counting time; a pool is the upgrade if that ever shows. Each queued closure pins
+// its parsed request, so the memory ceiling is countQueue (8) large transcripts; queue the raw
+// bytes instead if that matters.
+func (r *Recorder) countLoop() {
+	defer r.wg.Done()
+	for {
+		select {
+		case j := <-r.counts:
+			before, attempted := j.count()
+			r.queuedCountBytes.Add(-j.size)
+			frozen := before - attempted
+			if frozen < 0 {
+				frozen = 0
+			}
+			if err := r.db.setBypassTokens(j.id, before, attempted, frozen); err != nil {
+				slog.Warn("dash: could not store a bypassed request's token count", "id", j.id, "err", err)
+			}
+		case <-r.done:
+			return
+		}
+	}
 }

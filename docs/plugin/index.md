@@ -33,24 +33,9 @@ One command per question. Each opens with one line that answers it, then a small
 | `/context-guru:doctor` | Is it set up right? | [Doctor](doctor.md) |
 | `/context-guru:save-more` | Which config and keep-alive strategy would have cost least on my history? Change them, after a yes. | [Save more](save-more.md) |
 | `/context-guru:remove-mcp-and-skills` | Which MCP servers and skills do I never use, and what does removing them save? | [Remove MCP servers and skills](remove-mcp-and-skills.md) |
+| `/context-guru:cache-campaign` | Would a keep-alive campaign built from a tenant's history beat what it does today? (managers) | [Cache campaign](cache-campaign.md) |
 
 Five more views draw in the terminal: `/context-guru:watch`, `timeline`, `chart`, `heatmap` and `fill`. They are on [Terminal views](terminal-views.md).
-
-### Moved commands
-
-The old names keep working for one release. Each says where it moved and runs the new command.
-
-| Old | New |
-|---|---|
-| `/context-guru:savings`, `/context-guru:cache`, `/context-guru:waste` | `/context-guru:insights savings`, `insights cache`, `insights tools` |
-| `/context-guru:insights-capabilities` | `/context-guru:insights tools` |
-| `/context-guru:insights-idle` | `/context-guru:insights cache` |
-| `/context-guru:insights-components` | `/context-guru:insights savings` |
-| `/context-guru:cost-today` | `/context-guru:status` |
-| `/context-guru:cost-unused` | `/context-guru:insights tools` |
-| `/context-guru:cost-cold`, `/context-guru:cost-compact` | `/context-guru:insights cache` |
-| `/context-guru:cost-trends` | `/context-guru:insights savings` |
-| `/context-guru:adapt` | `/context-guru:save-more`, and `/context-guru:remove-mcp-and-skills` for `adapt tools` |
 
 `/context-guru:statusline` still installs, changes and removes the status line; `/context-guru:doctor` checks that it is there.
 
@@ -86,3 +71,5 @@ Codex has the same skills under the same names, invoked by name: `$context-guru-
 ## Next
 
 [Status line](statusline.md) · [Configuration and troubleshooting](configuration.md)
+
+See the [matrix of plugins, providers and settings](../reference/plugins-matrix.md) for what each plugin offers per provider.

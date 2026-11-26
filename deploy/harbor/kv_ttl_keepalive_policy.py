@@ -76,7 +76,7 @@ gate only in the limit:
     gate(prefix) = 0.0870 + (ping_input*input + ping_output*output)
                             / (prefix * (write_5m - cache_read))
 
-8.70% at 125k tokens, 8.72% at 20k, 8.96% at 2k, 9.74% at 500 — a spread of the same order as
+8.71% at 125k tokens, 8.75% at 20k, 9.22% at 2k, 10.79% at 500 (a ping's own input is 7 tokens) — a spread of the same order as
 the margins below, which is what `min_prefix` is for.
 
 That 8.70% is the MYOPIC bar and it is too high. With the option value counted the
@@ -126,6 +126,10 @@ from dataclasses import dataclass, field
 # The documented Anthropic multiples, as named constants rather than literals. kvcache's
 # pricing.go carries the same three.
 CACHE_READ_MULTIPLE = 0.10
+# A ping's own fresh input, in tokens. Mirrors kvcache.DefaultPingInputTokens (Go), the one constant
+# for it; a drift test in deploy/harbor compares the two. Local, so this module stays stdlib-only
+# (kv_ttl_cost_model.DEFAULT_PING_INPUT_TOKENS holds the same value).
+DEFAULT_PING_INPUT_TOKENS = 7
 WRITE_5M_MULTIPLE = 1.25
 WRITE_1H_MULTIPLE = 2.00
 
@@ -227,6 +231,7 @@ class Rates:
     `ping_input`/`ping_output` are the tokens a ping cannot avoid — the fresh input past the
     cached prefix, and the smallest generation the provider accepts. They do NOT scale with
     the prefix, which is why a small enough entry is not worth pinging at any probability.
+    `ping_input_tokens` defaults to DEFAULT_PING_INPUT_TOKENS (7), Go's kvcache.DefaultPingInputTokens.
     kvcache.Pricing.KeepAliveCost is the same expression.
     """
 
@@ -234,7 +239,7 @@ class Rates:
     output: float
     cache_read: float
     write_5m: float
-    ping_input_tokens: int = 1
+    ping_input_tokens: int = DEFAULT_PING_INPUT_TOKENS
     ping_output_tokens: int = 1
     known: bool = True
 
@@ -786,9 +791,9 @@ class _History:
         return hits / len(cell), len(cell)
 
 
-#: A successor that could not have read the entry however warm it was. The same two reasons
+#: A successor that could not have read the entry however warm it was. The same reasons
 #: kvcache's stepCost excludes from `hit`, so a "rescue" here means what it means there.
-_FULL_MISS = ("prefix_change", "cold_start")
+_FULL_MISS = ("prefix_change", "cold_start", "unknown")
 
 
 def load_spans(db_path: str, prices_path: str, *, since_ms: int | None = None,

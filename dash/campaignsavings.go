@@ -120,7 +120,7 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 		costRows, err := d.sql.QueryContext(d.readCtx(), `SELECT tenant_id,
 				CAST(strftime('%H', ts/1000, 'unixepoch') AS INTEGER) h,
 				COUNT(*), COALESCE(SUM(cost_usd),0)
-			FROM requests WHERE keepalive = 1 AND keepalive_strategy_id IN (`+
+			FROM requests WHERE keepalive = 1 AND manual_ping = 0 AND keepalive_strategy_id IN (`+
 			placeholders(len(strategyIDs))+`) AND ts >= ?
 			GROUP BY tenant_id, h`, costArgs...)
 		if err != nil {
@@ -149,6 +149,9 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 	// normalization denominators); the credited sum inside the same scan is narrowed to
 	// rows one of THIS campaign's own strategies rescued — see the file doc comment for
 	// why the two are scoped differently, and why that is not the ceiling this once was.
+	// The credit's own ping probe is floored at `since` (kaSavedSince), because the cost
+	// half above counts pings from `since` only: a ping the campaign did not pay for must
+	// not carry one of its credits (#678).
 	//
 	// With no strategy ids at all (a campaign whose every cell resolved to a
 	// non-activatable arm), the credited sum is a literal 0 rather than an "IN ()" —
@@ -159,7 +162,7 @@ func (d *DB) CampaignRealSavings(strategyIDs, tenantIDs []string, since int64) (
 		savingArgs := make([]any, 0, len(strategyIDs)+len(tenantIDs)+1)
 		if len(strategyIDs) > 0 {
 			savedExpr = `COALESCE(SUM(CASE WHEN r.keepalive_strategy_id IN (` +
-				placeholders(len(strategyIDs)) + `) THEN ` + kaSaved("r.") + ` ELSE 0 END),0)`
+				placeholders(len(strategyIDs)) + `) THEN ` + kaSavedSince("r.", since) + ` ELSE 0 END),0)`
 			// Bound before the tenant list because the CASE sits in the SELECT clause,
 			// which SQLite binds ahead of the WHERE — the args must follow the ORDER THE
 			// TEXT reads, not the order the two lists are named in this function's own

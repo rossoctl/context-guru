@@ -55,7 +55,7 @@ import (
 // Gross, per request, at the deployed rates. A block's size change under an arm is priced at
 // the rate the request actually paid for that position: its FIRST appearance in the session is
 // the uncached tail (the write rate, 5m and 1h tiers blended by what the request wrote, or
-// fresh where nothing was written), every later appearance at Event.repeatRate — the rule
+// fresh where nothing was written), every later appearance at estimateRepeatRate — the rule
 // request_components.saved_usd already uses. An arm that rewrites a block it had already sent
 // differently busts the prefix on a turn that read from cache, and is charged that turn's whole
 // cache read re-billed as a write (an upper bound, charged against the arm). An arm whose
@@ -68,23 +68,15 @@ import (
 // deterministic compaction components, in the default pipeline's order. Everything else in an
 // account's pipeline (cachesplit, toolfilter, the LLM components) keeps its place in the
 // applied config and is not run by the replay.
-var AdaptCompactionCandidates = []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract"}
+var AdaptCompactionCandidates = config.AdaptCandidates()
 
 // adaptKnobs are the settings the search varies, and the only settings the apply route accepts
 // from a client. Values are the grid tried.
-var adaptKnobs = map[string]map[string][]int{
-	"extract": {"min_tokens": {200, 300, 400, 800}},
-	"dedup":   {"min_tokens": {50, 100, 200}},
-}
+var adaptKnobs = config.AdaptKnobGrid()
 
 // AdaptCompactionKnobAllowed reports whether comp.key=v is a setting the apply route may store.
 func AdaptCompactionKnobAllowed(comp, key string, v int) bool {
-	for _, x := range adaptKnobs[comp][key] {
-		if x == v {
-			return true
-		}
-	}
-	return false
+	return config.AdaptKnobAllowed(comp, key, v)
 }
 
 // isAdaptReplayable says the replay can run name: it acts on messages and calls no model. The
@@ -123,14 +115,7 @@ func adaptCandidatesOf(comps []string) []string {
 	return out
 }
 
-func isAdaptCandidate(name string) bool {
-	for _, c := range AdaptCompactionCandidates {
-		if c == name {
-			return true
-		}
-	}
-	return false
-}
+func isAdaptCandidate(name string) bool { return config.IsAdaptCandidate(name) }
 
 const (
 	// adaptSearchRequests caps the covered requests the SEARCH replays (most recent sessions
@@ -643,29 +628,7 @@ func asIntAny(v any) (int, bool) {
 // component of cur kept right after the candidate it followed in cur (walking back past
 // candidates the new order drops), so cachesplit stays after the offloaders and an LLM
 // component stays where its owner put it relative to what remains.
-func AdaptCompactionMerge(cur, cands []string) []string {
-	keep := map[string]bool{}
-	for _, c := range cands {
-		keep[c] = true
-	}
-	after := map[string][]string{} // surviving candidate ("" = head) -> fixed comps after it
-	anchor := ""
-	for _, c := range cur {
-		if isAdaptCandidate(c) {
-			if keep[c] {
-				anchor = c
-			}
-			continue
-		}
-		after[anchor] = append(after[anchor], c)
-	}
-	out := append([]string(nil), after[""]...)
-	for _, c := range cands {
-		out = append(out, c)
-		out = append(out, after[c]...)
-	}
-	return out
-}
+func AdaptCompactionMerge(cur, cands []string) []string { return config.AdaptMerge(cur, cands) }
 
 // --- loading -------------------------------------------------------------------
 
@@ -850,29 +813,46 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 	// tokenizer correction carry no BilledDeltaFactor, so that column is on a different ruler
 	// from one deployment to the next. MAX per (request, component): request_components has
 	// no unique key and older rows carry duplicates.
+	//
+	// A row the accountant library priced (priced_by) carries the figure it booked, in dollars, on one
+	// ruler; that figure is the observation, and is not re-priced. A fallback row ('none') booked
+	// nothing. Only a row from before the switch (priced_by '') is re-priced from its tokens.
 	orow, err := d.sql.QueryContext(ctx, `SELECT rc.request_id, rc.component, MAX(rc.saved_gross),
-		MAX(rc.saved_unique) FROM request_components rc JOIN requests r ON r.id = rc.request_id
-		WHERE `+cond+` AND rc.saved_gross > 0 GROUP BY rc.request_id, rc.component`, args...)
+		MAX(rc.saved_unique), MAX(rc.saved_usd), MAX(rc.priced_by)
+		FROM request_components rc JOIN requests r ON r.id = rc.request_id
+		WHERE `+cond+` AND (rc.saved_gross > 0 OR rc.priced_by = 'accountant') GROUP BY rc.request_id, rc.component`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer orow.Close()
 	for orow.Next() {
 		var id, gross, unique int64
-		var comp string
-		if err := orow.Scan(&id, &comp, &gross, &unique); err != nil {
+		var comp, pricedBy string
+		var storedUSD float64
+		if err := orow.Scan(&id, &comp, &gross, &unique, &storedUSD, &pricedBy); err != nil {
 			return nil, err
 		}
-		// Savings to date: every priced request in the window, whether or not its content is stored.
-		if ar := all[id]; ar != nil {
+		if pricedBy == PricedByNone {
+			continue // the library could not price this request: it booked no saving
+		}
+		// observedUSD is what the row booked, in dollars: the stored figure for a row the library
+		// priced, else its tokens re-priced at the replay's rates.
+		observedUSD := func(rq *adaptReq) float64 {
+			if pricedBy == PricedByAccountant {
+				return storedUSD
+			}
 			u := unique
 			if u < 0 {
 				u = 0
 			} else if u > gross {
-				u = gross
+				u = gross // shared content keys can over-attribute, as in Event.Price
 			}
-			tail, repeat, _ := adaptRates(ar)
-			v := (float64(u)*tail + float64(gross-u)*repeat) * ar.factor
+			tail, repeat, _ := adaptRates(rq)
+			return (float64(u)*tail + float64(gross-u)*repeat) * rq.factor
+		}
+		// Savings to date: every priced request in the window, whether or not its content is stored.
+		if ar := all[id]; ar != nil {
+			v := observedUSD(ar)
 			cov.ObservedUSD += v
 			if cov.ObservedByComponent == nil {
 				cov.ObservedByComponent = map[string]float64{}
@@ -883,13 +863,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 			if r.observed == nil {
 				r.observed = map[string]float64{}
 			}
-			if unique < 0 {
-				unique = 0
-			} else if unique > gross {
-				unique = gross // shared content keys can over-attribute, as in Event.Price
-			}
-			tail, repeat, _ := adaptRates(r)
-			r.observed[comp] += (float64(unique)*tail + float64(gross-unique)*repeat) * r.factor
+			r.observed[comp] += observedUSD(r)
 		}
 	}
 	if err := orow.Err(); err != nil {
@@ -1014,26 +988,25 @@ func synthBody(r *adaptReq) []byte {
 }
 
 // adaptRates are the per-token rates a size change is priced at on r: the tail rate for a
-// block's first appearance and Event.repeatRate for a re-sent one, both with the write rate
+// block's first appearance and estimateRepeatRate for a re-sent one, both with the write rate
 // blended across the 5m and 1h tiers by what r actually wrote.
 func adaptRates(r *adaptReq) (tail, repeat, write float64) {
 	p := r.price
 	write = p.CacheWrite
 	if r.write > 0 && r.write1h > 0 {
 		f := math.Min(1, float64(r.write1h)/float64(r.write))
-		write = (1-f)*p.CacheWrite + f*2*p.Input
+		write = (1-f)*p.CacheWrite + f*p.CacheWrite1h()
 	}
 	pw := p
 	pw.CacheWrite = write
-	e := Event{FreshInput: r.fresh, CacheRead: r.read, CacheWrite: r.write}
-	repeat = e.repeatRate(pw)
+	repeat = estimateRepeatRate(pw, r.fresh, r.read, r.write)
 	// The tail is the newest write, and with a mixed-TTL request that is the 5m entry at the end;
 	// the 1h part is the head. Only a request that wrote everything at 1h wrote its tail there.
 	tail = p.Input
 	if r.write > 0 && r.write >= r.fresh {
 		tail = p.CacheWrite
 		if r.write1h >= r.write {
-			tail = 2 * p.Input
+			tail = p.CacheWrite1h()
 		}
 	}
 	return tail, repeat, write

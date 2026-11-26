@@ -292,6 +292,16 @@ Output under `min_size`, output with no over-long or repeated lines, marker-bear
 
 ---
 
+## searchcap
+
+!!! info "Offload — lossy, reversible (deterministic). Off by default, in no preset."
+    It caps the matches of each file in a `grep -n` or `rg` listing. It keeps the first
+    `per_file` matches (15) and, with `keep_last` (true), the last one. It replaces the rest with
+    `path: +K more matches`. Context rows after the kept last match are cut and not counted.
+    `max_files` (0, off) also keeps only the first N files. The agent gets the original back
+    with `expand`. Output that is not a match listing stays as it is. List it before
+    `searchfold`. Nobody has measured the expand rate live. Run an A/B before you turn it on.
+
 ## smartcrush
 
 !!! info "Offload — lossy, reversible"

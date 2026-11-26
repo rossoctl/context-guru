@@ -3,11 +3,14 @@ package dash
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // scopeFixture is a recorder holding two tenants' rows plus one pre-tenancy row.
@@ -37,23 +40,25 @@ func newScopeFixture(t *testing.T, principal func(*http.Request) (Principal, boo
 			Content:         []ContentRow{{Path: "0", Before: "SECRET-OF-" + tid, After: "x"}},
 		})
 	}
-	// Drain the writer so the rows exist before any query.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(p.Requests) == 3 {
-			for _, e := range p.Requests {
-				f.ids[e.TenantID] = e.ID
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist 3 rows (got %d)", len(p.Requests))
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Drain the writer so the rows exist before any query. The database alone is not
+	// enough: the writer publishes to the SSE hub only AFTER the insert commits, so a row
+	// /api/requests can see is not yet a row /api/events can replay — waiting on the
+	// database alone left a window where the live feed read empty (#91). Same package, so
+	// the hub's ring is reachable directly.
+	hubEvents := func() int {
+		rec.hub.mu.Lock()
+		defer rec.hub.mu.Unlock()
+		return len(rec.hub.ring)
+	}
+	testutil.WaitForState(t, "the writer stores 3 rows and publishes them",
+		func() bool { return rec.Stats().Written == 3 && hubEvents() == 3 },
+		func() string { return fmt.Sprintf("%d rows written, %d hub events", rec.Stats().Written, hubEvents()) })
+	p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
+	if err != nil || len(p.Requests) != 3 {
+		t.Fatalf("stored rows = %v, err %v, want 3", p, err)
+	}
+	for _, e := range p.Requests {
+		f.ids[e.TenantID] = e.ID
 	}
 
 	f.api = NewAPI(rec)
@@ -96,8 +101,7 @@ func asTenant(id string, manager bool) func(*http.Request) (Principal, bool) {
 // Every MOUNTED route is checked against the scoping decision it declared, by walking
 // the route table Mount itself uses.
 //
-// The list used to be hand-written here, which is why /api/benchmarks,
-// /api/benchmarks/{id}/tasks and /api/capture shipped with no auth and no scoping at
+// The list used to be hand-written here, which is why /api/capture shipped with no auth and no scoping at
 // all: they were never in the list, so nothing noticed. Iterating the real table means
 // a new route either declares a class and is checked, or fails here.
 func TestAPIScopesEveryRouteToTheCaller(t *testing.T) {
@@ -329,8 +333,7 @@ func TestSingleTenantAPIUnchanged(t *testing.T) {
 	// The routes that grew a manager gate in hosted mode must be exactly as open as they
 	// always were here: there is nobody to authenticate on a developer's laptop, and the
 	// full capture counters are the local operator's own numbers.
-	for _, path := range []string{"/api/benchmarks", "/api/benchmarks/1/tasks",
-		"/api/benchmarks?refresh=1", "/api/capture"} {
+	for _, path := range []string{"/api/capture"} {
 		if code, body := f.get(t, path); code != http.StatusOK {
 			t.Errorf("single-tenant %s = %d, want 200: %s", path, code, body)
 		}
@@ -633,20 +636,7 @@ func TestWideScopeSingleSessionViewDoesNotInterleaveTwoAccounts(t *testing.T) {
 			Content: []ContentRow{{Path: "0", Before: "SECRET-OF-" + tid, After: "x"}},
 		})
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		p, err := rec.DB().Requests(Filter{TenantAll: true}, 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(p.Requests) == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("writer did not persist 2 rows (got %d)", len(p.Requests))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testutil.WaitFor(t, "the writer stores 2 rows", func() bool { return rec.Stats().Written == 2 })
 	// The DB layer really does return both, so the pinning above it is what protects this.
 	both, err := rec.DB().SessionEvents(Filter{TenantAll: true}, "shared-id", true)
 	if err != nil || len(both) != 2 {

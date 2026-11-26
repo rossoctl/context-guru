@@ -52,7 +52,7 @@ provider credential of its own: the key is read off the request and dropped.
 (`cache.keepalive`, off by default) sends a request *between* your requests, when none is
 in flight — so for opted-in accounts it must retain your key, and the last request's body,
 for the length of the idle gap. Held in memory only, masked at rest, overwritten on
-release, never logged or persisted, and bounded by a hard deadline of about 14 minutes.
+release, never logged or persisted, and bounded by a hard deadline of about 12 minutes.
 Every use is a dashboard row you can audit. See
 [Keep an idle prompt cache warm](how-to/cache-keepalive.md).
 
@@ -628,7 +628,7 @@ the compaction.
 
 ## Default configuration
 
-Every new tenant starts on **`house`** — the structural offloaders with no model call
+Every new tenant starts on **`conservative`** (formerly named `house`) — the structural offloaders with no model call
 anywhere in the path:
 
 ```yaml
@@ -801,7 +801,7 @@ is what `per_output: false` used to mean.
 
 **Then check what it did**, before turning on anything else. Requests tab → open a request →
 **Compaction model calls**: one row per call with its cost, its saving, its latency, whether
-the result was accepted, and why not when it was not. The Components tab now carries an
+the result was accepted, and why not when it was not. The Preset steps tab (Components) now carries an
 `LLM cost` column and states the verdict in dollars. What to look for:
 
 | reading | meaning |

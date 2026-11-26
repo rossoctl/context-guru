@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """The /context-guru:* commands. Each answers ONE question: a bottom line, then a small picture, then (with
-`details`) the tables behind it. Dollars first, gateway prices, no raw token counts unless asked.
+`details`) the tables behind it. Dollars first, gateway prices, no raw token counts unless asked. On a Claude
+subscription, `home` and `insights savings` show the tokens saved instead, by tier, and the 5-hour share as an estimate.
 
     home      what is my situation, what should I do next
     savings   how much did Context Guru save me                  (saved and estimated kept apart)
     cache     is my cache about to cost me
-    insights  savings, cache and tools (what you carry and never use) in one place; `waste` is `insights tools`
+    insights  savings, cache and tools (what you carry and never use) in one place
     session   what happened in this session
     doctor    is it set up right
     save-more              which config and keep-alive strategy would have cost least on my own history
+                           (`save-more tools`: each tool, MCP server and skill, and tool deferral's keep, always-defer and search switches)
     remove-mcp-and-skills  which MCP servers and skills I carry and never use, and what removing them saves
+    ping      keep this session's cache warm with one ping right now (POST /api/me/cache/ping)
+    cache-campaign         build, compare and switch a keep-alive campaign for a tenant (manager login; docs/plugin/cache-campaign.md)
 
-Read-only: GETs against the local proxy, except `apply` and `revert`, which the user confirms first. Output is
+Read-only: GETs against the local proxy, except `apply`, `revert` and `cache-campaign build | mode`, which the user confirms first. Output is
 plain Unicode, no colour codes, so it reads the same on a light and a dark terminal and survives
 being echoed by the model. Stdlib only; `run(cmd, api, opts)` takes the fetcher so tests feed it a
 captured bundle.
@@ -28,6 +32,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -36,6 +41,8 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cgcache  # noqa: E402  (the on-disk request budget the status line shares)
+import costly as S  # noqa: E402  (settings that cost money: the list, detection, apply, revert)
 import cgcost as C  # noqa: E402  (usd, spark, bar, table, recommendations, unused_items ...)
 import tvlib as T  # noqa: E402  (Env: colour, ASCII fallback, width; cols, fit, clip)
 
@@ -87,6 +94,8 @@ class Api:
         headers = {"Content-Type": "application/json"} if data else {}
         if self.token:  # hosted: the account's own proxy token, accepted by /api/adapt/* only
             headers["x-context-guru-token"] = self.token
+        if os.environ.get("CG_DASH_COOKIE"):  # the manager routes (cache-campaign) take the dashboard login cookie, name=value
+            headers["Cookie"] = os.environ["CG_DASH_COOKIE"]
         req = urllib.request.Request(self.base + path + q, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -146,17 +155,25 @@ def stats(api: Api, since: int, until: int | None = None, session: str | None = 
 
 
 def levers(st: dict) -> list[tuple[str, float]]:
-    """Saved dollars by lever, from the stats waterfall. Own spend is subtracted, not hidden."""
-    w = {x["key"]: x["delta_usd"] for x in st.get("waterfall", [])}
-    rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", w.get("cachesplit_saved", 0.0)),
-            ("Keep-alive pings", w.get("keepalive_saved", 0.0) - abs(w.get("keepalive_ping", 0.0))),
-            ("Tool filtering", w.get("decl_filter_saved", 0.0)), ("Self-removed content", w.get("self_removed", 0.0)),
-            ("Context Guru's own model spend", -abs(w.get("cg_llm", 0.0)))]
+    """Saved dollars by lever, from the stats waterfall. Own spend is subtracted, not hidden.
+
+    Sign convention of `delta_usd` (dash/overview.go, waterfall()): a saving is NEGATIVE (money not
+    spent), a cost is POSITIVE. So the saving keys are negated here, and the cost keys are read as
+    they are. A key that really is a net loss then shows as negative. `self_removed` is left out on
+    purpose: a proxy older than #584 still sends it, OUTSIDE total_saved (it is the account's own
+    doing, not ours), so with it the rows could not add up to the headline.
+    """
+    w = {x["key"]: x["delta_usd"] for x in (st.get("waterfall") or [])}
+    rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),
+            ("Keep-alive pings", -w.get("keepalive_saved", 0.0) - w.get("keepalive_ping", 0.0)),
+            ("Tool filtering", -w.get("decl_filter_saved", 0.0)),
+            ("Tool deferral", -w.get("defer_net", 0.0)),
+            ("Context Guru's own model spend", -w.get("cg_llm", 0.0))]
     return [(n, v) for n, v in rows if abs(v) >= 0.005]
 
 
 def daily(api: Api, since: int, until: int, key: str) -> list[float]:
-    b = (api.get("/api/series", {"bucket": DAY_MS, "since": since, "until": until}) or {}).get("buckets", [])
+    b = (api.get("/api/series", {"bucket": DAY_MS, "since": since, "until": until}) or {}).get("buckets") or []
     days: dict[int, float] = {}
     for x in b:
         d = x["ts"] // DAY_MS
@@ -183,6 +200,353 @@ def cache_state(api: Api, session: str | None) -> dict | None:
     return cs if cs and not cs.get("none") and cs.get("last_ts") else None
 
 
+CACHESTATE_TTL_SECONDS = 10.0  # CONTRACT section 4; the status line uses the same
+
+
+def cachestate_cached(base: str, session: str, fetch=None) -> dict:
+    """The session's /api/cachestate through the status line's own cache file (same key, same TTL,
+    same single flight, same back-off), so a mod calling this and the status line rendering never
+    both hit the network. Adds `age_s` (how old the copy is) and `stale` (served without a refresh).
+    At most one request. {"error": ...} when there is nothing to show."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    path = os.path.join(cgcache.cache_dir(), f"context-guru-statusline-{port}-cs-{session}.json")
+    cached, age = cgcache.read_json(path), cgcache.age_of(path)
+    if cached is not None and age is not None and age < CACHESTATE_TTL_SECONDS:
+        return {**cached, "age_s": round(age, 1), "stale": False}
+    # Past the TTL: one caller per window refreshes; the rest, and anyone inside a back-off, serve the old copy.
+    wait = cgcache.backoff(path)
+    may_fetch = not wait and (cached is None or cgcache.take_slot(path, CACHESTATE_TTL_SECONDS))
+    kind = (wait or {}).get("kind") if isinstance(wait, dict) else None
+    if may_fetch:
+        if fetch:  # an injected fetcher answers a document or None (no answer)
+            doc = fetch()
+            status = 200 if isinstance(doc, dict) else 0
+        else:
+            status, doc = Api(base).send("GET", "/api/cachestate", {"session": session}, timeout=5)
+        if status == 200 and isinstance(doc, dict):
+            cgcache.write_atomic(path, json.dumps(doc).encode())
+            cgcache.clear_failure(path)
+            return {**doc, "age_s": 0.0, "stale": False}
+        # The status line's three cases: nothing answered (`down`), too slow (`timeout`), an answer that is no
+        # document (`empty`). Only `down` is the `cg ✕ proxy offline` notice.
+        kind = "down" if status == 0 else "timeout" if status == -1 else "empty"
+        cgcache.record_failure(path, kind)
+    if cached is not None:
+        return {**cached, "age_s": round(age or 0.0, 1), "stale": True}
+    return {"error": "proxy not answering", **({"failure": kind} if kind else {})}
+
+
+def name_agents(doc: dict, transcript: str) -> None:
+    """Adds `name` to each real sub-agent thread (`a:` ids) of a cachestate doc, with the status line's own
+    naming (Claude Code's agents list, read from <transcript>/subagents/*.meta.json). One copy of that logic:
+    statusline.py. Threads without a name get none, and the mod shows nothing for them."""
+    try:
+        import statusline as sl  # noqa: PLC0415  (lazy: the other commands do not pay for it)
+        ids = sl._agent_ids(doc)
+        names = sl._agent_names({"transcript_path": transcript}, ids)
+        rows = {r["id"]: r["name"] for r in sl._agent_rows(doc, float(doc.get("age_s") or 0), names)}
+    except Exception:  # noqa: BLE001  (a name is decoration: never fail the read over it)
+        return
+    for t in doc.get("threads") or []:
+        if isinstance(t, dict) and rows.get(t.get("id")):
+            t["name"] = rows[t["id"]]
+
+
+# The tiers of /api/stats `tokens.saved` / `tokens.caused`, in the order the band shows them, with their labels.
+TOKEN_TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
+
+
+def band_tokens_text(stats: dict | None, human) -> str | None:
+    """`saved 85.0k wr · cost 40.0k rd`: the tokens every feature saved, and what they cost, by tier, from /api/stats
+    `tokens`. The tiers are never added into one number: the provider does not say how a usage limit weights them. A
+    tier at 0 is left out; `cost …` only when a tier was paid. None when the answer has no `tokens` (a proxy before
+    #999) or nothing in any tier."""
+    tokens = stats.get("tokens") if isinstance(stats, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+
+    def tiers(kind: str) -> list[str]:
+        d = tokens.get(kind)
+        out = []
+        for key, tag in TOKEN_TIERS:
+            v = d.get(key) if isinstance(d, dict) else None
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 1:
+                out.append(f"{human(v)} {tag}")
+        return out
+
+    saved, caused = tiers("saved"), tiers("caused")
+    parts = (["saved " + " · ".join(saved)] if saved else []) + (["cost " + " · ".join(caused)] if caused else [])
+    return " · ".join(parts) or None
+
+
+# The learned 5-hour weights (GET /api/me/fivehour-weights, #1047) for the band's next-message share (#1095). The
+# endpoint fits once per 15 minutes; one read a minute here keeps the band at most a minute behind it. A failed read
+# serves the last copy only while it is younger than the endpoint's own 15 minutes, then gives none.
+FIVEHOUR_WEIGHTS_TTL_SECONDS = 60.0
+FIVEHOUR_WEIGHTS_MAX_AGE_SECONDS = 15 * 60.0
+FIVEHOUR_TIERS = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
+
+
+def share_weights(fit: dict | None) -> dict | None:
+    """The part of a /api/me/fivehour-weights answer the band reads: {"ok", "weights", "learned", "requests"}, numbers
+    and flags only. None unless the fit passed its gate (`ok`) and has a learned cache-read weight and at least one
+    learned cache-write weight, each a positive number. The mod checks the same again: either side failing gives the
+    token figure."""
+    if not isinstance(fit, dict) or fit.get("ok") is not True:
+        return None
+    w, learned = fit.get("weights"), fit.get("learned")
+    if not isinstance(w, dict) or not isinstance(learned, dict):
+        return None
+    good = lambda k: isinstance(w.get(k), (int, float)) and not isinstance(w.get(k), bool) and math.isfinite(w[k]) and w[k] > 0  # noqa: E731
+    if not (good("cache_read") and learned.get("cache_read") is True):
+        return None
+    if not any(good(k) and learned.get(k) is True for k in ("cache_write_5m", "cache_write_1h")):
+        return None
+    req = fit.get("requests")
+    return {
+        "ok": True,
+        "weights": {k: float(w[k]) for k in FIVEHOUR_TIERS if good(k)},
+        "learned": {k: learned.get(k) is True for k in FIVEHOUR_TIERS},
+        "requests": int(req) if isinstance(req, (int, float)) and not isinstance(req, bool) else 0,
+    }
+
+
+def fivehour_weights(base: str, fetch=None) -> dict | None:
+    """The account's learned 5-hour weights (share_weights of /api/me/fivehour-weights), through an on-disk cache:
+    one read a minute at most, single flight, backed off after a failure. A failure serves the last answer while it
+    is under 15 minutes old. None for an API key (the endpoint answers {}), an old proxy (404), a fit below its gate,
+    or no answer. `fetch` replaces the network in tests: it answers a document or None."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    path = os.path.join(cgcache.cache_dir(), f"context-guru-band-{port}-fivehour-weights.json")
+    cached, age = cgcache.read_json(path), cgcache.age_of(path)
+    if cached is not None and age is not None and age < FIVEHOUR_WEIGHTS_TTL_SECONDS:
+        return share_weights(cached)
+    if not cgcache.backoff(path) and (cached is None or cgcache.take_slot(path, FIVEHOUR_WEIGHTS_TTL_SECONDS)):
+        doc = fetch() if fetch else Api(base).get("/api/me/fivehour-weights", timeout=3)
+        if isinstance(doc, dict):
+            cgcache.write_atomic(path, json.dumps(doc).encode())
+            cgcache.clear_failure(path)
+            return share_weights(doc)
+        cgcache.record_failure(path, "error")
+    if cached is not None and age is not None and age < FIVEHOUR_WEIGHTS_MAX_AGE_SECONDS:
+        return share_weights(cached)
+    return None
+
+
+def status_extras(base: str, sid: str, doc: dict, window_start_ms: int | None) -> None:
+    """What the status line drew beside the money, the clock and the context, now that the mod draws it (the line is no
+    longer installed): `▲ update v0.6.1` from the local update-check record, the session's manual pings (`↻ $0.27`,
+    from the status line's own cached /api/stats), and on a subscription the tokens this session saved and cost in the
+    current 5-hour window (`band_tokens_text`). Each read goes through the status line's own cache files and TTLs. A failure leaves a field out."""
+    try:
+        import statusline as sl  # noqa: PLC0415
+        strip = lambda t: re.sub(r"\033\[[0-9;]*m", "", t or "")  # noqa: E731
+        up = strip(sl._update_available_segment())
+        if up:
+            doc["update"] = up
+        port = base.rsplit(":", 1)[-1].split("/")[0]
+        stats, _ = sl._fetch_stats(port, sid)
+        if isinstance(stats, dict) and isinstance(stats.get("manual_pings"), dict):
+            doc["manual_pings"] = stats["manual_pings"]
+        if window_start_ms:
+            # The 5-hour limit is the account's, but the band speaks for this session: only its own tokens count.
+            mine, _ = sl._bg_json(port, f"/api/stats?lean=1&since={window_start_ms}&session={sid}", f"win-{window_start_ms // 1000}-{sid}", sl.WINDOW_TTL_SECONDS)
+            # A proxy before #999 has no `tokens`: it keeps its compaction-only `rd / wr` figure.
+            has_tokens = isinstance(mine, dict) and isinstance(mine.get("tokens"), dict)
+            saved = band_tokens_text(mine, sl._human) if has_tokens else sl._saved_tokens_text(mine)
+            if saved:
+                doc["window_saved"] = saved
+    except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
+        pass
+    add_weights(base, doc, window_start_ms)
+
+
+def add_weights(base: str, doc: dict, window_start_ms: int | None) -> None:
+    """On a subscription (the mod sends the window's start only then), `fivehour_weights`: the learned weights that
+    price the next message as a share of the 5-hour limit. Fail open: no weights, and the band keeps its token figure."""
+    if not window_start_ms:
+        return
+    try:
+        w = fivehour_weights(base)
+        if w:
+            doc["fivehour_weights"] = w
+    except Exception:  # noqa: BLE001  (decoration: never fail the read over it)
+        pass
+
+
+def cmd_cachestate(api: Api, o: dict) -> list[str]:
+    sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
+        doc, code = {"error": "no session"}, 1
+    else:
+        doc = cachestate_cached(api.base, sid)
+        if o.get("transcript") and "error" not in doc:
+            name_agents(doc, o["transcript"])
+        if "error" not in doc:
+            status_extras(api.base, sid, doc, o.get("window_start_ms"))
+        elif doc.get("failure") == "down":
+            doc["notice"] = "cg ✕ proxy offline"  # the status line's own words, for a proxy that does not answer at all
+        elif doc.get("failure") == "timeout":
+            # Too slow, and nothing was ever read: the status line's `_timeout_result` with no cache says this. It
+            # redraws with real numbers on its own once an answer lands.
+            doc["notice"] = "cg: stats loading…"
+        code = 1 if "error" in doc else 0
+    o["exit"] = code
+    return [json.dumps(doc, separators=(",", ":"))]
+
+
+def usd(x: float) -> str:
+    """The one money format of the status line and the mod: `$12.34`, `$0.06`, `<$0.01`, `$123`, `-$1.50`."""
+    if 0 < x < 0.01:
+        return "<$0.01"
+    sign = "-" if x <= -0.005 else ""
+    return f"{sign}${abs(x):.0f}" if abs(x) >= 100 else f"{sign}${abs(x):.2f}"
+
+
+PANE_TTL_SECONDS = 60.0  # day, series and spend move slowly; a pane glance does not need fresher
+PANE_REQUESTS_TTL_SECONDS = 10.0
+
+
+def pane_get(base: str, path: str, params: dict, tag: str, ttl: float) -> dict | None:
+    """One read for the pane through the shared on-disk cache: a fresh copy answers without the network, a failure
+    serves the old copy (any age: the pane marks nothing, it simply shows the last figures) and backs off."""
+    port = base.rsplit(":", 1)[-1].split("/")[0]
+    file = os.path.join(cgcache.cache_dir(), f"context-guru-pane-{port}-{tag}.json")
+    cached, age = cgcache.read_json(file), cgcache.age_of(file)
+    if cached is not None and age is not None and age < ttl:
+        return cached
+    if not cgcache.backoff(file) and (cached is None or cgcache.take_slot(file, ttl)):
+        doc = Api(base).get(path, params, timeout=5)
+        if isinstance(doc, dict):
+            cgcache.write_atomic(file, json.dumps(doc).encode())
+            cgcache.clear_failure(file)
+            return doc
+        cgcache.record_failure(file, "error")
+    return cached
+
+
+def local_midnight_ms(now_s: float, days_ago: int = 0) -> int:
+    lt = time.localtime(now_s)
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_ago, 0, 0, 0, 0, 0, -1)) * 1000)
+
+
+def lost_today(spend: dict | None, midnight: int) -> float | None:
+    """Dollars cache misses cost today, from the proxy's spend explanation (excess over a hit)."""
+    days = spend.get("daily") if isinstance(spend, dict) else None
+    if not isinstance(days, list):
+        return None
+    return sum(float(d.get("rewrite_usd") or 0.0) for d in days if isinstance(d, dict) and (d.get("day") or 0) >= midnight - 3_600_000)
+
+
+def pane_spark(day: dict | None, series: dict | None, now_s: float) -> dict | None:
+    """SAVED LATELY: today's saving and 14 local days of it (the last value is today, the same read as the number)."""
+    today = day.get("total_saved_usd") if isinstance(day, dict) else None
+    buckets = series.get("buckets") if isinstance(series, dict) else None
+    if not isinstance(today, (int, float)) or not isinstance(buckets, list):
+        return None
+
+    def local_day(ms: float) -> tuple[int, int, int]:  # hourly UTC buckets placed by midpoint into the user's local days
+        lt = time.localtime(ms / 1000 + 1800)
+        return lt.tm_year, lt.tm_mon, lt.tm_mday
+
+    by_day: dict[tuple[int, int, int], float] = {}
+    for b in buckets:
+        if isinstance(b, dict) and b.get("ts"):
+            by_day[local_day(b["ts"])] = by_day.get(local_day(b["ts"]), 0.0) + float(b.get("saved_usd") or 0.0)
+    days = [by_day.get(local_day(local_midnight_ms(now_s, n) + 12 * 3_600_000 - 1_800_000), 0.0) for n in range(13, 0, -1)] + [float(today)]
+    return {"today": float(today), "days": days}
+
+
+def pane_strip(reqs: dict | None, spend: dict | None, now_s: float) -> dict | None:
+    """CACHE HITS: the last 20 requests of the main thread as hit / part / miss, oldest first, and what misses cost today."""
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    if not isinstance(rows, list):
+        return None
+    rows = sorted((r for r in rows if isinstance(r, dict) and r.get("thread_id", "") == "" and not r.get("keepalive")),
+                  key=lambda r: r.get("ts", 0))[-20:]
+    kinds = []
+    for r in rows:
+        try:
+            kinds.append(T.kind(r))
+        except (KeyError, TypeError):
+            continue
+    if not kinds:
+        return None
+    return {"kinds": kinds, "lost": lost_today(spend, local_midnight_ms(now_s))}
+
+
+def pane_heat(hourly: dict | None, spend: dict | None, now_s: float) -> dict | None:
+    """MISSES BY HOUR: cache misses in each local hour of today (24 values) and the hour reached."""
+    buckets = hourly.get("buckets") if isinstance(hourly, dict) else None
+    if not isinstance(buckets, list):
+        return None
+    per = [0.0] * 24
+    for b in buckets:
+        if isinstance(b, dict) and b.get("ts"):
+            per[time.localtime(b["ts"] / 1000 + 1800).tm_hour] += float(b.get("cache_misses") or 0.0)
+    return {"hours": per, "now": time.localtime(now_s).tm_hour, "lost": lost_today(spend, local_midnight_ms(now_s))}
+
+
+def pane_fill(reqs: dict | None, cs: dict | None) -> dict | None:
+    """CONTEXT: how full the window is, split into what loads every time and the conversation, and the time to full."""
+    used, window = (cs or {}).get("prefix_tokens"), (cs or {}).get("window")
+    if not isinstance(used, (int, float)) or not isinstance(window, (int, float)) or used <= 0 or window <= 0:
+        return None
+    rows = reqs.get("requests") if isinstance(reqs, dict) else None
+    main = sorted((r for r in rows if isinstance(r, dict) and r.get("thread_id", "") == "" and not r.get("keepalive")),
+                  key=lambda r: r.get("ts", 0)) if isinstance(rows, list) else []
+    try:
+        ctxs = [T.ctx(r) for r in main]
+        growth = T.growth(main)
+    except (KeyError, TypeError):
+        ctxs, growth = [], 0.0
+    base = min([used] + ctxs) / window if ctxs else None
+    eta = (window - used) / growth if growth > 0 else None
+    return {"used": float(used), "window": float(window), "frac": max(0.0, min(1.0, used / window)),
+            "base": None if base is None else max(0.0, min(1.0, base)), "eta_s": eta if eta and eta < 6 * 3600 else None,
+            "miss_usd": (cs or {}).get("next_cold_usd") or (cs or {}).get("rewrite_usd") or None}
+
+
+def cmd_panedata(api: Api, o: dict) -> list[str]:
+    """The five modes' data for the mod's pane, as one JSON document. A section whose data is missing is left out, so
+    the pane omits it instead of drawing it empty. Reads go through the on-disk cache; nothing here writes to the proxy."""
+    now_s = float(o.get("now_s") or time.time())
+    now_ms, midnight = int(now_s * 1000), local_midnight_ms(now_s)
+    sid = o["session"] or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid or not re.match(r"^[A-Za-z0-9_-]{1,128}$", sid):
+        return [json.dumps({"error": "no session"})]
+    tz = time.localtime(now_s).tm_gmtoff // 60
+    jobs = {
+        "series": lambda: pane_get(api.base, "/api/series", {"bucket": 3_600_000, "since": local_midnight_ms(now_s, 13), "until": now_ms}, "series14h", PANE_TTL_SECONDS),
+        "hourly": lambda: pane_get(api.base, "/api/series", {"bucket": 3_600_000, "since": midnight, "until": now_ms}, "hourly", PANE_TTL_SECONDS),
+        "spend": lambda: pane_get(api.base, "/api/spend/explain", {"since": midnight, "tz": tz, "now": now_ms}, "spend-today", PANE_TTL_SECONDS),
+        "day": lambda: pane_get(api.base, "/api/stats", {"lean": 1, "since": midnight}, "day", PANE_TTL_SECONDS),
+        "reqs": lambda: pane_get(api.base, "/api/requests", {"limit": 100, "session": sid}, "req100-" + sid, PANE_REQUESTS_TTL_SECONDS),
+    }
+    got: dict = {}
+
+    def run(name: str, fn) -> None:
+        try:
+            got[name] = fn()
+        except Exception:  # noqa: BLE001  (a failed read is a missing section, never a failed pane)
+            got[name] = None
+
+    threads = [threading.Thread(target=run, args=kv, daemon=True) for kv in jobs.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(8)
+    cs = cachestate_cached(api.base, sid)
+    cs = None if "error" in cs else cs
+    main = next((t for t in (cs or {}).get("threads") or [] if isinstance(t, dict) and t.get("main")), None)
+    fill_cs = {**(cs or {}), **(main or {})} if cs else None
+    if fill_cs is not None and not fill_cs.get("window_exact"):
+        fill_cs.pop("window", None)
+    doc = {"spark": pane_spark(got.get("day"), got.get("series"), now_s), "strip": pane_strip(got.get("reqs"), got.get("spend"), now_s),
+           "heat": pane_heat(got.get("hourly"), got.get("spend"), now_s), "fill": pane_fill(got.get("reqs"), fill_cs)}
+    return [json.dumps({k: v for k, v in doc.items() if v is not None}, separators=(",", ":"))]
+
+
 def remaining(cs: dict) -> float:
     return (cs["last_ts"] + cs["ttl_s"] * 1000 - cs["now_ms"]) / 1000
 
@@ -197,7 +561,144 @@ def session_id(api: Api, a_session: str | None) -> tuple[str | None, str]:
 
 
 # ---------------------------------------------------------------------------------------------
+# a Claude subscription: everything in tokens, the 5-hour share only as an estimate (#986, #998)
+
+FIVE_HOURS_MS = 5 * 3600 * 1000
+# The /api/stats token tiers in display order, with their labels. The tiers are never added into one number: the
+# provider does not publish how the 5-hour limit weights them (docs/dashboard.md, "Savings in tokens").
+TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
+# `tokens.by_feature` keys that are cache effects, in display order, after the compaction components (by name).
+EFFECTS = {"cachesplit": "Cache split", "keepalive": "Keep-alive rescue", "ttl": "1-hour cache", "ended_change": "Ended change"}
+
+
+def _statusline():
+    """The status line module, for its token formatter `_human`; None in the Codex copy, which has no status line."""
+    try:
+        import statusline as sl  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None
+    return sl if hasattr(sl, "_human") else None  # a stray `statusline` module is not ours
+
+
+def _real(doc: dict | None, key: str) -> float | None:
+    v = doc.get(key) if isinstance(doc, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def subscription(api: Api, o: dict) -> dict | None:
+    """The account's latest limit headers (GET /api/me/limits): {"used": percent, "start": ms} on a Claude
+    subscription, with both None when no 5-hour window is open now. None (today's dollar view) for an API key,
+    Bedrock, Vertex, an older proxy (404), no answer, or the Codex copy. Read once per run: `insights` draws
+    several screens with the same `o`."""
+    if "_sub" not in o:
+        o["_sub"] = _subscription(api, o)
+    return o["_sub"]
+
+
+def _subscription(api: Api, o: dict) -> dict | None:
+    if _statusline() is None:
+        return None
+    doc = api.get("/api/me/limits", timeout=3)
+    if not isinstance(doc, dict) or doc.get("subscription") is not True:
+        return None
+    five = doc.get("five_hour") if isinstance(doc.get("five_hour"), dict) else None
+    util, reset = _real(five, "utilization"), _real(five, "reset_s")
+    if util is None or reset is None or not 0 <= util <= 10 or reset * 1000 <= o["now"]:  # a window that is over is absent
+        return {"used": None, "start": None}
+    return {"used": util * 100, "start": int(reset * 1000) - FIVE_HOURS_MS}
+
+
+def limit_estimate(used: float | None, win: dict | None) -> str | None:
+    """`≈ 3% of the 5-hour limit (estimate at API-price weights)`: the share of the limit the savings are worth, if
+    the limit weighted tokens as the API prices them. Anthropic does not publish those weights, and the header has
+    whole percents only, so it is an estimate, and shown only with enough data. The provider stops a user at 100%,
+    so the share saved is at most `100 - used`; at that cap the line says the limit would have been hit."""
+    saved, cost = _real(win, "total_saved_usd"), _real(win, "cost_usd")
+    if used is None or used < 2 or cost is None or cost < 0.50 or saved is None or saved <= 0:
+        return None
+    pct = used * saved / cost
+    if pct >= 100 - used:
+        return "≈ without context-guru you would have hit the 5-hour limit (estimate at API-price weights)"
+    return f"≈ {f'{pct:.0f}%' if pct >= 0.5 else '<1%'} of the 5-hour limit (estimate at API-price weights)"
+
+
+def tier_text(tiers: dict | None) -> str:
+    """`85.0k wr · 12.0k in`: the tiers that are not 0, in the order wr, wr1h, rd, in. "" when all are 0."""
+    sl = _statusline()
+    vals = [(_real(tiers, k) or 0.0, tag) for k, tag in TIERS]
+    return " · ".join(f"{sl._human(n)} {tag}" for n, tag in vals if n > 0)
+
+
+def flow_text(flow: dict | None) -> str | None:
+    """`saved 85.0k wr · cost 40.0k rd`: a `{saved, caused}` token figure. The cost part shows only when the feature
+    made the requests pay a tier (keep-alive saves a write and pays reads). None when both are 0."""
+    flow = flow if isinstance(flow, dict) else {}
+    s, c = tier_text(flow.get("saved")), tier_text(flow.get("caused"))
+    return " · ".join((["saved " + s] if s else []) + (["cost " + c] if c else [])) or None
+
+
+def tokens_text(st: dict | None) -> str:
+    """The total of a /api/stats answer (`tokens.saved`, `tokens.caused`), lean or full."""
+    return flow_text(st.get("tokens") if isinstance(st, dict) else None) or "nothing saved yet"
+
+
+def unmeasured_note(st: dict | None) -> str | None:
+    """Requests with no token figure (from before the accountant, or not priced): "not measured", not "saved 0"."""
+    n = int(_real(st, "tokens_unmeasured_requests") or 0)
+    return f"{n} request{'s' if n != 1 else ''} not measured in tokens" if n > 0 else None
+
+
+def feature_rows(st: dict) -> list[list[str]]:
+    """One row per `tokens.by_feature` entry (full read): the compaction components by name, then the cache effects.
+    The keep-alive pings come last, apart: a ping is not agent traffic, so its tokens are not in the total."""
+    by = (st.get("tokens") or {}).get("by_feature") if isinstance(st.get("tokens"), dict) else None
+    by = by if isinstance(by, dict) else {}
+    keys = sorted(k for k in by if k not in EFFECTS) + [k for k in EFFECTS if k in by]
+    rows = [[EFFECTS.get(k, k), t] for k in keys if (t := flow_text(by[k]))]
+    ping = tier_text(st.get("keepalive_ping_tokens") if isinstance(st.get("keepalive_ping_tokens"), dict) else None)
+    if ping:
+        rows.append(["Keep-alive pings (not in the total)", "cost " + ping])
+    return rows
+
+
+def subscription_head(api: Api, o: dict, sub: dict) -> list[tuple[str, str] | None]:
+    """On a subscription, the rows that lead a screen: the tokens saved in this session and in the current 5-hour
+    window (lean reads), then the estimate, then a blank row. [] when there is neither."""
+    rows: list[tuple[str, str] | None] = []
+    sid, how = session_id(api, o["session"])
+    if sid:
+        rows.append((how.capitalize(), tokens_text(api.get("/api/stats", {"lean": 1, "session": sid}))))
+    if sub["start"]:
+        win = api.get("/api/stats", {"lean": 1, "since": sub["start"]})
+        rows.append(("This 5-hour window", tokens_text(win)))
+        est = limit_estimate(sub["used"], win)
+        if est:
+            rows.append(("", est))
+    return rows + [None] if rows else []
+
+
+def aligned(rows: list[tuple[str, str] | None]) -> list[str]:
+    """`label: text` rows with the texts in one column; a row with no label continues the one above; None is a
+    blank line."""
+    w = max((len(r[0]) for r in rows if r), default=0) + 2
+    return [(f"{r[0] + ':' if r[0] else '':<{w}}{r[1]}" if r else "") for r in rows]
+
+
+# ---------------------------------------------------------------------------------------------
 # /context-guru:status
+
+def preset_gap_line(api: Api) -> str | None:
+    """`preset: xhigh (ultrahigh after a restart)` when the saved preset differs from the running one
+    (the proxy's /stats `preset`); None when they agree or either is unknown."""
+    try:
+        import settings  # noqa: PLC0415 - lazy: the other commands do not pay for it
+        saved = settings.saved_preset()[0]
+        doc = api.get("/stats", timeout=3)
+    except Exception:  # noqa: BLE001 - a missing line is better than a failed home screen
+        return None
+    running = doc.get("preset") if isinstance(doc, dict) else None
+    return settings.preset_gap_note(saved, running if isinstance(running, str) else None) or None
+
 
 def cmd_home(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
@@ -208,7 +709,13 @@ def cmd_home(api: Api, o: dict) -> list[str]:
     saved, bill = st.get("total_saved_usd", 0.0), st.get("cost_usd", 0.0)
     sp, (tools, last) = spend_doc(api, o, d), tools_doc(api, o, d)
     recs = C.recommendations(sp, tools, d) if sp else []
+    sub = subscription(api, o)
+    if sub is not None:
+        return home_tokens(api, o, sub, st, recs, d, now)
     L = [f"Saved {dollars(saved)} in {d} days ({share(saved, st.get('baseline_cost_usd') or bill)} of what the same work would have cost)."]
+    gap = preset_gap_line(api)
+    if gap:
+        L.append(gap + ". Run /context-guru:preset-picker to restart the proxy now, or start a new session.")
     t0 = window(o, 1)[0]
     today, yest = stats(api, t0, now), stats(api, t0 - DAY_MS, t0)
     spend_d, saved_d = daily(api, since, now, "cost_usd"), daily(api, since, now, "saved_usd")
@@ -223,13 +730,34 @@ def cmd_home(api: Api, o: dict) -> list[str]:
         L.append(f"  {i}. {dollars(r['usd']):>8}  {r['short']}: {r['do']}")
     if not recs:
         L.append("  Nothing worth acting on right now.")
-    L += ["", "/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills",
-          "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill"]
-    return L
+    return L + HOME_MORE
+
+
+HOME_MORE = ["", "/context-guru:insights  /context-guru:session  /context-guru:doctor  /context-guru:save-more  /context-guru:remove-mcp-and-skills",
+             "/context-guru:watch  /context-guru:timeline  /context-guru:chart  /context-guru:heatmap  /context-guru:fill"]
+
+
+def home_tokens(api: Api, o: dict, sub: dict, st: dict, recs: list[dict], d: int, now: int) -> list[str]:
+    """`home` on a subscription: the same screen in tokens, no dollars. The estimates keep their order, unpriced."""
+    t0 = window(o, 1)[0]
+    today, yest = stats(api, t0, now), stats(api, t0 - DAY_MS, t0)
+    rows = subscription_head(api, o, sub)
+    rows += [(n, tokens_text(x)) for n, x in (("Today", today), ("Yesterday", yest)) if x]
+    rows.append((f"{d} days", tokens_text(st)))
+    note = unmeasured_note(st)
+    if note:
+        rows.append(("", note))
+    L = aligned(rows)
+    gap = preset_gap_line(api)
+    if gap:
+        L.append(gap + ". Run /context-guru:preset-picker to restart the proxy now, or start a new session.")
+    L += ["", "≈ Estimated   (waste you could still avoid; rows overlap)"]
+    L += [f"  {i}. {r['short']}: {r['do']}" for i, r in enumerate(recs[:3], 1)] or ["  Nothing worth acting on right now."]
+    return L + HOME_MORE
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:savings
+# /context-guru:insights savings
 
 def cmd_savings(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
@@ -237,11 +765,18 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
     st = stats(api, since, now)
     if not st:
         return ["No data yet. Run a few prompts through the proxy, then try again."]
+    sub = subscription(api, o)
+    if sub is not None:
+        return savings_tokens(api, o, sub, st, d)
     saved, bill = st["total_saved_usd"], st["cost_usd"]
     L = [f"Saved {dollars(saved)} in {d} days, net of Context Guru's own spend "
          f"({share(saved, st.get('baseline_cost_usd') or bill)} of the {dollars(st.get('baseline_cost_usd') or bill)} "
          f"the same work would have cost)."]
     lv = levers(st)
+    mp = st.get("manual_pings") if isinstance(st.get("manual_pings"), dict) else {}
+    if mp.get("count"):  # the Ping button / command: net of the ping's own cost, kept apart from every strategy
+        n = int(mp["count"])
+        lv.append((f"Manual pings ({n} ping{'s' if n != 1 else ''}, cost {dollars(mp.get('ping_usd') or 0.0)})", mp.get("saved_usd") or 0.0))
     top = max([abs(v) for _, v in lv] + [0.01])
     L += ["", f"✓ Saved   (vs the same requests without Context Guru, at gateway prices)  {C.spark(daily(api, since, now, 'saved_usd'))}"]
     L += C.table([[n, dollars(v), cells(max(v, 0) / top)] for n, v in lv] or [["Nothing saved yet", "", ""]], "lrl")
@@ -258,11 +793,27 @@ def cmd_savings(api: Api, o: dict) -> list[str]:
     return L
 
 
+def savings_tokens(api: Api, o: dict, sub: dict, st: dict, d: int) -> list[str]:
+    """`insights savings` on a subscription: the totals and each feature in tokens, by tier, no dollars."""
+    rows = subscription_head(api, o, sub) + [(f"{d} days", tokens_text(st))]
+    note = unmeasured_note(st)
+    if note:
+        rows.append(("", note))
+    L = aligned(rows)
+    L += ["", "✓ By feature   (tokens by tier: wr = cache write, wr1h = 1-hour cache write, rd = cache read, in = input)"]
+    L += C.table(feature_rows(st) or [["Nothing saved yet", ""]], "ll")
+    sp = spend_doc(api, o, d)
+    est = [[r["short"], r["cls"].split(";")[0]] for r in (C.recommendations(sp, None, d)[:2] if sp else [])]
+    if est:
+        L += ["", "≈ Estimated   (waste you could still avoid; rows overlap)"] + C.table(est, "ll")
+    return L
+
+
 # ---------------------------------------------------------------------------------------------
-# /context-guru:cache
+# /context-guru:insights cache
 
 CAUSES = {"idle_expiry": "You paused longer than the cache lasts", "prefix_change": "Settings or tools changed mid-session",
-          "cold_start": "A new session started", "new_thread": "A helper agent started",
+          "cold_start": "A new session started", "new_thread": "A subagent or side request started",
           "history_rewrite": "The conversation was rewound or compacted"}
 
 
@@ -293,27 +844,195 @@ def cmd_cache(api: Api, o: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# /context-guru:waste
+# /context-guru:cache-campaign  -- the server half is proxy/campaignbuild.go; see predictive/README.md. The manager view; a user
+# picks their own keep-alive strategy with save-more cache.
+
+MOCK_CAMPAIGN = {  # the shape of GET /api/cache/campaigns/{id}, trimmed to the fields this command reads
+    "id": "cmp-sample", "state": "done", "mode": "off", "live": False, "recommendation": "ship",
+    "window": {"since": 0, "until": 30 * DAY_MS}, "scope": {"type": "user", "id": "sample"},
+    "summary": {"model": {"strategy": "plan", "net_usd": 41.2, "ci95": [28.1, 53.9]},
+                "best_baseline": {"strategy": "best fixed rule", "net_usd": 29.4, "ci95": [20.0, 38.1]},
+                "vs_best_baseline": {"vs": "best fixed rule", "diff_usd": 11.8, "ci95": [4.2, 19.5]}},
+}
+VERDICT = {"ship": "Ready to switch on. Try shadow first: it decides but spends nothing.",
+           "baseline": "The plan did not beat a simple rule on your history. Keep your current setup.", "insufficient_data": "Not enough history yet to say."}
+COOKIE_HINT = "Only a manager can use campaigns. Set CG_DASH_COOKIE to your dashboard login cookie."
+CAMPAIGN_BASE = "/api/cache/campaigns"
+CAMPAIGN_USAGE = ("Usage: /context-guru:cache-campaign [show [ID] [details] | build [--builder auto] [--session-end] | mode ID off|shadow|active [--force]]")
+
+
+def campaign_error(code: int, doc: dict | None, what: str) -> list[str]:
+    """One line for a failed call: unreachable, the login hint for 401/403, else the server's own {"error"} text."""
+    if code == 0:
+        return ["Cannot reach the proxy."]
+    if code == -1:
+        return [f"{what}: the proxy did not answer in time."]
+    if code in (401, 403):
+        return [COOKIE_HINT]
+    msg = (doc or {}).get("error")
+    return [f"{what}: {msg}." if msg else f"{what} (HTTP {code})."]
+
+
+def campaign_screen(doc: dict, example: bool, details: bool) -> list[str]:
+    s = doc.get("summary") or {}
+    m, b, v = s.get("model"), s.get("best_baseline"), s.get("vs_best_baseline")
+    w = doc.get("window") or {}
+    days = round(((w.get("until") or 0) - (w.get("since") or 0)) / DAY_MS)
+    if not (m and b and v):
+        rec = doc.get("recommendation")
+        if rec in VERDICT:
+            return [f"Campaign {doc['id']}: {VERDICT[rec]}" + (f" {s['reason']}." if s.get("reason") else "")]
+        return [f"Campaign {doc['id']} has no result: {doc.get('error') or doc.get('state')}."]
+    lo, hi = v["ci95"]
+    verb = "beats" if lo > 0 else ("is not clearly better than" if hi > 0 else "does worse than")
+    head = f"Over {days} days your history says the plan {verb} the best fixed rule by {dollars(abs(v['diff_usd']))} (likely between {dollars(lo)} and {dollars(hi)}). {VERDICT.get(doc.get('recommendation'), '')}"
+    top = max(abs(m["net_usd"]), abs(b["net_usd"]), 0.01)
+    L = ([head] if not example else ["No cache plan available: this proxy cannot build one yet.", "", "EXAMPLE, not your data:", "  " + head])
+    pad = "  " if example else ""
+    L += ["", f"{pad}Plan             {cells(m['net_usd'] / top)} {dollars(m['net_usd'])}", f"{pad}Best fixed rule  {cells(b['net_usd'] / top)} {dollars(b['net_usd'])}",
+          f"{pad}Dollars compare strategies on your past traffic. They are not your bill, and not a promise."]
+    sh = doc.get("shadow")
+    if doc.get("live") and sh:
+        L += ["", f"Running in {doc['mode']} mode: {sh.get('decisions', 0)} decisions so far, would have earned about "
+                  f"{dollars(sh.get('est_net_usd', 0))} (estimate, not billed)."]
+    if details:
+        ev = (doc.get("spec") or {}).get("evidence") or {}
+        sh_ = ev.get("shipped")
+        if sh_:  # the auto builder: the plan that runs (refitted on the whole window) next to the fleet's
+            L += ["", f"Running plan {sh_.get('plan')}, fleet plan {sh_.get('fleet_plan')} (shrinkage kappa {sh_.get('kappa')}, "
+                      f"half-life {sh_.get('half_life_days')} days; None = no limit). Rebuilt daily while it runs."]
+        rows = ev.get("table") or []
+        if rows:
+            L += ["", "All strategies"] + C.table([[r["strategy"], dollars(r["net_usd"]), f"{dollars(r['ci95'][0])} to {dollars(r['ci95'][1])}"] for r in rows], "lrl")
+    if not example:
+        rec = doc.get("recommendation")
+        nxt = (f"Switch it on in shadow: /context-guru:cache-campaign mode {doc['id']} shadow" if doc.get("mode") == "off" and rec != "baseline"
+               else f"Mode is {doc.get('mode')}.")
+        if rec == "ship" and doc.get("mode") != "active":
+            nxt += f"   Or live: /context-guru:cache-campaign mode {doc['id']} active"
+        L += ["", nxt]
+    return L
+
+
+def poll(api: Api, cid: str, tries: int = 20) -> tuple[int, dict | None]:
+    for _ in range(tries):
+        code, doc = api.send("GET", f"{CAMPAIGN_BASE}/{urllib.parse.quote(cid)}")
+        if code != 200 or not doc or doc.get("state") != "running":
+            return code, doc
+        time.sleep(4)
+    return 200, doc
+
+
+def cmd_campaign(api: Api, o: dict) -> list[str]:
+    arg, opt = o["args"], o["campaign"]
+    if o.get("mock"):
+        return campaign_screen(MOCK_CAMPAIGN, True, o["details"])
+    verb = arg[0] if arg else "latest"
+    if verb == "build":
+        body = {"scope": opt["scope"], "id": opt["id"], "window": opt["window"], "objective": "net_usd"}
+        if opt.get("builder", "model") != "model":
+            body.update(builder=opt["builder"], session_end=bool(opt.get("session_end")))
+        code, built = api.send("POST", f"{CAMPAIGN_BASE}/build", body=body)
+        if code == 404 and api.send("GET", CAMPAIGN_BASE)[0] == 404:  # no such route: an older proxy
+            return campaign_screen(MOCK_CAMPAIGN, True, False)
+        if code not in (200, 202) or not built or "campaign_id" not in built:
+            return campaign_error(code, built, "Campaign build failed")
+        code, doc = poll(api, built["campaign_id"])
+        if doc and doc.get("state") == "running":
+            return [f"Still building {doc['id']} ({doc.get('stage', 'working')}); a build takes 1 to 8 minutes. Check: /context-guru:cache-campaign show {doc['id']}"]
+    elif verb == "mode" and len(arg) >= 3 and arg[2] in ("off", "shadow", "active"):
+        code, doc = api.send("POST", f"{CAMPAIGN_BASE}/{urllib.parse.quote(arg[1])}/mode", body={"mode": arg[2], "force": bool(o["force"])})
+        if code == 409:
+            return [f"Not allowed yet: {(doc or {}).get('error', 'the build is not done or not recommended')}."
+                    + ("" if o["force"] or arg[2] != "active" else " Add --force to go live anyway.")]
+        if code != 200 or not doc:
+            return campaign_error(code, doc, "Mode change failed")
+        return [f"Campaign {doc['id']} is now {doc['mode']}." + (" It decides but spends nothing." if doc["mode"] == "shadow" else "")]
+    elif verb not in ("latest", "show"):
+        return [CAMPAIGN_USAGE]
+    else:
+        if verb == "show" and len(arg) > 1:
+            cid = arg[1]
+        else:
+            code, lst = api.send("GET", CAMPAIGN_BASE)
+            if code == 404:  # no such route: an older proxy
+                return campaign_screen(MOCK_CAMPAIGN, True, False)
+            if code != 200 or not lst:
+                return campaign_error(code, lst, "Could not list campaigns")
+            if not lst.get("campaigns"):
+                return ["No campaigns yet. Build one from your history: /context-guru:cache-campaign build"]
+            cid = lst["campaigns"][0]["id"]
+        code, doc = api.send("GET", f"{CAMPAIGN_BASE}/{urllib.parse.quote(cid)}")
+        if code != 200 or not doc:
+            return campaign_error(code, doc, f"Could not show campaign {cid}")
+    if doc.get("state") == "failed":
+        return [f"Campaign {doc['id']} failed: {doc.get('error') or 'unknown error'}."]
+    if doc.get("state") == "running":
+        return [f"Campaign {doc['id']} is still building ({doc.get('stage', 'working')}). Check again soon."]
+    return campaign_screen(doc, False, o["details"])
+
+
+# ---------------------------------------------------------------------------------------------
+# /context-guru:insights tools
+
+def _cost(row: dict) -> tuple[float, bool]:
+    """(dollars, is the whole carry). carry_usd is everything the declaration cost to carry; an older proxy only
+    has unused_usd, the part carried while nothing called it."""
+    if isinstance(row.get("carry_usd"), (int, float)) and row.get("carry_priced", row.get("priced")) is not False:
+        return float(row["carry_usd"]), True
+    return float(row.get("unused_usd") or 0.0), False
+
+
+def tools_carried(tools: dict, details: bool) -> list[str]:
+    """MCP servers (each with its tools underneath) and skills, with what carrying them cost. Claude Code's
+    own tools and Context Guru's own components are left out: nobody removes those."""
+    keep = lambda r: not r.get("builtin") and not C.OWN.search(r.get("name") or r.get("server") or "") and (r.get("carry_priced") if "carry_priced" in r else r.get("priced"))  # noqa: E731
+    by_server: dict[str, list[dict]] = {}
+    for t in tools.get("tools") or []:
+        m = re.match(r"mcp__(.+?)__", t.get("name", ""))
+        if t.get("kind") == "mcp_tool" and keep(t) and m:
+            by_server.setdefault(t.get("server") or m.group(1), []).append(t)
+    servers = sorted((s for s in tools.get("servers") or [] if keep({**s, "name": s["server"]})), key=lambda s: -_cost(s)[0])
+    skills = sorted((k for k in ((tools.get("skills") or {}).get("skills") or []) if keep(k)), key=lambda k: -_cost(k)[0])
+    if not servers and not skills:
+        return []
+    whole = all(_cost(r)[1] for r in [*servers, *skills])
+    L = ["What you carry (MCP servers, their tools and skills; Claude Code's built-in tools are not listed)" if whole else
+         "What you carry (MCP servers, their tools and skills; this proxy reports only the part carried while unused)"]
+    rows = []
+    for sv in servers[: None if details else 5]:
+        calls = f"{sv['calls']} calls" if sv.get("calls") else "never called"
+        rows.append([f"MCP server  {sv['server']}", f"{sv['tools']} tools", calls, dollars(_cost(sv)[0])])
+        for t in sorted(by_server.get(sv["server"], []), key=lambda t: -_cost(t)[0])[: None if details else 3]:
+            rows.append([f"    {t['name'].split('__', 2)[-1]}", "", f"{t['calls']} calls" if t.get("calls") else "never called", dollars(_cost(t)[0])])
+    for k in skills[: None if details else 5]:
+        rows.append([f"skill       {k['name']}", "", f"{k['calls']} calls" if k.get("calls") else "never called", dollars(_cost(k)[0])])
+    L += C.table(rows, "lrrr")
+    if not details and (len(servers) > 5 or len(skills) > 5):
+        L.append(f"  ... {max(0, len(servers) - 5)} more servers, {max(0, len(skills) - 5)} more skills with details")
+    return L
+
 
 def cmd_waste(api: Api, o: dict) -> list[str]:
     d = o["days"] or 7
     tools, last = tools_doc(api, o, d)
     if not tools or not tools.get("totals"):
         return ["No tool inventory yet. The proxy records it per session; try again after a few sessions."]
-    items = C.unused_items(tools, last)
+    carried_rows = tools_carried(tools, o["details"])
+    items = [i for i in C.unused_items(tools, last) if i["kind"] != "client tool"]  # a built-in cannot be removed
     if not items:
-        return ["Nothing wasted: every tool, MCP server and skill you carry was used in this window."]
+        return [*carried_rows, *([""] if carried_rows else []), "Nothing wasted: every MCP server and skill you carry was used in this window."]
     carried = sum(i["usd"] for i in items)
     per_month = carried / d * 30
-    L = [f"{len(items)} things you carry were never used: {dollars(carried)} in {d} days, "
+    L = [*carried_rows, *([""] if carried_rows else []),
+         f"{len(items)} things you carry were never used: {dollars(carried)} in {d} days, "
          f"about {dollars(per_month)} a month.", ""]
     top = items[:5]
-    kind = lambda k: "built-in tool" if k == "client tool" else k  # noqa: E731
-    L += [f"Top {len(top)} of {len(items)}:"] + C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), cells(i["usd"] / items[0]["usd"], 10)] for i in top], "llrl")
+    L += [f"Top {len(top)} of {len(items)}:"] + C.table([[i["kind"], i["name"], dollars(i["usd"]), cells(i["usd"] / items[0]["usd"], 10)] for i in top], "llrl")
     L += ["", "Remove the first:", f"  {top[0]['cmd']}"]
     if o["details"]:
         L += ["", "All of them, with the command that removes each:"]
-        L += C.table([[kind(i["kind"]), i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
+        L += C.table([[i["kind"], i["name"], dollars(i["usd"]), i["cmd"]] for i in items], "llrl")
     L += ["", f"Measured carry; the monthly figure is an estimate that assumes your usage stays the same."]
     return L
 
@@ -394,6 +1113,19 @@ def cmd_session(api: Api, o: dict) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 # /context-guru:doctor
 
+def _ping_header_state() -> str:
+    """present | missing | opted-out | not-ours | unknown, asked of settings.py (the one place that knows)."""
+    try:
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.py"),
+                            "ensure-ping-header", "--check"], capture_output=True, text=True, timeout=10)
+        for ln in r.stdout.splitlines():
+            if ln.startswith("result="):
+                return ln[7:]
+    except Exception:
+        pass
+    return "unknown"
+
+
 def cmd_doctor(api: Api, o: dict) -> list[str]:
     checks: list[tuple[str, str, str]] = []  # (ok|warn|bad, what, fix)
 
@@ -416,9 +1148,18 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
             sl = json.load(f).get("statusLine") or {}
     except (OSError, ValueError):
         pass
-    add("ok" if "statusline" in str(sl.get("command", "")) else "warn", "Context Guru status line is installed", "Run /context-guru:statusline")
-    add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
-        'Add "refreshInterval": 5 to statusLine in settings.json')
+    # Since 0.6.1 the mod's band draws the status line's figures, and the install writes no statusLine. The line is
+    # an option: its two checks run only when it is there, so a default install is never told to add one.
+    if "statusline" in str(sl.get("command", "")):
+        add("ok", "Context Guru status line is installed", "Run /context-guru:statusline")
+        add("ok" if sl.get("refreshInterval") else "warn", "Status line refreshes on a timer (live cache countdown)",
+            'Add "refreshInterval": 5 to statusLine in settings.json')
+    ping_state = _ping_header_state()
+    if ping_state in ("present", "missing", "user-off", "removed"):
+        add("ok" if ping_state == "present" else "warn", "Ping header is set (the Ping button needs it)",
+            {"missing": "Run /context-guru:install to turn Ping on",
+             "removed": "You removed it. Run /context-guru:install to turn Ping on again",
+             "user-off": "Your own x-context-guru-ping line is not 1. Set it to 1 in env.ANTHROPIC_CUSTOM_HEADERS"}.get(ping_state, ""))
     cache_mode = cfg.get("cache_mode")
     add("ok" if cache_mode else "warn", "Cache mode is set", "See /context-guru:cache-strategy-picker")
     bad = [c for c in checks if c[0] == "bad"]
@@ -435,13 +1176,17 @@ def cmd_doctor(api: Api, o: dict) -> list[str]:
 # each setting and returns one report per kind (contract: docs/plugin/save-more.md). This side renders it and,
 # after a yes, sends back an option id the report offered. It never composes configuration itself.
 
-KINDS = ("config", "cache", "tools")
+KINDS = ("config", "cache", "tools", "settings", "deferral")
 ROUTE = {"config": "compaction", "cache": "cache", "tools": "tools"}  # the backend keeps its /api/adapt/* paths
-ALIAS = {"compaction": "config", "waste": "tools"}  # older names, still understood
+PATH = {"deferral": "/api/save-more/tools"}  # `save-more tools` (#869): tool deferral's per-tool report, and its writes
+ALIAS = {"compaction": "config"}  # an older name, still understood
 WRITES = ("apply", "revert")  # top-level commands; no read command ever writes, so a skill may pre-approve it
-READS = ("save-more", "remove-mcp-and-skills", "adapt")
-SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills"}
-NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills"}
+READS = ("save-more", "remove-mcp-and-skills")
+SLASH = {"config": "/context-guru:save-more", "cache": "/context-guru:save-more", "settings": "/context-guru:save-more", "tools": "/context-guru:remove-mcp-and-skills",
+         "deferral": "/context-guru:save-more"}
+NOUN = {"config": "config", "cache": "keep-alive strategy", "tools": "MCP servers and skills", "deferral": "tool deferral"}
+STATE = {"loaded": "loaded", "deferred_cg": "deferred by CG", "deferred_client": "deferred by Claude Code", "removed": "removed"}
+DEFERRAL_ROWS = 12  # rows of `save-more tools` without `details`
 ITEM_KINDS = {"mcp_server": "MCP server", "mcp_tool": "MCP tool", "skill": "skill"}  # never a built-in tool
 ADAPT_DAYS = 30
 MARKS = {"best": "★", "unrecommended": "☆", "current": "▸", "default": "◦"}
@@ -489,18 +1234,22 @@ def adapt_words(cmd: str, args: list[str], o: dict) -> tuple[str, list[str], str
         kinds = ["tools"]
     token = rest[0] if rest else None
     flags = (f" --days {o['days']}" if o["days"] else "") + (" --force" if o.get("force") else "")
-    usage = (f'Usage: python3 "{script}" save-more [config|cache] [details] [--custom] [--days N]\n'
+    usage = (f'Usage: python3 "{script}" save-more [config|cache|settings|tools] [details] [--custom] [--days N]\n'
              f'       python3 "{script}" remove-mcp-and-skills [details] [--days N]\n'
              f'       python3 "{script}" apply <{"|".join(KINDS)}> <option>@<basis>\n'
-             f'       python3 "{script}" revert <{"|".join(KINDS)}>')
+             f'       python3 "{script}" revert <{"|".join(KINDS)}> (settings: revert settings <check-id>)')
     if len(verbs) > 1 or len(kinds) > 1 or (verb == "apply" and (not kinds or len(rest) != 1)) \
-            or (verb == "revert" and (not kinds or rest)) or (verb == "read" and rest) \
+            or (verb == "revert" and (not kinds or len(rest) != (kinds == ["settings"]))) or (verb == "read" and rest) \
             or (cmd == "remove-mcp-and-skills" and kinds != ["tools"]):
         return verb, kinds, token, usage
+    # `save-more tools` is tool deferral's view (#869); the removal report stays remove-mcp-and-skills. A change typed
+    # as `save-more tools apply X` is deferral's; `insights tools apply X` (routed here as save-more) is the removal's.
+    if cmd == "save-more" and kinds == ["tools"] and "insights" not in args:
+        kinds = ["deferral"]
     if verb != "read" and cmd != verb:
         exact = f'python3 "{script}" {verb} {kinds[0]}' + (f" {shlex.quote(token)}" if token else "") + flags
         return verb, kinds, token, f"Run this instead (a change is its own command): {exact}"
-    return verb, kinds or ["config", "cache"], token, None
+    return verb, kinds or ["config", "cache", "settings"], token, None
 
 
 def money(x: float | None) -> str:
@@ -551,10 +1300,14 @@ def with_ticker(fn, label: str):
         sys.stderr.write("\r\x1b[K")
 
 
+def report_path(kind: str) -> str:
+    return PATH.get(kind) or f"/api/adapt/{ROUTE[kind]}"
+
+
 def adapt_report(api: Api, o: dict, kind: str, tick: bool = True) -> tuple[int, dict | None]:
     since, now = window(o, o["days"] or ADAPT_DAYS)
     q = {"since": since, "until": now, **({"custom": 1} if o.get("custom") and kind == "config" else {})}
-    get = lambda: api.send("GET", f"/api/adapt/{ROUTE[kind]}", q, timeout=ADAPT_TIMEOUT)  # noqa: E731
+    get = lambda: api.send("GET", report_path(kind), q, timeout=ADAPT_TIMEOUT)  # noqa: E731
     return with_ticker(get, f"Replaying {o['days'] or ADAPT_DAYS} days of history...") if tick else get()
 
 
@@ -726,7 +1479,68 @@ def plain_words(kind: str, rep: dict, o: dict) -> list[str]:
     return [a, b]
 
 
+def render_deferral(rep: dict, o: dict, e) -> list[str]:
+    """`save-more tools` (#485 D3): one row per tool, MCP server and skill, with its state, use, cost carried and
+    reason, then the changes it offers, each as a command to run after a yes. No recommendation: deferral decides
+    per tool from the user's own history, so this view is for overriding it."""
+    rows, w = rep.get("rows") or [], rep.get("window") or {}
+    by = {}
+    for r in rows:
+        by[r.get("state")] = by.get(r.get("state"), 0) + 1
+    on = rep.get("search_on")
+    # Missing is not zero: an unpriced row's dollars are unknown, so the total is a floor and says so.
+    priced = [r for r in rows if r.get("carry_priced", True)]
+    unpriced = len(rows) - len(priced)
+    carried = dollars(sum(r.get("carry_usd") or 0 for r in priced))
+    cost = (f"Carrying all of them cost at least {carried} over the last {days_of(w)} days; "
+            f"{unpriced} item{'s' * (unpriced != 1)} had no price." if unpriced
+            else f"Carrying all of them cost {carried} over the last {days_of(w)} days.")
+    lines = [f"Tool search is {'on' if on else 'off'} for your account"
+             + (f": Context Guru defers {by.get('deferred_cg', 0)} of these {len(rows)} items, from your own history." if on
+                else ": every tool is sent in full, unless Claude Code defers it itself."),
+             f"Claude Code defers {by.get('deferred_client', 0)} itself. {cost}"]
+    L = card("Save more: tools", lines, e)
+    shown = rows if o["details"] else rows[:DEFERRAL_ROWS]
+    if shown:
+        kind = {"tool": "tool", "mcp_server": "MCP server", "skill": "skill"}
+        L += ["", f"Your items, most costly first ({len(shown)} of {len(rows)}):" if len(shown) < len(rows) else "Your items, most costly first:"]
+        L += ["  " + r for r in T.cols([["kind", "name", "state", "used", "cost"]]
+                                       + [[kind.get(r.get("kind"), r.get("kind", "")) + (" (kept)" if r.get("kept") else "")
+                                           + (" (always deferred)" if r.get("always_deferred") else ""),
+                                           T.clip(r.get("name", ""), 36, e), STATE.get(r.get("state"), r.get("state", "")),
+                                           f"{r.get('sessions_used', 0)} of {r.get('sessions_declared', 0)}",
+                                           money(r.get("carry_usd") if r.get("carry_priced", True) else None)] for r in shown], "lllrr")]
+        if o["details"]:
+            L += ["", "Why:"] + [f"  {r.get('name', '')}: {r.get('reason', '')}" for r in shown]
+    if w.get("since"):
+        L += ["", f"  {day(w['since'], o)}..{day(w['until'], o)} {dot(e)} {w.get('sessions', 0):,} sessions, {w.get('requests', 0):,} requests"]
+    if rep.get("truncated"):
+        L.append(f"  ! {rep['truncated']} cheaper items are not listed.")
+    act = []  # never wrapped: these lines are run exactly as printed
+    basis = rep.get("basis_id")
+    if not rep.get("writable") or not basis:
+        L.append(f"  ! Changes are not available here: {rep.get('reason') or 'this proxy cannot edit your configuration.'}")
+    else:
+        sw = next((x for x in rep.get("options") or [] if x.get("action") in ("search_on", "search_off")), None)
+        act.append(f"Keep a tool loaded (never defer it), after a yes: {apply_line('deferral', 'keep:<name>@' + basis, o)}")
+        if any(x.get("action") == "defer" for x in rep.get("options") or []):
+            act.append(f"Always defer a tool, whatever your history says, after a yes: "
+                       f"{apply_line('deferral', 'defer:<name>@' + basis, o)}")
+        if any(x.get("action") == "undefer" for x in rep.get("options") or []):
+            act.append(f"Take a tool off the always-defer list, after a yes: {apply_line('deferral', 'undefer:<name>@' + basis, o)}")
+        if sw:
+            act.append(f"Turn tool search {'off' if sw['action'] == 'search_off' else 'on'} for your account, after a yes: "
+                       f"{apply_line('deferral', sw['id'] + '@' + basis, o)}")
+        act.append(f"Undo the last of these changes: {SLASH['deferral']} revert deferral")
+    for x in rep.get("not_yet") or []:
+        L.append(f"  Not available yet: {x.get('label', x.get('action', ''))} (#{x['issue']})." if x.get("issue")
+                 else f"  Not available yet: {x.get('label', x.get('action', ''))}.")
+    return T.fit(L, e) + act
+
+
 def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
+    if kind == "deferral":
+        return render_deferral(rep, o, e)
     title = {"config": "Save more: config", "cache": "Save more: cache", "tools": "Remove MCP servers and skills"}[kind]
     L = card(title, plain_words(kind, rep, o), e)
     L.append(rep.get("summary", ""))
@@ -745,9 +1559,14 @@ def render_kind(kind: str, rep: dict, o: dict, e) -> list[str]:
         shown = items if o["details"] else items[:8]
         top = max([i.get("usd") or 0 for i in shown] + [0.01])
         L += ["", f"Never used in this window ({len(shown)} of {len(items)}):" if len(shown) < len(items) else "Never used in this window:"]
-        L += ["  " + r for r in T.cols([[ITEM_KINDS[i["kind"]], T.clip(i["name"], 40, e),
-                                         money(i.get("usd") if i.get("priced", True) else None),
-                                         bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")]
+        rows = T.cols([[ITEM_KINDS[i["kind"]], T.clip(i["name"], 40, e),
+                        money(i.get("usd") if i.get("priced", True) else None),
+                        bar((i.get("usd") or 0) / top, 10, e)] for i in shown], "llrl")
+        for i, r in zip(shown, rows):
+            L.append("  " + r)
+            # The proxy cannot filter a deferred item, and the summary sends the reader to its command.
+            if i.get("client_only") and (i.get("remove") or i.get("suggest")):
+                L.append("      run: " + (i.get("remove") or i.get("suggest")))
     removed = rep.get("removed") or []
     if removed and o["details"]:
         # Measured (the proxy's filter) and estimated (removed in the client) stay apart and are never added
@@ -823,7 +1642,7 @@ def adapt_apply(api: Api, o: dict, kind: str, token: str) -> tuple[list[str], in
         basis = rep.get("basis_id", "")
     since, now = window(o, o["days"] or ADAPT_DAYS)  # the report's window, so the proxy can check the basis on it
     body = {"option": opt, **({"basis": basis} if basis else {}), **({"force": True} if o.get("force") else {})}
-    st, doc = with_ticker(lambda: api.send("POST", f"/api/adapt/{ROUTE[kind]}/apply", {"since": since, "until": now},
+    st, doc = with_ticker(lambda: api.send("POST", report_path(kind) + "/apply", {"since": since, "until": now},
                                            body, timeout=APPLY_WAIT + 40),
                           "Applying...")
     if st == 202 and isinstance(doc, dict) and doc.get("poll"):  # a long apply (a campaign build): wait for it
@@ -868,8 +1687,24 @@ def read_kinds(api: Api, o: dict, kinds: list[str]) -> list[tuple[str, int, dict
     return [(k, st, rep) for k, (st, rep) in zip(kinds, got)]
 
 
+def settings_card(api: Api, o: dict, e) -> list[str]:
+    """The "Settings that cost you money" card, or nothing when no check fires. Fails open: an old proxy or no answer
+    only turns the cost into "not measured". Reads the user's own settings on this machine; writes nothing."""
+    fs = S.findings()
+    if not fs:
+        return []
+    days = o["days"] or ADAPT_DAYS
+    since, now = window(o, days)
+    return S.render(fs, S.costs(api, since, now), days, dollars, card, SLASH["settings"], e)
+
+
 def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, list[tuple[str, dict]]]:
     """(lines, exit code, (kind, report) for each report that carries a recommendation)."""
+    want_settings = "settings" in kinds
+    kinds = [k for k in kinds if k != "settings"]
+    if not kinds:  # `save-more settings` alone: no replay
+        L = settings_card(api, o, e)
+        return (L if L else ["No settings that cost you money were found."]), 0, []
     got = read_kinds(api, o, kinds)
     if o.get("json"):
         return [json.dumps({k: rep for k, _, rep in got}, indent=2)], 0, []
@@ -897,6 +1732,9 @@ def cmd_save(api: Api, o: dict, kinds: list[str], e) -> tuple[list[str], int, li
         rc = 0 if ok else 1
     elif kinds == ["tools"] and recs:
         L.append(tools_question(recs[0][1], e))
+    if want_settings:
+        sc = settings_card(api, o, e)
+        L += (sc + [""]) if sc else []
     return L, rc, recs
 
 
@@ -906,16 +1744,17 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
     if err:
         print(err)
         return 1
+    if verb != "read" and kinds[0] == "settings":  # local files, no proxy: a settings change is the user's own, after their yes
+        L, rc = S.apply(token) if verb == "apply" else S.revert(token)
+        print("\n".join(L))
+        return rc
     if verb != "read":
         L, rc = adapt_apply(api, o, kinds[0], token if verb == "apply" else "revert")
         print("\n".join(L))
         return rc
     e = T.Env()
-    pre = []
-    if cmd == "adapt":  # the 0.6 name, for one release
-        pre = ["/context-guru:adapt is now /context-guru:save-more (config, cache) and /context-guru:remove-mcp-and-skills.", ""]
     L, rc, recs = cmd_save(api, o, kinds, e)
-    print("\n".join(pre + L))
+    print("\n".join(L))
     if recs and sys.stdin.isatty() and sys.stdout.isatty():
         for k, rep in recs:
             if input(f"\nApply {rep['recommendation']['change']}? [y/N] ").strip().lower() in ("y", "yes"):
@@ -931,9 +1770,6 @@ def adapt_main(api: Api, cmd: str, opts: dict) -> int:
 # each screen is the same function as before.
 
 INSIGHTS = {"savings": cmd_savings, "cache": cmd_cache, "tools": cmd_waste}
-INSIGHT_NAME = {"savings": "insights savings", "cache": "insights cache", "waste": "insights tools"}  # the old names
-
-
 def cmd_insights(api: Api, o: dict) -> list[str]:
     unknown = [a for a in o["args"] if a not in INSIGHTS]
     if unknown:  # its own usage, not another command's
@@ -950,38 +1786,146 @@ def cmd_insights(api: Api, o: dict) -> list[str]:
     return L + ["More: /context-guru:insights savings | cache | tools, each with details"]
 
 
-CMDS = {"home": cmd_home, "insights": cmd_insights, "savings": cmd_savings, "cache": cmd_cache, "waste": cmd_waste,
-        "session": cmd_session, "doctor": cmd_doctor}
+CMDS = {"home": cmd_home, "insights": cmd_insights,
+        "session": cmd_session, "doctor": cmd_doctor, "cache-campaign": cmd_campaign}
+
+
+# Why the server holds nothing to ping with (cachestate `ping_reason`), in words. The mod's toast says the same.
+PING_REASONS = {
+    "not opted in": "Ping isn't enabled for this install yet; it turns on in your next session (or run /context-guru:install)",
+    "below limits": "keep-alive is on, but this thread is below its minimum size or limits",
+    "over budget": "one ping would cost more than the per-ping limit",
+    "not worth it": "the planned pings would cost more than the cache miss they protect",
+    "too large": "context too large to hold for Ping",
+    "unsupported": "Ping cannot hold this session (extended thinking, or a route Ping does not support)",
+    "pings used": "the planned keep-alive pings have run out",
+    "done": "this agent has finished, so there is nothing to keep warm",
+    "stopped": "the proxy stopped keeping this thread warm after a miss or a refused ping",
+    "expired": "cache already cold",
+    "no entry": "the server knows nothing about this session yet; send a prompt first",
+    "unavailable": "the upstream route or credential is failing right now — try again shortly",
+}
+PING_REASON_OTHER = "cannot ping this session right now"  # a code from a newer server: never shown raw
+
+
+def ping_reason(cs: dict | None) -> str:
+    """The main thread's `ping_reason` from a cachestate doc, else the session entry's, else ""."""
+    if not isinstance(cs, dict):
+        return ""
+    main = next((t for t in cs.get("threads") or [] if isinstance(t, dict) and t.get("main")), {})
+    r = main.get("ping_reason") or cs.get("ping_reason")
+    return r if isinstance(r, str) else ""
+
+
+def ping_lines(code: int, doc: dict | None, reason: str = "") -> list[str]:
+    """The one-line answer of POST /api/me/cache/ping, whatever the status. `reason` is the cachestate's
+    ping_reason, which says WHY a 409 "not held" happened."""
+    doc = doc or {}
+    if code == 200 and doc.get("sent"):
+        return [f"Kept warm: saved {dollars(doc.get('saved_usd', 0))} net (ping cost {dollars(doc.get('ping_usd', 0))})."]
+    err = doc.get("error")
+    if code == 409 and err == "not held" and reason:
+        return [f"Can't ping: {PING_REASONS.get(reason, PING_REASON_OTHER)}."]
+    if code == 409 and err == "not held":
+        return ["Keep-alive is off for this account. Turn it on in the dashboard to ping."]
+    if code == 409 and err == "busy":
+        return ["A request is running; it refreshes the cache itself."]
+    if code == 409 and err in ("over budget", "too costly"):
+        return ["One ping would cost more than the keep-alive per-ping limit, so nothing was sent."]
+    if code == 409 and err == "cold":
+        return ["The cache is already cold, so there is nothing to keep warm. The next request rewrites it."]
+    if code == 409:
+        return [f"Ping refused: {err or 'no detail'}."]
+    if code == 404 and err == "unknown session":
+        return ["This server does not know that session yet. Send a prompt first."]
+    if code in (404, 405) and not err:  # the mux's plain-text "404 page not found": the route does not exist
+        return ["This Context Guru server does not support manual pings yet. Update the proxy."]
+    if code == 429 and err == "no spare capacity":
+        return [f"No spare capacity right now. Try again in {doc.get('retry_after_s', 5)}s."]
+    if code == 429:
+        return [f"Pinged a moment ago. Try again in {doc.get('retry_after_s', 30)}s."]
+    if code == 502:
+        return ["The upstream model refused the ping."]
+    if code == 0:
+        return ["The Context Guru server did not answer."]
+    if code == -1:
+        return ["The Context Guru server timed out."]
+    return [f"The ping failed (HTTP {code}): {doc.get('error', 'no detail')}."]
+
+
+def ping_main(api: Api, sid: str | None, thread: str | None, as_json: bool) -> int:
+    sid = sid or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        print(json.dumps({"status": 0, "error": "no session"}) if as_json else "No session id: pass --session ID.")
+        return 1
+    body: dict = {"session": sid}
+    if thread:
+        body["thread"] = thread
+    code, doc = api.send("POST", "/api/me/cache/ping", body=body, timeout=20)
+    reason = ""
+    if code == 409 and (doc or {}).get("error") == "not held":
+        own = (doc or {}).get("ping_reason")  # the server's own answer at the moment of the press: newer than any cached copy
+        if isinstance(own, str) and own:
+            reason = own
+        elif api.fixture is None:
+            reason = ping_reason(cachestate_cached(api.base, sid))  # the shared cache first: at most one fetch, only on this refusal
+    if as_json:  # the mod reads this: the HTTP status beside the server's own document
+        print(json.dumps({"status": code, **(doc or {}), **({"ping_reason": reason} if reason else {})}))
+    else:
+        print("\n".join(ping_lines(code, doc, reason)))
+    return 0 if code == 200 else 1
 
 
 def run(cmd: str, api: Api, opts: dict) -> str:
-    o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], **opts}
+    o = {"now": int(time.time() * 1000), "tz_min": 0, "days": 0, "details": False, "session": None, "args": [], "force": False,
+         "campaign": {"scope": "tenant", "id": "", "window": "30d"}, **opts}
     L = CMDS[cmd](api, o)
-    if not o["details"] and cmd not in ("doctor", "home", "insights"):
-        L += ["", f"More: /context-guru:{INSIGHT_NAME.get(cmd, cmd)} details"]
+    if not o["details"] and cmd not in ("doctor", "home", "insights", "cache-campaign"):
+        L += ["", f"More: /context-guru:{cmd} details"]
     return "\n".join(L)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES]))
-    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache]; apply <kind> <option>@<basis>; revert <kind>")
+    ap.add_argument("cmd", choices=sorted([*CMDS, *READS, *WRITES, "cachestate", "panedata", "tip", "ping"]))
+    ap.add_argument("args", nargs="*", help="`details` for the tables behind a screen; save-more [config|cache|settings]; apply <kind> <option>@<basis>; revert <kind>")
     ap.add_argument("--custom", action="store_true", help="save-more config: also search custom combinations, not only the shipped presets")
-    ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately)")
+    ap.add_argument("--force", action="store_true", help="apply: go ahead although the proxy's own check failed (asked separately); "
+                    "cache-campaign mode ... active: go live although the build did not recommend it")
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--port")
+    ap.add_argument("--transcript", help="cachestate: this session's transcript path, to name its sub-agents")
+    ap.add_argument("--window-start-ms", type=int, help="cachestate: when this subscription's 5-hour window began, for this session's saved tokens in it")
+    ap.add_argument("--thread", help="ping: the thread id (default: the main thread)")
     ap.add_argument("--session")
     ap.add_argument("--json", action="store_true", help="print the raw documents of one command")
     ap.add_argument("--fixture", help="read a captured bundle of API responses from this file (tests, demos)")
     ap.add_argument("--now", help="pretend it is this ISO time")
     ap.add_argument("--tz-offset-min", type=int)
+    ap.add_argument("--scope", choices=("user", "tenant"), default="tenant", help="cache-campaign build: whose history")
+    ap.add_argument("--id", default=os.environ.get("CG_TENANT", ""), help="cache-campaign build: tenant id")
+    ap.add_argument("--window", default="30d", help="cache-campaign build: history window, e.g. 30d")
+    ap.add_argument("--builder", choices=("model", "auto"), default="model", help="cache-campaign build: model (a predictor) or auto (a per-tenant plan shrunk to the fleet's)")
+    ap.add_argument("--session-end", action="store_true", help="cache-campaign build --builder auto: score as if the SessionEnd hook is installed")
+    ap.add_argument("--mock", action="store_true", help="cache-campaign: use the documented sample response")
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ("config", "compaction", "tools"):  # `cg.py config revert`: the read side, which names the change
-        argv = ["save-more", *argv]
+    if argv and argv[0] in ("config", "compaction", "tools", "settings"):  # `cg.py config revert`: the read side, which names the change
+        argv = ["remove-mcp-and-skills" if argv[0] == "tools" else "save-more", *argv]  # `tools` is the removal report's kind
     a = ap.parse_args(argv)
-    if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py cache revert`: say the one command that does it
+    if a.cmd not in (*READS, *WRITES) and set(a.args) & set(WRITES):  # `cg.py insights tools apply X`: say the one command that does it
         a.args, a.cmd = [a.cmd, *a.args], "save-more"
-    opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom,
+
+    if a.cmd == "tip":  # for the mod's band: which commands are stale (local files only, no proxy; the status line's rule)
+        try:
+            import statusline as sl  # noqa: PLC0415  (the Codex copy of this file has no status line: no tip there)
+            off = sl._tips_off()  # `--set-tips=off` silences the mod's tip too
+            print(json.dumps({"stale": [] if off else sl.stale_commands() or [], "days": sl.TIP_DAYS}))
+        except Exception:  # noqa: BLE001
+            print(json.dumps({"stale": [], "days": 7}))
+        return 0
+
+    opts: dict = {"days": a.days, "session": a.session, "json": a.json, "force": a.force, "custom": a.custom, "mock": a.mock,
+                  "campaign": {"scope": a.scope, "id": a.id, "window": a.window, "builder": a.builder, "session_end": a.session_end},
                   "details": "details" in a.args, "args": [x for x in a.args if x != "details"],
                   "tz_min": a.tz_offset_min if a.tz_offset_min is not None else time.localtime().tm_gmtoff // 60}
     if a.now:
@@ -990,14 +1934,31 @@ def main(argv: list[str] | None = None) -> int:
         with open(a.fixture, encoding="utf-8") as f:
             api = Api("", json.load(f))
     else:
-        adapt = a.cmd in (*READS, *WRITES)
-        base = proxy_base(a.port) or (hosted_base() if adapt else None)
-        if not base:
+        adapt = a.cmd in (*READS, *WRITES, "ping")
+        base = proxy_base(a.port) or (hosted_base() if adapt else None) or ("http://127.0.0.1:0" if a.mock else None)
+        if not base and a.cmd in ("cachestate", "panedata"):
+            print(json.dumps({"error": "no proxy routing this session"}))
+            return 1
+        local = adapt and "settings" in a.args and (a.cmd in WRITES or a.args[0:1] == ["settings"] and not set(a.args) & {"config", "cache"})
+        if not base and local:  # settings are read on this machine: apply and revert need no proxy; a read says "cost not measured"
+            base = "http://127.0.0.1:0"
+            api = Api(base, token=None)
+        elif not base:
             print(NO_PROXY)
             return 1 if adapt else 0  # a read that showed no report must not count as run (the skills chain on it)
-        api = Api(base, token=cg_token() if adapt else None)
+        else:
+            api = Api(base, token=cg_token() if adapt else None)
+    if a.cmd == "ping":
+        return ping_main(api, a.session, a.thread, a.json)
     if a.cmd in (*READS, *WRITES):
         return adapt_main(api, a.cmd, opts)
+    if a.cmd == "panedata":  # for the mod's pane: JSON only, the five modes' data (spark, strip, heat, fill)
+        print(cmd_panedata(api, {"session": a.session})[0])
+        return 0
+    if a.cmd == "cachestate":  # for the mods: JSON only, from the shared cache, exit 1 when there is nothing
+        o = {"session": a.session, "transcript": a.transcript, "window_start_ms": a.window_start_ms}
+        print(cmd_cachestate(api, o)[0])
+        return o["exit"]
     print(run(a.cmd, api, opts))
     return 0
 

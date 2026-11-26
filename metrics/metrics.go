@@ -2,8 +2,8 @@
 // concrete components.Emitter implementations; the pipeline depends only on the
 // Emitter interface, so this package imports components and not vice versa.
 //
-// v1 ships: Nop (in components), Slog (structured logs in OTel gen_ai.*
-// vocabulary), and Aggregator (in-process rollups behind /stats). An OTel-SDK
+// v1 ships: Nop (in components), Slog (structured logs, context_engineering.*
+// keys), and Aggregator (in-process rollups behind /stats). An OTel-SDK
 // emitter and honest-metrics extras (bounce-adjusted savings, waste signals)
 // land in P5. Each host surfaces these natively (proxy -> bifrost Prometheus/
 // OTel + /metrics; sidecar plugin -> StatsSource).
@@ -61,7 +61,7 @@ func (t Tee) KeepAlivePing(r components.KeepAliveReport) {
 	}
 }
 
-// Slog logs each component and run in the GenAI semantic-convention vocabulary.
+// Slog logs each component and run with context_engineering.* keys.
 //
 // At DEBUG, not INFO. These are per-component records — several per request — so at
 // INFO they buried the one line per request that describes the request, which is that
@@ -126,11 +126,12 @@ type Aggregator struct {
 	// stream to inspect it for an expand call. Buffering is the only thing that stops a
 	// stream being a stream, so counting it makes that cost visible instead of inferred
 	// (it used to be unconditional and unmeasured — issue #26).
-	sseTTFBMs     float64
-	sseTTFBMsBuf  float64
-	sseStreamed   int64
-	sseBuffered   int64
-	sseExpandLate int64
+	sseTTFBMs         float64
+	sseTTFBMsBuf      float64
+	sseStreamed       int64
+	sseBuffered       int64
+	sseExpandLate     int64
+	sseAdjudicateLate int64
 	// Mode dimension (#31). Enforced requests are counted per mode; observe-mode results
 	// are kept in PHYSICALLY separate fields with their own serialized names, so no query
 	// over the enforced rollups can accidentally include a hypothetical.
@@ -613,11 +614,24 @@ func (a *Aggregator) RecordSSE(ttfbMs float64, buffered bool) {
 // interception of an expand call that arrives after the response's first content block, in
 // exchange for not delaying ~33% of responses by ~21 seconds. If this counter is a
 // meaningful fraction of sse_streamed, the trade is wrong and the fix is the SSE splice
-// described in proxy/ssepeek.go. It is an UPPER bound: a model that writes the tool's name
+// described in inband/sse.go. It is an UPPER bound: a model that writes the tool's name
 // in prose is counted too.
 func (a *Aggregator) RecordSSEExpandAfterStream() {
 	a.mu.Lock()
 	a.sseExpandLate++
+	a.mu.Unlock()
+}
+
+// RecordSSEAdjudicateAfterStream notes a response whose adjudication tool_use reached the
+// client — the adjudication half of what RecordSSEExpandAfterStream used to count alone (#174).
+// The split matters at the moment this pair is promoted to the alert candidate
+// notExportedWhy names it as: "the peek leaked" must also say WHICH tool, because the two
+// leaks read differently — an expand leak is the splice giving up on a turn it could have
+// answered, an adjudicate leak is a co-called stray the loop deliberately deferred to the
+// next request's repair.
+func (a *Aggregator) RecordSSEAdjudicateAfterStream() {
+	a.mu.Lock()
+	a.sseAdjudicateLate++
 	a.mu.Unlock()
 }
 
@@ -692,6 +706,10 @@ type Snapshot struct {
 	// components", `null` is "no single pipeline describes this endpoint". Caught in review.
 	Pipeline    []string `json:"pipeline"`
 	PipelineLen int      `json:"pipeline_len"`
+	// Preset is the preset this proxy was started with ("" when none is named, or in hosted mode
+	// where no single preset describes the endpoint). The plugin compares it with the preset the
+	// user saved, to say that a saved change waits for a restart. Always emitted, like Pipeline.
+	Preset string `json:"preset"`
 	// TopPassthrough names components that ran but never saved a token — dead
 	// weight in the pipeline, candidates to drop from the config.
 	TopPassthrough []string `json:"top_passthrough"`
@@ -808,10 +826,47 @@ type Snapshot struct {
 	// failure, counted apart from CacheAwareSummarizerErrors for the same reason extract_llm_sweep
 	// separates sweep_no_prefix from sweep_ask_failed
 	CacheAwareSummarizerNoPrefix int64 `json:"cache_aware_summarizer_no_prefix"`
+	// request bodies the host's prefix stash refused because they were over its per-body cap. Each
+	// one leaves that thread with nothing to ask over, so a later no_prefix there is the cap, not a
+	// first turn
+	PrefixStashOversized int64 `json:"prefix_stash_oversized"`
+	// cache_aware_summarizer splice anchors (#723): a breakpoint written on the last kept tool_result
+	// after a splice, one skipped because the request already had 4 breakpoints, and one whose
+	// tool_result the rebuilt body did not contain
+	CacheAnchorWritten  int64 `json:"cache_anchor_written"`
+	CacheAnchorNoSlot   int64 `json:"cache_anchor_no_slot"`
+	CacheAnchorNotFound int64 `json:"cache_anchor_not_found"`
+	// in-band follow-up breakpoints (#784): the client's last message breakpoint moved to the end
+	// of a follow-up the proxy sent after answering an expand, a follow-up whose client request had
+	// no message breakpoint to move, one whose last block cannot take a breakpoint, and one whose
+	// new content is longer than the provider's 20-block lookback. All zero unless
+	// expand.inband_breakpoint is on
+	CacheInBandBPMoved    int64 `json:"cache_inband_bp_moved"`
+	CacheInBandBPNoMark   int64 `json:"cache_inband_bp_no_mark"`
+	CacheInBandBPNotFound int64 `json:"cache_inband_bp_not_found"`
+	CacheInBandBPTooFar   int64 `json:"cache_inband_bp_too_far"`
+	// tail breakpoints (#795): a breakpoint added at the end of a request whose client put its
+	// last one far from the end, a request with no free slot for it, one whose client mark already
+	// sits near the end (not_needed, the sum of at_end and short_tail: the mark is at the very end
+	// or the last block already holds a mark, or only 4 KiB or less follow it), one whose client
+	// put no mark in messages, and one
+	// whose last block cannot take a mark. All zero when cache.tail_breakpoint is false
+	CacheTailBPAdded     int64 `json:"cache_tail_bp_added"`
+	CacheTailBPNoSlot    int64 `json:"cache_tail_bp_no_slot"`
+	CacheTailBPNotNeeded int64 `json:"cache_tail_bp_not_needed"`
+	CacheTailBPAtEnd     int64 `json:"cache_tail_bp_at_end"`
+	CacheTailBPShortTail int64 `json:"cache_tail_bp_short_tail"`
+	CacheTailBPNoMark    int64 `json:"cache_tail_bp_no_mark"`
+	CacheTailBPNotFound  int64 `json:"cache_tail_bp_not_found"`
 	// a decline because the PrefixAsk path's stashed body does not cover the span this turn was
 	// about to commission a summary for — the stale-prefix guard, distinct from NoPrefix ("the
 	// session has sent nothing" vs. "something is stashed and it is the wrong something")
 	CacheAwareSummarizerStalePrefix int64 `json:"cache_aware_summarizer_stale_prefix"`
+	// a decline because an EARLIER COMPONENT changed the message count, so the span to verify
+	// against the stash could not be located (components.ErrCoordsShifted). Not a stash defect:
+	// expected on every compacted turn of a `high`/`xhigh` pipeline, counted apart from
+	// StalePrefix so that counter keeps meaning "the stashed body was the wrong one" (#452)
+	CacheAwareSummarizerCoordsShifted int64 `json:"cache_aware_summarizer_coords_shifted"`
 	// commission calls that reached the model through components.PrefixAsker rather than a
 	// components.MessagesModel — i.e. the Anthropic incoming-model path (#275). Zero here on a
 	// deployment running Anthropic-only traffic means this component is still measuring `off`,
@@ -860,6 +915,10 @@ type Snapshot struct {
 	// batched with a client tool, past the round cap, past the retain bound, or in a dialect
 	// that cannot be reconstructed. See Aggregator.RecordSSEExpandAfterStream.
 	SSEExpandAfterStream int64 `json:"sse_expand_after_stream"`
+	// SSEAdjudicateAfterStream is the same leak for the adjudication tool, split out of
+	// SSEExpandAfterStream so the pair can name its tool (#174). See
+	// Aggregator.RecordSSEAdjudicateAfterStream.
+	SSEAdjudicateAfterStream int64 `json:"sse_adjudicate_after_stream"`
 	// Freeze-replay health — the cache-WRITE cost line. A frozen decision replayed
 	// (frozen_hits) keeps an already-cached message byte-identical. A decision the store
 	// DROPS (frozen_dropped: TTL expiry / pin cap) would flip that message's
@@ -929,14 +988,25 @@ type Snapshot struct {
 	// lifecycle log line and are not alertable. Filled by the host at serve time.
 	UsageUnparsed   int64 `json:"usage_unparsed"`
 	UsageUnreadable int64 `json:"usage_unreadable"`
-	StashRefused    int64 `json:"stash_refused"`
-	StashMissing    int64 `json:"stash_missing"`
-	StashExpired    int64 `json:"stash_expired"`
-	StashRevived    int64 `json:"stash_revived"`
-	StashLive       int   `json:"stash_live"`
-	StashCapacity   int   `json:"stash_capacity"`
-	StashBytes      int64 `json:"stash_bytes"`
-	StashMaxBytes   int64 `json:"stash_max_bytes"`
+	// The early wait-cause scan (#1225, #1227), process-wide, filled by the host at serve time. The keeper
+	// takes the scan at response end without waiting: WaitScanUsed turns used its counts, WaitScanNotReady
+	// planned without them (the scan was still running), WaitScanUnknown planned without them (the scan
+	// said unknown: over the work bound, server-held history, a panic, cancelled). The writer's tracker
+	// update reused the scan (WaitScanWriterEarly) or normalized the body itself (WaitScanWriterOwn).
+	// Counts only.
+	WaitScanUsed        int64 `json:"wait_scan_used"`
+	WaitScanNotReady    int64 `json:"wait_scan_not_ready"`
+	WaitScanUnknown     int64 `json:"wait_scan_unknown"`
+	WaitScanWriterEarly int64 `json:"wait_scan_writer_early"`
+	WaitScanWriterOwn   int64 `json:"wait_scan_writer_own"`
+	StashRefused        int64 `json:"stash_refused"`
+	StashMissing        int64 `json:"stash_missing"`
+	StashExpired        int64 `json:"stash_expired"`
+	StashRevived        int64 `json:"stash_revived"`
+	StashLive           int   `json:"stash_live"`
+	StashCapacity       int   `json:"stash_capacity"`
+	StashBytes          int64 `json:"stash_bytes"`
+	StashMaxBytes       int64 `json:"stash_max_bytes"`
 	// ExpandPrefixFlips counts turns where an ESTABLISHED compaction was abandoned because the
 	// agent had expanded that content: a frozen decision existed, so the provider holds the
 	// compacted bytes, and the turn sends the original in full at the same position. That is a
@@ -1035,6 +1105,25 @@ type Snapshot struct {
 	// query lives in `dash`, which sits above this package). Omitted entirely on a hosted
 	// deployment or a proxy with no dashboard, same reasoning as KeepAlive above.
 	Savings any `json:"savings,omitempty"`
+
+	// ToolDefer is tool deferral's ledger (#485): the NET saving (deferred tokens at the tier each
+	// request was billed at, minus the names list and every search turn), and its counters. Filled by
+	// the host. Omitted when deferral never ran in this process.
+	ToolDefer any `json:"tool_defer,omitempty"`
+
+	// KeepAlivePingsPriced and KeepAliveRescueFactsMissing say whether the host wires keep-alive credit
+	// (filled by the host). Priced: pings the host priced (each PingSavings call that returned ok).
+	// Missing: real requests that followed keep-alive pings but found no ping facts, so credit was lost
+	// on that return. It also counts a return after an unpriced ping (non-2xx, no usage), after an
+	// eviction, and a request whose pricing panicked. If it keeps rising while Priced stays 0, the ping
+	// side is not wired or its pings keep failing (see the keeper's pings, failed and skipped). Counts only; Missing moves only with the dashboard on.
+	KeepAlivePingsPriced        int64 `json:"keepalive_pings_priced"`
+	KeepAliveRescueFactsMissing int64 `json:"keepalive_rescue_facts_missing"`
+	// BobBackend counts the replies on Bob's model route by backend label: A, B, other (the
+	// reply's marks match neither) and none (no id or no usage), plus id_no_usage (the none
+	// replies that have an id). Filled by the host. Always present, so a reader sees 0 and not a
+	// missing key before any Bob traffic.
+	BobBackend map[string]int64 `json:"bob_backend"`
 
 	// Provider-billed token tiers (W8), summed from response usage. ADDITIVE: the
 	// benchmark harnesses parse this payload, so fields are only ever added here,
@@ -1154,13 +1243,14 @@ func (a *Aggregator) Snapshot() Snapshot {
 		AddedLatencyMsAvg: addedAvg, UpstreamMsAvg: upAvg, UpstreamMsAvgBypassed: upAvgByp,
 		SSEStreamed: a.sseStreamed, SSEBuffered: a.sseBuffered,
 		SSETTFBMsAvg: ttfb, SSETTFBMsAvgBuf: ttfbBuf, SSEBufferedPct: bufPct,
-		SSEExpandAfterStream: a.sseExpandLate,
-		CmdfilterFamilies:    copyFilterStats(a.filterFam),
-		CmdfilterFilters:     copyFilterStats(a.filterName),
-		CmdfilterMisses:      topMisses(a.filterMiss, 20),
-		Mode:                 string(mode),
-		SyncEnforced:         a.syncRequests,
-		FreshInputTokens:     a.freshInput, CacheReadTokens: a.cacheRead,
+		SSEExpandAfterStream:     a.sseExpandLate,
+		SSEAdjudicateAfterStream: a.sseAdjudicateLate,
+		CmdfilterFamilies:        copyFilterStats(a.filterFam),
+		CmdfilterFilters:         copyFilterStats(a.filterName),
+		CmdfilterMisses:          topMisses(a.filterMiss, 20),
+		Mode:                     string(mode),
+		SyncEnforced:             a.syncRequests,
+		FreshInputTokens:         a.freshInput, CacheReadTokens: a.cacheRead,
 		CacheWriteTokens: a.cacheWrite, OutputTokens: a.outputTok,
 		AttemptedTokens: a.attempted, FrozenTokens: a.frozen,
 		SavingsPctAttempted: attemptedPct, SavingsPctNewInput: newInputPct,

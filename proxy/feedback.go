@@ -61,7 +61,11 @@ func (h *Handler) ctlSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 	// Stored. Everything below this line is best-effort notification, off the request
 	// path: the address is resolved here (one indexed read) and the send happens in the
 	// background, so a slow relay cannot hold this response open.
-	go h.deliverFeedback(fb, h.managerAddress())
+	h.mailWG.Add(1)
+	go func() {
+		defer h.mailWG.Done()
+		h.deliverFeedback(fb, h.managerAddress())
+	}()
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"status": "stored",
 		"id":     fb.ID,
@@ -168,6 +172,17 @@ func (h *Handler) deliverFeedback(fb *tenant.Feedback, to string) {
 			"feedback_id", fb.ID, "err", err.Error())
 	}
 }
+
+// waitMailForTest blocks until every feedback mail this handler has started is done.
+//
+// The send reads CG_MAIL_DEV_SINK (the dev sink path) at send time, but the test that
+// pointed it at its own t.TempDir restores the variable when it ends. A send still in
+// flight then reads whatever the NEXT test has set, and lands in that test's sink. So the
+// fixture registers this in t.Cleanup BEFORE the sink is restored (cleanups run in LIFO
+// order, and the sink is set first): by the time the env goes back, no goroutine can be
+// about to read it. Test-only, but lives here rather than in a _test file so the WaitGroup
+// stays private.
+func (h *Handler) waitMailForTest() { h.mailWG.Wait() }
 
 // feedbackSubject names the submitter and the headline score.
 //

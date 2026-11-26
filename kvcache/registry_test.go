@@ -3,6 +3,7 @@ package kvcache
 import (
 	"context"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -385,5 +386,134 @@ func TestAnUnpricedWindowIsNotValuedAndCannotPassAsACeiling(t *testing.T) {
 	if v := Simulate(reqs, Fixed5m(), priced); !v.Valued || v.TotalUSD <= 0 {
 		t.Errorf("the priced control is not valued (Valued=%v, total=%.6f); this test proves "+
 			"nothing", v.Valued, v.TotalUSD)
+	}
+}
+
+// A REJECTED NO-OP ROW IS NOT A TURN, for the ceiling exactly as for Simulate. Simulate skips a row
+// whose upstream rejected it, whose cost is unknown and whose prefix is empty: the provider read
+// nothing, so the cache entry is untouched. The optimum's dynamic program used to keep such a row as
+// a trajectory step, so it planned around a turn Simulate never bills — and on CG2's live history
+// keepalive-5m came out $39.94 BELOW "optimal" over 35 (account, hour) cells. A ceiling a plain arm
+// beats is not a ceiling.
+func TestOptimalIgnoresRejectedNoOpRowsLikeSimulate(t *testing.T) {
+	reqs, cfg := dataset(t)
+	// Put a rejected, empty, unpriced row in the middle of every trajectory, right after each turn,
+	// the shape a failed upstream call leaves in the dashboard.
+	var withNoOps []*Request
+	next := int64(10_000)
+	for _, r := range reqs {
+		withNoOps = append(withNoOps, r)
+		next++
+		withNoOps = append(withNoOps, &Request{ID: next, User: r.User, ConversationID: r.ConversationID,
+			TS: r.TS + 1, HourUTC: r.HourUTC, Bucket: r.Bucket, Model: r.Model,
+			Rejected: true, CostKnown: false, CachedContext: 0, MissReason: "hit"})
+	}
+	Derive(withNoOps)
+	best := Simulate(withNoOps, NewOptimal(withNoOps, cfg), cfg)
+	clean := Simulate(reqs, NewOptimal(reqs, cfg), cfg)
+	if diff := best.TotalUSD - clean.TotalUSD; diff > 0.01 || diff < -0.01 {
+		t.Errorf("no-op rows moved the optimum from $%.6f to $%.6f; Simulate bills them as nothing, so "+
+			"the ceiling must not change", clean.TotalUSD, best.TotalUSD)
+	}
+	for _, spec := range Registry() {
+		if spec.Name == StrategyOptimal || spec.Name == StrategyReplay {
+			continue
+		}
+		s, err := NewStrategy(spec.Name, withNoOps, cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", spec.Name, err)
+		}
+		if got := Simulate(withNoOps, s, cfg); got.TotalUSD < best.TotalUSD-0.01 {
+			t.Errorf("%s costs $%.6f, BELOW the optimum's $%.6f on a history with rejected no-op rows",
+				spec.Name, got.TotalUSD, best.TotalUSD)
+		}
+	}
+}
+
+// THE K-PING ARMS ARE ONE ARM WITH A BUDGET. keepalive-5m-xK holds the 5-minute tier and spends at
+// most K keep-alives per idle span: x1 is the same schedule as keepalive-5m-once, x2 the same as
+// keepalive-5m at the default MaxPings of 2, and a long gap buys strictly more pings as K grows.
+func TestTheKPingArmsAreKeepAliveWithABudget(t *testing.T) {
+	reqs, cfg := dataset(t)
+	run := func(name string) *Result {
+		t.Helper()
+		s, err := NewStrategy(name, reqs, cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if s.Name() != name {
+			t.Fatalf("NewStrategy(%q).Name() = %q", name, s.Name())
+		}
+		return Simulate(reqs, s, cfg)
+	}
+	once, x1 := run(StrategyKeepAlive5mOnce), run("keepalive-5m-x1")
+	if once.TotalUSD != x1.TotalUSD || once.Pings != x1.Pings {
+		t.Errorf("x1 = $%.6f/%d pings, once = $%.6f/%d: the same schedule", x1.TotalUSD, x1.Pings, once.TotalUSD, once.Pings)
+	}
+	two, x2 := run(StrategyKeepAlive5m), run("keepalive-5m-x2")
+	if two.TotalUSD != x2.TotalUSD || two.Pings != x2.Pings {
+		t.Errorf("x2 = $%.6f/%d pings, keepalive-5m at MaxPings 2 = $%.6f/%d", x2.TotalUSD, x2.Pings, two.TotalUSD, two.Pings)
+	}
+	// The arm's own budget binds whatever the window's MaxPings (here the default), so a sweep at
+	// the default scores x5 as five pings, as the campaign enforces it.
+	prev := int64(-1)
+	for k := 1; k <= MaxKeepAlivePings; k++ {
+		r := run(StrategyKeepAlive5mPingsPrefix + strconv.Itoa(k))
+		if r.Pings < prev {
+			t.Errorf("x%d spent %d pings, fewer than x%d's %d", k, r.Pings, k-1, prev)
+		}
+		prev = r.Pings
+	}
+	if prev <= x2.Pings {
+		t.Errorf("x%d spent %d pings, no more than x2's %d: the fixture has no gap long enough to tell them apart",
+			MaxKeepAlivePings, prev, x2.Pings)
+	}
+}
+
+// Only exact, in-range names parse: a typo must not quietly become some other budget.
+func TestKeepAlivePingsOfRejectsAnythingButAnExactBudget(t *testing.T) {
+	for _, bad := range []string{"keepalive-5m-x0", "keepalive-5m-x12", "keepalive-5m-x01", "keepalive-5m-x",
+		"keepalive-5m-x2a", "keepalive-1h-x2", "keepalive-5m"} {
+		if k, ok := KeepAlivePingsOf(bad); ok {
+			t.Errorf("KeepAlivePingsOf(%q) = %d, ok; want a refusal", bad, k)
+		}
+		if _, err := NewStrategy(bad, nil, Config{}); err == nil && bad != "keepalive-5m" {
+			t.Errorf("NewStrategy(%q) built an arm", bad)
+		}
+	}
+	if k, ok := KeepAlivePingsOf("keepalive-5m-x11"); !ok || k != 11 {
+		t.Errorf("KeepAlivePingsOf(x11) = %d, %v", k, ok)
+	}
+}
+
+// THE GATE KEEPS ITS OWN BUDGET when the window's MaxPings is raised for a many-ping sweep.
+func TestStopReasonGatedKeepsItsBudgetUnderARaisedMaxPings(t *testing.T) {
+	reqs, cfg := dataset(t)
+	for _, r := range reqs {
+		r.StopReason = "end_turn" // every span is "actually done", so the gate pings on all of them
+	}
+	at := func(maxPings int) *Result {
+		c := cfg
+		c.MaxPings = maxPings
+		s, _ := NewStrategy(StrategyStopReasonGated, reqs, c)
+		return Simulate(reqs, s, c)
+	}
+	if lo, hi := at(DefaultMaxPings), at(MaxKeepAlivePings); lo.Pings != hi.Pings || lo.TotalUSD != hi.TotalUSD {
+		t.Errorf("stop-reason-gated: %d pings at MaxPings %d, %d at %d; its live budget is %d either way",
+			lo.Pings, DefaultMaxPings, hi.Pings, MaxKeepAlivePings, DefaultMaxPings)
+	}
+}
+
+// A K-ping arm is scored at K whatever Config.MaxPings is, because the campaign enforces K.
+func TestAKPingArmIgnoresTheWindowsMaxPings(t *testing.T) {
+	reqs, cfg := dataset(t)
+	score := func(maxPings int) int64 {
+		c := cfg
+		c.MaxPings = maxPings
+		s, _ := NewStrategy("keepalive-5m-x"+strconv.Itoa(MaxKeepAlivePings), reqs, c)
+		return Simulate(reqs, s, c).Pings
+	}
+	if lo, hi := score(DefaultMaxPings), score(MaxKeepAlivePings); lo != hi {
+		t.Errorf("x%d spent %d pings at MaxPings %d but %d at %d", MaxKeepAlivePings, lo, DefaultMaxPings, hi, MaxKeepAlivePings)
 	}
 }

@@ -40,7 +40,7 @@
 # a different output cap, or control of max_tokens itself, and neither is available cheaply.
 #
 # Which is fine, because the rule is a SPECULATION that has already been retracted (see
-# internal/compactionpoint: one data point, and evidence against the mechanism that would make it
+# compactionpoint: one data point, and evidence against the mechanism that would make it
 # non-arbitrary). The primary source for C is direct observation in billed tokens and does not depend
 # on it. Keep this arm for the day a model with a different output cap is on hand; do not spend money
 # on it before then.

@@ -1,6 +1,7 @@
 ---
 name: update
-description: Check whether a newer context-guru-proxy BINARY has been released and, if the user wants it, install it. Use when the user asks to update, upgrade, or check the version of context-guru or its proxy, or after a session-start note said a newer proxy is available. The plugin itself updates through the marketplace; this updates the proxy binary, which is released separately and does not move when the plugin does.
+description: Check for a newer context-guru-proxy binary and install it if you want. The plugin itself updates through the marketplace.
+disable-model-invocation: true
 ---
 
 # Update the context-guru proxy binary
@@ -49,6 +50,7 @@ misleading thing this skill can do.
 ## 2. Report honestly
 
 - `update_available=false`: up to date, name the version.
+  This also holds when a beta is installed and `latest` is an older stable: an update never goes backwards.
 - `update_available=true`: name both versions and that the download is on the order of 30 MB.
 - `update_available=unknown`: say the check failed and why (`reason=`), and that you don't know
   either way — never fall back to the cached `latest=` from the block above as if it answered this.
@@ -94,8 +96,11 @@ CONTEXT_GURU_UPGRADE=1 "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
 
 This is the same checksum-verified download path `/context-guru:install` uses for a first install —
 nothing here reimplements it. Report `result=installed`/`checksum=`/any `reason=` exactly as that
-skill does; a failure there is a hard stop on the install — not on step 3, which has already run and
-whose recorded answer stands regardless.
+skill does. If it returns `result=present` with a `note=`, install.sh did not install. The installed version is
+not older than the latest release. Tell the user that nothing changed.
+
+A failure there is a hard stop on the install. It does not stop step 3, which has already run. Its
+recorded answer stands.
 
 On success, restart the proxy so the new binary is live now rather than at the next session:
 
