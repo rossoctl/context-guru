@@ -77,7 +77,7 @@ type ExtractSweep struct {
 
 	// warm turns on the WARM path (#491): the sweep also asks while the cache is live, holds the answer
 	// in memory, and applies it on a later warm request only if the economic gate says it pays. OFF by
-	// default and in no preset. See extract_sweep_warm.go.
+	// default; on only in the Bob plugin's bob-ultrahigh. See extract_sweep_warm.go.
 	warm bool
 	// warmEveryN is the fewest warm requests of a thread between two warm questions.
 	warmEveryN int
@@ -171,7 +171,7 @@ type extractSweepConfig struct {
 	KeepRecheckTurns int `yaml:"keep_recheck_turns"`
 	// MaxAskBatches is how many batches of 12 one sweep asks (0 = 4, at most 8). See extract_sweep_batch.go.
 	MaxAskBatches int `yaml:"max_ask_batches"`
-	// Warm turns on the warm path (#491). OFF by default and in no preset. See ExtractSweep.warm.
+	// Warm turns on the warm path (#491). OFF by default; on only in the Bob plugin's bob-ultrahigh. See ExtractSweep.warm.
 	Warm bool `yaml:"warm"`
 	// WarmEveryN is the fewest warm requests of a thread between two warm questions (0 = 30).
 	WarmEveryN int `yaml:"warm_every_n"`

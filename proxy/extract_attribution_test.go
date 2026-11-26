@@ -21,9 +21,9 @@ func TestStatsRendersPerComponentExtractionAttribution(t *testing.T) {
 	// test in this package that exercised extract_llm for real would otherwise make this one
 	// fail for a reason that has nothing to do with #176.
 	base := metrics.ExtractSnapshot(0, 0, 0, 0)
-	baseTailCalls, baseTailCost := int64(0), 0.0
+	baseTailCalls, baseTailCost, baseTailSource := int64(0), 0.0, "none"
 	if r := base.ByComponent["extract_llm"]; r != nil {
-		baseTailCalls, baseTailCost = r.Calls, r.ExtractionCostUSD
+		baseTailCalls, baseTailCost, baseTailSource = r.Calls, r.ExtractionCostUSD, r.CostSource
 	}
 
 	// The measured shape: the sweep pays for the calls, extract_llm only replays.
@@ -107,7 +107,9 @@ func TestStatsRendersPerComponentExtractionAttribution(t *testing.T) {
 	if sweep.CostSource != "component" {
 		t.Errorf("sweep cost_source = %q on the wire, want \"component\"", sweep.CostSource)
 	}
-	if tail.CostSource != "none" {
+	// Against the baseline too: a test that ran a sweep question before this one (the Bob end-to-end
+	// test) may have priced a call under this row, and the process-wide counter keeps it.
+	if baseTailSource == "none" && tail.CostSource != "none" {
 		t.Errorf("extract_llm cost_source = %q on the wire, want \"none\" (no calls, so $0 is "+
 			"the true figure and not a missing one)", tail.CostSource)
 	}
