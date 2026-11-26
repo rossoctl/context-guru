@@ -39,6 +39,9 @@ type Disk struct {
 
 	mu      sync.Mutex
 	pending map[string]pendingRow
+	// flushMu is held for the whole of Flush, so an erase can wait for a flush that already took
+	// its batch: without it, the flush could write the erased rows back after the delete.
+	flushMu sync.Mutex
 
 	flushEvery  time.Duration
 	loadTimeout time.Duration
@@ -240,10 +243,15 @@ func TenantStateRows(ctx context.Context, db *sql.DB, tenantID string) (int64, e
 // not an error. Rows of a session whose id continues the given one after a ':' go too: the key
 // format cannot tell them apart, and state is rebuilt from traffic.
 func DeleteSessionState(db *sql.DB, session string) (int64, error) {
+	return deleteSessionState(db, session, defaultLoadTimeout)
+}
+
+// deleteSessionState is DeleteSessionState with its time limit. EraseSession gives it the erase's.
+func deleteSessionState(db *sql.DB, session string, timeout time.Duration) (int64, error) {
 	if db == nil || session == "" {
 		return 0, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultLoadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var n int64
 	for _, p := range StatePrefixes {
@@ -330,6 +338,8 @@ func (d *Disk) run() {
 
 // Flush writes the pending rows now, in one transaction.
 func (d *Disk) Flush() {
+	d.flushMu.Lock()
+	defer d.flushMu.Unlock()
 	d.mu.Lock()
 	batch := d.pending
 	d.pending = map[string]pendingRow{}
@@ -521,9 +531,13 @@ func (m *Memory) LoadSession(session string) {
 		return
 	}
 	m.markLoaded(session, now)
+	gen := m.eraseGen
 	m.mu.Unlock()
 
 	rows, ok := d.loadSession(session) // outside the lock: this is a disk read
+	if m.afterLoadRead != nil {
+		m.afterLoadRead()
+	}
 	if !ok {
 		// A failed read must not block a retry for a whole lifetime, so the mark goes (from the
 		// order list too, or a failing disk would grow it by one per request). It does block a
@@ -539,6 +553,12 @@ func (m *Memory) LoadSession(session string) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.eraseGen != gen {
+		// An erase ran during the read: the rows may be the erased ones. Keep none, and let the
+		// session's next request read the disk again.
+		m.unmarkLoaded(session)
+		return
+	}
 	for _, r := range rows {
 		if el, ok := m.items[r.key]; ok && !m.now().After(el.Value.(*entry).expires) {
 			continue // memory is newer than disk
@@ -590,6 +610,7 @@ func (m *Memory) AttachDisk(d *Disk) {
 func (m *Memory) getGlobal(key string) ([]byte, bool) {
 	m.mu.Lock()
 	d := m.disk
+	gen := m.eraseGen
 	m.mu.Unlock()
 	if d == nil || !d.isGlobal(key) {
 		return nil, false
@@ -603,6 +624,9 @@ func (m *Memory) getGlobal(key string) ([]byte, bool) {
 	if el, live := m.items[key]; live && !m.now().After(el.Value.(*entry).expires) {
 		return el.Value.(*entry).payload, true // another goroutine wrote it meanwhile
 	}
+	if m.eraseGen != gen {
+		return nil, false // an erase ran during the read: the value may be an erased one
+	}
 	m.putLocked(key, v)
 	return v, true
 }
@@ -615,24 +639,38 @@ func (m *Memory) DropPrefix(prefix string) int {
 		return 0
 	}
 	m.mu.Lock()
+	n := m.dropLocked(func(k string) bool { return strings.HasPrefix(k, prefix) })
+	m.mu.Unlock()
+	return n
+}
+
+// dropLocked removes every key that match accepts from memory, and every write of such a key still
+// waiting for the disk. The caller holds m.mu; the pending map is cleared under it, so a Put
+// (which enqueues under m.mu) cannot slip a write between the two. It returns how many keys left
+// memory.
+func (m *Memory) dropLocked(match func(string) bool) int {
 	n := 0
 	for k, el := range m.items {
-		if strings.HasPrefix(k, prefix) {
-			// Not m.remove: that books a pinned key as LOST, and a purge is not a loss.
-			if e := el.Value.(*entry); e.pinned {
+		if match(k) {
+			// Not m.remove: that books a pinned key as LOST and a payload as EXPIRED, and a purge
+			// is neither.
+			e := el.Value.(*entry)
+			if e.pinned {
 				m.pinnedN--
+			}
+			if e.stash {
+				m.stashN--
+				m.stashBytes -= int64(len(e.payload))
 			}
 			m.ll.Remove(el)
 			delete(m.items, k)
 			n++
 		}
 	}
-	d := m.disk
-	m.mu.Unlock()
-	if d != nil {
+	if d := m.disk; d != nil {
 		d.mu.Lock()
 		for k := range d.pending {
-			if strings.HasPrefix(k, prefix) {
+			if match(k) {
 				delete(d.pending, k)
 			}
 		}
