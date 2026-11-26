@@ -2,7 +2,6 @@ package dash
 
 import (
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/rossoctl/accountant"
@@ -364,18 +363,15 @@ const PricedByAccountant = "accountant"
 // before the switch has it empty.
 const PricedByNone = "none"
 
-// spendUSD prices one spend Call from its own usage, at the prompt size it ran on: the call's own input tiers, or
-// the size the host states (accwire.SpendParamPromptTokens). A price with no tiers gives the base rates. A cost the
-// response stated (CostUSD) wins: it is a fact, not a rate of ours.
+// spendUSD prices one spend Call from its own usage, at the size of its own usage, as accountant.Figure does. A price
+// with no tiers gives the base rates. A cost the response stated (CostUSD) wins: it is a fact, not a rate of ours.
+// Interim: #1440 replaces it with accountant.Figure.
 func spendUSD(p modelinfo.Price, c *accountant.ModelCall) float64 {
 	u := c.Usage
 	if u.CostUSD > 0 {
 		return u.CostUSD
 	}
 	n := int64(u.Input) + int64(u.CacheRead) + int64(u.CacheWrite)
-	if v, err := strconv.ParseInt(c.Params[accwire.SpendParamPromptTokens], 10, 64); err == nil && v > 0 {
-		n = v
-	}
 	q := p.At(n)
 	return tierUSD(q, accountant.TierTokens{Input: u.Input, CacheRead: u.CacheRead,
 		CacheWrite5m: max(u.CacheWrite-u.CacheWrite1h, 0), CacheWrite1h: u.CacheWrite1h}) + float64(u.Output)*q.Output

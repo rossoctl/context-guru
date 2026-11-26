@@ -73,7 +73,7 @@ export function fiveHourWeights(x: unknown): FiveHourWeights | undefined {
 
 /** The LEARNED write weight for this entry's tier (ttl_s 3600 is the 1-hour tier, 300 the 5-minute one), or undefined
  * when the fit did not learn that tier. A weight the fit did not learn is the API price scaled to the account's spend,
- * a guess, so the band does not show it as a share (owner's decision, David Amid, #1135, 2026-11-12). With the tier
+ * a guess, so the band does not show it as a share (#1135). With the tier
  * unknown: the tier the fit learned (5-minute when it learned both). */
 function writeWeight(w: FiveHourWeights, tier: '5m' | '1h' | undefined): number | undefined {
   if (tier === '1h') return w.learned1h ? w.write1h : undefined

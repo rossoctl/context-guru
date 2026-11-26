@@ -94,7 +94,7 @@ sudo systemctl daemon-reload
 
 ## 4. Wipe both databases
 
-The owner asked to start clean. Do it here, with the service down, so nothing is
+Start clean. Do it here, with the service down, so nothing is
 half-migrated.
 
 ```sh

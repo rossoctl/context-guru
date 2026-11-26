@@ -991,7 +991,7 @@ func TestUnknownToPluginAndProxyStartsWithPresetOff(t *testing.T) {
 }
 
 // The check cannot run on a WARM start (the binary hangs until the time limit): leave the running
-// proxy alone, say so, exit 0. Owner decision, 2026-11-25.
+// proxy alone, say so, exit 0.
 func TestUnknownStrategyCheckThatCannotRunLeavesARunningProxyAlone(t *testing.T) {
 	r := unknownStrategyCase(t, futureStrategyFile, "sleep", false)
 	if r.first != r.after {

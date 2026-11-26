@@ -153,19 +153,20 @@ func TestCostFormulas(t *testing.T) {
 	// prefix as fresh input instead.
 	near(t, "no tier has no write rate", p.RequestCost(0, 0, 100_000, 0, TTLNone), 0)
 
-	// keep_alive_cost = cached×0.3e-6 + 1×3e-6 + 1×15e-6
+	// keep_alive_cost = cached×0.3e-6 + DefaultPingInputTokens×3e-6 + 1×15e-6
+	const pingIn = DefaultPingInputTokens * 3e-6
 	near(t, "one keep-alive on a 100k prefix", p.KeepAliveCost(100_000, sem),
-		100_000*0.3e-6+3e-6+15e-6)
+		100_000*0.3e-6+pingIn+15e-6)
 	// A provider that accepts a zero-generation request drops the output token.
 	near(t, "one keep-alive with zero generation",
 		p.KeepAliveCost(100_000, Semantics{ZeroGeneration: true}),
-		100_000*0.3e-6+3e-6)
+		100_000*0.3e-6+pingIn)
 
 	// recreate_cost pays the WRITE rate, which is where the 12.5x and 20x live.
 	near(t, "a late keep-alive at the 5m tier", p.RecreateCost(100_000, TTL5m, sem),
-		100_000*3.75e-6+3e-6+15e-6)
+		100_000*3.75e-6+pingIn+15e-6)
 	near(t, "a late keep-alive at the 1h tier", p.RecreateCost(100_000, TTL1h, sem),
-		100_000*6e-6+3e-6+15e-6)
+		100_000*6e-6+pingIn+15e-6)
 	// The ratio the whole mechanism rests on: a refresh against a re-creation.
 	if r := (100_000 * 3.75e-6) / (100_000 * 0.3e-6); math.Abs(r-12.5) > 1e-9 {
 		t.Errorf("a 5m re-creation is %.3fx a read, want 12.5x", r)
@@ -177,7 +178,7 @@ func TestCostFormulas(t *testing.T) {
 
 	// hold_cost = creation + pings×keep_alive
 	near(t, "holding 100k at 5m with two refreshes", p.HoldCost(100_000, TTL5m, 2, sem),
-		100_000*3.75e-6+2*(100_000*0.3e-6+3e-6+15e-6))
+		100_000*3.75e-6+2*(100_000*0.3e-6+pingIn+15e-6))
 	near(t, "holding 100k at 1h with no refresh", p.HoldCost(100_000, TTL1h, 0, sem),
 		100_000*6e-6)
 }

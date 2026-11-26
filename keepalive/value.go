@@ -90,3 +90,27 @@ func (p Policy) PingVerdict(pingUSD, missUSD float64, pings int) Verdict {
 	}
 	return VerdictOK
 }
+
+// SubstituteVerdict decides a substitute call (summary or sweep question) that takes the place of a
+// ping (#1439). It has the shape of PingVerdict with one call: the call is allowed when its projected
+// cost is below the miss it protects.
+//
+// The value is the miss of the entry the ping would renew (MissUSD). The call reads the same cached
+// prefix and renews the same entry, as the keep-alive rule demands, so it protects at least the miss
+// a ping protects. The payoff of a summary or a sweep answer (a shorter context, a cut) is not known
+// from metadata at ping time, so it is not counted: the value is a floor.
+//
+// An unset operator cap means no flat cap. An explicit one (MaxUSDPerPing > 0) still applies. A zero
+// cost (unpriced) or a zero miss (unknown) is allowed, as for pings.
+func (p Policy) SubstituteVerdict(costUSD, missUSD float64) Verdict {
+	return p.PingVerdict(costUSD, missUSD, 1)
+}
+
+// capPolicy is the policy that carries this entry's operator cap, for the substitute rule. A
+// manual-only entry keeps its cap in e.ceiling and a zero policy otherwise.
+func (e *kaEntry) capPolicy() Policy {
+	if e.manualOnly {
+		return Policy{MaxUSDPerPing: e.ceiling}
+	}
+	return e.pol
+}

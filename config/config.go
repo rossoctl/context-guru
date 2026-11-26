@@ -109,8 +109,8 @@ type CacheConfig struct {
 	// timeout = 300 s, the 5-minute lifetime. Measured on a live proxy: 92 of 95 failed pings were
 	// 60 s timeouts, and at 270 a ping that times out returns about 30 s after the cache expired,
 	// so it can only lose the cache (#707). 240 lowers that risk; it does not remove it, because a
-	// ping that runs to its timeout at 240 s still leaves no time to retry. The owner chose 240 and
-	// asked for it to be measured (#716). The earlier 270 choice (#435) was for robustness to where
+	// ping that runs to its timeout at 240 s still leaves no time to retry. The value 240 needs a
+	// measurement (#716). The earlier 270 choice (#435) was for robustness to where
 	// the provider's cache cliff sits, from replays that did not count failed pings.
 	KeepAliveIdleSeconds int `yaml:"keepalive_idle_seconds"`
 	// KeepAliveOpenAIIdleSeconds is the separate Responses ping interval for
@@ -172,7 +172,9 @@ type CacheConfig struct {
 	// this. 0 (the default) means the operator set none, and only the value rule applies: a planned
 	// ping chain must cost less than the miss it protects (keepalive.Policy.PingVerdict). The
 	// loader does not fill the field, so a set value is always the operator's own. Summary and
-	// sweep calls still use DefaultKeepAliveMaxUSDPerPing as their cap when this is 0.
+	// sweep calls that replace a ping follow the same rule (#1439): unset means no flat cap, and a call
+	// is allowed when its cost is below the miss it protects. A set value still caps each call.
+	// DefaultKeepAliveMaxUSDPerPing is no longer a cap for them.
 	//
 	// PER PING and not per session, which is the opposite of the obvious design and is
 	// measured. Ping cost is bimodal — p50 $0.0004, mean $0.0084, p99 $0.2275, max $0.3780 —

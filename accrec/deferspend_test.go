@@ -1,7 +1,9 @@
 package accrec
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accwire"
@@ -11,7 +13,7 @@ import (
 // The search turns of one deferred request are three spend operations on the tooldefer operator, each a Call with its
 // own usage (#1441).
 func TestDeferSpendOps(t *testing.T) {
-	ops := DeferSpendOps("m", tooldefer.SearchSpend{Output: 60, OutputEstimated: true, Loaded: 1500, Write1h: true, PromptTokens: 90_000})
+	ops := DeferSpendOps("m", tooldefer.SearchSpend{Output: 60, OutputEstimated: true, Loaded: 1500, Write1h: true})
 	if len(ops) != 3 {
 		t.Fatalf("%d operations, want 3: %+v", len(ops), ops)
 	}
@@ -20,8 +22,8 @@ func TestDeferSpendOps(t *testing.T) {
 		if o.Kind != accountant.KindSpend || o.Operator != accwire.Operator(accwire.OpToolDefer) || o.Call == nil || o.Call.Model != "m" || o.ChangeID != "" {
 			t.Errorf("operation %+v: want a spend on the tooldefer operator with a call and no ChangeID", o)
 		}
-		if o.Call.Params[accwire.SpendParamEstimated] != "true" || o.Call.Params[accwire.SpendParamPromptTokens] != "90000" {
-			t.Errorf("%s params %v: want estimated and the prompt size", o.ID, o.Call.Params)
+		if o.Call.Params[accwire.SpendParamEstimated] != "true" {
+			t.Errorf("%s params %v: want estimated", o.ID, o.Call.Params)
 		}
 		ids[o.ID] = o.Call.Usage
 	}
@@ -42,5 +44,40 @@ func TestDeferSpendOps(t *testing.T) {
 	// Nothing to pay, no operation.
 	if got := DeferSpendOps("m", tooldefer.SearchSpend{}); len(got) != 0 {
 		t.Errorf("empty spend made %d operations", len(got))
+	}
+}
+
+type flatPricer struct{}
+
+func (flatPricer) PriceAt(_ string, _ time.Time, t accountant.Tier, _ int64) (float64, bool) {
+	switch t {
+	case accountant.TierCacheRead:
+		return 0.3e-6, false
+	case accountant.TierCacheWrite5m:
+		return 3.75e-6, false
+	case accountant.TierOutput:
+		return 15e-6, false
+	}
+	return 3e-6, false
+}
+
+// DeferMoney maps the library's figure: net is the tooldefer component less its spend lines, gross is its saved side,
+// cost is gross less net. It prices nothing itself.
+func TestDeferMoneyMapsTheLibrarysFigure(t *testing.T) {
+	op := accwire.Operator(accwire.OpToolDefer)
+	ops := []accountant.PricedOp{{OpID: "r", Kind: accountant.KindRewrite, Operator: op, ChangeID: "c", Saved: accountant.TierTokens{CacheRead: 20_000}}}
+	for _, o := range DeferSpendOps("m", tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500}) {
+		ops = append(ops, accountant.PricedOp{OpID: o.ID, Kind: o.Kind, Operator: o.Operator, Call: o.Call})
+	}
+	f := accountant.Figure(accountant.FigureInput{Model: "m", Billed: accountant.Usage{CacheRead: 100_000}, Output: 100,
+		Result: accountant.Result{Ops: ops}}, flatPricer{})
+	m := DeferMoney(f)
+	gross := 20_000 * 0.3e-6
+	spend := 30*15e-6 + 1500*3e-6 + 1500*3.75e-6
+	if math.Abs(m.Gross-gross) > 1e-12 || math.Abs(m.Net-(gross-spend)) > 1e-12 || math.Abs(m.Cost-spend) > 1e-12 {
+		t.Fatalf("%+v, want gross %v net %v cost %v", m, gross, gross-spend, spend)
+	}
+	if Held(accountant.Result{}) || !Held(accountant.Result{Unpriced: []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}}) {
+		t.Fatal("Held")
 	}
 }

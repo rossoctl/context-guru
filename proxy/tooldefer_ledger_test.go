@@ -75,17 +75,20 @@ func TestToolDeferLedgerCountsSearchesOnEveryPath(t *testing.T) {
 			srv := httptest.NewServer(h.Mux())
 			defer srv.Close()
 			b := bytes.Replace(tdBody(), []byte(`"max_tokens":64,`), []byte(`"max_tokens":64,"stream":true,`), 1)
-			resp, out := tdPost(t, srv, b)
-			if resp.StatusCode != http.StatusOK || !strings.Contains(out, "tool_search_tool_result") {
-				t.Fatalf("status %d: %s", resp.StatusCode, out)
+			// Two requests of one thread. The first has no history, so the accountant holds it: unpriced, no dollars. The
+			// second is priced, and /stats shows its figure with the dashboard off (#1451, #1441).
+			for i := 0; i < 2; i++ {
+				resp, out := tdPost(t, srv, b)
+				if resp.StatusCode != http.StatusOK || !strings.Contains(out, "tool_search_tool_result") {
+					t.Fatalf("status %d: %s", resp.StatusCode, out)
+				}
 			}
 			st := ds.ledger.Snapshot()
-			if st.Requests != 1 || st.Searches != 1 {
-				t.Fatalf("ledger = %+v, want 1 request with 1 search", st)
+			if st.Requests != 2 || st.Searches != 2 {
+				t.Fatalf("ledger = %+v, want 2 requests with 1 search each", st)
 			}
-			// The dashboard is off, so no accountant figure exists: the request counts as unpriced, with no dollars (#1441).
-			if st.Unpriced != 1 || st.Gross != 0 || st.Net != 0 || st.Cost != 0 {
-				t.Fatalf("ledger = %+v, want 1 unpriced request and no dollars with the dashboard off", st)
+			if st.Unpriced != 1 || st.Net == 0 || st.Gross <= 0 || math.Abs(st.Gross-st.Cost-st.Net) > 1e-12 {
+				t.Fatalf("ledger = %+v, want 1 held (unpriced) request and the second one's figure, with the dashboard off", st)
 			}
 		})
 	}

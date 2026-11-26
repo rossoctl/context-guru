@@ -139,8 +139,7 @@ no row in the coverage table.
   `CGO_ENABLED=0`. cgo is needed only for `go test -race` and for `-tags cg_skeleton` (tree-sitter),
   which is why the Makefile still exports `CGO_ENABLED=1` for the test targets.
 - **`go.mod` pins only released tags, never a commit.** A pseudo-version pins a commit. Go writes it in
-  forms such as `v0.0.0-<date>-<sha>`, `vX.Y.Z-0.<date>-<sha>` and `vX.Y.Z-pre.0.<date>-<sha>`. (Owner rule,
-  David Amid, 2026-11-25.)
+  forms such as `v0.0.0-<date>-<sha>`, `vX.Y.Z-0.<date>-<sha>` and `vX.Y.Z-pre.0.<date>-<sha>`.
   - Our own modules, such as `rossoctl/accountant`, always get a release tag. When a change needs unreleased
     code from one of them, release it first. Then pin the new tag.
   - A module in a subfolder, such as `rossoctl/accountant/metrics`, needs its own tag, `<folder>/vX.Y.Z`
@@ -164,8 +163,7 @@ no row in the coverage table.
 
 ## Branches, worktrees and force-push
 
-Owner rule (David Amid, 2026-11-12): "subagents should work on their own worktree and own
-branch and then they can do any force push they want, no?"
+A subagent works on its own worktree and its own branch. It may force-push that branch.
 
 - Every agent works in its own worktree, at `.claude/worktrees/<topic>`, on its own branch. It
   never touches the main checkout.
@@ -203,8 +201,7 @@ needed, put it in a separate *Technical notes* section at the end, so the main t
 
 ## Working on a task
 
-Owner rule (David Amid, 2026-11-24): the integrator holder can change, so no rule here names
-the person. The team knows who holds the role at any time.
+The integrator holder can change, so no rule here names the person. The team knows who holds the role at any time.
 
 - **The main session coordinates.** Subagents do the work. Each subagent uses its own worktree
   and branch, as in [Branches, worktrees and force-push](#branches-worktrees-and-force-push).
@@ -212,10 +209,8 @@ the person. The team knows who holds the role at any time.
 
 ### Interim rule (in force until the 3-tier test plan lands)
 
-Owner decisions (David Amid): 2026-11-24 "in the meantime ask everyone to stop their heavy tests and
-u coordinate it once flaky is done. so u run all tests every few prs till we get the process right.
-rn everything is in livelock". 2026-11-25 "yes" (write it into CLAUDE.md, and make `check-ready.sh`
-accept the waiver).
+Until the 3-tier plan lands, heavy tests do not run on the shared laptop. The integrator runs all tests
+every few PRs. `check-ready.sh` accepts the waiver line below.
 
 - **Do NOT run `scripts/dev/local-tests.sh` or `scripts/release/part-a.sh` on the shared laptop.**
 - **Run only targeted tests** of the packages your PR changes: `go test ./<pkg>/...`. Do not use
@@ -231,7 +226,7 @@ The rest of this section, about `local-tests.sh`, applies after the interim rule
 
 ### Test tiers
 
-Owner decision (David Amid, 2026-11-25): "option E it is", then "E without the lock".
+Tier 2 is lean and local. Tier 3 is heavy CI on a schedule. There is no lock.
 
 - **Tier 1: CI on every PR.** The jobs `lint-build`, `purego` and `trivy`. `purego` runs `go test`
   without `-race` on `config`, `components`, `apply`, `proxy` and `store`.

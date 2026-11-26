@@ -19,7 +19,7 @@ func searchedEvent(price string, fresh int64, saved accountant.TierTokens) *Even
 	e := &Event{Model: "m", FreshInput: fresh, OutputTokens: 100, TokensBefore: 900_000, DeferTokens: 5000, DeferSearches: 1, DeferLoaded: 2,
 		Components: []CompRow{{Component: "idle"}}}
 	ops := []accountant.PricedOp{{Operator: accwire.Operator(accwire.OpToolDefer), ChangeID: "cg:tooldefer:x", Saved: saved}}
-	spend := tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500, PromptTokens: fresh}
+	spend := tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500}
 	for _, o := range accrec.DeferSpendOps("m", spend) {
 		ops = append(ops, accountant.PricedOp{OpID: o.ID, Kind: o.Kind, Operator: o.Operator, Call: o.Call})
 	}
@@ -82,7 +82,7 @@ func TestDeferFigureAboveAPriceLineHoldsTheReRateAndTheSearchTurns(t *testing.T)
 	}
 	fig := e.AccountantFigure(gpt56())
 	reRate := 250_000*5e-6 + 100*15e-6 // the tokens that stay and the output, at the dear rate less the base rate
-	// The search turns run on the sent prompt (250,000): base rates.
+	// The search turns are small calls: base rates.
 	spend := 30*30e-6 + 1500*5e-6 + 1500*5e-6
 	want := 40_000*10e-6 + reRate - spend
 	if got := fig.ByComponent["tooldefer"]; !accNear(got, want) {
@@ -96,23 +96,19 @@ func TestDeferFigureAboveAPriceLineHoldsTheReRateAndTheSearchTurns(t *testing.T)
 	}
 }
 
-// A search turn runs on the whole prompt, so it prices at the prompt's tier: a prompt above the line makes the second
-// pass dear. The call's own input is small, so the host states the prompt size.
-func TestDeferSpendPricesAtThePromptTierTheHostStates(t *testing.T) {
-	call := func(prompt string) *accountant.ModelCall {
-		c := &accountant.ModelCall{Usage: accountant.CallUsage{Usage: accountant.Usage{Input: 1000}}}
-		if prompt != "" {
-			c.Params = map[string]string{accwire.SpendParamPromptTokens: prompt}
-		}
-		return c
+// A spend call prices at the size of its own usage, as accountant.Figure does: a small call stays at the base rates
+// whatever the request's prompt, and a call of its own above the line is dear.
+func TestDeferSpendPricesAtItsOwnSize(t *testing.T) {
+	call := func(in int) *accountant.ModelCall {
+		return &accountant.ModelCall{Usage: accountant.CallUsage{Usage: accountant.Usage{Input: in}}}
 	}
-	if got := spendUSD(gpt56(), call("")); !accNear(got, 1000*5e-6) {
-		t.Fatalf("own size: %v", got)
+	if got := spendUSD(gpt56(), call(1000)); !accNear(got, 1000*5e-6) {
+		t.Fatalf("small call: %v", got)
 	}
-	if got := spendUSD(gpt56(), call("300000")); !accNear(got, 1000*10e-6) {
-		t.Fatalf("stated size above the line: %v", got)
+	if got := spendUSD(gpt56(), call(300_000)); !accNear(got, 300_000*10e-6) {
+		t.Fatalf("call above the line: %v", got)
 	}
-	if got := spendUSD(accTestPrice, call("300000")); !accNear(got, 1000*3e-6) {
+	if got := spendUSD(accTestPrice, call(300_000)); !accNear(got, 300_000*3e-6) {
 		t.Fatalf("a price with no tiers: %v", got)
 	}
 }

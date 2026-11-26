@@ -287,13 +287,10 @@ sends may shorten that.**
   dead-credential check as a planned ping.
 - **When a summary is due, only the summary goes**, even if it declines. The sweep question does not
   go in that span: after a declined summary it could pay a cache write, the same problem as the ping.
-  The sweep question takes the slot only when no summary is due. The owner's rule, 2026-10-30: "as
-  for sweep after summary. dont do that. it can probably have the sweep question pay a cache write
-  like the problem with the ping... so we should probably just do summary at that point".
+  The sweep question takes the slot only when no summary is due.
 - **A `cache_state: pre_expiry` summary at that slot.** For this one request only, its pre-expiry
   window widens to cover the slot, so it runs about 90 s before the cache expires instead of in the
-  usual last 64 s. A summary that takes a planned ping keeps the #715 / #717 window. The owner chose
-  this on 2026-10-30: "give it more time, it can run on the 210 sec mark".
+  usual last 64 s. A summary that takes a planned ping keeps the #715 / #717 window.
 - "Text turn" is read from metadata only: the role and block type of the held request's last
   non-system message. It is an internal flag on the held entry, not a published metric. It never
   applies on OpenAI, whose cache has no breakpoints and no text-turn rule.

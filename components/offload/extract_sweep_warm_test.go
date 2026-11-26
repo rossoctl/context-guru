@@ -988,7 +988,7 @@ func TestAWarmQuestionThatNeverAskedLeavesThePingFree(t *testing.T) {
 	}
 }
 
-// ⭐ GATE MODEL (#491, David). The provider reads back only up to a cache entry written BEFORE the change.
+// ⭐ GATE MODEL (#491). The provider reads back only up to a cache entry written BEFORE the change.
 // A drop deeper than the look-back from the last breakpoint rewrites the WHOLE conversation; a drop inside
 // it rewrites only the tail from the drop.
 func deepFixture(exchanges int) (*bschemas.BifrostChatRequest, []warmRemoval, int) {
@@ -1458,7 +1458,7 @@ func TestTheTriggerCountsAnOutputThatOnlyQuotesMarkerSyntaxAsRemovable(t *testin
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Decision records (#491, David): every trigger and apply-gate decision, accepted or refused.
+// Decision records (#491): every trigger and apply-gate decision, accepted or refused.
 
 func decisionsOf(stage string) []WarmDecision {
 	var out []WarmDecision
@@ -1554,7 +1554,7 @@ func TestTheDecisionLogKeepsTheLastFiftyAndOneInfoLineEach(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// The turns-left model (#491, David)
+// The turns-left model (#491)
 
 func turnsCtx(window int, exact bool, billed int, cutFrac float64) *components.Ctx {
 	return &components.Ctx{CtxWindow: window, CtxWindowExact: exact, PrevBilledInput: billed, PrevBilledInputThread: billed, CutFrac: cutFrac}

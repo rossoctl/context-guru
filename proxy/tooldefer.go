@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/cheapmodel"
 	"github.com/rossoctl/context-guru/dash"
@@ -415,16 +416,17 @@ func (h *Handler) deferLedger(ctx context.Context, cp *capture, di *deferInfo, u
 	if !ok {
 		return
 	}
+	// cp is the capture the accountant runs on: the dashboard's, or a lean one with the dashboard off (#1451). The
+	// dollars are the accountant's one figure for tooldefer, on both paths (#1441). The facts go first: the search
+	// turns are spend operations that the accountant reads when it prices the request.
+	cp.noteDefer(b.Request, b.Distinct)
 	ledger := h.deferFlow(nil).Parts().Ledger
-	tenant := b.Request.Tenant
-	if cp == nil {
-		// The dashboard is off: no accountant runs, so no figure exists. The request counts as unpriced, and its
-		// dollars read 0. /stats shows the counts without dollars (#1441).
-		ledger.AddMoney(tenant, tooldefer.Money{}, false)
+	fig, priced := cp.accFigure(ctx, u, usageOK)
+	if res, have := cp.accCompute(u, usageOK); !priced || !have || accrec.Held(res) {
+		ledger.AddMoney(b.Request.Tenant, tooldefer.Money{}, false)
 		return
 	}
-	cp.noteDefer(b.Request, b.Distinct)
-	cp.deferBook = func(m tooldefer.Money, priced bool) { ledger.AddMoney(tenant, m, priced) }
+	ledger.AddMoney(b.Request.Tenant, accrec.DeferMoney(fig), true)
 }
 
 // searchTally adds up the server-side searches of the rounds serve's loop held.

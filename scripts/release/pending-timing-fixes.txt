@@ -3,7 +3,7 @@
 # gets fixed to wait on the condition itself. A test where time IS the behavior is gated with
 # testutil.RequireTiming instead, and is not listed here.
 #
-# Owner rule (2026-11-24): on the laptop, a failure of a test listed here does not block a PR, as long
+# Rule: on the laptop, a failure of a test listed here does not block a PR, as long
 # as the PR does not change that test's package. local-tests.sh does not read this file: check it by
 # hand. A PR that fixes a listed test removes its line in the same PR.
 #
@@ -12,43 +12,4 @@
 components/offload TestAWarmQuestionAndAPingQuestionNeverRunTogetherOnAThread
 components/offload TestTheWarmQuestionIsJudgedByTheSharedCacheReadRule
 components/offload TestTheWarmSweepOuterTimeoutFitsSeveralBatches
-modes TestEnqueueDedupIsAtomic
-modes TestFullQueueDropsAndNeverBlocks
-modes TestPanickingJobIsContained
-modes TestPoolRunsJobs
-modes TestStopLeaksNoGoroutines
-opencode-plugin picker confirm and cancel (uses settle())
 opencode-plugin v2: setup waits for the host transform callback before judging providers
-proxy TestANonClaudeModelOnARelayIsNotPingedUnlessNamed
-proxy TestARetiredModelEndpointBuildsServesAndIsNeverCalled
-proxy TestAccEndDoesNotWaitForTheAccountantWork
-proxy TestAccountantPanicOffThePathCostsTheSavingOnly
-proxy TestAcquireSpareLeavesRealTrafficAlone
-proxy TestBobObserveModeRecordsBilledInputUnderXTaskID
-proxy TestCacheAwareStalePrefixThroughARealOversizedTurn
-proxy TestCacheAwareSummarizerUsesTheChatPrefixAskerWithoutAStaticModel
-proxy TestCachePresetDoesNotBufferSSE
-proxy TestCapturedRequestRecordsItsDeclarationDigest
-proxy TestClosingIdleConnectionsForAResendDoesNotBreakOtherStreams
-proxy TestConcurrentRequestsAgainstAFlakyGateway
-proxy TestEnforcedModeRecordsBilledInputPerThread
-proxy TestEveryCallAfterASweepOnlyProxyOnANonClaudeModelCarriesTheRequestsModel
-proxy TestLimiterBoundEvictsOneKeyNotAll
-proxy TestMarkerBearingSSEStreamsWhenItOpensWithText
-proxy TestMarkerFreeSSEStreamsThrough
-proxy TestObserveBilledInputKeyMatchesThePipelineWithTheSkillsHalfActive
-proxy TestObserveModeRecordsBilledInputIntoTheShadowStore
-proxy TestObserveModeRecordsBilledInputUnderTheRequestThread
-proxy TestObserveOffPathLinesCarryTenantAndMode
-proxy TestOpenAISSEStreamsThrough
-proxy TestPricerAdapterNeverBlocks
-proxy TestRefusalCountersMoveOncePerPath / NotCountedTwice / AnonymousLimiter / Exported / LabelsCarryNoError
-proxy TestResponsesRouteFeedsTheInventoryOnTheResponsesWire
-proxy TestSavingsRecordEndsWithTheInjectedForwardedBody
-proxy TestSeedAfterLoadKeepsTheLoadedUses
-proxy TestSummaryCallNeverSendsContextGurusToken
-proxy TestTheStreamedPrefixReachesTheClientBeforeTheExpandCall
-proxy TestToolDeferProbeAsk
-proxy TestToolDeferPurgeReachesAnUnopenedFile
-proxy TestToolDeferTenantAfterStartBuildsTheState
-proxy TestToolFilterRefusesADeferredTool

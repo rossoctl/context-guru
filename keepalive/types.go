@@ -135,8 +135,8 @@ type Policy struct {
 	MaxPings1h int
 	// MaxUSDPerPing is an opt-in flat dollar cap per ping. Pings read it through PingCap(): 0 means
 	// the operator set none and the value rule alone decides (PingVerdict); a negative value also
-	// means no cap. The summary and sweep substitutes read it through Ceiling(), where 0 means
-	// DefaultMaxUSDPerPing ($0.50): they cost more than a ping and keep that default.
+	// means no cap. The summary and sweep substitutes read it the same way, through
+	// PingCap() and SubstituteVerdict (#1439): 0 means no flat cap, and the value rule decides.
 	//
 	// It is PER PING and not per session, because ping cost is bimodal (p50 $0.0004, p99 $0.2275,
 	// max $0.3780 before #1407). A manager strategy replaces it only with a value other than 0.
@@ -286,7 +286,11 @@ func (p Policy) BodyLimit() int {
 	return p.MaxBodyBytes
 }
 
-// Ceiling is the per-ping cost guard that is actually ENFORCED.
+// Ceiling is the old flat guard, where zero means DefaultMaxUSDPerPing. No keeper path reads it any
+// more: pings (#1428) and substitutes (#1439) use the value rule and PingCap. It stays as the pinned
+// default the config loader mirrors.
+//
+// It was the per-ping cost guard that was ENFORCED.
 //
 // The whole of this method is the sentinel. `MaxUSDPerPing == 0` means "nobody configured
 // one", and the shipped code read that as "no cap": `MaxUSDPerPing <= 0 || cost <= cap`. On

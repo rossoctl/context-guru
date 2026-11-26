@@ -122,9 +122,6 @@ type SearchSpend struct {
 	Loaded int64
 	// Write1h is true when the next request's write is at the 1-hour price.
 	Write1h bool
-	// PromptTokens is the billed prompt size of the request: both passes run on that prompt, so it picks their
-	// price tier. 0 is unknown and prices at the base rates.
-	PromptTokens int64
 }
 
 // SearchSpend returns the search-turn costs of r. ok is false when no search ran.
@@ -141,7 +138,6 @@ func (r Request) SearchSpend() (s SearchSpend, ok bool) {
 	// The next request carries the loaded definitions in its transcript and writes them to the cache, once per
 	// load (#866, N7). The later reads are in that request's own weight.
 	s.Write1h = r.Tier == TierWrite1h
-	s.PromptTokens = r.PromptTokens
 	return s, true
 }
 

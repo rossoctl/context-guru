@@ -3,6 +3,8 @@
 # and for the --cleanup path of scripts/offload-review.sh. A temp repo, a bare origin and a stub
 # gh on PATH: no network.
 set -uo pipefail
+. "$(dirname "$0")/offload-review/lib.sh"
+require_bash4 || exit 1
 here=$(cd "$(dirname "$0")" && pwd)
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 fails=0
@@ -19,7 +21,6 @@ git clone -q "$d/origin.git" "$d/main" 2>/dev/null
     && git push -q origin "pr$n:refs/pull/$n/head" && git checkout -q main; done )
 
 # shellcheck source=offload-review/lib.sh
-. "$here/offload-review/lib.sh"
 lockdir=$d/main/.git/offload-review-worktree.lock
 
 # (a) 2 PRs fetch at the same time, 20 times.
@@ -104,10 +105,48 @@ mkdir "$lockdir"; echo "$live" > "$lockdir/pid"
 kill "$live" 2>/dev/null; wait; rm -rf "$lockdir"
 
 # (e) the EXIT trap removes a lock this process holds, and keeps a lock of another process.
-( trap unlock_if_held EXIT; lock; exit 0 ); [ ! -d "$lockdir" ] && ok "(e) the exit trap removes the lock this process holds" || bad "(e) lock left behind"
+( trap unlock EXIT; lock; exit 0 ); [ ! -d "$lockdir" ] && ok "(e) the exit trap removes the lock this process holds" || bad "(e) lock left behind"
 rm -rf "$lockdir"; sleep 30 & other=$!; mkdir "$lockdir"; echo "$other" > "$lockdir/pid"
-( trap unlock_if_held EXIT; exit 0 ); [ -d "$lockdir" ] && ok "(e) the exit trap keeps another process's lock" || bad "(e) another lock removed"
+( trap unlock EXIT; exit 0 ); [ -d "$lockdir" ] && ok "(e) the exit trap keeps another process's lock" || bad "(e) another lock removed"
 kill "$other" 2>/dev/null; rm -rf "$lockdir"
+
+# (g) unlock removes only the lock this process holds. A stale holder must not remove a new lock.
+mkdir "$lockdir"; sleep 30 & newh=$!; echo "$newh" > "$lockdir/pid"
+( unlock ); [ -d "$lockdir" ] && [ "$(cat "$lockdir/pid")" = "$newh" ] \
+  && ok "(g) unlock keeps a new holder's lock" || bad "(g) unlock removed another holder's lock"
+kill "$newh" 2>/dev/null; rm -rf "$lockdir"
+( lock; unlock ); [ ! -d "$lockdir" ] && ok "(g) unlock removes the lock this process holds" || bad "(g) own lock left"
+rm -rf "$lockdir"
+
+# (h) a lock with an empty pid file is "not yet written": a young one is waited for, an old one is taken.
+mkdir "$lockdir"; : > "$lockdir/pid"
+( OFFLOAD_LOCK_TRIES=5 lock ) 2>/dev/null && bad "(h) a young lock with an empty pid was taken" || ok "(h) a young lock with an empty pid is waited for"
+touch -t 202001010000 "$lockdir"
+( lock ) 2>/dev/null && ok "(h) an old lock with an empty pid is taken" || bad "(h) old empty-pid lock not taken"
+rm -rf "$lockdir"
+# lock_orphan: the keep-or-remove rule for a renamed lock that could not go back.
+mkdir "$d/o1"; : > "$d/o1/pid"; lock_orphan "$d/o1" ""
+[ -d "$d/o1" ] && ok "(h) lock_orphan keeps a young lock with an empty pid" || bad "(h) young empty-pid orphan removed"
+touch -t 202001010000 "$d/o1"; lock_orphan "$d/o1" ""
+[ ! -e "$d/o1" ] && ok "(h) lock_orphan removes an old lock with an empty pid" || bad "(h) old empty-pid orphan kept"
+( exit 0 ) & gone_pid=$!; wait $gone_pid; mkdir "$d/o2"; lock_orphan "$d/o2" "$gone_pid"
+[ ! -e "$d/o2" ] && ok "(h) lock_orphan removes a lock with a dead pid" || bad "(h) dead-pid orphan kept"
+sleep 30 & live2=$!; mkdir "$d/o3"; lock_orphan "$d/o3" "$live2"
+[ -d "$d/o3" ] && ok "(h) lock_orphan keeps a lock with a live pid" || bad "(h) live-pid orphan removed"
+kill "$live2" 2>/dev/null; rm -rf "$d/o3"
+# A lock aged exactly at the limit counts as old (60 s or older), the same rule as the waiter's.
+mkdir "$d/o4"; touch -t "$(date -v-60S +%Y%m%d%H%M.%S 2>/dev/null || date -d '-60 seconds' +%Y%m%d%H%M.%S)" "$d/o4"
+lock_orphan "$d/o4" ""; [ ! -e "$d/o4" ] && ok "(h) lock_orphan treats age 60 s as old" || bad "(h) age 60 s orphan kept"
+rm -rf "$d/o4"
+
+# (i) bash older than 4 is refused with a clear message.
+( require_bash4 3 ) 2>"$d/err" && bad "(i) bash 3 was accepted" || { grep -q "needs bash 4" "$d/err" && grep -q "brew install bash" "$d/err" \
+  && ok "(i) bash 3 is refused with a clear message" || bad "(i) refusal message missing: $(cat "$d/err")"; }
+require_bash4 4 && ok "(i) bash 4 is accepted" || bad "(i) bash 4 refused"
+if [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}')" -lt 4 ]; then
+  /bin/bash "$here/offload-review.sh" 1 2>"$d/err" && bad "(i) the script ran on old bash" \
+    || { grep -q "needs bash 4" "$d/err" && ok "(i) the script refuses to run on /bin/bash" || bad "(i) script on /bin/bash: $(cat "$d/err")"; }
+fi
 
 # (d) --cleanup removes the per-PR refs, with a stub gh that says the PR is closed.
 cat > "$d/bin/gh" <<'STUB'
@@ -125,6 +164,7 @@ mkdir -p "$d/main/scripts" && cp -R "$here/offload-review.sh" "$here/offload-rev
 mkdir "$d/rules"; : > "$d/rules/offload-review-pr1-rules.md"
 ( cd "$d/main" && OFFLOAD_RULES_DIR=$d/rules PATH=$d/bin:$PATH "$d/main/scripts/offload-review.sh" 1 --cleanup >/dev/null 2>"$d/err" ) \
   || bad "(d) --cleanup failed: $(cat "$d/err")"
+[ ! -e "$d/rules/offload-review-pr1-rules.md" ] && ok "(d) --cleanup removes the scratch rules file" || bad "(d) rules file left"
 if git -C "$d/main" rev-parse -q --verify refs/offload-review/pr1/head >/dev/null \
   || git -C "$d/main" rev-parse -q --verify refs/offload-review/pr1/base >/dev/null; then bad "(d) per-PR refs left"
 else ok "(d) --cleanup removes the per-PR refs"; fi

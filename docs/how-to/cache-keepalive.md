@@ -84,7 +84,9 @@ The proxy pings when the chain costs less than one miss. It refuses with the rea
 Example: a GPT-5.5 ping at 600K tokens costs about $0.60 and protects a miss of about $5.40.
 
 `keepalive_max_usd_per_ping` is an opt-in flat cap on top of this rule. No default and no strategy sets it. A ping over it is refused with the reason `over budget`.
-Summary and sweep calls that replace a ping still use a $0.50 cap when you set none.
+Summary and sweep calls that replace a ping follow the same rule. With no cap set, a call is allowed when its cost is below the miss it protects. An explicit cap still applies.
+The rule weighs each substitute call against the miss alone, so one idle span can cost more than one miss in total. That is the floor.
+The counters `keepalive_summary_substitute_over_budget` and `keepalive_sweep_over_budget` count both refusals, over the cap and not worth it.
 
 ### A named strategy
 

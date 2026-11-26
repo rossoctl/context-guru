@@ -854,7 +854,7 @@ func TestAffordableSweepBatchesIsTheLargestCountTheCeilingAdmits(t *testing.T) {
 		planned int
 		want    int
 	}{{0.5 * one, 4, 0}, {one, 4, 1}, {2.5 * one, 4, 2}, {4 * one, 4, 4}, {100, 4, 4}, {100, 1, 1}, {100, 0, 1}} {
-		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, tc.planned, tc.ceiling); got != tc.want {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, tc.planned, tc.ceiling, 0); got != tc.want {
 			t.Errorf("ceiling %.4f planned %d: %d batches, want %d", tc.ceiling, tc.planned, got, tc.want)
 		}
 	}
@@ -868,7 +868,7 @@ func TestAnUnpricedModelKeepsThePlannedSweepBatches(t *testing.T) {
 	if got := k.projectedSweepBatchesUSD("unpriced-model", "", 20000, 4); got != 0 {
 		t.Fatalf("an unpriced model projected %.6f, want 0", got)
 	}
-	if got := k.affordableSweepBatches("unpriced-model", "", 20000, 4, 0.0001); got != 4 {
+	if got := k.affordableSweepBatches("unpriced-model", "", 20000, 4, 0.0001, 0); got != 4 {
 		t.Errorf("an unpriced model was lowered to %d batches, want the planned 4", got)
 	}
 }
@@ -919,7 +919,7 @@ func TestAnInfiniteCeilingAdmitsEveryPlannedBatch(t *testing.T) {
 	k, _, _ := testKeeper(t)
 	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
 	for _, planned := range []int{1, 2, 4, 8} {
-		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, planned, math.Inf(1)); got != planned {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, planned, math.Inf(1), 0); got != planned {
 			t.Errorf("a ceiling of +Inf admits %d of %d planned batches, want all of them", got, planned)
 		}
 	}
@@ -928,7 +928,7 @@ func TestAnInfiniteCeilingAdmitsEveryPlannedBatch(t *testing.T) {
 	if !math.IsInf(pol.Ceiling(), 1) {
 		t.Fatalf("fixture: Policy{-1}.Ceiling() = %v, want +Inf", pol.Ceiling())
 	}
-	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, pol.Ceiling()); got != 4 {
+	if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, pol.Ceiling(), 0); got != 4 {
 		t.Errorf("the no-cap policy admits %d of 4 batches", got)
 	}
 }
@@ -939,7 +939,7 @@ func TestAZeroOrNegativeOrNaNCeilingAdmitsNothing(t *testing.T) {
 	k, _, _ := testKeeper(t)
 	fakeOf(k).setPrices(proxyPricer{fixedPrice{modelinfo.Price{CacheRead: 3.8e-7, Output: 19e-6}}})
 	for _, ceiling := range []float64{0, -1, math.Inf(-1), math.NaN()} {
-		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, ceiling); got != 0 {
+		if got := k.affordableSweepBatches("claude-sonnet-5", "", 20000, 4, ceiling, 0); got != 0 {
 			t.Errorf("a ceiling of %v admits %d batches, want 0", ceiling, got)
 		}
 	}

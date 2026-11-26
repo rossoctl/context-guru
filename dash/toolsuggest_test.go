@@ -444,3 +444,53 @@ func TestSingleTenantKeepsItsOwnReason(t *testing.T) {
 		t.Errorf("single-tenant reason = %q, want the deployment's own answer", st.Reason)
 	}
 }
+
+// tieredDeclPrice has one tier: above 100,000 prompt tokens every rate is 5x (the Haiku 5.5 shape).
+func tieredDeclPrice(string) (modelinfo.Price, bool) {
+	p := modelinfo.Price{Input: 1e-6, CacheRead: 1e-7, CacheWrite: 1.25e-6}
+	p.Tiers[0] = modelinfo.PriceTier{AbovePromptTokens: 100_000, InputMult: 5, ReadMult: 5, WriteMult: 5}
+	return p, true
+}
+
+// A row whose prompt size is above the line prices its declaration tokens at the tier. A row at
+// the line prices at base. A row with fresh_input 0 (written before the column) sizes from read and
+// write only, and so falls to base here.
+func TestDeclFilterSavingsPricesAtPromptSize(t *testing.T) {
+	cases := []struct {
+		name                 string
+		fresh, read, removed int64
+		rate                 float64
+	}{
+		{"above the line", 40_000, 60_001, 1000, 5 * 1e-7},
+		{"at the line", 40_000, 59_000, 1000, 1e-7},
+		// Sent 99,000 is below the line, but 99,000 + 4,000 removed is 103,000, above it.
+		{"sent below, without the filter above", 9_000, 90_000, 4000, 5 * 1e-7},
+		{"fresh_input missing", 0, 60_001, 1000, 1e-7},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := openTestDB(t)
+			e := mkEvent(1000, "s", "claude", 100, 90)
+			e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, int(c.removed)
+			e.FreshInput, e.CacheRead, e.CacheWrite = c.fresh, c.read, 0
+			if err := db.insertBatch([]*Event{e}); err != nil {
+				t.Fatal(err)
+			}
+			want := float64(c.removed) * c.rate
+			got, err := db.DeclFilterSavings(Filter{Tenant: "t1"}, tieredDeclPrice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.USD < want*0.999 || got.USD > want*1.001 {
+				t.Errorf("USD = %g, want %g", got.USD, want)
+			}
+			by, err := db.DeclFilterSavingsByTenant(0, tieredDeclPrice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if g := by["t1"].USD; g < want*0.999 || g > want*1.001 {
+				t.Errorf("by tenant USD = %g, want %g", g, want)
+			}
+		})
+	}
+}

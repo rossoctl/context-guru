@@ -142,7 +142,7 @@ func TestSearchSpend(t *testing.T) {
 	}
 	// Usage did not say the output: 30 per search, marked as an estimate.
 	s, ok := Request{Model: model, Searches: 2, LoadedTokens: 1500, Tier: TierRead, PromptTokens: 90_000}.SearchSpend()
-	if !ok || s.Output != 60 || !s.OutputEstimated || s.Write1h || s.PromptTokens != 90_000 || s.Loaded != int64(math.Round(1500*f)) {
+	if !ok || s.Output != 60 || !s.OutputEstimated || s.Write1h || s.Loaded != int64(math.Round(1500*f)) {
 		t.Fatalf("estimate: ok=%v %+v", ok, s)
 	}
 	// The output is stated, and the thread is on the 1-hour tier.

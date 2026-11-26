@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { mkdtempSync, readFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -9,10 +9,9 @@ process.env.CONTEXT_GURU_PORT_START = "9900"
 
 import plugin, { stateDirectory } from "../index.js"
 import tuiModule, { pickAndSwitch, registerPickerCommands } from "../tui.js"
-import { stubProxyBinary, waitUntilUnhealthy } from "./helpers.mjs"
+import { stubProxyBinary, waitFor, waitUntilUnhealthy } from "./helpers.mjs"
 
 const server = (directory) => ({ directory, client: { app: { log: async () => {} } } })
-const settle = () => new Promise((resolve) => setTimeout(resolve, 600))
 
 // A fake api.ui that records each dialog and lets the test answer it.
 function fakeApi(directory, { keymap = true, legacy = false } = {}) {
@@ -51,7 +50,7 @@ test("the TUI module exports id and tui, and no server", () => {
 // also has a string slashName. A command with `slash: { name }` and no namespace registers without error
 // and is invisible. That was the first defect the real-host test found.
 //
-// Owner decision (Option A): the native pickers are palette-only. /context-guru-preset and
+// Rule: the native pickers are palette-only. /context-guru-preset and
 // /context-guru-strategy open ONLY the chat commands of the server plugin, so each slash name shows once.
 function hostVisible(layers) {
   const palette = []
@@ -158,16 +157,16 @@ test("cancelling the first confirm saves nothing, and cancelling the restart sav
     assert.match(first.props.message, /spends your own credential/)
     first.props.onCancel()
     assert.equal(shown.at(-1).kind, "cleared")
-    await settle()
-    assert.ok(!(await import("node:fs")).existsSync(join(state, "settings.env")))
+    // Cancel is synchronous and starts no write, so the file is absent as soon as it returns.
+    assert.ok(!existsSync(join(state, "settings.env")))
 
     select.props.onSelect({ value: "none" })
     const second = shown.at(-1)
     assert.ok(!second.props.message.includes("spends your own credential"))
     await second.props.onConfirm()
     shown.at(-1).props.onCancel()
-    await settle()
-    assert.match(readFileSync(join(state, "settings.env"), "utf8"), /strategy=none/)
+    const settings = join(state, "settings.env")
+    await waitFor(() => existsSync(settings) && /strategy=none/.test(readFileSync(settings, "utf8")), "settings.env to hold strategy=none", 30000)
     assert.equal(JSON.parse(readFileSync(join(state, "install.json"), "utf8")).pid, before.pid)
     assert.match(toasts.at(-1).message, /next OpenCode start/)
     process.kill(before.pid, "SIGTERM")
