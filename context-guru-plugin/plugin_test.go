@@ -95,7 +95,8 @@ func settingsInDir(t *testing.T, state, home, dir string, args ...string) (map[s
 	py := requireTool(t, "python3")
 	cmd := exec.Command(py, append([]string{filepath.Join(scriptsDir(t), "settings.py")}, args...)...)
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home,
-		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t)) // the strategy table comes from the proxy binary
+		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t), // the strategy table comes from the proxy binary
+		strategiesLoadedLimit)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -6408,7 +6409,7 @@ func TestPresetUltrahighAsksForAProbe(t *testing.T) {
 	run := func(name string) string {
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", name)
 		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url,
-			"CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
+			"CONTEXT_GURU_BIN="+fakeStrategiesBin(t), strategiesLoadedLimit)
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -6452,7 +6453,8 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 
 		py := requireTool(t, "python3")
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "conservative")
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t),
+			strategiesLoadedLimit)
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -6484,7 +6486,8 @@ func TestPresetFallbackInheritsRoutingScope(t *testing.T) {
 
 		py := requireTool(t, "python3")
 		cmd := exec.Command(py, filepath.Join(scriptsDir(t), "settings.py"), "preset", "set", "--name", "conservative")
-		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
+		cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "CONTEXT_GURU_BIN="+fakeStrategiesBin(t),
+			strategiesLoadedLimit)
 		cmd.Dir = proj
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -7290,10 +7293,8 @@ func routeEnv(t *testing.T, home, state, extraPath string) []string {
 		}
 		env = append(env, kv)
 	}
-	// install.sh asks the proxy binary for its strategy list with a 5 s limit. On a loaded machine a
-	// stub that only prints a file can take longer, and the install then stops with
-	// strategy_list_unavailable. 30 s is the bound the other strategy tests use for the same reason.
-	env = append(env, "CONTEXT_GURU_STRATEGIES_TIMEOUT=30")
+	// install.sh reads the strategy list with a 5 s limit; see strategiesLoadedLimit.
+	env = append(env, strategiesLoadedLimit)
 	path := os.Getenv("PATH")
 	if extraPath == "" {
 		// The plugin asks the proxy binary for its strategies. Without a stub first on PATH, a test
