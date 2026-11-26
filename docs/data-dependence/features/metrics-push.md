@@ -2,7 +2,7 @@
 name: Metrics push to a central collector (`--metrics-push-url`, #886)
 kind: metadata
 off: ❌ Off. It is off until the operator sets a collector URL. With no URL it logs one warning and sends nothing. It also needs `--dashboard`, because the figures come from the dashboard's finished request. `--metrics-push=false` turns it off.
-metadata_only: 🟡 Works, metadata. **Data leaves the machine.** It sends totals only, every 30 seconds: token counts by tier, dollar amounts, request counts by status class, times, the model and provider names, the component names, the preset, the proxy version, and one random install ID. It sends no message text, no tool output, no session id, no request id, no user name and no host name. The install ID is random and is kept in `machine-id` beside the dashboard database.
+metadata_only: 🟡 Works, metadata. **Data leaves the machine.** It sends totals only, every 30 seconds: token counts by tier, dollar amounts, request counts by status class, the count of requests whose savings the accountant library withheld, by a reason code from a fixed list (`llm.savings.withheld`, accountant v0.9.0), times, the model and provider names, the component names, the preset, the proxy version, and one random install ID. It sends no message text, no tool output, no session id, no request id, no user name and no host name. The install ID is random and is kept in `machine-id` beside the dashboard database.
 everything: 🟡 Works, metadata. The storage level changes nothing, because the push never reads stored content.
 order: 290
 ---
