@@ -119,9 +119,9 @@ type kaEntry struct {
 	held bool
 	// ref is the handle Record.Hold returned: what the Dispatcher sends this entry's pings with and
 	// what Release drops. Meaningful only while held.
-	ref                         dispatch.Ref
-	provider                    bschemas.ModelProvider
-	model, route, preset, agent string
+	ref                  dispatch.Ref
+	provider             bschemas.ModelProvider
+	model, route, preset string
 	// identity is the client the host named for the request (Record.Identity).
 	identity agent.Client
 	pol      Policy
@@ -473,7 +473,6 @@ type Record struct {
 	OpenTasks *TaskCounts
 	Policy    Policy // resolved by the host
 	Tag       string // host label returned by Arrive (proxy: the applied strategy id)
-	Agent     string
 	Preset    string
 	Header    http.Header // the request's headers; only PingHeaders' allow-list is read
 	Store     store.Store
@@ -1127,7 +1126,7 @@ func (k *Keeper) Record(r Record) {
 		st:       r.Store,
 		emitter:  emitter,
 		provider: provider, model: model, route: route, preset: r.Preset,
-		agent: r.Agent, identity: r.Identity, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
+		identity: r.Identity, pol: pol, ttl1h: ttl1h, prefix: prefix, turnRead: u.CacheRead, stopReason: u.StopReason,
 		wait:         wait,
 		oneHour:      oneHour,
 		planPings:    planPings,
@@ -1662,6 +1661,15 @@ type pingJob struct {
 	gapStart time.Time
 }
 
+// agentLabel is the client label a ping row carries: the label agent.Identify named for the request
+// (Record.Identity). A host that set no Identity gets the generic label, as Identify of no headers does.
+func (e *kaEntry) agentLabel() string {
+	if e.identity.Label != "" {
+		return e.identity.Label
+	}
+	return agent.Identify(nil).Label
+}
+
 // fire sends one ping and accounts for it. Always fails open and quietly: the agent is not
 // waiting on this, so there is nobody to return an error to and nothing that a retry could
 // help. A failed ping is logged, counted, and forgotten.
@@ -2020,7 +2028,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 	// at record time and never mutated, but a retired entry is concurrent with this goroutine
 	// and the race detector is right to insist.
 	k.mu.Lock()
-	model, provider, route, preset, agent := e.model, e.provider, e.route, e.preset, e.agent
+	model, provider, route, preset, agent := e.model, e.provider, e.route, e.preset, e.agentLabel()
 	appliedStrategy, endpoint, prefix := e.tag, e.endpoint, e.prefix
 	k.mu.Unlock()
 	// A ping is not agent traffic, so it gets no cache-miss attribution and never touches
@@ -2099,7 +2107,7 @@ func (k *Keeper) record1(j pingJob, u Usage, status int, ms float64, startedAt t
 func (k *Keeper) recordTimedOut(j pingJob, ms float64) {
 	e := j.e
 	k.mu.Lock()
-	model, provider, route, preset, agent := e.model, e.provider, e.route, e.preset, e.agent
+	model, provider, route, preset, agent := e.model, e.provider, e.route, e.preset, e.agentLabel()
 	appliedStrategy, cost := e.tag, e.pingUSD
 	e.spent += cost
 	k.mu.Unlock()

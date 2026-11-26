@@ -2,7 +2,6 @@ package dash
 
 import (
 	"context"
-	"github.com/rossoctl/context-guru/agent"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
@@ -1196,7 +1195,3 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 
 // CachePrefixChangeReason marks the miss as caused by a changed prefix.
 func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChange }
-
-// AgentFor classifies a client User-Agent into an agent family so the dashboard
-// can filter by application.
-func AgentFor(ua string) string { return agent.IdentifyUserAgent(ua).Label }

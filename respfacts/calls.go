@@ -5,6 +5,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/schema"
 )
 
@@ -216,15 +217,17 @@ type Spawn struct {
 	Type string
 }
 
-// spawnTools are the tool names that start a subagent.
-var spawnTools = map[string]bool{"Agent": true, "Task": true}
+// spawnClient is the client whose subagent tools Spawns reads. Spawns has no request at hand, so
+// it takes the zero Client, which gets the fallback rule of every client: Claude Code's Agent and
+// Task (agent.Client.IsSubagentTool).
+var spawnClient agent.Client
 
 // Spawns counts the subagent calls of a response and reads the subagent_type of the last one.
 // A streamed Anthropic response joins each call's input_json_delta pieces. Other streams are not read.
 func Spawns(sse bool, body []byte) Spawn {
 	var sp Spawn
 	typeOf := func(input string) string {
-		if t := gjson.Get(input, "subagent_type"); t.Type == gjson.String && len(t.Str) <= 64 {
+		if t := gjson.Get(input, spawnClient.SubagentTypeField()); t.Type == gjson.String && len(t.Str) <= 64 {
 			return t.Str
 		}
 		return ""
@@ -232,7 +235,7 @@ func Spawns(sse bool, body []byte) Spawn {
 	if !sse {
 		for _, wire := range []string{schema.WireAnthropic, schema.WireOpenAI, schema.WireResponses} {
 			for _, c := range schema.OutputCalls(wire, body) {
-				if !c.Custom && spawnTools[c.Name] {
+				if !c.Custom && spawnClient.IsSubagentTool(c.Name) {
 					sp.N++
 					if t := typeOf(c.Args); t != "" {
 						sp.Type = t
@@ -252,7 +255,7 @@ func Spawns(sse bool, body []byte) Spawn {
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		idx := int(gjson.Get(payload, "index").Int())
 		if cb := gjson.Get(payload, "content_block"); cb.Get("type").String() == "tool_use" {
-			if spawnTools[cb.Get("name").String()] {
+			if spawnClient.IsSubagentTool(cb.Get("name").String()) {
 				inputs[idx] = &strings.Builder{}
 				order = append(order, idx)
 				if raw := cb.Get("input").Raw; raw != "" && raw != "{}" {

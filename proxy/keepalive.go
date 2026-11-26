@@ -438,7 +438,7 @@ func (k *keeper) recordTouch(touchAlias string, touchAtMs, touchSeq int64, tn *T
 		Usage: keepalive.Usage{FreshInput: u.FreshInput, CacheRead: u.CacheRead,
 			CacheWrite: u.CacheWrite, Output: u.Output, CacheWrite1h: u.CacheWrite1h,
 			StopReason: u.StopReason},
-		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Agent: r.UserAgent(), Identity: cl, Preset: tn.Preset,
+		UsageOK: usageOK, PrefixRewritten: u.PrefixRewritten, ToolUseNames: u.ToolUseNames, ToolUseIncomplete: u.ToolUseIncomplete, OpenTasks: open, Policy: pol, Tag: applied, Identity: cl, Preset: tn.Preset,
 		Header: r.Header, Store: tn.Store, Emitter: tn.Pipe.Emitter(),
 		Hold: func() dispatch.Ref { return k.d.hold(key, up, r.Header) }}
 	plan := &keepalive.PlanInForce{}

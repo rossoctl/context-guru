@@ -72,8 +72,11 @@ type Turn struct {
 	SpanID    string
 	ParentID  string
 
-	Model     string
-	System    string // "anthropic" | "openai"
+	Model  string
+	System string // "anthropic" | "openai"
+	// Client is the label of the client that sent the call (agent.Client.Label). "" gives the generic
+	// label (ClientLabel).
+	Client    string
 	Start     time.Time
 	End       time.Time
 	MaxTokens int
@@ -284,7 +287,7 @@ func (t Turn) ToSpan() Span {
 		StartTime:    FormatTime(t.Start),
 		EndTime:      FormatTime(t.End),
 		Attributes:   at,
-		ResourceAttr: map[string]any{"service.name": "claude-code"},
+		ResourceAttr: map[string]any{ResService: ClientLabel(t.Client)},
 		Status:       st,
 	}
 }

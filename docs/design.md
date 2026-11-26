@@ -352,7 +352,8 @@ The one exception is a store that keeps nothing (`store.Keeps` is false: storage
 | Reader | Reads | Why |
 |---|---|---|
 | Dashboard request rows (`Event.Agent`, filters) | `Label` (`pi`) | the user wants the harness |
-| Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | raw User-Agent, turned into its family by `dash.AgentFor` | unchanged. A Pi ping row keeps the SDK token. |
+| Keep-alive ping rows (`main_run.go`, from `Record.Identity`) | `Label` (`pi`) | a ping row and a request row of one client carry the same label, so the agent filter does not split them. A Pi ping row said the SDK token before. |
+| Trace spans (`proxy/recexport.go`, `internal/record`) | `Label`; no client gives `unknown` | a recorded session names its real client. Every span said `claude-code` before. |
 | Prediction model, live (`LiveFacts.Agent`, `predictiveDecide`) | `Client.ModelAgent(provider)` | the same value training reads (#1349). A raw User-Agent never matched the one-hots. |
 | Prediction model, stored rows (`campaign/replay.go`) | `agent.ModelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives a token back (`openai`, `anthropic`, or the provider string) |
 | Compaction point (`proxy/compactioncfg.go`) | `Name` | Pi and OpenCode have no setting |

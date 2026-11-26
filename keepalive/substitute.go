@@ -259,7 +259,7 @@ func (k *Keeper) recordSummarySubstitute(j pingJob, res offload.KeepAliveSummary
 func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float64, startedAt time.Time, answerUSD float64, hdr http.Header) float64 {
 	e := j.e
 	k.mu.Lock()
-	provider, route, preset, agent := e.provider, e.route, e.preset, e.agent
+	provider, route, preset, agent := e.provider, e.route, e.preset, e.agentLabel()
 	appliedStrategy, endpoint, prefix := e.tag, e.endpoint, e.prefix
 	k.mu.Unlock()
 	if model == "" {

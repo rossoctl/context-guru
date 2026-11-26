@@ -108,15 +108,12 @@ const (
 	WakeUnknown    = "unknown"
 )
 
-// askHumanTools are tool_use blocks that are themselves a tool call, but one that waits on a
-// HUMAN, not on the tool: the "exception" issue #424 section 1 names explicitly. A response
-// that calls one of these — even alongside other tools — means WaitingHuman, never
-// WaitingOwnTool; and a bare tool_result that answers one of these (the Messages API returns
-// every tool's answer the same way, human or not) means WakeHuman, never WakeToolResult.
-//
-// "request_user_input" is Codex's question tool (openai/codex f64f003,
-// codex-rs/core/src/tools/handlers/request_user_input_spec.rs, REQUEST_USER_INPUT_TOOL_NAME).
-var askHumanTools = map[string]bool{"AskUserQuestion": true, "ExitPlanMode": true, "request_user_input": true}
+// A tool_use that is itself a tool call, but one that waits on a HUMAN, not on the tool, is the
+// "exception" issue #424 section 1 names explicitly (agent.Client.AsksHuman: Claude Code's
+// AskUserQuestion and ExitPlanMode, Codex's request_user_input). A response that calls one of
+// these, even alongside other tools, means WaitingHuman, never WaitingOwnTool. A bare tool_result
+// that answers one of these (the Messages API returns every tool's answer the same way, human or
+// not) means WakeHuman, never WakeToolResult. A request with no named client takes both lists.
 
 // WaitPrompt values: whether the turn ends on a prompt that a person must answer (#1198).
 const (
@@ -126,19 +123,20 @@ const (
 	PromptOther      = "other"
 )
 
-// PromptOf reads the prompt a response ends on from its tool names alone. It uses the same set of
-// tools as ClassifyWaitingFor (askHumanTools): any call to one of them means a person must answer,
+// PromptOfClient reads the prompt a response ends on from its tool names alone. It uses the same set of
+// tools as ClassifyWaitingForClient (agent.Client.AsksHuman): any call to one of them means a person must answer,
 // as in a WaitingHuman response. A question tool is "question" and wins over the others; any other
 // tool of the set (a plan approval) is "other"; with none, "none". A permission prompt is not in
 // the response (the client raises it after the response ends), so the client's Notification signal
 // sets that value later. A name list that missed a call (a spliced window) can only under-report.
-func PromptOf(toolUseNames []string) string {
+// A zero cl takes both clients' tool lists. Question tools are read with agent.Client.IsQuestionTool.
+func PromptOfClient(cl agent.Client, toolUseNames []string) string {
 	out := PromptNone
 	for _, n := range toolUseNames {
-		if !askHumanTools[n] {
+		if !cl.AsksHuman(n) {
 			continue
 		}
-		if n == "AskUserQuestion" || n == "request_user_input" {
+		if cl.IsQuestionTool(n) {
 			return PromptQuestion
 		}
 		out = PromptOther
@@ -184,7 +182,7 @@ func ClassifyWaitingFor(toolUseNames []string, stopReason string, failed, usageO
 // is terminal the answer is WaitingDone. When it is a handback tool the answer is the one for an
 // end_turn with nothing else open.
 func ClassifyWaitingForTerminal(terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
-	return classifyWaitingFor(WaitingHuman, terminal, toolUseNames, stopReason, failed, usageOK, openBackground, openTeammate)
+	return classifyWaitingFor(agent.Client{}, WaitingHuman, terminal, toolUseNames, stopReason, failed, usageOK, openBackground, openTeammate)
 }
 
 // HumanFallback reports whether an end_turn with nothing open reads "human" for this client. It does
@@ -203,10 +201,10 @@ func ClassifyWaitingForClient(cl agent.Client, terminal []string, toolUseNames [
 	if !HumanFallback(cl) {
 		fallback = WaitingUnknown
 	}
-	return classifyWaitingFor(fallback, terminal, toolUseNames, stopReason, failed, usageOK, openBackground, openTeammate)
+	return classifyWaitingFor(cl, fallback, terminal, toolUseNames, stopReason, failed, usageOK, openBackground, openTeammate)
 }
 
-func classifyWaitingFor(fallback string, terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
+func classifyWaitingFor(cl agent.Client, fallback string, terminal []string, toolUseNames []string, stopReason string, failed, usageOK bool, openBackground, openTeammate int) (waitingFor, lastTool string) {
 	if failed {
 		return WaitingRetry, ""
 	}
@@ -223,7 +221,7 @@ func classifyWaitingFor(fallback string, terminal []string, toolUseNames []strin
 	}
 	if len(toolUseNames) > 0 {
 		for _, n := range toolUseNames {
-			if askHumanTools[n] {
+			if cl.AsksHuman(n) {
 				return WaitingHuman, ""
 			}
 		}
@@ -369,13 +367,16 @@ func (t *Tracker) ObserveWith(tenant, session, threadID string, body []byte, nor
 // for every client (the Claude Code markers).
 type Option func(*scanCfg)
 
-type scanCfg struct{ codex bool }
+type scanCfg struct {
+	codex  bool
+	client agent.Client // the client of the body; the zero Client takes the fallback rules (agent/rules.go)
+}
 
 // ForClient turns on the markers that only one client writes. The Codex terminal markers ("Process
 // running with session ID N", "Process exited with code C") are read only for the Codex client: a
 // Claude Code tool result that echoes the same text must not open a background task.
 func ForClient(cl agent.Client) Option {
-	return func(c *scanCfg) { c.codex = cl.Name == agent.ClientCodex }
+	return func(c *scanCfg) { c.codex, c.client = cl.Name == agent.ClientCodex, cl }
 }
 
 func cfgOf(opts []Option) scanCfg {
@@ -447,7 +448,7 @@ func (t *Tracker) observe(tenant, session, threadID string, body []byte, norm fu
 	if isRetry {
 		obs.WakeCause = WakeRetry
 	} else {
-		obs.WakeCause = classifyWake(entries)
+		obs.WakeCause = classifyWake(entries, cfgOf(opts).client)
 	}
 	return obs
 }
@@ -649,28 +650,21 @@ var (
 	durationPartsRE = regexp.MustCompile(`(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?`)
 )
 
-// systemMarkers are substrings that mark a block of text as something context-guru's own
-// client (Claude Code) injected rather than something a human typed. The API body carries no
-// `isMeta` flag the way a Claude Code transcript entry does (see the package doc), so these
-// have to be told apart by CONTENT. Not exhaustive by design — see WakeSystem's doc: anything
-// that is not one of these and not empty reads as human text, which is the safe direction (a
-// human's own words never carry one of these strings by accident in practice; a system marker
-// this list does not know about reads as human instead of system, which is a label on a
-// row, not a decision this package or the keep-alive ever acts on today).
-var systemMarkers = []string{
-	"<system-reminder",
-	"Base directory for this skill:",
-	"<command-name>",
-	"<local-command-stdout",
-}
-
-func hasSystemMarker(text string) bool {
-	for _, m := range systemMarkers {
-		if strings.Contains(text, m) {
-			return true
-		}
-	}
-	return false
+// isInjectedText reports whether a block of text is something the client injected rather than
+// something a human typed. The API body carries no `isMeta` flag the way a Claude Code transcript
+// entry does (see the package doc), so injected text is told apart by CONTENT, with the client's own
+// rule (agent.Client.Injected): the same one the transcript reconstruction reads
+// (record.HumanTextFor). Not exhaustive by design (see WakeSystem's doc): text that is not on the
+// list and not empty reads as human, which is the safe direction. A human's own words never carry
+// one of these by accident in practice, and a marker this list does not know reads as human instead
+// of system, which is a label on a row, not a decision this package or the keep-alive acts on.
+//
+// This reader matches a tag ANYWHERE in the block and a prefix only at the start. The reconstruction
+// strips tags and keeps the text next to them, because it must keep a real prompt that carries a
+// <system-reminder>. This reader labels the whole block, so one tag is enough.
+func isInjectedText(cl agent.Client, text string) bool {
+	inj := cl.Injected()
+	return inj.HasTag(text) || inj.HasExactPrefix(text)
 }
 
 // scanOpenState scans a request's entire message/input list, front to back, and APPLIES every
@@ -910,7 +904,7 @@ func parseHMS(s string) (time.Duration, bool) {
 // message on every turn carrying its remaining-budget reminder
 // (`<system-reminder><total_tokens>N tokens left</total_tokens>`). A role this explicit needs
 // no content guess, unlike the `<system-reminder>`-style TEXT a `user`-role entry can carry
-// (see systemMarkers): this is simply never a human and never a tool answering a call.
+// (see isInjectedText): this is simply never a human and never a tool answering a call.
 func isNoiseEntry(m bschemas.ChatMessage) bool {
 	return m.Role == bschemas.ChatMessageRoleSystem
 }
@@ -929,7 +923,7 @@ func lastSubstantiveIndex(entries []bschemas.ChatMessage) int {
 // classifyWake reads the last SUBSTANTIVE entry of a request's message/input list and says
 // what woke the thread, per issue #424 section 1's table (teammate beats background beats a
 // bare tool result beats plain text beats a system marker). The AskUserQuestion/ExitPlanMode
-// exception (SendMessage's own tool_result; see askHumanTools) is read off the entry before
+// exception (SendMessage's own tool_result; see agent.Client.AsksHuman) is read off the entry before
 // that — the response that STARTED this wait — the same call scripts/analysis/wait_causes.py's
 // classify_wake_cause makes (its own PR #425 review finding 1).
 //
@@ -940,7 +934,7 @@ func lastSubstantiveIndex(entries []bschemas.ChatMessage) int {
 // Unlike a `<system-reminder>` block, this is not something an API body ever asks us to
 // detect by content: the role itself already says "not something a human or a tool wrote",
 // which is a stronger, structural analogue of a transcript's `isMeta` flag.
-func classifyWake(entries []bschemas.ChatMessage) string {
+func classifyWake(entries []bschemas.ChatMessage, cl agent.Client) string {
 	idx := lastSubstantiveIndex(entries)
 	if idx < 0 {
 		return WakeUnknown
@@ -949,7 +943,7 @@ func classifyWake(entries []bschemas.ChatMessage) string {
 	askedHuman := false
 	if prev := lastSubstantiveIndex(entries[:idx]); prev >= 0 {
 		for _, b := range blocksOf(entries[prev]) {
-			if b.kind == kindToolUse && askHumanTools[b.toolName] {
+			if b.kind == kindToolUse && cl.AsksHuman(b.toolName) {
 				askedHuman = true
 			}
 		}
@@ -961,7 +955,7 @@ func classifyWake(entries []bschemas.ChatMessage) string {
 			hasToolResult = true
 		case kindText:
 			switch {
-			case teammateMarkerRE.MatchString(b.text):
+			case teammateMarkerRE.MatchString(b.text), cl.Injected().IsTeammate(b.text):
 				hasTeammate = true
 			// <task-notification> (a backgrounded Bash/Monitor finishing) and
 			// <agent-message from="X"> (an async agent or a background Skill finishing —
@@ -972,7 +966,7 @@ func classifyWake(entries []bschemas.ChatMessage) string {
 			// marker) misclassified it as WakeHuman instead of WakeBackground.
 			case taskNotifMarkerRE.MatchString(b.text), agentMessageFromRE.MatchString(b.text):
 				hasTaskNotif = true
-			case hasSystemMarker(b.text):
+			case isInjectedText(cl, b.text):
 				hasSystem = true
 			case strings.TrimSpace(b.text) != "":
 				hasPlainText = true
