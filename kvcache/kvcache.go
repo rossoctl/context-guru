@@ -161,12 +161,12 @@ const (
 // through to ClusterLooksDoneIsnt — the cluster that is NOT worth pinging on — rather than
 // being guessed into the high-value cluster on a name it has never been measured against.
 //
-// The tool reasons are schema.ToolStopReasons. The rest is this study's own choice, and stays here:
+// The tool reasons are schema.ToolStopReasonList. The rest is this study's own choice, and stays here:
 // stop_sequence, length and content_filter are not tool calls, but the turn did not finish by its
 // own choice, so the study counted them with the turns that go on.
 var stillWorkingReasons = func() map[string]bool {
 	m := map[string]bool{"stop_sequence": true, "length": true, "content_filter": true}
-	for _, r := range schema.ToolStopReasons {
+	for _, r := range schema.ToolStopReasonList() {
 		m[r] = true
 	}
 	return m

@@ -200,8 +200,8 @@ func toolStopWait(w string, noNames bool, stopReason string) string {
 
 // ToolStopReasons are the stop reasons that mean "the response called a tool". The dashboard reads
 // the same list when it looks for the first tool call of a thread in its stored rows. The list is
-// schema.ToolStopReasons.
-var ToolStopReasons = schema.ToolStopReasons
+// schema.ToolStopReasonList, as a copy of its own.
+var ToolStopReasons = schema.ToolStopReasonList()
 
 func toolStop(stopReason string) bool { return schema.IsToolStopReason(stopReason) }
 

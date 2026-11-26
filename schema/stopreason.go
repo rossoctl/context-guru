@@ -1,16 +1,20 @@
 package schema
 
-// ToolStopReasons are the stop reasons that say "the response called a tool", in each provider's own
+// The tool stop reasons are the stop reasons that say "the response called a tool", in each provider's own
 // words: Anthropic tool_use, OpenAI Chat tool_calls, and function_call (the older Chat form). A
 // Responses response has no such reason. It carries its calls as output items.
 //
 // This is the one list of the words. Each reader decides what else it counts for itself, and says
 // why: kvcache also treats stop_sequence, length and content_filter as "still working".
-var ToolStopReasons = []string{"tool_use", "tool_calls", "function_call"}
+var toolStopReasons = []string{"tool_use", "tool_calls", "function_call"}
+
+// ToolStopReasonList is a copy of the list, for a reader that needs the words (a SQL list, a map).
+// It is a copy so that no reader can change the list the others use.
+func ToolStopReasonList() []string { return append([]string(nil), toolStopReasons...) }
 
 // IsToolStopReason reports whether a stop reason says the response called a tool.
 func IsToolStopReason(reason string) bool {
-	for _, r := range ToolStopReasons {
+	for _, r := range toolStopReasons {
 		if r == reason {
 			return true
 		}

@@ -74,3 +74,17 @@ func TestSSEDataLine(t *testing.T) {
 		t.Error("an event line is not a data line")
 	}
 }
+
+// A long stream with no blank line, made of fragments of JSON, is one event past the size limit of
+// the whole-JSON check, and it ends. Without the limit, every line would re-check the whole buffer.
+func TestSSEDataLongRunOfFragments(t *testing.T) {
+	var b []byte
+	for i := 0; i < 40000; i++ {
+		b = append(b, "data: \"abcdefghijklmnopqrstuvwxyz\n"...) // a string that never closes
+	}
+	n := 0
+	SSEData(b, func([]byte) bool { n++; return true })
+	if n != 1 {
+		t.Errorf("%d events, want 1", n)
+	}
+}

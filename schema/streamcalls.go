@@ -143,12 +143,13 @@ func (s *CallStream) open(key string, fresh bool) *streamCall {
 }
 
 // addChat reads one delta.tool_calls entry. The name comes once per call, in the chunk that opens
-// it. A second name at the same index is a new call: some gateways give every call index 0.
+// it. A DIFFERENT name at the same index is a new call: some gateways give every call index 0. A
+// gateway that sends the same name on every chunk of one call stays one call.
 func (s *CallStream) addChat(tc gjson.Result) {
 	key := "c" + tc.Get("index").String()
 	c := s.byKey[key]
 	name := tc.Get("function.name").String()
-	if c == nil || (name != "" && c.name != "") {
+	if c == nil || (name != "" && c.name != "" && name != c.name) {
 		c = &streamCall{}
 		if s.byKey == nil {
 			s.byKey = map[string]*streamCall{}
@@ -181,11 +182,15 @@ func (s *CallStream) addResponses(t string, ev gjson.Result) {
 		}
 	case "response.function_call_arguments.done":
 		if c := s.byKey["r"+ev.Get("output_index").String()]; c != nil {
-			c.full, c.hasFull = ev.Get("arguments").String(), true
+			if v := ev.Get("arguments").String(); v != "" { // an empty one must not erase the pieces
+				c.full, c.hasFull = v, true
+			}
 		}
 	case "response.custom_tool_call_input.done":
 		if c := s.byKey["r"+ev.Get("output_index").String()]; c != nil {
-			c.full, c.hasFull = ev.Get("input").String(), true
+			if v := ev.Get("input").String(); v != "" {
+				c.full, c.hasFull = v, true
+			}
 		}
 	case "response.completed", "response.incomplete":
 		// The terminal event holds the whole output. It wins over the pieces.

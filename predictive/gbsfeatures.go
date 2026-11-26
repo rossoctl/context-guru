@@ -198,7 +198,7 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 		sinceRew = float64(n - st.lastRew)
 	}
 	// who started the turn. Only "tool_use" counts as a tool turn here, on purpose: the model was
-	// trained with that rule (scripts/campaign/gbsfeat.py), so schema.ToolStopReasons must not
+	// trained with that rule (scripts/campaign/gbsfeat.py), so the schema tool stop reasons must not
 	// replace it without a retrain. gbsstop_test.go pins it.
 	userTurn := prev == nil || prev.stop != "tool_use"
 	if userTurn {

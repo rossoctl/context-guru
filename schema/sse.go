@@ -6,6 +6,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// wholeJSONMax is the size of joined data up to which SSEData asks if it is already whole JSON.
+const wholeJSONMax = 64 << 10
+
 // SSEData walks a Server-Sent Events stream and calls fn with the data of each event, in order.
 // fn returns false to stop. It is the one reader of SSE framing for the readers that only want the
 // payloads; a reader that must forward the bytes unchanged keeps its own event splitter.
@@ -15,7 +18,7 @@ import (
 //   - A blank line ends an event. The end of the stream ends the last event.
 //   - A "data:" line adds to the event's data. Several lines of one event are joined with "\n".
 //     One exception, for a stream that leaves out the blank line between events: when the lines so
-//     far are already one whole JSON value, the next data line starts a new event.
+//     far are already one whole JSON value (and are at most 64 KiB), the next data line starts a new event.
 //   - Other fields (event:, id:, retry:) and ":" comment lines are skipped.
 //
 // Two rules are for this proxy and are not in the spec:
@@ -71,7 +74,9 @@ func SSEData(body []byte, fn func(data []byte) bool) {
 			// A line that is a whole JSON value on its own is an event, whatever follows it. A
 			// stream that leaves out the blank line between two events reads the same as one that
 			// does not, as it did before this reader joined lines. A fragment of JSON is joined.
-			if gjson.ValidBytes(bytes.TrimSpace(cur)) {
+			// The check stops above wholeJSONMax: a long run of fragments is then read by blank-line
+			// framing alone, and a stream with no blank lines cannot make the check quadratic.
+			if len(cur) <= wholeJSONMax && gjson.ValidBytes(bytes.TrimSpace(cur)) {
 				if !flush() {
 					return
 				}

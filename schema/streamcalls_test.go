@@ -127,3 +127,29 @@ func TestStreamCallsOtherEvents(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 }
+
+// A gateway that sends the SAME name on every chunk of one call has one call, not many.
+func TestStreamCallsChatSameNameRepeated(t *testing.T) {
+	got := StreamCalls(ev(
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"a","arguments":"{\"x\":"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"a","arguments":"1}"}}]}}]}`,
+	))
+	if len(got) != 1 || got[0].Name != "a" || got[0].Args != `{"x":1}` {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// A closing event with empty arguments must not erase the pieces.
+func TestStreamCallsResponsesEmptyDoneKeepsPieces(t *testing.T) {
+	got := StreamCalls(ev(
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"c","name":"shell","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"a\":1}"}`,
+		`{"type":"response.function_call_arguments.done","output_index":0,"arguments":""}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"type":"custom_tool_call","call_id":"d","name":"patch","input":""}}`,
+		`{"type":"response.custom_tool_call_input.delta","output_index":1,"delta":"text"}`,
+		`{"type":"response.custom_tool_call_input.done","output_index":1,"input":""}`,
+	))
+	if len(got) != 2 || got[0].Args != `{"a":1}` || got[1].Args != "text" {
+		t.Errorf("got %+v", got)
+	}
+}
