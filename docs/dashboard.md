@@ -161,6 +161,12 @@ When the library cannot price an event, the event books **no saving**, and the p
 `figure_without_row`, `duplicate_name`, `acted_without_figure` or `server_held_history`. A saving nothing
 measured is not shown.
 
+The library's reasons (`check_sum`, `check_unique_change`, `check_spans`, `check_other`, `unpriced`) come from
+`accountant.Withhold`, the same rule the metrics push and the `/stats` deferral ledger use (#1465). A `check_sum`
+failure in a section that no operation claims (accountant `Check.Claims` 0) is not one of them: a change that no
+operation reported moved that section, the reported operations are still right, and the request books their
+saving. The size bound, `ops_dropped`, `observe` and the three row reasons are the host's own gates.
+
 The same reason is stored in `requests.acc_fallback` for each request that logs the line. A request with no
 accountant record (`no_record`) logs no line and stores no reason: it had nothing to price. A bypassed request
 (`x-context-guru-bypass: true`) logs `size_unknown`, because bypass leaves the request size at 0, but stores no
@@ -168,7 +174,7 @@ reason: the client asked for no context-guru, so its $0 is a measured $0. Overvi
 
 - `fallback_requests` is the count, `fallback` the count by reason, and `fallback_cost_usd` their `cost_usd`
   plus `cg_llm_cost_usd`.
-- A fallback request can still book some saving the library did not price: the deferral ledger's net, the
+- A fallback request can still book some saving the library did not price: tool deferral's figure (none today), the
   measured filter credit, and minus its own model calls. `fallback_saved` gives it by part (`compaction_usd`,
   `defer_usd`, `keepalive_usd`, `reorder_usd`, `filter_usd`).
 - The hero and its part cards leave fallback requests out on both sides. Each part is the server's part less
@@ -207,7 +213,8 @@ Limits:
   (`ops_dropped`): the change is in the system section, and the proxy places component changes only on
   `input` items. The tool filter's own edit of `instructions` (a skill taken out of the list) is priced
   on the `toolfilter` row. When the skill list is in a leading `developer` item of `input` instead, that
-  edit has no operation, the sum check fails, and the request books no saving (`check_sum`).
+  edit has no operation, the sum check fails in that section. No operation claims the section, so the failure does not
+  gate (#1465): the request books the saving of its other operations.
 - A request with no history to classify a cache break against gets `penalty_unknown`. This is the
   first request of a thread, and a request after a gap longer than the cache lifetime when the
   provider's lifetime is unknown (no explicit breakpoints). The gross saving is right, and the net
@@ -291,8 +298,8 @@ Limits:
   library does not credit a keep-alive rescue after a gap past the TTL.
 - The proxy measures the operations against the body it forwards, and starts the request record from
   the body it received. When a repair runs before the pipeline (`repairExpandErrors`,
-  `AnswerStrayCalls`, a forced model), the two differ, the sum check fails (`check_sum`) and the
-  event books no saving. A request with no usage, or a model with no price, books no saving and logs
+  `AnswerStrayCalls`, a forced model), the two differ, and the sum check fails. When an operation claims the changed section
+  the event books no saving (`check_sum`). A section that no operation claims does not gate (#1465). A request with no usage, or a model with no price, books no saving and logs
   `unpriced`.
 - A change the pipeline made that no operation can describe drops every operation of the request
   (`ops_dropped`): a cache anchor written after a count-changing splice, and a splice that moves the

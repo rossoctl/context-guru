@@ -93,6 +93,10 @@ type capture struct {
 	// deferFacts is tool deferral's ledger entry for this request (noteDefer), nil when deferral
 	// did not change it.
 	deferFacts *deferFacts
+	// deferBook books the request's dollars in the /stats ledger from the accountant's figure (deferLedger sets it).
+	// It joins the accountant job, so it runs off the handler path: finishAccountant runs it after the join (no
+	// dashboard), finish runs it once the result is in (dashboard). Nil when deferral did not change the request.
+	deferBook func()
 	// sweepFalseExpWarm is the part of sweepFalseExp whose drop was applied on a warm request.
 	sweepFalseExpWarm int
 	// The response-side streaming facts, set by observeSSE from proxy.go's terminal defer.
@@ -517,22 +521,26 @@ func addSweepExpandEvents(e *dash.Event, rules map[string]int) {
 	}
 }
 
-// deferFacts is what tool deferral did on one request, for the dashboard row (#869).
+// deferFacts is what tool deferral did on one request, for the dashboard row (#869). Its dollars are not here: the
+// accountant prices them (dash.Event.PriceMode). spend is the search-turn cost, which finish reports to the
+// accountant as spend operations before it prices the request.
 type deferFacts struct {
 	tokens, list, searches, dropped, loaded, wrong int
-	gross, net, search                             float64
+	spend                                          tooldefer.SearchSpend
+	spendOK                                        bool
+	model                                          string
 }
 
 // noteDefer records tool deferral's ledger entry for this request: the request facts as the ledger
-// booked them (r.WrongGuesses and r.DroppedSearches included), its price (zero when the model has
-// none) and how many different tools its searches loaded.
-func (c *capture) noteDefer(r tooldefer.Request, m tooldefer.Money, loaded int) {
+// booked them (r.WrongGuesses and r.DroppedSearches included) and how many different tools its searches loaded.
+func (c *capture) noteDefer(r tooldefer.Request, loaded int) {
 	defer c.timed("noteDefer")()
 	if c == nil {
 		return
 	}
 	c.deferFacts = &deferFacts{tokens: r.DeferredTokens, list: r.ListTokens, searches: r.Searches,
-		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, gross: m.Gross, net: m.Net, search: m.SearchCost}
+		dropped: r.DroppedSearches, loaded: loaded, wrong: r.WrongGuesses, model: r.Model}
+	c.deferFacts.spend, c.deferFacts.spendOK = r.SearchSpend()
 }
 
 // finish builds the event and hands it off. Called once, after the response has
@@ -701,9 +709,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches
 		e.DeferDroppedSearches = d.dropped
 		e.DeferLoaded, e.DeferWrongGuesses = d.loaded, d.wrong
-		e.DeferGrossUSD, e.DeferNetUSD, e.DeferSearchUSD = d.gross, d.net, d.search
-		// The ledger's own cost, taken here, before PriceMode can move the net onto the library's figure.
-		e.DeferCostUSD = d.gross - d.net
+		// The dollars are the accountant's: PriceMode sets them from its figure for the tooldefer component.
 	}
 	e.SweepFalseExpandsWarm = c.sweepFalseExpWarm
 	e.FreshInput, e.CacheRead = usage.FreshInput, usage.CacheRead
@@ -845,17 +851,22 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	endAcc := timedSpan("accCompute")
 	// The rules for which request books no figure are accrec.Recorder.Price's (see accCompute). A request with no
 	// figure leaves the event with no Result, so PriceMode books no dollars either (acc_fallback no_result).
-	if res, ok := c.accCompute(usage, usageOK); ok {
-		e.SetAccountant(res)
-	}
-	// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
-	// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
-	// the client keeps.
-	if usageOK && !c.rejected() {
-		c.savings.recordThinking(usage.Thinking)
-	}
+	// Fail open (#1504): this runs in the handler's terminal defer, so a panic in the accountant must cost the figure
+	// only. The row, stopEarlyScan and the log line still run after it, and the row books as no_result.
+	failOpenAccountant("finish", func() {
+		if res, ok := c.accCompute(usage, usageOK); ok {
+			e.SetAccountant(res)
+		}
+		// The thinking blocks this response made, with its thinking_tokens: when the client sends one back, the
+		// accountant prices it at its own count (issue #1187). Only a billed response: a rejected one made no block
+		// the client keeps.
+		if usageOK && !c.rejected() {
+			c.savings.recordThinking(usage.Thinking)
+		}
+	})
 	endAcc()
-	c.savings.finished(c, usage, usageOK)
+	failOpenAccountant("finished", func() { c.savings.finished(c, usage, usageOK) })
+	c.runDeferBook() // recovers its own panic and books the request as unpriced
 	e.SetAccountantContext(c.trace.OpsDropped, c.observe)
 	if c.accServerHeldHistory {
 		e.SetAccountantServerHeldHistory()
