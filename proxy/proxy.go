@@ -464,14 +464,13 @@ func New(pipe *components.Pipeline, st store.Store, agg *metrics.Aggregator, opt
 	h := &Handler{agentFor: agent.ForPath, pipe: pipe, store: st, agg: agg, opts: opts, client: c,
 		tracker: tr, rec: opts.Dashboard, recorder: opts.Record,
 		sent: newSentStash()}
-	// The tracker needs a dashboard: the Result is attached to the recorded event.
-	if opts.Dashboard != nil {
-		h.savings = newSavingsTracker()
-		if opts.AccountantState != "" {
-			h.savings.restore(opts.AccountantState, time.Now())
-			h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})
-			go h.savings.keepSaved(opts.AccountantState, h.stateStop, h.stateDone)
-		}
+	// The accountant runs on every request, with or without a dashboard (#1451): the dashboard only stores and
+	// shows the Result. The state file is saved only when AccountantState is set, which needs a dashboard database.
+	h.savings = newSavingsTracker()
+	if opts.AccountantState != "" {
+		h.savings.restore(opts.AccountantState, time.Now())
+		h.stateStop, h.stateDone = make(chan struct{}), make(chan struct{})
+		go h.savings.keepSaved(opts.AccountantState, h.stateStop, h.stateDone)
 	}
 	// The restart grace decides by the thread's own last cache refresh — its last request or
 	// a keep-alive ping that read the cache — and not by this process's start (#766). The
@@ -1341,8 +1340,10 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		// Start the dashboard capture (nil when the dashboard is off). It only holds
 		// values the request path already computed; nothing here does I/O.
 		cp := h.newCapture(r, cl, string(provider), up.path, tn)
-		cp.noteModel(gjson.GetBytes(body, "model").String())
-		cp.noteReadSets(up.base, h.keeper.readSetsTTL)
+		// ac is what the accountant runs on: cp, or a lean capture when the dashboard is off (#1451).
+		ac := h.accCapture(cp, string(provider), up.path, tn)
+		ac.noteModel(gjson.GetBytes(body, "model").String())
+		ac.noteReadSets(up.base, h.keeper.readSetsTTL)
 		cp.noteCompactionPoint(cpoint.Tokens(window), string(cpoint.Source))
 		cp.noteAgentCompaction(agentCompaction)
 		// The request's own metadata (effort, thinking, sampling, tool_choice, shape),
@@ -1417,7 +1418,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			},
 			Applied: func(tr apply.Trace, added time.Duration) {
 				cp.noteCG(float64(added.Microseconds()) / 1000.0)
-				cp.noteTrace(tr)
+				ac.noteTrace(tr)
 			},
 			Observed: func(th thread.Result, tr apply.Trace, added time.Duration) {
 				// The thread is known before the savings tracker is told of the request: the first
@@ -1435,15 +1436,15 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// wide form): the body is only this turn. The record would compare that delta with the
 				// last full body as a client edit, and price a prefix the proxy cannot see. The event
 				// is marked instead, so the dashboard says why it has no saving (#899).
-				if cp != nil && cp.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
+				if ac != nil && ac.savings != nil && tr.Session != "" && schema.IsResponses(wire) &&
 					schema.ServerHeldHistory(orig) {
-					cp.accServerHeldHistory = true
-				} else if cp != nil && cp.savings != nil && tr.Session != "" {
-					cp.accBegin(accountant.RequestMeta{
+					ac.accServerHeldHistory = true
+				} else if ac != nil && ac.savings != nil && tr.Session != "" {
+					ac.accBegin(accountant.RequestMeta{
 						RequestID: "r" + strconv.FormatUint(h.accSeq.Add(1), 10),
 						Session:   tr.Session,
 						Model:     gjson.GetBytes(orig, "model").String(),
-						At:        cp.start,
+						At:        ac.start,
 						// The proxy has no subscription detection, so every request is billed as api.
 						Billing: accountant.Billing{Mode: accountant.BillingAPI},
 						// The first request after the agent's own compaction (R55). The wire does not yet
@@ -1472,7 +1473,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// Per THREAD of the session (#423): the main agent, each subagent and each fork have
 			// their own cache entry, and only this request's thread was refreshed.
 			Arrive: func(session, threadID string) {
-				cp.noteKeepAlive(h.keeper.arriveAt(tn.ID, session, threadID))
+				ac.noteKeepAlive(h.keeper.arriveAt(tn.ID, session, threadID))
 				if cp != nil {
 					cp.predArrival = h.predRT().arrive(tn.ID, session, threadID, time.Now())
 				}
@@ -1493,8 +1494,8 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 				// Deferral adds its names list to the messages after the pipeline reported its
 				// operations. Report it as an operation of its own, after theirs (#908).
 				if di != nil && !bytes.Equal(preDefer, b) {
-					if cp != nil {
-						cp.accPreDefer = preDefer
+					if ac != nil {
+						ac.accPreDefer = preDefer
 					}
 					tr.Ops = append(tr.Ops[:len(tr.Ops):len(tr.Ops)], accwire.For(preDefer).MessageOps(accwire.OpToolDefer, preDefer, b)...)
 				}
@@ -1504,13 +1505,13 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			// the provider bills the injected tool declarations, so the library's bytes-to-tokens
 			// ratio must count them too. They are appended to `tools`, so no message moves and the
 			// operations' positions stay valid.
-			Done: func(th thread.Result, b []byte, tr apply.Trace) { cp.accEnd(th, b, tr.Ops) },
+			Done: func(th thread.Result, b []byte, tr apply.Trace) { ac.accEnd(th, b, tr.Ops) },
 		})
 		if prep.Panic != nil {
 			lg.Error("context-guru: recovered from panic before forward; sending original", "panic", prep.Panic)
 			// The original goes upstream, so no operation of the savings record is on the wire: drop
 			// the record, and the event books no saving.
-			cp.accDrop()
+			ac.accDrop()
 		}
 		body = prep.Body
 		preBody, anchor, tr, added, threadID, threadOf := prep.PreBody, prep.Anchor, prep.Trace, prep.Added, prep.ThreadID, prep.ThreadOf
@@ -1522,7 +1523,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 		if threadID != thread.Primary {
 			slg = slg.With("thread", threadID)
 		}
-		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, tn, tr.Session, threadID, threadOf, anchor, slg,
+		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, ac, tn, tr.Session, threadID, threadOf, anchor, slg,
 			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
 	}
 }
@@ -1714,7 +1715,7 @@ var errNoUpstream = errors.New("no upstream configured")
 // anchor, when non-nil, is where this turn's in-band expands are restored on later turns
 // (expand.fixed_restore, #407): the client never sees the call or its result, so nothing in its
 // next request would otherwise carry the content.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string, touchAtMs, touchSeq int64) {
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client, provider bschemas.ModelProvider, up upstream, preBody, body []byte, bypassed bool, cp, ac *capture, tn *Tenancy, session, threadID string, threadOf func(session string) thread.Result, anchor *expand.Anchor, lg *slog.Logger, rc recCtx, di *deferInfo, touchAlias string, touchAtMs, touchSeq int64) {
 	wire := schema.WireFor(string(provider), up.path)
 	// The agent that owns the route may correct the shared parser's usage reading
 	// (readAgentUsage). On a route no agent owns, the neutral agent keeps that reading unchanged.
@@ -1839,6 +1840,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
 		usage.Live = cp.liveFacts(ttfb)
+		// The rounds are final here. The accountant reads them when it prices, and the deferral ledger below can ask
+		// for the figure before finish runs.
+		ac.noteRounds(rounds)
 		usage.PrefixRewritten = cp.prefixRewritten()
 		billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
 		// lifecycle.Finish runs the steps after the response in their order: the keep-alive touch, the
@@ -1857,7 +1861,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 				cp.noteKeepAlivePlan(h.keeper.recordTouch(touchAlias, touchAtMs, touchSeq, tn, session, threadID, lastUpStart, body, up, r, provider, up.path, status, usage, usageOK, cp.earlyOpenTasks(h)))
 			},
 			Ledger: func() {
-				h.deferLedger(r.Context(), cp, di, usage, usageOK && status == http.StatusOK, deferSearches)
+				h.deferLedger(r.Context(), ac, di, usage, usageOK && status == http.StatusOK, deferSearches)
 			},
 			// The session id is derived HERE rather than on the request path, so observe keeps paying
 			// only the enqueue for its measurement. The id is the one the shadow pipeline derives
@@ -1884,8 +1888,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 				}
 			},
 		})
-		cp.noteRounds(rounds)
-		cp.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
+		ac.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
 		cp.stopEarlyScan() // the request is over: the scan's work in progress ends (a finished result stays)
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
@@ -2002,7 +2005,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			lg.Warn("context-guru: upstream call failed", "upstream", up.base,
 				"round", round, "err", err)
 			status = http.StatusBadGateway
-			cp.noteUpstream(float64(time.Since(upStart).Microseconds())/1000.0,
+			ac.noteUpstream(float64(time.Since(upStart).Microseconds())/1000.0,
 				http.StatusBadGateway)
 			// And count it: this path does not go through failAuth, so without this the
 			// only 502s on the dashboard would be our own misconfiguration.
@@ -2033,7 +2036,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 		}
 		upMs := float64(time.Since(upStart).Microseconds()) / 1000.0
 		status = resp.StatusCode
-		cp.noteUpstream(upMs, resp.StatusCode)
+		ac.noteUpstream(upMs, resp.StatusCode)
 		cp.noteLimits(resp.Header)
 		if h.agg != nil {
 			h.agg.RecordUpstreamLatency(upMs, bypassed)
