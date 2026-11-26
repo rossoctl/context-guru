@@ -51,8 +51,15 @@ func TestRetentionRemovesDeclarationTextButKeepsSharedText(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := declTextRevealed(t, db)
-	if strings.Contains(got, "unique-old-text") {
-		t.Error("the expired session's own tool text survived retention")
+	// Counted in the table itself: the reveal goes through the declaration rows, which are gone
+	// either way, so it cannot see an orphaned text row.
+	var orphans int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM declaration_text WHERE hash NOT IN
+		(SELECT text_hash FROM tool_declarations WHERE text_hash IS NOT NULL)`).Scan(&orphans); err != nil {
+		t.Fatal(err)
+	}
+	if orphans != 0 {
+		t.Errorf("%d text rows survived retention with no declaration naming them", orphans)
 	}
 	if !strings.Contains(got, "run a command") {
 		t.Error("retention removed Bash text that the live session still names")

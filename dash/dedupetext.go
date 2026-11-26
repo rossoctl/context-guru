@@ -34,6 +34,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -235,6 +236,9 @@ func (d *DB) dedupeOneBatch(batch []declBlob) (int64, error) {
 	}
 
 	// Committed. Now verify, then clear.
+	if dedupeAfterCommit != nil {
+		dedupeAfterCommit()
+	}
 	tx2, err := d.sql.Begin()
 	if err != nil {
 		return 0, err
@@ -261,6 +265,12 @@ func (d *DB) dedupeOneBatch(batch []declBlob) (int64, error) {
 		}
 		var stored []byte
 		if err := read.QueryRow(hashes[i]).Scan(&stored); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// The GC trigger removed the text between the two transactions, because the
+				// session's last request went (#689). The row it served is gone too, or about to
+				// be: skip it and keep the batch.
+				continue
+			}
 			return 0, err
 		}
 		// Compared as TEXT, not as bytes: the row's own blob and the one under this hash are
@@ -286,6 +296,9 @@ func (d *DB) dedupeOneBatch(batch []declBlob) (int64, error) {
 	}
 	return moved, tx2.Commit()
 }
+
+// dedupeAfterCommit is a test seam: it runs between the two transactions of one batch.
+var dedupeAfterCommit func()
 
 // dedupeLoop runs the backfill once, then reclaims what it freed. Called from
 // backgroundMigrations (capture.go), not given its own goroutine — see that function's

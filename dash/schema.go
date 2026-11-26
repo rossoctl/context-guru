@@ -775,7 +775,7 @@ CREATE INDEX IF NOT EXISTS idx_tooluses_tenant ON tool_uses(tenant_id, last_ts D
 -- only through a declaration row the reader is already scoped to (see declTextJoin), and two
 -- accounts that share a row share bytes that are equal by construction — nothing about either
 -- account is inferable from it, and no count or hash is served. It does mean a shared row must
--- outlive one account's purge, which is why the delete above counts the other users first.
+-- outlive one account's purge, which is why the delete below counts the other users first.
 --
 -- A row goes when the last declaration row that names it goes. The trigger trg_tool_inventory_gc
 -- (additiveDDL2) does it, in the same transaction that deletes the session's declarations, so
@@ -844,10 +844,11 @@ CREATE INDEX IF NOT EXISTS idx_requests_limits_ts
 -- in the schema. Partial: a row with no stored text costs nothing here.
 CREATE INDEX IF NOT EXISTS idx_tooldecl_text_hash
   ON tool_declarations(text_hash) WHERE text_hash IS NOT NULL;
--- DROP then CREATE, not CREATE IF NOT EXISTS: a database opened by an older build already has the
+-- DROP then CREATE IF NOT EXISTS: a plain IF NOT EXISTS alone would keep an old trigger, and a plain
+-- CREATE after the DROP fails when two opens race. A database opened by an older build already has the
 -- trigger without the declaration_text step, and IF NOT EXISTS would keep that one for ever.
 DROP TRIGGER IF EXISTS trg_tool_inventory_gc;
-CREATE TRIGGER trg_tool_inventory_gc AFTER DELETE ON requests
+CREATE TRIGGER IF NOT EXISTS trg_tool_inventory_gc AFTER DELETE ON requests
 WHEN NOT EXISTS (SELECT 1 FROM requests
   WHERE session_id = OLD.session_id AND tenant_id = OLD.tenant_id)
 BEGIN

@@ -293,8 +293,9 @@ behaviour. Each finding needs a decision from its owner.
 2. **Keep-alive** keeps the last request body, with storage off and with content capture off.
    The proxy binary's Dispatcher also keeps the user's credential, masked, for the same time. The
    plugin turns keep-alive on by default. See #595.
-3. **Nothing deletes `declaration_text`**: not retention, and not an account purge. Tool
-   declarations and whole system prompts stay after the user turns consent off.
+3. **Fixed by #689:** retention, size limits and an account purge now delete `declaration_text`
+   when the last declaration that names it goes. Tool declarations and whole system prompts
+   still stay after the user turns consent off, until retention or a purge removes them.
 4. **Turning consent off deletes nothing.** Old rows in `request_content`, `extraction_calls` and
    the archive stay until retention or a purge removes them.
 5. **The dashboard writes some columns without consent:** tool, MCP-server and skill names,
@@ -386,7 +387,7 @@ file for it, and run the generator.
 | `--dashboard` / `DASHBOARD` | off (the plugin turns it on) | The dashboard database and its in-memory memos. Keep-alive also stops keeping bodies. | The body stash, the Store |
 | `--dashboard-content` / `DASHBOARD_CONTENT` | off | New writes of `request_content`, extraction-call text and `declaration_text` | Tool, MCP-server and skill names; `extraction_calls.rejection`; `request_components.err`; rows already written; keep-alive; the body stash; the memos |
 | Account consent `capture_content` (hosted) | **on** for a new account | The same as `--dashboard-content`, for one account. Both must be on. | The same as the row above. Turning it off deletes nothing. |
-| `--dashboard-retention` and size limits | 7 days, 512 MiB | Old dashboard rows, with their content | `declaration_text`, `tenant_spend`, `archived_sessions` |
+| `--dashboard-retention` and size limits | 7 days, 512 MiB | Old dashboard rows, with their content | `tenant_spend`, `archived_sessions` |
 | `--dashboard-backup` / `DASHBOARD_BACKUP` | on | The backup copies `<db>.bak` and `<db>.bak.1`. Before the age, size or quota rule deletes rows, the janitor copies the whole dashboard database (`VACUUM INTO`), content rows included, to that file (mode 0600, not encrypted). The copy before it moves to `<db>.bak.1`. A new copy is made only when the newest is older than 24 hours. Two copies at most, so **up to twice the database size on disk**. It holds the stored data at every storage level, so with `--dashboard-content` it holds the captured text. The disk-pressure rule makes no copy. An in-memory database has none. Decided by: David Amid, #1204, confirmed 2026-11-18. | The deletes themselves |
 | `--archive-remote` | off | Upload of old sessions to remote storage | — |
 | `cache.keepalive` (YAML), plugin strategy `none` | off in Go, `5-min-ping` in the plugin | Keep-alive bodies, the held credential, and pings | Manager strategies and per-session overrides can turn it on again |
