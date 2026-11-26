@@ -62,8 +62,8 @@ func (h *Handler) applyMode(r *reqInfo) ([]byte, time.Duration, apply.Trace) {
 	// cached transcript. nil on a non-Anthropic route or without an incoming client; a
 	// component decides for itself what nil means. See prefixask.go.
 	o.PrefixAsk = h.prefixAskerForAPI(r.provider, r.api, r.models)
-	// Whether the keep-alive can ping this thread, so a component that prepares something for a
-	// ping keeps nothing for a thread that will never get one. See keeper.canSweepAtPing.
+	// Whether the sweep can ask its question at a ping of this thread, so a component that prepares
+	// something for a ping keeps nothing for a thread that will never get one. See keeper.canSweepAtPing.
 	o.CanSweepAtPing = func(session, thread string) bool {
 		return h.keeper.canSweepAtPing(r.tn, session, thread, r.provider)
 	}

@@ -622,6 +622,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		CacheTTLMs:     ttl.Milliseconds(), CacheTTLMinimum: ttlKind == CacheLifetimeMinimum,
 		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
+	c.CanKeepAlive = c.CanSweepAtPing // the deprecated field, for a component that still reads it
 	res.Run = pipe.Run(chat, c)
 	start := 0
 	if cacheAware && maxCachedIdx >= 0 {

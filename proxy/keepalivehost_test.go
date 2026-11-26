@@ -673,7 +673,6 @@ func TestCanSweepAtPingFollowsTheKeepAlivePolicy(t *testing.T) {
 // hosted proxy with no recorder is false.
 func TestCanSweepAtPingKeepsItsAnswers(t *testing.T) {
 	on := &Tenancy{ID: "t1", Cache: kaPolicy()}
-	k, _, _ := testKeeper(t, Limits{})
 	for _, tc := range []struct {
 		name     string
 		hosted   bool
@@ -686,14 +685,17 @@ func TestCanSweepAtPingKeepsItsAnswers(t *testing.T) {
 		{"anthropic, hosted, no recorder", true, true, bschemas.Anthropic, false},
 		{"openai, hosted, no recorder", true, true, bschemas.OpenAI, false},
 	} {
-		if tc.noRec {
-			k.h.rec = nil
-		}
-		if tc.hosted {
-			k.h.opts.Tenants = &TenantSource{}
-		}
-		if got := k.canSweepAtPing(on, "sess-1", "", tc.provider); got != tc.want {
-			t.Errorf("%s: canSweepAtPing = %v, want %v", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			k, _, _ := testKeeper(t, Limits{}) // one keeper per case: no order dependence
+			if tc.noRec {
+				k.h.rec = nil
+			}
+			if tc.hosted {
+				k.h.opts.Tenants = &TenantSource{}
+			}
+			if got := k.canSweepAtPing(on, "sess-1", "", tc.provider); got != tc.want {
+				t.Errorf("canSweepAtPing = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
