@@ -62,11 +62,17 @@ func WithDerivedTurns(sessionID string, spans []Span) (out []Span) {
 		calls = append(calls, Call{Order: sp.StartTime, Messages: msgs, ToolDefs: defs})
 	}
 	turns := ReconstructTurns(calls)
-	client := ""
+	// A derived turn takes the client of the span whose call first carried it (FirstSeen is that
+	// span's start time). A turn whose span has no label takes the first label of the session.
+	client, byStart := "", map[string]string{}
 	for _, sp := range spans {
 		if c, _ := sp.ResourceAttr[ResService].(string); c != "" {
-			client = c
-			break
+			if client == "" {
+				client = c
+			}
+			if _, ok := byStart[sp.StartTime]; !ok {
+				byStart[sp.StartTime] = c
+			}
 		}
 	}
 	if len(turns) == 0 {
@@ -79,7 +85,7 @@ func WithDerivedTurns(sessionID string, spans []Span) (out []Span) {
 		if err != nil {
 			continue // FirstSeen is a span start time; skip rather than invent one
 		}
-		res = append(res, DerivedTurnSpan(sessionID, derivedSpanID(sessionID, t.Sequence, t.Root), "", t, start, client))
+		res = append(res, DerivedTurnSpan(sessionID, derivedSpanID(sessionID, t.Sequence, t.Root), "", t, start, clientOf(byStart, t.FirstSeen, client)))
 	}
 	return res
 }
@@ -87,4 +93,11 @@ func WithDerivedTurns(sessionID string, spans []Span) (out []Span) {
 func derivedSpanID(sessionID string, seq int, root string) string {
 	sum := sha256.Sum256([]byte(sessionID + "\x00" + root + "\x00" + strconv.Itoa(seq)))
 	return hex.EncodeToString(sum[:8])
+}
+
+func clientOf(byStart map[string]string, firstSeen, fallback string) string {
+	if c := byStart[firstSeen]; c != "" {
+		return c
+	}
+	return fallback
 }

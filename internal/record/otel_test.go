@@ -355,6 +355,31 @@ func TestSpanResourceNamesTheClient(t *testing.T) {
 	}
 }
 
+// Each derived turn takes the client of the span whose call first carried it.
+func TestDerivedTurnsTakeTheirOwnSpansClient(t *testing.T) {
+	mk := func(client, start, text string) Span {
+		turn := sampleTurn()
+		turn.Client = client
+		sp := turn.ToSpan()
+		sp.StartTime = start
+		in, _ := json.Marshal([]Message{{Role: "user", Parts: []Part{{Type: PartText, Content: text}}}})
+		sp.Attributes[AttrInputMsgs] = string(in)
+		sp.Attributes[AttrToolDefs] = mainToolDefs
+		return sp
+	}
+	out := WithDerivedTurns("s1", []Span{
+		mk("codex", "2026-09-10T07:18:20.000000+00:00", "first prompt"),
+		mk("pi", "2026-09-10T07:19:20.000000+00:00", "second prompt"),
+	})
+	got := map[string]string{}
+	for _, s := range out[2:] {
+		got[s.Attributes[AttrTurnPrompt].(string)], _ = s.ResourceAttr["service.name"].(string)
+	}
+	if got["first prompt"] != "codex" || got["second prompt"] != "pi" {
+		t.Errorf("derived turn clients = %v, want first=codex second=pi", got)
+	}
+}
+
 // WithDerivedTurns labels the derived span with the client of the session's observed spans.
 func TestDerivedTurnsTakeTheObservedClient(t *testing.T) {
 	obs := sampleTurn()

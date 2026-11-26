@@ -129,8 +129,6 @@ const (
 // tool of the set (a plan approval) is "other"; with none, "none". A permission prompt is not in
 // the response (the client raises it after the response ends), so the client's Notification signal
 // sets that value later. A name list that missed a call (a spliced window) can only under-report.
-func PromptOf(toolUseNames []string) string { return PromptOfClient(agent.Client{}, toolUseNames) }
-
 // PromptOfClient is PromptOf for the question tools of cl (agent.Client.AsksHuman, IsQuestionTool).
 func PromptOfClient(cl agent.Client, toolUseNames []string) string {
 	out := PromptNone
@@ -666,7 +664,7 @@ var (
 // <system-reminder>. This reader labels the whole block, so one tag is enough.
 func isInjectedText(cl agent.Client, text string) bool {
 	inj := cl.Injected()
-	return inj.HasTag(text) || inj.HasPrefix(text)
+	return inj.HasTag(text) || inj.HasExactPrefix(text)
 }
 
 // scanOpenState scans a request's entire message/input list, front to back, and APPLIES every
@@ -957,7 +955,7 @@ func classifyWake(entries []bschemas.ChatMessage, cl agent.Client) string {
 			hasToolResult = true
 		case kindText:
 			switch {
-			case teammateMarkerRE.MatchString(b.text):
+			case teammateMarkerRE.MatchString(b.text), cl.Injected().IsTeammate(b.text):
 				hasTeammate = true
 			// <task-notification> (a backgrounded Bash/Monitor finishing) and
 			// <agent-message from="X"> (an async agent or a background Skill finishing —

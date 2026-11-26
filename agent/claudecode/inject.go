@@ -48,6 +48,15 @@ var InjectedPrefixes = []string{
 	"Continue from where you left off.",
 }
 
+// TeammatePrefixes are the InjectedPrefixes that are another agent's message, not the harness's.
+// A wake by one of them reads as a teammate wake. They are also in InjectedPrefixes, so the
+// transcript reconstruction drops them as it always did.
+var TeammatePrefixes = []string{
+	"The coordinator sent a message while you were working",
+	"Another Claude session sent a message while you were working",
+	"A teammate sent a message while you were working",
+}
+
 // WrapperTags enclose injected content. They are STRIPPED rather than used to drop the whole
 // message, because a message may hold genuine human text alongside them -- most commonly a
 // <system-reminder> appended after a real prompt.

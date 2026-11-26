@@ -73,8 +73,9 @@ different text, so only Claude Code has rules for these, and Codex has its own q
   the agent packages makes those packages import `compactionpoint`, and `compactionpoint` import
   them: a cycle. Moving only the file readers would split the env names and file keys from the
   types they fill.
-- **Callers with no request** (`respfacts.Spawns`, `dash` declaration rows, `record` reconstruction)
-  pass the zero `Client`. They get the fallback until a caller threads a `Client` through.
+- **Callers with no request** (`dash` declaration rows, `record` reconstruction) pass the zero
+  `Client`. They get the fallback. `respfacts.Spawns` also passes it, but its caller does have the
+  request's `Client`: the stream readers belong to another change, which threads it through.
 
 ## By host
 

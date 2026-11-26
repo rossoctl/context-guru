@@ -193,5 +193,8 @@ func ClientLabel(label string) string {
 	if label != "" {
 		return label
 	}
-	return agent.Identify(nil).Label
+	return genericClientLabel
 }
+
+// genericClientLabel is the label of agent.Identify with no headers, computed once.
+var genericClientLabel = agent.Identify(nil).Label

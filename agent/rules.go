@@ -10,7 +10,8 @@ import (
 // The rules below name tools and injected text that one client sends. They sit here, and in the
 // client's own package, so library code asks the Client and names no client itself.
 //
-// Fallback, for every rule here: a client with no rule of its own gets Claude Code's rule. This is
+// Fallback, for every rule here: a client with no rule of its own gets Claude Code's rule, except
+// AsksHuman and IsQuestionTool, where it gets the union of Claude Code's and Codex's lists. This is
 // what the code did before the rules moved. It is also what a zero Client gets, which is what a
 // reader with no request at hand (a stored row, an offline transcript) passes. No source shows
 // that Codex, OpenCode, Pi or Bob send different text or tool names, so none has its own rule yet.
@@ -89,6 +90,8 @@ type InjectedText struct {
 	Prefixes []string
 	// Tags are element names (without the angle brackets) that enclose injected content.
 	Tags []string
+	// teammate are the prefixes that are another agent's message.
+	teammate []string
 	// whole matches a message that is injected by its exact shape, not by a prefix.
 	whole func(normalized string) bool
 }
@@ -96,7 +99,7 @@ type InjectedText struct {
 // Injected is the client's injected-text rule. Claude Code: see claudecode.InjectedPrefixes and
 // claudecode.WrapperTags.
 func (c Client) Injected() InjectedText {
-	return InjectedText{Prefixes: claudecode.InjectedPrefixes, Tags: claudecode.WrapperTags, whole: claudecode.IsSkillReloadNotice}
+	return InjectedText{Prefixes: claudecode.InjectedPrefixes, Tags: claudecode.WrapperTags, teammate: claudecode.TeammatePrefixes, whole: claudecode.IsSkillReloadNotice}
 }
 
 // HasPrefix reports whether text starts, after trimming white space, with a prefix marker, or is
@@ -109,6 +112,31 @@ func (t InjectedText) HasPrefix(text string) bool {
 		}
 	}
 	return t.whole != nil && t.whole(n)
+}
+
+// HasExactPrefix is HasPrefix with the case kept. The wake check uses it: a person's prompt that
+// starts with "api error" must not read as injected. The transcript reconstruction uses HasPrefix,
+// which ignores case, because the list was built from its corpus that way. One list, two match modes.
+func (t InjectedText) HasExactPrefix(text string) bool {
+	n := strings.TrimSpace(text)
+	for _, p := range t.Prefixes {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return t.whole != nil && t.whole(n)
+}
+
+// IsTeammate reports whether text starts with another agent's message (a coordinator, a teammate or
+// another session), case kept.
+func (t InjectedText) IsTeammate(text string) bool {
+	n := strings.TrimSpace(text)
+	for _, p := range t.teammate {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasTag reports whether text holds the opening of an enclosing tag anywhere, case-sensitive.
