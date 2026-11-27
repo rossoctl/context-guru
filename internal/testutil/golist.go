@@ -9,7 +9,8 @@ import (
 
 // GoListDeps runs `go list -deps <pkgs>` and returns one import path per line.
 //
-// It removes -json from GOFLAGS. The heavy CI run sets GOFLAGS=-json to time each test. With
+// It removes -json from GOFLAGS. The coverage step in .github/workflows/ci.yaml (line ~116),
+// which heavy-ci.sh dispatches, sets GOFLAGS=-json to time each test. With
 // that flag, `go list` prints JSON instead of import paths, and a dependency guard that reads the
 // output proves nothing. The other GOFLAGS (for example -tags) stay.
 func GoListDeps(t testing.TB, pkgs ...string) string {
