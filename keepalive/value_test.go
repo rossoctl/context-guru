@@ -249,7 +249,9 @@ func TestMixedHeadFollowsTheBilledWrite(t *testing.T) {
 	}{
 		{"mixed write", 0, Usage{CacheWrite: 100, CacheWrite1h: 60}, true, 60},
 		{"all 1h write", 60, Usage{CacheWrite: 100, CacheWrite1h: 100}, true, 0},
-		{"5m write over a head keeps the head", 60, Usage{CacheWrite: 10}, true, 60},
+		{"5m write that reads the head keeps the head", 60, Usage{CacheRead: 60, CacheWrite: 10}, true, 60},
+		{"5m write that does not read the head drops it", 60, Usage{CacheWrite: 70}, true, 0},
+		{"5m write that reads less than the head drops it", 60, Usage{CacheRead: 20, CacheWrite: 50}, true, 0},
 		{"read only", 60, Usage{CacheRead: 100}, true, 60},
 		{"no usage", 60, Usage{}, false, 60},
 	} {

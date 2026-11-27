@@ -117,3 +117,73 @@ func TestFactsOfOneHourIsTheHeadRule(t *testing.T) {
 		}
 	}
 }
+
+// The SQL form of the head size is the Go form: MixedHeadWriteSQL agrees with MixedHead on every shape.
+func TestMixedHeadSQLAgreesWithGo(t *testing.T) {
+	fx := newKAFixture(t)
+	for _, c := range []struct{ write, write1h int64 }{{0, 0}, {100, 0}, {100, 40}, {100, 100}, {100, 150}, {0, 5}} {
+		var got int64
+		q := `SELECT ` + keepalive.MixedHeadWriteSQL("") + ` FROM (SELECT ? AS cache_write, ? AS cache_write_1h)`
+		if err := fx.db.sql.QueryRow(q, c.write, c.write1h).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if want := keepalive.MixedHead(c.write, c.write1h); got != want {
+			t.Errorf("write %d / 1h %d: SQL head = %d, Go head = %d", c.write, c.write1h, got, want)
+		}
+	}
+}
+
+// The live panel prices a mixed entry's miss as the tail while the head lives, and inherits the head the way the
+// keeper does: a later 5-minute write that reads the head keeps it, a later write that does not read it drops it, and a
+// later all-1h write has no separate head.
+func TestLivePanelMissOfAMixedEntryIsTheTail(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	ago := func(sec int64) int64 { return now - sec*1000 }
+	ev := func(ts int64, session string, read, write, write1h int64) *Event {
+		e := kaAgent(ts, session, 0.10)
+		e.Provider, e.Model = "anthropic", "aws/claude-sonnet-5"
+		e.CacheRead, e.CacheWrite, e.CacheWrite1h = read, write, write1h
+		return e
+	}
+	const head, tail = 20_000, 150
+	fx := newKAFixture(t,
+		ev(ago(100), "mixed", 0, head+tail, head),
+		ev(ago(400), "inherit", 0, head+tail, head),
+		ev(ago(100), "inherit", head, tail, 0), // reads the head, rewrites a 5-minute tail
+		ev(ago(400), "dead", 0, head+tail, head),
+		ev(ago(100), "dead", 0, head+tail, 0), // wrote it all again: the head was not read
+		ev(ago(400), "allhour", 0, head+tail, head),
+		ev(ago(100), "allhour", 0, head+tail, head+tail), // a later all-1h write: no separate head
+	)
+	p := modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}
+	got, err := fx.db.KeepAliveLive(Filter{TenantAll: true}, now, 280, 2, func(string) (modelinfo.Price, bool) { return p, true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]KeepAliveLiveRow{}
+	for _, r := range got.Rows {
+		rows[r.SessionID] = r
+	}
+	prefix := int64(head + tail)
+	tailMiss := keepalive.MissUSDHead(p, "aws/claude-sonnet-5", prefix, false, head)
+	for _, c := range []struct {
+		session string
+		want    float64
+	}{
+		{"mixed", tailMiss},
+		{"inherit", keepalive.MissUSDHead(p, "aws/claude-sonnet-5", prefix, false, head)},
+		{"dead", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, false)},
+		{"allhour", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, true)},
+	} {
+		r, ok := rows[c.session]
+		if !ok {
+			t.Fatalf("%s: no live row", c.session)
+		}
+		if r.MissUSD != c.want {
+			t.Errorf("%s: miss_usd = %v, want %v", c.session, r.MissUSD, c.want)
+		}
+	}
+	if want := float64(tail) * (3.75e-6 - 3e-7); !(tailMiss > want*0.999 && tailMiss < want*1.001) {
+		t.Errorf("tail miss = %v, want the tail premium %v", tailMiss, want)
+	}
+}

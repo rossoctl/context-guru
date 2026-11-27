@@ -1329,8 +1329,8 @@ func (k *Keeper) projectedMissUSD(model string, prefix int64, endpoint string, o
 }
 
 // mixedHead is the size of the 1-hour head of the thread's entry after this response (MixedHead of the write).
-// A read-only turn keeps prev, the head of the last write. Pure, and 0 on any doubt (the miss is then priced
-// for the whole prefix, as before).
+// A read-only turn keeps prev, the head of the last write, and so does a response with no usage (it is not
+// pinged). A write all at 5 minutes keeps prev only when it read the head. Pure.
 func mixedHead(prev int64, u Usage, usageOK bool) int64 {
 	if !usageOK || u.CacheWrite <= 0 {
 		return prev
@@ -1341,7 +1341,13 @@ func mixedHead(prev int64, u Usage, usageOK bool) int64 {
 	if u.CacheWrite1h >= u.CacheWrite {
 		return 0 // all at 1 hour: no separate head
 	}
-	return prev // all at 5 minutes: the head was read, not written, and lives on
+	// All at 5 minutes. The head lives on only if this turn read it: the cache is prefix-contiguous, so a live
+	// head is part of the read. Otherwise it expired (or the gateway downgraded the rewrite), and the miss is
+	// priced for the whole prefix.
+	if prev > 0 && u.CacheRead >= prev {
+		return prev
+	}
+	return 0
 }
 
 // headOf is the head size the miss price may use, or 0 for the whole-prefix price. A miss is priced from the

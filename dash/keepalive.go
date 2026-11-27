@@ -1239,19 +1239,20 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		       MAX(r.ts) OVER w2 AS last_ts,
 		       CASE WHEN r.cache_write > 0 THEN ROW_NUMBER() OVER ww END AS wrn,
 		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h,
-		       CASE WHEN r.cache_write > 0 AND r.cache_write_1h > 0 THEN ROW_NUMBER() OVER wh END AS hrn,
-		       CASE WHEN r.cache_write_1h > 0 AND r.cache_write_1h < r.cache_write THEN r.cache_write_1h ELSE 0 END AS head_tok
+		       r.cache_read AS rd,
+		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN ROW_NUMBER() OVER wh END AS hrn,
+		       `+keepalive.MixedHeadWriteSQL("r.")+` AS head_tok
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
 		       ww AS (PARTITION BY r.tenant_id, r.session_id, r.cache_write > 0 ORDER BY r.ts DESC, r.id DESC),
-		       wh AS (PARTITION BY r.tenant_id, r.session_id, r.cache_write > 0 AND r.cache_write_1h > 0 ORDER BY r.ts DESC, r.id DESC),
+		       wh AS (PARTITION BY r.tenant_id, r.session_id, `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` ORDER BY r.ts DESC, r.id DESC),
 		       w2 AS (PARTITION BY r.tenant_id, r.session_id)),
 	t AS (
 		SELECT *, MAX(CASE WHEN wrn = 1 THEN billed_1h ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS last_write_billed_1h,
 		       MAX(CASE WHEN hrn = 1 THEN head_tok ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS head_tokens
 		FROM u)
-		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h, head_tokens
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h, head_tokens, rd, head_tok
 		FROM t WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
 		// The window is computed only for sessions with a request inside the hour (the subquery),
@@ -1267,11 +1268,14 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	for rows.Next() {
 		var r KeepAliveLiveRow
 		var oneHour int
-		var head int64
+		var head, read, own int64
 		var provider string
 		if err := rows.Scan(&r.SessionID, &r.TenantID, &r.Model, &r.Turns, &r.LastTS,
-			&r.Prefix, &provider, &oneHour, &head); err != nil {
+			&r.Prefix, &provider, &oneHour, &head, &read, &own); err != nil {
 			return nil, err
+		}
+		if own == 0 && read < head {
+			head = 0 // the last request neither wrote the head nor read it, so it is not alive (as the keeper's mixedHead)
 		}
 		ttl := modelinfo.CacheLifetime(provider, r.Model, oneHour == 1)
 		r.TTLSeconds = int64(ttl.Seconds())
