@@ -148,7 +148,7 @@ groups:
             cg_metrics_age_seconds is above 120s: whatever this dashboard shows for every
             cg_* series is that old or older, even though Prometheus itself is scraping
             fine. Check cg_metrics_render_seconds for whether a render is stuck (per-tenant
-            store queries are the usual suspect — see CachesplitHistoricalUSD's history)
+            store queries are the usual suspect)
             and `journalctl -u context-guru` for what the render is stuck on.
         labels:
           severity: critical

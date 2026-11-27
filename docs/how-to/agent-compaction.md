@@ -120,7 +120,7 @@ as Bob when its User-Agent starts with `bobshell/`. It counts as Codex when it s
 Bob cannot expand a `<<cg:HASH>>` marker — it has no way to call the expand tool (see
 [Integrations](../integrations.md#use-it-with-an-agent-bob-bobshell)). Any lossy component
 therefore leaves content permanently unrecoverable in a Bob session. Use lossless
-components (`format`, `toon`, `cachesplit`) with Bob, and add lossy ones only where losing
+components (`format`, `toon`) with Bob, and add lossy ones only where losing
 that content is acceptable.
 
 <details markdown="1">

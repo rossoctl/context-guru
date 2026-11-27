@@ -125,8 +125,8 @@ What the library prices:
   cached), `saved_replay_usd` (at the read tier: content in the cached prefix), and the costs, which
   are `saved_usd` minus both. `priced_by` is `accountant`. On a request the library could not price (a
   fallback) it is `none`: the row books no saving, and the read views do not value it.
-- **The envelope.** The proxy changes `tools` and `system` in seven places (toolschema, toolfilter,
-  cachesplit, headttl, the tail mark, expand and adjudicate). It reports each change to the library
+- **The envelope.** The proxy changes `tools` and `system` in six places (toolschema, toolfilter,
+  headttl, the tail mark, expand and adjudicate). It reports each change to the library
   from a diff of the two bodies. An injected tool declaration (expand, adjudicate) is a cost on a
   row of its own.
 - **Keep-alive.** `keepalive_saved_usd` is the library's rescue. The proxy passes each ping's usage,
@@ -142,7 +142,6 @@ What the library prices:
   to the measured filter credit (the net saving has them). The exception is a request whose figure was held out
   (`estimate_held = 1`): the net saving has nothing for it, so the measured credit keeps its dollars. It still counts in the request count, the
   tokens not sent and the first date, so the Realized block and the item list stay.
-- **Cachesplit.** `cachesplit_saved_usd` is the library's split effect.
 - **Head TTL.** The 1h premium and the rescue it earns are on the `headttl` row.
 - **A break nobody owns.** A break that a change left behind when it ended is counted on the
   `ended_change` row. A break the client body has too (a client edit, an expiry) is not counted.
@@ -175,7 +174,7 @@ accountant record (`no_record`) logs no line and stores no reason: it had nothin
   plus `cg_llm_cost_usd`.
 - A fallback request can still book some saving the library did not price: tool deferral's figure (none today), the
   measured filter credit, and minus its own model calls. `fallback_saved` gives it by part (`compaction_usd`,
-  `defer_usd`, `keepalive_usd`, `reorder_usd`, `filter_usd`).
+  `defer_usd`, `keepalive_usd`, `filter_usd`).
 - The hero and its part cards leave fallback requests out on both sides. Each part is the server's part less
   its fallback share, and "You spent" is the spend less `fallback_cost_usd`. A line under the total names the
   requests, the spend and the saving left out. Cost totals on other pages, and the token figures, still
@@ -521,11 +520,10 @@ equal the full totals.
   another: the keep-alive rescue saves a cache write and pays cache reads.
 - **`tokens.saved`, `tokens.caused`.** The sums over every feature.
 - **`tokens.by_feature`.** One entry per compaction component (by its name, for example `mask`,
-  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `cachesplit`, `ttl`
+  `extract`, `tailbreakpoint`, `toolfilter`), plus `keepalive` (the rescue), `ttl`
   (the 1-hour head's premium and rescue), `ended_change` (the break a change left when it
-  ended) and `interaction` (the tokens no operation owns on a rescued request). A feature with no tokens has no entry. `cachesplit` is one entry: the split effect plus
-  any tokens of the `cachesplit` component's own operations. Its dollars are `cachesplit_saved_usd`
-  plus the `cachesplit` component's `saved_usd`. Full read only.
+  ended) and `interaction` (the tokens no operation owns on a rescued request). A feature with no tokens has no entry. Full read only. Cachesplit was removed (#567): the
+  dashboard no longer shows its figures, and old rows no longer count.
 - **`keepalive_ping_tokens`, `keepalive_ping_output_tokens`** (beside `tokens`, next to
   `keepalive_ping_usd`). What the cache strategy's pings paid, in billed tokens by tier. A ping is
   not agent traffic, so this is not in `tokens.caused`. Show it beside the keep-alive rescue, never
@@ -574,7 +572,7 @@ open 5-hour window), the Overview shows every saving in tokens. Dollars do not s
   `keepalive_ping_tokens` is not in the total or in any card's cost. Every screen follows this rule:
   the band's lean read has no ping tokens.
 - **The cards** read `tokens.by_feature`:
-  - Cache: `keepalive` (the rescue), `cachesplit` and `ttl`, with one row each, and the pings line.
+  - Cache: `keepalive` (the rescue) and `ttl`, with one row each, and the pings line.
     A row with no tokens does not show; with no rows, the list does not show. Manual pings have no
     token figure, so they do not show.
   - Tools and skills filter: `toolfilter`. Tool deferral: `tooldefer`. The Tool deferral card says

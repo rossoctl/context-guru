@@ -269,17 +269,6 @@ type Trace struct {
 	// CacheTTL is the prompt-cache lifetime tier this request asked for: "ephemeral_5m",
 	// "ephemeral_1h", or "" when the body carried no cache_control at all. See ttlTier.
 	CacheTTL string
-	// SplitTailHash identifies the VOLATILE half the split moved the breakpoint off. Compared
-	// against the same session's previous request to decide whether the snapshot moved, which
-	// is the turn on which the split is worth anything: with the block unsplit, a moved
-	// snapshot re-creates the whole thing. 0 when nothing split.
-	SplitTailHash uint64
-	// SplitStableTokens is the token count of the half the volatile-tail split moved the
-	// breakpoint onto — the tokens it moved out of the cache-creation tier. 0 when nothing
-	// split. It is the honest numerator for the prefix-cache saving: the alternative,
-	// crediting the request's whole cache_read, over-credits by whatever the agent's OTHER
-	// breakpoints were already matching — 7.5x in dollars on a measured session.
-	SplitStableTokens int
 	// FilteredDeclTokens is what the declaration filter stopped carrying on this request:
 	// the token weight of the `tools` elements it removed under the account's opt-in list.
 	// 0 when nothing was configured, nothing matched, or the prose gate refused.
@@ -569,43 +558,12 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		return res
 	}
 
-	// Volatile-tail split, before anything else touches the body. This is a
-	// body-level concern rather than a component one: the pipeline operates on
-	// `messages`, but the block that needs splitting lives in the top-level `system`
-	// array, which components never see. See prefixsplit.go for what it splits and why.
-	//
-	// Gated on `cachesplit` OR `cacheinject`. The two were coupled only because the split
-	// had to hang off some existing config entry, but they are independent mechanisms
-	// with very different evidence: the split is measured (−34.1% cost, 0% → 96.7% hit in
-	// an isolated A/B), while breakpoint PLACEMENT has never been measured — so #32 drops
-	// cacheinject from the default presets and puts `cachesplit` there instead. Without
-	// its own gate the split would have gone down with cacheinject, turning "disable an
-	// unproven component" into a real cost regression. It stays opt-in rather than
-	// unconditional so `off` remains a true passthrough control for A/B runs.
-	systemSplit := false
-	// shiftAt/shift carry the split's effect on the rest of the body's byte offsets, so
-	// the writeback can reuse the offsets in msgs (taken from the PRE-split body) rather
-	// than re-parse the whole messages array to find each message again — that parse
-	// measured ~3x the cost of the whole-body copy it was meant to save.
-	shiftAt, shift := 0, 0
-	// splitStableTokens is the size of the stable half the split moved the breakpoint onto, recorded
-	// on the dashboard row. The split's saving is the accountant library's split effect. 0 when
-	// nothing split.
-	splitStableTokens := 0
-	// splitTailHash identifies the volatile half, so a later turn can tell whether the
-	// snapshot MOVED. Only on such a turn would the unsplit block have been re-created.
-	var splitTailHash uint64
-	if !bypass && pipe != nil && (pipe.Has("cachesplit") || pipe.Has("cacheinject")) {
-		body, systemSplit, shiftAt, shift, splitStableTokens, splitTailHash =
-			splitVolatileTail(body, provider)
-	}
-
 	// Parsed ONCE and shared: normalize, the count-changed rebuild and the writeback
 	// splice all want the same array, and each Array() call re-walks the whole request.
 	msgs := msgsRaw.Array()
 	norm, slots := normalize(provider, msgs)
 	if len(norm) == 0 {
-		res.Body, res.Changed = body, systemSplit || toolSchema || filteredDecls > 0 || headTTL1h // keep the envelope rewrites even with nothing to compact
+		res.Body, res.Changed = body, toolSchema || filteredDecls > 0 || headTTL1h // keep the envelope rewrites even with nothing to compact
 		tr.FilteredDeclTokens, tr.FilteredDecls, tr.FilteredDeclBytes = filteredTokens, filteredDecls, filteredBytes
 		return res
 	}
@@ -906,14 +864,9 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		CanSweepAtPing:      canSweepAtPingFor(sweepAtPingOf(o), sessionID, tr.Thread.ID),
 		CacheTTLMs:          ttlMs,
 		CacheTTLMinimum:     ttlMinimum,
-		// Set BEFORE the run, so cachesplit's own report is right at the source and every
-		// consumer of it agrees. Amending the report afterwards fixed the dashboard and
-		// left /stats and the Prometheus component counters still saying "skipped",
-		// because the pipeline emits each report to them as it goes.
-		SystemSplit:   systemSplit,
-		ToolSchema:    toolSchema,
-		FilteredDecls: filteredDecls,
-		Restored:      restore.restored(),
+		ToolSchema:          toolSchema,
+		FilteredDecls:       filteredDecls,
+		Restored:            restore.restored(),
 	}
 	c.CanKeepAlive = c.CanSweepAtPing // the deprecated field, for a component that still reads it
 	c.PrevRatioTokens, c.PrevRatioBytes = prevRatioThread(st, sessionID, tr.Thread.ID)
@@ -932,7 +885,6 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	if bps.Total() > 0 {
 		tr.CacheTTL = ttlTier(provider, body)
 	}
-	tr.SplitStableTokens, tr.SplitTailHash = splitStableTokens, splitTailHash
 	tr.FilteredDeclTokens, tr.FilteredDecls, tr.FilteredDeclBytes = filteredTokens, filteredDecls, filteredBytes
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
@@ -956,7 +908,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// cost. Without this line the only visible symptom is a small saving.
 		lg.Debug("cg.cache_boundary", "cache_aware", cacheAware, "max_cached_idx", maxCachedIdx,
 			"messages", len(norm), "attempted_tokens", tr.AttemptedTokens,
-			"existing_breakpoints", c.ExistingBreakpoints, "system_split", systemSplit,
+			"existing_breakpoints", c.ExistingBreakpoints,
 			"bypassed", bypass, "ctx_window", o.Window,
 			"cache_mode", o.CacheMode, "tracked", o.Tracker != nil)
 		dumpToolOutputs(lg, norm)
@@ -1021,20 +973,16 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		} else {
 			giveUp()
 		}
-		if !ok && systemSplit {
-			res.Body, res.Changed = body, true // keep the split even when the rebuild declined
-			return res
-		}
-		res.Body, res.Changed = nb, ok || systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
+		res.Body, res.Changed = nb, ok || toolSchema || filteredDecls > 0 || headTTL1h
 		if ok {
 			res = finishRestore(res, restore, string(provider), body, msgs, mode == components.ModeObserve)
 		}
 		return res
 	}
 
-	// The envelope rewrites (tail split, tool-schema strip) already rewrote `body`, so
+	// The envelope rewrites (tool-schema strip) already rewrote `body`, so
 	// the result must be forwarded even if no component changes a message.
-	changed := systemSplit || toolSchema || filteredDecls > 0 || headTTL1h
+	changed := toolSchema || filteredDecls > 0 || headTTL1h
 	// Each changed message's new bytes, keyed by its index in the body's messages array,
 	// spliced into the body in ONE pass after the loop (spliceMessages). The loop used to
 	// sjson.SetBytes into the whole body per changed message, which copies the entire
@@ -1176,7 +1124,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// rather than splice at a guessed offset.
 	out := body
 	if len(edits) > 0 {
-		nb, ok := spliceMessages(body, msgs, edits, shiftAt, shift)
+		nb, ok := spliceMessages(body, msgs, edits)
 		if !ok {
 			res.Body = body
 			giveUp()
@@ -2752,7 +2700,7 @@ func wireGroups(slots []slot) []int {
 // unknown", and it is relative to whatever json the Result was parsed from. So the span
 // is never trusted on its word: the body's own bytes at that span must equal the
 // message's Raw, or we decline (ok=false) and the caller forwards the original request.
-func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte, shiftAt, shift int) ([]byte, bool) {
+func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte) ([]byte, bool) {
 	idx := slices.Sorted(maps.Keys(edits))
 	out := make([]byte, 0, len(body))
 	prev := 0
@@ -2762,9 +2710,6 @@ func spliceMessages(body []byte, msgs []gjson.Result, edits map[int][]byte, shif
 		}
 		m := msgs[i]
 		start := m.Index
-		if start >= shiftAt {
-			start += shift // the volatile-tail split moved this message
-		}
 		end := start + len(m.Raw)
 		// start <= prev also rejects an unset (0) Index and any overlap, so the spans are
 		// strictly increasing and disjoint — the messages array is walked once.

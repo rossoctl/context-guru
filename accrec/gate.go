@@ -40,11 +40,11 @@ const (
 
 // EnvelopeComponents are the operators that change the request envelope (tools, system, cache marks) and may have no
 // pipeline row: the proxy reports them from a body diff (accwire/envelope.go). expand, adjudicate and expand_restore
-// are never pipeline components; headttl is a host option; toolschema, toolfilter and cachesplit are components whose
-// row can be absent when the rewrite ran from an equivalent gate (cacheinject runs the split too).
+// are never pipeline components; headttl is a host option; toolschema and toolfilter are components whose
+// row can be absent when the rewrite ran from an equivalent gate.
 var EnvelopeComponents = map[string]bool{
 	accwire.OpExpand: true, accwire.OpAdjudicate: true, accwire.OpHeadTTL: true, accwire.OpExpandRestore: true,
-	"toolschema": true, "toolfilter": true, "cachesplit": true,
+	"toolschema": true, "toolfilter": true,
 	accwire.OpTailBreakpoint: true, accwire.OpToolDefer: true,
 }
 

@@ -174,7 +174,7 @@ func TestTrailingReminderSurvivesCountChange(t *testing.T) {
 	msgs = append(msgs, map[string]any{"role": "user", "content": "what failed?"})
 	body, _ := json.Marshal(map[string]any{"model": "claude-x", "messages": msgs})
 
-	const yaml = "pipeline: [summarize, extract_llm, cachesplit]\n" +
+	const yaml = "pipeline: [summarize, extract_llm]\n" +
 		"components:\n" +
 		"  summarize: {keep_last: 3, start_from_message: 0, min_tokens: 1, trigger: {min_request_frac: 0}}\n" +
 		"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, " +

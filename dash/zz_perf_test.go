@@ -97,8 +97,8 @@ func TestOverviewStaysFastOnALargeWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	comps := time.Since(t1)
-	t.Logf("%d rows: Overview %v (provider cache $%.2f, ours $%.2f), Components %v",
-		n, overview, o.CacheSavedUSD, o.CachesplitSavedUSD, comps)
+	t.Logf("%d rows: Overview %v (provider cache $%.2f), Components %v",
+		n, overview, o.CacheSavedUSD, comps)
 	// RELATIVE, because an absolute millisecond bound is a machine and a -race build away
 	// from being either meaningless or flaky: under -race SQLite is ~4x slower here. The
 	// invariant that matters is that the two queries THIS change added are not the expensive

@@ -66,8 +66,6 @@ func TestSnapshotValueNumbers(t *testing.T) {
 	for _, d := range o.Denominators {
 		t.Logf("denominator %-14s %.3f%%  (%d / %d)", d.Key, d.Percent, d.Numerator, d.Denominator)
 	}
-	t.Logf("split: acted %d  moved %d  credited %d  credited+moved %d  $%.4f",
-		o.SplitRequests, o.SplitTailMoved, o.SplitCredited, o.SplitCreditedMoved, o.CachesplitSavedUSD)
 	t.Logf("prefix_change: after-mutation %d req $%.2f · all %d req $%.2f",
 		o.PrefixChangeRequests, o.PrefixChangeCost, o.PrefixChangeRequestsAll, o.PrefixChangeCostAll)
 	t.Logf("net saved $%.4f  total saved $%.4f  billed $%.2f", o.NetSavedUSD, o.TotalSavedUSD, o.CostUSD)
@@ -111,9 +109,6 @@ func TestSnapshotValueNumbers(t *testing.T) {
 	if ceiling := o.BaselineCostUSD - o.CostUSD; withEst > ceiling*1.02 {
 		t.Errorf("component dollars sum to $%.4f, above the request-level saving of $%.4f — "+
 			"the read-time valuation is inflating", withEst, ceiling)
-	}
-	if o.SplitCredited < o.SplitCreditedMoved {
-		t.Errorf("credited-and-moved (%d) exceeds credited (%d)", o.SplitCreditedMoved, o.SplitCredited)
 	}
 }
 

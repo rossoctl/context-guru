@@ -141,7 +141,7 @@ def window(o: dict, days: int) -> tuple[int, int]:
 
 def stats(api: Api, since: int, until: int | None = None, session: str | None = None) -> dict | None:
     # The FULL endpoint, not lean=1. #502 made lean a bounded path by moving the
-    # pre-instrumentation cachesplit credit and the declaration-filter credit out of it for
+    # declaration-filter credit out of it for
     # anything wider than a single session — every call this plugin makes is a day/week/month
     # window, never a session, so lean would quietly understate total_saved_usd here. These
     # commands run once per invocation, not on every status-line render, so the full handler's
@@ -164,7 +164,7 @@ def levers(st: dict) -> list[tuple[str, float]]:
     doing, not ours), so with it the rows could not add up to the headline.
     """
     w = {x["key"]: x["delta_usd"] for x in (st.get("waterfall") or [])}
-    rows = [("Compaction", -w.get("compaction", 0.0)), ("Cache split", -w.get("cachesplit_saved", 0.0)),
+    rows = [("Compaction", -w.get("compaction", 0.0)),
             ("Keep-alive pings", -w.get("keepalive_saved", 0.0) - w.get("keepalive_ping", 0.0)),
             ("Tool filtering", -w.get("decl_filter_saved", 0.0)),
             ("Tool deferral", -w.get("defer_net", 0.0)),
@@ -568,7 +568,7 @@ FIVE_HOURS_MS = 5 * 3600 * 1000
 # provider does not publish how the 5-hour limit weights them (docs/dashboard.md, "Savings in tokens").
 TIERS = (("cache_write_5m", "wr"), ("cache_write_1h", "wr1h"), ("cache_read", "rd"), ("input", "in"))
 # `tokens.by_feature` keys that are cache effects, in display order, after the compaction components (by name).
-EFFECTS = {"cachesplit": "Cache split", "keepalive": "Keep-alive rescue", "ttl": "1-hour cache", "ended_change": "Ended change"}
+EFFECTS = {"keepalive": "Keep-alive rescue", "ttl": "1-hour cache", "ended_change": "Ended change"}
 
 
 def _statusline():

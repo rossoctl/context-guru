@@ -3774,14 +3774,13 @@ def default_strategy(table: dict | None = None) -> str:
 # a Terminal-Bench task on Claude Code CLI traffic and does not describe interactive use (#263).
 # The measurements that do:
 # with cachesplit OFF a real session's first request still read 45,805 tokens from cache and only
-# 8,499 more moved when it was on (apply/prefixsplit_test.go), and its production credit over the
+# 8,499 more moved when it was on, and its production credit over the
 # measured window was $0.03 against keep-alive's +$125. So the component that earns the install is
 # keep-alive, and the pipeline default should not be quietly editing anybody's requests to add 18%
 # to what their client already caches for free.
 #
-# `cache` remains a valid preset in config/config.go, reachable via /plugin configure's raw form —
-# only the default changed, and the picker no longer offers `cache` as one of its named options
-# (it isn't part of the "carry less" ladder; it doesn't drop or trim anything). Choosing a preset
+# `cache` was removed from config/config.go (#567); an old config that names it loads with a
+# warning and runs no component. Choosing a preset
 # such as `medium`/`high`/`xhigh` IS opting into context editing, which is fine - it is a
 # deliberate step rather than a default.
 #

@@ -297,7 +297,7 @@ func AdaptKnobAllowed(comp, key string, v int) bool {
 
 // AdaptMerge returns the pipeline to store: cands in their new order, and every other
 // component of cur kept right after the candidate it followed in cur (walking back past
-// candidates the new order drops), so cachesplit stays after the offloaders and an LLM
+// candidates the new order drops), so an LLM
 // component stays where its owner put it relative to what remains.
 func AdaptMerge(cur, cands []string) []string {
 	keep := map[string]bool{}

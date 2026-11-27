@@ -11,7 +11,7 @@ infrastructure the components sit on.
 | Package | Role |
 |---|---|
 | `components/` | `Component`/`Reformat`/`Offload` interfaces, `Report`, `Ctx`, the `Pipeline`, the registry |
-| `components/reformat/` | lossless components: `format`, `toon`, `searchfold`, `cacheinject`, `cachesplit` |
+| `components/reformat/` | lossless components: `format`, `toon`, `searchfold`, `cacheinject` |
 | `components/offload/` | lossy-reversible components: `skeleton`, `dedup`, `collapse`, `failed_run`, `cmdfilter`, `extract`, `extract_llm`, `smartcrush`, `mask`, `summarize` |
 | `components/dsl/` | declarative text-filter engine (wrapped by `cmdfilter`) |
 | `components/all/` | blank-imports every component so `init()` registrations run |
@@ -81,7 +81,7 @@ YAML block as bytes), `NeedsModel` (declares it calls a cheap LLM — the model 
 yet wired).
 
 - **Reformat** = lossless repack (`format` re-encodes JSON compact; `cacheinject` adds
-  `cache_control`; `cachesplit` is a marker enabling a body-level split). No information leaves the
+  `cache_control`). No information leaves the
   wire, so nothing is stashed.
 - **Offload** = lossy-but-reversible. It drops bytes and returns the `cache_keys` under which
   it stashed the originals. If it shrinks the request but returns no keys, the pipeline treats
@@ -532,7 +532,7 @@ Unknown keys are rejected.
 
 ```yaml
 preset: conservative
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
+pipeline: [format, dedup, failed_run, cmdfilter]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
   smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }

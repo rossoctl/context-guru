@@ -66,7 +66,7 @@ func TestDashboardSavingEqualsTheSavingsCounters(t *testing.T) {
 			continue
 		}
 		priced++
-		dashTotal += (e.BaselineCostUSD - e.CostUSD) + e.KeepAliveSavedUSD + e.CachesplitSavedUSD + e.EstimatedSavedUSD
+		dashTotal += (e.BaselineCostUSD - e.CostUSD) + e.KeepAliveSavedUSD + e.EstimatedSavedUSD
 	}
 	if priced == 0 {
 		t.Fatal("no request was priced by the accountant: the test proves nothing")

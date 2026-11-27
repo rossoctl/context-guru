@@ -170,31 +170,11 @@ type Overview struct {
 	// deep history — a diagnostic, and the API keeps it for that. The dashboard does not
 	// show it as a saving, because it is not ours.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	// CachesplitSavedUSD is the cache saving that IS ours: summed over requests where the
-	// volatile-tail split ran, the snapshot had MOVED since the session's previous request,
-	// and the provider then read at least the stable half from cache while writing less than
-	// it. Priced against a cache miss. A floor. The accountant library's split effect.
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// DeferNetUSD is tool deferral's NET saving, OURS and MEASURED: the sum of the per-request
 	// `defer_net_usd`: the library's one deferral figure (the definitions left out, the tier re-rate, less the
 	// names list and the search turns, #1441). A request with no accountant figure books none. It is in TotalSavedUSD
 	// and is its own lever, and the library's figure is not also in the baseline. 0 for an account that never deferred.
 	DeferNetUSD float64 `json:"defer_net_usd"`
-	// The three counts behind that figure, so a small number is explicable rather than
-	// mysterious. This mattered: when the credit was gated on the session's FIRST REQUEST the
-	// figure read ~$0 on real traffic, and the reason was visible only in these counts —
-	// 1,105 of 1,127 session starts had no cache to hit, because the previous session's had
-	// expired. That gate is gone (the split is priced by the accountant library now); the
-	// counts stay, because the replacement gate also fires rarely and for its own reason.
-	//
-	// SplitRequests is requests the split ran on; SplitTailMoved is the subset whose snapshot
-	// had moved (the turns it can earn on); SplitCredited is the subset that also read the
-	// stable half from cache instead of re-creating it (the turns it did earn on).
-	// CachesplitHistorical is what the split earned on requests that predate the
-	// instrumentation for it, valued at read time and never stored. nil when it could not be
-	// priced — absent, not zero. See DB.CachesplitHistoricalUSD.
-	CachesplitHistorical *CachesplitHistorical `json:"cachesplit_historical,omitempty"`
-
 	// The idle keep-alive's ledger. Four numbers, and they belong together: a mechanism that
 	// spends the caller's money to avoid a larger charge is only defensible if both sides are
 	// on the same page, and either alone is misleading. KeepAlivePings is how many pings were
@@ -220,27 +200,6 @@ type Overview struct {
 	// and expected to be — see apply/headttl.go.
 	CacheWrite1h int64 `json:"cache_write_1h"`
 
-	// ONE definition of "moved", used here and at the write site (Recorder.ObserveSplit): the
-	// tail moved if this request's tail hash differs from the most recent PREVIOUS tail hash
-	// recorded for the session, and a session with no previously recorded tail counts as moved
-	// because there was nothing there to match. The read-time recomputation used to compare
-	// against the previous ROW's hash including 0 — and 0 means "nothing was split on that
-	// turn", not "the tail was zero" — while the write-time map only ever remembered non-zero
-	// hashes. The two therefore counted different things and the page showed 844 acted / 314
-	// moved / 3 credited, which reads as broken arithmetic. Under the single definition the
-	// same corpus is 844 / 16 / 3.
-	//
-	// SplitCreditedMoved is the reconciliation: the credited requests that the recomputation
-	// also calls moved. It is 0 on the stored corpus, and that is a finding rather than a
-	// rounding difference — the write-time map is process-scoped, so a proxy restart or a
-	// session-eviction made three mid-session turns look like first sightings and they were
-	// credited for a snapshot that had not moved. The write path no longer does that (a
-	// session we have SEEN but whose tail we have forgotten is not a move), so from here on
-	// the two counts agree by construction. The stored $0.03 is left exactly as recorded.
-	SplitRequests      int64 `json:"split_requests"`
-	SplitTailMoved     int64 `json:"split_tail_moved"`
-	SplitCredited      int64 `json:"split_credited"`
-	SplitCreditedMoved int64 `json:"split_credited_moved"`
 	// The declarations the filter stopped sending, MEASURED and OURS: `requests.filtered_decl_tokens`,
 	// written by the filter on every request it acted on, priced at the tier those requests paid.
 	// It is in TotalSavedUSD. It was in NO total before, and that was a bug rather than a policy —
@@ -553,24 +512,12 @@ type SafetyCost struct {
 	Description      string  `json:"description"`
 }
 
-// splitMoved is the ONE definition of "the volatile tail moved", in SQL. It matches
-// Recorder.ObserveSplit's in-process test: differs from the last non-zero tail hash recorded
-// for this session's THREAD (#423: another thread's tail is another cache entry's), and a thread
-// with no earlier non-zero hash counts as moved. Written once
-// and referenced twice so the count and its reconciliation cannot drift apart.
 // withKeepAlive returns f with ping rows included. A named helper rather than an inline field
 // set, so the two places that legitimately see pings are greppable.
 func withKeepAlive(f Filter) Filter {
 	f.WithKeepAlive = true
 	return f
 }
-
-const splitMoved = `r.split_stable_tokens > 0 AND r.split_tail_hash <> 0
-	AND r.split_tail_hash <> COALESCE((
-		SELECT p.split_tail_hash FROM requests p
-		WHERE p.tenant_id = r.tenant_id AND p.session_id = r.session_id AND p.thread_id = r.thread_id AND p.split_tail_hash <> 0
-		  AND (p.ts < r.ts OR (p.ts = r.ts AND p.id < r.id))
-		ORDER BY p.ts DESC, p.id DESC LIMIT 1), r.split_tail_hash + 1)`
 
 // afterOurMutation is the ONE definition of "the session's previous turn mutated something",
 // in SQL, shared by the prefix-change cost and its request count so the two cannot drift.
@@ -614,29 +561,6 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
 		COALESCE(SUM(r.cache_saved_usd),0),
-		-- Our own cache saving. A plain SUM of a per-request column, because all three
-		-- conditions that qualify a request were settled at write time where the model's
-		-- rates and the session's history were both in hand (the accountant library).
-		-- The predecessor did the component test here as a correlated EXISTS over
-		-- request_components, which was both slower and wrong: it credited every cache read
-		-- in a session, including the later turns that would have hit anyway.
-		COALESCE(SUM(r.cachesplit_saved_usd),0),
-		-- The counts behind that dollar figure. tail_moved is derived rather than stored: a
-		-- request's tail moved if the previous request in the same session carried a different
-		-- one. Recomputable from the table on purpose, so the money can be audited without
-		-- trusting the write path.
-		COALESCE(SUM(CASE WHEN r.split_stable_tokens > 0 THEN 1 ELSE 0 END),0),
-		-- "Moved", one definition, shared with the write path. The previous hash is the last
-		-- NON-ZERO one in the session: 0 means nothing was split on that turn, so comparing
-		-- against it counted every first split as a move and then again on the next turn.
-		-- No previous non-zero hash at all still counts as moved -- there was nothing to
-		-- match -- which is why the sentinel is this row's own hash plus one rather than 0.
-		COALESCE(SUM(CASE WHEN `+splitMoved+` THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN r.cachesplit_saved_usd > 0 THEN 1 ELSE 0 END),0),
-		-- The reconciliation: credited AND moved under that one definition. A gap means the
-		-- write-time map had forgotten a session it had in fact seen (restart, eviction) and
-		-- read a first sighting where there was none. See Overview.SplitCreditedMoved.
-		COALESCE(SUM(CASE WHEN r.cachesplit_saved_usd > 0 AND `+splitMoved+` THEN 1 ELSE 0 END),0),
 		-- The prefix-change diagnostic (Overview.PrefixChangeCost): what the turns cost where
 		-- the cache missed on a changed prefix AND the session's previous turn had mutated
 		-- something. Derived, never stored, and never netted off — see the field's comment for
@@ -711,8 +635,6 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 		&o.AttemptedTokens, &o.FrozenTokens, &o.SavedGrossAttempted, &o.AttemptedRequests,
 		&o.FreshInput, &o.CacheRead, &o.CacheWrite,
 		&o.OutputTokens, &o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
-		&o.CachesplitSavedUSD, &o.SplitRequests, &o.SplitTailMoved, &o.SplitCredited,
-		&o.SplitCreditedMoved,
 		&o.PrefixChangeCost, &o.PrefixChangeRequests, &o.PrefixChangeCostAll, &o.PrefixChangeRequestsAll,
 		&cgAvg, &upAvg, &o.Expands, &o.ExpandTokens, &o.Reverts, &restoredTok, &o.Passthroughs,
 		&o.SafetyCost.CGLatencyMsTotal,
@@ -874,7 +796,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 			`SELECT COUNT(*) FROM requests r WHERE `+rcond, rargs...).Scan(&invalidConfigRecent)
 	})
 	// The replay ceiling's raw form, corrected below by the inflation query once both are in —
-	// see the comment above `splitMoved` usage earlier in this function for the ceiling's own
+	// see the replay ceiling's own
 	// derivation, and see the correlated-vs-window-function tradeoff explained where this query
 	// used to live: NOT rewritten as a window function despite looking like the same shape
 	// CompactionResets was fixed for. Tried it, verified against live production data:
@@ -1171,7 +1093,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 	// half, and the entries the pings refreshed) all come from the ONE formula SavingsTotals
 	// also uses, so the dashboard and /stats can never disagree about what they mean.
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
-		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
+		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
 		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	// The total exists before the priced additions land, so a deployment with no rates — or a
 	// caller that does not attach the credit — reads a total that is short rather than one that
@@ -1223,7 +1145,7 @@ func (d *DB) Overview(f Filter) (*Overview, error) {
 // correlated form, byte-identical result. `COUNT(*) OVER (PARTITION BY ...)` with no ORDER
 // BY/frame, paired with a separately-ordered ROW_NUMBER() in the same CTE, is specifically
 // what this driver executes badly, independent of how much data it reads — see
-// dash/cachehistory.go's CachesplitHistoricalUSD for the same shape, scoped the same way, and
+// the replay ceiling query for the same shape, scoped the same way, and
 // compactionResetsQuery below for a sibling window query that stayed fast once scoped, so this
 // is not blanket advice against window functions. Unscoped (the whole-deployment view) keeps
 // the window form: nothing above measured that case, and #492 is not about it.
@@ -1392,18 +1314,6 @@ func (o *Overview) waterfall() []WaterfallStep {
 		{Key: "net_saved", Label: "Net savings", DeltaUSD: o.NetSavedUSD, Total: true,
 			Description: "Baseline minus net. Negative means context-guru cost more than it saved " +
 				"in this window, which is a real outcome the dashboard will not hide."},
-		{Key: "cachesplit_saved", Label: "Prefix-cache savings", DeltaUSD: -o.CachesplitSavedUSD,
-			Description: "A SECOND saving, outside the walk above, and the only cache figure we " +
-				"claim. Claude Code ends its big system block with a live environment snapshot, so " +
-				"the block's own breakpoint hashes the churn and the prefix never matches across " +
-				"sessions; cachesplit moves the breakpoint onto the stable half. Counted only where " +
-				"the component rewrote the prefix, the provider then read it from cache, AND the " +
-				"snapshot had MOVED since this session's previous request — the turn that would " +
-				"otherwise have missed. A turn whose snapshot did not move would have hit whether " +
-				"or not we ever split, so it is not ours. Priced against a cache " +
-				"MISS, which is what the counterfactual actually is: those tokens carry " +
-				"cache_control, so a miss bills them as creation at 1.25x fresh, not at 1x. A " +
-				"floor — a stable prefix serves a whole session and this counts one request of it."},
 		{Key: "keepalive_ping", Label: "Keep-alive pings", DeltaUSD: o.KeepAlivePingUSD,
 			Description: "What the idle keep-alive SPENT: one minimal request per idle span, " +
 				"re-reading a session's cached prefix so the provider refreshes its 5-minute " +

@@ -72,7 +72,7 @@ func rendered(t *testing.T, raw string) string {
 // marked prefix, so it reads the entry turn 1 wrote. Live, turn 2 read 29,939 tokens where it had
 // read 26,885 and written 3,200 without the step.
 func TestTheNextTurnCarriesTheWholePrefixTheTailBreakpointMarked(t *testing.T) {
-	const cfg = "preset: cache\n"
+	const cfg = "preset: conservative\n"
 	in1, in2 := betasTurn(t, "1"), betasTurn(t, "2")
 	if gjson.GetBytes(in1, "messages.1.role").String() != "system" ||
 		!gjson.GetBytes(in1, "messages.0.content.1.cache_control").IsObject() {
@@ -105,7 +105,7 @@ func TestTheNextTurnCarriesTheWholePrefixTheTailBreakpointMarked(t *testing.T) {
 // so the A/B control arm stays a passthrough.
 func TestTheTailBreakpointIsOffWhenTheConfigSaysSo(t *testing.T) {
 	in := betasTurn(t, "1")
-	for _, cfg := range []string{"preset: cache\ncache:\n  tail_breakpoint: false\n", "preset: off\n"} {
+	for _, cfg := range []string{"preset: conservative\ncache:\n  tail_breakpoint: false\n", "preset: off\n"} {
 		if out := tailRun(t, cfg, in); string(out) != string(in) {
 			t.Fatalf("%q: the body changed:\n%.300s", cfg, gjson.GetBytes(out, "messages.1").Raw)
 		}

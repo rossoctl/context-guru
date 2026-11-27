@@ -34,12 +34,12 @@ const TILE_INFO = {
   'total-saved-usd': {
     what: 'The money context-guru avoided in total, after paying for itself. This is the '
       + 'one number to look at if you only look at one.',
-    how: 'Four savings added together. First, what your preset avoided: what this traffic '
+    how: 'Three savings added together. First, what your preset avoided: what this traffic '
       + 'would have cost had we removed nothing, minus what it actually cost, minus what '
-      + "context-guru's own model calls cost. Second, what the prefix-cache split avoided. "
-      + 'Third, your cache strategy\u2019s NET \u2014 what it avoided minus what its pings cost. '
-      + 'Fourth, the tool, MCP and skill declarations the removal filter stopped sending, counted '
-      + 'from what the filter itself recorded on each request it acted on. The four touch '
+      + "context-guru's own model calls cost. "
+      + 'Second, your cache strategy\u2019s NET \u2014 what it avoided minus what its pings cost. '
+      + 'Third, the tool, MCP and skill declarations the removal filter stopped sending, counted '
+      + 'from what the filter itself recorded on each request it acted on. The three touch '
       + 'different tokens, so adding them does not count anything twice.',
     catch: 'It can be NEGATIVE, and it is shown in red when it is \u2014 that means context-guru '
       + 'spent more on its own model calls than it saved you. Nothing here is hidden when '
@@ -195,9 +195,6 @@ const TILE_INFO = {
       + 'made to trim your prompts.',
     how: 'Baseline cost − actual cost − our own LLM cost. The baseline is what the very '
       + 'same requests would have been billed if context-guru had removed nothing.',
-    catch: 'It differs from "Total dollars avoided" only by the prefix-cache saving, which '
-      + 'is usually cents. Two large dollar figures side by side look like a contradiction '
-      + 'and are not — one just includes a second, smaller mechanism.',
   },
   'saved-unique': {
     what: 'Content that genuinely never reached the model provider — counted once, no '
@@ -436,18 +433,6 @@ const TILE_INFO = {
       + 'the front of the cached prompt; that charge is inside the billed cost and is not '
       + 'subtracted from this figure.',
   },
-  'cachesplit-saved': {
-    what: 'Money saved by splitting the prompt so that the stable part stays cached when '
-      + 'the volatile part changes.',
-    how: 'Summed over the requests where the split ran, the snapshot had actually MOVED '
-      + 'since that session’s previous request, and the provider then read at least the '
-      + 'stable half from its cache instead of re-creating it. Valued against what a cache '
-      + 'miss would have cost.',
-    catch: 'A floor, and a small one on this traffic. The credit can only fire when the '
-      + 'environment snapshot moves mid-session, and on real Claude Code traffic it '
-      + 'does not — it is captured once per process. The mechanism works; there is simply '
-      + 'almost nothing for it to earn on here.',
-  },
 
   // ── addressable spend ─────────────────────────────────────────────────────
   addressable: {
@@ -477,50 +462,6 @@ const TILE_INFO = {
     catch: 'They disagree by however much prices moved during the window, and a gap over 5% '
       + 'is flagged in red. A gap is a RATE CHANGE, not an arithmetic error — showing both '
       + 'is the only way to tell those apart.',
-  },
-
-  // ── prefix split ──────────────────────────────────────────────────────────
-  'split-requests': {
-    what: 'Requests where the prompt actually got split into a stable and a volatile half.',
-    how: 'Counted from the requests where the split component changed something.',
-    catch: 'This component MOVES tokens out of the expensive cache-creation tier rather than '
-      + 'removing any, so on the Preset steps tab it correctly reports zero "acted" (which counts '
-      + 'removed tokens) alongside a large "structural" count. That is not a broken component '
-      + 'and not a component doing nothing — the structural column is its real fire count. '
-      + 'Separately, zero HERE with a large run count means these prompts carry no volatile '
-      + 'tail to separate, which is a fact about the prompt rather than a fault.',
-  },
-  'split-tail-moved': {
-    what: 'Of those, the turns where the volatile part had actually changed — the only '
-      + 'turns the split can possibly earn anything on.',
-    how: "This request's tail fingerprint differs from the last one recorded for the "
-      + 'session. A session with none recorded yet counts as moved.',
-  },
-  'split-credited': {
-    what: 'Of those, the turns where the provider really did serve the stable half from '
-      + 'cache instead of re-creating it — the turns it did earn on.',
-    how: 'The request read at least as many tokens from cache as the stable half it moved.',
-  },
-  'split-credited-moved': {
-    what: 'A cross-check that the credited turns and the moved turns agree.',
-    how: 'The credited turns that a fresh recount also calls moved.',
-    catch: 'A gap means old rows are still in the window: a proxy restart used to make a '
-      + 'mid-session turn look like a first sighting, and it was credited for a snapshot '
-      + 'that had not moved. That is fixed at the write path, so a gap is history, not a '
-      + 'live miscount.',
-  },
-  'split-hit-rate': {
-    what: 'How often, when the snapshot moved, the split actually kept the stable half out '
-      + 'of the expensive cache-creation tier.',
-    how: 'Credited turns ÷ moved-snapshot turns.',
-  },
-  'split-historical': {
-    what: 'What the split earned before we started recording it per request.',
-    how: 'Valued when this page loads, from the session starts in that earlier period. It '
-      + 'is never stored.',
-    catch: 'Kept as its own tile so it is never confused with the measured figure. It reads '
-      + '"—" rather than "$0" when those models had no known rates, because an unpriced '
-      + 'number must not look like a zero.',
   },
 
   // ── billed tokens ─────────────────────────────────────────────────────────
@@ -972,15 +913,14 @@ function renderSavedLedger(o, ka, partial) {
   const saving = (tid, v, flow, ran) => sub ? tokens(tid.replace(/-usd$/, '-tok'), flow, ran) : money(tid, v, ran);
   const grid = el('div', { class: 'ov-cards' });
 
-  // Cache: the automatic pings (and the cache reorder), plus your manual pings.
+  // Cache: the automatic pings, plus your manual pings.
   const cacheUSD = parts.cache + parts.manual;
-  const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || parts.reorder !== 0 || (mp.count || 0) > 0;
+  const cacheRan = o.keepalive_pings > 0 || !!o.keepalive_net_usd || (mp.count || 0) > 0;
   const tokRow = (label, flow) => hasTokens(flow) ? el('li', {}, el('span', { text: label }), el('strong', { text: tokenLine(flow, compact) })) : null;
   const pings = sub ? pingLine(o, compact) : '';
   const subRows = sub ? [
     tokRow('Keep-alive rescue', ft.keepalive),
     pings ? el('li', { 'data-testid': 'saved-cache-pings' }, el('span', { text: PING_LABEL }), el('strong', { text: pings })) : null,
-    tokRow('Cache reorder', ft.cachesplit),
     tokRow('1-hour cache', ft.ttl),
   ].filter(Boolean) : [];
   // No empty list when every row is empty.
@@ -988,8 +928,7 @@ function renderSavedLedger(o, ka, partial) {
     : el('ul', { class: 'ov-split', 'data-testid': 'saved-cache-split' },
     el('li', {}, el('span', { text: 'Automatic pings' }), el('strong', { text: usd(parts.keepalive) })),
     el('li', { 'data-testid': 'saved-manual' }, el('span', { text: 'Manual pings' + (mp.count ? ' (' + num(mp.count) + ')' : '') + (mp.count ? ' · estimate' : '') }),
-      el('strong', { text: usd(parts.manual) })),
-    parts.reorder !== 0 ? el('li', {}, el('span', { text: 'Cache reorder' }), el('strong', { text: usd(parts.reorder) })) : null);
+      el('strong', { text: usd(parts.manual) })));
   // The strategy's name, as the plugin calls it, beside "Cache" the way the preset's name sits beside
   // "Preset". Read from the signed-in account's own settings; not guessed for a manager looking at
   // everyone, nor for a local proxy, whose page does not see the plugin's strategy file.
@@ -1018,7 +957,7 @@ function renderSavedLedger(o, ka, partial) {
         'requests that read a warm cache' + (w.manual ? ' · up to ' + num(w.manual) + ' more from manual pings that found it warm' : ''), '') : null,
     ],
     infoButton('cache', 'Cache', sub ? [
-      'Tokens saved: the cache writes context-guru prevented, by kind, and "cost" for what that made you pay. It is the keep-alive rescue, the cache reorder and the 1-hour cache together.',
+      'Tokens saved: the cache writes context-guru prevented, by kind, and "cost" for what that made you pay. It is the keep-alive rescue and the 1-hour cache together.',
       'Keep-alive rescue: requests that read a cache a ping kept warm, in place of writing it again. Its cost is the cache reads.',
       'Keep-alive pings: what the pings themselves paid. A ping is not your agent\'s traffic, so it is on its own line and not in the total.',
       'This is the most it could have saved. Another session can keep the same cache warm. The Cache strategy tab says if it pays off.',

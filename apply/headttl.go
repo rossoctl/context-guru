@@ -140,9 +140,8 @@ func upgradeHeadTTL(body []byte, provider bschemas.ModelProvider, minBytes int) 
 // `system` blocks up to and including the last one carrying a breakpoint.
 //
 // Counted over the JSON of the tool declarations and the TEXT of the system blocks, which
-// is what the provider hashes and bills. It is an estimate in the same sense
-// splitVolatileTail's stableTokens is — BPE over our own reconstruction rather than the
-// provider's block-granular accounting — so it is used for measuring f and never for
+// is what the provider hashes and bills. It is an estimate: BPE over our own
+// reconstruction rather than the provider's block-granular accounting. So it is used for measuring f and never for
 // pricing a request. The billed figure comes from `usage`.
 //
 // Only called when the upgrade actually fires, which is off by default and gated on size:

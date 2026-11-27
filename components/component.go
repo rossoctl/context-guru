@@ -805,16 +805,9 @@ type Ctx struct {
 	// Mode is the operating mode this request runs under. Components that behave
 	// differently off the request path read this rather than inferring anything.
 	Mode Mode
-	// SystemSplit says the host already split a volatile tail out of the top-level
-	// `system` array for this request. Only `cachesplit` reads it, and only to report
-	// itself honestly: the split is body-level work that happens in the host (components
-	// never see the system array), so without this the marker component reported Skipped
-	// on the very requests where the mechanism had just run — and everything downstream
-	// derives "did it do anything" from that.
-	SystemSplit bool
 	// ToolSchema says the host already stripped JSON-Schema annotation keywords from
 	// the top-level `tools` array for this request. Only `toolschema` reads it, and
-	// only to report itself honestly — same arrangement, same reason, as SystemSplit.
+	// only to report itself honestly.
 	ToolSchema bool
 	// FilteredDecls is how many tool/MCP declarations the host dropped from `tools` on
 	// this request under the account's opt-in removal list. Set for the same reason

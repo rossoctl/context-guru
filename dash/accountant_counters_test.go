@@ -66,7 +66,7 @@ func TestAccountantFigureEqualsTheSavingsCountersAcrossALine(t *testing.T) {
 			}
 		}
 	}
-	dashboard := f.DeltaUSD + f.KeepAliveSavedUSD + f.SplitUSD + f.TTLUSD
+	dashboard := f.DeltaUSD + f.KeepAliveSavedUSD + f.TTLUSD
 	if dashboard == 0 || math.Abs(dashboard-counters) > 1e-9 {
 		t.Fatalf("dashboard %v, counters %v", dashboard, counters)
 	}

@@ -215,7 +215,7 @@ const declFilterInBaseline = `(r.estimate_held = 0 AND EXISTS (SELECT 1 FROM req
 		WHERE c.request_id = r.id AND c.component = 'toolfilter' AND c.priced_by = '` + PricedByAccountant + `'))`
 
 // declFilterSavingsQuery builds the SQL and args DeclFilterSavings executes — pulled out for
-// #502's EXPLAIN-plan test, same reason as cachesplitHistoricalQuery (dash/cachehistory.go).
+// #502's EXPLAIN-plan test.
 // Bounded by `cond` directly: a session's own index for session scope, the ts range for a
 // time window, neither for `since=0` — which is why OverviewLean never calls this unscoped.
 func declFilterSavingsQuery(f Filter) (string, []any) {
@@ -277,8 +277,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 }
 
 // DeclFilterSavingsByTenant is DeclFilterSavings for every tenant since a given time, in one
-// pass instead of one call per tenant — see CachesplitHistoricalUSDByTenant
-// (dash/cachehistory.go) for why a query per tenant re-pays the same table scan N times over.
+// pass instead of one call per tenant, which would re-pay the same table scan N times over.
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,

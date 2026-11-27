@@ -11,7 +11,7 @@ import (
 )
 
 func newFactsRecorder() *Recorder {
-	return &Recorder{lastSeen: map[string]int64{}, lastTail: map[string]uint64{}, seenModel: map[string]bool{}}
+	return &Recorder{lastSeen: map[string]int64{}, seenModel: map[string]bool{}}
 }
 
 // causeMiss runs one cache-missing request through the same calls proxy/dashcapture.go makes and
@@ -26,7 +26,7 @@ func causeMiss(r *Recorder, session, threadID string, ts int64, f PrefixFacts) *
 // as it did before #496. usageTurn below covers the known-previous-prompt shape.
 func causeMissWith(r *Recorder, session, threadID string, ts int64, f PrefixFacts, read int64, status int) *Event {
 	f.TS = ts
-	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
+	seenSession, seenModel, since := r.ObserveThread("t1", session, threadID, f.Model, ts)
 	cause, modelGap, known, _, prevPrompt, _ := r.ObservePrefix(session, threadID, "", false, f, status >= 200 && status < 300)
 	if known {
 		since = modelGap
@@ -377,7 +377,7 @@ func TestAFailureAfterASuccessKeepsTheModelSeen(t *testing.T) {
 func usageTurn(r *Recorder, session, threadID string, ts int64, f PrefixFacts, fresh, read, write int64) *Event {
 	f.TS = ts
 	f.PromptTokens = fresh + read + write
-	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, f.Model, ts, 0)
+	seenSession, seenModel, since := r.ObserveThread("t1", session, threadID, f.Model, ts)
 	cause, modelGap, known, _, prevPrompt, _ := r.ObservePrefix(session, threadID, "", false, f, true)
 	if known {
 		since = modelGap
@@ -435,7 +435,7 @@ func ttlTurn(r *Recorder, ts int64, f PrefixFacts, read, write, write1h int64) *
 	ev := &Event{TS: ts, CacheRead: read, CacheWrite: write, CacheWrite1h: write1h}
 	derived := FactsOf(ev)
 	f.TS, f.OneHour, f.NoWrite, f.PromptTokens = ts, derived.OneHour, derived.NoWrite, derived.PromptTokens
-	seenSession, seenModel, since, _ := r.ObserveThread("t1", "s", "th", f.Model, ts, 0)
+	seenSession, seenModel, since := r.ObserveThread("t1", "s", "th", f.Model, ts)
 	cause, modelGap, known, _, prevPrompt, prevOneHour := r.ObservePrefix("s", "th", "", false, f, true)
 	if known {
 		since = modelGap
@@ -597,7 +597,7 @@ func TestSeededTierAfterARestart(t *testing.T) {
 			r := restartedWith(t, c.rows...)
 			// A restart forgets which models were seen, so the first request on a model reads
 			// cold_start. Another thread marks the model seen, as live traffic does within seconds.
-			r.ObserveThread("t1", "other", "", "m", t0+60_000, 0)
+			r.ObserveThread("t1", "other", "", "m", t0+60_000)
 			last := t0
 			if c.readOnly {
 				ttlTurn(r, t0+2*60_000, base(), 50_000, 0, 0)

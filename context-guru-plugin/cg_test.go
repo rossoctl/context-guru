@@ -665,12 +665,12 @@ func cgWaterfall(total float64, deltas map[string]float64) map[string]any {
 
 // Sign convention of /api/stats (dash/overview.go, waterfall()): a saving is a NEGATIVE delta_usd, a
 // cost is positive. #582: keepalive_saved was read as if positive, so a saving showed as a loss.
-// The lever rows must add up to total_saved_usd, which is compaction + cache split + the keep-alive's
+// The lever rows must add up to total_saved_usd, which is compaction + the keep-alive's
 // net + tool filtering - own spend, and does NOT include self_removed (the account's own doing).
 // A proxy older than #584 still sends that row; a current one does not, and the rows add up either way.
 func TestInsightsLeversAddUpToTotalSaved(t *testing.T) {
-	st := cgWaterfall(80+20+(120-60)+15-6, map[string]float64{
-		"baseline": 1000, "compaction": -80, "cachesplit_saved": -20, "keepalive_saved": -120,
+	st := cgWaterfall(80+(120-60)+15-6, map[string]float64{
+		"baseline": 1000, "compaction": -80, "keepalive_saved": -120,
 		"keepalive_ping": 60, "decl_filter_saved": -15, "self_removed": -30, "cg_llm": 6,
 	})
 	rows := cgLevers(t, st)
@@ -681,7 +681,7 @@ func TestInsightsLeversAddUpToTotalSaved(t *testing.T) {
 	if want := st["total_saved_usd"].(float64); sum < want-0.005 || sum > want+0.005 {
 		t.Errorf("rows add up to %.2f, total_saved is %.2f: %v", sum, want, rows)
 	}
-	for name, want := range map[string]float64{"Compaction": 80, "Cache split": 20, "Keep-alive pings": 60,
+	for name, want := range map[string]float64{"Compaction": 80, "Keep-alive pings": 60,
 		"Tool filtering": 15, "Context Guru's own model spend": -6} {
 		if got := rows[name]; got < want-0.005 || got > want+0.005 {
 			t.Errorf("%s = %.2f, want %.2f", name, got, want)

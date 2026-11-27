@@ -754,12 +754,12 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	// prefix (a rewind, an edit, a fork): by the mass it shares it is not a cold start.
 	observe := c.rec.ObserveThread
 	if c.hasInherit {
-		observe = func(tenant, session, threadID, model string, now int64, tail uint64) (bool, bool, int64, bool) {
-			return c.rec.ObserveThreadFrom(tenant, session, threadID, c.inherits, model, now, tail)
+		observe = func(tenant, session, threadID, model string, now int64) (bool, bool, int64) {
+			return c.rec.ObserveThreadFrom(tenant, session, threadID, c.inherits, model, now)
 		}
 	}
-	seenSession, seenModel, sinceMs, tailChanged := observe(
-		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS, e.SplitTailHash)
+	seenSession, seenModel, sinceMs := observe(
+		e.TenantID, e.SessionID, e.ThreadID, e.Model, e.TS)
 	// The restart grace's clock must also learn this session's ALIAS id (#766): a seesaw-id
 	// tenant (the session header on some turns, not others) refreshes the ONE provider entry
 	// under either id, so a later headerless turn — whose own derived id IS the alias — must
@@ -828,7 +828,6 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 		e.PrefixCompared = known
 		e.AttributeCache(seenSession, seenModel, age, c.attributionTTLMs(e.Provider, e.Model, prevOneHour), cause, prevPromptTokens)
 	})
-	e.SessionFirst, e.TailChanged = !seenSession, tailChanged
 	// The raw gap and what the keep-alive did during it, recorded on the row. The keep-alive's
 	// saving is the accountant library's rescue, not computed from these.
 	e.SinceLastMs = sinceMs

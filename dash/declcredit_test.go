@@ -109,24 +109,13 @@ func TestDeclCreditFlagsAnUnpricedModel(t *testing.T) {
 
 // TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions is the API-handler-level version
 // of TestSetDeclCreditPutsEachHalfInTheRightTotal: it caught a real bug that the field-level
-// test could not, because o.Waterfall is built INSIDE Overview(), before CachesplitHistoricalUSD
-// and SetDeclCredit ever run — so the waterfall's own "total_saved" bar baked in a total short by
-// both additions, silently disagreeing with the headline tile two inches above it (which reads
+// test could not, because o.Waterfall is built INSIDE Overview(), before SetDeclCredit ever runs — so the waterfall's own "total_saved" bar baked in a total short by
+// the addition, silently disagreeing with the headline tile two inches above it (which reads
 // o.TotalSavedUSD directly, not through the waterfall). Exercises the real GET /api/stats
 // handler, not the field-level helpers, because that staleness is invisible to anything that
 // calls Overview()/SetDeclCredit directly without going through the handler's full sequence.
 func TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions(t *testing.T) {
 	db := seedCredit(t, 1000)
-	// A pre-instrumentation cachesplit-historical row, same shape as
-	// TestHistoricalSplitValuationIsReadOnlyAndConservative: one row teaching the model's stable
-	// half, one session-first row that qualifies for the historical credit.
-	teach := mkEvent(9000, "s-hist", "aws/claude-sonnet-5", 100, 100)
-	teach.TenantID, teach.CacheRead, teach.CacheWrite, teach.SplitStableTokens = "t1", 54_304, 1_000, 5_697
-	qualifies := mkEvent(9100, "s-new-hist", "aws/claude-sonnet-5", 100, 100)
-	qualifies.TenantID, qualifies.CacheRead, qualifies.CacheWrite = "t1", 54_304, 1_000
-	if err := db.insertBatch([]*Event{teach, qualifies}); err != nil {
-		t.Fatal(err)
-	}
 	// A Recorder built directly around the already-seeded db, not via NewRecorder: that
 	// constructor starts background goroutines (the writer, the dedupe backfill) against
 	// whatever DB it opens, and swapping rec.db out from under them afterward is a data race

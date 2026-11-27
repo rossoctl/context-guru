@@ -353,7 +353,7 @@ Single-file `grep -n`, prose, already-grouped output.
 coding agent re-sends its whole tool catalogue on every call. On captured Claude Code traffic
 that is **31 tools, 168 descriptions, 131 KB of JSON** — 40% of the median request body.
 
-Like [`cachesplit`](caching.md#cachesplit) it is a **marker**: `tools` is a top-level body field the
+It is a **marker**: `tools` is a top-level body field the
 pipeline never sees (components operate on `messages`), so the rewrite is body-level and runs
 in `apply`, gated on this name being present. The transform itself is
 `reformat.CompactToolSchemas`.
@@ -513,13 +513,13 @@ of code, and it is not in the component.
 None. It is a name in the pipeline:
 
 ```yaml
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit, toolschema]
+pipeline: [format, dedup, failed_run, cmdfilter, toolschema]
 ```
 
 It reports `Skipped` on any request where the strip did not run or found nothing, via
 `Ctx.ToolSchema` — set in `apply` *before* the pipeline runs, so `/stats`, the Prometheus
-component counters and the dashboard all agree (the mistake [`cachesplit`](caching.md#cachesplit)
-records).
+component counters and the dashboard all agree (the mistake `cachesplit`, now removed,
+made).
 
 ---
 
@@ -583,7 +583,7 @@ into a correctness bug, so it is **opt-in, per account, per name, and never infe
 ### How to configure it
 
 ```yaml
-pipeline: [format, dedup, extract, cachesplit, toolfilter]
+pipeline: [format, dedup, extract, toolfilter]
 components:
   toolfilter:
     remove: [CronCreate, CronDelete, CronList, Workflow, mcp__playwright]

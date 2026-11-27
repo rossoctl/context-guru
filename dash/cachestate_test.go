@@ -135,20 +135,20 @@ func TestHeldUntilStartsFromTheLastRealRefresh(t *testing.T) {
 func TestCacheStateSplitsTheSessionsMoney(t *testing.T) {
 	a, rec := newTestAPI(t, Options{})
 	now := time.Now().UnixMilli()
-	row := func(ago int64, thread string, cost, base, cgllm, split float64) *Event {
+	row := func(ago int64, thread string, cost, base, cgllm float64) *Event {
 		e := mkEvent(now-ago, "s1", "aws/claude-sonnet-5", 1000, 800)
 		e.Status, e.ThreadID, e.CacheRead = 200, thread, 5000
-		e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CachesplitSavedUSD = cost, base, cgllm, split
+		e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD = cost, base, cgllm
 		return e
 	}
-	ping := row(30_000, "", 0.05, 0, 0, 0)
+	ping := row(30_000, "", 0.05, 0, 0)
 	ping.KeepAlive = true
-	noTouch := row(10_000, "a:fresh", 0.20, 0.30, 0, 0)
+	noTouch := row(10_000, "a:fresh", 0.20, 0.30, 0)
 	noTouch.CacheRead, noTouch.CacheWrite = 0, 0
 	seed(t, rec,
-		row(100_000, "", 1.00, 9.00, 0.10, 0.50), ping, // main: y = 9.50, x = 9.50 - 1.00 - 0.10 - 0.05
-		row(60_000, "a:X", 0.40, 1.00, 0, 0),
-		row(50_000, "p:side", 0.10, 0.10, 0, 0), noTouch)
+		row(100_000, "", 1.00, 9.00, 0.10), ping, // main: y = 9.00, x = 9.00 - 1.00 - 0.10 - 0.05
+		row(60_000, "a:X", 0.40, 1.00, 0),
+		row(50_000, "p:side", 0.10, 0.10, 0), noTouch)
 
 	_, body := get(t, a, "/api/cachestate?session=s1", "")
 	money, _ := body["money"].(map[string]any)
@@ -166,7 +166,7 @@ func TestCacheStateSplitsTheSessionsMoney(t *testing.T) {
 			t.Errorf("%s: saved %v exceeds its baseline %v", name, m["saved_usd"], m["baseline_usd"])
 		}
 	}
-	check("main", map[string]float64{"saved_usd": 8.35, "baseline_usd": 9.50, "threads": 1})
+	check("main", map[string]float64{"saved_usd": 7.85, "baseline_usd": 9.00, "threads": 1})
 	check("others", map[string]float64{"saved_usd": 0.70, "baseline_usd": 1.40, "threads": 3})
 	// The listed cache entries are unchanged: the no-touch thread is money only.
 	for _, th := range body["threads"].([]any) {
@@ -176,7 +176,7 @@ func TestCacheStateSplitsTheSessionsMoney(t *testing.T) {
 	}
 	// A session whose only rows touched no cache still reports its money on the `none` answer.
 	seed(t, rec, func() *Event {
-		e := row(1_000, "", 0.10, 0.20, 0, 0)
+		e := row(1_000, "", 0.10, 0.20, 0)
 		e.SessionID, e.CacheRead, e.CacheWrite = "s2", 0, 0
 		return e
 	}())

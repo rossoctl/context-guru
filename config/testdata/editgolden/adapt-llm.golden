@@ -2,9 +2,9 @@ components:
   dedup:
     min_tokens: 100
 pipeline:
-  - cachesplit
+  - cacheinject
   - dedup
   - format
   - extract_llm
   - toon
-PIPELINE cachesplit,dedup,format,extract_llm,toon
+PIPELINE cacheinject,dedup,format,extract_llm,toon

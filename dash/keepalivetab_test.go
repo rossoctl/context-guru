@@ -277,7 +277,7 @@ func TestTotalSavedTakesTheKeepAliveNetNotItsGross(t *testing.T) {
 	}
 	// The credit row adds its own compaction saving too, so compare against that baseline plus
 	// the net rather than against the base alone.
-	if b.TotalSavedUSD >= b.NetSavedUSD+b.CachesplitSavedUSD {
+	if b.TotalSavedUSD >= b.NetSavedUSD {
 		t.Errorf("total_saved %.4f did not fall by the keep-alive's loss (%.4f); the gross was "+
 			"used, which presents a saving without the spend that bought it",
 			b.TotalSavedUSD, b.KeepAliveNetUSD)

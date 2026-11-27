@@ -12,8 +12,8 @@ says what each one does at three storage levels: off, metadata only, and everyth
 - **The rule:** a component or feature works from **metadata** only. A feature that needs
   **content** is a rare, deliberate exception. Many users turn storage off, and a feature that
   quietly needs content then works worse, with nothing reported.
-- **14 of 24 components need no stored content to do their job:**
-  - 5 keep nothing.
+- **13 of 23 components need no stored content to do their job:**
+  - 4 keep nothing.
   - 2 keep only hashes or names: `cacheinject` keeps hashes, and `toolfilter` keeps tool names when
     tool deferral is on (the `ultrahigh` preset, or the Bob plugin's `bob-ultrahigh`).
   - 1 keeps only a speed-up cache.
@@ -84,7 +84,7 @@ The results:
 
 - **A rewrite that depends only on the message needs no storage.** Context Guru runs it again every
   turn and gets the same bytes. Only CPU time is repeated. These components work this way:
-  `format`, `toon`, `searchfold`, `textclean`, `toolfilter`, `cachesplit`, `cmdfilter`, `linecap`,
+  `format`, `toon`, `searchfold`, `textclean`, `toolfilter`, `cmdfilter`, `linecap`,
   `dedup`, `smartcrush` and `extract`.
 - **Storage is necessary only when Context Guru cannot rebuild the rewrite from the message:**
   - **Model-written text** (`extract_llm`, `summarize`, `cache_aware_summarizer`, `agentdiet`). A

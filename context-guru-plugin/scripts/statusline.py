@@ -1502,7 +1502,7 @@ def _saved_tokens(win: dict | None) -> tuple[float, float] | None:
     * read = `replay_tokens` (`saved_gross - saved_unique`): the same removals, absent again from
       every later turn that re-sends the transcript. Billed as a cache READ on a hit.
 
-    These are the proxy's own token estimates, compaction only: cachesplit, keep-alive and
+    These are the proxy's own token estimates, compaction only: keep-alive and
     declaration-filter savings are dollar figures with no token count, so they are not here.
     None when the fields are absent; a window with nothing saved reads (0, 0)."""
     write, read = _num(win, "saved_unique"), _num(win, "replay_tokens")

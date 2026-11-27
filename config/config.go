@@ -498,8 +498,11 @@ func Validate(b []byte) error {
 //
 // coref cut tool outputs that no later turn referred to. It was in no preset, and
 // extract_llm_sweep replaced it. The index it used stays in internal/coref.
+//
+// cachesplit split the git snapshot out of the system prompt. Claude Code 2.1.328 to 2.1.332 no
+// longer puts the snapshot there, so it did nothing (#567).
 var removedComponents = map[string]bool{
-	"coref": true,
+	"coref": true, "cachesplit": true,
 }
 
 // dropRemoved removes removedComponents from the pipeline and their config blocks.
@@ -526,9 +529,11 @@ func (c *Config) dropRemoved() {
 // deletes by a heuristic (age, size, a guess about the future). A config that names one loads,
 // logs a warning and runs no preset components: an explicit pipeline in the same document still
 // runs as written. The components stay and are reachable by a hand-written `pipeline:`.
+//
+// cache named cachesplit alone, which was removed (#567).
 var retiredPresets = map[string]bool{
 	"balanced": true, "aggressive": true, "coding": true, "mcp": true, "agent": true,
-	"general": true, "agentdiet": true, "codesmart": true, "codesafe": true,
+	"general": true, "agentdiet": true, "codesmart": true, "codesafe": true, "cache": true,
 }
 
 // applyPreset fills an empty Pipeline (and, for rich presets, default component
@@ -611,10 +616,10 @@ func (c *Config) applyPreset() error {
 //
 // CURRENT, OBSOLETE AND RETIRED PRESETS (#1345). Six presets are current: off, conservative,
 // medium, high, xhigh, ultrahigh. They are the effort ladder the plugin preset pickers offer.
-// Six more are OBSOLETE and stay in this map so old configs load: cache, safe, summarize,
+// Five more are OBSOLETE and stay in this map so old configs load: safe, summarize,
 // summarizer1509, house, housellm. They run exactly as before.
 //
-// Nine presets are RETIRED (see retiredPresets). Each named a heuristic offloader. They are not in
+// Ten presets are RETIRED (see retiredPresets). Each named a heuristic offloader. They are not in
 // this map. A config that names one loads, logs a warning and runs no preset components. Published
 // numbers for codesmart and codesafe are reproducible only on release v0.7.10 or older.
 //
@@ -623,36 +628,9 @@ func (c *Config) applyPreset() error {
 // wording below that calls an obsolete preset "recommended" is historical.
 var presets = map[string][]string{
 	"off": {}, // passthrough: no components (baseline / A-B control)
-	// OBSOLETE (#1345): cache, safe, summarize, summarizer1509, house, housellm.
-	// cache: the volatile-tail split and NOTHING else. This is the preset a stranger
-	// evaluating context-guru on their own Claude Code sessions is pointed at, and the
-	// reason it exists is that it can be verified by reading this one line: no content is
-	// dropped, no `<<cg:HASH>>` marker is written, no expand tool is injected into the
-	// request, and no model is called. The loudest objection to putting a proxy on the
-	// wire — "you are editing my agent's context" — does not apply to it.
-	//
-	// It is also the best-evidenced single component in the repo, and the evidence is NARROW:
-	// -34.1% mean cost is one Terminal-Bench task (fix-code-vulnerability) measured three times
-	// on Claude Code CLI traffic at Sonnet 5 rates, and 0% -> 96.7% prefix-cache hit is the
-	// two-session A/B beside it (docs/components/caching.md). The figure does not transfer:
-	// Agent-SDK traffic carries no volatile-tail marker, so cachesplit acted=0 on all of it
-	// (docs/results/terminal-bench-comparison.md), and this service's own interactive window
-	// credited the split $0.03 (docs/results/measured-2026-08.md). The funnel still leads with
-	// the cache because its claim is verifiable by reading one line, not because it is the
-	// biggest lever.
-	//
-	// Deliberately NOT `safe` (format -> textclean -> searchfold -> cachesplit): those are
-	// lossless in meaning but they still rewrite the JSON, so "we do not touch your
-	// context" stops being literally true and a reviewer has to take four components on
-	// trust instead of reading one. TestCachePresetIsCachesplitAlone holds it to that, and
-	// the lossless-folds rule exempts it for the same reason.
-	//
-	// Anthropic-family only, and the docs say so: cachesplit is a no-op on implicit
-	// prefix-cache backends (vLLM, llm-d) — see apply/prefixsplit.go.
-	// OBSOLETE (#1345).
-	"cache": {"cachesplit"},
+	// OBSOLETE (#1345): safe, summarize, summarizer1509, house, housellm.
 	// OBSOLETE (#1345): safe.
-	"safe": {"format", "textclean", "searchfold", "cachesplit"},
+	"safe": {"format", "textclean", "searchfold"},
 	// OBSOLETE (#1345): summarize, summarizer1509.
 	// summarize restructures the whole transcript (changes the message count) — run
 	// it alone so no other component's in-place edits race apply's rebuild.
@@ -690,7 +668,7 @@ var presets = map[string][]string{
 	// on the same 1,795-request corpus, house vs house+linecap: +152,615 tokens, +0.797 pp,
 	// 14.5% of what was reachable. Real, and an order of magnitude short of "the largest
 	// deterministic lever", which is what the gross number reads as.
-	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	"housellm": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "toolfilter"},
 
 	// conservative/medium/high/xhigh: the effort ladder the Claude Code plugin's preset picker
 	// offers (context-guru-plugin/skills/preset-picker), replacing the old off/cache/house/
@@ -713,15 +691,15 @@ var presets = map[string][]string{
 	// pipeline-order guard (proxy/cache_aware_pipeline_order_integration_test.go). It is placed
 	// first so its stale-prefix guard and the stored request see the same messages; keep_last_turns
 	// (default 10) leaves the tail the other components act on untouched regardless of order.
-	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"},
-	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
-	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"},
+	"conservative": {"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "toolfilter"},
+	"medium":       {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "toolfilter"},
+	"high":         {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "toolfilter"},
 	// The sweep is back in xhigh (#404 PR C), with no production shadow phase first: the false-drop
 	// signals (SweepDropCounters, the dashboard) are the watch on it.
-	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	"xhigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "toolfilter"},
 	// ultrahigh = xhigh + tool deferral (#485): the same pipeline, with toolfilter's `defer: auto`.
 	// Opt-in only. Every other preset, xhigh included, leaves deferral off. See package tooldefer.
-	"ultrahigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "cachesplit", "toolfilter"},
+	"ultrahigh": {"cache_aware_summarizer", "format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract_llm_sweep", "extract", "toolfilter"},
 }
 
 // presetConfigs carries FULL config docs for presets whose behavior depends on tuned
@@ -860,7 +838,7 @@ components:
 	// per idle span per thread, and what bounds it is the keep-alive's own schedule.
 	//
 	// `shadow` is deliberately NOT set here or in any preset: it is the measurement switch.
-	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	"housellm": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, toolfilter]
 components:
   extract:
     min_tokens: 400
@@ -890,14 +868,14 @@ components:
 	// it adds no upstream spend and no latency to anyone else's agent on a shared box.
 	// tenant.DefaultConfigYAML is this pipeline with `mode: sync`, and a test there asserts
 	// the two cannot drift apart. The obsolete name `house` is copied from this entry by init().
-	"conservative": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
+	"conservative": `pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, toolfilter]
 components:
   extract:
     min_tokens: 400`,
 	// medium's summarizer runs in the conservative mode (#417): cache_state: pre_expiry holds the
 	// summary in reserve and uses it only on a cold return. Everything else comes from the
 	// component's defaults (min_request_frac 0.9, the money-gated refresh of #415).
-	"medium": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+	"medium": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, toolfilter]
 components:
   cache_aware_summarizer:
     model:
@@ -925,7 +903,7 @@ components:
 	// high's summarizer is cache_aware_summarizer at its default cache_state (`any`): summarize at
 	// 0.9 of the window and use the summary on the next request (#417). Only model.source is
 	// carried over, as for xhigh below.
-	"high": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, cachesplit, toolfilter]
+	"high": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract, toolfilter]
 components:
   cache_aware_summarizer:
     model:
@@ -950,7 +928,7 @@ components:
       min_request_tokens: 3000`,
 	// xhigh = high + extract_llm_sweep. Same summarizer settings as high: model.source: incoming,
 	// trigger at the component's own defaults (min_request_frac 0.9, cache_state any).
-	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	"xhigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, toolfilter]
 components:
   cache_aware_summarizer:
     model:
@@ -977,7 +955,7 @@ components:
     min_tokens: 1000`,
 	// ultrahigh = xhigh + toolfilter `defer: auto` (#485). Everything else is xhigh's block, copied
 	// verbatim; TestUltrahighIsXhighPlusDeferral pins that the two cannot drift.
-	"ultrahigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, cachesplit, toolfilter]
+	"ultrahigh": `pipeline: [cache_aware_summarizer, format, dedup, toon, cmdfilter, searchfold, textclean, extract_llm, extract_llm_sweep, extract, toolfilter]
 components:
   cache_aware_summarizer:
     model:

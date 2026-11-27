@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// cachePipeline is a cachesplit-only pipeline: the shape a cache-focused deployment runs, and the
-// one whose promise is that nothing else touches the request.
-const cachePipeline = "pipeline: [cachesplit]\n"
+// cachePipeline is the default preset, which is what the funnel puts in front of a stranger's client.
+const cachePipeline = "preset: conservative\n"
 
 // attributionText is the block Claude Code prepends as the first system block.
 const attributionText = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -23,8 +22,8 @@ func jsonStr(v string) string {
 	return string(b)
 }
 
-// volatileSystemText is a system block over cachesplit's per-family floor (modelinfo.MinCacheableO200k) that
-// ends in the environment snapshot the split exists to move out of the hashed prefix.
+// volatileSystemText is a large system block that ends in an environment snapshot, as old Claude Code
+// versions sent it.
 func volatileSystemText() string {
 	return strings.Repeat("You are a coding agent. Follow the instructions carefully.\n", 120) +
 		"\nCurrent branch: main\nRecent commits:\n0898367954 SWE-bench\n"

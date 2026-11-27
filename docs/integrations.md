@@ -131,7 +131,7 @@ How the gateway routes Bob's traffic:
     response text, so it has no way to call `context_guru_expand`. A `<<cg:HASH>>` marker
     is a dead end in a Bob session: whatever a lossy component removed is gone for good.
 
-    Use the lossless components — `format`, `toon`, `cachesplit` — which need no
+    Use the lossless components — `format`, `toon` — which need no
     cheap-model config and leave the transcript intact. Verified end to end: with
     `[format, toon]` Bob authenticates and answers correctly through the proxy with its
     model call reduced. Add a lossy component (`mask`, `dedup`, `cmdfilter`, `extract`)

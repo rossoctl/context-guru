@@ -104,9 +104,7 @@ guard that turned each candidate away, which separates three different situation
   Cross-check `cmdfilter_selector_misses`, which ranks the output shapes no filter claimed
   and tells you which filter to [write next](../components/dsl.md).
 
-`top_passthrough` lists components that ran and changed nothing. `cachesplit` always lands
-there because its win is a provider-side cache hit, invisible to content-token counts; a
-content offloader that never fires is a candidate to drop from your pipeline.
+`top_passthrough` lists components that ran and changed nothing. A content offloader that never fires is a candidate to drop from your pipeline.
 
 `top_discarded` is different and always worth investigating: the component mutated the
 request and the writeback layer threw the change away before it reached the wire. Check the

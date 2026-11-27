@@ -72,7 +72,7 @@ func TestAdaptApplyHostedStoresOnlyTheOfferedChange(t *testing.T) {
 		t.Fatalf("apply = %d %s", w.Code, w.Body)
 	}
 	form, doc := storedForm(t, f, jar)
-	if got := strings.Join(form.Pipeline, ","); got != "format,searchfold,textclean,extract,cachesplit,toolfilter" {
+	if got := strings.Join(form.Pipeline, ","); got != "format,searchfold,textclean,extract,toolfilter" {
 		t.Fatalf("pipeline %s", got)
 	}
 	if v, _ := form.Components["extract"]["min_tokens"].(int); v != 800 || strings.Contains(doc, "keepalive") {
@@ -90,7 +90,7 @@ func TestAdaptApplyHostedStoresOnlyTheOfferedChange(t *testing.T) {
 	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusOK {
 		t.Fatalf("revert = %d %s", w.Code, w.Body)
 	}
-	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,toon,cmdfilter,searchfold,textclean,extract,cachesplit,toolfilter" {
+	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,toon,cmdfilter,searchfold,textclean,extract,toolfilter" {
 		t.Fatalf("revert left %v", form.Pipeline)
 	}
 	// Nothing left to undo: the latest change is the revert itself.
@@ -217,7 +217,7 @@ func TestAdaptApplyLocalHotReloadsAndPersists(t *testing.T) {
 	if w := post(`{"option":"c1","basis":"`+basis+`"}`, "127.0.0.1:4000"); w.Code != http.StatusOK {
 		t.Fatalf("apply = %d %s", w.Code, w.Body)
 	}
-	want := "format,searchfold,textclean,cachesplit,toolfilter"
+	want := "format,searchfold,textclean,toolfilter"
 	if got := strings.Join(h.static.Load().Pipe.Names(), ","); got != want {
 		t.Fatalf("running pipeline %s, want %s", got, want)
 	}
@@ -272,7 +272,7 @@ func TestAdaptRevertNeverUndoesAManagersEdit(t *testing.T) {
 	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"c1","basis":"`+basis+`"}`, jar); w.Code != http.StatusOK {
 		t.Fatalf("apply = %d %s", w.Code, w.Body)
 	}
-	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, cachesplit]\n"}`, boss); w.Code != http.StatusOK {
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, toolfilter]\n"}`, boss); w.Code != http.StatusOK {
 		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
 	}
 	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusConflict {
@@ -286,7 +286,7 @@ func TestAdaptRevertNeverUndoesAManagersEdit(t *testing.T) {
 	if tw.Code != http.StatusConflict {
 		t.Fatalf("token revert over a manager's edit = %d %s", tw.Code, tw.Body)
 	}
-	if form, _ := storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,cachesplit" {
+	if form, _ := storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,toolfilter" {
 		t.Fatalf("the manager's edit was lost: %v", form.Pipeline)
 	}
 	// And with no adapt apply at all, there is nothing to undo.
@@ -325,8 +325,8 @@ func TestAdaptRevertIsPerKindAndOnce(t *testing.T) {
 	w, verify := f.signUp(t, "user@ibm.com", "u")
 	jar := w.Result().Cookies()
 	id := verify["tenant"].(map[string]any)["id"].(string)
-	explicit := "pipeline: [format, dedup, searchfold, cachesplit]\n"
-	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, dedup, searchfold, cachesplit]\n"}`, bw.Result().Cookies()); w.Code != http.StatusOK {
+	explicit := "pipeline: [format, dedup, searchfold, toolfilter]\n"
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, dedup, searchfold, toolfilter]\n"}`, bw.Result().Cookies()); w.Code != http.StatusOK {
 		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
 	}
 	basis := offer(f.h, id, explicit, []string{"format", "searchfold"}, nil)
@@ -343,7 +343,7 @@ func TestAdaptRevertIsPerKindAndOnce(t *testing.T) {
 	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusOK {
 		t.Fatalf("revert = %d %s", w.Code, w.Body)
 	}
-	if form, _ := storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,searchfold,cachesplit" {
+	if form, _ := storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,searchfold,toolfilter" {
 		t.Fatalf("revert left %v", form.Pipeline)
 	}
 	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusConflict {
@@ -366,8 +366,8 @@ func TestSaveMoreAppliesAPresetAndRevertsIt(t *testing.T) {
 	w, verify := f.signUp(t, "user@ibm.com", "u")
 	jar := w.Result().Cookies()
 	id := verify["tenant"].(map[string]any)["id"].(string)
-	start := "pipeline: [format, dedup, cachesplit]\nmode: sync\n"
-	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, dedup, cachesplit]\nmode: sync\n"}`, bw.Result().Cookies()); w.Code != http.StatusOK {
+	start := "pipeline: [format, dedup, toolfilter]\nmode: sync\n"
+	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, `{"config_yaml":"pipeline: [format, dedup, toolfilter]\nmode: sync\n"}`, bw.Result().Cookies()); w.Code != http.StatusOK {
 		t.Fatalf("manager edit = %d %s", w.Code, w.Body)
 	}
 	basis := f.h.API().OfferAdapt("compaction", id, map[string]any{"safe": dash.AdaptCompactionChoice{
@@ -398,7 +398,7 @@ func TestSaveMoreAppliesAPresetAndRevertsIt(t *testing.T) {
 	if w, _ := f.do(t, "POST", "/api/adapt/compaction/apply", `{"option":"revert"}`, jar); w.Code != http.StatusOK {
 		t.Fatalf("revert = %d %s", w.Code, w.Body)
 	}
-	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,cachesplit" {
+	if form, _ = storedForm(t, f, jar); strings.Join(form.Pipeline, ",") != "format,dedup,toolfilter" {
 		t.Fatalf("revert left %v", form.Pipeline)
 	}
 }
@@ -411,7 +411,7 @@ func TestSaveMoreAppliesThePresetWithoutOverrides(t *testing.T) {
 	w, verify := f.signUp(t, "user@ibm.com", "u")
 	jar := w.Result().Cookies()
 	id := verify["tenant"].(map[string]any)["id"].(string)
-	start := "components:\n    format:\n        min_tokens: 999999\npipeline:\n    - cachesplit\n"
+	start := "components:\n    format:\n        min_tokens: 999999\npipeline:\n    - toolfilter\n"
 	body, _ := json.Marshal(map[string]string{"config_yaml": start})
 	if w, _ := f.do(t, "PATCH", "/api/tenants/"+id, string(body), bw.Result().Cookies()); w.Code != http.StatusOK {
 		t.Fatalf("manager edit = %d %s", w.Code, w.Body)

@@ -49,12 +49,12 @@ func TestTriggerCounterfactual(t *testing.T) {
 	// Arm A is what production runs (codesmart minus the LLM call). Arm B lifts every
 	// size floor those components own — that IS "the trigger lifted" on the deterministic
 	// path, because no deployed component except extract_llm consults Trigger.Fires.
-	const armA = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+	const armA = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract]
 components:
   extract:
     min_tokens: 400
 `
-	const armB = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+	const armB = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract]
 components:
   format:
     min_tokens: 1
@@ -220,7 +220,7 @@ func replayArm(t *testing.T, name, yaml string, recs []capRec) armResult {
 // Deliberately hermetic: a synthetic 1-message request with no tool_result surface, which
 // is the shape 53% of production's gated tokens actually have.
 func TestBelowTriggerIsNotTheTrigger(t *testing.T) {
-	cfg := pipe(t, `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+	cfg := pipe(t, `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract]
 components:
   extract:
     min_tokens: 1
@@ -252,7 +252,7 @@ components:
 
 // deterministicPipeline is the deployed pipeline minus the LLM call: what production
 // actually runs on the traffic this file measures.
-const deterministicPipeline = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+const deterministicPipeline = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract]
 components:
   extract:
     min_tokens: 400

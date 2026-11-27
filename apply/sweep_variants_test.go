@@ -10,7 +10,7 @@ package apply_test
 // These variants measure whether extraction on the warm tail pays once that is true.
 var sweepVariants = []sweepVariant{
 	{name: "det-only", yaml: `
-pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract]
 components:
   extract:
     min_tokens: 400
@@ -18,7 +18,7 @@ mode: sync
 `},
 	// Osher's production document, verbatim.
 	{name: "prod-osher", yaml: `
-pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract]
 components:
   extract:
     min_tokens: 400
@@ -43,7 +43,7 @@ mode: sync
 	// The hypothesis: let it act on warm cached turns, fire on size, and let it see the
 	// file reads that AUTO would skip.
 	{name: "warm-tail", yaml: `
-pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract]
 components:
   extract:
     min_tokens: 400
@@ -62,7 +62,7 @@ components:
 mode: sync
 `},
 	{name: "warm-tail-800", yaml: `
-pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract]
 components:
   extract:
     min_tokens: 400
@@ -80,7 +80,7 @@ components:
 mode: sync
 `},
 	{name: "warm-tail-high", yaml: `
-pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract]
 components:
   extract:
     min_tokens: 400
@@ -100,7 +100,7 @@ mode: sync
 	// Deterministic-only extraction on the same trigger: the free comparison arm. If this
 	// gets close to the LLM arms, the LLM calls are not buying much.
 	{name: "det-strategy", yaml: `
-pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract_llm_sweep, extract]
 components:
   extract:
     min_tokens: 400

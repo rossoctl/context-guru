@@ -1175,7 +1175,7 @@ func TestOverviewCountsEstimatedRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lean, err := db.OverviewLean(f, nil, nil)
+	lean, err := db.OverviewLean(f, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,7 +1207,7 @@ func TestOverviewKeepsEstimatedSavingsOutOfTheTotals(t *testing.T) {
 	exact := 1000 * 3.75e-6
 	for name, get := range map[string]func() (*Overview, error){
 		"full": func() (*Overview, error) { return db.Overview(f) },
-		"lean": func() (*Overview, error) { return db.OverviewLean(f, nil, nil) },
+		"lean": func() (*Overview, error) { return db.OverviewLean(f, nil) },
 	} {
 		o, err := get()
 		if err != nil {

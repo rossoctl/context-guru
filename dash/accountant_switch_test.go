@@ -58,23 +58,22 @@ func TestPriceMode_AccountantOverridesComponentsAndBaseline(t *testing.T) {
 	}
 }
 
-// The keep-alive rescue and the split saving come from the library, in their own columns.
-func TestPriceMode_KeepAliveAndSplitComeFromTheLibrary(t *testing.T) {
+// The keep-alive rescue comes from the library, in its own column.
+func TestPriceMode_KeepAliveComesFromTheLibrary(t *testing.T) {
 	e := switchEvent()
-	e.KeepAlivePings, e.SinceLastMs, e.SplitStableTokens = 1, 1<<40, 500 // legacy would credit both
+	e.KeepAlivePings, e.SinceLastMs = 1, 1<<40 // legacy would credit it
 	e.accRes.CacheEffects = []accountant.CacheEffect{
 		{Kind: accountant.EffectRescue, ChangeID: "ka:main:w", Saved: accountant.TierTokens{CacheWrite5m: 200}, Caused: accountant.TierTokens{CacheRead: 200}},
-		{Kind: accountant.EffectSplit, ChangeID: "cg:cachesplit:x", Saved: accountant.TierTokens{CacheWrite5m: 100}, Caused: accountant.TierTokens{CacheRead: 100}},
 	}
 	e.PriceMode(accTestPrice, true)
 	if fb := e.AccountantFallback(); fb != "" {
 		t.Fatalf("fell back: %q", fb)
 	}
-	if !accNear(e.KeepAliveSavedUSD, 200*(3.75e-6-0.3e-6)) || !accNear(e.CachesplitSavedUSD, 100*(3.75e-6-0.3e-6)) {
-		t.Fatalf("keep-alive %v split %v", e.KeepAliveSavedUSD, e.CachesplitSavedUSD)
+	if !accNear(e.KeepAliveSavedUSD, 200*(3.75e-6-0.3e-6)) {
+		t.Fatalf("keep-alive %v", e.KeepAliveSavedUSD)
 	}
 	if !accNear(e.BaselineCostUSD-e.CostUSD, 1000*0.3e-6) {
-		t.Fatalf("the rescue or the split leaked into the baseline: delta %v", e.BaselineCostUSD-e.CostUSD)
+		t.Fatalf("the rescue leaked into the baseline: delta %v", e.BaselineCostUSD-e.CostUSD)
 	}
 }
 
@@ -752,7 +751,7 @@ func TestOverviewSumsTheHeldFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lean, err := db.OverviewLean(f, nil, nil)
+	lean, err := db.OverviewLean(f, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -459,8 +459,7 @@ func (d *DB) KeepAliveLedger(f Filter) (*KeepAliveLedger, error) {
 
 // KeepAliveNetUSDByTenant is the keep-alive net (credit minus ping spend) for every tenant
 // since a given time, in one pass — the exporter's per-tenant series otherwise needs one
-// query per tenant, and CachesplitHistoricalUSDByTenant (dash/cachehistory.go) is why that
-// gets paid for once instead of N times over.
+// query per tenant.
 func (d *DB) KeepAliveNetUSDByTenant(since int64) (map[string]float64, error) {
 	out := map[string]float64{}
 	cond, args := (Filter{Since: since, TenantAll: true}).where()

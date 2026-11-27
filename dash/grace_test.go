@@ -90,7 +90,7 @@ func TestARestartRecoversTheGraceClockIncludingCacheReadingPings(t *testing.T) {
 	if n, err := rec2.SeedSessions(now); err != nil || n != 4 {
 		t.Fatalf("SeedSessions recovered %d threads (err %v), want 4", n, err)
 	}
-	if seen, _, since, _ := rec2.ObserveThread("t1", "s1", "", "m", now, 0); !seen || since != twoHours {
+	if seen, _, since := rec2.ObserveThread("t1", "s1", "", "m", now); !seen || since != twoHours {
 		t.Errorf("pinged thread's attributed gap = %d ms (seen %v), want %d — the gap since its own last request",
 			since, seen, twoHours)
 	}
@@ -109,7 +109,7 @@ func TestALiveRecorderCountsRequestsAndPingsOnTheGraceClock(t *testing.T) {
 	const now = int64(1_700_000_000_000)
 	key := thread.Key("s1", "")
 	// A real request starts the clock.
-	rec.ObserveThread("t1", "s1", "", "m", now-twoHours, 0)
+	rec.ObserveThread("t1", "s1", "", "m", now-twoHours)
 	if at, ok := rec.ThreadRefreshedAt(key); !ok || at != now-twoHours {
 		t.Fatalf("real request did not start the grace clock: (%d, %v)", at, ok)
 	}
@@ -141,7 +141,7 @@ func TestAPingThatReWroteTheEntryCountsOnTheGraceClock(t *testing.T) {
 	defer rec.Close()
 	const now = int64(1_700_000_000_000)
 	key := thread.Key("s1", "")
-	rec.ObserveThread("t1", "s1", "", "m", now-twoHours, 0)
+	rec.ObserveThread("t1", "s1", "", "m", now-twoHours)
 	rec.Record(&Event{TS: now - 120_000, TenantID: "t1", SessionID: "s1", Model: "m",
 		TokensBefore: 10, KeepAlive: true, FreshInput: 900})
 	if at, _ := rec.ThreadRefreshedAt(key); at != now-twoHours {

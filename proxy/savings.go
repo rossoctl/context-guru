@@ -18,8 +18,6 @@ type SavingsScope struct {
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	NetSavedUSD     float64 `json:"net_saved_usd"`
 
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
-
 	KeepAlivePingUSD  float64 `json:"keepalive_ping_usd"`
 	KeepAliveSavedUSD float64 `json:"keepalive_saved_usd"`
 	KeepAliveNetUSD   float64 `json:"keepalive_net_usd"`
@@ -37,9 +35,8 @@ type SavingsScope struct {
 func savingsScope(t *dash.SavingsTotals) *SavingsScope {
 	return &SavingsScope{
 		CostUSD: t.CostUSD, BaselineCostUSD: t.BaselineCostUSD, CGLLMCostUSD: t.CGLLMCostUSD,
-		NetSavedUSD:        t.NetSavedUSD,
-		CachesplitSavedUSD: t.CachesplitSavedUSD,
-		KeepAlivePingUSD:   t.KeepAlivePingUSD, KeepAliveSavedUSD: t.KeepAliveSavedUSD,
+		NetSavedUSD:      t.NetSavedUSD,
+		KeepAlivePingUSD: t.KeepAlivePingUSD, KeepAliveSavedUSD: t.KeepAliveSavedUSD,
 		KeepAliveNetUSD:  t.KeepAliveNetUSD,
 		TotalSavedUSD:    t.TotalSavedUSD,
 		CapCorrectionUSD: t.CapCorrectionUSD, CapNotApplied: t.CapNotApplied,

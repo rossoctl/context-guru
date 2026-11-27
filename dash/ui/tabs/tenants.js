@@ -466,7 +466,7 @@ async function loadVariants() {
       el('th', {}, 'Variant'), el('th', {}, 'Accounts'), el('th', {}, 'Requests'),
       el('th', {}, 'Tokens in → out'), el('th', {}, 'Saved'), el('th', {}, 'Spent'),
       el('th', {}, 'Spent / request'), el('th', {}, 'Saved (est.)'),
-      el('th', {}, 'Prefix split'), el('th', {}, 'Provider cache'),
+      el('th', {}, 'Provider cache'),
       el('th', {}, 'Unpriced'))));
   const body = el('tbody');
   for (const v of rows) {
@@ -498,10 +498,8 @@ async function loadVariants() {
         el('span', { class: 'denom' }, 'counterfactual')),
       // Beside it, because an arm that compacts deeper can win on the column above while
       // losing more than that on the cache it destroyed. Both figures, because they answer
-      // different questions: ours is what the prefix split earned in this arm, the provider's
-      // is the control variable — the thing a deep pipeline silently spends.
-      el('td', {}, usd(v.cachesplit_saved_usd),
-        el('span', { class: 'denom' }, 'prefix split, ours')),
+      // different questions: the provider's cache saving is the control variable — the thing a
+      // deep pipeline silently spends.
       el('td', {}, usd(v.cache_saved_usd),
         el('span', { class: 'denom' }, 'provider cache')),
       // Rows the provider priced for nobody. Where this approaches the request count, the

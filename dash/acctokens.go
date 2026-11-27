@@ -72,7 +72,6 @@ func (f *AccFigure) addTok(c string, saved, caused accountant.TierTokens) {
 // AccEffectTokens is a request's cache effects in tokens: the ones no component row carries.
 type AccEffectTokens struct {
 	KeepAlive  TokenFlow `json:"keepalive"`    // rescue effects (keepalive_saved_usd)
-	Split      TokenFlow `json:"cachesplit"`   // split effects (cachesplit_saved_usd)
 	TTL        TokenFlow `json:"ttl"`          // head-TTL premium and rescue (on the headttl row's dollars)
 	EndedBreak TokenFlow `json:"ended_change"` // the ended-change break (on the ended_change row's dollars)
 }
@@ -121,7 +120,6 @@ var compTokenColumns = flowColumns("tok")
 // column stem in the stats query.
 var requestTokenEffects = []struct{ prefix, feature string }{
 	{"tok_ka", "keepalive"},
-	{"tok_split", "cachesplit"},
 	{"tok_ttl", "ttl"},
 	{"tok_ended", EndedChangeComponent},
 }
@@ -157,7 +155,7 @@ func requestStoredTokenArgs(e *Event) []any {
 	for _, c := range e.Components {
 		total.add(c.Tokens)
 	}
-	for _, f := range []TokenFlow{e.AccTokens.KeepAlive, e.AccTokens.Split, e.AccTokens.TTL, e.AccTokens.EndedBreak} {
+	for _, f := range []TokenFlow{e.AccTokens.KeepAlive, e.AccTokens.TTL, e.AccTokens.EndedBreak} {
 		total.add(f)
 	}
 	return append(requestTokenArgs(e.AccTokens), total.args()...)
@@ -170,7 +168,7 @@ var requestTokenSelect = "r." + strings.Join(requestTokenColumns(), ", r.")
 // requestTokenDest is the scan targets of requestTokenSelect, in the same order.
 func requestTokenDest(a *AccEffectTokens) []any {
 	var out []any
-	for _, f := range []*TokenFlow{&a.KeepAlive, &a.Split, &a.TTL, &a.EndedBreak} {
+	for _, f := range []*TokenFlow{&a.KeepAlive, &a.TTL, &a.EndedBreak} {
 		out = append(out, f.dest()...)
 	}
 	return out
@@ -178,7 +176,7 @@ func requestTokenDest(a *AccEffectTokens) []any {
 
 func requestTokenArgs(a AccEffectTokens) []any {
 	var out []any
-	for _, f := range []TokenFlow{a.KeepAlive, a.Split, a.TTL, a.EndedBreak} {
+	for _, f := range []TokenFlow{a.KeepAlive, a.TTL, a.EndedBreak} {
 		out = append(out, f.args()...)
 	}
 	return out
@@ -204,8 +202,7 @@ type AccTokenStats struct {
 	Saved  TierTokens `json:"saved"`
 	Caused TierTokens `json:"caused"`
 	// ByFeature is one entry per compaction component (its request_components rows), plus the
-	// request-level effects: keepalive (the rescue), cachesplit (the split; added to a cachesplit
-	// component row's own figure if one exists), ttl (the head-TTL legs) and ended_change (the break an
+	// request-level effects: keepalive (the rescue), ttl (the head-TTL legs) and ended_change (the break an
 	// ended change left behind). Tool filter and deferral are components (toolfilter, tooldefer)
 	// when the library prices them. Features with no tokens are left out. The lean read has no
 	// by_feature at all (absent, not empty): only the full read has the breakdown.

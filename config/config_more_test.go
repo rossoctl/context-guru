@@ -126,15 +126,9 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 	// restructures the transcript alone, and agentdiet reproduces a published baseline
 	// whose whole claim is what ONE reflection achieves — stacking folds beside it would
 	// reduce the same outputs first and there would be nothing left to attribute.
-	// `cache` is exempt for a reason the other three do not share: its whole product claim
-	// is that it is ONE component, verifiable by reading one line of the presets map. Adding
-	// format/textclean/searchfold to it would each be lossless in meaning and would still
-	// cost the claim — a stranger deciding whether to route their agent through us can check
-	// "nothing but a cache breakpoint moves" in a second, and cannot check four rewriters as
-	// fast. See TestCachePresetIsCachesplitAlone, which holds the other side of that trade.
 	// summarizer1509 is exempt for exactly summarize's reason — it IS summarize, configured as the
 	// cache-unaware no-reuse reference arm, and it restructures the transcript alone.
-	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true, "cache": true}
+	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true}
 	for name, pipeline := range presets {
 		if exempt[name] {
 			continue
@@ -213,7 +207,7 @@ func TestToonIsInNoPreset(t *testing.T) {
 	}
 }
 
-// linecap must sit immediately before cachesplit in every preset that runs it. The mechanism
+// linecap must sit last in every preset that runs it. The mechanism
 // is asserted in components/offload (TestLinecapYieldsToAnEarlierOffloader), but the mistake
 // that actually happened was an ORDERING one: every Offload leaves a marker and every Offload
 // skips marker-bearing content, so a modest reducer ahead of a drastic one takes its candidate
@@ -225,44 +219,68 @@ func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
 			if c != "linecap" {
 				continue
 			}
-			if i != len(pipeline)-2 || pipeline[len(pipeline)-1] != "cachesplit" {
-				t.Errorf("preset %q runs linecap at %d of %v; it must be immediately before "+
-					"cachesplit, or it steals candidates from the heavier offloaders", name, i, pipeline)
+			if i != len(pipeline)-1 {
+				t.Errorf("preset %q runs linecap at %d of %v; it must be last, "+
+					"or it steals candidates from the heavier offloaders", name, i, pipeline)
 			}
 		}
 	}
 }
 
-// TestCachePresetIsCachesplitAlone guards the one preset whose CONTENT is its promise.
-//
-// `cache` is what the local-distribution funnel points a stranger at, and the pitch is
-// exact: no content dropped, no `<<cg:HASH>>` marker written, no expand tool injected, no
-// model called. That is not a property of cachesplit that survives company — every other
-// component in the repo either rewrites JSON, offloads content, or calls a model, so ANY
-// addition here converts a checkable claim into a trust-me claim, and the docs that make the
-// claim (docs/how-to/choose-a-preset.md, the plugin's install skill) do not get to notice.
-//
-// It is also why `cache` is exempt from TestLosslessFoldsAreInEveryWorkingPreset. That
-// exemption is only defensible while this test exists: without it, "cache is exempt from the
-// folds rule" would read as permission to put anything at all in it.
-func TestCachePresetIsCachesplitAlone(t *testing.T) {
-	p, ok := presets["cache"]
-	if !ok {
-		t.Fatal("preset `cache` is gone; the local-distribution funnel and the install skill both name it")
+// TestRemovedCachePresetFailsOpen holds the removed `cache` preset to what an old config needs: it
+// loads with a warning, runs no component, and is no longer a preset. The same name from the
+// --preset flag goes through the same loader.
+func TestRemovedCachePresetFailsOpen(t *testing.T) {
+	if _, ok := presets["cache"]; ok {
+		t.Fatal("preset `cache` is retired but still in the presets map")
 	}
-	if len(p) != 1 || p[0] != "cachesplit" {
-		t.Fatalf("preset `cache` = %v, want exactly [cachesplit]: it is the only preset whose "+
-			"losslessness is verifiable by reading one line, and every other component either "+
-			"rewrites JSON, offloads content, or calls a model", p)
+	if p, ok := PresetPipeline("cache"); !ok || len(p) != 0 {
+		t.Fatalf("PresetPipeline(cache) = %v, %v; want empty, true", p, ok)
 	}
-	// The pipeline the proxy actually builds, not just the map literal: applyPreset and the
-	// rich-preset path both sit between this map and the wire.
-	built, ok := PresetPipeline("cache")
-	if !ok {
-		t.Fatal(`PresetPipeline("cache") did not resolve, so ?preset=cache would 400`)
+	for _, doc := range []string{
+		"preset: cache\n",
+		"preset: cache\ncache:\n  keepalive: true\n",
+		"preset: cache\npipeline: [format]\n",
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatalf("%q must load: %v", doc, err)
+		}
+		want := 0
+		if strings.Contains(doc, "format") {
+			want = 1
+		}
+		if len(c.Pipeline) != want {
+			t.Errorf("%q: pipeline %v, want %d component(s)", doc, c.Pipeline, want)
+		}
+		if err := Validate([]byte(doc)); err != nil {
+			t.Errorf("%q: Validate must accept it: %v", doc, err)
+		}
 	}
-	if len(built) != 1 || built[0] != "cachesplit" {
-		t.Fatalf(`PresetPipeline("cache") = %v, want [cachesplit]`, built)
+	if _, err := LoadBytes([]byte("preset: nonesuch\n")); err == nil {
+		t.Error("an unknown preset must still fail")
+	}
+}
+
+// A stored config that still names the removed cachesplit component must load, run the rest of its
+// pipeline and drop the name with a warning.
+func TestRemovedCachesplitIsDroppedNotRejected(t *testing.T) {
+	doc := "pipeline: [format, cachesplit, dedup]\ncomponents:\n  cachesplit: {}\n"
+	c, err := LoadBytes([]byte(doc))
+	if err != nil {
+		t.Fatalf("a config naming cachesplit must load: %v", err)
+	}
+	if got := strings.Join(c.Pipeline, ","); got != "format,dedup" {
+		t.Errorf("pipeline = %q, want format,dedup", got)
+	}
+	if _, ok := c.Components["cachesplit"]; ok {
+		t.Error("the cachesplit config block was not dropped")
+	}
+	if err := Validate([]byte(doc)); err != nil {
+		t.Errorf("Validate must accept it: %v", err)
+	}
+	if err := Validate([]byte("pipeline: [cachesplit]\n")); err != nil {
+		t.Errorf("Validate must accept a pipeline of only cachesplit: %v", err)
 	}
 }
 
@@ -382,9 +400,9 @@ func TestExpandInBandBreakpointReachesThePipeline(t *testing.T) {
 // `cache.tail_breakpoint` (#795) is on unless set to false, and never on an empty pipeline.
 func TestCacheTailBreakpointReachesThePipeline(t *testing.T) {
 	for doc, want := range map[string]bool{
-		"preset: cache\n": true,
-		"preset: cache\ncache:\n  tail_breakpoint: true\n":  true,
-		"preset: cache\ncache:\n  tail_breakpoint: false\n": false,
+		"preset: conservative\n":                                   true,
+		"preset: conservative\ncache:\n  tail_breakpoint: true\n":  true,
+		"preset: conservative\ncache:\n  tail_breakpoint: false\n": false,
 		"preset: off\n": false,
 		"preset: off\ncache:\n  tail_breakpoint: true\n": false,
 	} {
@@ -426,7 +444,7 @@ func TestHouseIsAnAliasOfConservative(t *testing.T) {
 		t.Errorf("PresetPipeline: house %v, conservative %v", hp, cp)
 	}
 	// The pipeline that the old default ran, written out, so a retune of both names fails here.
-	want := []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "cachesplit", "toolfilter"}
+	want := []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract", "toolfilter"}
 	if !reflect.DeepEqual(c.Pipeline, want) {
 		t.Errorf("conservative pipeline = %v, want the old house pipeline %v", c.Pipeline, want)
 	}

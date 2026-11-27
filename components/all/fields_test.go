@@ -160,9 +160,8 @@ func TestAMistypedComponentKeyIsRejected(t *testing.T) {
 	for _, doc := range []string{
 		"pipeline: [dedup]\ncomponents:\n  dedup:\n    min_tokns: 5000\n",
 		"pipeline: [extract_llm]\ncomponents:\n  extract_llm:\n    cold_cache:\n      enabled: true\n      min_tokenz: 10\n",
-		// cachesplit takes no configuration, and used to accept and discard whatever was
-		// written under it.
-		"pipeline: [cachesplit]\ncomponents:\n  cachesplit:\n    ttl: 1h\n",
+		// cacheinject's `ttl` takes only 5m or 1h.
+		"pipeline: [cacheinject]\ncomponents:\n  cacheinject:\n    ttl: 2h\n",
 	} {
 		if err := config.Validate([]byte(doc)); err == nil {
 			t.Errorf("accepted a mistyped component key:\n%s", doc)

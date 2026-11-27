@@ -52,8 +52,8 @@ func (p *Pipeline) Emitter() Emitter {
 // Names returns the component names in pipeline order, which is what makes an EMPTY pipeline
 // reportable. Without it a caller can only see the per-component stats, and a pipeline configured
 // with no components is indistinguishable there from one whose components all ran and did nothing:
-// both are an empty map. That ambiguity is the same class as the one that made `cachesplit` look
-// dead for a release — it is Mutated-never-Acted by design, so acted/ran read 0% and a panel painted
+// both are an empty map. That ambiguity is the same class as the one that made `cachesplit` (removed, #567) look
+// dead for a release — it was Mutated-never-Acted by design, so acted/ran read 0% and a panel painted
 // it red (docs/results/measured-2026-08.md). `off` is now the default preset, so the empty case is
 // the COMMON case and has to be legible rather than merely correct.
 func (p *Pipeline) Names() []string {

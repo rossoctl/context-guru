@@ -42,7 +42,7 @@ type toolfilterConfig struct {
 
 // Toolfilter is a marker component holding the opt-in list: `tools` is a top-level body
 // field the pipeline never sees (components operate on `messages`), so the rewrite lives in
-// apply — the same arrangement toolschema and cachesplit use. apply reads the list back
+// apply — the same arrangement toolschema uses. apply reads the list back
 // through Removed().
 //
 // The skills half lives there too, for a different reason: the listing IS in `messages`, but it
@@ -164,7 +164,7 @@ func (t Toolfilter) AlwaysDefer() []string { return t.always }
 
 // Reformat is a no-op: the rewrite already happened in apply, which reports it here through
 // Ctx.FilteredDecls so this component does not read "declined" on the requests where it just
-// acted — the mistake cachesplit's doc records.
+// acted — the mistake the removed cachesplit made.
 func (Toolfilter) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) error {
 	rep.Skipped = c == nil || c.FilteredDecls == 0
 	return nil

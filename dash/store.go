@@ -46,13 +46,8 @@ type DB struct {
 	// tests, for a value only the HTTP layer can supply. The struct is two fields and holds no
 	// lock, so copying it is safe; `go vet` would say otherwise if it did.
 	ctx context.Context
-	// sizeSpread is CachesplitSizeSpread's own TTL cache (dash/cachehistory.go) — a POINTER, not
-	// an inline mutex, so WithContext's shallow copy above stays lock-free and copies the
-	// pointer, sharing one cache across every handle this *DB produces rather than giving each
-	// shallow copy its own, independently-stale one.
-	sizeSpread *cachesplitSizeSpreadCache
 	// sizeStuck is the size rule's memory of a round that deleted rows and freed no space (#1224).
-	// A POINTER for the same reason as sizeSpread: WithContext copies the struct.
+	// A POINTER, so that WithContext's shallow copy stays lock-free.
 	sizeStuck *sizeStuckState
 }
 
@@ -301,7 +296,7 @@ func openDSN(d, path string) (*DB, error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, path: path, sizeSpread: &cachesplitSizeSpreadCache{}, sizeStuck: &sizeStuckState{}}, nil
+	return &DB{sql: sdb, path: path, sizeStuck: &sizeStuckState{}}, nil
 }
 
 // OpenReadOnly opens an EXISTING dashboard database for reading only — for analysis tools that run
@@ -342,7 +337,7 @@ func OpenReadOnly(path string) (*DB, error) {
 		sdb.Close()
 		return nil, &versionMismatch{have: have}
 	}
-	return &DB{sql: sdb, path: path, readOnly: true, sizeSpread: &cachesplitSizeSpreadCache{}}, nil
+	return &DB{sql: sdb, path: path, readOnly: true}, nil
 }
 
 // A read-only handle cannot ALTER, and the queries read every column of additiveColumns, which a
@@ -593,8 +588,8 @@ func (d *DB) insertBatch(evs []*Event) error {
 		ts, tenant_id, session_id, model, provider, agent, preset, mode, route, status, bypassed, cache_aware,
 		messages, tokens_before, tokens_after, attempted_tokens, frozen_tokens, saved_unique,
 		fresh_input, cache_read, cache_write, output_tokens,
-		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cache_saved_usd, cachesplit_saved_usd,
-		split_stable_tokens, split_tail_hash, filtered_decl_tokens, decl_digest,
+		cost_usd, baseline_cost_usd, cg_llm_cost_usd, cache_saved_usd,
+		filtered_decl_tokens, decl_digest,
 		cache_ttl, sse_buffered, ttfb_ms,
 		cache_write_1h, keepalive, keepalive_pings, keepalive_saved_usd, cg_latency_ms, upstream_ms,
 		expands, expand_tokens, reverts, token_accounting, cache_miss_reason, uncompressed_reason,
@@ -609,7 +604,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
 		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
 		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, restored_tokens, currency, ` + strings.Join(requestStoredTokenColumns(), ", ") + `, backend, client_compaction, acc_fallback, ` + strategyMetaCols + `, ` + liveRatioCols + `
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `,?,?,?,` + placeholders(strategyMetaN) + `,` + placeholders(liveRatioN) + `)`)
@@ -666,8 +661,8 @@ func (d *DB) insertBatch(evs []*Event) error {
 			boolInt(e.Bypassed), boolInt(e.CacheAware),
 			e.Messages, e.TokensBefore, e.TokensAfter, e.AttemptedTokens, e.FrozenTokens, e.SavedUnique,
 			e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens,
-			e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CacheSavedUSD, e.CachesplitSavedUSD,
-			e.SplitStableTokens, int64(e.SplitTailHash), e.FilteredDeclTokens, e.DeclDigest,
+			e.CostUSD, e.BaselineCostUSD, e.CGLLMCostUSD, e.CacheSavedUSD,
+			e.FilteredDeclTokens, e.DeclDigest,
 			e.CacheTTL, boolInt(e.SSEBuffered), e.TTFBMs,
 			e.CacheWrite1h, boolInt(e.KeepAlive), e.KeepAlivePings, e.KeepAliveSavedUSD,
 			e.CGLatencyMs, e.UpstreamMs,

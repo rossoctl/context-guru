@@ -103,7 +103,7 @@ func Main(hooks Hooks) {
 		addrFlag  = flag.String("listen", envOr("LISTEN_ADDR", ":4000"), "address to listen on")
 		showVer   = flag.Bool("version", false, "print version and exit")
 		cfgPath   = flag.String("config", envOr("CONFIG", ""), "path to context-guru YAML config")
-		preset    = flag.String("preset", envOr("PRESET", "conservative"), "preset to use when --config is absent. Current: off, conservative, medium, high, xhigh, ultrahigh. The default is conservative. The obsolete name house runs the same pipeline. Obsolete presets (cache, safe, summarize, summarizer1509, house, housellm) still load and run as before. Retired presets (balanced, aggressive, coding, mcp, agent, general, agentdiet, codesmart, codesafe) load, log a warning and run no components")
+		preset    = flag.String("preset", envOr("PRESET", "conservative"), "preset to use when --config is absent. Current: off, conservative, medium, high, xhigh, ultrahigh. The default is conservative. The obsolete name house runs the same pipeline. Obsolete presets (safe, summarize, summarizer1509, house, housellm) still load and run as before. Retired presets (cache, balanced, aggressive, coding, mcp, agent, general, agentdiet, codesmart, codesafe) load, log a warning and run no components")
 		openai    = flag.String("openai-upstream", envOr("OPENAI_UPSTREAM", "https://api.openai.com"), "OpenAI upstream base URL")
 		anthropic = flag.String("anthropic-upstream", envOr("ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "Anthropic upstream base URL")
 		// Not a whole-request timeout on purpose: a streaming turn that is still producing
@@ -1165,7 +1165,7 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// current while the user is idle. auth_subscription stays 0: a ping carries no client auth kind.
 	ev.Limits = proxy.PingLimits(r)
 	// ev.Price still has to run: it is what fills TokenAccounting, BilledTokenFactor,
-	// BaselineCostUSD, CachesplitSavedUSD and KeepAliveSavedUSD, none of which the report
+	// BaselineCostUSD and KeepAliveSavedUSD, none of which the report
 	// carries. But r.CostUSD is already the authoritative figure — record1 computed it,
 	// priced the same way, to drive the keeper's OWN bookkeeping (e.spent, k.spentUSD) — so
 	// overwrite Price's recomputation with it afterward rather than trusting a second
@@ -1204,51 +1204,31 @@ func tenantMetrics(rec *dash.Recorder, prices modelinfo.Pricer) proxy.TenantMetr
 
 type tenantMetricsAdapter struct {
 	rec *dash.Recorder
-	// prices values the pre-instrumentation split figure, which is the one number here that
-	// has to be priced on read. nil = that metric reports 0.
+	// prices values the declaration filter's saving, which is priced on read. nil = 0.
 	prices modelinfo.Pricer
 }
 
 func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRow, error) {
-	// The four queries below are independent — none consumes another's result — so they run
-	// concurrently rather than one after another: CachesplitHistoricalUSDByTenant alone measured
-	// ~2s against a production-sized copy of the DB, and summed sequentially with the other
-	// three that is most of a /metrics scrape's wall time for no reason. A plain
-	// sync.WaitGroup, not an errgroup, because three of these four keep an EXISTING
-	// best-effort contract — a query failure zeroes that one metric for every tenant rather
-	// than failing the whole scrape — and an errgroup's Wait returns the first error, which
-	// would turn one optional query's failure into the whole scrape's.
+	// The three queries below are independent — none consumes another's result — so they run
+	// concurrently rather than one after another. A plain sync.WaitGroup, not an errgroup,
+	// because two of these three keep a best-effort contract — a query failure zeroes that
+	// one metric for every tenant rather than failing the whole scrape — and an errgroup's
+	// Wait returns the first error, which would turn one optional query's failure into the
+	// whole scrape's.
 	var (
 		rows    []dash.TenantMetricRow
 		rowsErr error
-		// The pre-instrumentation split figure, per tenant, priced here because this is the
-		// layer that holds the rates. One query for every tenant, not one per tenant — see
-		// DB.CachesplitHistoricalUSDByTenant for why a query per tenant re-paid the same
-		// whole-table sort N times over.
-		hist = map[string]float64{}
 		// The keep-alive net needs no pricer (the credit is already priced at write time) —
 		// one more grouped-by-tenant query, best-effort like the one above.
 		kaNet = map[string]float64{}
-		// The declaration filter's saving, priced on read the same way the historical split
-		// figure is above.
+		// The declaration filter's saving, priced on read.
 		declFilter = map[string]float64{}
 	)
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		rows, rowsErr = a.rec.DB().TenantMetrics(since)
-	}()
-	go func() {
-		defer wg.Done()
-		if a.prices == nil {
-			return
-		}
-		if byTenant, err := a.rec.DB().CachesplitHistoricalUSDByTenant(since, a.prices); err == nil {
-			for tid, h := range byTenant {
-				hist[tid] = h.USD
-			}
-		}
 	}()
 	go func() {
 		defer wg.Done()
@@ -1285,9 +1265,8 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			SavedUnique: r.SavedUnique, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
 			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
-			CacheSavedUSD: r.CacheSavedUSD, CachesplitSavedUSD: r.CachesplitSavedUSD,
-			CachesplitHistoricalUSD: hist[r.TenantID],
-			KeepAliveNetUSD:         kaNet[r.TenantID], DeclFilterUSD: declFilter[r.TenantID],
+			CacheSavedUSD:   r.CacheSavedUSD,
+			KeepAliveNetUSD: kaNet[r.TenantID], DeclFilterUSD: declFilter[r.TenantID],
 			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,
 		})

@@ -45,7 +45,6 @@ func tokEvent(ts int64, session string) *Event {
 			{Kind: accountant.EffectBreak, Saved: accountant.TierTokens{CacheRead: 50}, Caused: accountant.TierTokens{CacheWrite5m: 50}},
 			{Kind: accountant.EffectMarkPremium, Saved: accountant.TierTokens{Input: 200}, Caused: accountant.TierTokens{CacheWrite5m: 200}},
 			{Kind: accountant.EffectRescue, ChangeID: "ka:main:w", Saved: accountant.TierTokens{CacheWrite5m: 2000}, Caused: accountant.TierTokens{CacheRead: 2000}},
-			{Kind: accountant.EffectSplit, ChangeID: "cg:cachesplit:x", Saved: accountant.TierTokens{CacheWrite5m: 700}, Caused: accountant.TierTokens{CacheRead: 700}},
 			{Kind: accountant.EffectTTLPremium, ChangeID: "headttl:main:x", Saved: accountant.TierTokens{CacheWrite5m: 100}, Caused: accountant.TierTokens{CacheWrite1h: 100}},
 		},
 	})
@@ -57,7 +56,7 @@ func flow(saved, caused TierTokens) TokenFlow { return TokenFlow{Saved: saved, C
 // Each component row gets the tokens whose dollars it gets: for every row the library priced, its
 // SavedUSD is tierUSD(Saved) - tierUSD(Caused) of its tokens, except the two rows whose dollars come
 // from a request-level effect (headttl, ended_change): their tokens are in AccTokens, and adding
-// those gives the dollars back. The keep-alive and split dollars match their tokens the same way.
+// those gives the dollars back. The keep-alive dollars match their tokens the same way.
 func TestAccTokens_AttributionMatchesTheDollars(t *testing.T) {
 	e := tokEvent(1, "s")
 	e.PriceMode(accTestPrice, true)
@@ -100,15 +99,14 @@ func TestAccTokens_AttributionMatchesTheDollars(t *testing.T) {
 	}
 	wantFx := AccEffectTokens{
 		KeepAlive:  flow(TierTokens{CacheWrite5m: 2000}, TierTokens{CacheRead: 2000}),
-		Split:      flow(TierTokens{CacheWrite5m: 700}, TierTokens{CacheRead: 700}),
 		TTL:        flow(TierTokens{CacheWrite5m: 100}, TierTokens{CacheWrite1h: 100}),
 		EndedBreak: flow(TierTokens{CacheRead: 50}, TierTokens{CacheWrite5m: 50}),
 	}
 	if e.AccTokens != wantFx {
 		t.Fatalf("effects = %+v, want %+v", e.AccTokens, wantFx)
 	}
-	if !accNear(e.KeepAliveSavedUSD, tokUSD(wantFx.KeepAlive)) || !accNear(e.CachesplitSavedUSD, tokUSD(wantFx.Split)) {
-		t.Fatalf("keep-alive %v split %v do not match their tokens", e.KeepAliveSavedUSD, e.CachesplitSavedUSD)
+	if !accNear(e.KeepAliveSavedUSD, tokUSD(wantFx.KeepAlive)) {
+		t.Fatalf("keep-alive %v does not match its tokens", e.KeepAliveSavedUSD)
 	}
 }
 
@@ -124,7 +122,7 @@ func TestAccTokens_UnpricedEmptyOpHasNoTokens(t *testing.T) {
 }
 
 // A held estimate holds its tokens out as it holds its dollars: the component rows, the head-TTL
-// legs and the ended-change break. The rescue and the split stay booked.
+// legs and the ended-change break. The rescue stays booked.
 func TestAccTokens_HeldEstimateHoldsTheTokensOut(t *testing.T) {
 	e := tokEvent(1, "s")
 	e.accRes.Unpriced = []accountant.Unpriced{{Reason: accountant.ReasonPenaltyUnknown}}
@@ -140,8 +138,8 @@ func TestAccTokens_HeldEstimateHoldsTheTokensOut(t *testing.T) {
 	if e.AccTokens.TTL != (TokenFlow{}) || e.AccTokens.EndedBreak != (TokenFlow{}) {
 		t.Errorf("held legs keep tokens: %+v", e.AccTokens)
 	}
-	if e.AccTokens.KeepAlive == (TokenFlow{}) || e.AccTokens.Split == (TokenFlow{}) {
-		t.Errorf("the rescue and the split lost their tokens: %+v", e.AccTokens)
+	if e.AccTokens.KeepAlive == (TokenFlow{}) {
+		t.Errorf("the rescue lost its tokens: %+v", e.AccTokens)
 	}
 }
 
@@ -203,7 +201,6 @@ func TestAccTokens_StatsSumByFeatureAndCountTheUnmeasured(t *testing.T) {
 		"extract":            two(flow(TierTokens{CacheRead: 1500, Input: 500}, TierTokens{Input: 40})),
 		"tailbreakpoint":     two(flow(TierTokens{Input: 200}, TierTokens{CacheWrite5m: 200})),
 		"keepalive":          two(flow(TierTokens{CacheWrite5m: 2000}, TierTokens{CacheRead: 2000})),
-		"cachesplit":         two(flow(TierTokens{CacheWrite5m: 700}, TierTokens{CacheRead: 700})),
 		"ttl":                two(flow(TierTokens{CacheWrite5m: 100}, TierTokens{CacheWrite1h: 100})),
 		EndedChangeComponent: two(flow(TierTokens{CacheRead: 50}, TierTokens{CacheWrite5m: 50})),
 	}
@@ -225,9 +222,8 @@ func TestAccTokens_StatsSumByFeatureAndCountTheUnmeasured(t *testing.T) {
 		t.Errorf("ping tokens %+v output %d, want %+v and 1", o.KeepAlivePingTokens, o.KeepAlivePingOutputTokens, want)
 	}
 	// The stored dollars agree with the stored tokens, feature by feature.
-	if !accNear(o.KeepAliveSavedUSD, tokUSD(want["keepalive"])) || !accNear(o.CachesplitSavedUSD, tokUSD(want["cachesplit"])) {
-		t.Errorf("keep-alive %v split %v, tokens price to %v and %v", o.KeepAliveSavedUSD, o.CachesplitSavedUSD,
-			tokUSD(want["keepalive"]), tokUSD(want["cachesplit"]))
+	if !accNear(o.KeepAliveSavedUSD, tokUSD(want["keepalive"])) {
+		t.Errorf("keep-alive %v, tokens price to %v", o.KeepAliveSavedUSD, tokUSD(want["keepalive"]))
 	}
 }
 
@@ -247,7 +243,7 @@ func TestAccTokens_LeanAgreesWithFull(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lean, err := db.OverviewLean(f, nil, nil)
+		lean, err := db.OverviewLean(f, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -326,8 +322,8 @@ func TestAccTokenColumnsExistOnAFreshDatabase(t *testing.T) {
 			t.Errorf("request_components has no %s", c)
 		}
 	}
-	if n := len(requestStoredTokenColumns()); n != 40 || len(requestStoredTokenArgs(&Event{})) != n {
-		t.Errorf("request token columns %d, args %d, want 40", n, len(requestStoredTokenArgs(&Event{})))
+	if n := len(requestStoredTokenColumns()); n != 32 || len(requestStoredTokenArgs(&Event{})) != n {
+		t.Errorf("request token columns %d, args %d, want 32", n, len(requestStoredTokenArgs(&Event{})))
 	}
 }
 

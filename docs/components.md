@@ -16,7 +16,6 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | [`toolschema`](components/reformat.md#toolschema) | Reformat | nothing (strips JSON-Schema annotation keywords from `tools`) | n/a (lossless) | any request carrying tool schemas; **opt-in, in no preset** — it re-anchors the cached prefix once, see the break-even | — (no config) |
 | [`toolfilter`](components/reformat.md#toolfilter) | Reformat | the tool/MCP declarations the account listed in `remove` (82.7% of a session's declared tokens are never invoked) | yes — delete the name from `remove` (re-anchors the prefix once) | any request carrying declarations; **opt-in, in no preset** — it never removes a name the account did not list, and keeps any name still described in the system prompt's prose | `remove` (empty) |
 | [`cacheinject`](components/caching.md#cacheinject) | Reformat | nothing (adds `cache_control`) | n/a (lossless) | Anthropic-family requests; **opt-in, in no preset** — placement is unmeasured | `ttl` (5m) |
-| [`cachesplit`](components/caching.md#cachesplit) | Reformat | nothing (splits a `system` block) | n/a (lossless) | Anthropic-family requests; **in every caching preset** — enables the measured volatile-tail split | — (no config) |
 | [`skeleton`](components/skeleton.md) | Offload | function/method bodies | via expand | fenced ` ```lang ` code blocks and raw file dumps (`Read`/`cat`/`sed -n`); **behind the `cg_skeleton` build tag, needs CGO, in no preset, and must not be enabled** — it removes 0 tokens per live turn because every `Read` is the newest of its path, and the guards that make it safe are what make it worthless, see the measurement | `min_tokens` (80) |
 | [`dedup`](components/offload-reducers.md#dedup) | Offload | later byte-identical tool outputs | via expand | repeated identical outputs | `min_tokens` (100) |
 | [`readlifecycle`](components/offload-reducers.md#readlifecycle) | Offload | file `Read` bodies the transcript proves are stale (file edited later) or superseded (re-read later) | via expand | `Read` results in an editing session; **opt-in, in no preset** — 0 tokens warm, a third of a *cold* request, see the break-even | `min_tokens` (100), `stale`, `superseded`, `bash_edits`, `stale_at_depth`, `cold_cache` |
@@ -33,9 +32,9 @@ messages (`role:"tool"`; for Anthropic, `tool_result` blocks normalized to that 
 | [`cache_aware_summarizer`](components/advanced-offload.md#cache_aware_summarizer) | Offload (LLM) | the middle of the transcript → one summary, but the summarizer CALL reuses the conversation's own prefix instead of rebuilding a prompt. [Two ways to use `trigger.cache_state`](components/advanced-offload.md#two-ways-to-use-cache_state) | via expand | long trajectories on a prefix-caching backend; needs a `MessagesModel` or (Anthropic traffic) a prior request to reuse, and **declines without either** | `keep_last_turns` (10), `instruction_role` (auto), `model_id`, `min_tokens` (500), `resummarize_tokens` (6000), `refresh_cost` (extra), `profiles_path`, `model.source`, `trigger` |
 | [`agentdiet`](components/advanced-offload.md#agentdiet) | Offload (LLM) | useless/redundant/**expired** content in the step that just aged past the delay | via expand | a step above `min_step_tokens`, `delay_steps` turns back; **in no preset** | `delay_steps` (2), `context_steps` (1), `min_step_tokens` (500), `min_saved_tokens` (400), `max_keep_ratio` (0.8), `model.source` |
 
-Six presets are current: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. The other 6 are obsolete: `cache`, `safe`, `summarize`, `summarizer1509`, `house`, `housellm`. They still load, and the [preset reference](reference/presets.md) lists every pipeline, verbatim.
+Six presets are current: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultrahigh`. The other 5 are obsolete: `safe`, `summarize`, `summarizer1509`, `house`, `housellm`. They still load, and the [preset reference](reference/presets.md) lists every pipeline, verbatim.
 
-**The lossless trio leads the presets that run it** (`safe` and the old `cache` aside, every preset that does deterministic work starts with `format`, `textclean`, `searchfold`; the `house` family keeps the operator's order). The three are verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every downstream token count honest. `toon` is absent from the older presets: it acted 0 times on 5,752 production requests.
+**The lossless trio leads the presets that run it** (`safe` aside, every preset that does deterministic work starts with `format`, `textclean`, `searchfold`; the `house` family keeps the operator's order). The three are verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every downstream token count honest. `toon` is absent from the older presets: it acted 0 times on 5,752 production requests.
 
 **Nine offloaders are in no preset:** `failed_run`, `collapse`, `mask`, `linecap`, `smartcrush`, `readlifecycle`, `agentdiet`, `skeleton` and `searchcap`. Some of them were named by presets that are now retired (see [Retired presets](reference/presets.md#retired-presets)). They still work: name them in a hand-written `pipeline:`. The `coref` component was removed (the `extract_llm_sweep` component replaced it).
 
@@ -47,8 +46,7 @@ worth ~12.5x a warm-turn one. Set `cold_cache: false` per component to restore t
 It is **not** defaulted on for `readlifecycle` or `skeleton`, whose replacements are not pure
 functions of (content, config).
 
-Every preset that touches caching carries `cachesplit`, never `cacheinject` — see
-[Presets](reference/presets.md).
+No preset carries `cacheinject`. See [Presets](reference/presets.md).
 
 **Dynamic, model-aware triggers.** Trigger thresholds can be expressed as **fractions of the model's
 context window** (resolved dynamically via LiteLLM's public model map, no hand-maintained list):
@@ -114,7 +112,7 @@ actually smaller.
 Six components repack a tool output or the request envelope without dropping anything. Full
 detail on each, with before/after examples and config, lives on its own page:
 [Reformat components](components/reformat.md) (format, toon, textclean, searchfold, toolschema,
-toolfilter) and [Prompt caching](components/caching.md) (cacheinject, cachesplit).
+toolfilter) and [Prompt caching](components/caching.md) (cacheinject).
 
 ## Offload (lossy, reversible)
 

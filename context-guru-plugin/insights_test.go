@@ -649,7 +649,7 @@ func TestInsightsWritesNothingAndPingsNothing(t *testing.T) {
 		"/api/tools":      toolsWithSuggestableServer(),
 		"/api/toolfilter": suggestionWorth(2.5),
 		"/api/keepalive":  `{"pings":3,"net_usd":0.2,"misses_avoided":2}`,
-		"/api/components": `{"components":[{"component":"cachesplit","runs":9}]}`,
+		"/api/components": `{"components":[{"component":"cacheinject","runs":9}]}`,
 	})
 	dir := insightsProject(t, map[string]any{"port": stub.port})
 

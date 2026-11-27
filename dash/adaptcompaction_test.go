@@ -227,21 +227,21 @@ func TestAdaptModelledBlockChargesDroppingTheComponentThatRewroteIt(t *testing.T
 }
 
 func TestAdaptMergeKeepsOtherComponentsInPlace(t *testing.T) {
-	cur := []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cachesplit", "toolfilter"}
+	cur := []string{"format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm", "extract", "cacheinject", "toolfilter"}
 	got := AdaptCompactionMerge(cur, []string{"format", "dedup", "searchfold", "textclean"})
-	// extract left, so extract_llm, cachesplit and toolfilter re-anchor on textclean.
-	want := []string{"format", "dedup", "searchfold", "textclean", "extract_llm", "cachesplit", "toolfilter"}
+	// extract left, so extract_llm, cacheinject and toolfilter re-anchor on textclean.
+	want := []string{"format", "dedup", "searchfold", "textclean", "extract_llm", "cacheinject", "toolfilter"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v", got)
 	}
-	got = AdaptCompactionMerge([]string{"cachesplit"}, []string{"format", "extract"})
-	if !reflect.DeepEqual(got, []string{"cachesplit", "format", "extract"}) {
+	got = AdaptCompactionMerge([]string{"toolfilter"}, []string{"format", "extract"})
+	if !reflect.DeepEqual(got, []string{"toolfilter", "format", "extract"}) {
 		t.Fatalf("head-anchored component: %v", got)
 	}
 }
 
-// End to end: an account with nothing but cachesplit, whose history is pretty JSON, is told
-// format would have saved money, and the applied pipeline keeps cachesplit.
+// End to end: an account with nothing but toolfilter, whose history is pretty JSON, is told
+// format would have saved money, and the applied pipeline keeps toolfilter.
 func TestAdaptCompactionRecommendsWhatSaves(t *testing.T) {
 	blocks := map[string]string{"messages.1.content.0.content": prettyJSON()}
 	db := adaptFixtureDB(t, "acct", map[string][]adaptFixtureReq{"s1": {
@@ -251,7 +251,7 @@ func TestAdaptCompactionRecommendsWhatSaves(t *testing.T) {
 	// Rates x1000 so the saving clears the recommendation floor on a two-request fixture.
 	p := modelinfo.Price{Input: 1e-3, CacheRead: 0.1e-3, CacheWrite: 1.25e-3, Output: 5e-3}
 	rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": p}, "pipeline: [cachesplit]\n", defaultAdaptDocForTest, true)
+		staticTable{"m": p}, "pipeline: [toolfilter]\n", defaultAdaptDocForTest, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,8 @@ func TestAdaptCompactionRecommendsWhatSaves(t *testing.T) {
 		!slices.Contains(best.spec.comps, "format") {
 		t.Fatalf("best %+v recommendation %+v summary %q", best, rep.Recommendation, rep.Summary)
 	}
-	if !slices.Contains(best.Pipeline, "cachesplit") {
+	// A preset arm replaces the pipeline whole, so only a merged arm keeps the account's own.
+	if best.spec.preset == "" && !slices.Contains(best.Pipeline, "toolfilter") {
 		t.Fatalf("applied pipeline dropped a non-candidate: %v", best.Pipeline)
 	}
 	cur := adaptOpt(t, rep, rep.Current)
@@ -273,7 +274,7 @@ func TestAdaptCompactionRecommendsWhatSaves(t *testing.T) {
 	}
 	ch := rep.choices[best.ID]
 	maps := ch.Preset == best.Preset && (ch.Preset != "" || reflect.DeepEqual(ch.Candidates, best.spec.comps))
-	if !maps || ch.ConfigHash != AdaptConfigHash("pipeline: [cachesplit]\n") {
+	if !maps || ch.ConfigHash != AdaptConfigHash("pipeline: [toolfilter]\n") {
 		t.Fatalf("option %q maps to %+v", best.ID, ch)
 	}
 }
@@ -346,7 +347,7 @@ func TestAdaptChargesDroppingAComponentForTheSavingTheReplayCannotSee(t *testing
 		t.Fatal(err)
 	}
 	rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": adaptTestPrice}, "pipeline: [format, dedup, cachesplit]\n", defaultAdaptDocForTest, true)
+		staticTable{"m": adaptTestPrice}, "pipeline: [format, dedup, toolfilter]\n", defaultAdaptDocForTest, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +393,7 @@ func TestAdaptRouteIsOneAccountAgainstItsOwnConfig(t *testing.T) {
 	var asked []string
 	api.SetAdaptCompactionConfig(func(id string) (string, string, bool, string) {
 		asked = append(asked, id)
-		return "pipeline: [cachesplit]\n", defaultAdaptDocForTest, true, ""
+		return "pipeline: [toolfilter]\n", defaultAdaptDocForTest, true, ""
 	})
 	// Both report routes: the adapt command's and save-more config's (presets and custom).
 	for _, route := range []struct {
@@ -554,7 +555,7 @@ func TestAdaptReportIsDeterministicOnTies(t *testing.T) {
 	var first string
 	for i := 0; i < 4; i++ {
 		rep, err := db.AdaptCompaction(context.Background(), Filter{Tenant: "acct"}, staticTable{"m": p},
-			"pipeline: [dedup, cachesplit]\n", defaultAdaptDocForTest, true)
+			"pipeline: [dedup, toolfilter]\n", defaultAdaptDocForTest, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -666,7 +667,7 @@ var bigPrice = modelinfo.Price{Input: 1e-3, CacheRead: 0.1e-3, CacheWrite: 1.25e
 // for it, and a recommendation is only made when it does.
 func TestSaveMoreReproductionGatesTheRecommendation(t *testing.T) {
 	ok, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": bigPrice}, "pipeline: [format, cachesplit]\n", defaultAdaptDocForTest, false)
+		staticTable{"m": bigPrice}, "pipeline: [format, toolfilter]\n", defaultAdaptDocForTest, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +679,7 @@ func TestSaveMoreReproductionGatesTheRecommendation(t *testing.T) {
 	}
 	// The same history, booked at ten times what format did: the replay cannot match it.
 	bad, err := formattedHistory(t, 10).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": bigPrice}, "pipeline: [format, cachesplit]\n", defaultAdaptDocForTest, false)
+		staticTable{"m": bigPrice}, "pipeline: [format, toolfilter]\n", defaultAdaptDocForTest, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +692,7 @@ func TestSaveMoreReproductionGatesTheRecommendation(t *testing.T) {
 // excluded, and its range bracketing its figure.
 func TestSaveMorePricesEveryShippedPreset(t *testing.T) {
 	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": bigPrice}, "pipeline: [cachesplit]\n", defaultAdaptDocForTest, false)
+		staticTable{"m": bigPrice}, "pipeline: [toolfilter]\n", defaultAdaptDocForTest, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +741,7 @@ func TestSaveMoreCustomSearchOrder(t *testing.T) {
 		t.Fatalf("order moves %v", swaps)
 	}
 	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
-		staticTable{"m": bigPrice}, "pipeline: [dedup, format, cachesplit]\n", defaultAdaptDocForTest, true)
+		staticTable{"m": bigPrice}, "pipeline: [dedup, format, toolfilter]\n", defaultAdaptDocForTest, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +760,7 @@ func TestSaveMoreCustomSearchOrder(t *testing.T) {
 // The priced preset option is the applied one: an account's own component blocks win over the
 // preset's when the preset is applied, so they must win in the replay too.
 func TestSaveMorePricesThePresetDocumentApplyStores(t *testing.T) {
-	cur := "pipeline: [format, extract, cachesplit]\ncomponents:\n  extract:\n    min_tokens: 9999\n"
+	cur := "pipeline: [format, extract, toolfilter]\ncomponents:\n  extract:\n    min_tokens: 9999\n"
 	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
 		staticTable{"m": bigPrice}, cur, defaultAdaptDocForTest, false)
 	if err != nil {
@@ -793,7 +794,7 @@ func TestSaveMorePricesThePresetDocumentApplyStores(t *testing.T) {
 // and safe as it ships price differently. Both are offered, each priced on exactly the document
 // applying it stores, and the pure one says it drops the account's settings.
 func TestSaveMoreOffersThePresetWithoutTheAccountsOverrides(t *testing.T) {
-	cur := "pipeline: [cachesplit]\ncomponents:\n  format:\n    min_tokens: 999999\n"
+	cur := "pipeline: [toolfilter]\ncomponents:\n  format:\n    min_tokens: 999999\n"
 	rep, err := formattedHistory(t, 1).AdaptCompaction(context.Background(), Filter{Tenant: "acct"},
 		staticTable{"m": bigPrice}, cur, defaultAdaptDocForTest, false)
 	if err != nil {

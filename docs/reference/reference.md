@@ -79,8 +79,7 @@ session self-compacts earlier than it needs to — paying for a summarization ca
 transcript the proxy was already handling. On a measured body: `115,933` tokens reported,
 `32,802` actually forwarded. The count also excludes any tool declaration the proxy adds.
 
-Two upstream caveats: on an implicit prefix-cache backend the numbers are unaffected because
-`cachesplit` is a no-op there, and at least one LiteLLM-fronted gateway answers this endpoint with
+Two upstream caveats: on an implicit prefix-cache backend the numbers are unaffected, and at least one LiteLLM-fronted gateway answers this endpoint with
 an implausible count (`13` for a body whose system prompt alone is ~7,929 tokens) — the same answer
 it gives when called directly, so the undercount is upstream's, but it means the route's
 cheap-budgeting justification does not hold on that upstream.
@@ -120,7 +119,7 @@ rules and dashboards are written against — where a rename breaks monitoring *s
 | `bounces` | How many expand events produced that waste. |
 | `adjusted_saved` | `saved − wasted`. May be negative. |
 | `components` | Per-component rollup (see below). |
-| `top_passthrough` | Components that ran but never *changed* a request — dead weight. A component that mutated without saving content tokens (`cachesplit`, `cacheinject`) is **not** listed here. |
+| `top_passthrough` | Components that ran but never *changed* a request — dead weight. A component that mutated without saving content tokens (`cacheinject`) is **not** listed here. |
 | `adjudicate_stray` | Times the **agent** called `context_guru_adjudicate`, the verdict tool the proxy injects for [`extract_llm_sweep`](../components/advanced-offload.md#extract_llm_sweep) and tells the model not to call. Counted whether the call was answered on the response path or repaired on the next request. Most cost the agent nothing, because the response path answers them in band before the client is written to; one co-called with a *client* tool in the same assistant turn costs one turn, because the loop hands that round over whole and the next request's repair fixes it. Either way this is a *description-health* number rather than an error: non-zero means the "do not call this yourself" wording has stopped working. Measured 0 over three benchmark passes. Also exported as `cg_adjudicate_stray_total`. |
 | `top_discarded` | Components whose changes the **writeback layer threw away** at least once. Any entry needs investigating: the component ran, mutated, and had no effect on the wire. |
 
@@ -418,9 +417,8 @@ Three families answer "this component ran and did nothing — is it broken?":
 - `cg_component_runs_total{outcome="ran|mutated|acted|discarded|reverted"}`. The outcomes
   are **nested, not disjoint**: `acted` ⊆ `mutated` ⊆ `ran`. `acted` means content tokens
   were removed; `mutated` means the request changed at all. A component can be
-  mutated-never-acted **by design** — `cachesplit` moves tokens out of the hashed prefix
-  rather than removing any, so `acted/ran` reads 0% for the component with the largest
-  measured cost effect in the pipeline. Any "is it doing anything?" query wants `mutated`.
+  mutated-never-acted **by design** — `cacheinject` moves cache breakpoints
+  rather than removing any tokens, so `acted/ran` reads 0% for it. Any "is it doing anything?" query wants `mutated`.
   `discarded` is the odd one out: it counts *changes* the writeback layer threw away, not
   runs.
 - `cg_component_gate_declines_total{component,gate}` — how many candidates each named gate
@@ -857,7 +855,7 @@ Always explicit — nothing infers it from the rest of the configuration.
 
 ```yaml
 preset: conservative
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
+pipeline: [format, dedup, failed_run, cmdfilter]   # order + enable
 components:
   collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
   smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
@@ -959,7 +957,7 @@ indistinguishable from "every model is free".
     server-side, not a model. Any rate for it is a guess. The shipped entry is fitted against
     the `session_costs` Bob prints for itself and lands within about a third on real runs;
     the example file shows both measurements. That error bar carries into every **absolute**
-    dollar figure for those rows — baseline, compaction savings, prefix-cache savings and the
+    dollar figure for those rows — baseline, compaction savings and the
     "total avoided" headline. It does not touch the before/after **ratio**, where a uniform
     rate error cancels.
 

@@ -71,11 +71,8 @@ func TestNoToolRoleOnAnthropicWireAfterCountChange(t *testing.T) {
 		"  extract_llm: {strategy: deterministic, min_tokens: 1, economic_gate: false, " +
 		"allow_on_caching_backend: true}\n"
 
-	// Both the reduced pipeline and the one this was reported against. cachesplit is not a
-	// spectator: it is a no-op in Reformat and the split it names happens inside THIS package,
-	// which rewrites the envelope before the rebuild runs and changes the rebuild's control flow
-	// (a declined rebuild is still forwarded when systemSplit is set). So a fix verified only
-	// without it is not verified for the configuration that produced the live 400.
+	// The pipeline this was reported against. It also named cachesplit, which is gone; an old config
+	// that still names it loads without it.
 	for _, tc := range []struct{ name, pipeline string }{
 		{"summarize+extract_llm", "pipeline: [summarize, extract_llm]\n"},
 		{"reported: summarize+extract_llm+cachesplit", "pipeline: [summarize, extract_llm, cachesplit]\n"},

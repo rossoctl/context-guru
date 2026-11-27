@@ -291,68 +291,9 @@ func cacheAware(p schemas.ModelProvider) bool {
 
 // --------------------------------------------------------------------------- //
 
-func init() { components.Register("cachesplit", newCachesplit) }
-
-// Cachesplit is a marker component: it carries no logic of its own, and exists so a
-// preset can enable the volatile-tail split (apply/prefixsplit.go) WITHOUT also
-// enabling cacheinject's breakpoint placement.
-//
-// The two were one config entry until #32, which separated them because their evidence
-// is not comparable. The split is measured: −34.1% cost and 0% → 96.7% cache hit in an
-// isolated A/B, because it moves a churning env snapshot out of a hashed prefix.
-// Placement has never been measured at all — until #32 its breakpoints never reached
-// the provider. So the split ships on by default and placement does not.
-//
-// It is a Reformat that always skips: the actual rewrite is body-level (it edits the
-// top-level `system` array, which components never see) and lives in `apply`, gated on
-// this name being present. ponytail: a marker beats plumbing a new config flag through
-// every host.
-type Cachesplit struct{}
-
-// newCachesplit takes no configuration. It decodes STRICTLY into an empty struct, so a
-// `cachesplit:` block with anything in it is an error rather than silence: the signature
-// used to be `newCachesplit([]byte)`, which discarded whatever was written there — a
-// config saying `cachesplit: {ttl: 1h}` looked configured and was not.
-func newCachesplit(raw []byte) (components.Component, error) {
-	var none struct{}
-	if err := components.Decode(raw, &none); err != nil {
-		return nil, fmt.Errorf("cachesplit: takes no configuration: %w", err)
-	}
-	return Cachesplit{}, nil
-}
-
-func (Cachesplit) Name() string { return "cachesplit" }
-
-func (Cachesplit) Enabled(*components.Ctx) bool { return true }
-
-// Reformat is intentionally a no-op — see the type doc. The split happens in apply, which
-// reports it here through Ctx.SystemSplit.
-//
-// That flag is the whole reason this method is not a bare `rep.Skipped = true`. Every consumer
-// of a component report — /stats, the Prometheus component counters, the dashboard's components
-// table — answers "did this component do anything?" from Skipped. Reporting it unconditionally
-// made the measured -34.1%-cost mechanism read "declined" on the requests where it had just
-// run.
-//
-// The dashboard's prefix-cache saving no longer reads this flag: it is priced from
-// apply.Trace.SplitStableTokens, the size of the half the split moved, which is set on exactly
-// the same requests and also says HOW MUCH. Keeping the report honest still matters for
-// everything above, and for anyone comparing the two.
-//
-// It is Mutated but never Acted: the split removes no content tokens, it moves them out of
-// the hashed prefix. cacheinject reads the same way, and the dashboard has a verdict for it.
-func (Cachesplit) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) error {
-	rep.Skipped = c == nil || !c.SystemSplit
-	return nil
-}
-
 func init() {
 	components.RegisterFields("cacheinject", Cacheinject{}, []components.Field{
 		{Key: "ttl", Type: components.FieldEnum, Default: "5m", Options: []string{"5m", "1h"},
 			Hint: "Cache lifetime to request. Leave 5m: a 1h write costs 2.0x instead of 1.25x and only pays when reuse is genuinely sparse (task starts more than 5 minutes apart), because every read refreshes the TTL for free."},
 	})
-	// cachesplit takes no configuration at all, and says so: an empty descriptor is what
-	// the settings page draws as "no options", and the strict decode in newCachesplit now
-	// REJECTS a block instead of accepting one and discarding it.
-	components.RegisterFields("cachesplit", struct{}{}, nil)
 }

@@ -23,11 +23,10 @@ function errRate(c) { return c.runs > 0 ? (c.errors || 0) / c.runs : 0; }
 /**
  * actedStructuralOnly is a component that mutated requests without removing any content.
  *
- * cachesplit is the whole reason this predicate exists: its job is WHERE the cache breakpoint
- * goes, so `acted_tokens` and `saved_unique` are 0 by construction and every content-shaped
- * test below reads it as inert. Its dollars are recorded per REQUEST (`cachesplit_saved_usd`,
- * $60.33 on this window from /api/stats) and never reach /api/components at all, so this
- * column cannot judge it and must not try.
+ * cacheinject (and the removed cachesplit, which old rows still carry) is the reason this
+ * predicate exists: its job is WHERE the cache breakpoint goes, so `acted_tokens` and
+ * `saved_unique` are 0 by construction and every content-shaped test below reads it as inert.
+ * This column cannot judge it and must not try.
  */
 function actedStructuralOnly(c) {
   return (c.acted_structural || 0) > 0 && (c.acted_tokens || 0) === 0;
@@ -450,8 +449,8 @@ function savedKnown(c) {
 function savedNAReason(c) {
   if (actedStructuralOnly(c)) {
     return c.component + ' removes no content, so this column cannot value it. It mutated '
-      + num(c.acted_structural) + ' requests structurally — cache placement — and its saving is '
-      + 'recorded per request instead, as the prefix-cache figure on Overview.';
+      + num(c.acted_structural) + ' requests structurally — cache placement — and this column '
+      + 'cannot value it in dollars.';
   }
   return num(c.saved_usd_unpriced_rows) + ' of this component\u2019s acted rows ran on a model '
     + 'with no entry in the operator\u2019s price list, or on a request the accountant could not price '
@@ -531,8 +530,7 @@ function renderUnpricedNote(components) {
       el('strong', {}, structural.map((c) => c.component).join(', ')
         + (structural.length === 1 ? ' removes' : ' remove') + ' no content'),
       ' — ' + (structural.length === 1 ? 'its' : 'their') + ' work is where the cache breakpoint '
-      + 'goes, which this table measures in the Rearranged column and cannot value in dollars. '
-      + 'The saving is recorded per request and appears on Overview as the prefix-cache figure.'));
+      + 'goes, which this table measures in the Rearranged column and cannot value in dollars.'));
   }
 }
 

@@ -122,7 +122,7 @@ func TestDeferNetIsItsOwnLeverInTheTotal(t *testing.T) {
 			return o.TotalSavedUSD, o.DeferNetUSD, nil
 		},
 		"lean": func(db *DB) (float64, float64, error) {
-			o, err := db.OverviewLean(f, nil, nil)
+			o, err := db.OverviewLean(f, nil)
 			if err != nil {
 				return 0, 0, err
 			}

@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS requests (
   -- figure (price_estimated alone does not say which meaning a row has).
   estimate_held      INTEGER NOT NULL DEFAULT 0,
   -- The accountant library's cache effects in TOKENS by tier (#998), beside their dollars: the
-  -- keep-alive rescue (tok_ka_*), the split (tok_split_*), the head-TTL legs (tok_ttl_*) and the
+  -- keep-alive rescue (tok_ka_*), the head-TTL legs (tok_ttl_*) and the
   -- ended-change break (tok_ended_*). Each is saved and caused, by tier: in = fresh input,
   -- rd = cache read, w5m / w1h = the 5-minute / 1-hour cache write. Stored at write time for the
   -- reason saved_first_usd is: the library prices from the thread's history, which a row does not
@@ -128,8 +128,6 @@ CREATE TABLE IF NOT EXISTS requests (
   -- "not measured", not "saved nothing". Additive (acctokens.go).
   tok_ka_saved_in INTEGER NOT NULL DEFAULT 0, tok_ka_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_saved_w1h INTEGER NOT NULL DEFAULT 0,
   tok_ka_caused_in INTEGER NOT NULL DEFAULT 0, tok_ka_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ka_caused_w1h INTEGER NOT NULL DEFAULT 0,
-  tok_split_saved_in INTEGER NOT NULL DEFAULT 0, tok_split_saved_rd INTEGER NOT NULL DEFAULT 0, tok_split_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_split_saved_w1h INTEGER NOT NULL DEFAULT 0,
-  tok_split_caused_in INTEGER NOT NULL DEFAULT 0, tok_split_caused_rd INTEGER NOT NULL DEFAULT 0, tok_split_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_split_caused_w1h INTEGER NOT NULL DEFAULT 0,
   tok_ttl_saved_in INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_saved_w1h INTEGER NOT NULL DEFAULT 0,
   tok_ttl_caused_in INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_rd INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w5m INTEGER NOT NULL DEFAULT 0, tok_ttl_caused_w1h INTEGER NOT NULL DEFAULT 0,
   tok_ended_saved_in INTEGER NOT NULL DEFAULT 0, tok_ended_saved_rd INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w5m INTEGER NOT NULL DEFAULT 0, tok_ended_saved_w1h INTEGER NOT NULL DEFAULT 0,
@@ -162,21 +160,6 @@ CREATE TABLE IF NOT EXISTS requests (
   -- because it is what collapses when a pipeline rewrites deep history. Never reported as
   -- our saving.
   cache_saved_usd    REAL    NOT NULL DEFAULT 0,
-  -- What OUR volatile-tail split saved: nonzero only where the split ran on the request, the
-  -- provider read at least that much from cache while writing less, and the snapshot had MOVED
-  -- since this session's previous request (Event.TailChanged) — the turn that would otherwise
-  -- have missed. Priced against a cache MISS (creation rate), not fresh input.
-  -- Written from the accountant library's split effect. The legacy rule's
-  -- session's-first-request test was REPLACED because it reported ~$0, and three
-  -- descriptions of this column went on stating it for a while after.
-  cachesplit_saved_usd REAL  NOT NULL DEFAULT 0,
-  -- The size of the prefix half cachesplit moved the breakpoint onto: the numerator of the
-  -- column above, stored so a dollar figure can be checked against a token count.
-  split_stable_tokens INTEGER NOT NULL DEFAULT 0,
-  -- The volatile half's identity on this request. Compared against the same session's previous
-  -- request to decide whether the snapshot MOVED, which is the turn the split is worth
-  -- anything on. Stored so the figure survives a restart and can be recomputed from the table.
-  split_tail_hash    INTEGER NOT NULL DEFAULT 0,
   -- The idle keep-alive's three columns. keepalive marks a row that IS a ping — a request
   -- context-guru sent on its own initiative, with no agent behind it — so every query that
   -- reports agent traffic can exclude it and the ledger can price it. It is the audit trail
@@ -198,8 +181,7 @@ CREATE TABLE IF NOT EXISTS requests (
   -- What the ping avoided on THIS row: its cache-read tokens priced at the difference
   -- between the creation tier it would have paid and the read tier it did pay. Nonzero only
   -- where a ping preceded it, the idle gap exceeded the provider lifetime, and the provider
-  -- read more than it wrote. Priced against a cache MISS, not fresh input, for the same
-  -- reason cachesplit_saved_usd is: those tokens carry cache_control, so a miss bills them
+  -- read more than it wrote. Priced against a cache MISS, not fresh input: those tokens carry cache_control, so a miss bills them
   -- as creation at 1.25x rather than at 1.0x.
   keepalive_saved_usd REAL   NOT NULL DEFAULT 0,
   -- billed_token_factor is the tokenizer correction (issue #240) applied to this row's
@@ -918,6 +900,12 @@ CREATE INDEX IF NOT EXISTS idx_requests_keepalive_strategy
 CREATE INDEX IF NOT EXISTS idx_rc_request_comp ON request_components(request_id, component);
 `
 
+// Retired columns (#567). An existing database may still hold `requests.cachesplit_saved_usd`,
+// `split_stable_tokens`, `split_tail_hash` and the eight `tok_split_*` columns. Nothing reads or writes
+// them any more and a fresh database does not create them. They are not dropped: every one has
+// NOT NULL DEFAULT, so an insert that omits them works, and a drop rewrites a table that can be
+// hundreds of MB (the same reason text_gz stays, above).
+
 // additiveColumns are columns added to an EXISTING table without a version bump.
 //
 // The same argument as additiveDDL, one step further: `ALTER TABLE … ADD COLUMN` with a
@@ -933,9 +921,6 @@ CREATE INDEX IF NOT EXISTS idx_rc_request_comp ON request_components(request_id,
 // end up with different shapes.
 var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "cache_saved_usd", "REAL NOT NULL DEFAULT 0"},
-	{"requests", "cachesplit_saved_usd", "REAL NOT NULL DEFAULT 0"},
-	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
-	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	// The request ratio and the byte counts that convert a removal with it (#1533). Nullable, no default: NULL is
 	// "not measured" (a row written before them, or a request with no accountant Result), never 0 bytes.

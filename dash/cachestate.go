@@ -250,17 +250,17 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 	)
 	for rows.Next() {
 		var (
-			t                                    ThreadCache
-			last                                 sql.NullInt64
-			ms                                   sql.NullFloat64
-			model, provider                      sql.NullString
-			prefix                               sql.NullInt64
-			base, cost, cgllm, split, kaSv, ping float64
-			manualSaved, manualCost              float64
-			deferNet                             float64
+			t                             ThreadCache
+			last                          sql.NullInt64
+			ms                            sql.NullFloat64
+			model, provider               sql.NullString
+			prefix                        sql.NullInt64
+			base, cost, cgllm, kaSv, ping float64
+			manualSaved, manualCost       float64
+			deferNet                      float64
 		)
 		if err := rows.Scan(&t.ID, &last, &ms, &model, &provider, &prefix,
-			&base, &cost, &cgllm, &split, &kaSv, &ping, &manualSaved, &manualCost, &deferNet); err != nil {
+			&base, &cost, &cgllm, &kaSv, &ping, &manualSaved, &manualCost, &deferNet); err != nil {
 			return nil, nil, err
 		}
 		t.provider = provider.String
@@ -270,7 +270,7 @@ func (d *DB) ThreadsFor(f Filter, sinceMS int64) ([]ThreadCache, *SessionMoney, 
 		if ttl, ok := ttls[t.ID]; ok {
 			t.TTLSeconds = ttl
 		}
-		t.SavedUSD, t.BaselineUSD = threadMoney(base, cost, cgllm, split, kaSv, ping, manualSaved, manualCost, deferNet)
+		t.SavedUSD, t.BaselineUSD = threadMoney(base, cost, cgllm, kaSv, ping, manualSaved, manualCost, deferNet)
 		m := &money.Others
 		if t.ID == "" {
 			m = &money.Main
@@ -368,7 +368,6 @@ func cacheThreadsQuery(f Filter) (string, []any) {
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.baseline_cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cg_llm_cost_usd ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cachesplit_saved_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + agent + ` THEN ` + kaSavedSince("r.", f.Since) + ` ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + autoPing + ` THEN r.cost_usd ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN ` + manualPing + ` THEN r.manual_saved_usd ELSE 0 END),0),
@@ -379,18 +378,18 @@ func cacheThreadsQuery(f Filter) (string, []any) {
 
 // threadMoney is one thread's `saved $x of $y` on one basis. y is what its requests would have cost
 // without context-guru, at the same prices: the baseline (the requests uncompacted) plus the
-// cache-split and keep-alive savings, which the baseline does not contain. x is y minus what was
+// keep-alive savings, which the baseline does not contain. x is y minus what was
 // actually paid: the requests, context-guru's own model calls and its keep-alive pings. So x <= y,
 // and x is the same net as savingsArithmetic's total. Only savings written per request are in it;
-// the two credits priced on read (CachesplitHistoricalUSD, an estimate, and DeclFilterSavings,
-// which needs Go-side pricing per row) are not. Tool deferral's net (#888) is in: the definitions it
-// left out are outside the baseline, so like the split and keep-alive savings it raises y too.
+// the credit priced on read (DeclFilterSavings,
+// which needs Go-side pricing per row) is not. Tool deferral's net (#888) is in: the definitions it
+// left out are outside the baseline, so like the keep-alive savings it raises y too.
 //
 // The user's own pings join both sides: the write they avoided raises y, and their cost lowers x
 // like any other spend, so pressing Ping moves `saved` by (avoided - cost).
-func threadMoney(baseline, cost, cgllm, split, kaSv, ping, manualSaved, manualCost, deferNet float64) (saved, base float64) {
-	_, _, saved = savingsArithmetic(cost, baseline, cgllm, split, kaSv, ping, manualSaved-manualCost, deferNet)
-	return saved, baseline + split + kaSv + manualSaved + deferNet
+func threadMoney(baseline, cost, cgllm, kaSv, ping, manualSaved, manualCost, deferNet float64) (saved, base float64) {
+	_, _, saved = savingsArithmetic(cost, baseline, cgllm, kaSv, ping, manualSaved-manualCost, deferNet)
+	return saved, baseline + kaSv + manualSaved + deferNet
 }
 
 // SessionMoney is a session's `saved $x of $y` split into the main thread and the sum of every

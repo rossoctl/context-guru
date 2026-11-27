@@ -57,9 +57,9 @@ func turnOn(r *Recorder, thread, from string, hasFrom bool, model string, ts int
 	var seenSession, seenModel bool
 	var since int64
 	if hasFrom {
-		seenSession, seenModel, since, _ = r.ObserveThreadFrom("t1", "s", thread, from, model, ts, 0)
+		seenSession, seenModel, since = r.ObserveThreadFrom("t1", "s", thread, from, model, ts)
 	} else {
-		seenSession, seenModel, since, _ = r.ObserveThread("t1", "s", thread, model, ts, 0)
+		seenSession, seenModel, since = r.ObserveThread("t1", "s", thread, model, ts)
 	}
 	cause, modelGap, known, _, prevPrompt, prevOneHour := r.ObservePrefix("s", thread, from, hasFrom, f, true)
 	if known {

@@ -222,7 +222,6 @@ type Recorder struct {
 	mu        sync.Mutex
 	life      *lifecycle             // nil unless Options.LifecycleSignals
 	lastSeen  map[string]int64       // thread.Key(session, thread) -> epoch ms of previous request
-	lastTail  map[string]uint64      // thread.Key(session, thread) -> previous request's volatile-tail hash
 	lastFacts map[string]PrefixFacts // thread.Key(session, thread), and that + "\x00" + model -> latest prefix facts
 	// seedTier holds, per thread.Key(session, thread) + "\x00" + model, when that thread last
 	// wrote a cache entry at the billed one-hour tier on that model, before a restart
@@ -289,7 +288,6 @@ func NewRecorder(opts Options) (*Recorder, error) {
 		sm:        newStrategyMeta(),
 		done:      make(chan struct{}),
 		lastSeen:  map[string]int64{},
-		lastTail:  map[string]uint64{},
 		lastFacts: map[string]PrefixFacts{},
 		seedTier:  map[string]int64{},
 		seenModel: map[string]bool{},
@@ -663,28 +661,17 @@ func (r *Recorder) run() {
 // warm cache because a DIFFERENT tenant had used it. That is both wrong and a small
 // disclosure — it tells you which models other people are running.
 func (r *Recorder) Observe(tenant, session, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
-	seenSession, seenModel, sinceLastMs, _ = r.ObserveSplit(tenant, session, model, now, 0)
-	return seenSession, seenModel, sinceLastMs
+	return r.ObserveThread(tenant, session, thread.Primary, model, now)
 }
 
-// ObserveSplit is Observe plus the volatile-tail comparison: tailChanged reports whether this
-// request's tail differs from the previous request's in the same session, which is the turn on
-// which the split is worth money (the accountant library prices it). A session's FIRST request
-// counts as changed — there was nothing there to match.
-//
-// tailHash 0 means nothing split, and then tailChanged is false: there is no split to credit.
-func (r *Recorder) ObserveSplit(tenant, session, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
-	return r.ObserveThread(tenant, session, thread.Primary, model, now, tailHash)
-}
-
-// ObserveThread is ObserveSplit for one THREAD of the session (#423). Recency, the cold-start
-// test and the tail comparison are all per thread, because each thread has its own provider
+// ObserveThread is Observe for one THREAD of the session (#423). Recency and the cold-start
+// test are both per thread, because each thread has its own provider
 // cache entry: a subagent's request must not reset the main thread's idle gap, or the main
 // thread's expiry reads as a prefix change; and a subagent's first request is a cold start,
 // not a prefix change. seenSession is therefore "seen this thread". The primary thread keys on
 // the session alone, exactly as before threads existed.
-func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
-	return r.observe(tenant, session, threadID, "", false, model, now, tailHash)
+func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
+	return r.observe(tenant, session, threadID, "", false, model, now)
 }
 
 // ObserveThreadFrom is ObserveThread for the first request of a thread whose content is mostly
@@ -692,13 +679,13 @@ func (r *Recorder) ObserveThread(tenant, session, threadID, model string, now in
 // a request is that conversation's next turn with a changed prefix, not a cold start, so it is
 // observed as seen, with its gap measured from fromThread's last request. A miss on it then
 // reads prefix_change or ttl_expiry. Once the new thread has been seen, this is ObserveThread.
-func (r *Recorder) ObserveThreadFrom(tenant, session, threadID, fromThread, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
-	return r.observe(tenant, session, threadID, fromThread, true, model, now, tailHash)
+func (r *Recorder) ObserveThreadFrom(tenant, session, threadID, fromThread, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
+	return r.observe(tenant, session, threadID, fromThread, true, model, now)
 }
 
-func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom bool, model string, now int64, tailHash uint64) (seenSession, seenModel bool, sinceLastMs int64, tailChanged bool) {
+func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom bool, model string, now int64) (seenSession, seenModel bool, sinceLastMs int64) {
 	if r == nil {
-		return true, true, 0, false
+		return true, true, 0
 	}
 	key := thread.Key(session, threadID)
 	r.mu.Lock()
@@ -706,8 +693,6 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	mk := tenant + "\x00" + model
 	prev, seenSession := r.lastSeen[key]
 	if !seenSession && hasFrom {
-		// The tail stays unknown for the new key, so the switch below refuses the split credit
-		// (the "seen but no tail" branch) — the safe direction.
 		prev, seenSession = r.lastSeen[thread.Key(session, fromThread)]
 	}
 	if seenSession {
@@ -731,27 +716,6 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	if len(r.seenModel) > 1000 {
 		r.seenModel = map[string]bool{}
 	}
-	if tailHash != 0 {
-		prevTail, had := r.lastTail[key]
-		switch {
-		case had:
-			tailChanged = prevTail != tailHash
-		case !seenSession:
-			// Genuinely the first request of this session: nothing to match, so it counts as
-			// moved. This is the same rule the read-time recomputation applies (see the SQL
-			// in Overview, splitMoved), and the two now count the same thing.
-			tailChanged = true
-		default:
-			// We have SEEN this session but do not remember its tail: this map is
-			// process-scoped and pruned by age, so a proxy restart or an eviction lands here
-			// mid-session. That is amnesia, not a moved snapshot, and treating it as one paid
-			// real credit for nothing — measured, all three credited requests on the
-			// production corpus were this case, and a faithful recomputation calls none of
-			// them moved. Refusing the credit is the only safe direction.
-			tailChanged = false
-		}
-		r.lastTail[key] = tailHash
-	}
 	r.lastSeen[key] = now
 	r.seenModel[mk] = true
 	// A real request refreshes the provider's cache entry, so it counts on the grace clock
@@ -760,7 +724,7 @@ func (r *Recorder) observe(tenant, session, threadID, fromThread string, hasFrom
 	if session != "" {
 		r.touchGraceLocked(key, now)
 	}
-	return seenSession, seenModel, sinceLastMs, tailChanged
+	return seenSession, seenModel, sinceLastMs
 }
 
 // touchGraceLocked records a cache refresh on the restart grace's clock: ts only ever moves a
@@ -793,7 +757,6 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 	for k, ts := range r.lastSeen {
 		if now-ts > staleSession {
 			delete(r.lastSeen, k)
-			delete(r.lastTail, k)
 		}
 	}
 	// seedTier is keyed per thread and model, so it ages by its own write time.
@@ -817,7 +780,7 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 		}
 	}
 	if len(r.lastSeen) > 20000 || len(r.graceSeen) > 20000 {
-		r.lastSeen, r.lastTail = map[string]int64{}, map[string]uint64{}
+		r.lastSeen = map[string]int64{}
 		r.lastFacts = map[string]PrefixFacts{}
 		r.seedTier = map[string]int64{}
 		r.graceSeen = map[string]int64{}
@@ -833,15 +796,12 @@ func (r *Recorder) pruneSessionsLocked(now int64) {
 // over-claim the prefix-cache figure exists to avoid. It also fixes cache_miss_reason, which
 // reported a cold start for every session in flight across a restart.
 //
-// Three queries at startup (recency and tail, tiers, models), bounded to sessions young enough to
+// Three queries at startup (recency, tiers, models), bounded to sessions young enough to
 // still matter.
 func (r *Recorder) SeedSessions(now int64) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
 	}
-	// The tail hash of each session's LATEST request, alongside its recency: without it the
-	// first turn after a restart reads as a tail change and earns a credit it did not.
-	//
 	// `keepalive = 0` in BOTH halves. A keep-alive ping is a row in `requests`, and the row
 	// this seeds from is the session's LATEST — which for a pinged session is usually a ping.
 	// Seeding recency from one re-dates the session across a restart and makes the next real
@@ -856,7 +816,7 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	// matters (ObservePrefix commits a request only when it succeeded). A failed request wrote no
 	// cache entry, so counting it makes the entry look younger than it is and turns a ttl_expiry
 	// into a prefix_change or unknown. A thread with no 2xx row is not seeded: it has no entry.
-	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts, r.split_tail_hash FROM requests r
+	rows, err := r.db.sql.Query(`SELECT r.session_id, r.thread_id, r.ts FROM requests r
 		WHERE r.ts >= ? AND r.keepalive = 0 AND r.status >= 200 AND r.status < 300
 			AND r.id = (SELECT r2.id FROM requests r2
 			WHERE r2.session_id = r.session_id AND r2.thread_id = r.thread_id AND r2.keepalive = 0
@@ -868,23 +828,14 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 	}
 	defer rows.Close()
 	seeded := map[string]int64{}
-	tails := map[string]uint64{}
 	for rows.Next() {
 		var sid, tid string
-		var ts, tail int64
-		// int64, not uint64: SQLite's INTEGER is signed, so a hash whose top bit is set
-		// comes back negative and scanning it straight into a uint64 fails the whole
-		// query — which it did on every start, silently costing the seeding this function
-		// exists for ("could not recover session recency" in the log). The bits are the
-		// same; only the Go type of the container differs.
-		if err := rows.Scan(&sid, &tid, &ts, &tail); err != nil {
+		var ts int64
+		if err := rows.Scan(&sid, &tid, &ts); err != nil {
 			return 0, err
 		}
 		id := thread.Key(sid, tid)
 		seeded[id] = ts
-		if tail != 0 {
-			tails[id] = uint64(tail)
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
@@ -904,9 +855,6 @@ func (r *Recorder) SeedSessions(now int64) (int, error) {
 		// construction, and its sinceLastMs is the one the request path measured.
 		if _, ok := r.lastSeen[id]; !ok {
 			r.lastSeen[id] = ts
-			if t, ok := tails[id]; ok {
-				r.lastTail[id] = t
-			}
 		}
 	}
 	// A tier belongs to a thread and a model. It is not tied to the thread's recency, so a thread

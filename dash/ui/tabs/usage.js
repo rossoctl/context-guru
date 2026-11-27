@@ -99,9 +99,6 @@ async function loadUsage() {
         el('td', { class: 'num more', text: compact(g.tokens_before) }),
         el('td', { class: 'num more', text: compact(g.tokens_after) }),
         el('td', { class: 'num more', text: compact(g.saved_unique) }),
-        // Ours, not the provider's: this column used to carry cache_saved_usd, which made
-        // every model look like a large cache saving we had nothing to do with.
-        el('td', { class: 'num more' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.cachesplit_saved_usd) }),
         el('td', { class: 'num more' + (unpriced ? ' na' : ''), text: unpriced ? 'unknown' : usd(g.total_saved_usd) }),
         el('td', { class: 'num more', text: num(g.incomplete_rows) })));
     }

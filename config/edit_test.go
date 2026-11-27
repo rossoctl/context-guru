@@ -12,7 +12,7 @@ import (
 // proxy test (proxy/configedit_golden_test.go) reads the same files through the host.
 
 const editDoc = `# account config
-pipeline: [format, dedup, cachesplit, extract]  # the order matters
+pipeline: [format, dedup, cacheinject, extract]  # the order matters
 components:
   # keep the big ones
   extract:
@@ -30,7 +30,7 @@ var editDocs = map[string]string{
 	"empty":    "",
 	"minimal":  "pipeline: [format]\n",
 	"nopipe":   "components:\n  toolfilter:\n    remove: [a, b]\n",
-	"llm":      "pipeline: [cachesplit, format, extract_llm]\n",
+	"llm":      "pipeline: [cacheinject, format, extract_llm]\n",
 	"badyaml":  "a: [",
 	"always":   "pipeline: [toolfilter]\ncomponents:\n  toolfilter:\n    defer: auto\n    always_defer: [mcp__ops]\n",
 	"noremove": "pipeline: [format, toolfilter]\ncomponents:\n  toolfilter:\n    defer: off\n",
@@ -189,12 +189,12 @@ func TestDeclConfigName(t *testing.T) {
 }
 
 func TestAdaptMergeKeepsFixedComponentsAfterTheirCandidate(t *testing.T) {
-	cur := []string{"format", "dedup", "cachesplit", "extract", "extract_llm"}
+	cur := []string{"format", "dedup", "cacheinject", "extract", "extract_llm"}
 	got := strings.Join(AdaptMerge(cur, []string{"extract", "format"}), ",")
-	if got != "extract,extract_llm,format,cachesplit" {
+	if got != "extract,extract_llm,format,cacheinject" {
 		t.Errorf("merge = %s", got)
 	}
-	if got := strings.Join(AdaptMerge([]string{"cachesplit"}, []string{"format", "extract"}), ","); got != "cachesplit,format,extract" {
+	if got := strings.Join(AdaptMerge([]string{"cacheinject"}, []string{"format", "extract"}), ","); got != "cacheinject,format,extract" {
 		t.Errorf("head = %s", got)
 	}
 }

@@ -12,6 +12,6 @@ components:
 pipeline:
   - format
   - dedup
-  - cachesplit
+  - cacheinject
   - extract
   - toolfilter

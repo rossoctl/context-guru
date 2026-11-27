@@ -7,7 +7,7 @@ silently ignored, and you can't miss one that exists.
 
 ## What's on the form
 
-Fields are grouped by component (`dedup`, `extract_llm`, `cachesplit`, and so on), plus the
+Fields are grouped by component (`dedup`, `extract_llm`, `cacheinject`, and so on), plus the
 top-level `pipeline` (which components run, and in what order) and `mode`. Within a
 component, each field is a dotted key such as `min_request_tokens` or `extract_llm.strategy`, and
 every field has a one-line hint explaining what it does and, for a component that is

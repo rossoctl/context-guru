@@ -238,7 +238,7 @@ func TestFigureReRateDoesNotCountCacheEffectTokensTwice(t *testing.T) {
 	f := e.AccountantFigure(gpt56())
 	without := 150_000*10e-6 + 169_000*1e-6 + 1_000*10e-6
 	sent := 100_000*5e-6 + 150_000*0.5e-6 + 20_000*5e-6
-	total := f.DeltaUSD + f.KeepAliveSavedUSD + f.SplitUSD + f.TTLUSD
+	total := f.DeltaUSD + f.KeepAliveSavedUSD + f.TTLUSD
 	if !accNear(total, without-sent) {
 		t.Fatalf("booked %v, bill difference %v", total, without-sent)
 	}
