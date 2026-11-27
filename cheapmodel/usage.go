@@ -67,7 +67,7 @@ type Sink struct {
 	// cacheWrite1h is the part of cacheWrite the provider billed at the one-hour write premium —
 	// a SUBSET of cacheWrite, never an addition to it, mirroring proxy.Usage.CacheWrite1h's own
 	// relationship to CacheWrite. Needed so a caller pricing a cheap-model call with
-	// modelinfo.Price.CostWithCacheWrite1h (cache_aware_summarizer's keep-alive substitute is the
+	// accountant.RequestCost (cache_aware_summarizer's keep-alive substitute is the
 	// first one to) can price the 1h tier at its own premium instead of silently folding it into
 	// the 5-minute rate — see KeepAliveSummaryResult.CacheWrite1h.
 	cacheWrite1h atomic.Int64

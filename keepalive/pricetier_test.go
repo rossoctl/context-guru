@@ -20,24 +20,25 @@ func TestProjectedPingUsesTheTierOfThePrefix(t *testing.T) {
 	k, fd, _ := testKeeper(t)
 	fd.setPrices(proxyPricer{fixedPrice{tieredGPT56()}})
 	out := float64(pingOutputBudget("/v1/messages"))
-	// A ping carries kvcache.DefaultPingInputTokens (7) of its own: a prefix of 271,993 sends
+	// A ping carries kvcache.DefaultPingInputTokens (7) of its own, and pays for them at the input rate
+	// (accountant.PingCost; before, the guard left them out): a prefix of 271,993 sends
 	// exactly 272,000, which is still base.
 	at := k.projectedPingUSD("gpt-5.6", 271_993, "/v1/messages", "")
-	if want := 271_993*0.5e-6 + out*30e-6; !near(at, want) {
+	if want := 271_993*0.5e-6 + 7*5e-6 + out*30e-6; !near(at, want) {
 		t.Fatalf("at the line %v want base %v", at, want)
 	}
 	// 271,995 + 7 = 272,002 is above the line: the tier rate (#1437). Before, it priced at base.
 	near5 := k.projectedPingUSD("gpt-5.6", 271_995, "/v1/messages", "")
-	if want := 271_995*1e-6 + out*45e-6; !near(near5, want) {
+	if want := 271_995*1e-6 + 7*10e-6 + out*45e-6; !near(near5, want) {
 		t.Fatalf("prefix 271,995 %v want tier %v", near5, want)
 	}
 	// A prefix of exactly 272,000 sends a ping above the line: the tier rate.
 	edge := k.projectedPingUSD("gpt-5.6", 272_000, "/v1/messages", "")
-	if want := 272_000*1e-6 + out*45e-6; !near(edge, want) {
+	if want := 272_000*1e-6 + 7*10e-6 + out*45e-6; !near(edge, want) {
 		t.Fatalf("prefix 272,000 %v want tier %v", edge, want)
 	}
 	above := k.projectedPingUSD("gpt-5.6", 300_000, "/v1/messages", "")
-	if want := 300_000*1e-6 + out*45e-6; !near(above, want) { // 2x read, 1.5x output
+	if want := 300_000*1e-6 + 7*10e-6 + out*45e-6; !near(above, want) { // 2x read, 1.5x output
 		t.Fatalf("above the line %v want tier %v", above, want)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
@@ -1119,6 +1120,7 @@ func (k *Keeper) Record(r Record) {
 	if emitter == nil {
 		emitter = components.NopEmitter{}
 	}
+	pingUSD, missUSD := k.projectedPingAndMissUSD(model, prefix, route, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID)))
 	e := &kaEntry{
 		key: r.Key, tenant: r.Key.Tenant, session: session, client: r.Client, thread: threadID, startedAt: startedAt, gapStart: startedAt,
 		cred: r.Cred, touchAlias: r.TouchAlias,
@@ -1132,8 +1134,8 @@ func (k *Keeper) Record(r Record) {
 		planPings:    planPings,
 		recordedReal: time.Now(),
 		toolUseNames: r.ToolUseNames, usageOK: usageOK, terminal: terminalFor(k.o.TerminalTools, r.ToolUseIncomplete), endsAtText: provider != bschemas.OpenAI && endsAtTextTurn(body),
-		pingUSD: k.projectedPingUSD(model, prefix, route, r.Endpoint),
-		missUSD: k.projectedMissUSD(model, prefix, r.Endpoint, ttl1h || missAtOneHour(pol, oneHour, IsSubagentThread(threadID))),
+		pingUSD: pingUSD,
+		missUSD: missUSD,
 		hdr:     hdr, tag: r.Tag,
 	}
 	e.refreshedAt = startedAt // the real request refreshed the provider's entry
@@ -1266,9 +1268,9 @@ func (k *Keeper) price(endpoint, model string, prefix int64) (Price, bool) {
 	return k.o.Dispatcher.Price(context.Background(), endpoint, model, prefix)
 }
 
-// projectedPingUSD is what one ping on this prefix will cost: the prefix at the model's own
-// cache-read rate, plus the route's output budget. Computed at record time so the guard can
-// refuse an expensive ping BEFORE sending it rather than reporting it afterwards.
+// projectedPingUSD is what one ping on this prefix will cost: PingUSD, with the route's output budget.
+// Computed at record time so the guard can refuse an expensive ping BEFORE sending it rather than
+// reporting it afterwards.
 //
 // Zero when the model is not priced, which lets the ping through — refusing to protect a cache
 // because a price list is incomplete would be the wrong failure, and the spend still lands on
@@ -1281,7 +1283,24 @@ func (k *Keeper) projectedPingUSD(model string, prefix int64, route, endpoint st
 	if !ok || price.Zero() {
 		return 0
 	}
-	return float64(prefix)*price.CacheRead + float64(pingOutputBudget(route))*price.Output
+	return PingUSD(price, model, prefix, int64(pingOutputBudget(route)))
+}
+
+// projectedPingAndMissUSD is projectedPingUSD and projectedMissUSD on one price lookup: the record path
+// needs both for each response, so the price is read and boxed once.
+func (k *Keeper) projectedPingAndMissUSD(model string, prefix int64, route, endpoint string, oneHour bool) (ping, miss float64) {
+	if model == "" || prefix <= 0 {
+		return 0, 0
+	}
+	price, ok := k.price(endpoint, model, pingPrompt(prefix))
+	if !ok {
+		return 0, 0
+	}
+	var rates accountant.SizedPricer = modelinfo.OnePrice{Model: model, Price: price} // boxed once
+	if !price.Zero() {
+		ping = pingUSDWith(rates, model, prefix, int64(pingOutputBudget(route)))
+	}
+	return ping, missUSDWith(rates, model, prefix, oneHour)
 }
 
 // projectedMissUSD is what one cache miss costs over a hit on this prefix, at the tier of the
@@ -1335,7 +1354,8 @@ func (k *Keeper) projectedSummaryUSD(model, endpoint string, prefix int64) float
 	if !ok || price.Zero() {
 		return 0
 	}
-	return float64(prefix)*price.CacheRead + float64(summaryOutputBudgetGuess)*price.Output
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, Output: summaryOutputBudgetGuess, PromptTokens: pingPrompt(prefix)}, modelinfo.OnePrice{Model: model, Price: price})
+	return usd
 }
 
 // projectedRefreshExtraUSD is what a refresh costs OVER the ping it replaces (#1144): the summary
@@ -2145,6 +2165,16 @@ func billedPrompt(u Usage, prefix int64) int64 {
 	return prefix
 }
 
+// billedUSD is the bill of one request's usage: accountant.RequestCost, at the prompt size prompt that picks its
+// price tier (billedPrompt of the whole usage). It gives the same bits as the bill that dash.Event.Price stores, with the one-hour part of
+// a write at the one-hour rate. Zero for a price with no rates.
+func billedUSD(price Price, model string, prompt int64, u Usage) float64 {
+	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: model,
+		Billed: accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead), CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)},
+		Output: int(u.Output), PromptTokens: prompt}, modelinfo.OnePrice{Model: model, Price: price})
+	return usd
+}
+
 // pingCost prices one ping's usage. The same gate dash.Event.Price used to apply before pricing
 // anything: no cost without a usable rate, and no cost claimed for a ping whose usage reported
 // nothing at all. priced is false when the model has no rate.
@@ -2157,9 +2187,9 @@ func (k *Keeper) pingCost(endpoint, model string, prefix int64, u Usage) (cost f
 		return 0, false
 	}
 	if u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0 {
-		// See modelinfo.Price.CostWithCacheWrite1h for the one-hour write premium this folds
-		// in — the same helper dash.Event.Price uses, so the two cannot drift apart again.
-		cost = price.CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
+		// The accountant prices the bill, with the one-hour write premium folded in — the same function
+		// dash.Event.Price uses, so the two cannot drift apart again.
+		cost = billedUSD(price, model, billedPrompt(u, prefix), u)
 	}
 	return cost, true
 }

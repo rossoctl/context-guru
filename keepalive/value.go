@@ -1,6 +1,11 @@
 package keepalive
 
-import "math"
+import (
+	"math"
+
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
+)
 
 // The ping value rule (#1420).
 //
@@ -21,7 +26,10 @@ import "math"
 // incomplete price list must not switch off a protection.
 //
 // The operator's flat cap (Policy.MaxUSDPerPing > 0) is OPT-IN and applies on top of this rule.
-// Replay (campaign) calls the same function, so the live keeper and the replay decide alike.
+// Replay (campaign) calls the same verdict function, and prices the ping and the miss with the same
+// accountant functions (PingCost, MissCost), at the same prompt size (PingPrompt). One difference stays:
+// the keeper knows the route, so a ping on a Responses route bills its 16 output tokens (pingOutputBudget).
+// A replay row has no route and bills 1.
 
 // Verdict is the answer of PingVerdict.
 type Verdict int
@@ -56,16 +64,17 @@ func (p Policy) PingCap() float64 {
 }
 
 // MissUSD is the extra cost of one cache miss on a prefix: the write rate minus the read rate, on
-// every prefix token. oneHour picks the 1-hour write rate. Zero when the price is unknown.
+// every prefix token, at the rates of the ping's prompt size (PingPrompt). oneHour picks the 1-hour
+// write rate. Zero when the price is unknown. The accountant owns the formula (accountant.MissCost):
+// it floors a miss at 0, and a miss never has a negative value.
 func MissUSD(price Price, model string, prefix int64, oneHour bool) float64 {
-	if prefix <= 0 || price.Zero() {
-		return 0
-	}
-	write := price.CacheWrite5mFor(model)
-	if oneHour {
-		write = price.CacheWrite1hFor(model)
-	}
-	return max(0, float64(prefix)*(write-price.CacheReadFor(model)))
+	return missUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, oneHour)
+}
+
+// missUSDWith is MissUSD for a rate table that the caller built once (see pingUSDWith).
+func missUSDWith(rates accountant.SizedPricer, model string, prefix int64, oneHour bool) float64 {
+	usd, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: prefix, PromptTokens: PingPrompt(prefix), OneHour: oneHour}, rates)
+	return usd
 }
 
 // PingVerdict decides one ping chain. pingUSD is the projected cost of one ping, missUSD the miss

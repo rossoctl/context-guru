@@ -13,6 +13,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -71,7 +72,11 @@ func PlanOutcome(k int, x, u, gap float64, returned bool, stop float64) (fired i
 func Priced(pRead, pWrite float64) bool { return pRead > 0 && pWrite > pRead }
 
 // Stake is one avoided rewrite: the prefix times what a write costs over a read. Gateway dollars.
-func Stake(prefix int64, pRead, pWrite float64) float64 { return float64(prefix) * (pWrite - pRead) }
+// The accountant owns the formula (accountant.MissCost): a rewrite never costs less than 0.
+func Stake(prefix int64, pRead, pWrite float64) float64 {
+	usd, _ := accountant.MissCost(accountant.MissInput{Prefix: prefix}, modelinfo.FlatRates{CacheRead: pRead, Write5m: pWrite})
+	return usd
+}
 
 // Score is the closed-form result of one decision, in the builder's units (gateway dollars times the calibrated scales).
 type Score struct {
@@ -103,7 +108,7 @@ type RowFacts struct {
 	Returned           bool
 	ToEnd              float64 // seconds from this response's end to the end of the session's last response (any model): SessionEnd cancels pings after it
 	Stake, Ping        float64 // one avoided rewrite (prefix x (write - read)) and one ping, gateway $
-	Miss               float64 // the miss the value rule weighs (keepalive.MissUSD): the same figure at the ping's prompt tier, 5-minute write rate. 0 = unknown, and the rule fails open
+	Miss               float64 // the miss the value rule weighs (keepalive.MissUSD): the same figure at the ping's prompt tier, at the 5-minute write rate, or at the 1-hour rate for a row with CacheWrite1h > 0 (the entry was billed at the 1-hour tier). 0 = unknown, and the rule fails open
 	Turn               int     // requests of the conversation before this one
 	Prefix             int64
 	Hour, Dow          int // request start, UTC
@@ -162,7 +167,7 @@ func NewFacts(model, stop, agent string, prefix int64, pingCost float64, hourUTC
 // Rows turns the dashboard dataset into tuner rows plus each row's facts (same order). A row whose outcome is not known by untilMs (its response ended
 // less than the last ping plus the cache lifetime before it) is dropped, and so is one with no price or incomplete accounting. Gains are in the
 // builder's units (calibrated to the pinned replay engine).
-func Rows(reqs []*kvcache.Request, price func(model string, promptTokens int64) (pIn, pOut, pRead, pWrite float64, ok bool), sessionEnd bool, untilMs int64) ([]predictive.AutoRow, []RowFacts) {
+func Rows(reqs []*kvcache.Request, price PriceFunc, sessionEnd bool, untilMs int64) ([]predictive.AutoRow, []RowFacts) {
 	type sk struct{ user, conv string }
 	lastEnd := map[sk]int64{}
 	byThr := map[sk][]int64{} // request starts per thread of a session: the keeper's turns and entries are per thread
@@ -189,25 +194,16 @@ func Rows(reqs []*kvcache.Request, price func(model string, promptTokens int64) 
 		if r.KeepAlive || r.Rejected || !r.CostKnown || r.CachedContext <= 0 || float64(end)+2700e3 > float64(untilMs) {
 			continue
 		}
-		pIn, pOut, pRead, pWrite, ok := price(r.Model, modelinfo.PromptTokens(r.InputTokens, r.CacheRead, r.CacheWrite))
-		if !ok || pWrite <= pRead {
+		dp, ok := PriceDecision(price, r.Model, r.CachedContext, modelinfo.PromptTokens(r.InputTokens, r.CacheRead, r.CacheWrite), r.CacheWrite1h > 0)
+		if !ok || dp.PWrite <= dp.PRead {
 			continue
-		}
-		// A replayed ping reads CachedContext plus its own input: priced at that size, not at the row's.
-		pingIn, pingOut, pingRead, pingWrite, pingOK := price(r.Model, r.CachedContext+kvcache.DefaultPingInputTokens)
-		if !pingOK {
-			pingIn, pingOut, pingRead = pIn, pOut, pRead
-		}
-		miss := Stake(r.CachedContext, pRead, pWrite)
-		if pingOK {
-			miss = Stake(r.CachedContext, pingRead, pingWrite)
 		}
 		key, tk := sk{r.User, r.ConversationID}, sk{r.User, r.ConversationID + "\x00" + r.ThreadID}
 		st := time.UnixMilli(r.TS).UTC()
 		f := RowFacts{U: r.UpstreamMs / 1000, Returned: r.HasNext, ToEnd: float64(max(0, lastEnd[key]-end)) / 1000,
-			Stake: Stake(r.CachedContext, pRead, pWrite), Miss: miss, Ping: (&predictive.Response{Prefix: r.CachedContext, PIn: pingIn, POut: pingOut, PRead: pingRead}).PingCost(),
+			Stake: dp.Stake, Miss: dp.Miss, Ping: dp.Ping,
 			Turn: sort.Search(len(byThr[tk]), func(i int) bool { return byThr[tk][i] >= r.TS }), Prefix: r.CachedContext,
-			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: agent.ModelAgentOf(r.Agent, r.Provider), Stop: r.StopReason, Cause: r.WaitingFor, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: pRead, PWrite: pWrite}
+			Hour: st.Hour(), Dow: int(st.Weekday()), StartMs: r.TS, Model: r.Model, Agent: agent.ModelAgentOf(r.Agent, r.Provider), Stop: r.StopReason, Cause: r.WaitingFor, Subagent: keepalive.IsSubagentThread(r.ThreadID), OpenAI: r.Provider == "openai", PRead: dp.PRead, PWrite: dp.PWrite}
 		f.Span = math.Inf(1)
 		ss := byThr[tk]
 		if j := sort.Search(len(ss), func(i int) bool { return ss[i] > r.TS }); j < len(ss) {

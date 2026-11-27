@@ -73,8 +73,8 @@ func TestEntryWithOneHourFracOfOneAddsNoExtraCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := tb.Price(context.Background(), "acme/flat-1")
-	got := p.CostWithCacheWrite1h(4, 0, 20315, 12, 20157)
-	want := p.CostWithCacheWrite1h(4, 0, 20315, 12, 0)
+	got := storedBill(p, 4, 0, 20315, 12, 20157)
+	want := storedBill(p, 4, 0, 20315, 12, 0)
 	if math.Abs(got-want) > 1e-12 {
 		t.Fatalf("cost with 1h writes = %v, want %v (no extra cost)", got, want)
 	}
@@ -92,7 +92,7 @@ func TestClaudeEntryWithoutTheKeyKeepsTheTwoXRate(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := tb.Price(context.Background(), "claude-sonnet-4-6")
-	got := p.CostWithCacheWrite1h(4, 0, 20315, 12, 20157)
+	got := storedBill(p, 4, 0, 20315, 12, 20157)
 	want := 4*3e-6 + 20315*3.75e-6 + 12*15e-6 + 20157*0.75*3e-6
 	if math.Abs(got-want) > 1e-12 {
 		t.Fatalf("cost = %v, want %v", got, want)

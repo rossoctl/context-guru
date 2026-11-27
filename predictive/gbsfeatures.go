@@ -239,7 +239,7 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 	}
 
 	f := row.F[GBSBase:]
-	stake := float64(r.Prefix) * (r.PWrite5m - r.PRead)
+	stake := missUSD(int64(r.Prefix), r.PRead, r.PWrite5m)
 	end := time.UnixMilli(r.EndMs).UTC()
 	hr, dow := float64(end.Hour()), float64((int(end.Weekday())+6)%7)
 	i := 0
@@ -254,8 +254,8 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 	put(dow)
 	put(float64(r.Prefix))
 	put(float64(r.Output))
-	put(float64(r.Prefix) * r.PRead)
-	put(float64(r.Prefix) * r.PWrite5m)
+	put(readUSD(r.Prefix, r.PRead))       // read_cost
+	put(rebuildUSD(r.Prefix, r.PWrite5m)) // rebuild_cost
 	put(r.PingCost())
 	put(cost)
 	put(float64(r.Fresh))
