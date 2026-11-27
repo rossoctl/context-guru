@@ -29,6 +29,9 @@ import (
 // change to a default must not silently re-tune a strategy that an install already uses. The
 // Claude Code plugin keeps no copy: it reads this table with `context-guru-proxy strategies`.
 // TestEveryStrategyHasTheSameEffectiveConfigAsItsOldKeys keeps the files it wrote before that valid.
+// TestStrategiesWriteTheShippedKeepAliveDefaults pins three keys in all 5 strategies
+// (keepalive_idle_seconds, keepalive_min_prefix_tokens, keepalive_idle_seconds_1h) to the shipped
+// values. A drift from the Default* constants fails there, and a person decides which side moves.
 // A test also pins the floor in this table to DefaultKeepAliveMinPrefix, so the two are
 // changed together. The table does not write keepalive_tool_wait_min_prefix_tokens: the default
 // (20000) applies, so an old strategy file gets the tool-wait floor without a re-render.
@@ -80,10 +83,10 @@ var Strategies = []Strategy{
 		Providers: []string{"anthropic", "openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
-			{"keepalive_idle_seconds", DefaultKeepAliveIdle},
+			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 2},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
-			{"keepalive_idle_seconds_1h", DefaultKeepAliveIdle1h},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 		},
 	},
@@ -94,10 +97,10 @@ var Strategies = []Strategy{
 		Providers: []string{"anthropic", "openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
-			{"keepalive_idle_seconds", DefaultKeepAliveIdle},
+			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 1},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
-			{"keepalive_idle_seconds_1h", DefaultKeepAliveIdle1h},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 		},
 	},
@@ -108,10 +111,10 @@ var Strategies = []Strategy{
 		Providers: []string{"anthropic", "openai"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
-			{"keepalive_idle_seconds", DefaultKeepAliveIdle},
+			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 2},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
-			{"keepalive_idle_seconds_1h", DefaultKeepAliveIdle1h},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 2},
 		},
 	},
@@ -132,10 +135,10 @@ var Strategies = []Strategy{
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
-			{"keepalive_idle_seconds", DefaultKeepAliveIdle},
+			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 2},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
-			{"keepalive_idle_seconds_1h", DefaultKeepAliveIdle1h},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 			{"keepalive_one_hour_on_wait", true},
 		},
@@ -147,10 +150,10 @@ var Strategies = []Strategy{
 		Providers: []string{"anthropic"},
 		Cache: []StrategyKey{
 			{"keepalive", true},
-			{"keepalive_idle_seconds", DefaultKeepAliveIdle},
+			{"keepalive_idle_seconds", 240},
 			{"keepalive_max_pings", 2},
-			{"keepalive_min_prefix_tokens", DefaultKeepAliveMinPrefix},
-			{"keepalive_idle_seconds_1h", DefaultKeepAliveIdle1h},
+			{"keepalive_min_prefix_tokens", 80000},
+			{"keepalive_idle_seconds_1h", 3540},
 			{"keepalive_max_pings_1h", 1},
 			{"keepalive_one_hour_always", true},
 		},

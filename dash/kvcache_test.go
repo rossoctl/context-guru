@@ -579,6 +579,11 @@ func TestPingScheduleMatchesTheKeepAliveTab(t *testing.T) {
 		}
 		return min(int(math.Floor((gap-idle)/idle))+1, k)
 	}
+	// A fractional gap at an exact multiple of idle can differ from the old float rule by one ping: kvcache,
+	// the real schedule, floors in integer nanoseconds. That case is pinned below, not compared with ref.
+	if got := PingsPerSpan(0.6, 0.2, 4); got != 3 || ref(0.6, 0.2, 4) != 2 {
+		t.Errorf("PingsPerSpan(0.6, 0.2, 4) = %d (old rule %d), want 3 (old 2)", got, ref(0.6, 0.2, 4))
+	}
 	for _, gap := range []float64{0, 0.3, 1, 279, 279.9, 280, 280.5, 281, 559, 560, 600, 1800, 3600, 14400, 86400} {
 		for _, idle := range []float64{0, 60, 240, 280, 299.9, 300, 3360, 3540} {
 			for k := 0; k <= 4; k++ {
