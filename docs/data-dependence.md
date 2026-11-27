@@ -12,12 +12,12 @@ says what each one does at three storage levels: off, metadata only, and everyth
 - **The rule:** a component or feature works from **metadata** only. A feature that needs
   **content** is a rare, deliberate exception. Many users turn storage off, and a feature that
   quietly needs content then works worse, with nothing reported.
-- **13 of 24 components need no stored content to do their job:**
+- **14 of 25 components need no stored content to do their job:**
   - 5 keep nothing.
   - 2 keep only hashes or names: `cacheinject` keeps hashes, and `toolfilter` keeps tool names when
     tool deferral is on (the `ultrahigh` preset, or the Bob plugin's `bob-ultrahigh`).
   - 1 keeps only a speed-up cache.
-  - 5 keep only the original. Without it they still work, but the `expand` tool cannot give it back.
+  - 6 keep only the original. Without it they still work, but the `expand` tool cannot give it back.
 - **5 more could work on metadata only**, with a small change: one "already done" flag per message.
 - **4 components cannot work without content.** A model writes their text, and the words differ
   each time. These are `extract_llm`, `summarize`, `cache_aware_summarizer` and `agentdiet`.
@@ -204,6 +204,7 @@ One row for each registered component. Each row is its own file,
 | `skeleton` | content | Store: the frozen decision and the original source | ❌ **Does not work.** It skips, so it saves nothing. | ❌ **Does not work.** It skips. | ✅ Works | It removes function bodies from source code. Without the original, the agent cannot tell a removed body from an empty one, so it refuses to run. | Osher Elhadad, first commit a91d6f4 |
 | `cmdfilter` | content | Store: the filtered text (a speed-up) and the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It applies a filter for each known command, and the same output always gives the same text. It keeps the original only so the agent can get dropped lines back. | Osher Elhadad, first commit a91d6f4; memo in #188 |
 | `linecap` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It shortens very long lines and folds repeated lines, the same way every time. It keeps the original only so the agent can get the cut lines back. | Osher Elhadad, #89 |
+| `searchcap` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It keeps the first matches of each file in a search listing and cuts the rest. It keeps the original only so the agent can get the cut matches back. | Osher Elhadad, #439 |
 | `dedup` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. The note still says "expand", with nothing to expand. | ✅ Works, no `expand` | ✅ Works | It replaces a repeated tool output with a pointer to the earlier copy in the same request. It keeps the repeat only so the agent can get it back. | Osher Elhadad, first commit a91d6f4 |
 | `smartcrush` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It keeps the first and last items of a long JSON array, and any error items, the same way every time. It keeps the full array only for `expand`. | Osher Elhadad, first commit a91d6f4 |
 | `extract` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It removes clear noise, such as repeated lines and progress bars, the same way every time. It keeps the original only for `expand`. | Osher Elhadad, first commit a91d6f4 |
