@@ -17,7 +17,9 @@ type Usage struct {
 	FreshInput, CacheRead, CacheWrite, CacheWrite1h int64
 }
 
-func (u Usage) lib() accountant.Usage {
+// Accountant is the usage in the library's type. It is the one conversion: every host site that builds an
+// accountant.Usage from a billed usage calls it.
+func (u Usage) Accountant() accountant.Usage {
 	return accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead),
 		CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)}
 }
@@ -150,7 +152,7 @@ func ThreadOf(id string, parent string, hasParent bool) accountant.Thread {
 
 // Compute prices the request. It stores the new ThreadState (so a shadow run still advances it).
 func (s *Recorder) Compute(req *accountant.Request, u Usage) accountant.Result {
-	return req.Compute(u.lib())
+	return req.Compute(u.Accountant())
 }
 
 // ComputeSafe is Compute for the request path. The library asks the host to wrap Compute, and the rule is

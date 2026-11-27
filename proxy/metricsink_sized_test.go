@@ -75,7 +75,7 @@ func trimObs(model string, billed, output, saved, caused int) acmetrics.Observat
 // the output included. 290,000 in at 2e-6 and 1,000 out at 6e-6, minus 250,000 in at 1e-6 and 1,000
 // out at 4e-6.
 func TestMetricsSinkBooksTheFullBillDifferenceAcrossALine(t *testing.T) {
-	p := metricsPricer{prices: sizedTierPricer{}}
+	p := modelinfo.ChainRates(sizedTierPricer{})
 	saved, added := sinkSums(t, p, trimObs("gpt-5.6", 250_000, 1_000, 50_000, 10_000))
 	want := (290_000*2e-6 + 1_000*6e-6) - (250_000*1e-6 + 1_000*4e-6)
 	if !near(saved-added, want) {
@@ -88,7 +88,7 @@ func TestMetricsSinkBooksTheFullBillDifferenceAcrossALine(t *testing.T) {
 
 // Without the output, the output re-rate (1,000 tokens x (6e-6 - 4e-6)) is lost.
 func TestMetricsSinkBooksTheOutputReRate(t *testing.T) {
-	p := metricsPricer{prices: sizedTierPricer{}}
+	p := modelinfo.ChainRates(sizedTierPricer{})
 	with, _ := sinkSums(t, p, trimObs("gpt-5.6", 250_000, 1_000, 50_000, 10_000))
 	without, _ := sinkSums(t, p, trimObs("gpt-5.6", 250_000, 0, 50_000, 10_000))
 	if !near(with-without, 1_000*(6e-6-4e-6)) {
@@ -99,8 +99,8 @@ func TestMetricsSinkBooksTheOutputReRate(t *testing.T) {
 // A request that stays below the line books what it booked before: PriceAt gives the base rate.
 func TestMetricsSinkBelowTheLineIsUnchanged(t *testing.T) {
 	o := trimObs("gpt-5.6", 100_000, 1_000, 20_000, 5_000)
-	sv, ad := sinkSums(t, metricsPricer{prices: sizedTierPricer{}}, o)
-	ov, oa := sinkSums(t, sizedOnly{metricsPricer{prices: sizedTierPricer{}}}, o)
+	sv, ad := sinkSums(t, modelinfo.ChainRates(sizedTierPricer{}), o)
+	ov, oa := sinkSums(t, sizedOnly{modelinfo.ChainRates(sizedTierPricer{})}, o)
 	if !near(sv, ov) || !near(ad, oa) {
 		t.Errorf("sized = (%v, %v), base = (%v, %v)", sv, ad, ov, oa)
 	}
@@ -110,7 +110,7 @@ func TestMetricsSinkBelowTheLineIsUnchanged(t *testing.T) {
 }
 
 func TestMetricsPricerPriceAt(t *testing.T) {
-	p := metricsPricer{prices: sizedTierPricer{}}
+	p := modelinfo.ChainRates(sizedTierPricer{})
 	at := time.Unix(1700000000, 0)
 	for _, tc := range []struct {
 		model string
@@ -134,10 +134,10 @@ func TestMetricsPricerPriceAt(t *testing.T) {
 		}
 	}
 	// Fail open: an unknown model is no money and estimated, as Price says.
-	if v, est := (metricsPricer{prices: unknownPricer{}}).PriceAt("x", at, acmetrics.TierInput, 300_000); v != 0 || !est {
+	if v, est := (modelinfo.ChainRates(unknownPricer{})).PriceAt("x", at, acmetrics.TierInput, 300_000); v != 0 || !est {
 		t.Errorf("unknown model: got (%v, %v), want (0, true)", v, est)
 	}
-	if v, est := (metricsPricer{}).PriceAt("gpt-5.6", at, acmetrics.TierInput, 300_000); v != 0 || !est {
+	if v, est := (modelinfo.ChainRates(nil)).PriceAt("gpt-5.6", at, acmetrics.TierInput, 300_000); v != 0 || !est {
 		t.Errorf("nil prices: got (%v, %v), want (0, true)", v, est)
 	}
 }

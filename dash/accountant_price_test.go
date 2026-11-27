@@ -397,3 +397,32 @@ func TestSumFailureGateIsWithholdOnTheRowAndTheLedgerAndThePush(t *testing.T) {
 		})
 	}
 }
+
+// A rescued request with an interaction AND a tool-deferral search turn: the search spend comes off the
+// total once, and the rows still add up to it. The counted total (DeltaUSD plus the interaction) must not
+// overwrite the spend subtraction.
+func TestAccountantFigureInteractionAndDeferSpendTogether(t *testing.T) {
+	e := &Event{Model: "m", FreshInput: 1000, CacheRead: 20_000, OutputTokens: 100}
+	e.SetAccountant(accountant.Result{
+		Ops: []accountant.PricedOp{
+			{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 5000}},
+			{OpID: "s", Kind: accountant.KindSpend, Operator: "context-guru.tooldefer",
+				Call: &accountant.ModelCall{Usage: accountant.CallUsage{Output: 400}}},
+		},
+		Interaction:       accountant.TierTokens{CacheWrite5m: 300},
+		InteractionCaused: accountant.TierTokens{CacheRead: 300},
+	})
+	f := e.AccountantFigure(accTestPrice)
+	spend := 400 * 15e-6
+	want := 5000*0.3e-6 - spend + f.InteractionUSD
+	if f.InteractionUSD == 0 || !accNear(f.DeltaUSD, want) {
+		t.Fatalf("DeltaUSD %v, want saving - spend + interaction = %v (interaction %v)", f.DeltaUSD, want, f.InteractionUSD)
+	}
+	var rows float64
+	for _, v := range f.ByComponent {
+		rows += v
+	}
+	if !accNear(rows+f.EndedBreakUSD+f.InteractionUSD, f.DeltaUSD) {
+		t.Fatalf("rows %v + ended %v + interaction %v do not add up to delta %v", rows, f.EndedBreakUSD, f.InteractionUSD, f.DeltaUSD)
+	}
+}

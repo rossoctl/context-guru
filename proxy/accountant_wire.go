@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/components"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -185,8 +186,7 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend() },
 			// The metrics are booked before the rescue counter and the ping-facts drop, as they always were.
 			AfterCompute: func(res accountant.Result) {
-				c.observeMetrics(res, accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
-					CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)}, int(usage.Output))
+				c.observeMetrics(res, usage.accrec().Accountant(), int(usage.Output))
 			},
 			Session: c.accMeta.Session, Thread: c.accThread, KaPings: c.kaPings, PingWindow: c.accPingWindow, Pings: c.pings,
 		})
@@ -227,9 +227,8 @@ func (c *capture) accFigure(ctx context.Context, usage Usage, usageOK bool) (fig
 	}
 	fig = accountant.Figure(accountant.FigureInput{
 		Model: c.model, At: c.start, Output: int(usage.Output), Result: res,
-		Billed: accountant.Usage{Input: int(usage.FreshInput), CacheRead: int(usage.CacheRead),
-			CacheWrite: int(usage.CacheWrite), CacheWrite1h: int(usage.CacheWrite1h)},
-	}, metricsPricer{prices: c.pricer})
+		Billed: usage.accrec().Accountant(),
+	}, modelinfo.ChainRates(c.pricer))
 	// The dashboard row's gate, so a request the row refuses books no figure here either (accrec.Gate).
 	in := accrec.GateIn{Observe: c.observe, OpsDropped: c.trace.OpsDropped, Rows: accrec.GateRowsOf(c.trace.Run)}
 	if reason, _ := accrec.Gate(res, fig, in); reason != "" {

@@ -3,29 +3,12 @@ package dash
 import (
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
-
-// hostPricer is the host's rate table for accountant.Figure (SizedPricer): the rate of one token at the
-// prompt size of its request. The rule lives in modelinfo.Price.RateAt, the same one the metrics sink uses.
-// It holds the price of ONE model. For any other model (a spend call made on another model) it refuses:
-// rate 0, estimated. It never prices that call with the wrong rates.
-type hostPricer struct {
-	model string
-	p     modelinfo.Price
-}
-
-func (h hostPricer) PriceAt(model string, _ time.Time, t accountant.Tier, promptTokens int64) (float64, bool) {
-	if model != h.model {
-		return 0, true
-	}
-	return h.p.RateAt(model, t, promptTokens)
-}
 
 // AccFigure is the request's savings in dollars, from the library's tokens. Only dollars are
 // summed; token tiers are never collapsed into one total.
@@ -75,7 +58,7 @@ type AccFigure struct {
 }
 
 // AccountantFigure is the attached Result in dollars. The dollars come from accountant.Figure, priced with
-// the host's rates at the prompt size of each side (hostPricer). This function only maps the library's
+// the host's rates at the prompt size of each side (modelinfo.OneModel). This function only maps the library's
 // figure to the dashboard's rows and columns, and takes the tokens of each row from the Result.
 //
 // It reads a DryRun operation as the library does: computed, never counted. A spend (Call != nil) is a
@@ -94,10 +77,9 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	w := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
 	fig := accountant.Figure(accountant.FigureInput{
 		Model: e.Model, Output: int(e.OutputTokens), Result: *e.accRes,
-		Billed: accountant.Usage{Input: int(e.FreshInput), CacheRead: int(e.CacheRead),
-			CacheWrite: int(e.CacheWrite), CacheWrite1h: int(e.CacheWrite1h)},
+		Billed:  accrec.Usage{FreshInput: e.FreshInput, CacheRead: e.CacheRead, CacheWrite: e.CacheWrite, CacheWrite1h: e.CacheWrite1h}.Accountant(),
 		Unsized: w <= 0, // no billed usage: no size, so every token prices at the base rate
-	}, hostPricer{model: e.Model, p: p})
+	}, modelinfo.OneModel(e.Model, p))
 	f.Fig = fig
 	rows := make([]accrec.GateRow, 0, len(e.Components))
 	for _, c := range e.Components {
@@ -111,7 +93,8 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	f.Unpriced, f.Estimated = fig.Unpriced, fig.Estimated
 	// The search turns of tool deferral are spend calls, a separate bill in the library's figure. They are a cost of
 	// the deferral figure (#1441), so they come off its row and the request total. The same sum as /stats reads.
-	if spend := accrec.DeferSpendUSD(fig); spend != 0 {
+	spend := accrec.DeferSpendUSD(fig)
+	if spend != 0 {
 		f.ByComponent[DeferComponent] -= spend
 		f.DeltaUSD -= spend
 	}
@@ -157,7 +140,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	// keeps it out of Figure's DeltaUSD, in TotalUSD), owned by no component: the interaction row.
 	if ia, ic := e.accRes.Interaction, e.accRes.InteractionCaused; ia != (accountant.TierTokens{}) || ic != (accountant.TierTokens{}) {
 		f.InteractionUSD = fig.InteractionUSD
-		f.DeltaUSD += f.InteractionUSD
+		f.DeltaUSD = fig.CountedUSD() - spend // the spend came off the deferral row above: it comes off the total too
 		f.addTok(InteractionComponent, ia, ic)
 	}
 	return f

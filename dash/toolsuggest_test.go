@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // day is a millisecond offset helper; the fixtures below are dated because the sufficiency
@@ -485,6 +486,61 @@ func TestDeclFilterSavingsPricesAtPromptSize(t *testing.T) {
 				t.Errorf("USD = %g, want %g", got.USD, want)
 			}
 			by, err := db.DeclFilterSavingsByTenant(0, tieredDeclPrice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if g := by["t1"].USD; g < want*0.999 || g > want*1.001 {
+				t.Errorf("by tenant USD = %g, want %g", g, want)
+			}
+		})
+	}
+}
+
+// The saving is the removed tokens at the tier of the head, at the size without the filter, with NO tokenizer
+// factor (it is deferred: the accountant's live request ratio will give it). A model with a measured factor
+// (opus) prices the same as one without: 99,000 sent + 1,000 removed is on the line (100,000), so the base rate
+// holds. A factor in the size would push it above the line (5x).
+func TestDeclFilterSavingsAppliesNoTokenizerFactor(t *testing.T) {
+	if bf, measured := tokens.BilledDeltaFactor("opus"); !measured || bf <= 1 {
+		t.Fatalf("test needs a measured factor above 1 for opus, got %v %v", bf, measured)
+	}
+	price := func(string) (modelinfo.Price, bool) {
+		p := modelinfo.Price{Input: 1e-6, CacheRead: 1e-7, CacheWrite: 1.25e-6}
+		p.Tiers[0] = modelinfo.PriceTier{AbovePromptTokens: 100_000, InputMult: 5, ReadMult: 5, WriteMult: 5}
+		return p, true
+	}
+	cases := []struct {
+		name                        string
+		fresh, read, write, write1h int64
+		rate                        float64
+		reads, writes, fresh0       int64
+	}{
+		{"read", 9_000, 90_000, 0, 0, 1e-7, 1000, 0, 0},
+		{"write", 9_000, 0, 90_000, 0, 1.25e-6, 0, 1000, 0},
+		{"write 1h", 9_000, 0, 90_000, 90_000, 2e-6, 0, 1000, 0},
+		{"fresh", 99_000, 0, 0, 0, 1e-6, 0, 0, 1000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := openTestDB(t)
+			e := mkEvent(1000, "s", "opus", 100, 90)
+			e.TenantID, e.Tools, e.FilteredDeclTokens = "t1", 4, 1000
+			e.FreshInput, e.CacheRead, e.CacheWrite, e.CacheWrite1h = c.fresh, c.read, c.write, c.write1h
+			if err := db.insertBatch([]*Event{e}); err != nil {
+				t.Fatal(err)
+			}
+			want := 1000 * c.rate
+			got, err := db.DeclFilterSavings(Filter{Tenant: "t1"}, price)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.USD < want*0.999 || got.USD > want*1.001 {
+				t.Errorf("USD = %g, want %g", got.USD, want)
+			}
+			if got.CacheReadTokens != c.reads || got.CacheWriteTokens != c.writes || got.FreshTokens != c.fresh0 {
+				t.Errorf("tokens by tier = %d/%d/%d, want %d/%d/%d", got.CacheReadTokens, got.CacheWriteTokens, got.FreshTokens, c.reads, c.writes, c.fresh0)
+			}
+			by, err := db.DeclFilterSavingsByTenant(0, price)
 			if err != nil {
 				t.Fatal(err)
 			}
