@@ -238,6 +238,10 @@ func TestLowerTTLLowersTheFactsToTheBilledTier(t *testing.T) {
 	if got := r.LowerTTL(req, "s", "main", asked, 300, 0); got.TTL != BaseTTL {
 		t.Fatalf("TTL = %v, want %v", got.TTL, BaseTTL)
 	}
+	// A mixed write (1-hour head, 5-minute tail) keeps the asked tier on the facts and on the 1h breakpoints.
+	if got := r.LowerTTL(req, "s", "mixed", asked, 300, 200); got.TTL != time.Hour {
+		t.Fatalf("mixed write: TTL = %v, want 1h", got.TTL)
+	}
 	// A write billed at 1h keeps the asked tier.
 	if got := r.LowerTTL(req, "s", "other", asked, 300, 300); got.TTL != time.Hour {
 		t.Fatalf("TTL = %v, want 1h", got.TTL)

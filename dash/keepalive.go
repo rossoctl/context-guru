@@ -1238,17 +1238,27 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		       COUNT(*) OVER w2 AS turns,
 		       MAX(r.ts) OVER w2 AS last_ts,
 		       CASE WHEN r.cache_write > 0 THEN ROW_NUMBER() OVER ww END AS wrn,
-		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h
+		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h,
+		       r.cache_read AS rd,
+		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN ROW_NUMBER() OVER wh END AS hrn,
+		       `+keepalive.MixedHeadWriteSQL("r.")+` AS head_tok
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
 		       ww AS (PARTITION BY r.tenant_id, r.session_id, r.cache_write > 0 ORDER BY r.ts DESC, r.id DESC),
+		       wh AS (PARTITION BY r.tenant_id, r.session_id, `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` ORDER BY r.ts DESC, r.id DESC),
 		       w2 AS (PARTITION BY r.tenant_id, r.session_id)),
 	t AS (
-		SELECT *, MAX(CASE WHEN wrn = 1 THEN billed_1h ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS last_write_billed_1h
-		FROM u)
-		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h
-		FROM t WHERE rn = 1 AND ts >= ?
+		SELECT *, MAX(CASE WHEN wrn = 1 THEN billed_1h ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS last_write_billed_1h,
+		       MAX(CASE WHEN hrn = 1 THEN head_tok ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS head_tokens
+		FROM u),
+	-- Only a WRITE kills a head, and it kills it when it read less than the head (the keeper's mixedHead). So the
+	-- least read of the writes newer than the head's own row decides, whatever the later read-only turns read.
+	h AS (
+		SELECT *, MIN(CASE WHEN wrn IS NOT NULL AND wrn < head_wrn THEN rd END) OVER (PARTITION BY tenant_id, session_id) AS newer_write_read
+		FROM (SELECT *, MAX(CASE WHEN hrn = 1 THEN wrn END) OVER (PARTITION BY tenant_id, session_id) AS head_wrn FROM t))
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h, head_tokens, newer_write_read
+		FROM h WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
 		// The window is computed only for sessions with a request inside the hour (the subquery),
 		// because the outer filter keeps nothing else: it is a per-session answer, so leaving the
@@ -1263,10 +1273,15 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	for rows.Next() {
 		var r KeepAliveLiveRow
 		var oneHour int
+		var head int64
+		var newerRead sql.NullInt64
 		var provider string
 		if err := rows.Scan(&r.SessionID, &r.TenantID, &r.Model, &r.Turns, &r.LastTS,
-			&r.Prefix, &provider, &oneHour); err != nil {
+			&r.Prefix, &provider, &oneHour, &head, &newerRead); err != nil {
 			return nil, err
+		}
+		if newerRead.Valid && newerRead.Int64 < head {
+			head = 0 // a write after the head's own row read less than the head, so the head is dead (the keeper's rule)
 		}
 		ttl := modelinfo.CacheLifetime(provider, r.Model, oneHour == 1)
 		r.TTLSeconds = int64(ttl.Seconds())
@@ -1285,11 +1300,12 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				// The accountant prices the ping and the miss (keepalive.PingUSD, keepalive.MissUSD), at the
 				// rates of the ping's prompt size. The miss is the one of the entry's own tier.
 				r.PingUSDEach = keepalive.PingUSD(p, r.Model, r.Prefix, 1)
-				r.MissUSD = keepalive.MissUSD(p, r.Model, r.Prefix, oneHour == 1)
+				// A mixed entry (a 1-hour head, a 5-minute tail) whose head lives: the miss is the tail rewrite, as for the keeper.
+				r.MissUSD = keepalive.MissUSDHead(p, r.Model, r.Prefix, oneHour == 1, head)
 				if r.PingUSDEach > 0 {
-					r.BreakevenPings = int64(keepalive.MissUSD(p, r.Model, r.Prefix, false) / r.PingUSDEach)
+					r.BreakevenPings = int64(keepalive.MissUSDHead(p, r.Model, r.Prefix, false, head) / r.PingUSDEach) // the tail on a mixed row, as MissUSD
 					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
-					miss1h := keepalive.MissUSD(p, r.Model, r.Prefix, true)
+					miss1h := keepalive.MissUSDHead(p, r.Model, r.Prefix, true, head)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
 					// pings bridges twelve times the wall clock: K x X per span still, but the

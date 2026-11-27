@@ -21,7 +21,7 @@ func searchedEvent(price string, fresh int64, saved accountant.TierTokens) *Even
 		Components: []CompRow{{Component: "idle"}}}
 	ops := []accountant.PricedOp{{Operator: accwire.Operator(accwire.OpToolDefer), ChangeID: "cg:tooldefer:x", Saved: saved}}
 	spend := tooldefer.SearchSpend{Output: 30, OutputEstimated: true, Loaded: 1500}
-	for _, o := range accrec.DeferSpendOps(spend) {
+	for _, o := range accrec.DeferSpendOps(spend, nil) {
 		ops = append(ops, accountant.PricedOp{OpID: o.ID, Kind: o.Kind, Operator: o.Operator, Call: o.Call})
 	}
 	e.SetAccountant(accountant.Result{Ops: ops})

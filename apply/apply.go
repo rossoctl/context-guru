@@ -278,6 +278,9 @@ type Trace struct {
 	// CLIENT declared (it reads the pristine body), so a figure computed from it would keep
 	// reporting a saving for a request the filter had declined to touch.
 	FilteredDeclTokens int
+	// FilteredDeclBytes is the bytes the filter took out of the body: the same removal in the unit the accountant's
+	// request ratio converts (#1533). A count. 0 when nothing went.
+	FilteredDeclBytes int
 	// FilteredDecls is how many declarations went, for the component's own report.
 	FilteredDecls int
 	// HeadTTL1h says this request asked for the provider's ONE-HOUR cache tier on its head
@@ -532,7 +535,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	// here, from the one configured list, and both report into the same two counters — the
 	// component's ledger says "declarations no longer sent", and a reader does not care which of
 	// the two shapes each one had.
-	body, toolSchema, filteredTokens, filteredDecls := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
+	body, toolSchema, filteredTokens, filteredDecls, filteredBytes := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
 
 	// Mixed TTL: ask for the one-hour tier on the head's existing breakpoints. Here for the
 	// third time for the same reason as the two rewrites above — it edits `tools` and
@@ -551,7 +554,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		// set above, and a bypassed request that also lacks a messages array must still
 		// report itself as bypassed rather than as "no messages".
 		res.Body, res.Changed = body, toolSchema || filteredDecls > 0 || headTTL1h
-		tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
+		tr.FilteredDeclTokens, tr.FilteredDecls, tr.FilteredDeclBytes = filteredTokens, filteredDecls, filteredBytes
 		return res
 	}
 
@@ -561,7 +564,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	norm, slots := normalize(provider, msgs)
 	if len(norm) == 0 {
 		res.Body, res.Changed = body, toolSchema || filteredDecls > 0 || headTTL1h // keep the envelope rewrites even with nothing to compact
-		tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
+		tr.FilteredDeclTokens, tr.FilteredDecls, tr.FilteredDeclBytes = filteredTokens, filteredDecls, filteredBytes
 		return res
 	}
 
@@ -866,6 +869,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		Restored:            restore.restored(),
 	}
 	c.CanKeepAlive = c.CanSweepAtPing // the deprecated field, for a component that still reads it
+	c.PrevRatioTokens, c.PrevRatioBytes = prevRatioThread(st, sessionID, tr.Thread.ID)
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
 	// The cache TTL TIER this request asked for. cacheTTL() has always computed it — it is an
@@ -881,7 +885,7 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 	if bps.Total() > 0 {
 		tr.CacheTTL = ttlTier(provider, body)
 	}
-	tr.FilteredDeclTokens, tr.FilteredDecls = filteredTokens, filteredDecls
+	tr.FilteredDeclTokens, tr.FilteredDecls, tr.FilteredDeclBytes = filteredTokens, filteredDecls, filteredBytes
 	// The eligible (attempted) denominator: what age/supersession offloaders were
 	// allowed to touch. Everything before MaxCachedIdx is frozen for cache safety —
 	// the cost of that mechanism, reported next to its benefit.
@@ -1855,10 +1859,10 @@ func SessionIDFor(tenant, explicitSess string, provider bschemas.ModelProvider, 
 // call it only when there is state to write.
 func EnforcedSessionIDFor(pipe *components.Pipeline, tenant, explicitSess, api string, provider bschemas.ModelProvider, bypass bool, body []byte) string {
 	if schema.IsResponses(schema.WireFor(string(provider), api)) {
-		out, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
+		out, _, _, _, _ := transformEnvelope(body, pipe, bypass, responsesEnvelopeAdapter{})
 		return SessionIDFor(tenant, explicitSess, provider, out)
 	}
-	out, _, _, _ := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
+	out, _, _, _, _ := transformEnvelope(body, pipe, bypass, chatEnvelopeAdapter{})
 	return SessionIDFor(tenant, explicitSess, provider, out)
 }
 
@@ -1909,6 +1913,37 @@ func RecordBilledInputThread(st store.Store, session, threadID string, tokens in
 		return
 	}
 	st.Put(store.BilledThreadPrefix+thread.Key(session, threadID), []byte(strconv.FormatInt(tokens, 10)))
+}
+
+// RecordRatioThread stores the request ratio of a finished turn for its thread (#1533): the provider's billed tokens
+// of the forwarded text and its bytes (accountant.Ratio.Text). Call it next to RecordBilledInputThread. A turn with
+// no ratio writes nothing, and the previous one stays.
+func RecordRatioThread(st store.Store, session, threadID string, tokens, bytes int) {
+	if st == nil || session == "" || tokens <= 0 || bytes <= 0 {
+		return
+	}
+	st.Put(store.RatioThreadPrefix+thread.Key(session, threadID), []byte(strconv.Itoa(tokens)+":"+strconv.Itoa(bytes)))
+}
+
+// prevRatioThread reads back what RecordRatioThread stored, or 0, 0 (unknown).
+func prevRatioThread(st store.Store, session, threadID string) (tokens, bytes int) {
+	if st == nil {
+		return 0, 0
+	}
+	b, ok := st.Get(store.RatioThreadPrefix + thread.Key(session, threadID))
+	if !ok || len(b) == 0 {
+		return 0, 0
+	}
+	t, by, found := strings.Cut(string(b), ":")
+	if !found {
+		return 0, 0
+	}
+	tn, err1 := strconv.Atoi(t)
+	bn, err2 := strconv.Atoi(by)
+	if err1 != nil || err2 != nil || tn <= 0 || bn <= 0 {
+		return 0, 0
+	}
+	return tn, bn
 }
 
 // prevBilledInputThread reads back what RecordBilledInputThread stored, or 0 (unknown).

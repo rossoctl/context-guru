@@ -13,9 +13,15 @@ import (
 //   - defer-search-second-pass: the API's second pass reads the loaded definitions once without the cache (input);
 //   - defer-search-next-write: the next request writes the loaded definitions to the cache once (cache write).
 //
-// The library prices each Call at its own usage and size. The second and third are estimates. The first is an estimate too when usage did not give the output. A cost of 0
+// With a ratio (the request's own, accrec.Recorder.RatioFor) the loaded definitions are priced from their bytes. The library prices each Call at its own usage and size. The second and third are estimates. The first is an estimate too when usage did not give the output. A cost of 0
 // tokens makes no operation. The ChangeID is empty: a spend is booked once, on the request that paid it.
-func DeferSpendOps(s tooldefer.SearchSpend) []accountant.Operation {
+func DeferSpendOps(s tooldefer.SearchSpend, ratio *accountant.Ratio) []accountant.Operation {
+	loaded := s.Loaded
+	if ratio != nil && s.LoadedBytes > 0 {
+		// Ratio.Tokens converts 0 above 2^31 bytes (no real definition set is that large), so the loaded weight is 0 then and
+		// the request books no search read or write: the safe side.
+		loaded = int64(ratio.Tokens(int(s.LoadedBytes))) // the request's own ratio (#1533); the table is the fallback
+	}
 	op := func(id string, u accountant.CallUsage, estimated bool) accountant.Operation {
 		params := map[string]string{}
 		if estimated {
@@ -28,11 +34,11 @@ func DeferSpendOps(s tooldefer.SearchSpend) []accountant.Operation {
 	if s.Output > 0 {
 		ops = append(ops, op("defer-search-output", accountant.CallUsage{Output: int(s.Output)}, s.OutputEstimated))
 	}
-	if s.Loaded > 0 {
-		ops = append(ops, op("defer-search-second-pass", accountant.CallUsage{Usage: accountant.Usage{Input: int(s.Loaded)}}, true))
-		w := accountant.Usage{CacheWrite: int(s.Loaded)}
+	if loaded > 0 {
+		ops = append(ops, op("defer-search-second-pass", accountant.CallUsage{Usage: accountant.Usage{Input: int(loaded)}}, true))
+		w := accountant.Usage{CacheWrite: int(loaded)}
 		if s.Write1h {
-			w.CacheWrite1h = int(s.Loaded)
+			w.CacheWrite1h = int(loaded)
 		}
 		ops = append(ops, op("defer-search-next-write", accountant.CallUsage{Usage: w}, true))
 	}

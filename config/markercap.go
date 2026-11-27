@@ -14,7 +14,7 @@ var markerModeComponents = map[string]bool{
 	"agentdiet": true, "cache_aware_summarizer": true, "cmdfilter": true, "collapse": true,
 	"coref": true, "dedup": true, "extract": true, "extract_llm": true,
 	"extract_llm_sweep": true, "failed_run": true, "linecap": true, "mask": true,
-	"readlifecycle": true, "smartcrush": true, "summarize": true,
+	"readlifecycle": true, "searchcap": true, "smartcrush": true, "summarize": true,
 }
 
 // markerRank orders the modes. A value not listed here (a typo, "Full", "Summary") ranks as

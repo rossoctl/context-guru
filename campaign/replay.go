@@ -73,8 +73,11 @@ func Priced(pRead, pWrite float64) bool { return pRead > 0 && pWrite > pRead }
 
 // Stake is one avoided rewrite: the prefix times what a write costs over a read. Gateway dollars.
 // The accountant owns the formula (accountant.MissCost): a rewrite never costs less than 0.
-func Stake(prefix int64, pRead, pWrite float64) float64 {
-	usd, _ := accountant.MissCost(accountant.MissInput{Prefix: prefix}, modelinfo.FlatRates{CacheRead: pRead, Write5m: pWrite})
+func Stake(prefix int64, pRead, pWrite float64) float64 { return StakeHead(prefix, 0, pRead, pWrite) }
+
+// StakeHead is Stake on a mixed entry. head above 0 is a 1-hour head that lives: only the tail is rewritten.
+func StakeHead(prefix, head int64, pRead, pWrite float64) float64 {
+	usd, _ := accountant.MissCost(accountant.MissInput{Prefix: prefix, HeadTokens: head, HeadAlive: head > 0}, modelinfo.FlatRates{CacheRead: pRead, Write5m: pWrite})
 	return usd
 }
 
@@ -194,7 +197,7 @@ func Rows(reqs []*kvcache.Request, price PriceFunc, sessionEnd bool, untilMs int
 		if r.KeepAlive || r.Rejected || !r.CostKnown || r.CachedContext <= 0 || float64(end)+2700e3 > float64(untilMs) {
 			continue
 		}
-		dp, ok := PriceDecision(price, r.Model, r.CachedContext, modelinfo.PromptTokens(r.InputTokens, r.CacheRead, r.CacheWrite), r.CacheWrite1h > 0)
+		dp, ok := PriceDecisionHead(price, r.Model, r.CachedContext, modelinfo.PromptTokens(r.InputTokens, r.CacheRead, r.CacheWrite), r.CacheWrite1h > 0, keepalive.MixedHead(r.CacheWrite, r.CacheWrite1h))
 		if !ok || dp.PWrite <= dp.PRead {
 			continue
 		}

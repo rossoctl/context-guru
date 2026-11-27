@@ -276,7 +276,9 @@ func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer
 		// independent implementation of the same arithmetic, and a fix applied to one while
 		// the other stayed put is what TestPreColumnComponentRowsAreValuedNotZeroed exists
 		// to catch — it compares the two paths against each other.
-		bf, _ := tokens.BilledDeltaFactor(model)
+		// Rows here are legacy ones only (not accountant-priced, not a fallback): written before the switch, so before the
+		// ratio and the removed bytes were stored (#1533). The table is the only source for them.
+		bf, _ := tokens.LegacyFactor(model)
 		first, rep := float64(unique)*price.CacheWrite*bf, float64(replay)*rate*bf
 		c.SavedUSDFirstRemoval += first
 		c.SavedUSDReplay += rep
@@ -435,7 +437,7 @@ func estimateFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer,
 		}
 		// Same tokenizer correction as Event.Price and SavedUSDFirstRemoval above — this
 		// estimator's whole defence is that it runs the IDENTICAL formula to the write path.
-		bf, _ := tokens.BilledDeltaFactor(model)
+		bf, _ := tokens.LegacyFactor(model)
 		c.SavedUSDEstimated += (float64(unique)*price.CacheWrite + float64(replay)*rate) * bf
 		c.SavedUSDEstimatedRows += n
 	}

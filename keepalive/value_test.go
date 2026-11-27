@@ -180,3 +180,83 @@ func TestMissIsPricedAtOneHourWhenThePolicyWritesAtOneHour(t *testing.T) {
 		t.Errorf("HeadTTL1h on a subagent: miss = %v, want the 1-hour %v", got, hour)
 	}
 }
+
+// A head-TTL thread (a 1-hour head, a 5-minute tail) on the 5-minute ping plan: while the head lives, a miss
+// rewrites only the tail, so a ping that reads head + tail is not worth it. The same thread without a mixed
+// write keeps the whole-prefix price, and the ping is held.
+func TestHeadTTLMissIsThePriceOfTheTail(t *testing.T) {
+	p := modelinfo.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Output: 15e-6}
+	const head, tail = 20_157, 150
+	const model = "claude-sonnet-5"
+
+	// The price: head alive is the tail only. No head is the old whole-prefix form. An unpriced model is 0.
+	if got, want := MissUSDHead(p, model, head+tail, false, head), float64(tail)*(3.75e-6-0.3e-6); !near(got, want) {
+		t.Errorf("head alive miss = %v, want the tail %v", got, want)
+	}
+	if got, want := MissUSDHead(p, model, head+tail, true, head), float64(tail)*(3.75e-6-0.3e-6); !near(got, want) {
+		t.Errorf("head alive miss with oneHour = %v, want the tail %v (oneHour does not count)", got, want)
+	}
+	if got, want := MissUSDHead(p, model, head+tail, false, 0), MissUSD(p, model, head+tail, false); !near(got, want) {
+		t.Errorf("no head miss = %v, want the whole prefix %v", got, want)
+	}
+	if got := MissUSDHead(modelinfo.Price{}, model, head+tail, false, head); got != 0 {
+		t.Errorf("unpriced miss = %v, want 0 (fail open)", got)
+	}
+
+	// The verdict: one ping reads head + tail and costs far more than the tail miss.
+	ping := float64(head+tail)*0.3e-6 + float64(pingOutputBudget("/v1/messages"))*15e-6
+	pol := Policy{KeepAlive: true, HeadTTL1h: true, Idle: 240 * time.Second, MaxPings: 2}
+	if v := pol.PingVerdict(ping, MissUSDHead(p, model, head+tail, false, head), 2); v != VerdictNotWorth {
+		t.Errorf("verdict on the tail miss = %v, want NotWorth", v)
+	}
+
+	held := func(u Usage, second Usage) (kept bool, miss float64) {
+		k, fd, clock := testKeeper(t)
+		fd.setPrices(proxyPricer{fixedPrice{p}})
+		key := Key{Tenant: "t1", Session: "head-1"}
+		for i, uu := range []Usage{u, second} {
+			k.Record(Record{Key: key, StartedAt: clock.now().Add(time.Duration(i-1) * time.Second), Body: []byte(kaBody), Provider: bschemas.Anthropic,
+				Route: "/v1/messages", Status: http.StatusOK, Usage: uu, UsageOK: true, Policy: pol, Header: kaHeader(), Hold: fd.hold(key)})
+		}
+		_, kept = k.Entry(key)
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		for _, e := range k.live {
+			miss = e.missUSD
+		}
+		return kept, miss
+	}
+	// Turn 1 writes the mixed entry. Turn 2 reads the head and rewrites a tail: no 1-hour token, the head is inherited.
+	mixed := Usage{CacheWrite: head + tail, CacheWrite1h: head}
+	reread := Usage{CacheRead: head, CacheWrite: tail}
+	if kept, miss := held(mixed, reread); kept {
+		t.Errorf("a ping on a head-TTL thread was held (miss %v), want it refused while the head lives", miss)
+	}
+	// With no mixed write the head is unknown: the whole-prefix price at the 1-hour rate (HeadTTL1h), and the ping stays.
+	plain := Usage{CacheRead: head, CacheWrite: tail}
+	if kept, _ := held(plain, plain); !kept {
+		t.Error("a thread with no known head lost its ping")
+	}
+}
+
+func TestMixedHeadFollowsTheBilledWrite(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		prev int64
+		u    Usage
+		ok   bool
+		want int64
+	}{
+		{"mixed write", 0, Usage{CacheWrite: 100, CacheWrite1h: 60}, true, 60},
+		{"all 1h write", 60, Usage{CacheWrite: 100, CacheWrite1h: 100}, true, 0},
+		{"5m write that reads the head keeps the head", 60, Usage{CacheRead: 60, CacheWrite: 10}, true, 60},
+		{"5m write that does not read the head drops it", 60, Usage{CacheWrite: 70}, true, 0},
+		{"5m write that reads less than the head drops it", 60, Usage{CacheRead: 20, CacheWrite: 50}, true, 0},
+		{"read only", 60, Usage{CacheRead: 100}, true, 60},
+		{"no usage", 60, Usage{}, false, 60},
+	} {
+		if got := mixedHead(c.prev, c.u, c.ok); got != c.want {
+			t.Errorf("%s: head = %d, want %d", c.name, got, c.want)
+		}
+	}
+}

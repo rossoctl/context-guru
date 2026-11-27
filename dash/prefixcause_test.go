@@ -501,13 +501,19 @@ func TestSummarizerOnA1hThreadMissIsPricedAtTheRead(t *testing.T) {
 	}
 }
 
-func TestTTLExpiryOnAMixedWriteKeepsFiveMinutes(t *testing.T) {
+// The miss-cause check reads the head rule (keepalive.HeadLifetimeOneHour): a mixed write lives 1 hour, so 20 minutes
+// later the thread is not past its lifetime and the rewritten 5-minute tail has no named cause. Owner decision on #1530.
+func TestTTLExpiryOnAMixedWriteUsesTheHeadRule(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	r := newFactsRecorder()
 	ttlTurn(r, t0, base(), 0, 50_000, 10_000) // 1h head (10k) over a 5m tail (40k)
 	// Head still alive, tail re-created, nothing differed.
-	if got := ttlTurn(r, t0+20*60_000, base(), 10_000, 40_000, 0).CacheMissReason; got != CacheTTLExpiry {
-		t.Errorf("reason = %q, want %q", got, CacheTTLExpiry)
+	if got := ttlTurn(r, t0+20*60_000, base(), 10_000, 40_000, 0).CacheMissReason; got != CacheUnknown {
+		t.Errorf("reason = %q, want %q", got, CacheUnknown)
+	}
+	// Past the hour the head expires too.
+	if got := ttlTurn(r, t0+90*60_000, base(), 0, 50_000, 10_000).CacheMissReason; got != CacheTTLExpiry {
+		t.Errorf("after the head expires: reason = %q, want %q", got, CacheTTLExpiry)
 	}
 }
 
@@ -573,7 +579,7 @@ func TestSeededTierAfterARestart(t *testing.T) {
 	}{
 		{"1h thread is not an expiry", []seedRow{{t0, 0, 50_000, 50_000, 200}}, false, false},
 		{"5m thread is an expiry", []seedRow{{t0, 0, 50_000, 0, 200}}, false, true},
-		{"mixed write seeds 5m", []seedRow{{t0, 0, 50_000, 10_000, 200}}, false, true},
+		{"mixed write seeds 1h (the head lives)", []seedRow{{t0, 0, 50_000, 10_000, 200}}, false, false},
 		{"only read rows: tier unknown, 5m", []seedRow{{t0, 50_000, 0, 0, 200}}, false, true},
 		{"full-hit last row keeps the earlier 1h tier",
 			[]seedRow{{t0, 0, 50_000, 50_000, 200}, {t0 + 60_000, 50_000, 0, 0, 200}}, false, false},

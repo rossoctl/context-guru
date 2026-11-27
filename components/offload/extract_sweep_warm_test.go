@@ -3085,6 +3085,83 @@ func TestTheColdApplyUsesTheMeasuredReadOnAnUnknownPhase(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The previous turn's own request ratio prices the removed content (#1533).
+
+func TestWarmLiveContentFollowsThePreviousRatioAndFailsOpen(t *testing.T) {
+	// 0.5 token a byte, 800 bytes removed, 100 local tokens removed: 8 bytes a local token, so 4 provider tokens each.
+	if got, ok := warmLiveContent(3000, 6000, 800, 100); !ok || got != 4 {
+		t.Fatalf("live content = %v ok=%v, want 4", got, ok)
+	}
+	for name, a := range map[string][4]float64{
+		"no previous tokens": {0, 6000, 800, 100}, "no previous bytes": {3000, 0, 800, 100},
+		"no removed bytes": {3000, 6000, 0, 100}, "no removed local": {3000, 6000, 800, 0},
+		"below one":   {500, 6000, 800, 100},    // 0.67: the provider counts less than we do: a bad sample
+		"above bound": {60000, 6000, 8000, 100}, // 800: past the bound
+	} {
+		if got, ok := warmLiveContent(int(a[0]), int(a[1]), a[2], int(a[3])); ok {
+			t.Errorf("%s: gave %v; the gate must keep the table answer", name, got)
+		}
+	}
+}
+
+// With the previous turn's ratio the gate scales the removed content by it, and without one it keeps the family
+// table: the decision says which (RatioContentLive).
+func TestTheGateUsesThePreviousTurnsRatioForTheRemovedContent(t *testing.T) {
+	run := func(session string, tok, bytes int) WarmDecision {
+		t.Helper()
+		r := newWarmRig(t, session, warmCfg, payingTail(), 7.0) // the full ratio is 7: a content ratio under it stands
+		r.toHeld()
+		c := warmCtx(r.session, r.st)
+		c.ModelName = "claude-sonnet-5"
+		c.PrevRatioTokens, c.PrevRatioBytes = tok, bytes
+		r.request(c)
+		ds := decisionsOf("apply")
+		if len(ds) != 1 {
+			t.Fatalf("%s: apply decisions = %+v, want one", session, SweepWarmCounters().RecentDecisions)
+		}
+		return ds[0]
+	}
+	table := run("w-live-none", 0, 0)
+	if table.RatioContentLive || table.RatioContent <= 0 {
+		t.Fatalf("with no previous ratio: %+v, want the table's content ratio", table)
+	}
+	one := run("w-live-one", 1, 1)   // 1 token a byte
+	half := run("w-live-half", 1, 2) // 0.5 token a byte
+	if !one.RatioContentLive || !half.RatioContentLive {
+		t.Fatalf("live flags %v %v, want both live", one.RatioContentLive, half.RatioContentLive)
+	}
+	if got := one.RatioContent / half.RatioContent; got < 1.99 || got > 2.01 {
+		t.Fatalf("content ratio at 1.0 token a byte = %v, at 0.5 = %v: the ratio is %v, want 2", one.RatioContent, half.RatioContent, got)
+	}
+	if one.RatioContent == table.RatioContent {
+		t.Fatalf("the live content ratio %v equals the table's: the previous ratio was not used", one.RatioContent)
+	}
+}
+
+// The gate runs on every warm request that holds a drop. The live ratio adds one len() and one multiply for each
+// drop and one MessageText for each: this measures that, with 20 drops of 8 KB each.
+func BenchmarkWarmLiveContent(b *testing.B) {
+	msgs := make([]bschemas.ChatMessage, 20)
+	body := strings.Repeat("tool output line\n", 500)
+	for i := range msgs {
+		msgs[i] = userMsg(body)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		var bytes float64
+		removed := 0
+		for i := range msgs {
+			removed += 900
+			bytes += float64(len(schema.MessageText(msgs[i]))) * 900 / 2000
+		}
+		if _, ok := warmLiveContent(3000, 6000, bytes, removed); !ok {
+			b.Fatal("not ok")
+		}
+	}
+}
+
 // The warm sweep's look-back is the provider's, schema.LookbackBlocks, and its value is 20.
 func TestWarmLookbackIsTheSchemaLookback(t *testing.T) {
 	got, want := warmLookbackBlocks, schema.LookbackBlocks

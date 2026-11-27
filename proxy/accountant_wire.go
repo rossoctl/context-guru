@@ -139,7 +139,7 @@ func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 // TTL for the verdict and stores it as the entry's TTL. Without it the library treats a gap of 5 to 60
 // minutes as hot and can overstate a rescue by up to 55 minutes of idle time.
 //
-// The rule is keepalive.BilledOneHour's, which ResolveTier uses: a write bills its tier on the tokens it
+// The rule is keepalive.HeadLifetimeOneHour's: a write any token of which bills at 1 hour lives 1 hour (the head of a mixed write counts). A write bills its tier on the tokens it
 // wrote; a turn that wrote nothing bills none and keeps the thread's last billed tier (issue #1078). A
 // thread with no earlier write has none to keep, so the asked tier stands. Only an exact lifetime has a TTL
 // that can be lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd
@@ -183,7 +183,7 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 		c.accDone = true
 		out := c.savings.Price(c.accReq, accrec.PriceIn{
 			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
-			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend() },
+			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend(usage) },
 			// The metrics are booked before the rescue counter and the ping-facts drop, as they always were.
 			AfterCompute: func(res accountant.Result) {
 				c.observeMetrics(res, usage.accrec().Accountant(), int(usage.Output))
@@ -265,12 +265,12 @@ func failOpenAccountant(what string, step func()) {
 
 // accDeferSpend reports the search-turn costs of a deferred request to the accountant as spend operations on the
 // tooldefer operator (#1441), so the one figure for deferral holds them. It runs before Compute. Nil-safe.
-func (c *capture) accDeferSpend() {
+func (c *capture) accDeferSpend(usage Usage) {
 	d := c.deferFacts
 	if c.accReq == nil || d == nil || !d.spendOK {
 		return
 	}
-	for _, op := range accrec.DeferSpendOps(d.spend) {
+	for _, op := range accrec.DeferSpendOps(d.spend, c.savings.RatioFor(c.accReq, usage.accrec())) {
 		c.accReq.Add(op)
 	}
 }
@@ -288,4 +288,29 @@ func (c *capture) runDeferBook() {
 		}
 	}()
 	f()
+}
+
+// liveRatioText is the request ratio's text counts for the thread's next turn (#1533). The rule for which ratio a
+// thread keeps is accrec.Recorder.RatioTextFor's. This only joins the accountant job first (the record is opened off
+// the request path, and finish reads it later), then calls it. It runs before the request is priced, while the forwarded
+// body is still held. Fail open: a panic gives 0, 0. Nil-safe.
+func (c *capture) liveRatioText(usage Usage, usageOK bool) (tokens, bytes int) {
+	if c == nil || c.savings == nil || !usageOK {
+		return 0, 0
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: the request ratio panicked; the thread keeps its last ratio", "panic", p)
+			tokens, bytes = 0, 0
+		}
+	}()
+	if c.accMu != nil {
+		c.accMu.Lock() // the ledger's hook and the finish goroutine can both join the job
+		defer c.accMu.Unlock()
+	}
+	c.accWait() // idempotent: the record is c.accReq only after the job is joined
+	if c.accReq == nil {
+		return 0, 0
+	}
+	return c.savings.RatioTextFor(c.accReq, usage.accrec(), c.status, c.rounds)
 }

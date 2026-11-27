@@ -1852,6 +1852,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 		failOpenAccountant("noteRounds", func() { ac.noteRounds(rounds) })
 		failOpenAccountant("prefixRewritten", func() { usage.PrefixRewritten = cp.prefixRewritten() })
 		billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
+		ratioTok, ratioBytes := ac.liveRatioText(usage, usageOK) // the thread's next warm gate reads it (#1533)
 		// lifecycle.Finish runs the steps after the response in their order: the keep-alive touch, the
 		// deferral ledger, the release of a deferred cache-aware summary, the warm sweep's question,
 		// and, only when usage is OK, the provider's own input count kept for this session's NEXT turn
@@ -1860,7 +1861,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 		// apply itself derived, which RecordBilledInput requires.
 		lifecycle.Finish(lifecycle.Fin{
 			Store: tn.Store, Shadow: tn.Shadow, Mode: tn.Mode, Session: session, ThreadID: threadID,
-			UsageOK: usageOK, Billed: billed, Forwarded: status/100 == 2, CacheRead: int(usage.CacheRead),
+			UsageOK: usageOK, Billed: billed, RatioTokens: ratioTok, RatioBytes: ratioBytes, Forwarded: status/100 == 2, CacheRead: int(usage.CacheRead),
 			// Hand the finished request to the keep-alive. At request end, so `body` is the bytes that actually
 			// went upstream on the final round (an expand round rewrites it) and the prefix a ping
 			// would replay is the one the provider just hashed. Costs nothing when no tenant has opted in.

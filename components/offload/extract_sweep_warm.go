@@ -75,7 +75,7 @@ const (
 	maxWarmThreads  = 256
 	// maxBilledRatio bounds the billed-over-local ratio the gate trusts. A figure outside [1, max] came
 	// from another thread's turn or a bad sample, and the gate refuses instead of acting on it.
-	maxBilledRatio = 8.0
+	maxBilledRatio = tokens.MaxBilledRatio
 )
 
 // Wait-cause weights on the expected warm turns (#453). A thread whose last wake was its own tool's
@@ -517,11 +517,27 @@ func warmRatios(model string, prevBilled, prevLocal int) (content, full float64,
 	if full < 1 || full > maxBilledRatio {
 		return 0, 0, false
 	}
-	content, _ = tokens.BilledDeltaFactor(model)
+	content, _ = tokens.LegacyFactor(model)
 	if full < content {
 		content = full
 	}
 	return content, full, true
+}
+
+// warmLiveContent is the provider's tokens for each local token of the removed content, from the previous turn's own
+// request ratio (#1533): its billed tokens over the bytes of its forwarded text (prevTokens, prevBytes), times the
+// bytes the drops remove, over the local tokens they remove. It replaces the family table of warmRatios. ok is false
+// when any input is unknown, or the answer is outside 1..maxBilledRatio, as warmRatios treats the full ratio: the
+// caller then keeps the table (fail open).
+func warmLiveContent(prevTokens, prevBytes int, removedBytes float64, removedLocal int) (float64, bool) {
+	if prevTokens <= 0 || prevBytes <= 0 || removedBytes <= 0 || removedLocal <= 0 {
+		return 0, false
+	}
+	r := float64(prevTokens) / float64(prevBytes) * removedBytes / float64(removedLocal)
+	if r < 1 || r > maxBilledRatio {
+		return 0, false
+	}
+	return r, true
 }
 
 // warmWeight is the wait-cause weight, read off the request in hand (#453). The thread's last message
@@ -770,6 +786,7 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 		d.RatioContent, d.RatioFull = content, full
 		var rm []warmRemoval
 		removed, first := 0, -1
+		var removedBytes float64 // the bytes the drops remove, by the size of each output (Saves over Tokens)
 		for _, o := range res.Valid {
 			idx, found := rawToolMessage(req.Input, o.ToolUseID)
 			if !found {
@@ -777,12 +794,21 @@ func (e *ExtractSweep) warmGate(c *components.Ctx, req *bschemas.BifrostChatRequ
 			}
 			rm = append(rm, warmRemoval{idx, o.Saves})
 			removed += o.Saves
+			if o.Tokens > 0 {
+				removedBytes += float64(len(schema.MessageText(req.Input[idx]))) * float64(o.Saves) / float64(o.Tokens)
+			}
 			if first < 0 || idx < first {
 				first = idx
 			}
 		}
 		if first < 0 {
 			return false, "no_valid_drop"
+		}
+		// The removed content in the provider's tokens, from the previous turn's own request ratio (#1533). With no
+		// such ratio, or one that gives a ratio out of range, the table answer above stands.
+		if live, ok := warmLiveContent(c.PrevRatioTokens, c.PrevRatioBytes, removedBytes, removed); ok {
+			content = min(live, full)
+			d.RatioContent, d.RatioContentLive = content, true
 		}
 		read, write := e.warmGateRates(c)
 		rewritten, deep := warmRewrite(req, first, cachedEnd(c, req), rm)
@@ -1444,7 +1470,9 @@ type WarmDecision struct {
 	// RatioFull and RatioContent are the billed-over-local ratios the gate used.
 	RatioFull    float64 `json:"ratio_full"`
 	RatioContent float64 `json:"ratio_content"`
-	Deep         bool    `json:"deep"`
+	// RatioContentLive says RatioContent came from the previous turn's own request ratio, not from the family table (#1533).
+	RatioContentLive bool `json:"ratio_content_live,omitempty"`
+	Deep             bool `json:"deep"`
 	// Proposed is how many drops the held answer carried into the recheck, and Dropped is what the recheck
 	// removed from them, by reason (output_gone, content_changed, referenced_later, expanded, conversation_shorter).
 	// Without it a refused apply read as "no valid drop" with no way to say why 59 to 87% of the judge's

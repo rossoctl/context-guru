@@ -510,10 +510,10 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 	// paths into this transformed body. Both transforms are deterministic and
 	// preserve the original body on a parse or safety-check failure.
 	var toolSchema bool
-	var filteredTokens, filteredDecls int
-	o.Body, toolSchema, filteredTokens, filteredDecls = transformEnvelope(o.Body, pipe, o.Bypass, responsesEnvelopeAdapter{})
+	var filteredTokens, filteredDecls, filteredBytes int
+	o.Body, toolSchema, filteredTokens, filteredDecls, filteredBytes = transformEnvelope(o.Body, pipe, o.Bypass, responsesEnvelopeAdapter{})
 	res.Body, res.Changed = o.Body, toolSchema || filteredDecls > 0
-	res.FilteredDeclTokens, res.FilteredDecls = filteredTokens, filteredDecls
+	res.FilteredDeclTokens, res.FilteredDecls, res.FilteredDeclBytes = filteredTokens, filteredDecls, filteredBytes
 	norm, slots := normalizeResponses(o.Body)
 	res.Messages = len(norm)
 	if len(norm) == 0 {
@@ -623,6 +623,7 @@ func bodyResponsesOpts(ctx context.Context, pipe *components.Pipeline, st store.
 		PrevBilledInput: prevBilledInput(st, res.Session), PrevBilledInputThread: prevBilledInputThread(st, res.Session, res.Thread.ID), SelfRates: o.SelfRates, RatesFor: o.RatesFor,
 		Restored: restore.restored()}
 	c.CanKeepAlive = c.CanSweepAtPing // the deprecated field, for a component that still reads it
+	c.PrevRatioTokens, c.PrevRatioBytes = prevRatioThread(st, res.Session, res.Thread.ID)
 	res.Run = pipe.Run(chat, c)
 	start := 0
 	if cacheAware && maxCachedIdx >= 0 {

@@ -130,3 +130,20 @@ func TestRetryRefusedLeavesOtherResponsesAlone(t *testing.T) {
 		}
 	}
 }
+
+// The sweep's expand sink gets the size of the restored text in bytes (#1533), so the dashboard can convert it with
+// the request's own ratio: the host's token count alone cannot be.
+func TestRepairExpandErrorsReportsTheRestoredBytes(t *testing.T) {
+	st := store.NewMemory(store.Options{})
+	st.Put("HASH", []byte("THE ORIGINAL"))
+	body := []byte(`{"model":"claude","messages":[` +
+		`{"role":"user","content":"look at <<cg:HASH>>"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"` + expand.ToolName + `","input":{"id":"HASH"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"No such tool available: ` + expand.ToolName + `","is_error":true}]}]}`)
+	var got []int
+	s := Sinks{NoteSweepExpand: func(_ int, n offload.SweepExpandNote) { got = append(got, n.Bytes) }}
+	RepairExpandErrors("anthropic", body, st, func([]byte) string { return "sess" }, s)
+	if len(got) != 1 || got[0] != len("THE ORIGINAL") {
+		t.Fatalf("restored bytes = %v, want [%d]", got, len("THE ORIGINAL"))
+	}
+}

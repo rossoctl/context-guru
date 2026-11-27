@@ -903,7 +903,7 @@ func (r *Recorder) seedModels(since int64) ([]string, error) {
 // time of the write when the thread's latest successful, non-ping WRITE on that model was billed at
 // the one-hour tier. A failed request writes no entry, and a full hit leaves the tier of the
 // earlier write as it was. This is the live rule (ObservePrefix keeps the tier over a read-only
-// turn; only a 2xx request commits). The FactsOf rule decides the tier: the write is all one-hour.
+// turn; only a 2xx request commits). The head rule decides the tier (keepalive.HeadLifetimeOneHour): any one-hour token counts.
 // An entry belongs to one model, so the tier does too (#994).
 func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 	rows, err := r.db.sql.Query(`SELECT session_id, thread_id, model, ts, cache_write, cache_write_1h FROM (
@@ -923,8 +923,8 @@ func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 		if err := rows.Scan(&sid, &tid, &model, &ts, &write, &write1h); err != nil {
 			return nil, err
 		}
-		// The whole-entry rule, as before: this seed feeds the ping schedule, a money decision.
-		if keepalive.BilledOneHour(write, write1h, false) {
+		// The head rule, as FactsOf (the live half of the miss-cause check): any token billed at 1 hour counts.
+		if keepalive.HeadLifetimeOneHour(write, write1h, false) {
 			// The key carries no tenant: the session id already does, as `tenant:base`
 			// (session.Scoped). The ranking above is per tenant all the same (#1071), so one
 			// tenant's later write cannot hide another's; on a key two rows still share, the
