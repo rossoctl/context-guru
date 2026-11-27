@@ -1,9 +1,10 @@
 package agent
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 const module = "github.com/rossoctl/context-guru"
@@ -12,18 +13,8 @@ const module = "github.com/rossoctl/context-guru"
 // the bifrost adapter) imports them, never the reverse. This test enforces that rule. It reads
 // the full dependency list of ./..., so an indirect import, or a new agent package, is covered.
 func TestAgentDoesNotImportAHost(t *testing.T) {
-	// The go on PATH: the toolchain running this test. runtime.GOROOT is deprecated and can be
-	// empty under -trimpath or a moved toolchain.
-	goBin, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatalf("go is not on PATH: %v", err)
-	}
-	out, err := exec.Command(goBin, "list", "-deps", "./...").CombinedOutput()
-	if err != nil {
-		// Fatal, not Skip: a guard that skips proves nothing.
-		t.Fatalf("go list failed: %v\n%s", err, out)
-	}
-	deps := strings.Fields(string(out))
+	out := testutil.GoListDeps(t, "./...")
+	deps := strings.Fields(out)
 	for _, want := range []string{module + "/agent", module + "/agent/bob", module + "/agent/codex", module + "/agent/claudecode", module + "/agent/opencode", module + "/agent/pi"} {
 		if !contains(deps, want) {
 			t.Fatalf("go list did not list %s; the guard would prove nothing:\n%s", want, out)
