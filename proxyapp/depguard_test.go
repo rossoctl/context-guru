@@ -3,11 +3,10 @@
 package proxyapp
 
 import (
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/rossoctl/context-guru/internal/testutil"
 )
 
 // The default build must not link the recorder's dependencies (+11.5 MB): gRPC, protobuf, and the
@@ -20,16 +19,11 @@ import (
 // break this test. An earlier version banned the whole go.opentelemetry.io/ prefix, which also
 // banned the API that the accountant module already imports.
 func TestDefaultBuildLinksNoOpenTelemetryGRPCOrProtobuf(t *testing.T) {
-	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
-	out, err := exec.Command(goBin, "list", "-deps", ".").CombinedOutput()
-	if err != nil {
-		// Fatal, not Skip: a guard that skips proves nothing.
-		t.Fatalf("go list failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "github.com/rossoctl/context-guru/proxy") {
+	out := testutil.GoListDeps(t, ".")
+	if !strings.Contains(out, "github.com/rossoctl/context-guru/proxy") {
 		t.Fatalf("go list did not list the proxy package; the guard would prove nothing:\n%s", out)
 	}
-	for _, pkg := range strings.Fields(string(out)) {
+	for _, pkg := range strings.Fields(out) {
 		for _, bad := range []string{
 			"google.golang.org/grpc", "google.golang.org/protobuf", "github.com/grpc-ecosystem/",
 			"go.opentelemetry.io/proto/", "go.opentelemetry.io/otel/exporters/otlp/",
