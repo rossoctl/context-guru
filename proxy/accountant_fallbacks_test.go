@@ -53,7 +53,7 @@ func accNoSumFailure(t *testing.T, e dash.Event) {
 func TestTailBreakpointReportsItsBytes(t *testing.T) {
 	up := billedUpstream(t)
 	defer up.Close()
-	h, rec, tap := accHandlerYAML(t, up.URL, "preset: codesafe\ncache:\n  tail_breakpoint: true\n")
+	h, rec, tap := accHandlerYAML(t, up.URL, "preset: conservative\ncache:\n  tail_breakpoint: true\n")
 	build := func(n int) []byte {
 		msgs := []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "text", "text": "reminder"},
@@ -213,7 +213,7 @@ func TestToolDeferReportsItsNamesList(t *testing.T) {
 func TestBypassedRequestStoresNoFallback(t *testing.T) {
 	up := billedUpstream(t)
 	defer up.Close()
-	h, rec, tap := accHandlerYAML(t, up.URL, "preset: codesafe\n")
+	h, rec, tap := accHandlerYAML(t, up.URL, "preset: conservative\n")
 	b, _ := json.Marshal(map[string]any{"model": "aws/claude-sonnet-5", "max_tokens": 64,
 		"messages": []any{map[string]any{"role": "user", "content": "hi"}}})
 	srv := httptest.NewServer(h.Mux())

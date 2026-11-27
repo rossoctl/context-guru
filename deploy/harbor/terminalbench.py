@@ -218,7 +218,7 @@ def start_proxy(preset, base, token, capture=None, dump=None):
         env["CONTEXT_GURU_DUMP"] = dump
         Path(dump).unlink(missing_ok=True)
     log = open(f"/tmp/tb-runs/proxy-terminalbench-{preset}.log", "w")
-    PRESETS = {"off", "safe", "balanced", "aggressive", "coding", "mcp", "agent", "general"}
+    PRESETS = {"off", "safe", "conservative"}
     if preset in CUSTOM_CONFIGS:
         cfgp = f"/tmp/tb-runs/cfg-{preset}.yaml"
         Path(cfgp).write_text(CUSTOM_CONFIGS[preset])

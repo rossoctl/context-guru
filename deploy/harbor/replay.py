@@ -24,15 +24,15 @@ PORT = 4020
 # deterministic components (no model needed); LLM ones (extract-code, summarize)
 # are handled with a cheap model separately.
 DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
-               "cmdfilter", "mask", "collapse", "extract", "smartcrush", "skeleton",
-               "phi_evict", "agent", "balanced"]
+               "cmdfilter", "mask", "collapse", "extract", "smartcrush",
+               "conservative"]
 PIPE = {
-    "off": None, "agent": ("preset", "agent"), "balanced": ("preset", "balanced"),
-    "general": ("preset", "general"), "coding": ("preset", "coding"), "mcp": ("preset", "mcp"),
-    # The shipped defaults. They need the preset path, not a bare pipeline name-list:
-    # their tuned per-component blocks live in config.presetConfigs, so replaying
-    # `pipeline: [codesmart]` would fail to resolve a component and measure nothing.
-    "codesmart": ("preset", "codesmart"), "codesafe": ("preset", "codesafe"),
+    "off": None,
+    # A current preset needs the preset path, not a bare pipeline name-list: a preset's tuned
+    # per-component blocks live in config.presetConfigs. The old presets that named a heuristic
+    # offloader (balanced, aggressive, coding, mcp, agent, general, codesmart, codesafe) were retired:
+    # replaying one now runs no components, so they are not arms here. Name the components instead.
+    "conservative": ("preset", "conservative"),
 }
 
 

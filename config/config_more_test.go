@@ -452,3 +452,51 @@ func TestHouseIsAnAliasOfConservative(t *testing.T) {
 		t.Errorf("conservative has no extract block")
 	}
 }
+
+// A retired preset (it named a heuristic offloader) and a removed component (coref) must not stop
+// the proxy: the config loads, a warning is logged, and nothing that was named runs.
+func TestRetiredPresetsAndRemovedComponentsLoadWithoutThem(t *testing.T) {
+	for name := range retiredPresets {
+		if _, ok := presets[name]; ok {
+			t.Errorf("preset %q is retired but still in the presets map", name)
+		}
+		if _, ok := presetConfigs[name]; ok {
+			t.Errorf("preset %q is retired but still has a presetConfigs block", name)
+		}
+		c, err := LoadBytes([]byte("preset: " + name + "\n"))
+		if err != nil {
+			t.Fatalf("preset %s: %v", name, err)
+		}
+		if len(c.Pipeline) != 0 {
+			t.Errorf("preset %s: pipeline = %v, want empty", name, c.Pipeline)
+		}
+		if p, ok := PresetPipeline(name); !ok || len(p) != 0 {
+			t.Errorf("PresetPipeline(%s) = %v, %v; want empty, true", name, p, ok)
+		}
+		if _, err := c.Build(nil); err != nil {
+			t.Errorf("preset %s: build: %v", name, err)
+		}
+	}
+	// An explicit pipeline in the same document still runs as written.
+	c, err := LoadBytes([]byte("preset: codesmart\npipeline: [format, extract]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Pipeline, ","); got != "format,extract" {
+		t.Errorf("pipeline = %s, want format,extract", got)
+	}
+	// coref was removed: the name and its block are dropped, the rest builds.
+	c, err = LoadBytes([]byte("pipeline: [format, coref, extract]\ncomponents:\n  coref: {min_tokens: 300}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Pipeline, ","); got != "format,extract" {
+		t.Errorf("pipeline = %s, want format,extract", got)
+	}
+	if _, ok := c.Components["coref"]; ok {
+		t.Error("the removed component's config block was kept")
+	}
+	if _, err := c.Build(nil); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+}

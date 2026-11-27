@@ -468,9 +468,6 @@ On iteration 024's own decisions the horizon was **exactly zero on 51 of 203 fir
 refuses unconditionally. The growth *rate* still comes from the pre-removal request, because the rate is a
 fact about history that already happened; only the *room left* is a fact about the future.
 
-Note the asymmetry with `coref`, which shares this break-even but keeps the uncredited form: its
-drop selection was calibrated against that expression, and moving the objective a measured component
-optimises would invalidate those measurements rather than improve them.
 
 ### When the cache read does not happen
 
@@ -954,6 +951,9 @@ next rather than to whoever runs it.
 
 ## agentdiet
 
+!!! note "In no preset"
+    The `agentdiet` preset was retired. Use the component from a hand-written `pipeline:`.
+
 !!! info "Offload (LLM) — lossy, reversible"
     A baseline reproduction of the published **AgentDiet** trajectory-reduction method: one
     cheap-model reflection per turn, on the step that has just aged past a fixed delay.
@@ -1020,7 +1020,7 @@ recovered via `context_guru_expand` / `GET /expand`.
 | `min_step_tokens` | 500 | *θ* — a step below this is not worth a reflection call. |
 | `min_saved_tokens` | 400 | Apply the reduction if it saves at least this many tokens… |
 | `max_keep_ratio` | 0.8 | …or if it keeps less than this fraction of the step. |
-| `model.source` | `incoming` | LLM source: `incoming` or `config` (the cheap model). The preset uses `config`. The endpoint and credential for `config` are the host's own (`CHEAP_MODEL*` env vars on the standalone proxy); this block never names one. |
+| `model.source` | `incoming` | LLM source: `incoming` or `config` (the cheap model). The endpoint and credential for `config` are the host's own (`CHEAP_MODEL*` env vars on the standalone proxy); this block never names one. |
 | `model.model` | *the source's own model* | The reflection model, on that source's endpoint and credential. The method's economics depend on it being much cheaper than the agent's. |
 | `marker_mode` | `full` | `full` (reversible) \| `summary` \| `off`. |
 | `cache_tail_only` | `false` | Restrict new reductions to the uncached tail. See the warning below. |
@@ -1085,7 +1085,7 @@ is well under θ.
 
 ### Run it alone
 
-The preset is `[format, agentdiet]` on purpose. The method's claim is what **one**
+The old `agentdiet` preset (retired) ran `[format, agentdiet]` on purpose. The method's claim is what **one**
 age-targeted reflection achieves; stacking context-guru's own offloaders beside it would reduce the
 same tool outputs first, and there would be nothing left to attribute.
 

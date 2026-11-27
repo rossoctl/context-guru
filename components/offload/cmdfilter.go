@@ -75,7 +75,7 @@ func newCmdfilter(raw []byte) (components.Component, error) {
 			return nil, err
 		}
 	}
-	// The ledger-derived sets are OPT-IN so that codesmart/codesafe — the published
+	// The ledger-derived sets are OPT-IN so that the codesmart/codesafe arms — the published
 	// SWE-bench arms — keep their measured baseline. See cmdfilter_agentcmd.go.
 	extra, err := agentFilterDocs(cfg.AgentFilters)
 	if err != nil {

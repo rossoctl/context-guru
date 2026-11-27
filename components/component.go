@@ -728,7 +728,7 @@ type Ctx struct {
 	RawInput []schemas.ChatMessage
 	// CutFrac is the smallest trigger fraction of the window at which a component of THIS pipeline cuts
 	// the conversation (CutFracProvider), or 0 when none does. Set by Pipeline.Run before any
-	// component runs. Coref's horizon (and later the warm sweep's) reads it to estimate the turns left
+	// component runs. The cache-rewrite horizon (and the warm sweep's) reads it to estimate the turns left
 	// before the cut. A summarizer's min/max_request_tokens gates can cut earlier than this fraction
 	// says, so the horizon can be an overestimate.
 	CutFrac float64

@@ -80,7 +80,7 @@ func scanUpstream(t *testing.T, hits *atomic.Int64, scanned <-chan struct{}) *ht
 // scanHandler is a real handler with the keep-alive on: person floor 80k, tool-wait floor 20k, Idle 200 ms.
 func scanHandler(t *testing.T, upURL string) *Handler {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

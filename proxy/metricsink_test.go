@@ -63,7 +63,7 @@ func TestMetricsSinkSeesEachPricedRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := &counted{Observer: inner}
-	h, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.MetricsSink = sink })
+	h, rec, _ := accHandlerOpts(t, up.URL, "preset: conservative\n", func(o *Options) { o.MetricsSink = sink })
 	accPost(t, h, "sess-metrics")
 	accPost(t, h, "sess-metrics")
 	waitForRows(t, rec, 2)
@@ -91,7 +91,7 @@ func (panicSink) Observe(acmetrics.Observation) { panic("boom") }
 // A panic in the sink costs the metric only. The request is answered and recorded (R46, R20).
 func TestPanickingMetricsSinkDoesNotHurtTheRequest(t *testing.T) {
 	up := usageUpstream(t)
-	h, rec, tap := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.MetricsSink = panicSink{} })
+	h, rec, tap := accHandlerOpts(t, up.URL, "preset: conservative\n", func(o *Options) { o.MetricsSink = panicSink{} })
 	accPost(t, h, "sess-panic")
 	accPost(t, h, "sess-panic")
 	waitForRows(t, rec, 2)
@@ -204,7 +204,7 @@ func TestInferenceMetricsSeeARealRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.InferenceMetrics = im })
+	h, rec, _ := accHandlerOpts(t, up.URL, "preset: conservative\n", func(o *Options) { o.InferenceMetrics = im })
 	accPost(t, h, "sess-inference")
 	waitForRows(t, rec, 1)
 

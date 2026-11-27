@@ -251,7 +251,7 @@ func (cl *Collapse) runeWindow(content string, maxTokens int) (func(string) stri
 	r := []rune(content)
 	// Never seed above the content. chars/4 OVERESTIMATES on dense JSON (~2.5 chars/token),
 	// so bailing out below on the un-measured seed declined content the fit loop would have
-	// cut: at max_tokens 3000 — what the shipped codesafe preset sets — one-line JSON from
+	// cut: at max_tokens 3000 — what the retired codesafe preset set — one-line JSON from
 	// 3,006 to 4,491 tokens was oversized and left entirely uncut. marker_no_win already
 	// protects the downside of seeding low.
 	budget := min(maxTokens*collapseCharsPerToken, len(r)-1)

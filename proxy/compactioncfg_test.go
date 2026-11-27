@@ -132,7 +132,7 @@ func TestReadClaudeCompactReadsNoFileWithoutAHome(t *testing.T) {
 // gate used the configured C and the row carried none, so a later dashboard walk read the table.
 func TestCompactEndpointRecordsTheConfiguredPoint(t *testing.T) {
 	agg := metrics.NewAggregator()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

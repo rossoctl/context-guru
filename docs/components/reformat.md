@@ -275,8 +275,8 @@ single regex probe (`no_terminal_noise`).
 
 ### Presets
 
-Shipped in **`general`**, right after the JSON reformatters. It is deliberately **not** added to
-`codesmart` / `codesafe`: those name-lists are the SWE-bench study's published arms, and
+Shipped in the old `general` preset (retired), right after the JSON reformatters. It is deliberately **not** added to
+the old `codesmart` / `codesafe` presets: those name-lists were the SWE-bench study's published arms, and
 `config/config.go` states that a change to them is a reason to re-measure rather than a
 documentation edit.
 

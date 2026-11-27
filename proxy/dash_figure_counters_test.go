@@ -54,7 +54,7 @@ func TestDashboardSavingEqualsTheSavingsCounters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, rec, evs := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.MetricsSink = sink })
+	h, rec, evs := accHandlerOpts(t, up.URL, "preset: conservative\n", func(o *Options) { o.MetricsSink = sink })
 	postTwice(t, h, "sess-equal")
 	waitForRows(t, rec, 2)
 	got := evs.waitAll(t, 2)

@@ -107,7 +107,7 @@ func TestMetricsDoNotChangeResponseTime(t *testing.T) {
 	scenarios := []*scenario{{name: "off", collector: ""}, {name: "on, collector answers", collector: answers.URL},
 		{name: "on, collector hangs", collector: hangs.URL}, {name: "on, collector refuses", collector: refusedURL}}
 	for _, s := range scenarios {
-		h, _, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", metricsMode(t, s.collector))
+		h, _, _ := accHandlerOpts(t, up.URL, "preset: conservative\n", metricsMode(t, s.collector))
 		s.h, s.srv = h, httptest.NewServer(h.Mux())
 		defer s.srv.Close()
 		e2eRun(t, s.h, s.srv.URL, s.srv.Client(), 30) // warm the connection and the caches

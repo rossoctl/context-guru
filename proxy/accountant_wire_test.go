@@ -49,7 +49,7 @@ func (c *accTap) waitAll(t *testing.T, n int) []dash.Event {
 
 func accHandler(t *testing.T, up string) (*Handler, *dash.Recorder, *accTap) {
 	t.Helper()
-	return accHandlerYAML(t, up, "preset: codesafe\n")
+	return accHandlerYAML(t, up, "preset: conservative\n")
 }
 
 // accHandlerYAML is accHandler with the config document spelled out.

@@ -17,7 +17,7 @@ func TestLoadStrictRejectsUnknownFields(t *testing.T) {
 }
 
 func TestPresetExpandsPipeline(t *testing.T) {
-	c, err := LoadBytes([]byte("preset: balanced\n"))
+	c, err := LoadBytes([]byte("preset: safe\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestPresetExpandsPipeline(t *testing.T) {
 }
 
 func TestExplicitPipelineOverridesPreset(t *testing.T) {
-	c, err := LoadBytes([]byte("preset: balanced\npipeline: [cacheinject]\n"))
+	c, err := LoadBytes([]byte("preset: safe\npipeline: [cacheinject]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,64 +49,47 @@ func TestDuplicatePipelineComponentIsRejected(t *testing.T) {
 	}
 }
 
-// TestRichPresetCarriesComponentConfig verifies the codesmart preset expands to both
-// its pipeline AND its tuned per-component config (which a bare name-list can't carry) —
-// specifically that extract_llm is routed to the cheap "config" model, not the default.
+// TestRichPresetCarriesComponentConfig verifies a rich preset (summarizer1509) expands to both
+// its pipeline AND its tuned per-component config, which a bare name-list can't carry.
 func TestRichPresetCarriesComponentConfig(t *testing.T) {
-	c, err := LoadBytes([]byte("preset: codesmart\n"))
+	c, err := LoadBytes([]byte("preset: summarizer1509\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "extract_llm", "extract", "linecap"}
-	if strings.Join(c.Pipeline, ",") != strings.Join(want, ",") {
-		t.Fatalf("codesmart pipeline = %v, want %v", c.Pipeline, want)
+	if strings.Join(c.Pipeline, ",") != "summarize" {
+		t.Fatalf("summarizer1509 pipeline = %v, want [summarize]", c.Pipeline)
 	}
-	node, ok := c.Components["extract_llm"]
+	node, ok := c.Components["summarize"]
 	if !ok {
-		t.Fatal("codesmart must carry extract_llm component config")
+		t.Fatal("summarizer1509 must carry summarize component config")
 	}
 	var got struct {
-		Model struct {
-			Source string `yaml:"source"`
-		} `yaml:"model"`
-		MinTokens int `yaml:"min_tokens"`
+		KeepFirst int `yaml:"keep_first"`
+		KeepLast  int `yaml:"keep_last"`
 	}
 	if err := node.Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Model.Source != "config" {
-		t.Fatalf("extract_llm.model.source = %q, want config (cheap model)", got.Model.Source)
-	}
-	if got.MinTokens != 3000 {
-		t.Fatalf("extract_llm.min_tokens = %d, want 3000", got.MinTokens)
+	if got.KeepFirst != 2 || got.KeepLast != 10 {
+		t.Fatalf("summarize keep_first/keep_last = %d/%d, want 2/10", got.KeepFirst, got.KeepLast)
 	}
 }
 
 // TestRichPresetUserOverrideWins: an explicit component config overrides the preset's.
 func TestRichPresetUserOverrideWins(t *testing.T) {
-	c, err := LoadBytes([]byte("preset: codesmart\ncomponents:\n  extract_llm:\n    min_tokens: 9999\n"))
+	c, err := LoadBytes([]byte("preset: summarizer1509\ncomponents:\n  summarize:\n    keep_last: 99\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
-		MinTokens int `yaml:"min_tokens"`
+		KeepLast int `yaml:"keep_last"`
 	}
-	node := c.Components["extract_llm"]
+	node := c.Components["summarize"]
 	if err := node.Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.MinTokens != 9999 {
-		t.Fatalf("user min_tokens should win: got %d, want 9999", got.MinTokens)
-	}
-	// and codesafe (deterministic-only) must contain NO extract_llm.
-	cs, err := LoadBytes([]byte("preset: codesafe\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range cs.Pipeline {
-		if name == "extract_llm" {
-			t.Fatal("codesafe must be deterministic-only (no extract_llm)")
-		}
+	if got.KeepLast != 99 {
+		t.Fatalf("user keep_last should win: got %d, want 99", got.KeepLast)
 	}
 }
 
