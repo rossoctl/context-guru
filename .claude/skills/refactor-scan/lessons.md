@@ -33,6 +33,29 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   and `finishAccountant` have one.
 - **A cost or saving formula belongs in the accountant.** Move it there, release a tag, and call it.
   Do not leave a second formula in a host or a library package.
+- **A comment that gives a design reason is not a copy.** In #1535, `config/strategy.go` wrote its
+  keep-alive numbers out on purpose ("a later change to a default must not silently re-tune a
+  strategy an install uses"). The fix made them read the constants, which reverses that choice.
+  Read the reason before you merge two values. Pin them with a test instead.
+- **"One rule" can be two questions.** In #1521, "billed at the 1h tier" was coded two ways. The
+  mixed write (a 1h head plus a 5m tail) is the designed head-TTL shape. "Every token" and "any
+  token" answer different questions: whether the whole entry lives 1h, and whether the head lives
+  1h. Name two rules. Do not force one, and test the designed shape.
+- **A host refactor of a total can drop a term.** #1507's `f.DeltaUSD = fig.CountedUSD()`
+  overwrote the defer-spend subtraction made just before it. When you replace a sum with a library
+  call, list every term the old total had, and test a case with all of them.
+- **Two numbers from different removals make an unbounded ratio.** #1536's RequestFactor divided
+  gross bytes, including discarded changes, by net tokens. Pair the numerator and the denominator
+  on the same set, and bound the result like its sister value.
+- **Model inputs keep their trained values.** A move to the accountant must not change a feature
+  the model was trained on, unless training used the new value. Check the training script (#1508:
+  CostUSD moved to the stored bill, which training used; the gbs stop feature stayed `tool_use`
+  only).
+- **Bit-equal money needs per-product rounding.** On arm64, `usd += r*n` fuses into one
+  multiply-add. Round each product with an explicit `float64()` when a figure must equal a stored
+  one (accountant #125, #1128).
+- **A constant above 2^31 breaks 32-bit builds.** Accountant #129's `1 << 31` did not fit a 32-bit
+  int. Build with `GOARCH=386` when you add a bound.
 
 ### Cost
 
@@ -54,6 +77,11 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   the final head, with no output filter.
 - **Find the name of a failing test before you call it flaky.** Keep the full output in a file. Then
   run the same test on an unmodified origin/main.
+- **A change to dash SQL needs the proxy tests too.** Proxy tests drive `/api/cachestate`, so #1521
+  broke a proxy test that the dash tests did not see. Run the packages that read the endpoint.
+- **A test that builds the state by hand can skip the real order.** In #1536, a test set the
+  accountant record by hand and passed. The real job path read it before the job was joined, so the
+  feature never ran. Test through the real path (start, goroutine, join).
 
 ### The PR text
 
@@ -75,3 +103,13 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   act on only the first message.
 - **Rebase after main moves.** A rebase moves the head, so a PR with a real conflict needs one more
   review round at the new head.
+- **Two fix agents can add the same new helper.** #1507 and #1508 each added a pricer adapter.
+  Name one owner for each new shared helper, and stack the other PR on it.
+- **A stacked PR after its base squash-merges.** `approval-still-valid.sh` says CHANGED, because
+  it measures against main's old merge base. Compare the PR's own sorted `-U0` +/- lines at the
+  approved head (against its stacked base) and at the new head (against main), as RELEASING
+  "Stacked PRs" says (#1508).
+- **Agents stop mid-edit on a gateway error.** Two agents stopped on an API 502 with uncommitted
+  work. Check the worktree's `git status` before you resume them.
+- **Messages cross, again.** Agents answered an older message several times. Repeat every open
+  item in the second message.
