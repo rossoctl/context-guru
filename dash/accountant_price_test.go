@@ -8,6 +8,7 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/modelinfotest"
 )
 
 var accTestPrice = modelinfo.Price{Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Output: 15e-6}
@@ -286,7 +287,7 @@ func TestFigure_BreakCausedAsOneHourWrite(t *testing.T) {
 // Issue #1076: Event.CostUSD (modelinfo) and the accountant figure (tierUSD) must price the same
 // 1h-written tokens alike, for every price shape: derived, a flat 1h rate (cache_write_1h_frac:
 // 1.0, as prices.example.yaml ships) and a stated 5m rate above the derived 1h one.
-func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
+func TestTierUSDAgreesWithStoredBill(t *testing.T) {
 	for name, p := range map[string]modelinfo.Price{
 		"derived":     accTestPrice,
 		"flat 1h":     {Input: 3e-6, CacheRead: 0.3e-6, CacheWrite: 3.75e-6, Write1hFrac: 1.0},
@@ -294,20 +295,20 @@ func TestTierUSDAgreesWithCostWithCacheWrite1h(t *testing.T) {
 	} {
 		const n = 1000
 		got := tierUSD(p, accountant.TierTokens{CacheWrite1h: n})
-		want := p.CostWithCacheWrite1h(0, 0, n, 0, n)
+		want := modelinfotest.StoredBill(p, 0, 0, n, 0, n)
 		if !accNear(got, want) {
-			t.Errorf("%s: tierUSD = %v, CostWithCacheWrite1h = %v", name, got, want)
+			t.Errorf("%s: tierUSD = %v, StoredBill = %v", name, got, want)
 		}
 	}
 }
 
 // NextRequestUSD names the 1h tier by the modelinfo TTL, not by a literal.
 func TestNextRequestUSDColdAtTheOneHourRate(t *testing.T) {
-	_, cold := NextRequestUSD(accTestPrice, 1000, 0, 3600)
+	_, cold := NextRequestUSD(accTestPrice, "claude-sonnet-5", 1000, 0, 3600)
 	if want := 1000 * accTestPrice.CacheWrite1h(); !accNear(cold, want) {
 		t.Errorf("1h cold = %v, want %v", cold, want)
 	}
-	_, cold = NextRequestUSD(accTestPrice, 1000, 0, 300)
+	_, cold = NextRequestUSD(accTestPrice, "claude-sonnet-5", 1000, 0, 300)
 	if want := 1000 * accTestPrice.CacheWrite; !accNear(cold, want) {
 		t.Errorf("5m cold = %v, want %v", cold, want)
 	}
@@ -385,15 +386,44 @@ func TestSumFailureGateIsWithholdOnTheRowAndTheLedgerAndThePush(t *testing.T) {
 			if got := e.AccountantFallback(); got != tc.want {
 				t.Errorf("row fallback %q, want %q", got, tc.want)
 			}
-			reason, _ := accrec.Gate(*e.accRes, accountant.USDFigure{}, accrec.GateIn{TokensBefore: e.TokensBefore,
+			reason, _ := accrec.Gate(*e.accRes, accountant.USDFigure{}, accrec.GateIn{
 				Rows: []accrec.GateRow{{Name: "mask", Acted: true}, {Name: "idle"}}})
 			// The gate also refuses a figure with no component entry; the library's reasons are what must agree.
 			if tc.want == "" && reason == FallbackCheckSum || tc.want != "" && reason != tc.want {
 				t.Errorf("accrec.Gate (the /stats gate) reason %q, want %q", reason, tc.want)
 			}
-			if got := accountant.Withhold(*e.accRes, accountant.SizeNotGiven); got != tc.want {
+			if got := accountant.Withhold(*e.accRes); got != tc.want {
 				t.Errorf("the push's Withhold %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A rescued request with an interaction AND a tool-deferral search turn: the search spend comes off the
+// total once, and the rows still add up to it. The counted total (DeltaUSD plus the interaction) must not
+// overwrite the spend subtraction.
+func TestAccountantFigureInteractionAndDeferSpendTogether(t *testing.T) {
+	e := &Event{Model: "m", FreshInput: 1000, CacheRead: 20_000, OutputTokens: 100}
+	e.SetAccountant(accountant.Result{
+		Ops: []accountant.PricedOp{
+			{Operator: "context-guru.tooldefer", ChangeID: "cg:tooldefer:x", Saved: accountant.TierTokens{CacheRead: 5000}},
+			{OpID: "s", Kind: accountant.KindSpend, Operator: "context-guru.tooldefer",
+				Call: &accountant.ModelCall{Usage: accountant.CallUsage{Output: 400}}},
+		},
+		Interaction:       accountant.TierTokens{CacheWrite5m: 300},
+		InteractionCaused: accountant.TierTokens{CacheRead: 300},
+	})
+	f := e.AccountantFigure(accTestPrice)
+	spend := 400 * 15e-6
+	want := 5000*0.3e-6 - spend + f.InteractionUSD
+	if f.InteractionUSD == 0 || !accNear(f.DeltaUSD, want) {
+		t.Fatalf("DeltaUSD %v, want saving - spend + interaction = %v (interaction %v)", f.DeltaUSD, want, f.InteractionUSD)
+	}
+	var rows float64
+	for _, v := range f.ByComponent {
+		rows += v
+	}
+	if !accNear(rows+f.EndedBreakUSD+f.InteractionUSD, f.DeltaUSD) {
+		t.Fatalf("rows %v + ended %v + interaction %v do not add up to delta %v", rows, f.EndedBreakUSD, f.InteractionUSD, f.DeltaUSD)
 	}
 }

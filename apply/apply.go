@@ -858,13 +858,14 @@ func BodyOpts(ctx context.Context, pipe *components.Pipeline, st store.Store, o 
 		ExistingBreakpoints: bps.Total(),
 		Mode:                mode,
 		PrefixAsk:           o.PrefixAsk,
-		CanKeepAlive:        canKeepAliveFor(o.CanKeepAlive, sessionID, tr.Thread.ID),
+		CanSweepAtPing:      canSweepAtPingFor(sweepAtPingOf(o), sessionID, tr.Thread.ID),
 		CacheTTLMs:          ttlMs,
 		CacheTTLMinimum:     ttlMinimum,
 		ToolSchema:          toolSchema,
 		FilteredDecls:       filteredDecls,
 		Restored:            restore.restored(),
 	}
+	c.CanKeepAlive = c.CanSweepAtPing // the deprecated field, for a component that still reads it
 	tr.Session, tr.CacheAware, tr.MaxCachedIdx, tr.Messages = sessionID, cacheAware, maxCachedIdx, len(norm)
 	tr.Breakpoints = bps
 	// The cache TTL TIER this request asked for. cacheTTL() has always computed it — it is an

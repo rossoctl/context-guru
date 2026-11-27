@@ -8,6 +8,7 @@ import (
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/dash"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -53,7 +54,7 @@ func interactionAgrees(t *testing.T, model string, usage accountant.Usage) float
 	res := interactionRes()
 
 	r := sdk.NewManualReader()
-	s, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), metricsPricer{prices: sizedTierPricer{}})
+	s, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("test"), modelinfo.ChainRates(sizedTierPricer{}))
 	if err != nil {
 		t.Fatal(err)
 	}

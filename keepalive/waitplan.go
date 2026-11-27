@@ -5,6 +5,8 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/waitcause"
 )
@@ -35,9 +37,9 @@ const (
 	// config.DefaultKeepAliveBackgroundExtraPings and DefaultKeepAliveHumanExtraPings.
 	DefaultBackgroundExtraPings = 3
 	DefaultHumanExtraPings      = 1
-	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait, background work, a teammate and any subagent wait. Mirrored by
+	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait, background work, a teammate and any subagent wait. It is
 	// config.DefaultKeepAliveToolWaitMinPrefix.
-	DefaultToolWaitMinPrefix = 20000
+	DefaultToolWaitMinPrefix = config.DefaultKeepAliveToolWaitMinPrefix
 	// MaxWaitPings bounds any plan result unless the base itself is higher. It equals the highest
 	// strategy ping count, so the credential hold stays at (11+1) x 299 s = 60 min or less.
 	MaxWaitPings = 11
@@ -198,17 +200,11 @@ func toolStopWait(w string, noNames bool, stopReason string) string {
 }
 
 // ToolStopReasons are the stop reasons that mean "the response called a tool". The dashboard reads
-// the same list when it looks for the first tool call of a thread in its stored rows.
-var ToolStopReasons = []string{"tool_use", "tool_calls", "function_call"}
+// the same list when it looks for the first tool call of a thread in its stored rows. The list is
+// schema.ToolStopReasonList, as a copy of its own.
+var ToolStopReasons = schema.ToolStopReasonList()
 
-func toolStop(stopReason string) bool {
-	for _, s := range ToolStopReasons {
-		if s == stopReason {
-			return true
-		}
-	}
-	return false
-}
+func toolStop(stopReason string) bool { return schema.IsToolStopReason(stopReason) }
 
 // SpanFacts is what a stored request row says about the idle span that follows it: the facts the
 // plan needs. The dashboard replays the plan from them (Policy.SpanPings).

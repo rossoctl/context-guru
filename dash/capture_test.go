@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
@@ -383,8 +384,8 @@ func TestAgentClassification(t *testing.T) {
 		"SomeVeryLongUnknownAgentNameWithNoDelimiterAtAllThatKeepsGoingForever": "someverylongunknownagentnamewith",
 	}
 	for ua, want := range cases {
-		if got := AgentFor(ua); got != want {
-			t.Errorf("AgentFor(%q) = %q; want %q", ua, got, want)
+		if got := agent.IdentifyUserAgent(ua).Label; got != want {
+			t.Errorf("IdentifyUserAgent(%q).Label = %q; want %q", ua, got, want)
 		}
 	}
 }

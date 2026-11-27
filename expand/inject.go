@@ -106,18 +106,7 @@ func Inject(provider, mode string, body []byte, storePersists bool) (out []byte,
 // the ADVERTISE test: a host must intercept expand calls exactly when this is true, or
 // it either declares a tool whose use it ignores (the call reaches a client that has no
 // such tool) or pays to inspect responses that cannot contain one.
-func HasTool(provider string, body []byte) bool {
-	nameField := "function.name"
-	if provider == schema.WireAnthropic || schema.IsResponses(provider) {
-		nameField = "name"
-	}
-	for _, t := range gjson.GetBytes(body, "tools").Array() {
-		if t.Get(nameField).String() == ToolName {
-			return true
-		}
-	}
-	return false
-}
+func HasTool(provider string, body []byte) bool { return schema.HasToolNamed(provider, body, ToolName) }
 
 // toolChoiceIsAuto reports whether a tool_choice value leaves the model free to
 // choose (so injecting one more tool is safe). OpenAI: the string "auto". Anthropic:

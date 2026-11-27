@@ -208,9 +208,8 @@ func TestToolDeferReportsItsNamesList(t *testing.T) {
 	}
 }
 
-// A bypassed request (x-context-guru-bypass) runs no pipeline, so it leaves TokensBefore at 0, and the proxy logs it
-// as an acc_fallback with size_unknown. But the client asked for no context-guru: its $0 saving is a measured $0. So
-// it stores no reason, and the Overview keeps its cost in the saving share (#1004).
+// A bypassed request (x-context-guru-bypass) runs no pipeline. The client asked for no context-guru: its $0 saving is
+// a measured $0. So it stores no reason, and the Overview keeps its cost in the saving share (#1004).
 func TestBypassedRequestStoresNoFallback(t *testing.T) {
 	up := billedUpstream(t)
 	defer up.Close()
@@ -234,8 +233,12 @@ func TestBypassedRequestStoresNoFallback(t *testing.T) {
 		t.Fatalf("events = %d, want 1", len(evs))
 	}
 	e := evs[0]
-	if !e.Bypassed || e.AccountantFallback() != dash.FallbackSizeUnknown {
-		t.Fatalf("setup: bypassed %v, fallback %q; want true, %q", e.Bypassed, e.AccountantFallback(), dash.FallbackSizeUnknown)
+	if !e.Bypassed {
+		t.Fatalf("setup: bypassed %v, want true", e.Bypassed)
+	}
+	// The gate books a bypassed request (no size_unknown): its $0 saving is a measured $0.
+	if fb := e.AccountantFallback(); fb != "" {
+		t.Fatalf("bypassed request: fallback %q, want none (booked)", fb)
 	}
 	if e.AccFallback != "" {
 		t.Fatalf("stored acc_fallback %q on a bypassed request, want none", e.AccFallback)

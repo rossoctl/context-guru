@@ -76,9 +76,9 @@ func TestNextRequestUSDPricesAtTheTierItsInputReaches(t *testing.T) {
 	seedFresh(t, rec, "s1", 100, 5_000, 6_000)
 	p := modelinfo.Price{Input: 4e-6, Output: 20e-6, CacheRead: 0.4e-6, CacheWrite: 5e-6}.WithTiers("gpt-5.6")
 	n := rec.DB().NextInputTokens(Filter{Session: "s1"}, "")
-	warm, cold := NextRequestUSD(p, 268_000, n, 1800)
+	warm, cold := NextRequestUSD(p, "gpt-5.6", 268_000, n, 1800)
 	hi := p.At(272_001)
-	if warm != 268_000*hi.CacheRead || cold != 268_000*hi.CacheWrite {
+	if !nearly(warm, 268_000*hi.CacheRead) || !nearly(cold, 268_000*hi.CacheWrite) {
 		t.Errorf("warm=%v cold=%v, want the tier rates %v/%v", warm, cold, hi.CacheRead, hi.CacheWrite)
 	}
 	if warm == 268_000*p.CacheRead {

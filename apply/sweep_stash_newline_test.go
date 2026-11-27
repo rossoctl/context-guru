@@ -117,7 +117,7 @@ func TestTheSweepStashKeepsTheOutputsLastNewline(t *testing.T) {
 	opts := apply.Opts{
 		Provider: bschemas.Anthropic, Body: body, Session: "sweep-newline",
 		CacheMode: "on", Tracker: tr, Now: base,
-		PrefixAsk: asker, CanKeepAlive: func(_, _ string) bool { return true },
+		PrefixAsk: asker, CanSweepAtPing: func(_, _ string) bool { return true },
 	}
 	// Turn 1 registers the thread's sweep question.
 	res1 := apply.BodyOpts(context.Background(), p, st, opts)

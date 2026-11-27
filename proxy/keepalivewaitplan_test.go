@@ -120,7 +120,7 @@ func TestBestStrategyIgnoringWindowsKeepsPriorityAndTarget(t *testing.T) {
 	}
 }
 
-// #858 review: canPing keeps the windows, so a thread that will not be pinged keeps no sweep copy. A
+// #858 review: canSweepAtPing keeps the windows, so a thread that will not be pinged keeps no sweep copy. A
 // person wait outside the window, and a thread with no tool call yet, register nothing.
 func TestCanPingKeepsWindowsAndRefusesAThreadWithNoToolCall(t *testing.T) {
 	k, _, clock := testKeeper(t, Limits{})
@@ -133,8 +133,8 @@ func TestCanPingKeepsWindowsAndRefusesAThreadWithNoToolCall(t *testing.T) {
 	acct := &Tenancy{ID: "t1", Cache: CachePolicy{WaitPlan: true}} // keep-alive off on the account
 	// A tool call was seen, so only the window decides here.
 	recordResp(t, k, CachePolicy{WaitPlan: true}, "", now, Usage{StopReason: "tool_use", ToolUseNames: []string{"Bash"}})
-	if k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
-		t.Error("window closed, account off: canPing = true, so a copy would be kept for a thread that never pings")
+	if k.canSweepAtPing(acct, "sess-1", "", bschemas.Anthropic) {
+		t.Error("window closed, account off: canSweepAtPing = true, so a copy would be kept for a thread that never pings")
 	}
 	k.Keeper.Forget("t1")
 	// Open window, but no tool call yet on the thread.
@@ -143,17 +143,17 @@ func TestCanPingKeepsWindowsAndRefusesAThreadWithNoToolCall(t *testing.T) {
 		Windows: []tenant.Window{{Start: "00:00", End: "24:00"}},
 		Target:  tenant.Target{Mode: tenant.TargetAll}, UpdatedAt: now,
 	}})
-	if k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
-		t.Error("no tool call yet: canPing = true")
+	if k.canSweepAtPing(acct, "sess-1", "", bschemas.Anthropic) {
+		t.Error("no tool call yet: canSweepAtPing = true")
 	}
 	recordResp(t, k, CachePolicy{WaitPlan: true}, "", now, Usage{StopReason: "tool_use", ToolUseNames: []string{"Bash"}})
-	if !k.canPing(acct, "sess-1", "", bschemas.Anthropic) {
-		t.Error("a tool call was seen and the window is open: canPing = false")
+	if !k.canSweepAtPing(acct, "sess-1", "", bschemas.Anthropic) {
+		t.Error("a tool call was seen and the window is open: canSweepAtPing = false")
 	}
 	// The plan off: the guard is off too, as before #858.
 	k.Keeper.Forget("t1")
-	if !k.canPing(&Tenancy{ID: "t1", Cache: CachePolicy{}}, "sess-1", "", bschemas.Anthropic) {
-		t.Error("plan off, strategy matching: canPing = false")
+	if !k.canSweepAtPing(&Tenancy{ID: "t1", Cache: CachePolicy{}}, "sess-1", "", bschemas.Anthropic) {
+		t.Error("plan off, strategy matching: canSweepAtPing = false")
 	}
 }
 

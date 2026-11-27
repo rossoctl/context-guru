@@ -308,7 +308,7 @@ const (
 	// background work, a teammate and for every wait of a subagent thread (keepalive.Policy.WaitMinPrefix).
 	DefaultKeepAliveMinPrefix = 80000
 	// DefaultKeepAliveToolWaitMinPrefix is 20000. No long subagent idle span had a prefix under 20k, and
-	// a 20k floor cut subagent tool-wait misses from 65 to 31 (#858). Mirrors keepalive.DefaultToolWaitMinPrefix.
+	// a 20k floor cut subagent tool-wait misses from 65 to 31 (#858). keepalive.DefaultToolWaitMinPrefix is this value.
 	DefaultKeepAliveToolWaitMinPrefix = 20000
 	// The per-wait ping plan defaults (#858). They mirror keepalive.DefaultToolWaitMaxPings,
 	// DefaultBackgroundExtraPings and DefaultHumanExtraPings, pinned equal by a test.

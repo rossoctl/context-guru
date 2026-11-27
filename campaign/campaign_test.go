@@ -381,6 +381,20 @@ func TestFidMissByFamily(t *testing.T) {
 	}
 }
 
+// Opus 5.5 is read by tier and version, as modelinfo reads it. The first four ids gave 0.009 or 0.028
+// before, and still do. The last two are the edge: a dotted id used to miss, and "opus-5-50" used to hit.
+func TestFidMissOpus55ByVersion(t *testing.T) {
+	for model, want := range map[string]float64{
+		"claude-opus-5-5-20260101": 0.009, "us.anthropic.claude-opus-5-5[1m]": 0.009,
+		"claude-opus-5": 0.028, "claude-opus-5-20260101": 0.028,
+		"claude-opus-5.5": 0.009, "claude-opus-5-50": 0.028,
+	} {
+		if got := FidMiss(model); got != want {
+			t.Errorf("FidMiss(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
 // The shadow scorer's constants are the ones the build's replay was calibrated with.
 func TestShadowConstantsMatchTheEngineCalibration(t *testing.T) {
 	b, err := os.ReadFile("../scripts/campaign/engine_calibration.json")

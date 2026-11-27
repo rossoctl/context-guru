@@ -51,12 +51,7 @@ func anchorKey(session string) string { return store.RestorePrefix + session }
 
 // MessagesField is the body field where a dialect keeps its transcript: Responses `input`,
 // every other dialect `messages`. The one definition the anchor code and apply share.
-func MessagesField(wire string) string {
-	if schema.IsResponses(wire) {
-		return "input"
-	}
-	return "messages"
-}
+func MessagesField(wire string) string { return schema.TranscriptField(wire) }
 
 // Fingerprint identifies one wire message independently of what a client changes on an old
 // message without changing what the model reads: the hash of its canonical form
@@ -279,24 +274,15 @@ type CallSite struct {
 
 // CallSites lists the expand calls in a transcript, first call per id.
 func CallSites(wire string, body []byte) []CallSite {
-	msgs := gjson.GetBytes(body, MessagesField(wire)).Array()
 	answers := map[string]string{} // call id -> result text
-	for _, m := range msgs {
+	for _, r := range schema.RequestResults(wire, body) {
 		switch {
 		case schema.IsResponses(wire):
-			if t := m.Get("type").String(); t == "function_call_output" || t == "custom_tool_call_output" {
-				answers[m.Get("call_id").String()] = schema.ContentText(m.Get("output"))
-			}
+			answers[r.CallID] = schema.ContentText(r.Raw.Get("output"))
 		case wire == schema.WireAnthropic:
-			for _, blk := range m.Get("content").Array() {
-				if blk.Get("type").String() == "tool_result" {
-					answers[blk.Get("tool_use_id").String()] = schema.ToolResultText(blk)
-				}
-			}
+			answers[r.CallID] = schema.ToolResultText(r.Raw)
 		default:
-			if m.Get("role").String() == "tool" {
-				answers[m.Get("tool_call_id").String()] = schema.ContentText(m.Get("content"))
-			}
+			answers[r.CallID] = schema.ContentText(r.Raw.Get("content"))
 		}
 	}
 	var out []CallSite
@@ -312,28 +298,9 @@ func CallSites(wire string, body []byte) []CallSite {
 		seen[id] = true
 		out = append(out, CallSite{ID: id, At: at, Answer: ans})
 	}
-	for i, m := range msgs {
-		switch {
-		case schema.IsResponses(wire):
-			if t := m.Get("type").String(); (t == "function_call" || t == "custom_tool_call") && m.Get("name").String() == ToolName {
-				args := m.Get("arguments").String()
-				if t == "custom_tool_call" {
-					args = m.Get("input").String()
-				}
-				add(i, m.Get("call_id").String(), gjson.Get(args, "id").String())
-			}
-		case wire == schema.WireAnthropic:
-			for _, blk := range m.Get("content").Array() {
-				if blk.Get("type").String() == "tool_use" && blk.Get("name").String() == ToolName {
-					add(i, blk.Get("id").String(), blk.Get("input.id").String())
-				}
-			}
-		default:
-			for _, tc := range m.Get("tool_calls").Array() {
-				if tc.Get("function.name").String() == ToolName {
-					add(i, tc.Get("id").String(), gjson.Get(tc.Get("function.arguments").String(), "id").String())
-				}
-			}
+	for _, c := range schema.RequestCalls(wire, body) {
+		if c.Name == ToolName {
+			add(c.At, c.ID, gjson.Get(c.Args(), "id").String())
 		}
 	}
 	return out

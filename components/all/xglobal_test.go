@@ -269,7 +269,7 @@ func TestHousellmSweepActuallyFires(t *testing.T) {
 		Store: st, CacheAware: true, MaxCachedIdx: -1,
 		CtxWindow: 1_000_000, ColdCache: false,
 		IdleMs: 20 * 1000, CacheTTLMs: 5 * 60 * 1000, PrefixAsk: asker,
-		CanKeepAlive: func() bool { return true }}
+		CanSweepAtPing: func() bool { return true }}
 	var rep components.Report
 	if _, err := shipped.Offload(req, &rep, c); err != nil {
 		t.Fatal(err)

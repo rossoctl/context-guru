@@ -24,7 +24,7 @@ func TestRecExportKeepsTheTurnsIDsAndTimes(t *testing.T) {
 		Model: "claude-opus-5", System: "anthropic", Start: start, End: start.Add(2 * time.Second),
 		FreshInput: 1, CacheRead: 2, CacheWrite: 3, Output: 4,
 	}
-	if err := x.export("", tr.ToOTLP()); err != nil {
+	if err := x.export("", "", tr.ToOTLP()); err != nil {
 		t.Fatal(err)
 	}
 	// Flush, not Shutdown: the in-memory exporter forgets its spans when shut down.
@@ -73,7 +73,7 @@ func TestRecExportPutsTheTenantOnTheResource(t *testing.T) {
 	for i, who := range []string{"alice", "bob"} {
 		tr := record.Turn{SessionID: testSessionUUID, SpanID: []string{"1111111111111111", "2222222222222222"}[i],
 			Model: "m", Start: time.Now(), End: time.Now()}
-		if err := x.export(who, tr.ToOTLP()); err != nil {
+		if err := x.export(who, "", tr.ToOTLP()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -100,5 +100,40 @@ func TestRecExportRejectsABadEndpoint(t *testing.T) {
 		if _, err := newRecExport(bad); err == nil {
 			t.Errorf("newRecExport(%q) accepted a URL with no host", bad)
 		}
+	}
+}
+
+// The resource names the client that sent the call, not Claude Code by default. A call with no
+// client gets the generic label.
+func TestRecExportPutsTheClientOnTheResource(t *testing.T) {
+	mem := tracetest.NewInMemoryExporter()
+	x := newRecExportWith(mem)
+	clients := []string{"codex", "pi", ""}
+	for i, c := range clients {
+		tr := record.Turn{SessionID: testSessionUUID, SpanID: []string{"1111111111111111", "2222222222222222", "3333333333333333"}[i],
+			Model: "m", Start: time.Now(), End: time.Now()}
+		if err := x.export("", c, tr.ToOTLP()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := x.flush(); err != nil {
+		t.Fatal(err)
+	}
+	defer x.Shutdown()
+	seen := map[string]bool{}
+	for _, sp := range mem.GetSpans() {
+		for _, kv := range sp.Resource.Attributes() {
+			if string(kv.Key) == record.ResClient {
+				seen[kv.Value.AsString()] = true
+			}
+		}
+	}
+	for _, want := range []string{"codex", "pi", "unknown"} {
+		if !seen[want] {
+			t.Errorf("cg.client.name %q missing from %v", want, seen)
+		}
+	}
+	if seen["claude-code"] {
+		t.Errorf("a span is labelled claude-code with no Claude Code request: %v", seen)
 	}
 }

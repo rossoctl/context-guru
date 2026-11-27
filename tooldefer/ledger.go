@@ -4,6 +4,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
@@ -28,15 +29,15 @@ const (
 	TierWrite1h
 )
 
-// TierOf is the tier the head of the prefix was billed at, from the response usage. The same rule
-// as the dashboard's declaration-filter saving: any cache read means the head was read.
+// TierOf is the tier the head of the prefix was billed at, from the response usage. It is
+// accountant.HeadTier, the rule the dashboard's declaration-filter saving uses.
 func TierOf(cacheRead, cacheWrite, cacheWrite1h int64) Tier {
-	switch {
-	case cacheRead > 0:
+	switch accountant.HeadTier(accountant.Usage{CacheRead: int(cacheRead), CacheWrite: int(cacheWrite), CacheWrite1h: int(cacheWrite1h)}) {
+	case accountant.TierCacheRead:
 		return TierRead
-	case cacheWrite1h > 0:
+	case accountant.TierCacheWrite1h:
 		return TierWrite1h
-	case cacheWrite > 0:
+	case accountant.TierCacheWrite5m:
 		return TierWrite
 	}
 	return TierFresh

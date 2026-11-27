@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/deferred"
+	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 )
 
@@ -715,24 +716,15 @@ func recentUses(body []byte) map[string]bool {
 		from = 0
 	}
 	out := map[string]bool{}
+	mark := func(name string) { out[name] = true }
 	for i := from; i < n; i++ {
 		m := msgs.Get(itoa(i))
 		m.Get("content").ForEach(func(_, b gjson.Result) bool {
 			switch b.Get("type").String() {
 			case "tool_use":
 				out[b.Get("name").String()] = true
-			case "tool_search_tool_result":
-				b.Get("content.tool_references").ForEach(func(_, r gjson.Result) bool {
-					out[r.Get("tool_name").String()] = true
-					return true
-				})
-			case "tool_result":
-				b.Get("content").ForEach(func(_, r gjson.Result) bool {
-					if r.Get("type").String() == "tool_reference" {
-						out[r.Get("tool_name").String()] = true
-					}
-					return true
-				})
+			default:
+				cgschema.BlockLoads(b, mark)
 			}
 			return true
 		})

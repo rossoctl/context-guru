@@ -3,6 +3,7 @@ package respfacts
 import (
 	"testing"
 
+	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/providerusage"
 )
 
@@ -187,7 +188,7 @@ func TestUsageReadsTheOneHourWriteTier(t *testing.T) {
 
 // readWhy is Read in the shape the table tests were written for.
 func readWhy(contentType string, body []byte, spliced bool) (Facts, Miss, bool) {
-	f := Read(contentType, body, spliced)
+	f := Read(agent.Client{}, contentType, body, spliced)
 	return f, f.Miss, f.Miss == MissNone
 }
 

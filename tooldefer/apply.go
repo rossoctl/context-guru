@@ -1,9 +1,10 @@
 package tooldefer
 
 import (
-	"strings"
+	"bytes"
 
 	"github.com/rossoctl/context-guru/internal/tokens"
+	cgschema "github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 	"github.com/tidwall/gjson"
 )
@@ -334,10 +335,7 @@ func (r *SearchRead) add(b gjson.Result) {
 		}
 	case "tool_search_tool_result":
 		r.Results++
-		b.Get("content.tool_references").ForEach(func(_, t gjson.Result) bool {
-			r.Loaded = append(r.Loaded, t.Get("tool_name").String())
-			return true
-		})
+		cgschema.SearchResultLoads(b, func(name string) { r.Loaded = append(r.Loaded, name) })
 	}
 }
 
@@ -366,11 +364,11 @@ func SearchesInSSE(raw []byte) (searches int, loaded []string) {
 
 // ReadSearchesSSE is SearchesInSSE with the result count.
 func ReadSearchesSSE(raw []byte) (r SearchRead) {
-	for _, line := range strings.Split(string(raw), "\n") {
-		if !strings.HasPrefix(line, "data:") || !strings.Contains(line, "content_block_start") {
-			continue
+	cgschema.SSEData(raw, func(d []byte) bool {
+		if bytes.Contains(d, []byte("content_block_start")) {
+			r.add(gjson.GetBytes(d, "content_block"))
 		}
-		r.add(gjson.Get(strings.TrimSpace(line[5:]), "content_block"))
-	}
+		return true
+	})
 	return r
 }

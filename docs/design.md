@@ -15,7 +15,7 @@ infrastructure the components sit on.
 | `components/offload/` | lossy-reversible components: `skeleton`, `dedup`, `collapse`, `failed_run`, `cmdfilter`, `extract`, `extract_llm`, `smartcrush`, `mask`, `summarize` |
 | `components/dsl/` | declarative text-filter engine (wrapped by `cmdfilter`) |
 | `components/all/` | blank-imports every component so `init()` registrations run |
-| `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`) |
+| `schema/` | helpers over bifrost's schema: token counting, deep-clone, `MessageText`/`SetMessageText`, `Rewritable`, `ToolCalls` (pairs a tool result with the call that produced it), `ValidateShapeFor`/`ValidateShape` (static message-shape validation), the prompt-cache breakpoint rule (`MaxBreakpoints`, `CountBreakpoints`, `CountBreakpointsEscaped`, `ElemMarks`, `MayHoldBreakpoint`, `HasBlockBreakpoint`), the SSE reader (`SSEData`: framing, `[DONE]`, multi-line data), the streamed-call rebuild (`CallStream`, `StreamCalls`) and the tool stop reasons (`ToolStopReasonList`, `IsToolStopReason`) |
 | `accwire/` | the accountant's reader for each wire (Anthropic Messages and Chat Completions, Responses): hashed body positions, cache-mark breakpoints, envelope operations, slot path to wire position. Chosen once per body by `accwire.For` |
 | `accrec/` | the accountant's glue rules, shared by every host: the billed body of a tool deferral, entry facts and the billed-tier TTL, the sibling warm store, ping pricing, the rules for which request books no figure, `HeldFloorUSD` (the floor of a held figure), the `Recorder` (`Begin`/`End`/`Record`/`LowerTTL`/`Price`: the per-thread state and the finish-time pricing), the `PingStore`, and the state-file format (`SnapshotState`/`RestoreState`) |
 | `apply/` | the one place the pipeline meets a raw wire body: extract `messages` → run → byte-lossless splice |
@@ -352,7 +352,8 @@ The one exception is a store that keeps nothing (`store.Keeps` is false: storage
 | Reader | Reads | Why |
 |---|---|---|
 | Dashboard request rows (`Event.Agent`, filters) | `Label` (`pi`) | the user wants the harness |
-| Keep-alive ping rows (`main_run.go`, from `Record.Agent`) | raw User-Agent, turned into its family by `dash.AgentFor` | unchanged. A Pi ping row keeps the SDK token. |
+| Keep-alive ping rows (`main_run.go`, from `Record.Identity`) | `Label` (`pi`) | a ping row and a request row of one client carry the same label, so the agent filter does not split them. A Pi ping row said the SDK token before. |
+| Trace spans (`proxy/recexport.go`, `internal/record`) | `Label`; no client gives `unknown` | a recorded session names its real client. Every span said `claude-code` before. |
 | Prediction model, live (`LiveFacts.Agent`, `predictiveDecide`) | `Client.ModelAgent(provider)` | the same value training reads (#1349). A raw User-Agent never matched the one-hots. |
 | Prediction model, stored rows (`campaign/replay.go`) | `agent.ModelAgentOf(label, provider)` | a stored Pi row says `pi`; the provider column gives a token back (`openai`, `anthropic`, or the provider string) |
 | Compaction point (`proxy/compactioncfg.go`) | `Name` | Pi and OpenCode have no setting |

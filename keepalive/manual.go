@@ -123,7 +123,7 @@ func (k *Keeper) PingNow(r ManualRequest) (ManualResult, error) {
 		thread: e.thread, st: e.st, emitter: e.emitter, touchAlias: e.touchAlias,
 		// The gap this press serves began at the last real request; a press never moves it.
 		gapStart: e.gapStart}
-	endpoint, prefix, agent, preset := e.endpoint, e.prefix, e.agent, e.preset
+	endpoint, prefix, agent, preset := e.endpoint, e.prefix, e.agentLabel(), e.preset
 	k.mu.Unlock()
 	defer zero(raw)
 

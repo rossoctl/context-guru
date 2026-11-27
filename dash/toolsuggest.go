@@ -56,6 +56,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
 )
@@ -235,45 +237,39 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 	if out.Since == 0 || ts < out.Since {
 		out.Since = ts
 	}
-	var rate float64
-	p, priced := modelinfo.Price{}, false
-	if price != nil && model != "" {
-		p, priced = price(model)
-		// The request bills at the rates of ITS prompt size (#1407). A row from before fresh_input
-		// was stored has 0 there: its size is then too small, so its tier is never too dear.
-		p = p.At(modelinfo.PromptTokens(fresh, cacheRead, cacheWrite) + tok) // the size WITHOUT the filter: sent plus removed
-	}
-	switch {
-	case cacheRead > 0:
-		// The prefix was served from cache on this request, so these declarations would
-		// have been re-read at the cache-read rate. This is the overwhelmingly common case
-		// and the cheapest tier, which is exactly why the figure must be computed this way
-		// rather than at the fresh-input rate: doing the latter inflates it 10x.
+	// The tier the head of the prefix was billed at decides which kind of token the declarations were:
+	// read from cache (the overwhelmingly common case, and the cheapest tier, which is why the figure
+	// must not use the fresh-input rate: that inflates it 10x), created in the cache, or fresh input.
+	tier := accrec.Usage{FreshInput: fresh, CacheRead: cacheRead, CacheWrite: cacheWrite, CacheWrite1h: cacheWrite1h}.Accountant()
+	head := accountant.HeadTier(tier)
+	switch head {
+	case accountant.TierCacheRead:
 		out.CacheReadTokens += tok
-		rate = p.CacheRead
-	case cacheWrite > 0:
-		// No read, but a write: this request CREATED the prefix, so carrying them would
-		// have cost the creation rate (1.25x fresh).
+	case accountant.TierCacheWrite5m, accountant.TierCacheWrite1h:
 		out.CacheWriteTokens += tok
-		rate = p.CacheWrite
-		// A one-hour breakpoint precedes every 5-minute one, so a request that wrote any 1h tokens
-		// wrote the declarations at the head at the 1h rate: 2x input. (The same rule as carriedCost.)
-		if cacheWrite1h > 0 {
-			rate = p.CacheWrite1h()
-		}
 	default:
 		out.FreshTokens += tok
-		rate = p.Input
 	}
 	if skipUSD {
 		return 0
 	}
-	if !priced {
+	if price == nil || model == "" {
 		out.Priced = false
 		return 0
 	}
-	out.USD += float64(tok) * rate
-	return float64(tok) * rate
+	if _, priced := price(model); !priced {
+		out.Priced = false
+		return 0
+	}
+	// The accountant prices the removal (R1): at the tier of the head, at the size WITHOUT the filter (sent
+	// plus removed, #1407). A row from before fresh_input was
+	// stored has 0 there: its size is then too small, so its tier is never too dear.
+	fig := accountant.RemovalSaving(accountant.RemovalInput{
+		Model: model, Tier: head, Prompt: modelinfo.PromptTokens(fresh, cacheRead, cacheWrite),
+		Removed: int(tok), // no tokenizer factor: it is deferred (the accountant's live request ratio will give it)
+	}, modelinfo.Rates{Lookup: price})
+	out.USD += fig.SavedUSD
+	return fig.SavedUSD
 }
 
 // DeclFilterSavingsByTenant is DeclFilterSavings for every tenant since a given time, in one

@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/adjudicate"
 	"github.com/rossoctl/context-guru/expand"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // The envelope is the part of a request no pipeline component sees: the tools array, the system
@@ -87,7 +88,8 @@ func (k kind) rootTTLOps(client, forwarded []byte) []accountant.Operation {
 	return []accountant.Operation{envelopeOpID(OpHeadTTL, at, len(raw), len(raw), "headttl:root:"+hashOf(raw))}
 }
 
-// toolsOps matches declarations by name. An unnamed declaration (an Anthropic server tool carries a
+// toolsOps matches declarations by schema.ToolDeclName, the name the inventory and the removal use: the
+// function name on any wire, else the connector's server, else its type. An unnamed declaration (an Anthropic server tool carries a
 // type, and a name too, but a malformed one may not) is matched by its position in the unnamed ones.
 // A name that repeats is matched by its occurrence: the second "x" of the client body is the second
 // "x" of the forwarded body, so an append or an in-place rewrite keeps matching the bytes. A removal
@@ -100,7 +102,7 @@ func toolsOps(cl, fw []gjson.Result) []accountant.Operation {
 		keys, at := make([]string, len(arr)), map[string]int{}
 		seen := map[string]int{}
 		for i, d := range arr {
-			base := d.Get("name").String()
+			base := schema.ToolDeclName(d)
 			if base == "" {
 				base = "\x00" // unnamed declarations share one counter
 			}

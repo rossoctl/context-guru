@@ -121,8 +121,10 @@ func TestPriceMode_FallsBackToNoSaving(t *testing.T) {
 		}, FallbackUnpriced},
 		"acted without figure": {func(e *Event) { e.Components[1].Acted = true }, FallbackActedWithoutFigure},
 		"figure without row":   {func(e *Event) { e.Components = e.Components[1:] }, FallbackFigureWithoutRow},
-		"saved above size":     {func(e *Event) { e.TokensBefore = 999 }, FallbackImplausibleSize},
-		"size unknown":         {func(e *Event) { e.TokensBefore = 0 }, FallbackSizeUnknown},
+		"saved above size": {func(e *Event) {
+			e.accRes.MessageTokens = 999
+			e.accRes.Ops[0].SavedMessages = accountant.TierTokens{CacheRead: 1000}
+		}, FallbackImplausibleSize},
 		"duplicate names": {func(e *Event) {
 			e.Components = append(e.Components, CompRow{Component: "mask"})
 		}, FallbackDuplicateName},
@@ -449,11 +451,11 @@ func TestAccountantPricedIsSetOnOverrideAndStored(t *testing.T) {
 	}
 }
 
-// Removed tool declarations are not message text. TokensBefore counts messages only, so a small
+// Removed tool declarations are not message text. The library's bound counts SavedMessages only, so a small
 // conversation that drops a large tool list must not trip the plausibility bound (#907).
 func TestPriceMode_ToolSectionTokensAreNotBoundedByMessageTokens(t *testing.T) {
 	e := switchEvent()
-	e.TokensBefore = 121
+	e.accRes.MessageTokens = 121
 	e.accRes.Ops = []accountant.PricedOp{{Operator: "context-guru.toolfilter", ChangeID: "cg:toolfilter:x",
 		Saved: accountant.TierTokens{CacheRead: 2188}}}
 	e.Components = []CompRow{{Component: "idle"}}
@@ -466,8 +468,9 @@ func TestPriceMode_ToolSectionTokensAreNotBoundedByMessageTokens(t *testing.T) {
 	}
 	// The bound still holds for messages: the same size on a message operation falls back.
 	m := switchEvent()
-	m.TokensBefore = 121
+	m.accRes.MessageTokens = 121
 	m.accRes.Ops[0].Saved = accountant.TierTokens{CacheRead: 2188}
+	m.accRes.Ops[0].SavedMessages = accountant.TierTokens{CacheRead: 2188}
 	m.PriceMode(accTestPrice, true)
 	if fb := m.AccountantFallback(); fb != FallbackImplausibleSize {
 		t.Fatalf("message operation: fallback %q, want %q", fb, FallbackImplausibleSize)

@@ -197,7 +197,9 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 	if st.lastRew > 0 {
 		sinceRew = float64(n - st.lastRew)
 	}
-	// who started the turn
+	// who started the turn. Only "tool_use" counts as a tool turn here, on purpose: the model was
+	// trained with that rule (scripts/campaign/gbsfeat.py), so the schema tool stop reasons must not
+	// replace it without a retrain. gbsstop_test.go pins it.
 	userTurn := prev == nil || prev.stop != "tool_use"
 	if userTurn {
 		st.userTurnTs, st.userTurnN = ts, n
@@ -237,7 +239,7 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 	}
 
 	f := row.F[GBSBase:]
-	stake := float64(r.Prefix) * (r.PWrite5m - r.PRead)
+	stake := missUSD(int64(r.Prefix), r.PRead, r.PWrite5m)
 	end := time.UnixMilli(r.EndMs).UTC()
 	hr, dow := float64(end.Hour()), float64((int(end.Weekday())+6)%7)
 	i := 0
@@ -252,8 +254,8 @@ func (t *Tracker) gbsFill(a *Arrival, r *Response, row *Row) {
 	put(dow)
 	put(float64(r.Prefix))
 	put(float64(r.Output))
-	put(float64(r.Prefix) * r.PRead)
-	put(float64(r.Prefix) * r.PWrite5m)
+	put(readUSD(r.Prefix, r.PRead))       // read_cost
+	put(rebuildUSD(r.Prefix, r.PWrite5m)) // rebuild_cost
 	put(r.PingCost())
 	put(cost)
 	put(float64(r.Fresh))

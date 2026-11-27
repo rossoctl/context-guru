@@ -8,6 +8,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // body hashes a request body in the provider's order: tools, system, messages. A string
@@ -141,6 +142,10 @@ func (k kind) parse(raw []byte, count accountant.OpaqueCount) (accountant.Body, 
 // array (issue #917). A key named cache_control anywhere else is data, not a mark, and stays (see FindCacheMark).
 // An element with none is returned as it is, byte for byte, so the common case costs no allocation. The result is
 // only hashed. It is never sent anywhere.
+//
+// It is not schema's dropCacheControl, on purpose. That one decodes and re-encodes a message, drops cache_control at
+// every depth and sorts the keys, to compare two messages by meaning. This one keeps the wire bytes and removes only
+// the marks the provider ignores (#1272), so the hash and the sizes stay those of the wire.
 func WithoutCacheMarks(body []byte, v gjson.Result) []byte {
 	raw := v.Raw
 	if !strings.Contains(raw, "cache_control") {
@@ -240,38 +245,21 @@ func breakpointsOf(sec sections) []accountant.Breakpoint {
 		}
 		return "5m"
 	}
-	// mark finds the first cache_control and the first content of an object in one pass, as Get does for each key.
-	mark := func(el gjson.Result) (cc, content gjson.Result) {
-		if !el.IsObject() {
-			return
-		}
-		var gotCC, gotContent bool
-		el.ForEach(func(k, v gjson.Result) bool {
-			switch k.String() {
-			case "cache_control":
-				if !gotCC {
-					gotCC, cc = true, v
-				}
-			case "content":
-				if !gotContent {
-					gotContent, content = true, v
-				}
-			}
-			return !(gotCC && gotContent)
-		})
-		return
-	}
-	scan := func(sec accountant.Section, arr gjson.Result) {
+	// scan reads one array. eachMark is schema's rule for what a mark is: an object under cache_control, or
+	// under cachePoint (Bedrock) on a tool, a system block or a content block. A message holds cache_control only.
+	scan := func(sec accountant.Section, arr gjson.Result, eachMark func(gjson.Result, func(gjson.Result))) {
 		i := 0
 		arr.ForEach(func(_, el gjson.Result) bool {
-			cc, content := mark(el)
-			if cc.Exists() {
-				add(accountant.Position{Section: sec, Index: i}, ttl(cc))
+			if !el.IsObject() {
+				i++
+				return true
 			}
-			if content.IsArray() {
+			pos := accountant.Position{Section: sec, Index: i}
+			eachMark(el, func(mark gjson.Result) { add(pos, ttl(mark)) })
+			if content := el.Get("content"); content.IsArray() && schema.MayHoldBreakpoint(content.Raw) {
 				content.ForEach(func(_, blk gjson.Result) bool {
-					if cc, _ := mark(blk); cc.Exists() {
-						add(accountant.Position{Section: sec, Index: i}, ttl(cc))
+					if blk.IsObject() {
+						schema.EachMark(blk, func(mark gjson.Result) { add(pos, ttl(mark)) })
 					}
 					return true
 				})
@@ -280,11 +268,11 @@ func breakpointsOf(sec sections) []accountant.Breakpoint {
 			return true
 		})
 	}
-	scan(accountant.SectionTools, sec.tools)
+	scan(accountant.SectionTools, sec.tools, schema.EachMark)
 	if sec.system.IsArray() {
-		scan(accountant.SectionSystem, sec.system)
+		scan(accountant.SectionSystem, sec.system, schema.EachMark)
 	}
-	scan(accountant.SectionMessages, sec.messages)
+	scan(accountant.SectionMessages, sec.messages, schema.EachMessageMark)
 	if sec.auto.IsObject() {
 		if p, ok := lastPosition(sec); ok {
 			add(p, ttl(sec.auto))

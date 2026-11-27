@@ -24,7 +24,7 @@ const dryBase = "pipeline: [extract_llm_sweep]\ncomponents:\n  extract_llm_sweep
 // dryOpts is the shared request shape: the same body for both arms.
 func dryOpts(session string, body []byte, now time.Time, asker *dropAsker, tr *modes.Tracker) apply.Opts {
 	return apply.Opts{Provider: bschemas.Anthropic, Body: body, Session: session, CacheMode: "on", Tracker: tr, Now: now,
-		PrefixAsk: asker, CanKeepAlive: func(_, _ string) bool { return true }}
+		PrefixAsk: asker, CanSweepAtPing: func(_, _ string) bool { return true }}
 }
 
 // runCold plays the cold-apply scenario of the #752 test (turn 1 registers, a ping holds the answer, turn 2 is

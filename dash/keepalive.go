@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
@@ -220,8 +222,8 @@ func kaSavedGate(alias, pingFloor string) string {
 	// billedHour is the BILLED tier of the entry r read (see the comment above kaSavedGate). The
 	// subquery (alias bw: dash/cachestate_test.go bans a `w` plan line, meant for a per-thread subquery) sits inside the EXISTS, behind the `> 0` guard, so it never runs for an uncredited row.
 	billedHour := "(" + alias + "cache_ttl = '" + apply.TTLEphemeral1h + "' AND CASE" +
-		" WHEN " + alias + "cache_write > 0 THEN " + alias + "cache_write_1h >= " + alias + "cache_write" +
-		" ELSE COALESCE((SELECT bw.cache_write_1h >= bw.cache_write FROM requests bw" +
+		" WHEN " + alias + "cache_write > 0 THEN " + keepalive.BilledOneHourWriteSQL(alias) +
+		" ELSE COALESCE((SELECT " + keepalive.BilledOneHourWriteSQL("bw.") + " FROM requests bw" +
 		" WHERE bw.tenant_id = " + alias + "tenant_id AND bw.session_id = " + alias + "session_id" +
 		" AND bw.thread_id = " + alias + "thread_id AND bw.keepalive = 0 AND bw.cache_write > 0" +
 		" AND bw.ts < " + alias + "ts" +
@@ -1136,7 +1138,8 @@ type KeepAliveLiveRow struct {
 	// runs a median 3.38x low.
 	Prefix int64 `json:"prefix_tokens"`
 	// TTLSeconds is the lifetime IN FORCE: 1800 on OpenAI GPT-5.6+, else 3600 when this session's
-	// most recent write landed in the one-hour tier, 300 otherwise. Read off cache_write_1h rather than off configuration,
+	// most recent write landed in the one-hour tier, 300 otherwise. It follows the head rule
+	// (keepalive.HeadLifetimeOneHour), so a mixed write counts as 1 hour. Read off cache_write_1h rather than off configuration,
 	// because a `ttl: "1h"` request that the model does not support is granted as a 5-minute
 	// entry with a perfectly normal 200 — the tier billed is the only honest source.
 	TTLSeconds int64 `json:"ttl_seconds"`
@@ -1225,23 +1228,27 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 		SoonSeconds: keepAliveSoon.Seconds(), Rows: []KeepAliveLiveRow{}}
 	cond, args := f.where()
 	// One pass. The partition is (tenant, session) exactly as everywhere else on this tab, and
-	// the three window MAXes answer "which tier is in force" without a query per row: the entry's
+	// the window functions answer "which tier is in force" without a query per row: the entry's
 	// lifetime is the one it was WRITTEN at, and a read refreshes it at that same tier, so the
-	// tell is whether this session's most recent write was a one-hour write.
-	rows, err := d.sql.QueryContext(d.readCtx(), `WITH t AS (
+	// tell is whether this session's most recent write (latest ts, then id: two writes in one
+	// millisecond do not tie) had a head that lives 1 hour (keepalive.HeadLifetimeOneHour: a mixed write counts).
+	rows, err := d.sql.QueryContext(d.readCtx(), `WITH u AS (
 		SELECT r.session_id AS session_id, r.tenant_id AS tenant_id, r.ts AS ts, r.model AS model, r.provider AS provider,
 		       r.cache_read + r.cache_write AS prefix,
 		       ROW_NUMBER() OVER w AS rn,
 		       COUNT(*) OVER w2 AS turns,
 		       MAX(r.ts) OVER w2 AS last_ts,
-		       MAX(CASE WHEN r.cache_write > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_write_ts,
-		       MAX(CASE WHEN r.cache_write_1h > 0 THEN r.ts ELSE 0 END) OVER w2 AS last_1h_ts
+		       CASE WHEN r.cache_write > 0 THEN ROW_NUMBER() OVER ww END AS wrn,
+		       CASE WHEN `+keepalive.HeadLifetimeOneHourWriteSQL("r.")+` THEN 1 ELSE 0 END AS billed_1h
 		FROM requests r WHERE `+cond+` AND r.session_id <> ''
 		  AND r.session_id IN (SELECT r.session_id FROM requests r WHERE `+cond+` AND r.ts >= ?)
 		WINDOW w AS (PARTITION BY r.tenant_id, r.session_id ORDER BY r.ts DESC, r.id DESC),
-		       w2 AS (PARTITION BY r.tenant_id, r.session_id))
-		SELECT session_id, tenant_id, model, turns, ts, prefix, provider,
-		       CASE WHEN last_1h_ts > 0 AND last_1h_ts = last_write_ts THEN 1 ELSE 0 END
+		       ww AS (PARTITION BY r.tenant_id, r.session_id, r.cache_write > 0 ORDER BY r.ts DESC, r.id DESC),
+		       w2 AS (PARTITION BY r.tenant_id, r.session_id)),
+	t AS (
+		SELECT *, MAX(CASE WHEN wrn = 1 THEN billed_1h ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS last_write_billed_1h
+		FROM u)
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h
 		FROM t WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
 		// The window is computed only for sessions with a request inside the hour (the subquery),
@@ -1276,13 +1283,14 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				// identical (#706), but the reply is one token and output is billed as generated.
 				// max_tokens 0 is accepted by this gateway and bills none, but the figure has to
 				// match what is sent, not the cheapest shape available.
-				p = p.At(r.Prefix + kvcache.DefaultPingInputTokens) // the ping reads this prefix: the rates of that prompt size
-				r.PingUSDEach = float64(r.Prefix)*p.CacheRead + p.Output
-				r.MissUSD = float64(r.Prefix) * (p.CacheWrite - p.CacheRead)
+				// The accountant prices the ping and the miss (keepalive.PingUSD, keepalive.MissUSD), at the
+				// rates of the ping's prompt size. The miss is the one of the entry's own tier.
+				r.PingUSDEach = keepalive.PingUSD(p, r.Model, r.Prefix, 1)
+				r.MissUSD = keepalive.MissUSD(p, r.Model, r.Prefix, oneHour == 1)
 				if r.PingUSDEach > 0 {
-					r.BreakevenPings = int64(r.MissUSD / r.PingUSDEach)
+					r.BreakevenPings = int64(keepalive.MissUSD(p, r.Model, r.Prefix, false) / r.PingUSDEach)
 					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
-					miss1h := float64(r.Prefix) * (p.CacheWrite1h() - p.CacheRead)
+					miss1h := keepalive.MissUSD(p, r.Model, r.Prefix, true)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
 					// pings bridges twelve times the wall clock: K x X per span still, but the
@@ -1396,29 +1404,27 @@ func CoverageSecondsFor(idleSeconds float64, maxPings int, ttl time.Duration) fl
 	return float64(maxPings)*idleSeconds + ttl.Seconds()
 }
 
-// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K).
+// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K). It is
+// kvcache.PingsPerSpan, the one schedule rule, with seconds as the unit.
 //
 // The first ping fires at X, each subsequent one X after the last, and K caps the count. A gap
 // no wider than X attracts none.
 func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
-	if gap <= idleSeconds || idleSeconds <= 0 || maxPings <= 0 {
-		return 0
-	}
-	n := int(math.Floor((gap-idleSeconds)/idleSeconds)) + 1
-	if n > maxPings {
-		n = maxPings
-	}
-	return n
+	return kvcache.PingsPerSpan(secondsToDuration(gap), secondsToDuration(idleSeconds), maxPings)
+}
+
+// secondsToDuration rounds to the nearest nanosecond, so a whole number of seconds stays exact.
+func secondsToDuration(s float64) time.Duration {
+	return time.Duration(math.Round(s * float64(time.Second)))
 }
 
 // kaGateMinPrefix and kaGateToolWaitMinPrefix are the billed-prefix floors a replay gates on: the
-// shipped defaults, mirroring config.DefaultKeepAliveMinPrefix (80000) and
-// config.DefaultKeepAliveToolWaitMinPrefix (20000), which this package may not import. The second
+// shipped defaults: config.DefaultKeepAliveMinPrefix and config.DefaultKeepAliveToolWaitMinPrefix. The second
 // applies to a tool wait, background work, a teammate and any subagent wait (keepalive.Policy.WaitMinPrefix). Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
 const (
-	kaGateMinPrefix         = 80000
-	kaGateToolWaitMinPrefix = 20000
+	kaGateMinPrefix         = config.DefaultKeepAliveMinPrefix
+	kaGateToolWaitMinPrefix = config.DefaultKeepAliveToolWaitMinPrefix
 )
 
 // gatePolicy is the policy a replay gates and counts with: wait, with the shipped floors where it
@@ -1494,7 +1500,7 @@ func factsCTE(cond string) string {
 		       CASE WHEN r.stop_reason IN (` + toolStopList() + `) OR r.waiting_for = 'own_tool' THEN 1 ELSE 0 END AS tool,
 		       CASE WHEN r.cache_write > 0 THEN
 		              ROW_NUMBER() OVER (PARTITION BY r.tenant_id, r.session_id, r.thread_id ORDER BY r.ts, r.id) * 2
-		              + CASE WHEN r.cache_ttl = '` + apply.TTLEphemeral1h + `' AND r.cache_write_1h >= r.cache_write
+		              + CASE WHEN r.cache_ttl = '` + apply.TTLEphemeral1h + `' AND ` + keepalive.BilledOneHourWriteSQL("r.") + `
 		                     THEN 1 ELSE 0 END
 		            END AS wcode
 		FROM requests r WHERE ` + cond + `),
@@ -1838,9 +1844,10 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		out.AddressableUSD += e.usd
 	}
 	if out.Priced {
-		p = p.At(prefix + kvcache.DefaultPingInputTokens) // a ping reads this prefix: the rates of that prompt size
-		out.PingUSDEach = float64(prefix)*p.CacheRead + p.Output
-		out.AvoidedUSDEach = float64(prefix) * (p.CacheWrite - p.CacheRead)
+		// The accountant prices the ping and the miss (keepalive.PingUSD, keepalive.MissUSD). The calculator
+		// has no tier for an expiry, so the miss is the 5-minute one.
+		out.PingUSDEach = keepalive.PingUSD(p, model, prefix, 1)
+		out.AvoidedUSDEach = keepalive.MissUSD(p, model, prefix, false)
 	}
 	// finish fills the money columns of a rung from its counts.
 	finish := func(row *CalcRow) {
@@ -1849,7 +1856,7 @@ func (d *DB) KeepAliveCalc(f Filter, idleSeconds float64, prefix int64, model st
 		}
 		if out.Priced {
 			row.PingUSD = float64(row.Pings) * out.PingUSDEach
-			row.SavedUSD = float64(row.Convertible) * out.AvoidedUSDEach
+			row.SavedUSD = accountant.AvoidedMissesUSD(row.Convertible, out.AvoidedUSDEach)
 			row.NetUSD = row.SavedUSD - row.PingUSD
 		}
 	}
@@ -2077,8 +2084,8 @@ type RecInterval struct {
 // plan's base and the interval is the plan's; recMaxPings alone is the fixed-count policy, the one with
 // keepalive_wait_plan off.
 const (
-	recIdleSeconds = 240
-	recMaxPings    = 2
+	recIdleSeconds = config.DefaultKeepAliveIdle
+	recMaxPings    = config.DefaultKeepAliveMaxPings
 )
 
 // The service-wide interval, for scale inside a refusal. Measured by the adjudicated bootstrap

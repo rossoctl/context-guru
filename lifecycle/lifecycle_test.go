@@ -407,3 +407,27 @@ func TestRatesAtMatchesPriceAt(t *testing.T) {
 		}
 	}
 }
+
+// #1510: a panic in one step after the response costs that step only. Every later step still runs.
+func TestFinishRunsLaterStepsAfterAPanic(t *testing.T) {
+	for _, panicIn := range []string{"touch", "ledger", "counters"} {
+		t.Run(panicIn, func(t *testing.T) {
+			ran := map[string]bool{}
+			step := func(name string) func() {
+				return func() {
+					ran[name] = true
+					if name == panicIn {
+						panic("boom " + name)
+					}
+				}
+			}
+			Finish(Fin{Store: store.NewMemory(store.Options{}), Session: "s", ThreadID: "t", UsageOK: true, Billed: 7,
+				Touch: step("touch"), Ledger: step("ledger"), Counters: step("counters")})
+			for _, n := range []string{"touch", "ledger", "counters"} {
+				if !ran[n] {
+					t.Errorf("step %s did not run after a panic in %s", n, panicIn)
+				}
+			}
+		})
+	}
+}

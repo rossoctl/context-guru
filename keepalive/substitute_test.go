@@ -16,6 +16,7 @@ import (
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/components/offload"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/modelinfotest"
 	"github.com/rossoctl/context-guru/internal/testutil"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
@@ -577,7 +578,7 @@ func TestKeepAliveSummaryCallIsBookedOnceOnThePingRow(t *testing.T) {
 			k.summarySubstituted.Load(), model.calls.Load(), fs.n())
 	}
 	// Booked once on the ping side: the keeper's spend grew by exactly the priced call.
-	want := price.CostWithCacheWrite1h(281, 43400, 0, 683, 0)
+	want := modelinfotest.StoredBill(price, 281, 43400, 0, 683, 0)
 	if got := math.Float64frombits(k.spentUSD.Load()) - spentBefore; math.Abs(got-want) > 1e-12 {
 		t.Fatalf("ping-row cost = %v, want the priced call %v", got, want)
 	}

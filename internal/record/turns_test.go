@@ -423,7 +423,7 @@ func TestToolCallsLiftedFromBody(t *testing.T) {
 func TestDerivedTurnSpanNeverClaimsObservation(t *testing.T) {
 	sp := DerivedTurnSpan("trace1", "span1", "parent1",
 		ReconTurn{Sequence: 3, Text: "fix the bug", Root: "abc123"},
-		time.Date(2026, 9, 10, 7, 18, 20, 896000000, time.UTC))
+		time.Date(2026, 9, 10, 7, 18, 20, 896000000, time.UTC), "claude-code")
 
 	if sp.Name == "claude_code.interaction" {
 		t.Fatal("a reconstruction must not wear the observed span's name")

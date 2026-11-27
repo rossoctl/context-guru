@@ -54,7 +54,7 @@ func presetIn(t *testing.T, state, home, proj, url string, args ...string) (map[
 	t.Helper()
 	cmd := exec.Command(requireTool(t, "python3"), append([]string{filepath.Join(scriptsDir(t), "settings.py"), "preset"}, args...)...)
 	cmd.Env = append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "ANTHROPIC_BASE_URL="+url+"/anthropic",
-		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t))
+		"CONTEXT_GURU_BIN="+fakeStrategiesBin(t), strategiesLoadedLimit)
 	cmd.Dir = proj
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -134,7 +134,8 @@ func TestPresetRestartReplacesTheProxyThroughTheStarterAndProbesTheNewOne(t *tes
 
 	env := func() []string {
 		return append(sandboxEnv(t), "CONTEXT_GURU_STATE="+state, "HOME="+home, "TMPDIR="+dir,
-			"CONTEXT_GURU_BIN="+bin, "ANTHROPIC_BASE_URL="+url+"/anthropic", "CONTEXT_GURU_HEALTH_BUDGET=10")
+			"CONTEXT_GURU_BIN="+bin, "ANTHROPIC_BASE_URL="+url+"/anthropic", "CONTEXT_GURU_HEALTH_BUDGET=10",
+			strategiesLoadedLimit)
 	}
 	start := exec.Command("bash", filepath.Join(scriptsDir(t), "start-proxy.sh"), "--preset", "xhigh")
 	start.Env, start.Dir = env(), proj

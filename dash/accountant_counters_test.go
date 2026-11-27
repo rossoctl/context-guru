@@ -8,16 +8,10 @@ import (
 
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
-
-// sinkPricer is hostPricer as the sink wants it: the base rate, and the rate at a size.
-type sinkPricer struct{ hostPricer }
-
-func (s sinkPricer) Price(model string, at time.Time, t acmetrics.Tier) (float64, bool) {
-	return s.PriceAt(model, at, t, 0)
-}
 
 // Issue #1440: across a price line, with operations that save and add, a rescue and an owned break, the
 // dashboard's per-component figures and the llm_savings_* counters of the same request are one number.
@@ -40,7 +34,7 @@ func TestAccountantFigureEqualsTheSavingsCountersAcrossALine(t *testing.T) {
 	f := e.AccountantFigure(p)
 
 	r := sdk.NewManualReader()
-	sink, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("t"), sinkPricer{hostPricer{model: "gpt-5.6", p: p}})
+	sink, err := acmetrics.New(sdk.NewMeterProvider(sdk.WithReader(r)).Meter("t"), modelinfo.OneModel("gpt-5.6", p))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,8 +106,8 @@ func TestAccountantFigureInBaselineRescueIsNotBooked(t *testing.T) {
 }
 
 // A spend call on another model is never priced with this request's rates.
-func TestHostPricerRefusesAnotherModel(t *testing.T) {
-	h := hostPricer{model: "a", p: accTestPrice}
+func TestOneModelRatesRefuseAnotherModel(t *testing.T) {
+	h := modelinfo.OneModel("a", accTestPrice)
 	if v, est := h.PriceAt("b", time.Time{}, accountant.TierInput, 10); v != 0 || !est {
 		t.Fatalf("got %v %v, want 0 true", v, est)
 	}

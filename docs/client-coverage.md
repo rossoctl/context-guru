@@ -41,6 +41,43 @@ Notes:
     OpenCode `packages/ai/src/tool-runtime.ts:23-31` (2.4.1);
     Pi `dist/agent-loop.js:488-493` (from the report, not verified here).
 
+## Rules that name one client's text, tools or fields
+
+Each rule below lives in `agent/claudecode` (or `agent/codex`) and is read through `agent.Client`
+(`agent/rules.go`). **fallback** for every rule here: a client with no rule of its own gets Claude
+Code's rule, as the code did before the rules moved. The exception is the tools that wait on a
+person (`AsksHuman`, `IsQuestionTool`): the fallback is the union of Claude Code's and Codex's lists. A zero `Client` (a stored row, an offline
+transcript, a host that passes none) gets the same. No source shows that another client sends
+different text, so only Claude Code has rules for these, and Codex has its own question tool.
+
+| Rule | Claude Code | Codex | OpenCode | Pi | Bob |
+|---|---|---|---|---|---|
+| Client label on a ping row and a trace span (`Client.Label`; no client gives `unknown`) | covered | covered | covered: first User-Agent token | covered: `pi` | covered |
+| Injected text: prefixes and wrapper tags (`Client.Injected`; wake cause and transcript reconstruction) | covered | fallback: Claude Code's | fallback: Claude Code's | fallback: Claude Code's | fallback: Claude Code's |
+| Subagent tool names and the subagent type field (`IsSubagentTool`) | covered: `Agent`, `Task` | fallback | fallback | fallback | fallback |
+| Built-in subagent types (`IsBuiltinSubagentType`) | covered | fallback | fallback | fallback | fallback |
+| Built-in tool list, with `ToolSearch` (`IsBuiltinTool`) | covered | fallback | fallback | fallback | fallback |
+| Tools that wait on a person (`AsksHuman`, `IsQuestionTool`) | covered: `AskUserQuestion`, `ExitPlanMode` | covered: `request_user_input` | fallback: both lists | fallback: both lists | fallback: both lists |
+| Per-person id in the body (`Client.UserID`: `metadata.user_id`) | covered | fallback: the field is absent, so `""` | fallback | fallback | fallback |
+
+- **Sources:** the injected prefixes and tags were read off real Claude Code transcripts (the
+  corpus the comments in `agent/claudecode/inject.go` cite). The source file and version were not
+  recorded when they were written. The Codex question tool is `openai/codex` f64f003,
+  `codex-rs/core/src/tools/handlers/request_user_input_spec.rs`.
+- **The two readers of injected text match on purpose in different ways.** The wake cause labels a
+  whole block, so one tag anywhere or a prefix at the start makes it `system`. The transcript
+  reconstruction keeps the real text next to a tag, so it strips tags and drops a message that
+  starts with a prefix.
+- **Compaction settings** (`compactionpoint`) stay where they are. The settings types of each
+  client (`ClaudeCode`, `Bob`, `Codex`), their `Resolve` methods and `Settings.Pick` form one unit.
+  `Resolve` returns `compactionpoint.Point`, and `Settings` holds the types. Moving the types into
+  the agent packages makes those packages import `compactionpoint`, and `compactionpoint` import
+  them: a cycle. Moving only the file readers would split the env names and file keys from the
+  types they fill.
+- **Callers with no request** (`dash` declaration rows, `record` reconstruction) pass the zero
+  `Client`. They get the fallback. `respfacts.Spawns` also passes it, but its caller does have the
+  request's `Client`: the stream readers belong to another change, which threads it through.
+
 ## By host
 
 A host without a client signal gives the generic result.

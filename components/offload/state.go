@@ -485,7 +485,7 @@ const (
 // (session, key), that this session stashed that key, and GET /expand only resolves a
 // key the caller's session actually owns.
 
-func ownerKey(session, key string) string { return "cg:own:" + session + ":" + key }
+func ownerKey(session, key string) string { return store.OwnPrefix + session + ":" + key }
 
 // recordOwner marks that this session stashed key (no-op for empty key / summary-off).
 func recordOwner(c *components.Ctx, key string) {

@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/dash"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
@@ -259,16 +260,16 @@ func (im *InferenceMetrics) missCostUSD(e *dash.Event) float64 {
 	if !ok {
 		return 0
 	}
-	p = p.At(modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)).Resolved(e.Model)
+	size := modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)
+	// OnePrice reads each rate with Price.RateAt: the price is Resolved for the model first, then At picks the
+	// tier of the size. That order is deliberate (RateAt's documented order): a blank rate is the model's
+	// multiple of the input rate of the TIER, not of the base.
 	w1h := min(max(e.CacheWrite1h, 0), e.CacheWrite)
-	usd := 0.0
-	if prem := p.CacheWrite - p.CacheRead; prem > 0 {
-		usd += float64(e.CacheWrite-w1h) * prem
-	}
-	if prem := p.CacheWrite1h() - p.CacheRead; prem > 0 && w1h > 0 {
-		usd += float64(w1h) * prem
-	}
-	return usd
+	// The accountant prices each part at its own write tier (MissCost): never below zero, at the rates
+	// of the request's own prompt size.
+	m5, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, At: time.UnixMilli(e.TS), Prefix: e.CacheWrite - w1h, PromptTokens: size}, modelinfo.OnePrice{Model: e.Model, Price: p})
+	m1h, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, At: time.UnixMilli(e.TS), Prefix: w1h, PromptTokens: size, OneHour: true}, modelinfo.OnePrice{Model: e.Model, Price: p})
+	return m5 + m1h
 }
 
 // missCause maps the event's reason and cause to the spec's set: ttl_expiry, prefix_change,

@@ -1,6 +1,6 @@
 ---
 name: context-guru-uninstall
-description: Restore Codex's previous default provider and stop the context-guru proxy. Use when asked to disable, remove, or uninstall it.
+description: Remove the context-guru profile and stop the context-guru proxy. Use when asked to disable, remove, or uninstall it.
 ---
 
 # Remove context-guru from Codex
@@ -16,7 +16,7 @@ Tell the user to exit Codex, then run this directly in an ordinary shell:
 ~/.local/state/context-guru-codex/context-guru-reset --yes
 ```
 
-It removes only the marked provider block, restores the previous default provider unless the user
-changed it since installation, and stops only its owned user service (with guarded
+It removes only the marked provider and profile block (an older install's default-provider
+rewrite is also undone, unless the user changed it since), and stops only its owned user service (with guarded
 recorded-process cleanup for older installations). The next ordinary Codex session uses the
 restored provider.

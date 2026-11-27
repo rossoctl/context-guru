@@ -2,7 +2,6 @@ package dash
 
 import (
 	"context"
-	"github.com/rossoctl/context-guru/agent"
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
@@ -1013,8 +1012,12 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
 	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
 	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
-	// See Price.CostWithCacheWrite1h for the one-hour write premium this folds in.
-	e.CostUSD = p.CostWithCacheWrite1h(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens, e.CacheWrite1h)
+	// The accountant prices the bill (RequestCost): the rates of the prompt size, every write at the 5-minute
+	// rate, and the one-hour part with its premium on top. The proxy's live cost and the keeper's ping cost
+	// call the same function, so the three give the same bits.
+	e.CostUSD, _ = accountant.RequestCost(accountant.RequestCostInput{Model: e.Model,
+		Billed: accountant.Usage{Input: int(e.FreshInput), CacheRead: int(e.CacheRead), CacheWrite: int(e.CacheWrite), CacheWrite1h: int(e.CacheWrite1h)},
+		Output: int(e.OutputTokens), PromptTokens: modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)}, modelinfo.OnePrice{Model: e.Model, Price: p})
 	if e.FallbackRateCostUSD = p.FallbackCost(e.CacheRead); e.FallbackRateCostUSD > e.CostUSD {
 		e.FallbackRateCostUSD = e.CostUSD // a part of the cost, never more (dash's min is for ints)
 	}
@@ -1094,10 +1097,12 @@ func (e *Event) sweepWarmRewriteUSD(p modelinfo.Price, component string) float64
 	if e.CacheWrite > 0 && e.CacheWrite < n {
 		n = e.CacheWrite
 	}
-	if n <= 0 || p.CacheWrite <= p.CacheRead {
+	if n <= 0 {
 		return 0
 	}
-	return float64(n) * (p.CacheWrite - p.CacheRead)
+	// The accountant owns the miss formula: the write rate minus the read rate, never below zero.
+	usd, _ := accountant.MissCost(accountant.MissInput{Model: e.Model, Prefix: n, PromptTokens: modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite)}, modelinfo.OnePrice{Model: e.Model, Price: p})
+	return usd
 }
 
 // SummarizerComponents is THE list of pipeline components whose removals are EARLIER transcript:
@@ -1195,7 +1200,3 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 
 // CachePrefixChangeReason marks the miss as caused by a changed prefix.
 func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChange }
-
-// AgentFor classifies a client User-Agent into an agent family so the dashboard
-// can filter by application.
-func AgentFor(ua string) string { return agent.IdentifyUserAgent(ua).Label }

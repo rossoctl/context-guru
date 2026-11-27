@@ -659,6 +659,31 @@ func canonAt(h hash.Hash64, v gjson.Result, message bool) {
 			h.Write([]byte(toolCallID))
 			return
 		}
+		if !message && typ == "text" {
+			// A plain text block is written type first, then text, whatever order the client sent its keys
+			// in: the string form of the same message is hashed that way (see below), and the two must agree.
+			// canon.go's canonical form agrees too, since it sorts the keys.
+			var text gjson.Result
+			n := 0
+			for _, f := range fields {
+				switch f.k.Str {
+				case "cache_control":
+				case "type":
+					n++
+				case "text":
+					n++
+					text = f.val
+				default:
+					n += 2 // another key: not a plain text block
+				}
+			}
+			if n == 2 && text.Type == gjson.String {
+				h.Write([]byte(`{type:"text",text:`))
+				h.Write([]byte(text.Raw))
+				h.Write([]byte(`,}`))
+				return
+			}
+		}
 		h.Write([]byte("{"))
 		for _, f := range fields {
 			k, val := f.k, f.val

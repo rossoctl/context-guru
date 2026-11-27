@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/rossoctl/context-guru/agent"
 )
 
 // The metadata that predicts when a user returns (issue #1198). The pieces that are read off one
@@ -476,10 +478,10 @@ func (s *strategyMetaScan) into(e *Event) {
 	e.KAPlannedPings, e.KAMinPrefixTokens, e.KAIdleS = intPtr(s.planned), intPtr(s.floor), intPtr(s.idle)
 }
 
-// builtinSubagents are the subagent types that ship with the client. Any other type is a name the
-// user chose, so it is stored as a keyed hash.
-var builtinSubagents = map[string]bool{"general-purpose": true, "Explore": true, "Plan": true,
-	"statusline-setup": true, "claude-code-guide": true}
+// builtinSubagent reports whether raw is a subagent type that ships with the client. Any other type
+// is a name the user chose, so it is stored as a keyed hash. The row has no request at hand, so it
+// takes the zero Client: the fallback rule of every client, Claude Code's list.
+func builtinSubagent(raw string) bool { return agent.Client{}.IsBuiltinSubagentType(raw) }
 
 // fillSpawn turns the raw subagent type of Event.SpawnTypeRaw into SubagentType.
 func (r *Recorder) fillSpawn(e *Event) {
@@ -488,7 +490,7 @@ func (r *Recorder) fillSpawn(e *Event) {
 	if raw == "" || r.sm == nil {
 		return
 	}
-	if builtinSubagents[raw] {
+	if builtinSubagent(raw) {
 		e.SubagentType = raw
 		return
 	}

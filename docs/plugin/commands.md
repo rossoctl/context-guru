@@ -14,7 +14,7 @@ the model's skills list and cost no tokens there. If Claude tries one, Claude Co
 Claude can still offer the others by itself when your question fits: `insights`, `save-more`,
 `remove-mcp-and-skills`, `preset-picker`, `cache-strategy-picker`, `install` and `cache-campaign`.
 
-In Codex the same commands that exist there (all of the above except `dashboard`, `doctor`, `statusline` and `install-beta`) set
+In Codex the same commands that exist there (all of the above except `dashboard`, `statusline` and `install-beta`) set
 `allow_implicit_invocation: false` in their `agents/openai.yaml`. You run them as `$context-guru-<name>`.
 
 | Command | The question | Example first line |

@@ -14,6 +14,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
 // Layer sizes of the exported network.
@@ -292,7 +295,7 @@ func Decide(m Model, row *Row, e Econ) Decision {
 		ts[r.KMax+k] = float64(k) * r.XS // when ping k fires
 	}
 	m.Survival(row, ts[:n], s[:n])
-	stake := e.PrefixTok * (e.PWrite5m - e.PRead)
+	stake := missUSD(int64(e.PrefixTok), e.PRead, e.PWrite5m)
 	best, bestNet, net := 0, 0.0, 0.0
 	for k := 1; k <= r.KMax; k++ {
 		net += stake*(s[k-1]-s[k]) - r.Lam*e.PingCost*s[r.KMax+k]
@@ -305,4 +308,27 @@ func Decide(m Model, row *Row, e Econ) Decision {
 		d.PWindow = s[0] - s[best]
 	}
 	return d
+}
+
+// missUSD is the avoided rewrite of a prefix at 5-minute rates: prefix x (write - read), from the
+// accountant (accountant.MissCost). It is never below 0. Every row that reaches a model has a write rate
+// above its read rate (the live gate campaign.Priced and the replay's own gate), so the floor never
+// changes a value that the model reads.
+func missUSD(prefix int64, read, write float64) float64 {
+	usd, _ := accountant.MissCost(accountant.MissInput{Prefix: prefix}, modelinfo.FlatRates{CacheRead: read, Write5m: write})
+	return usd
+}
+
+// readUSD is the cost of reading a prefix from the cache: prefix x read, from the accountant (a ping with no
+// fresh input and no output). The model reads it as the read_cost feature.
+func readUSD(prefix int64, read float64) float64 {
+	usd, _ := accountant.PingCost(accountant.PingInput{Prefix: prefix}, modelinfo.FlatRates{CacheRead: read})
+	return usd
+}
+
+// rebuildUSD is the cost of writing a prefix at the 5-minute rate: prefix x write, from the accountant (a late
+// ping with no fresh input and no output). The model reads it as the rebuild_cost feature.
+func rebuildUSD(prefix int64, write float64) float64 {
+	usd, _ := accountant.LatePingCost(accountant.LatePingInput{PingInput: accountant.PingInput{Prefix: prefix}}, modelinfo.FlatRates{Write5m: write})
+	return usd
 }

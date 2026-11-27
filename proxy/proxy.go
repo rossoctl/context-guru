@@ -74,7 +74,7 @@ import (
 type Options struct {
 	// ClaudeCompact is the user's own Claude Code auto-compact setting, read ONCE at start-up in
 	// local mode (ReadClaudeCompact, #948). The zero value changes nothing. Ignored when Tenants
-	// is set. It applies only to requests whose User-Agent is Claude Code (dash.AgentFor gives
+	// is set. It applies only to requests whose User-Agent is Claude Code (agent.Identify gives
 	// "claude-code" or "claude-cli"). All other requests use the table.
 	ClaudeCompact compactionpoint.ClaudeCode
 	// BobCompact and CodexCompact are the same for Bob Shell and Codex CLI (#963), read once at
@@ -1530,7 +1530,7 @@ func (h *Handler) chat(provider bschemas.ModelProvider, static upstream, pick fu
 			slg = slg.With("thread", threadID)
 		}
 		h.serve(w, r, cl, provider, up, preBody, body, bypassed, cp, ac, tn, tr.Session, threadID, threadOf, anchor, slg,
-			h.newRecCtx(provider, orig, tn, explicitSess), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
+			h.newRecCtx(provider, orig, tn, explicitSess, cl), di, tr.TouchAlias, tr.TouchAtMs, tr.TouchSeq)
 	}
 }
 
@@ -1845,11 +1845,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 		if sse && !sseBuffered {
 			ttfb = msSince(reqStart, sseFirstByte)
 		}
-		usage.Live = cp.liveFacts(ttfb)
+		// Fail open (#1510): each step of this defer costs its own figure only, so the steps after it still run.
+		failOpenAccountant("liveFacts", func() { usage.Live = cp.liveFacts(ttfb) })
 		// The rounds are final here. The accountant reads them when it prices, and the deferral ledger below can ask
 		// for the figure before finish runs.
-		ac.noteRounds(rounds)
-		usage.PrefixRewritten = cp.prefixRewritten()
+		failOpenAccountant("noteRounds", func() { ac.noteRounds(rounds) })
+		failOpenAccountant("prefixRewritten", func() { usage.PrefixRewritten = cp.prefixRewritten() })
 		billed := usage.FreshInput + usage.CacheRead + usage.CacheWrite
 		// lifecycle.Finish runs the steps after the response in their order: the keep-alive touch, the
 		// deferral ledger, the release of a deferred cache-aware summary, the warm sweep's question,
@@ -1895,7 +1896,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			},
 		})
 		ac.finish(usage, usageOK, h.captureContentFor(tn), h.contentCap(), h.contentMax())
-		cp.stopEarlyScan() // the request is over: the scan's work in progress ends (a finished result stays)
+		failOpenAccountant("stopEarlyScan", cp.stopEarlyScan) // the request is over: the scan's work in progress ends (a finished result stays)
 		// THE one line per request. In a defer so every terminal path emits it exactly
 		// once — stream-through, buffered replay, the round-cap exit, an upstream failure
 		// (which also logged its own WARN with the reason).
@@ -1944,6 +1945,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 				h.recorder.Record(&recEvent{
 					traceID:   rc.traceID,
 					tenantID:  rc.tenantID,
+					client:    rc.client,
 					provider:  provider,
 					path:      r.URL.Path,
 					headers:   record.AllowedHeaders(r.Header), // a filtered copy: the writer reads it after serve returns
@@ -2063,7 +2065,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// is the only route to a recorded response, not an optimisation. Claude Code
 			// advertises neither expand nor adjudicate, so every turn of the session this
 			// feature exists to record arrives here.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, h.thinkCollector(provider, resp))
+			first, u, why, ok := h.streamRecOn(w, resp, tee, cl, ag, h.thinkCollector(provider, resp))
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2162,7 +2164,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// carry an empty response and NO reason why, which is the one thing
 			// Turn.Incomplete exists to prevent. Recording it and marking it no_body_on_path
 			// is the honest outcome; see record.TurnFromCall.
-			first, u, why, ok := h.streamRecOn(w, resp, tee, ag, nil) // no Anthropic stream here: nothing to collect
+			first, u, why, ok := h.streamRecOn(w, resp, tee, cl, ag, nil) // no Anthropic stream here: nothing to collect
 			if !sseBuffered {
 				sseFirstByte = first
 			}
@@ -2189,7 +2191,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, cl agent.Client,
 			// bail below ends the client's turn with a complete stream rather than cutting
 			// it off mid-message.
 		}
-		u, why, ok := responseUsageWhy(resp.Header.Get("Content-Type"), respBody, false)
+		u, why, ok := responseUsageWhy(cl, resp.Header.Get("Content-Type"), respBody, false)
 		if h.savings != nil {
 			u.Thinking = thinkcount.FromBody(resp.Header.Get("Content-Type"), respBody) // issue #1187
 		}
@@ -2436,7 +2438,7 @@ func setUpstreamAuth(dst http.Header, up upstream) {
 //
 // tee is nil when recording is off, which is the only state the shipped default has.
 func (h *Handler) streamRec(w http.ResponseWriter, resp *http.Response, tee *recTee) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
-	return h.streamRecOn(w, resp, tee, agent.Base{}, nil)
+	return h.streamRecOn(w, resp, tee, agent.Client{}, agent.Base{}, nil)
 }
 
 // thinkCollector is the Collector for a chat response the accountant prices, or nil. The thinking signatures
@@ -2453,7 +2455,7 @@ func (h *Handler) thinkCollector(provider bschemas.ModelProvider, resp *http.Res
 // streamRecOn is streamRec for a chat route. ag is the agent that owns the route: it may correct
 // the shared parser's usage reading (readAgentUsage). think, when not nil, is the thinking collector
 // (thinkCollector), and it reads every byte the client gets.
-func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
+func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *recTee, cl agent.Client, ag agent.Agent, think *thinkcount.Collector) (firstByte time.Time, u Usage, why respfacts.Miss, ok bool) {
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -2488,7 +2490,7 @@ func (h *Handler) streamRecOn(w http.ResponseWriter, resp *http.Response, tee *r
 	// hidden block as `unreadable_body` rather than as the provider streaming no usage — and a
 	// block that was present but rejected stays a dialect finding, whatever the window did.
 	win := sn.bytes()
-	u, why, ok = responseUsageWhy(resp.Header.Get("Content-Type"), win, sn.spliced())
+	u, why, ok = responseUsageWhy(cl, resp.Header.Get("Content-Type"), win, sn.spliced())
 	{
 		// The request's context carries its logger. A test's hand-built response has no request.
 		ctx := context.Background()

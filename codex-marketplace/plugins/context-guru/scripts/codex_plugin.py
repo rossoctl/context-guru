@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and operate context-guru's default Codex routing."""
+"""Install and operate context-guru's opt-in Codex routing (profile + launcher)."""
 
 import argparse
 import hashlib
@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config_route import install as install_default_route
-from config_route import is_routed, restore as restore_default_route
+from config_route import check_profile_writable, is_default_routed, is_routed, restore as restore_default_route
 
 MARKER = "# Managed by the context-guru Codex plugin."
 CONFIG_MARKER = "# Managed by the context-guru Codex plugin."
@@ -117,6 +117,17 @@ def first_free_port():
             except OSError:
                 pass
     raise RuntimeError("no free port in 8787..8887")
+
+
+def write_record(record, directory=None):
+    """Write install.json at mode 0600 (it holds the provider's bearer token)."""
+    path = (directory or state_dir()) / "install.json"
+    temporary = path.with_name("install.json.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(json.dumps(record, indent=2) + "\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
 
 
 def read_record():
@@ -256,6 +267,10 @@ def install_escape_hatch():
     controller = state_dir() / "codex_plugin.py"
     shutil.copyfile(Path(__file__), controller)
     controller.chmod(0o700)
+    launcher = state_dir() / "context-guru-codex"
+    launcher.write_text(f"#!/bin/sh\n{MARKER}\n"
+                        f'exec python3 "{controller}" launch -- "$@"\n')
+    launcher.chmod(0o700)
     updater = state_dir() / "context-guru-update"
     shutil.copyfile(Path(__file__).with_name("update.sh"), updater)
     updater.chmod(0o700)
@@ -396,7 +411,7 @@ def restart_proxy(record):
         return False
     record["pid"] = process.pid
     record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     return True
 
 
@@ -545,7 +560,7 @@ def proxy_command(executable, port, upstream=None):
     command = [executable, "--listen", f"127.0.0.1:{port}", "--config", str(proxy_config()),
                "--dashboard", "--dashboard-db", str(root / "dashboard.db")]
     if upstream:
-        command.extend(["--openai-upstream", upstream.rstrip("/")])
+        command.extend(["--openai-upstream", upstream.rstrip("/").removesuffix("/v1")])
     return command
 
 
@@ -596,8 +611,11 @@ def setup(args):
     if args.plan:
         facts(result="planned", scope="user", config=main_config(),
               reset=state_dir() / "context-guru-reset",
-              consent_question="Route every new Codex session on this machine through a local "
-                               "context-guru proxy, with cache keep-alive using your own quota?")
+              launch=state_dir() / "context-guru-codex",
+              consent_question="Add a context-guru profile to your Codex config and run a local "
+                               "context-guru proxy (cache keep-alive uses your own quota)? Plain "
+                               "`codex` is left unchanged; start routed sessions with "
+                               "context-guru-codex.")
         return 0
     if not args.i_consent_to_traffic_interception:
         facts(result="refused", reason="consent_required")
@@ -606,6 +624,11 @@ def setup(args):
         check_proxy_config_writable()
     except Exception as error:
         facts(result="config_conflict", config=proxy_config(), detail=error)
+        return 2
+    try:
+        check_profile_writable(main_config())
+    except Exception as error:
+        facts(result="config_conflict", config=profile(), detail=error)
         return 2
     executable = find_binary()
     if not executable:
@@ -633,7 +656,7 @@ def setup(args):
             load_strategy_table(executable)
             if existing.get("binary") and existing["binary"] != executable:
                 existing["binary"] = executable
-                (state_dir() / "install.json").write_text(json.dumps(existing, indent=2) + "\n")
+                write_record(existing, state_dir())
             write_proxy_config(executable)
     except RuntimeError as error:
         facts(result="strategies_unavailable", detail=error)
@@ -641,7 +664,7 @@ def setup(args):
     except OSError as error:
         facts(result="config_conflict", config=proxy_config(), detail=error)
         return 2
-    provider = existing.get("provider") if is_routed(main_config()) else None
+    provider = existing.get("provider") if is_routed(main_config()) or is_default_routed(main_config()) else None
     if not isinstance(provider, dict):
         provider = base_provider()
     if port and healthy(port):
@@ -653,14 +676,11 @@ def setup(args):
             return 1
         existing.update(config=str(main_config()), provider=provider,
                         upstream=provider.get("base_url"))
-        (state_dir() / "install.json").write_text(json.dumps(existing, indent=2) + "\n")
-        old_profile = profile()
-        if old_profile.exists() and old_profile.read_text().startswith(MARKER):
-            old_profile.unlink()
+        write_record(existing, state_dir())
         facts(result="already_running", port=port, config=main_config(), reset=reset,
-              launch="codex")
+              launch=state_dir() / "context-guru-codex")
         return 0
-    port = first_free_port()
+    port = getattr(args, "port", 0) or first_free_port()
     root = state_dir()
     root.mkdir(parents=True, exist_ok=True)
     upstream = provider.get("base_url")
@@ -676,34 +696,111 @@ def setup(args):
                     "pid": process.pid, "binary": executable})
         facts(result="setup_failed", detail=error)
         return 1
-    old_profile = profile()
-    if old_profile.exists() and old_profile.read_text().startswith(MARKER):
-        old_profile.unlink()
     record = {"port": port, "pid": process.pid, "binary": executable,
               "config": str(main_config()), "upstream": upstream, "provider": provider,
               "service": "systemd" if platform.system() == "Linux" else "launchd"}
-    (root / "install.json").write_text(json.dumps(record, indent=2) + "\n")
-    facts(result="installed", port=port, config=main_config(), reset=reset, launch="codex")
+    write_record(record, root)
+    facts(result="installed", port=port, config=main_config(), reset=reset, launch=state_dir() / "context-guru-codex")
     return 0
+
+
+def revive(record):
+    """True when the recorded proxy answers, restarting its user service first if it is down."""
+    port, executable = int(record.get("port", 0)), record.get("binary")
+    if not port or not executable:
+        return False
+    if healthy(port):
+        return True
+    process = start_proxy(executable, port, record.get("upstream"))
+    if process is None:
+        return False
+    record["pid"] = process.pid
+    record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
+    write_record(record, state_dir())
+    return True
 
 
 def ensure(_args):
     record = read_record()
     port = int(record.get("port", 0))
-    executable = record.get("binary")
-    if not port or not executable or not is_routed(main_config()):
+    if not port or not is_routed(main_config()) or healthy(port):
         return 0
-    if healthy(port):
-        return 0
-    process = start_proxy(executable, port, record.get("upstream"))
-    if process is None:
+    if revive(record):
+        facts(result="restarted", port=port)
+    else:
         facts(result="start_failed", log=state_dir() / "proxy.log")
-        return 0
-    record["pid"] = process.pid
-    record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
-    facts(result="restarted", port=port)
     return 0
+
+
+def launch(args):
+    """Start Codex through the profile; if the proxy cannot be brought up, start plain Codex.
+
+    Plain `codex` never depends on the proxy, so a dead proxy cannot lock the user out.
+    """
+    codex = os.environ.get("CODEX_BIN") or shutil.which("codex")
+    if not codex:
+        print("context-guru-codex: `codex` not found on PATH", file=sys.stderr)
+        return 127
+    rest = args.codex_args[1:] if args.codex_args[:1] == ["--"] else args.codex_args
+    own_profile = any(a in ("-p", "--profile") or a.startswith("--profile=") for a in rest)
+    if own_profile:
+        reason = "you passed your own --profile, which would replace the context-guru profile"
+    elif not is_routed(main_config()):
+        reason = f"the context-guru profile file is missing ({profile()}); run $context-guru-setup"
+    elif not revive(read_record()):
+        reason = f"the proxy is not reachable and could not be restarted (log: {state_dir() / 'proxy.log'})"
+    else:
+        reason = None
+    if reason is None:
+        os.environ["CONTEXT_GURU_ROUTED"] = "1"
+        argv = [codex, "--profile", "context-guru", *rest]
+    else:
+        print(f"context-guru-codex: {reason}; starting Codex directly. "
+              "This session is NOT routed through context-guru.", file=sys.stderr)
+        argv = [codex, *rest]
+    os.execv(codex, argv)
+
+
+def session_start_hook(_args):
+    """Advisory only, and never fails. A hook runs after provider selection, so it cannot change
+    transport. It does not check the proxy: a sandboxed hook may not reach loopback, so a failed
+    check would prove nothing. The launcher restarts the proxy; `doctor` checks its health."""
+    try:
+        record = read_record()
+        if not int(record.get("port", 0)) or not is_routed(main_config()):
+            return 0
+        if os.environ.get("CONTEXT_GURU_ROUTED") != "1":
+            print(json.dumps({"systemMessage": (
+                "context-guru is installed but this session is not routed through it. "
+                f"Start Codex with {state_dir() / 'context-guru-codex'} to route it.")}))
+    except Exception:
+        pass
+    return 0
+
+
+def doctor(_args):
+    """Read-only checks; each line is name=ok, or name=FAIL fix=<command>."""
+    record = read_record()
+    port = int(record.get("port", 0))
+    launcher = state_dir() / "context-guru-codex"
+    checks = [
+        ("codex_on_path", bool(os.environ.get("CODEX_BIN") or shutil.which("codex")),
+         "install the Codex CLI"),
+        ("installed", bool(port), "run $context-guru-setup"),
+        ("profile_present", is_routed(main_config()), "run $context-guru-setup"),
+        ("default_provider_untouched", not is_default_routed(main_config()),
+         f"run {state_dir() / 'context-guru-reset'} --yes"),
+        ("binary_present", bool(record.get("binary")) and Path(record["binary"]).is_file(),
+         "run $context-guru-setup"),
+        ("launcher_present", launcher.is_file(), "run $context-guru-setup"),
+        ("proxy_healthy", bool(port) and healthy(port),
+         f"start Codex with {launcher} (it restarts the proxy); log: {state_dir() / 'proxy.log'}"),
+        ("session_routed", os.environ.get("CONTEXT_GURU_ROUTED") == "1",
+         f"start Codex with {launcher}"),
+    ]
+    for name, ok, fix in checks:
+        print(f"{name}=ok" if ok else f"{name}=FAIL fix={fix}")
+    return 0 if all(ok for _, ok, _ in checks[:-1]) else 1
 
 
 def serve(_args):
@@ -714,7 +811,7 @@ def serve(_args):
     if not port or not executable or not is_routed(main_config()) or healthy(port):
         return 0
     record["pid"] = os.getpid()
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     log_fd = os.open(state_dir() / "proxy.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(log_fd, 1)
     os.dup2(log_fd, 2)
@@ -779,7 +876,7 @@ def status(args):
     up = bool(port and healthy(port))
     configured = is_routed(main_config())
     values = {"result": "ok" if up and configured else "not_ready", "config": main_config(),
-              "default_routing_configured": str(configured).lower(), "port": port or "(none)",
+              "profile_configured": str(configured).lower(), "default_provider_untouched": str(not is_default_routed(main_config())).lower(), "port": port or "(none)",
               "proxy_up": str(up).lower(), "session_routed": "unknown"}
     if up:
         try:
@@ -879,7 +976,7 @@ def update(args):
         return 1
     record.update(pid=process.pid, binary=executable)
     record["service"] = "systemd" if platform.system() == "Linux" else "launchd"
-    (state_dir() / "install.json").write_text(json.dumps(record, indent=2) + "\n")
+    write_record(record, state_dir())
     facts(result="updated", version=version, restart="completed", port=port)
     return 0
 
@@ -888,7 +985,7 @@ def uninstall(args):
     record = read_record()
     routed = is_routed(main_config())
     facts(result="planned" if args.dry_run else "removing", config=main_config(),
-          default_routing_configured=str(routed).lower(), pid=record.get("pid", "(none)"))
+          profile_configured=str(routed).lower(), pid=record.get("pid", "(none)"))
     if args.dry_run:
         return 0
     process_result = stop_owned(record)
@@ -899,6 +996,9 @@ def uninstall(args):
     path = profile()
     if path.exists() and path.read_text().startswith(MARKER):
         path.unlink()
+    launcher = state_dir() / "context-guru-codex"
+    if launcher.exists() and MARKER in launcher.read_text():
+        launcher.unlink()
     config = proxy_config()
     if config.exists() and config.read_text().startswith(CONFIG_MARKER):
         config.unlink()
@@ -916,12 +1016,17 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("setup")
     install.add_argument("--plan", action="store_true")
+    install.add_argument("--port", type=int, default=0)
     install.add_argument("--i-consent-to-traffic-interception", action="store_true")
     status_parser = commands.add_parser("status")
     status_parser.add_argument("--stats", action="store_true")
     commands.add_parser("ensure")
     commands.add_parser("serve")
+    commands.add_parser("doctor")
+    commands.add_parser("session-start-hook")
     commands.add_parser("signal")
+    starter = commands.add_parser("launch")
+    starter.add_argument("codex_args", nargs=argparse.REMAINDER)
     upgrade = commands.add_parser("update")
     mode = upgrade.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
@@ -934,7 +1039,8 @@ def main():
     settings.add_argument("--cache-strategy")
     args = parser.parse_args()
     return {"setup": setup, "status": status, "ensure": ensure, "serve": serve, "signal": signal_hook,
-            "update": update, "uninstall": uninstall, "configure": configure}[args.command](args)
+            "update": update, "uninstall": uninstall, "configure": configure,
+            "doctor": doctor, "launch": launch, "session-start-hook": session_start_hook}[args.command](args)
 
 
 if __name__ == "__main__":

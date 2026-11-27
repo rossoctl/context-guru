@@ -20,10 +20,10 @@ const (
 	GateCheckSpans        = accountant.WithheldCheckSpans        // library: an operation's spans do not add up to its sizes
 	GateCheckOther        = accountant.WithheldCheckOther        // library: a fatal check with no reason of its own
 	GateUnpriced          = accountant.WithheldUnpriced          // library: an operation or effect is unpriced
-	// The size bound is the host's. Withhold's bound adds the tokens of every operation, tool declarations included,
-	// and the host's measure (TokensBefore) counts message text only (#907). The push gives no measure, so it skips it.
-	GateSizeUnknown     = "size_unknown"     // host: TokensBefore is 0, so the plausibility bound cannot be checked
-	GateImplausibleSize = "implausible_size" // host: the library saved more message tokens than the request had
+	// The size bound is the library's too (accountant v0.11.0): the message tokens the operations saved, less the ones
+	// they caused, must fit the request's message tokens, all at the request ratio. Tool declarations are in no
+	// SavedMessages, so a deferral or a tool filter is not withheld (#907).
+	GateImplausibleSize = accountant.WithheldImplausibleSize // library: the operations saved more message tokens than the request had
 	// The other host gates: what only the host knows, the change list, the run mode and its own rows.
 	GateOpsDropped         = "ops_dropped"          // host: a change could not be placed as an operation
 	GateObserve            = "observe"              // host: the run was observe mode
@@ -46,30 +46,6 @@ var EnvelopeComponents = map[string]bool{
 	accwire.OpExpand: true, accwire.OpAdjudicate: true, accwire.OpHeadTTL: true, accwire.OpExpandRestore: true,
 	"toolschema": true, "toolfilter": true,
 	accwire.OpTailBreakpoint: true, accwire.OpToolDefer: true,
-}
-
-// toolSectionOperators are the operators whose operations act on the tools section, not on messages. Their tokens are
-// not in TokensBefore, which counts message text only. Deferral's names list is a growth in messages and saves
-// nothing, so it adds no saved tokens to the bound.
-var toolSectionOperators = map[string]bool{
-	accwire.Operator("toolfilter"): true, accwire.Operator("toolschema"): true,
-	accwire.Operator(accwire.OpExpand): true, accwire.Operator(accwire.OpAdjudicate): true,
-	accwire.Operator(accwire.OpToolDefer): true,
-}
-
-// CountedSavedTokens is the Saved tokens, all four tiers, of the operations that feed a component figure: not DryRun,
-// not a spend, and not an operation on the tools section. TokensBefore is the size of the messages. A tool declaration
-// is not in it, so 2,188 removed declaration tokens would look larger than a 121-token conversation and drop the whole
-// result (#907). The bound stays for every operation on messages.
-func CountedSavedTokens(res accountant.Result) int {
-	n := 0
-	for _, o := range res.Ops {
-		if o.DryRun || o.Call != nil || toolSectionOperators[o.Operator] {
-			continue
-		}
-		n += o.Saved.Input + o.Saved.CacheRead + o.Saved.CacheWrite5m + o.Saved.CacheWrite1h
-	}
-	return n
 }
 
 // GateRow is one component row of the request, as the gate needs it.
@@ -95,9 +71,7 @@ func GateRowsOf(run *components.RunReport) []GateRow {
 type GateIn struct {
 	Observe    bool // the run was observe mode
 	OpsDropped int  // changes that could not be placed as operations
-	// TokensBefore is the size of the request's messages, in tokens: the plausibility bound. 0 or less: unknown.
-	TokensBefore int
-	Rows         []GateRow
+	Rows       []GateRow
 }
 
 // ComponentFigure maps the library's ByComponent, ByComponentFirst and ByComponentReplay to the host's component names
@@ -142,9 +116,8 @@ func ComponentFigure(res accountant.Result, fig accountant.USDFigure, rows []Gat
 
 // Gate says why a request books no accountant figure, or "" when it does. detail is the library's "opID:reason" for
 // GateUnpriced. fig is the library's own figure for res. The gates, in order: a change dropped, an observe run, the
-// library's (accountant.Withhold: a fatal check, an unpriced operation or effect; penalty_unknown does not gate: see
-// Held), the host's size bound
-// (TokensBefore unknown, or more tokens saved than the request had), then the rows: a figure for a component with no
+// library's (accountant.Withhold: a fatal check, an unpriced operation or effect, or more message tokens saved than the
+// request had; penalty_unknown does not gate: see Held), then the rows: a figure for a component with no
 // row, a row that the host adds for the ended change or the interaction when a component has that name already, two
 // rows with one name, and a component that acted with no figure.
 //
@@ -156,9 +129,9 @@ func Gate(res accountant.Result, fig accountant.USDFigure, in GateIn) (reason, d
 	case in.Observe:
 		return GateObserve, ""
 	}
-	// The library's gates: Withhold decides alone (checks, unpriced operations and effects). A sum failure that no
-	// operation claims does not gate (#1465). The size gate is the host's, below.
-	if r := accountant.Withhold(res, accountant.SizeNotGiven); r != "" {
+	// The library's gates: Withhold decides alone (checks, unpriced operations and effects, the size
+	// bound). A sum failure that no operation claims does not gate (#1465). No size is given: the library measures it.
+	if r := accountant.Withhold(res); r != "" {
 		detail := ""
 		if r == accountant.WithheldUnpriced {
 			for _, u := range fig.Unpriced {
@@ -169,12 +142,6 @@ func Gate(res accountant.Result, fig accountant.USDFigure, in GateIn) (reason, d
 			}
 		}
 		return r, detail
-	}
-	if in.TokensBefore <= 0 {
-		return GateSizeUnknown, ""
-	}
-	if CountedSavedTokens(res) > in.TokensBefore {
-		return GateImplausibleSize, ""
 	}
 	rows := map[string]bool{}
 	for _, r := range in.Rows {

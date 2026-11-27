@@ -106,7 +106,7 @@ type Usage struct {
 }
 
 // Price is one model's per-token rates in USD — dispatch.Price, so every host's
-// Dispatcher.Price and the keeper price with one formula (Price.CostWithCacheWrite1h).
+// Dispatcher.Price and the keeper price with one formula (accountant.RequestCost).
 type Price = dispatch.Price
 
 // Policy is one tenant's resolved cache policy — the host-level half of the cache

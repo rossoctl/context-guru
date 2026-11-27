@@ -17,8 +17,10 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/agent"
 	"github.com/rossoctl/context-guru/campaign"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/predictive"
 )
 
@@ -335,11 +337,25 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 		return predDecision{}, false
 	}
 	model := gjson.GetBytes(body, "model").String()
+	// The decision (Choose, the segment test, the pending stake and ping) runs on the same economics as
+	// the replay (campaign.PriceDecision): the rates of the request's own prompt size, and a ping priced
+	// at its own. A tiered model decides on the tiers that replay saw.
+	//
+	// The MODEL INPUTS keep the rates that the model was trained on. The training data (scripts/campaign/dpbuild.py)
+	// reads each model's base rates (p_in, p_out, p_read, p_write5m), so the Response carries the base
+	// rates (the price at size 0), and its CostUSD is the stored bill of the request (below).
+	// One price lookup for the whole response, with no memo and no closure that outlives the call: the
+	// lookup answers from memory, and a memo would keep an old rate after the price list changes.
+	mp, priced := k.h.livePrice(model)
+	var dp campaign.DecisionPrices
 	var pIn, pOut, pRead, pWrite float64
-	if p := k.h.opts.Prices; p != nil && model != "" {
-		if price, ok := p.Price(context.Background(), model); ok && !price.Zero() {
-			pIn, pOut, pRead, pWrite = price.Input, price.Output, price.CacheRead, price.CacheWrite
+	if priced {
+		at := func(_ string, n int64) (float64, float64, float64, float64, bool) {
+			q := mp.At(n)
+			return q.Input, q.Output, q.CacheRead, q.CacheWrite, true
 		}
+		dp, _ = campaign.PriceDecision(at, model, u.CacheRead+u.CacheWrite, modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite), u.CacheWrite1h > 0)
+		pIn, pOut, pRead, pWrite, _ = at(model, 0)
 	}
 	now := k.now()
 	pc.mu.Lock()
@@ -363,7 +379,10 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 			Stream: gjson.GetBytes(body, "stream").Bool(), Agent: cl.ModelAgent(provider), MaxTokens: int(gjson.GetBytes(body, "max_tokens").Int())}
 	}
 	nowMs := now.UnixMilli()
-	cost := float64(u.FreshInput)*pIn + float64(u.CacheRead)*pRead + float64(u.CacheWrite)*pWrite + float64(u.Output)*pOut
+	var cost float64
+	if priced {
+		cost = billedCostOf(mp, model, startedAt, u)
+	}
 	resp := &predictive.Response{
 		Request: predictive.Request{Tenant: tenantID, Session: session, Thread: thread, Model: model, TsMs: startedAt.UnixMilli()},
 		EndMs:   nowMs, DecMs: nowMs, Provider: provider, CacheTTL: lf.CacheTTL, Effort: lf.Effort, MaxTokens: lf.MaxTokens, SystemBlocks: lf.SystemBlocks,
@@ -372,7 +391,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 		StopReason: u.StopReason, Agent: lf.Agent, Thinking: lf.Thinking, Stream: lf.Stream, PIn: pIn, POut: pOut, PRead: pRead, PWrite5m: pWrite,
 	}
 	pc.tr.Ended(a, resp)
-	pingCost := resp.PingCost()
+	pingCost := dp.Ping
 	st := startedAt.UTC()
 	facts := campaign.NewFacts(model, u.StopReason, resp.Agent, int64(resp.Prefix), pingCost, st.Hour(), int(st.Weekday()))
 	pc.mu.Lock()
@@ -385,7 +404,7 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	} else {
 		pc.tr.Release(a, resp) // plan-only campaign: no features, and no history to accumulate
 	}
-	kk, idle := campaign.Choose(spec, pc.model, row, &facts, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: pWrite, PRead: pRead, PingCost: pingCost})
+	kk, idle := campaign.Choose(spec, pc.model, row, &facts, predictive.Econ{PrefixTok: float64(resp.Prefix), PWrite5m: dp.PWrite, PRead: dp.PRead, PingCost: pingCost})
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.stats.Decisions++
@@ -400,9 +419,29 @@ func (k *keeper) predictiveDecideInner(a *predictive.Arrival, optedOut bool, ten
 	if pc.npend < predPendingMax {
 		pc.npend++
 		tk := session + "\x00" + thread
-		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: campaign.Stake(int64(resp.Prefix), pRead, pWrite), ping: pingCost})
+		pc.pending[tk] = append(pc.pending[tk], predPending{endMs: resp.EndMs, startMs: startedAt.UnixMilli(), k: kk, x: idle, stake: dp.Stake, ping: pingCost})
 	}
 	return predDecision{campaign: pc, k: kk, idleS: idle, active: pc.meta.Mode == campaignModeActive && !optedOut}, true
+}
+
+// livePrice is the price of a model for one live decision: ok is false with no price source, no model, no
+// price, or a price with no rates. It answers from memory.
+func (h *Handler) livePrice(model string) (modelinfo.Price, bool) {
+	if h.opts.Prices == nil || model == "" {
+		return modelinfo.Price{}, false
+	}
+	p, ok := h.opts.Prices.Price(context.Background(), model)
+	return p, ok && !p.Zero()
+}
+
+// billedCostOf is the bill of one request, as the dashboard stores it (cost_usd) and as the model was
+// trained on: the rates of the request's own prompt size, and the 1-hour part of the write at the
+// 1-hour rate. The accountant prices it (accountant.RequestCost).
+func billedCostOf(p modelinfo.Price, model string, at time.Time, u Usage) float64 {
+	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: model, At: at,
+		Billed: accountant.Usage{Input: int(u.FreshInput), CacheRead: int(u.CacheRead), CacheWrite: int(u.CacheWrite), CacheWrite1h: int(u.CacheWrite1h)},
+		Output: int(u.Output), PromptTokens: modelinfo.PromptTokens(u.FreshInput, u.CacheRead, u.CacheWrite)}, modelinfo.OnePrice{Model: model, Price: p})
+	return usd
 }
 
 // campaignStrategyID tags the pings a campaign bought on their dash rows.

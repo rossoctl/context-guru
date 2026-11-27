@@ -7,8 +7,10 @@ import (
 	"time"
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 )
 
 // CacheState is the SERVER's view of one session's prompt cache: what the provider last billed us
@@ -317,11 +319,13 @@ func (d *DB) threadTTLs(f Filter) (map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// billedTierSQL is 1 when the write on row alias was billed at the 1h tier, else 0. SQL cannot
+// billedTierSQL is 1 when the HEAD of the write on row alias lives 1 hour, else 0. A mixed write
+// (1h head, 5m tail) is 1: the panel's clock follows the head. The rule is
+// keepalive.HeadLifetimeOneHour, through keepalive.HeadLifetimeOneHourWriteSQL. SQL cannot
 // parse a model name, so it gives only the BILLED tier; the Go side finishes the lifetime with
 // modelinfo.CacheLifetime from the row's provider and model (billedTTL).
 func billedTierSQL(alias string) string {
-	return "CASE WHEN " + alias + "cache_write_1h > 0 THEN 1 ELSE 0 END"
+	return "CASE WHEN " + keepalive.HeadLifetimeOneHourWriteSQL(alias) + " THEN 1 ELSE 0 END"
 }
 
 // billedTTL is the lifetime in seconds of an entry written at the billed tier.
@@ -512,17 +516,22 @@ func medianNextInput(v []int64) int64 {
 	return (v[len(v)/2-1] + v[len(v)/2]) / 2
 }
 
-// NextRequestUSD prices a cached prefix of `tokens` for the next request: warm is a cache read, cold
+// NextRequestUSD prices a cached prefix of `tokens` for the NEXT real request: warm is a cache read, cold
 // is a rewrite at the write rate of the tier the cache was written at (2.0x input on the 1h tier;
-// same derivation as CostWithCacheWrite1h). nextIn is the new input that request adds to the
-// prefix (NextInputTokens); it picks the price tier. One definition for /api/cachestate and the
-// manual ping, so the "kept warm" credit is the cold figure the status line already showed.
-func NextRequestUSD(p modelinfo.Price, tokens, nextIn, ttlS int64) (warm, cold float64) {
-	p = p.At(tokens + nextIn) // the next request sends this prefix plus new input: its tier's rates
-	if ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second) {
-		return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite1h()
-	}
-	return float64(tokens) * p.CacheRead, float64(tokens) * p.CacheWrite
+// same derivation as accountant.RequestCost). nextIn is the new input that request adds to the
+// prefix (NextInputTokens); it picks the price tier. The dashboard's cache-state view (/api/cachestate)
+// shows both figures, so the "kept warm" figure and the cold figure agree.
+//
+// The accountant owns the arithmetic: warm is the read of the prefix (PingCost with no fresh input),
+// cold is warm plus the miss (MissCost). The size is the prefix plus the next request's own input, not
+// the size of a ping (keepalive.PingPrompt): it prices the next request, which is what this is. The
+// tier is the entry's own, by its lifetime (ttlS), as the keeper's miss uses the entry's tier.
+func NextRequestUSD(p modelinfo.Price, model string, tokens, nextIn, ttlS int64) (warm, cold float64) {
+	size := tokens + nextIn // the next request sends this prefix plus new input: its tier's rates
+	warm, _ = accountant.PingCost(accountant.PingInput{Model: model, Prefix: tokens, PromptTokens: size}, modelinfo.OnePrice{Model: model, Price: p})
+	miss, _ := accountant.MissCost(accountant.MissInput{Model: model, Prefix: tokens, PromptTokens: size,
+		OneHour: ttlS == int64(modelinfo.AnthropicCacheTTL1h/time.Second)}, modelinfo.OnePrice{Model: model, Price: p})
+	return warm, warm + miss
 }
 
 // rewrite is next's cold half, the figure RewriteUSD has always carried.
@@ -586,7 +595,7 @@ func (a *API) cacheState(w http.ResponseWriter, r *http.Request) {
 			nextIn = a.db(r).NextInputTokens(f, model)
 			sizes[model] = nextIn
 		}
-		warm, cold = NextRequestUSD(p, tokens, nextIn, ttl)
+		warm, cold = NextRequestUSD(p, model, tokens, nextIn, ttl)
 		return warm, cold, true
 	}
 	s.RewriteUSD, s.Priced = rewrite(next, s.Model, s.PrefixTokens, s.TTLSeconds)

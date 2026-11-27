@@ -1,45 +1,13 @@
 package proxy
 
 import (
-	"context"
 	"log/slog"
-	"time"
 
 	"github.com/rossoctl/accountant"
 	acmetrics "github.com/rossoctl/accountant/metrics"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"go.opentelemetry.io/otel/metric"
 )
-
-// metricsPricer gives the shared metrics module this proxy's own rates (R47). The module has no
-// rate table. Price reads the same chain the dashboard prices from, and it never blocks: the
-// LiteLLM link fetches in the background and answers from memory.
-type metricsPricer struct{ prices modelinfo.Pricer }
-
-func (p metricsPricer) Price(model string, _ time.Time, t acmetrics.Tier) (float64, bool) {
-	return p.rate(model, t, 0)
-}
-
-// PriceAt is the sized form (acmetrics.SizedPricer): the rate of a request with promptTokens
-// prompt tokens. It uses the tier rule of the dashboard (modelinfo.Price.At). A price with no tiers,
-// or a size that is not above a line, gives the base rate, the same as Price.
-func (p metricsPricer) PriceAt(model string, _ time.Time, t acmetrics.Tier, promptTokens int64) (float64, bool) {
-	return p.rate(model, t, promptTokens)
-}
-
-// rate reads one tier rate. A promptTokens of 0 or less gives the base rate.
-func (p metricsPricer) rate(model string, t acmetrics.Tier, promptTokens int64) (float64, bool) {
-	if p.prices == nil {
-		return 0, true
-	}
-	pr, ok := p.prices.Price(context.Background(), model)
-	if !ok {
-		return 0, true // unknown model: no money, marked estimated
-	}
-	return pr.RateAt(model, t, promptTokens)
-}
-
-var _ acmetrics.SizedPricer = metricsPricer{}
 
 // NewMetricsSink returns the accountant sink for the savings counters, priced from prices. A nil
 // prices gives zero money and marks every figure estimated.
@@ -48,7 +16,7 @@ func NewMetricsSink(m metric.Meter, prices modelinfo.Pricer, components ...strin
 	if len(components) > 0 {
 		opts = append(opts, acmetrics.WithComponents(components...))
 	}
-	return acmetrics.New(m, metricsPricer{prices: prices}, opts...)
+	return acmetrics.New(m, modelinfo.ChainRates(prices), opts...)
 }
 
 // observeMetrics hands one priced request to the sink. It runs after the request is answered. A

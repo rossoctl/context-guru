@@ -1,13 +1,14 @@
 package predictive
 
 import (
-	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"math"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
 )
 
@@ -53,9 +54,12 @@ type Response struct {
 	PIn, POut, PRead, PWrite5m        float64
 }
 
-// PingCost is what one keep-alive ping on this prefix costs.
+// PingCost is what one keep-alive ping on this prefix costs, at the rates the response carries
+// (PIn, POut and PRead, already read at the ping's prompt size). The accountant owns the formula.
 func (r *Response) PingCost() float64 {
-	return float64(r.Prefix)*r.PRead + pingFresh*r.PIn + r.POut
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: r.Model, Prefix: r.Prefix, FreshInput: pingFresh, Output: 1},
+		modelinfo.FlatRates{Input: r.PIn, Output: r.POut, CacheRead: r.PRead})
+	return usd
 }
 
 // Arrival is the state a request carries from its start to its end: everything that depends on what came BEFORE it.

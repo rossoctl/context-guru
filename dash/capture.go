@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/thread"
 )
 
@@ -974,7 +975,8 @@ func (r *Recorder) seedOneHourTiers(since int64) (map[string]int64, error) {
 		if err := rows.Scan(&sid, &tid, &model, &ts, &write, &write1h); err != nil {
 			return nil, err
 		}
-		if write1h >= write {
+		// The whole-entry rule, as before: this seed feeds the ping schedule, a money decision.
+		if keepalive.BilledOneHour(write, write1h, false) {
 			// The key carries no tenant: the session id already does, as `tenant:base`
 			// (session.Scoped). The ranking above is per tenant all the same (#1071), so one
 			// tenant's later write cannot hide another's; on a key two rows still share, the

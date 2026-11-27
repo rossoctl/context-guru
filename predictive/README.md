@@ -83,7 +83,7 @@ capture that also fills the dashboard row, so the campaign sees the values it wa
 | `tools`, `system_blocks`, `stream`, `m_tools`, `m_system_blocks`, `m_max_tokens`, `thinking`, `m_thinking`, `m_effort` | `Live`, from `metaFromBody` on the pristine inbound body (the dashboard's own parse) |
 | `m_cache_ttl` | `Live.CacheTTL` = the pipeline trace's cache tier asked for |
 | `family`, `m_model`, `m_ctx_window`, `m_ctx_fill` | the model name; the window is the model file's own table (smallest of 128k / 200k / 400k / 1M above the largest context seen in training) |
-| `agent_type`, `m_agent` | `dash.AgentFor(User-Agent)`, as stored on the row |
+| `agent_type`, `m_agent` | the `agent.Identify` label, as stored on the row |
 | `provider` | the routed provider name, as stored on the row |
 | `prefix_tok`, `fresh_input`, `output_tok`, `m_ctx_tokens`, `m_cache_read_ratio`, `m_cache_write_ratio`, `m_fresh_ratio`, `m_out_tokens`, `m_out_ratio`, `m_rewrite`, `stop_reason`, `m_stop_reason` | the response's usage block and stop reason |
 | `read_cost`, `rebuild_cost`, `ping_cost`, `stake`, `ping_over_stake`, `cost_usd`, `m_cost_req` | usage x the model's rates (`modelinfo.Price`); a ping = prefix read + 7 fresh tokens + 1 output token |

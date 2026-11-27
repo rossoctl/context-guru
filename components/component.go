@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/store"
 )
@@ -752,12 +753,19 @@ type Ctx struct {
 	// offload.ResolveWarmQuestion(session, thread, forwarded, cacheRead) when the request ends: the
 	// sweep's warm question runs from it, and it drops the copy kept for that question (#1193).
 	PrefixAsk PrefixAsker
-	// CanKeepAlive, when non-nil, reports whether the host's keep-alive can ping THIS request's thread:
-	// the policy is on, the kill switch is off, an audit sink exists. A component that prepares
+	// CanSweepAtPing, when non-nil, reports whether the sweep can ask its question at a keep-alive ping
+	// of THIS request's thread: the policy is on, the kill switch is off, an audit sink exists, and the
+	// provider supports the question (Anthropic only). It is NOT "the keeper pings this thread": the
+	// keeper also pings OpenAI threads, and this is false for them. A component that prepares
 	// something for a ping (extract_llm_sweep's question) registers for the ping only when it returns
-	// true, so a thread that will never be pinged keeps nothing for a ping. nil => false: a host with no
-	// keep-alive leaves it unset. (extract_llm_sweep with warm on keeps a copy for its warm question
-	// alone, only while that question is due; no ping reads it.)
+	// true, so a thread that will never get that question keeps nothing for a ping. nil => false: a host
+	// with no keep-alive leaves it unset. (extract_llm_sweep with warm on keeps a copy for its warm
+	// question alone, only while that question is due; no ping reads it.)
+	CanSweepAtPing func() bool
+	// CanKeepAlive is the old name of CanSweepAtPing, with the same meaning. It is used only when
+	// CanSweepAtPing is nil.
+	//
+	// Deprecated: use CanSweepAtPing.
 	CanKeepAlive func() bool
 	// CacheTTLMs is a known cache lifetime in milliseconds: Anthropic's explicit
 	// expiry tier or GPT-5.6+'s documented 30-minute minimum. The latter has
@@ -1019,29 +1027,31 @@ type RateTier struct {
 // rates apply to every token. With several tiers, the highest line below the prompt size wins. The result
 // has no tiers.
 func (r TokenRates) At(promptTokens int64) TokenRates {
-	var t *RateTier
-	for i := range r.Tiers {
-		c := &r.Tiers[i]
-		if c.AbovePromptTokens > 0 && promptTokens > c.AbovePromptTokens && (t == nil || c.AbovePromptTokens > t.AbovePromptTokens) {
-			t = c
-		}
-	}
 	q := TokenRates{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
-	if t != nil {
+	if i, ok := modelinfo.TierBelow(promptTokens, r.lines()); ok {
+		t := r.Tiers[i]
 		q = TokenRates{Input: t.Input, Output: t.Output, CacheRead: t.CacheRead, CacheWrite: t.CacheWrite}
 	}
 	return q
 }
 
+// lines lists the tier lines, 0 for an unused entry.
+func (r TokenRates) lines() []int64 {
+	var l [MaxRateTiers]int64
+	for i := range r.Tiers {
+		l[i] = r.Tiers[i].AbovePromptTokens
+	}
+	return l[:]
+}
+
 // LineBelow returns the highest tier line that promptTokens is above. ok is false when the price is flat
 // or the prompt is at or below every line.
 func (r TokenRates) LineBelow(promptTokens int64) (line int64, ok bool) {
-	for i := range r.Tiers {
-		if c := r.Tiers[i].AbovePromptTokens; c > 0 && promptTokens > c && c > line {
-			line, ok = c, true
-		}
+	i, ok := modelinfo.TierBelow(promptTokens, r.lines())
+	if !ok {
+		return 0, false
 	}
-	return line, ok
+	return r.Tiers[i].AbovePromptTokens, true
 }
 
 // Zero reports whether no rate is known.
@@ -1052,7 +1062,7 @@ func (r TokenRates) Zero() bool {
 // Cost prices one call's four token tiers. A card with tiers prices the whole call at the rates of its
 // prompt size (fresh + cache write + cache read), as the provider bills it.
 func (r TokenRates) Cost(fresh, output, cacheWrite, cacheRead int64) float64 {
-	r = r.At(fresh + cacheWrite + cacheRead)
+	r = r.At(modelinfo.PromptTokens(fresh, cacheRead, cacheWrite))
 	return float64(fresh)*r.Input + float64(output)*r.Output +
 		float64(cacheWrite)*r.CacheWrite + float64(cacheRead)*r.CacheRead
 }
@@ -1256,7 +1266,9 @@ type KeepAliveReport struct {
 	// anything else here, and a sink that timestamps its own row from wall-clock-at-receipt
 	// would disagree with a keeper running on an injected clock.
 	TS int64
-	// Agent, Preset, StopReason and Strategy are copied verbatim from the kaEntry that
+	// Agent is the agent.Client.Label of the request that established this ping (agent.Identify), so a
+	// ping row and a request row of one client carry the same label. Preset, StopReason and Strategy
+	// are copied verbatim from the kaEntry that
 	// established this ping — see keepalive.go's record1 — so a sink that mirrors the
 	// pre-existing dash.Event can reproduce every column it wrote before this type existed.
 	// Strategy is the manager-controlled keep-alive strategy id that resolved this ping's

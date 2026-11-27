@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 )
 
@@ -329,9 +330,28 @@ func (s Semantics) pingOutput(p Pricing) int64 {
 //	request_cost = input×input_rate + read×cache_read_rate + write×write_rate(tier) + output×output_rate
 //
 // The write rate is the tier's, never a blend: that is the whole reason Pricing carries two.
+//
+// The accountant owns the formula (accountant.RequestCost), with the stored-bill rule: every write token is
+// priced at the 5-minute rate, and the 1-hour part pays the premium on top only when the 1-hour rate is above
+// the 5-minute rate (a 1-hour rate below it bills at 5 minutes). Only a hand-edited simulator pricing reaches
+// that case. A request that asked for no cache tier
+// (TTLNone) writes nothing, so its write tokens are not priced here (see writeRate).
 func (p Pricing) RequestCost(input, read, write, output int64, tier TTL) float64 {
-	return float64(input)*p.Input + float64(read)*p.CacheRead +
-		float64(write)*p.writeRate(tier) + float64(output)*p.Output
+	b := accountant.Usage{Input: int(input), CacheRead: int(read)}
+	switch tier {
+	case TTL5m:
+		b.CacheWrite = int(write)
+	case TTL1h:
+		b.CacheWrite, b.CacheWrite1h = int(write), int(write)
+	}
+	usd, _ := accountant.RequestCost(accountant.RequestCostInput{Model: p.Model, Billed: b, Output: int(output)}, p.rates())
+	return usd
+}
+
+// rates is this Pricing as a rate table for the accountant. The size does not change a rate here: a
+// Pricing holds the rates of one size.
+func (p Pricing) rates() modelinfo.FlatRates {
+	return modelinfo.FlatRates{Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, Write5m: p.Write5m, Write1h: p.Write1h}
 }
 
 // writeRate is the creation rate for one tier. TTLNone has no write — a request carrying no
@@ -359,9 +379,14 @@ func (p Pricing) writeRate(tier TTL) float64 {
 // ping is needed: a five-minute entry has to be touched roughly twelve times as often as a
 // one-hour one to be held for the same wall-clock span. Charging two different per-ping rates
 // would be inventing a price no provider publishes.
+//
+// The accountant owns the formula (accountant.PingCost). This is the simulator's what-if, so it
+// reads the ping input of THIS Pricing, which an operator can edit in the page. The live ping reads
+// no override: its body is fixed (keepalive.PingUSD).
 func (p Pricing) KeepAliveCost(cached int64, s Semantics) float64 {
-	return float64(cached)*p.CacheRead + float64(p.PingInputTokens)*p.Input +
-		float64(s.pingOutput(p))*p.Output
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: p.Model, Prefix: cached, FreshInput: p.PingInputTokens, Output: s.pingOutput(p)},
+		p.rates())
+	return usd
 }
 
 // RecreateCost is what a keep-alive costs when it arrives TOO LATE: the entry has already
@@ -372,9 +397,19 @@ func (p Pricing) KeepAliveCost(cached int64, s Semantics) float64 {
 //
 // This is the pathology of a schedule whose interval exceeds the lifetime it is protecting,
 // and pricing it as a read is the arithmetic error that would hide it completely.
+//
+// The accountant owns the formula (accountant.LatePingCost), with the stored-bill rule: the prefix is priced at
+// the 5-minute rate and a 1-hour entry pays the premium on top. A write rate of 0 is unknown, so the cost is 0
+// (only a hand-edited simulator pricing has one). A tier with no write (TTLNone) has no
+// write rate, so the prefix is not priced.
 func (p Pricing) RecreateCost(cached int64, tier TTL, s Semantics) float64 {
-	return float64(cached)*p.writeRate(tier) + float64(p.PingInputTokens)*p.Input +
-		float64(s.pingOutput(p))*p.Output
+	if tier != TTL5m && tier != TTL1h {
+		cached = 0 // writeRate is 0 for TTLNone: the prefix is not written
+	}
+	usd, _ := accountant.LatePingCost(accountant.LatePingInput{
+		PingInput: accountant.PingInput{Model: p.Model, Prefix: cached, FreshInput: p.PingInputTokens, Output: s.pingOutput(p)},
+		OneHour:   tier == TTL1h}, p.rates())
+	return usd
 }
 
 // HoldCost is what it costs to hold a prefix of `cached` tokens at `tier` from nothing: the

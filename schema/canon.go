@@ -100,6 +100,9 @@ func CanonicalWireMessage(raw string) (b []byte, ok bool) {
 	return b, true
 }
 
+// dropCacheControl removes cache_control at every depth of a decoded message, for a comparison by meaning.
+// accwire.WithoutCacheMarks is the byte-keeping twin for hashing the wire. It stops at the content arrays, so
+// a cache_control key in a tool's input is data there (#1272). The two answer different questions.
 func dropCacheControl(v any) any {
 	switch t := v.(type) {
 	case map[string]any:

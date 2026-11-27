@@ -109,6 +109,7 @@ import (
 
 	"github.com/rossoctl/context-guru/internal/skills"
 	"github.com/rossoctl/context-guru/internal/tokens"
+	"github.com/rossoctl/context-guru/schema"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -140,11 +141,12 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 	cand := make([]bool, len(arr))
 	any := false
 	for i, t := range arr {
-		n := declName(t)
+		n := schema.ToolDeclName(t)
 		if n == "" {
 			continue
 		}
-		if names[n] || (servers[mcpServer(n)] && mcpServer(n) != "") {
+		lt := labelledMCPType(t)
+		if names[n] || (servers[mcpServer(n)] && mcpServer(n) != "") || (lt != "" && names[lt]) {
 			cand[i], any = true, true
 		}
 	}
@@ -169,7 +171,7 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 	forced := forcedToolName(body)
 	kept := make([]string, 0, len(arr))
 	for i, t := range arr {
-		n := declName(t)
+		n := schema.ToolDeclName(t)
 		switch {
 		case !cand[i]:
 		case n == forced:
@@ -198,6 +200,16 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 		return body, 0, 0
 	}
 	return next, removedTokens, removed
+}
+
+// labelledMCPType is the type of a Responses `mcp` tool that names itself by `server_label`, or "".
+// Before the label was the name, such a tool was matched by its type, so a configured entry "mcp"
+// removed every one of them. That entry keeps working.
+func labelledMCPType(t gjson.Result) string {
+	if schema.ToolFnName(t) != "" || t.Get("mcp_server_name").String() != "" || t.Get("server_label").String() == "" {
+		return ""
+	}
+	return t.Get("type").String()
 }
 
 // removeSets splits the configured list into exact names and whole-server entries, and drops the
@@ -246,23 +258,6 @@ func mcpServer(n string) string {
 		return ""
 	}
 	return rest[:i]
-}
-
-// declName reads a tool declaration's name in either dialect. Anthropic server tools
-// (`web_search_*`, the mcp_toolset connector) name themselves through `type` or
-// `mcp_server_name` instead, and are matched the same way the inventory reports them so a
-// suggestion and a removal talk about the same string.
-func declName(t gjson.Result) string {
-	if n := t.Get("name").String(); n != "" {
-		return n
-	}
-	if n := t.Get("function.name").String(); n != "" {
-		return n
-	}
-	if n := t.Get("mcp_server_name").String(); n != "" {
-		return n
-	}
-	return t.Get("type").String()
 }
 
 // forcedToolName is the tool `tool_choice` requires, in either dialect, or "".
