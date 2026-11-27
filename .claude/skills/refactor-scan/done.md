@@ -44,6 +44,23 @@ Rows are leaks of business logic out of the host packages. All issues are closed
 | 12 | Dashboard savings math in dash | #1440, PR #1462 |
 | 13 | Tool-deferral savings figure, not from the accountant | #1441, open |
 
+## 2026-11-26 run (tracking #1503)
+
+Each row is a cluster of findings. The Result column gives the issues and the PR. All PRs are merged.
+
+| # | Concern | Result |
+|---|---|---|
+| G-A | Keep-alive cost into the accountant (A1, A8, A9, B1, B4, B5) | #1475, #1482, #1483, #1487, #1490, #1491, PR #1508 (merged), accountant PRs #122, #124, #125 (merged) |
+| G-B | A3, B2, B3 | #1477, #1488, #1489, PR #1507 (merged), accountant PR #123 (merged). The owner dropped the tokenizer factor from #1507. It moved to #1533. |
+| G-C | Client and harness rules into `agent/` (A5, A6, A11, B15) | #1479, #1480, #1485, #1501, PR #1506 (merged) |
+| G-D | Tool declaration and call readers (A4, A12, B11, B12) | #1478, #1486, #1497, #1498, PR #1505 (merged) |
+| G-E | Stream and stop-reason readers (A7, A10, B13) | #1481, #1484, #1499, PR #1528 (merged) |
+| G-F | Two named rules: the whole entry `BilledOneHour`, and the head `HeadLifetimeOneHour` (A2) | #1476, PR #1521 (merged) |
+| G-G | B6, B7, B8, B9, B10, B14, B16 | #1492, #1493, #1494, #1495, #1496, #1500, #1502, PR #1535 (merged) |
+| - | The dash accountant path did not fail open | #1504, fixed by another session |
+| - | Head TTL: accrec lowers the 1h head on a mixed write, and the keeper prices a mixed miss as a full rewrite | #1525, #1526, PR #1530 (merged) |
+| - | The live request ratio replaces the `BilledDeltaFactor` table | #1533, accountant PR #129 (merged), PR #1536 (merged). #1533 stays open for the comparison only. |
+
 ## How to add a run
 
 After each run, add its findings below the table above, with the date of the run. Use the same
