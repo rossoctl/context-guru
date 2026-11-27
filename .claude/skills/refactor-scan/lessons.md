@@ -99,8 +99,8 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   "Anthropic values do not change" and one did. They also flagged a PR that claimed a change the
   write path can never produce.
 - **A doc that says "always" needs a test for the corner.** Accountant #129 said a Result's ratio
-  is always in range, but a hand-built body with no text bytes broke it. Round 2 missed the
-  doc fix, and round 3 fixed it. Pin the claim in a test, or scope it.
+  is always in range, but a hand-built body with no text bytes broke it. Round 2 asked for the
+  doc fix. It was still missing at round 3, where both reviewers blocked. It was fixed before round 4. Pin the claim in a test, or scope it.
 - **A body-only edit after approval keeps the approvals, but `check-ready` reads the body.**
   #1505 and #1528 had `Local tests: waived (owner rule)` on a line shared with other text.
   `check-ready` failed on #1505 until its body was fixed. Keep the waiver on a line by itself.
