@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/keepalive"
 )
 
@@ -875,10 +876,17 @@ func smallPrefix(e *Event) *Event {
 // The replay gate is the request path's gate. A drift here is a calculator modelling a policy
 // nobody runs, which is the whole of F5.
 func TestTheReplayGateMatchesTheShippedPolicy(t *testing.T) {
-	if kaGateMinPrefix != 80000 || kaGateToolWaitMinPrefix != 20000 {
-		t.Errorf("replay floors = %d / %d; config.DefaultKeepAliveMinPrefix is 80000 and "+
-			"DefaultKeepAliveToolWaitMinPrefix is 20000, and the replay "+
-			"has to gate on what the request path gates on", kaGateMinPrefix, kaGateToolWaitMinPrefix)
+	got := gatePolicy(keepalive.Policy{})
+	if got.MinPrefixTokens != config.DefaultKeepAliveMinPrefix || got.ToolWaitMinPrefix != config.DefaultKeepAliveToolWaitMinPrefix {
+		t.Errorf("replay floors = %d / %d; the replay has to gate on config.DefaultKeepAliveMinPrefix (%d) and "+
+			"DefaultKeepAliveToolWaitMinPrefix (%d), what the request path gates on",
+			got.MinPrefixTokens, got.ToolWaitMinPrefix, config.DefaultKeepAliveMinPrefix, config.DefaultKeepAliveToolWaitMinPrefix)
+	}
+	// The values themselves are the shipped ones (#435, #858). A change is a behavior change.
+	if config.DefaultKeepAliveMinPrefix != 80000 || config.DefaultKeepAliveToolWaitMinPrefix != 20000 ||
+		recIdleSeconds != 240 || recMaxPings != 2 {
+		t.Errorf("shipped keep-alive defaults changed: %d %d %d %d", config.DefaultKeepAliveMinPrefix,
+			config.DefaultKeepAliveToolWaitMinPrefix, recIdleSeconds, recMaxPings)
 	}
 }
 

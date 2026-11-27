@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
@@ -1419,13 +1420,12 @@ func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
 }
 
 // kaGateMinPrefix and kaGateToolWaitMinPrefix are the billed-prefix floors a replay gates on: the
-// shipped defaults, mirroring config.DefaultKeepAliveMinPrefix (80000) and
-// config.DefaultKeepAliveToolWaitMinPrefix (20000), which this package may not import. The second
+// shipped defaults: config.DefaultKeepAliveMinPrefix and config.DefaultKeepAliveToolWaitMinPrefix. The second
 // applies to a tool wait, background work, a teammate and any subagent wait (keepalive.Policy.WaitMinPrefix). Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
 const (
-	kaGateMinPrefix         = 80000
-	kaGateToolWaitMinPrefix = 20000
+	kaGateMinPrefix         = config.DefaultKeepAliveMinPrefix
+	kaGateToolWaitMinPrefix = config.DefaultKeepAliveToolWaitMinPrefix
 )
 
 // gatePolicy is the policy a replay gates and counts with: wait, with the shipped floors where it
@@ -2085,8 +2085,8 @@ type RecInterval struct {
 // plan's base and the interval is the plan's; recMaxPings alone is the fixed-count policy, the one with
 // keepalive_wait_plan off.
 const (
-	recIdleSeconds = 240
-	recMaxPings    = 2
+	recIdleSeconds = config.DefaultKeepAliveIdle
+	recMaxPings    = config.DefaultKeepAliveMaxPings
 )
 
 // The service-wide interval, for scale inside a refusal. Measured by the adjudicated bootstrap
