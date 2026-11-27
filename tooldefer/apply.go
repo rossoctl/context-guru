@@ -339,6 +339,22 @@ func (r *SearchRead) add(b gjson.Result) {
 	}
 }
 
+// LoadedBytes is the size in bytes, in the original request, of the named tools: the definitions as sent.
+func LoadedBytes(body []byte, names []string) int {
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	n := 0
+	gjson.GetBytes(body, "tools").ForEach(func(_, t gjson.Result) bool {
+		if want[t.Get("name").String()] {
+			n += len(t.Raw)
+		}
+		return true
+	})
+	return n
+}
+
 // LoadedWeight is the weight, in the original request, of the named tools.
 func LoadedWeight(body []byte, names []string) int {
 	want := map[string]bool{}

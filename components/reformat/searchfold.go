@@ -209,6 +209,17 @@ func splitHit(l string) (string, bool) {
 	return "", false
 }
 
+// SplitHit is splitHit for another component. Searchfold and searchcap call it, so they
+// agree on what a search row is. It returns the path, and whether the row is a match row
+// (`:`) or a context row (`-`).
+func SplitHit(l string) (path string, hit, ok bool) {
+	p, ok := splitHit(l)
+	if !ok {
+		return "", false, false
+	}
+	return p, l[len(p)] == ':', true
+}
+
 func allDigits(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {

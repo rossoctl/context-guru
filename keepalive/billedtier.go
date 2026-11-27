@@ -31,6 +31,15 @@ func HeadLifetimeOneHour(cacheWrite, cacheWrite1h int64, prev bool) bool {
 	return prev
 }
 
+// MixedHeadWriteSQL is MixedHead as a SQL expression: the tokens a row billed at the one-hour tier when it is a
+// mixed write (some at 1 hour, some not), else 0. alias is as in BilledOneHourWriteSQL. The row that carries the
+// head is the latest one that HeadLifetimeOneHourWriteSQL accepts; a later all-5-minute write inherits it only if
+// it read the head (see Keeper's mixedHead), which the caller checks against the row's cache_read.
+func MixedHeadWriteSQL(alias string) string {
+	return "CASE WHEN " + alias + "cache_write_1h > 0 AND " + alias + "cache_write_1h < " + alias + "cache_write THEN " +
+		alias + "cache_write_1h ELSE 0 END"
+}
+
 // HeadLifetimeOneHourWriteSQL is HeadLifetimeOneHour's write half as a SQL condition: the row wrote,
 // and any of it was billed at the one-hour tier. alias is as in BilledOneHourWriteSQL.
 func HeadLifetimeOneHourWriteSQL(alias string) string {

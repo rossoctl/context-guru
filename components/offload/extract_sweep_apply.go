@@ -430,6 +430,9 @@ type SweepExpandNote struct {
 	// One per owner thread that had a first expand: with no thread, every owner of the marker gets one,
 	// and each owner raised its own dropped event. The host counts expands per rule with it (#1191).
 	Rules map[string]int
+	// Bytes is the size of the restored text in bytes (#1533): the host sets it, NoteSweepExpand does not know it.
+	// The accountant's request ratio converts it to the provider's tokens, where tokens is the host's own count.
+	Bytes int
 }
 
 // NoteSweepExpand is called by the host for every expand call that resolved; tokens is what the

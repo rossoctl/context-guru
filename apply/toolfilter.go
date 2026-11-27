@@ -122,16 +122,17 @@ import (
 // remove holds exact declaration names, plus the bare form `mcp__<server>` which stands for
 // every tool of that MCP server — the unit a user actually adds and removes.
 func filterDeclarations(body []byte, remove []string) (out []byte, removedTokens, removed int) {
-	return filterDeclarationsWithAdapter(body, remove, chatEnvelopeAdapter{})
+	out, removedTokens, removed, _ = filterDeclarationsWithAdapter(body, remove, chatEnvelopeAdapter{})
+	return
 }
 
-func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAdapter) (out []byte, removedTokens, removed int) {
+func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAdapter) (out []byte, removedTokens, removed, removedBytes int) {
 	if len(remove) == 0 {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	names, servers := removeSets(remove)
 	arr := tools.Array()
@@ -151,7 +152,7 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 		}
 	}
 	if !any {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	// A pending call for a tool we are about to un-declare: leave this request alone.
 	//
@@ -164,7 +165,7 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 	// turn an account switches the filter ON mid-session, which re-anchors once by
 	// definition.
 	if wire.pendingCallFor(body, names, servers) {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	// Pass 2: the prose gate (hazard 2 above), on candidates only.
 	prose := wire.proseRegion(body)
@@ -187,19 +188,20 @@ func filterDeclarationsWithAdapter(body []byte, remove []string, wire envelopeAd
 			continue
 		}
 		removedTokens += tokens.Count(t.Raw)
+		removedBytes += len(t.Raw) // the declaration as serialized in the body, the unit of the accountant's ratio (#1533)
 		removed++
 	}
 	// An empty `tools` is not the same request with less in it — a body that declares a
 	// catalogue and a body that declares none are different shapes to the provider, and
 	// some reject the empty array outright. Never produce one.
 	if removed == 0 || len(kept) == 0 {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	next, err := sjson.SetRawBytes(body, "tools", []byte("["+strings.Join(kept, ",")+"]"))
 	if err != nil {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
-	return next, removedTokens, removed
+	return next, removedTokens, removed, removedBytes
 }
 
 // labelledMCPType is the type of a Responses `mcp` tool that names itself by `server_label`, or "".
@@ -459,10 +461,11 @@ func identByte(prose string, i int) bool {
 // Fails open on everything: no listing, no terminator, a body shape it does not recognise, a
 // re-encode that errors — all return the input untouched and a saving of zero.
 func filterSkillListing(body []byte, remove []string) (out []byte, removedTokens, removed int) {
-	return filterSkillListingWithAdapter(body, remove, chatEnvelopeAdapter{})
+	out, removedTokens, removed, _ = filterSkillListingWithAdapter(body, remove, chatEnvelopeAdapter{})
+	return
 }
 
-func filterSkillListingWithAdapter(body []byte, remove []string, wire envelopeAdapter) (out []byte, removedTokens, removed int) {
+func filterSkillListingWithAdapter(body []byte, remove []string, wire envelopeAdapter) (out []byte, removedTokens, removed, removedBytes int) {
 	drop := map[string]bool{}
 	for _, r := range remove {
 		if n := strings.TrimPrefix(r, skills.RemovePrefix); n != r && n != "" {
@@ -470,18 +473,18 @@ func filterSkillListingWithAdapter(body []byte, remove []string, wire envelopeAd
 		}
 	}
 	if len(drop) == 0 {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	// Which message holds the listing, and — when its content is an array — which block. The
 	// FIRST match. skills.Locate is the one finder, and dash's reader calls it too, so the page and
 	// the filter describe the same listing on a body that somehow carries two.
 	path, text := wire.skillListingPath(body)
 	if path == "" {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	i := strings.Index(text, skills.Header)
 	if i < 0 {
-		return body, 0, 0 // path said there was one: refuse rather than guess
+		return body, 0, 0, 0 // path said there was one: refuse rather than guess
 	}
 	head := text[:i+len(skills.Header)]
 	rest := text[i+len(skills.Header):]
@@ -498,22 +501,23 @@ func filterSkillListingWithAdapter(body []byte, remove []string, wire envelopeAd
 		}
 	}
 	if len(drop) == 0 {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	for _, e := range l.Entries {
 		if drop[e.Name] {
 			removedTokens += tokens.Count(l.Text(e))
+			removedBytes += jsonStringLen(l.Text(e)) // as the body writes it: the escapes count
 		}
 	}
 	next, n := l.Without(drop)
 	if n == 0 {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
 	nb, err := sjson.SetBytes(body, path, head+next+tail)
 	if err != nil {
-		return body, 0, 0
+		return body, 0, 0, 0
 	}
-	return nb, removedTokens, n
+	return nb, removedTokens, n, removedBytes
 }
 
 // skillListingPath finds the listing: the sjson path of the string that holds it, and that
@@ -528,4 +532,16 @@ func skillListingPath(body []byte) (string, string) {
 
 func (chatEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 	return skills.Locate(body) // the one rule, shared with dash's reader
+}
+
+// jsonStringLen is the bytes a string takes inside a JSON string in the body (the quotes not counted), written by the
+// same encoder the body is rewritten with (sjson), so control characters and quotes count as escapes and non-ASCII
+// text counts as its UTF-8 bytes.
+func jsonStringLen(s string) int {
+	const frame = len(`{"k":""}`)
+	b, err := sjson.SetBytes([]byte(`{}`), "k", s)
+	if err != nil {
+		return len(s)
+	}
+	return len(b) - frame
 }

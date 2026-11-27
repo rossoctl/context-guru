@@ -338,6 +338,16 @@ CREATE TABLE IF NOT EXISTS requests (
   -- saving for a request the filter had declined to touch. 0 therefore means "nothing was
   -- removed here", which is the honest reading on every row that predates the feature.
   filtered_decl_tokens INTEGER NOT NULL DEFAULT 0,
+  -- The request ratio and the byte counts that convert a removal with it (#1533). Counts, no text. Nullable with no
+  -- default: NULL is "not measured" (a row from before them, or a request with no accountant Result), never 0.
+  -- body_text_bytes and body_billed_tokens are the accountant's Result.Ratio.Text: the bytes of the forwarded text and
+  -- the provider's billed tokens for it. ratio_capped is Result.Ratio.Capped. sweep_expand_bytes is
+  -- sweep_expand_tokens in bytes. filtered_decl_bytes is filtered_decl_tokens in bytes.
+  body_text_bytes INTEGER,
+  body_billed_tokens INTEGER,
+  ratio_capped INTEGER,
+  sweep_expand_bytes INTEGER,
+  filtered_decl_bytes INTEGER,
   -- The digest of the declaration SET this request carried (tool_declarations.digest), so a
   -- declaration's cost can be priced on exactly the requests that carried it. '' on rows
   -- written before it existed, where the set is inferred from the tool count instead.
@@ -472,7 +482,11 @@ CREATE TABLE IF NOT EXISTS request_components (
   -- folding them into the gates column made this row blind in proportion to how well the
   -- component was doing: a turn that removed twelve outputs showed an empty cell, while a turn
   -- that refused everything showed a full one.
-  events       TEXT    NOT NULL DEFAULT ''
+  events       TEXT    NOT NULL DEFAULT '',
+  -- The bytes this component removed from the request (#1533): the sum of its changes' before-size minus after-size,
+  -- the unit the accountant's request ratio converts. A count. NULL is "not measured" (a row from before the column),
+  -- never 0 bytes. saved_gross is the same removal in the host's own tokens.
+  saved_bytes  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_rc_request ON request_components(request_id);
 CREATE INDEX IF NOT EXISTS idx_rc_comp    ON request_components(component);
@@ -923,6 +937,15 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"requests", "split_stable_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "split_tail_hash", "INTEGER NOT NULL DEFAULT 0"},
 	{"requests", "filtered_decl_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	// The request ratio and the byte counts that convert a removal with it (#1533). Nullable, no default: NULL is
+	// "not measured" (a row written before them, or a request with no accountant Result), never 0 bytes.
+	// body_text_bytes and body_billed_tokens are Result.Ratio.Text; ratio_capped is Result.Ratio.Capped.
+	// sweep_expand_bytes is sweep_expand_tokens in bytes; filtered_decl_bytes is filtered_decl_tokens in bytes.
+	{"requests", "body_text_bytes", "INTEGER"},
+	{"requests", "body_billed_tokens", "INTEGER"},
+	{"requests", "ratio_capped", "INTEGER"},
+	{"requests", "sweep_expand_bytes", "INTEGER"},
+	{"requests", "filtered_decl_bytes", "INTEGER"},
 	{"requests", "decl_digest", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "session_alias", "TEXT NOT NULL DEFAULT ''"},
 	{"requests", "price_estimated", "INTEGER NOT NULL DEFAULT 0"},
@@ -990,6 +1013,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"request_components", "saved_first_usd", "REAL NOT NULL DEFAULT 0"},
 	{"request_components", "saved_replay_usd", "REAL NOT NULL DEFAULT 0"},
 	{"request_components", "priced_by", "TEXT NOT NULL DEFAULT ''"},
+	// The bytes the component removed (#1533). Nullable, no default: NULL is not measured.
+	{"request_components", "saved_bytes", "INTEGER"},
 	// extract_llm_sweep's quality signals and answer cost (#404 PR C). Additive with a default of 0:
 	// a row from before the sweep applied anything reads as "no sweep activity", which is true.
 	// sweep_expands / sweep_expand_tokens are the part of expands / expand_tokens that restored a

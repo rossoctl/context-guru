@@ -82,8 +82,9 @@ type capture struct {
 	expands   int
 	expandTok int
 	// The expands that restored a sweep marker, and what they returned. A subset of the two above.
-	sweepExpands   int
-	sweepExpandTok int
+	sweepExpands     int
+	sweepExpandTok   int
+	sweepExpandBytes int // the bytes of the restored text: the accountant's request ratio converts them (#1533)
 	// sweepFalseExp counts first expands of a sweep drop that no earlier signal had already counted.
 	sweepFalseExp int
 	// sweepExpandRules counts first expands of a sweep v3 drop by what chose it: a rule name, or "judge"
@@ -482,6 +483,7 @@ func (c *capture) noteSweepExpand(tokens int, note offload.SweepExpandNote) {
 	}
 	c.sweepExpands++
 	c.sweepExpandTok += tokens
+	c.sweepExpandBytes += note.Bytes
 	if note.First && !note.Overlap {
 		c.sweepFalseExp++
 		if note.Warm {
@@ -703,6 +705,7 @@ func (c *capture) finish(usage Usage, usageOK bool, captureContent bool, content
 	e.TTFBMs, e.SSEBuffered = c.sseTTFBMs, c.sseBuffered
 	e.Expands, e.ExpandTokens = c.expands, c.expandTok
 	e.SweepExpands, e.SweepExpandTokens, e.SweepFalseExpands = c.sweepExpands, c.sweepExpandTok, c.sweepFalseExp
+	e.SweepExpandBytes = c.sweepExpandBytes
 	failOpenAccountant("sweep expand events", func() { addSweepExpandEvents(e, c.sweepExpandRules) })
 	if d := c.deferFacts; d != nil {
 		e.DeferTokens, e.DeferListTokens, e.DeferSearches = d.tokens, d.list, d.searches

@@ -61,6 +61,9 @@ type Request struct {
 	// LoadedTokens is the weight of the definitions the searches in this response loaded: the
 	// second pass reads them uncached once, and the next request writes them to the cache once.
 	LoadedTokens int
+	// LoadedBytes is the size of the same definitions in bytes (#1533). The host converts it with the request's
+	// own ratio when it has one; LoadedTokens, scaled by the legacy table, is the fallback.
+	LoadedBytes int
 	// WrongGuesses is how many tools this request deferred that a search in its response then
 	// loaded. DroppedSearches is how many searches of this response have no result: the API does
 	// not run a search sent together with another tool call, and the model searches again.
@@ -122,6 +125,9 @@ type SearchSpend struct {
 	// WITHOUT the cache (Input, an estimate), and the next request writes them to the cache once (Write, an
 	// estimate: that request has not happened yet).
 	Loaded int64
+	// LoadedBytes is the size of the loaded definitions in bytes. With the request's own ratio the host prices
+	// Loaded as ratio.Tokens(LoadedBytes) (accrec.DeferSpendOps); without one, Loaded stands.
+	LoadedBytes int64
 	// Write1h is true when the next request's write is at the 1-hour price.
 	Write1h bool
 }
@@ -131,12 +137,13 @@ func (r Request) SearchSpend() (s SearchSpend, ok bool) {
 	if r.Searches <= 0 {
 		return SearchSpend{}, false
 	}
-	f, _ := tokens.BilledDeltaFactor(r.Model)
+	f, _ := tokens.LegacyFactor(r.Model) // the fallback, for a request with no live ratio (#1533)
 	s.Output = r.SearchOutput
 	if s.Output == 0 {
 		s.Output, s.OutputEstimated = int64(r.Searches*searchOutputEstimate), true
 	}
 	s.Loaded = int64(math.Round(float64(r.LoadedTokens) * f))
+	s.LoadedBytes = int64(r.LoadedBytes)
 	// The next request carries the loaded definitions in its transcript and writes them to the cache, once per
 	// load (#866, N7). The later reads are in that request's own weight.
 	s.Write1h = r.Tier == TierWrite1h
