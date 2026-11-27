@@ -152,6 +152,11 @@ func TestLivePanelMissOfAMixedEntryIsTheTail(t *testing.T) {
 		ev(ago(100), "inherit", head, tail, 0), // reads the head, rewrites a 5-minute tail
 		ev(ago(400), "dead", 0, head+tail, head),
 		ev(ago(100), "dead", 0, head+tail, 0), // wrote it all again: the head was not read
+		// t0 a mixed write, t1 a 5-minute rewrite that does not read the head (it is dead), t2 a read-only turn that
+		// reads the new prefix: the read-only turn must not bring the head back.
+		ev(ago(400), "revive", 0, head+tail, head),
+		ev(ago(200), "revive", 0, head+tail, 0),
+		ev(ago(100), "revive", head+tail, 0, 0),
 		ev(ago(400), "allhour", 0, head+tail, head),
 		ev(ago(100), "allhour", 0, head+tail, head+tail), // a later all-1h write: no separate head
 	)
@@ -173,6 +178,7 @@ func TestLivePanelMissOfAMixedEntryIsTheTail(t *testing.T) {
 		{"mixed", tailMiss},
 		{"inherit", keepalive.MissUSDHead(p, "aws/claude-sonnet-5", prefix, false, head)},
 		{"dead", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, false)},
+		{"revive", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, false)},
 		{"allhour", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, true)},
 	} {
 		r, ok := rows[c.session]

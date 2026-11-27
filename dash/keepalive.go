@@ -1251,9 +1251,14 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	t AS (
 		SELECT *, MAX(CASE WHEN wrn = 1 THEN billed_1h ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS last_write_billed_1h,
 		       MAX(CASE WHEN hrn = 1 THEN head_tok ELSE 0 END) OVER (PARTITION BY tenant_id, session_id) AS head_tokens
-		FROM u)
-		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h, head_tokens, rd, head_tok
-		FROM t WHERE rn = 1 AND ts >= ?
+		FROM u),
+	-- Only a WRITE kills a head, and it kills it when it read less than the head (the keeper's mixedHead). So the
+	-- least read of the writes newer than the head's own row decides, whatever the later read-only turns read.
+	h AS (
+		SELECT *, MIN(CASE WHEN wrn IS NOT NULL AND wrn < head_wrn THEN rd END) OVER (PARTITION BY tenant_id, session_id) AS newer_write_read
+		FROM (SELECT *, MAX(CASE WHEN hrn = 1 THEN wrn END) OVER (PARTITION BY tenant_id, session_id) AS head_wrn FROM t))
+		SELECT session_id, tenant_id, model, turns, ts, prefix, provider, last_write_billed_1h, head_tokens, newer_write_read
+		FROM h WHERE rn = 1 AND ts >= ?
 		ORDER BY prefix DESC, session_id`,
 		// The window is computed only for sessions with a request inside the hour (the subquery),
 		// because the outer filter keeps nothing else: it is a per-session answer, so leaving the
@@ -1268,14 +1273,15 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 	for rows.Next() {
 		var r KeepAliveLiveRow
 		var oneHour int
-		var head, read, own int64
+		var head int64
+		var newerRead sql.NullInt64
 		var provider string
 		if err := rows.Scan(&r.SessionID, &r.TenantID, &r.Model, &r.Turns, &r.LastTS,
-			&r.Prefix, &provider, &oneHour, &head, &read, &own); err != nil {
+			&r.Prefix, &provider, &oneHour, &head, &newerRead); err != nil {
 			return nil, err
 		}
-		if own == 0 && read < head {
-			head = 0 // the last request neither wrote the head nor read it, so it is not alive (as the keeper's mixedHead)
+		if newerRead.Valid && newerRead.Int64 < head {
+			head = 0 // a write after the head's own row read less than the head, so the head is dead (the keeper's rule)
 		}
 		ttl := modelinfo.CacheLifetime(provider, r.Model, oneHour == 1)
 		r.TTLSeconds = int64(ttl.Seconds())
