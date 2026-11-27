@@ -272,8 +272,7 @@ func init() { components.Register("toolschema", newToolschema) }
 
 // Toolschema is a marker component: `tools` is a top-level body field the pipeline
 // never sees (it operates on `messages`), so the rewrite lives in apply and is gated
-// on this name being present — the same arrangement cachesplit uses for the
-// system-array split. See CompactToolSchemas for the mechanism and the break-even.
+// on this name being present — the same arrangement toolfilter uses. See CompactToolSchemas for the mechanism and the break-even.
 type Toolschema struct{}
 
 func newToolschema(raw []byte) (components.Component, error) {
@@ -290,7 +289,7 @@ func (Toolschema) Enabled(*components.Ctx) bool { return true }
 
 // Reformat is a no-op: the rewrite already happened in apply, which reports it here
 // through Ctx.ToolSchema so this component does not read "declined" on the requests
-// where it just ran (the mistake cachesplit's doc records).
+// where it just ran (the mistake the removed cachesplit made).
 func (Toolschema) Reformat(_ *schemas.BifrostChatRequest, rep *components.Report, c *components.Ctx) error {
 	rep.Skipped = c == nil || !c.ToolSchema
 	return nil

@@ -901,7 +901,7 @@ CREATE INDEX IF NOT EXISTS idx_rc_request_comp ON request_components(request_id,
 `
 
 // Retired columns (#567). An existing database may still hold `requests.cachesplit_saved_usd`,
-// `split_stable_tokens`, `split_tail_hash` and the sixteen `tok_split_*` columns. Nothing reads or writes
+// `split_stable_tokens`, `split_tail_hash` and the eight `tok_split_*` columns. Nothing reads or writes
 // them any more and a fresh database does not create them. They are not dropped: every one has
 // NOT NULL DEFAULT, so an insert that omits them works, and a drop rewrites a table that can be
 // hundreds of MB (the same reason text_gz stays, above).

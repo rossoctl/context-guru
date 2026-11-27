@@ -28,14 +28,14 @@ import (
 // two items that were DEFECTS rather than confirmations — the expand-tool gate and the missing
 // count_tokens route — are tested beside their fixes in expandgate_test.go and
 // counttokens_test.go.
-// TestCachePresetForwardsAnUpstreamErrorByteForByte covers conformance item 4.
+// TestConservativeForwardsAnUpstreamErrorByteForByte covers conformance item 4.
 //
 // Claude Code's capability-rejection recovery matches on the upstream's error WORDING. A gateway
 // that wraps, re-encodes or summarises an error body breaks that recovery path — the client can
 // no longer tell "your cache_control was refused" from any other 400, so instead of retrying
 // without the capability it surfaces a failure. The status, the body and the content type all
 // have to arrive exactly as the upstream wrote them.
-func TestCachePresetForwardsAnUpstreamErrorByteForByte(t *testing.T) {
+func TestConservativeForwardsAnUpstreamErrorByteForByte(t *testing.T) {
 	// A real Anthropic error shape, whitespace and key order included: this is what the
 	// client's matching runs against, so the test compares bytes rather than parsed JSON.
 	errBody := `{"type":"error","error":{"type":"invalid_request_error","message":"A maximum of 4 blocks with cache_control may be provided, but found 5."}}`
@@ -74,15 +74,15 @@ func TestCachePresetForwardsAnUpstreamErrorByteForByte(t *testing.T) {
 	}
 }
 
-// TestCachePresetDoesNotBufferSSE covers conformance item 1.
+// TestConservativeDoesNotBufferSSE covers conformance item 1.
 //
 // Claude Code aborts a stream that has been silent for 300s, and a gateway that buffers a whole
 // response before relaying it stalls the client. context-guru does buffer SOME responses — the
-// ones where the model opens by calling the expand tool — but under the `cache` preset nothing
-// injects that tool, so the buffering path must be unreachable. This asserts that rather than
+// ones where the model opens by calling the expand tool — but a request with no tools declared and no marker
+// does not get that tool injected, so the buffering path must be unreachable. This asserts that rather than
 // assuming it: the client's first event has to arrive while the upstream is still writing later
 // ones.
-func TestCachePresetDoesNotBufferSSE(t *testing.T) {
+func TestConservativeDoesNotBufferSSE(t *testing.T) {
 	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

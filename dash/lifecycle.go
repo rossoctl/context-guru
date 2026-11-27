@@ -41,7 +41,7 @@ type LifecycleReq = reqfacts.Lifecycle
 const lifecycleSweepMs = 60_000
 
 // lifecycle remembers when each thread's last response ended. State is lost on restart (the
-// first request after one reads -1), the same amnesia ObserveSplit documents.
+// first request after one reads -1), the same amnesia as the Recorder's recency maps.
 type lifecycle struct {
 	mu      sync.Mutex
 	end     map[string]int64 // tenant\0session\0thread -> epoch ms of the last response end

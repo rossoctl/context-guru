@@ -126,12 +126,6 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 	// restructures the transcript alone, and agentdiet reproduces a published baseline
 	// whose whole claim is what ONE reflection achieves — stacking folds beside it would
 	// reduce the same outputs first and there would be nothing left to attribute.
-	// `cache` is exempt for a reason the other three do not share: its whole product claim
-	// is that it is ONE component, verifiable by reading one line of the presets map. Adding
-	// format/textclean/searchfold to it would each be lossless in meaning and would still
-	// cost the claim — a stranger deciding whether to route their agent through us can check
-	// "nothing but a cache breakpoint moves" in a second, and cannot check four rewriters as
-	// fast. See TestCachePresetIsCachesplitAlone, which holds the other side of that trade.
 	// summarizer1509 is exempt for exactly summarize's reason — it IS summarize, configured as the
 	// cache-unaware no-reuse reference arm, and it restructures the transcript alone.
 	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true}

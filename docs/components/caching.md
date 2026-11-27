@@ -37,6 +37,9 @@ the part that changes each session. It did nothing on current Claude Code, so we
 - **Nothing is left to rescue.** The text before the snapshot in the first user message is about
   150 characters. That is far below the minimum a breakpoint needs, so the provider would ignore
   a breakpoint there.
+- **`cacheinject` no longer runs the split.** Until #567 a pipeline that named `cacheinject` also ran
+  the split. It does not now. On Claude Code older than the version that moved the snapshot (2.1.299
+  or earlier, see #567), the split no longer protects the cache.
 - **An old config still loads.** A pipeline or a `components:` block that names `cachesplit` loads
   with a warning. The name is dropped. The preset `cache` named only `cachesplit`. It was removed
   too. A config with `preset: cache` loads with a warning and runs no component.

@@ -147,17 +147,24 @@ mode: sync
 // a record, not a mechanism: nothing rewrites a stored config on the strength of it. A
 // sweep, if one is ever wanted, gets to be a separate and reversible decision.
 var supersededDefaults = []string{
+	// Superseded 2026-11-27 by the removal of cachesplit (#567).
+	`pipeline: [format, dedup, toon, cmdfilter, searchfold, textclean, extract, cachesplit, toolfilter]
+components:
+  extract:
+    min_tokens: 400
+mode: sync
+`,
 	// Superseded 2026-08-23 by the config named `house` in config.presetConfigs (now an alias of
 	// `conservative`, via init): searchfold
 	// and toolfilter added, dedup moved ahead of toon.
-	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract]
+	`pipeline: [format, toon, textclean, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
 mode: sync
 `,
 	// Superseded 2026-08-20 by the addition of textclean.
-	`pipeline: [format, toon, dedup, cmdfilter, extract]
+	`pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400

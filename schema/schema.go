@@ -128,7 +128,7 @@ func cloneViaJSON(in []schemas.ChatMessage) []schemas.ChatMessage {
 // Type/Text/Refusal/ImageURLStruct/InputAudio/File — it silently drops the three
 // non-OpenAI block fields ChatContentBlock also carries: CacheControl, Citations and
 // CachePoint. Losing cache_control here would DELETE a prompt-cache breakpoint on
-// revert, i.e. exactly what cachesplit/cacheinject exist to put on the wire, and a
+// revert, i.e. exactly what cacheinject exists to put on the wire, and a
 // missed breakpoint costs a full cache write at ~12.5x the cache-read price. So we
 // restore them after the bifrost copy.
 func fallbackClone(in []schemas.ChatMessage, err error) []schemas.ChatMessage {
