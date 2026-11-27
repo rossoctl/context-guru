@@ -181,7 +181,7 @@ var requestCols = `r.id, r.ts, r.tenant_id, r.session_id, r.model, r.provider, r
 	r.status, r.bypassed, r.cache_aware, r.messages, r.tokens_before, r.tokens_after,
 	r.attempted_tokens, r.frozen_tokens, r.saved_unique, r.fresh_input, r.cache_read,
 	r.cache_write, r.output_tokens, r.cost_usd, r.baseline_cost_usd, r.cg_llm_cost_usd,
-	r.cache_saved_usd, r.cachesplit_saved_usd, r.split_stable_tokens,
+	r.cache_saved_usd,
 	r.cache_write_1h, r.keepalive, r.keepalive_pings, ` + kaSaved("r.") + `,
 	r.cg_latency_ms, r.upstream_ms, r.expands, r.expand_tokens, r.reverts,
 	r.token_accounting, r.cache_miss_reason, r.uncompressed_reason,
@@ -218,7 +218,7 @@ func scanRequest(rows interface{ Scan(...any) error }) (*Event, error) {
 		&e.Status, &byp, &ca, &e.Messages, &e.TokensBefore, &e.TokensAfter,
 		&e.AttemptedTokens, &e.FrozenTokens, &e.SavedUnique, &e.FreshInput, &e.CacheRead,
 		&e.CacheWrite, &e.OutputTokens, &e.CostUSD, &e.BaselineCostUSD, &e.CGLLMCostUSD,
-		&e.CacheSavedUSD, &e.CachesplitSavedUSD, &e.SplitStableTokens,
+		&e.CacheSavedUSD,
 		&e.CacheWrite1h, &keepAlive, &e.KeepAlivePings, &e.KeepAliveSavedUSD,
 		&e.CGLatencyMs, &e.UpstreamMs, &e.Expands, &e.ExpandTokens, &e.Reverts,
 		&e.TokenAccounting, &e.CacheMissReason, &e.UncompressedReason,
@@ -852,10 +852,10 @@ type ComponentRow struct {
 	// Acted is the stored `acted` flag: mutated AND removed at least one token
 	// (Event.FromTrace). ActedTokens is the same figure under a name that says so, and
 	// ActedStructural is the rest of `mutated` — runs that changed the request without
-	// removing anything, which is the whole point of a component like cachesplit (it moves a
-	// cache breakpoint) or cacheinject (it places one). Reported apart because one number
-	// could not carry both: cachesplit mutated 1,805 requests on production traffic and
-	// "acted" on 0 of them, so its act rate was permanently 0% and painted red, which is the
+	// removing anything, which is the whole point of a component like cacheinject (it places a
+	// cache breakpoint). Reported apart because one number
+	// could not carry both: such a component can mutate requests and
+	// "act" on 0 of them, so its act rate was permanently 0% and painted red, which is the
 	// same class of bug that was already fixed for the Prometheus counters.
 	ActedTokens     int64   `json:"acted_tokens"`
 	ActedStructural int64   `json:"acted_structural"`
@@ -1525,14 +1525,13 @@ type Bucket struct {
 	SavedUSD float64 `json:"saved_usd"`
 	// CacheSavedUSD is what the PROVIDER's prompt cache saved in this bucket — a
 	// diagnostic series, the one that moves when compaction starts rewriting a live
-	// prefix. CachesplitSavedUSD is the part that is ours (see Overview).
-	CacheSavedUSD      float64 `json:"cache_saved_usd"`
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
-	CGLatencyMs        float64 `json:"cg_latency_ms_avg"`
-	UpstreamMs         float64 `json:"upstream_ms_avg"`
-	Expands            int64   `json:"expands"`
-	ExpandTokens       int64   `json:"expand_tokens"`
-	Misses             int64   `json:"cache_misses"`
+	// prefix.
+	CacheSavedUSD float64 `json:"cache_saved_usd"`
+	CGLatencyMs   float64 `json:"cg_latency_ms_avg"`
+	UpstreamMs    float64 `json:"upstream_ms_avg"`
+	Expands       int64   `json:"expands"`
+	ExpandTokens  int64   `json:"expand_tokens"`
+	Misses        int64   `json:"cache_misses"`
 	// DeferNetUSD is tool deferral's net saving in this bucket: its own series, left out of the
 	// JSON when 0 so an account that never deferred has no deferral series.
 	DeferNetUSD float64 `json:"defer_net_usd,omitempty"`
@@ -1595,7 +1594,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		SUM(r.tokens_before), SUM(r.tokens_after), SUM(r.saved_unique),
 		SUM(r.attempted_tokens), SUM(r.frozen_tokens),
 		SUM(r.fresh_input), SUM(r.cache_read), SUM(r.cache_write), SUM(r.output_tokens),
-		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd), SUM(r.cachesplit_saved_usd),
+		SUM(r.cost_usd), SUM(r.baseline_cost_usd), SUM(r.cg_llm_cost_usd), SUM(r.cache_saved_usd),
 		AVG(r.cg_latency_ms), AVG(r.upstream_ms),
 		SUM(r.expands), SUM(r.expand_tokens),
 		SUM(CASE WHEN r.cache_miss_reason NOT IN ('hit','') THEN 1 ELSE 0 END),
@@ -1612,7 +1611,7 @@ func (d *DB) Series(f Filter, bucketMs int64) ([]*Bucket, error) {
 		var cgAvg, upAvg sql.NullFloat64
 		if err := rows.Scan(&b.TS, &b.Requests, &b.TokensBefore, &b.TokensAfter, &b.SavedUnique,
 			&b.AttemptedTokens, &b.FrozenTokens, &b.FreshInput, &b.CacheRead, &b.CacheWrite,
-			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD, &b.CachesplitSavedUSD,
+			&b.OutputTokens, &b.CostUSD, &b.BaselineCostUSD, &b.CGLLMCostUSD, &b.CacheSavedUSD,
 			&cgAvg, &upAvg, &b.Expands, &b.ExpandTokens, &b.Misses, &b.DeferNetUSD); err != nil {
 			return nil, err
 		}
@@ -1649,13 +1648,12 @@ type GroupRow struct {
 	SpentUSD float64 `json:"spent_usd"`
 	SavedUSD float64 `json:"saved_usd"`
 	// CacheSavedUSD is the PROVIDER's prompt-cache saving for this group (a diagnostic);
-	// CachesplitSavedUSD is ours, and TotalSavedUSD is compaction's plus ours. Per MODEL
+	// TotalSavedUSD is compaction's saving. Per MODEL
 	// these are the numbers that were most wrong before: the rates now come from the
 	// operator's price list, so a gateway that charges half the public API's rate is no
 	// longer reported at the public rate.
-	CacheSavedUSD      float64 `json:"cache_saved_usd"`
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
-	TotalSavedUSD      float64 `json:"total_saved_usd"`
+	CacheSavedUSD float64 `json:"cache_saved_usd"`
+	TotalSavedUSD float64 `json:"total_saved_usd"`
 	// Incomplete counts rows whose accounting is not `complete`, i.e. rows whose cost
 	// contribution is unknown rather than zero. A bar with Requests>0 and
 	// Incomplete==Requests is a bar whose money figures mean nothing, and the UI has to
@@ -1752,7 +1750,7 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		COALESCE(SUM(r.fresh_input),0), COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(r.output_tokens),0),
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
-		COALESCE(SUM(r.cache_saved_usd),0), COALESCE(SUM(r.cachesplit_saved_usd),0),
+		COALESCE(SUM(r.cache_saved_usd),0),
 		COALESCE(SUM(CASE WHEN r.token_accounting <> 'complete' THEN 1 ELSE 0 END),0)
 		FROM requests r WHERE ` + cond + `
 		GROUP BY k ORDER BY SUM(r.cost_usd) DESC, COUNT(*) DESC, k LIMIT 200`
@@ -1767,13 +1765,13 @@ func (d *DB) Breakdown(f Filter, dim string) ([]*GroupRow, error) {
 		if err := rows.Scan(&g.Key, &g.Requests, &g.Sessions,
 			&g.TokensBefore, &g.TokensAfter, &g.SavedUnique,
 			&g.FreshInput, &g.CacheRead, &g.CacheWrite, &g.OutputTokens,
-			&g.CostUSD, &g.BaselineCostUSD, &g.CGLLMCostUSD, &g.CacheSavedUSD, &g.CachesplitSavedUSD, &g.Incomplete); err != nil {
+			&g.CostUSD, &g.BaselineCostUSD, &g.CGLLMCostUSD, &g.CacheSavedUSD, &g.Incomplete); err != nil {
 			return nil, err
 		}
 		g.Saved = g.TokensBefore - g.TokensAfter
 		g.SpentUSD = g.CostUSD + g.CGLLMCostUSD
 		g.SavedUSD = g.BaselineCostUSD - g.SpentUSD
-		g.TotalSavedUSD = g.SavedUSD + g.CachesplitSavedUSD
+		g.TotalSavedUSD = g.SavedUSD
 		out = append(out, &g)
 	}
 	return out, rows.Err()

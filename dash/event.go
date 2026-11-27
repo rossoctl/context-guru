@@ -357,18 +357,6 @@ type Event struct {
 	// because it is the number that falls when a compaction pipeline destroys a prefix —
 	// and reported nowhere as a saving of ours, because it is not one.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	// CachesplitSavedUSD is what the volatile-tail split saved, and it is the only cache
-	// figure this project claims. See Price.
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
-	// SplitStableTokens is the size of the prefix half cachesplit moved the breakpoint
-	// onto — the tokens it moved out of the cache-creation tier, and the numerator of the
-	// figure above. Persisted so the dollar number can be checked against a token count
-	// instead of taken on trust.
-	SplitStableTokens int `json:"split_stable_tokens"`
-	// SplitTailHash identifies the volatile half on this request. Persisted for two reasons:
-	// it seeds the per-session comparison across a restart, and it lets the whole figure be
-	// recomputed from the table rather than trusted.
-	SplitTailHash uint64 `json:"split_tail_hash"`
 	// CacheTTL is the prompt-cache lifetime tier this request ASKED for — "ephemeral_5m",
 	// "ephemeral_1h", or "" for a body that carried no cache_control at all. The pipeline has
 	// always computed this (it is an input to cold-cache attribution) and then discarded it,
@@ -603,26 +591,6 @@ type Event struct {
 	Content    []ContentRow `json:"content,omitempty"`
 	// Extractions is one row per LLM call an expensive component made on this request.
 	Extractions []ExtractionRow `json:"extractions,omitempty"`
-
-	// TailChanged says the volatile tail differs from this session's previous request (or that
-	// this is its first). It is the condition that makes a cache hit attributable to the
-	// split: only on such a turn would the unsplit block have been re-created.
-	//
-	// It replaced "the session's first request", which was the wrong test on real traffic.
-	// Measured on this deployment: 1,105 of 1,127 session starts were COLD — the previous
-	// session's cache had expired before the next began — so a figure gated on the session's
-	// first request was structurally near zero while the component was in fact serving the
-	// system prompt from cache on hundreds of mid-session turns.
-	TailChanged bool `json:"-"`
-
-	// SessionFirst marks the first request captured for this session, which is what makes a
-	// cache hit attributable (see Price). Not persisted because it does not need to be: a
-	// nonzero cachesplit_saved_usd identifies exactly the rows that qualified, and
-	// split_stable_tokens, cache_read and cache_write are all stored beside it, so the
-	// figure can be recomputed from the row. (It is NOT recoverable from
-	// cache_miss_reason, which reads "hit" on every qualifying row — a qualifying row's
-	// read covers the previous prompt, so the partial-read rule (#496) leaves it a hit.)
-	SessionFirst bool `json:"-"`
 
 	// ContentCap is the per-blob byte cap Redact applies. Set at the capture site and
 	// consumed by the writer goroutine; not persisted (a knob, not a fact about the
@@ -954,7 +922,7 @@ func uncompressedReason(e *Event, tr apply.Trace) string {
 // Price fills the cost columns AT WRITE TIME, from this request's four billed token tiers: CostUSD,
 // the provider's own cache saving (CacheSavedUSD, a measurement, never ours), and the accounting
 // fields. It books NO saving of ours: BaselineCostUSD equals CostUSD, and every component's SavedUSD,
-// CachesplitSavedUSD and KeepAliveSavedUSD are 0. The savings are the accountant library's, applied
+// KeepAliveSavedUSD are 0. The savings are the accountant library's, applied
 // by PriceMode. An event the library cannot price (AccountantFallback) keeps these zeros: a saving
 // nothing measured is not shown.
 //
@@ -1041,7 +1009,7 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 			e.CacheSavedUSD = 0 // a provider whose cache reads cost MORE than fresh input saved nothing
 		}
 	}
-	e.CachesplitSavedUSD, e.KeepAliveSavedUSD = 0, 0
+	e.KeepAliveSavedUSD = 0
 	for i := range e.Components {
 		e.Components[i].SavedUSD = 0
 	}

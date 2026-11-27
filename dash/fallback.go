@@ -12,11 +12,10 @@ type FallbackSaving struct {
 	CompactionUSD float64 `json:"compaction_usd"` // baseline - cost - cg_llm: the net_saved_usd part
 	DeferUSD      float64 `json:"defer_usd"`      // tool deferral's figure: the defer_net_usd part
 	KeepAliveUSD  float64 `json:"keepalive_usd"`  // the keep-alive credit: the keepalive_saved_usd part
-	ReorderUSD    float64 `json:"reorder_usd"`    // cachesplit_saved_usd: the cache reorder part
 	FilterUSD     float64 `json:"filter_usd"`     // the measured filter credit: the decl_filter_usd part
 }
 
-// fallbackTerms is the SQL for a fallbackAgg: 6 sums over the rows guard selects ("" for every row the query
+// fallbackTerms is the SQL for a fallbackAgg: 5 sums over the rows guard selects ("" for every row the query
 // reads). since is the window start, for the keep-alive credit (kaSavedSince).
 func fallbackTerms(guard string, since int64) string {
 	col := func(x string) string {
@@ -27,7 +26,7 @@ func fallbackTerms(guard string, since int64) string {
 	}
 	return col("1") + ", " + col("r.cost_usd + r.cg_llm_cost_usd") + ", " +
 		col("r.baseline_cost_usd - r.cost_usd - r.cg_llm_cost_usd") + ", " + col(deferNetCol) + ", " +
-		col(kaSavedSince("r.", since)) + ", " + col("r.cachesplit_saved_usd")
+		col(kaSavedSince("r.", since))
 }
 
 // fallbackAgg is one fallbackTerms read.
@@ -38,7 +37,7 @@ type fallbackAgg struct {
 }
 
 func (a *fallbackAgg) dest() []any {
-	return []any{&a.n, &a.cost, &a.CompactionUSD, &a.DeferUSD, &a.KeepAliveUSD, &a.ReorderUSD}
+	return []any{&a.n, &a.cost, &a.CompactionUSD, &a.DeferUSD, &a.KeepAliveUSD}
 }
 
 func (a *fallbackAgg) add(b fallbackAgg) {
@@ -47,7 +46,6 @@ func (a *fallbackAgg) add(b fallbackAgg) {
 	a.CompactionUSD += b.CompactionUSD
 	a.DeferUSD += b.DeferUSD
 	a.KeepAliveUSD += b.KeepAliveUSD
-	a.ReorderUSD += b.ReorderUSD
 }
 
 // apply sets the Overview's fallback fields. The filter part is not in the SQL, so it is kept.

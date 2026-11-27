@@ -638,37 +638,6 @@ func TestUnpricedRowsAreCountedNotValued(t *testing.T) {
 	}
 }
 
-// TestAmnesiaIsNotAMovedSnapshot pins the write half of the single "moved" definition.
-//
-// The tail map is process-scoped and pruned by age, so a restart or an eviction leaves a
-// mid-session request looking like a first sighting. Crediting that as a moved snapshot is how
-// the only three credited requests on the production corpus were paid: a faithful
-// recomputation calls none of them moved, because their tail had not in fact changed.
-func TestAmnesiaIsNotAMovedSnapshot(t *testing.T) {
-	r, err := NewRecorder(Options{DBPath: filepath.Join(t.TempDir(), "a.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 1000, 0xAA); !changed {
-		t.Error("a session's genuinely first request has nothing to match and must count as moved")
-	}
-	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 2000, 0xAA); changed {
-		t.Error("an unchanged tail was reported as moved")
-	}
-	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 3000, 0xBB); !changed {
-		t.Error("a changed tail was not reported as moved")
-	}
-	// Amnesia: the tail is forgotten, the session is not. This is a restart mid-session.
-	r.mu.Lock()
-	delete(r.lastTail, "s1")
-	r.mu.Unlock()
-	if _, _, _, changed := r.ObserveSplit("", "s1", "m", 4000, 0xBB); changed {
-		t.Error("a session we have SEEN but whose tail we forgot was credited as a moved " +
-			"snapshot; that is amnesia, not a move, and it pays credit for nothing")
-	}
-}
-
 // TestProviderCacheSavingIsNeverOurs is a structural guard on the single most dangerous number
 // on this page.
 //
@@ -681,8 +650,8 @@ func TestAmnesiaIsNotAMovedSnapshot(t *testing.T) {
 func TestProviderCacheSavingIsNeverOurs(t *testing.T) {
 	// A window whose provider cache saved a fortune and whose compaction saved nothing must
 	// still report nothing. TotalSavedUSD is the only figure the headline calls "avoided".
-	o := &Overview{CacheSavedUSD: 3339.18, NetSavedUSD: 0, CachesplitSavedUSD: 0}
-	o.TotalSavedUSD = o.NetSavedUSD + o.CachesplitSavedUSD
+	o := &Overview{CacheSavedUSD: 3339.18, NetSavedUSD: 0}
+	o.TotalSavedUSD = o.NetSavedUSD
 	if o.TotalSavedUSD != 0 {
 		t.Fatalf("total_saved_usd = %.2f with no saving of ours; the provider's cache leaked "+
 			"into our headline", o.TotalSavedUSD)

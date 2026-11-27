@@ -264,8 +264,7 @@ type compStat struct {
 	// component saw no candidates, or saw them and a specific guard refused.
 	// Verdict is the one-word reading of the three counters above, because two of them read
 	// as a contradiction to anyone who has not read the source. A component can MUTATE a
-	// request without SAVING a content token — cachesplit moves tokens out of a hashed
-	// prefix, cacheinject adds cache_control, toolschema rewrites annotations — and for
+	// request without SAVING a content token — cacheinject adds cache_control, toolschema rewrites annotations — and for
 	// those `acted: 0` beside `mutated: 755` has been read as a broken component and filed
 	// as a bug twice, most recently against a mechanism that was working exactly as
 	// designed. So the rollup states the reading rather than leaving it to be inferred:

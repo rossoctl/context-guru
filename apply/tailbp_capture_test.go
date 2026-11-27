@@ -105,7 +105,7 @@ func TestTheNextTurnCarriesTheWholePrefixTheTailBreakpointMarked(t *testing.T) {
 // so the A/B control arm stays a passthrough.
 func TestTheTailBreakpointIsOffWhenTheConfigSaysSo(t *testing.T) {
 	in := betasTurn(t, "1")
-	for _, cfg := range []string{"preset: cache\ncache:\n  tail_breakpoint: false\n", "preset: off\n"} {
+	for _, cfg := range []string{"preset: conservative\ncache:\n  tail_breakpoint: false\n", "preset: off\n"} {
 		if out := tailRun(t, cfg, in); string(out) != string(in) {
 			t.Fatalf("%q: the body changed:\n%.300s", cfg, gjson.GetBytes(out, "messages.1").Raw)
 		}

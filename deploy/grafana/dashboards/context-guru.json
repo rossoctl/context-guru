@@ -761,70 +761,10 @@
    }
   },
   {
-   "id": 41,
-   "type": "stat",
-   "title": "Prefix-cache saved this month",
-   "description": "What context-guru's volatile-tail split saved: counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the request's whole cache_read \u2014 a cachesplit-off control arm still read 45,805 tokens, because the agent's other breakpoints match regardless. Priced against a cache MISS (creation rate, 1.25x fresh) because those tokens carry cache_control. EXPECT IT TO BE SMALL on interactive traffic: Claude Code captures its environment block once per session (measured: one distinct tail hash across nine turns and four commits), and a new session finds the previous prefix already expired unless it started inside the provider's 5-minute TTL (measured: 1,105 of 1,127 session starts read zero from cache). The regime where this pays is back-to-back sessions \u2014 which is what the SWE-bench A/B measured at -34.1% cost. The provider's own total cache saving is cg_tenant_cache_saved_usd, a diagnostic. This stat ADDS cg_tenant_cachesplit_historical_usd: the same saving on requests written before it could be measured per request, valued on read from the model's measured stable half and never stored. Only the session's FIRST request of each of those, because crediting a mid-session turn needs a tail hash those rows do not carry \u2014 so it is a floor on a floor.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "cg-prom"
-   },
-   "gridPos": {
-    "h": 5,
-    "w": 3,
-    "x": 9,
-    "y": 7
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "cg-prom"
-     },
-     "expr": "sum(cg_tenant_cachesplit_saved_usd)",
-     "editorMode": "code",
-     "legendFormat": "Prefix-cache saved",
-     "instant": true,
-     "range": false
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "currencyUSD",
-     "decimals": 2,
-     "mappings": [],
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "#199e70",
-        "value": null
-       }
-      ]
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
-    },
-    "textMode": "value",
-    "colorMode": "value",
-    "graphMode": "none",
-    "justifyMode": "auto"
-   }
-  },
-  {
    "id": 42,
    "type": "stat",
    "title": "Total avoided this month",
-   "description": "The dashboard's own total_saved_usd, matched term for term: compaction (baseline minus actual, minus what our own model calls cost), plus the prefix-cache saving, plus the idle keep-alive's net (credit minus ping spend), plus the declaration filter's saving. Four disjoint sources, all ours, added rather than nested \u2014 the compaction baseline already assumes the cache behaved as it did. It is NOT the cost of an uncached world: the provider's own cache saved far more on the same traffic (cg_tenant_cache_saved_usd) and none of that is credited here. NEGATIVE is the bad value and is painted red: spending more on our own model or pings than we save is exactly the state this tile exists to show, and a green -$10.19 congratulates the operator for being underwater.",
+   "description": "The dashboard's own total_saved_usd, matched term for term: compaction (baseline minus actual, minus what our own model calls cost), plus the idle keep-alive's net (credit minus ping spend), plus the declaration filter's saving. Three disjoint sources, all ours, added rather than nested \u2014 the compaction baseline already assumes the cache behaved as it did. It is NOT the cost of an uncached world: the provider's own cache saved far more on the same traffic (cg_tenant_cache_saved_usd) and none of that is credited here. NEGATIVE is the bad value and is painted red: spending more on our own model or pings than we save is exactly the state this tile exists to show, and a green -$10.19 congratulates the operator for being underwater.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"
@@ -842,7 +782,7 @@
       "type": "prometheus",
       "uid": "cg-prom"
      },
-     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_cachesplit_saved_usd) + sum(cg_tenant_keepalive_net_usd) + sum(cg_tenant_decl_filter_usd)",
+     "expr": "sum(cg_tenant_baseline_cost_usd) - sum(cg_tenant_cost_usd) - sum(cg_tenant_cg_llm_cost_usd) + sum(cg_tenant_keepalive_net_usd) + sum(cg_tenant_decl_filter_usd)",
      "editorMode": "code",
      "legendFormat": "Total avoided this month",
      "instant": true,
@@ -1629,7 +1569,7 @@
    "id": 18,
    "type": "bargauge",
    "title": "Activity rate by component",
-   "description": "How often a component that ran actually CHANGED the request (mutated), not just how often it removed content tokens (acted). The distinction is the whole panel: cachesplit is mutated-never-acted by design \u2014 it moves tokens out of the hashed prefix rather than removing any \u2014 so acted/ran painted the component with the largest measured cost effect (-34.1%) as a dead red bar. 0% here means it genuinely never did anything; check cg_component_gate_declines_total for which gate turned every candidate away.",
+   "description": "How often a component that ran actually CHANGED the request (mutated), not just how often it removed content tokens (acted). The distinction is the whole panel: cacheinject is mutated-never-acted by design \u2014 it moves cache breakpoints rather than removing any tokens \u2014 so acted/ran painted it as a dead red bar. 0% here means it genuinely never did anything; check cg_component_gate_declines_total for which gate turned every candidate away.",
    "datasource": {
     "type": "prometheus",
     "uid": "cg-prom"

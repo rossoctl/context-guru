@@ -183,28 +183,27 @@ type TenantMetricsSource interface {
 // TenantMetricRow is one tenant's rollup. Deliberately flat: every field becomes one
 // Prometheus series, and a nested shape would just have to be flattened here anyway.
 type TenantMetricRow struct {
-	TenantID           string
-	Label              string
-	Requests           int64
-	TokensBefore       int64
-	TokensAfter        int64
-	SavedUnique        int64
-	CacheRead          int64
-	CacheWrite         int64
-	FreshInput         int64
-	OutputTokens       int64
-	CostUSD            float64
-	BaselineUSD        float64
-	CGLLMCostUSD       float64
-	CacheSavedUSD      float64
-	CachesplitSavedUSD float64
-	KeepAliveNetUSD    float64
-	DeclFilterUSD      float64
-	CGLatencyMs        float64
-	UpstreamMs         float64
-	Sessions           int64
-	ArchivedCount      int64
-	ArchivedBytes      int64
+	TenantID        string
+	Label           string
+	Requests        int64
+	TokensBefore    int64
+	TokensAfter     int64
+	SavedUnique     int64
+	CacheRead       int64
+	CacheWrite      int64
+	FreshInput      int64
+	OutputTokens    int64
+	CostUSD         float64
+	BaselineUSD     float64
+	CGLLMCostUSD    float64
+	CacheSavedUSD   float64
+	KeepAliveNetUSD float64
+	DeclFilterUSD   float64
+	CGLatencyMs     float64
+	UpstreamMs      float64
+	Sessions        int64
+	ArchivedCount   int64
+	ArchivedBytes   int64
 }
 
 type promCache struct {
@@ -602,17 +601,16 @@ func (h *Handler) renderMetrics() string {
 		// Per component: which parts of the pipeline are earning their place.
 		// The outcomes are NESTED, not disjoint: acted ⊆ mutated ⊆ ran. `acted` means the
 		// run removed content tokens; `mutated` means it changed the request at all. A
-		// component can be mutated-never-acted BY DESIGN — cachesplit moves tokens out of
-		// the hashed prefix without removing any, so acted/ran reads 0% and the one
-		// component with a measured -34.1% cost effect renders as dead. Any "is this
+		// component can be mutated-never-acted BY DESIGN — cacheinject moves cache breakpoints
+		// without removing any tokens, so acted/ran reads 0% and it renders as dead. Any "is this
 		// component doing anything?" panel wants mutated. `discarded` is the odd one out:
 		// it counts CHANGES the writeback layer threw away, not runs, and it is here
 		// because the family is where an operator already looks.
 		promHeaderProc(&b, "cg_component_runs_total",
 			"Component invocations by outcome. acted (removed content tokens) is a subset of "+
 				"mutated (changed the request at all), which is a subset of ran — a component "+
-				"that mutates without saving content tokens, like cachesplit moving tokens out "+
-				"of the cached prefix, is working. discarded counts changes the writeback layer "+
+				"that mutates without saving content tokens, like cacheinject placing cache "+
+				"breakpoints, is working. discarded counts changes the writeback layer "+
 				"threw away, so it is a count of changes rather than of runs.", "counter")
 		names := make([]string, 0, len(s.Components))
 		for name := range s.Components {
@@ -977,11 +975,6 @@ func (h *Handler) renderMetrics() string {
 				"DIAGNOSTIC, not a saving of ours: what the PROVIDER's prompt cache saved this tenant against paying the fresh rate for the same tokens. The agent places most of the breakpoints. Watch it because rewriting a live prefix destroys it — a fall here is a compaction pipeline going too deep.", "gauge")
 			for _, t := range rows {
 				promLine(&b, "cg_tenant_cache_saved_usd", tenantLabels(t), t.CacheSavedUSD)
-			}
-			promHeader(&b, "cg_tenant_cachesplit_saved_usd",
-				"What context-guru's volatile-tail split (cachesplit) saved this tenant. Counted only where the split ran, the environment snapshot had MOVED since that session's previous request, and the provider then read at least the stable half from cache while writing less than it. The amount is the stable half, not the whole cache_read: with cachesplit off a real session's first request still read 45,805 tokens, so only the difference was ever ours. Priced against a cache miss (creation rate), because those tokens carry cache_control. Expect it to be SMALL against a warm-cache workload: Claude Code captures its environment block once per session, and a session start finds the previous session's prefix already expired unless it began inside the provider's TTL — measured, 1,105 of 1,127 starts were cold. A floor.", "gauge")
-			for _, t := range rows {
-				promLine(&b, "cg_tenant_cachesplit_saved_usd", tenantLabels(t), t.CachesplitSavedUSD)
 			}
 			promHeader(&b, "cg_tenant_keepalive_net_usd",
 				"This tenant's idle keep-alive credit minus its ping spend: what the mechanism actually netted this tenant, over the same rows Overview's keepalive_net_usd sums (a request the mechanism rescued, less what the pings that rescued it cost). Can read negative — a tenant whose pings mostly missed their own refresh nets a real loss, and this series says so rather than hiding it.", "gauge")

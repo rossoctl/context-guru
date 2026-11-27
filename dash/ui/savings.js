@@ -1,8 +1,7 @@
 // The Overview's savings as plain numbers: no DOM, so dash/savings.test.mjs can check that they
 // add up to the server's own total_saved_usd.
 //
-//   cache       keep-alive's net (an upper bound) plus the cache-reorder credit (what moving the stable part
-//               of the prompt first earned, in the window and on earlier requests)
+//   cache       keep-alive's net (an upper bound)
 //   compaction  net_saved_usd, already after our own model calls
 //   filter      tools and skills left out of the prompt
 //   defer       tool deferral's net saving (ultrahigh); 0 on an account that never deferred
@@ -15,15 +14,14 @@ const forTests = typeof module !== 'undefined' ? module.exports : {};
 
 function savedParts(o) {
   const keepalive = o.keepalive_net_usd || 0;
-  const reorder = o.cachesplit_saved_usd || 0; // stored history only: no new rows (#567)
-  const cache = keepalive + reorder;
+  const cache = keepalive;
   const compaction = o.net_saved_usd || 0;
   const filter = o.decl_filter_usd || 0;
   const defer = o.defer_net_usd || 0;
   // The user's own Ping presses. saved_usd is already net of what the pings cost, and the server adds it to
   // total_saved_usd as its own addend, outside the cache strategy.
   const manual = (o.manual_pings && o.manual_pings.saved_usd) || 0;
-  return { cache, keepalive, reorder, compaction, filter, defer, manual, total: cache + compaction + filter + defer + manual, serverTotal: o.total_saved_usd || 0 };
+  return { cache, keepalive, compaction, filter, defer, manual, total: cache + compaction + filter + defer + manual, serverTotal: o.total_saved_usd || 0 };
 }
 forTests.savedParts = savedParts;
 
@@ -43,8 +41,7 @@ function overviewTotals(o) {
   const off = (k) => fb[k] || 0;
   const p = Object.assign({}, all);
   p.keepalive = all.keepalive - off('keepalive_usd');
-  p.reorder = all.reorder - off('reorder_usd');
-  p.cache = p.keepalive + p.reorder;
+  p.cache = p.keepalive;
   p.compaction = all.compaction - off('compaction_usd');
   p.filter = all.filter - off('filter_usd');
   p.defer = all.defer - off('defer_usd');
@@ -271,13 +268,13 @@ function tokenFigure(flow, scope, fmt) {
 }
 forTests.tokenFigure = tokenFigure;
 
-// The request-level cache effects (`cachesplit` is one entry: the split plus its component's own).
-const CACHE_FEATURES = ['keepalive', 'cachesplit', 'ttl'];
+// The request-level cache effects.
+const CACHE_FEATURES = ['keepalive', 'ttl'];
 
 // The Overview cards in tokens, from tokens.by_feature (full read only):
 //   keepalive   the rescue (what the pings paid is not in it: see pingLine)
-//   cachesplit, ttl
-//   cache       the three above together: the Cache card
+//   ttl
+//   cache       the two above together: the Cache card
 //   filter      toolfilter;   defer  tooldefer
 //   compaction  every other entry (the preset's components, ended_change and interaction)
 // The cards add up to the total (totalTokens), tier by tier.
@@ -287,9 +284,8 @@ function featureTokens(o) {
   const rest = Object.keys(bf).filter((k) => !CACHE_FEATURES.includes(k) && k !== 'toolfilter' && k !== 'tooldefer');
   return {
     keepalive: flow(bf.keepalive),
-    cachesplit: flow(bf.cachesplit),
     ttl: flow(bf.ttl),
-    cache: flow(bf.keepalive, bf.cachesplit, bf.ttl),
+    cache: flow(bf.keepalive, bf.ttl),
     filter: flow(bf.toolfilter),
     defer: flow(bf.tooldefer),
     compaction: flow(...rest.map((k) => bf[k])),

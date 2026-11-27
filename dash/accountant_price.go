@@ -19,10 +19,9 @@ type AccFigure struct {
 	// replay of content in the cached prefix). ByComponent minus both is its costs (Caused, breaks).
 	ByComponentFirst, ByComponentReplay map[string]float64
 	// DeltaUSD is the sum of ByComponent plus EndedBreakUSD and InteractionUSD. It excludes
-	// UnattributedBreakUSD, KeepAliveSavedUSD, SplitUSD and TTLUSD.
+	// UnattributedBreakUSD, KeepAliveSavedUSD and TTLUSD.
 	DeltaUSD          float64
 	KeepAliveSavedUSD float64 // rescue effects
-	SplitUSD          float64 // cachesplit effects (Saved - Caused): CachesplitSavedUSD
 	TTLUSD            float64 // headttl effects: premium (negative) plus rescue: the headttl row
 	// EndedBreakUSD is the break a change left behind when it ended (accountant design §5.2 row 1,
 	// Q12): it has no ChangeID, so no component owns it, but the client body would have read that
@@ -52,7 +51,6 @@ type AccFigure struct {
 	// tierUSD(Saved) - tierUSD(Caused).
 	TokByComponent map[string]TokenFlow
 	TokKeepAlive   TokenFlow // rescue effects
-	TokSplit       TokenFlow // split effects
 	TokTTL         TokenFlow // ttlPremium and ttlRescue effects
 	TokEndedBreak  TokenFlow // the break an ended change left behind
 }
@@ -87,7 +85,7 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 	}
 	f.ByComponent, f.ByComponentFirst, f.ByComponentReplay = accrec.ComponentFigure(*e.accRes, fig, rows)
 	f.DeltaUSD = fig.DeltaUSD
-	f.KeepAliveSavedUSD, f.SplitUSD, f.TTLUSD = fig.KeepAliveSavedUSD, fig.SplitUSD, fig.TTLUSD
+	f.KeepAliveSavedUSD, f.TTLUSD = fig.KeepAliveSavedUSD, fig.TTLUSD
 	f.EndedBreakUSD = fig.EndedBreakUSD + fig.UnownedReRateUSD
 	f.UnattributedBreakUSD = fig.UnattributedBreakUSD
 	f.Unpriced, f.Estimated = fig.Unpriced, fig.Estimated
@@ -124,8 +122,6 @@ func (e *Event) AccountantFigure(p modelinfo.Price) AccFigure {
 			}
 		case accountant.EffectRescue:
 			f.TokKeepAlive.addTiers(ce.Saved, ce.Caused)
-		case accountant.EffectSplit:
-			f.TokSplit.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectTTLPremium, accountant.EffectTTLRescue:
 			f.TokTTL.addTiers(ce.Saved, ce.Caused)
 		case accountant.EffectMarkPremium, accountant.EffectMarkPayback:
@@ -236,7 +232,7 @@ func (e *Event) UnpricedWhy() string {
 }
 
 // PriceMode is Price, then an override of each component's SavedUSD, of BaselineCostUSD, of
-// KeepAliveSavedUSD and of CachesplitSavedUSD from the library's figure. CacheSavedUSD (the
+// KeepAliveSavedUSD from the library's figure. CacheSavedUSD (the
 // provider's own cache, a measurement), CostUSD and CGLLMCostUSD always stay as Price set them.
 //
 // The override is all-or-nothing per event, because a partial list would show an unmeasured
@@ -338,7 +334,7 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 	// The tokens of the effects outside the component rows. The headttl and ended_change rows carry
 	// the dollars of TTL and EndedBreak; their tokens are here, never on those rows, so no token is
 	// counted twice.
-	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, Split: fig.TokSplit, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
+	e.AccTokens = AccEffectTokens{KeepAlive: fig.TokKeepAlive, TTL: fig.TokTTL, EndedBreak: fig.TokEndedBreak}
 	e.BaselineCostUSD = e.CostUSD + fig.DeltaUSD
 	// Tool deferral has one figure, the accountant's (#1441): the definitions it left out as a shrink of tools
 	// positions, the search tool and the names list as growth (accountant R56), the tier re-rate, and the search
@@ -378,8 +374,8 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 		// be negative when the request's net effect is a cost (a tooldefer names list, an injected
 		// expand or adjudicate declaration): the cost is held out with the rest, and the readers render
 		// a negative figure as a cost. What stays booked, each in its own column outside the baseline:
-		// the keep-alive rescue (keepalive_saved_usd) and the split saving (cachesplit_saved_usd), which
-		// do not depend on a break. The filter's dollars are owned by the measured credit
+		// the keep-alive rescue (keepalive_saved_usd), which
+		// does not depend on a break. The filter's dollars are owned by the measured credit
 		// (declFilterInBaseline is false for a held row), not by this figure.
 		e.EstimatedSavedUSD = fig.DeltaUSD
 		e.EstimatedSavedLowUSD = accrec.HeldFloorUSD(fig.Fig, fig.DeltaUSD)
@@ -390,12 +386,11 @@ func (e *Event) accOverride(p modelinfo.Price) string {
 			e.Components[i].Tokens = TokenFlow{}
 		}
 		// The tokens of what is held out are held out too: the head-TTL legs and the ended-change
-		// break are part of fig.DeltaUSD. The rescue and the split stay, as their dollars do.
+		// break are part of fig.DeltaUSD. The rescue stays, as its dollars do.
 		e.AccTokens.TTL, e.AccTokens.EndedBreak = TokenFlow{}, TokenFlow{}
 	}
-	// The keep-alive rescue and the split saving keep their own columns, outside the baseline, as
-	// the legacy rules had them: every reader of keepalive_saved_usd and cachesplit_saved_usd stays valid.
-	e.KeepAliveSavedUSD, e.CachesplitSavedUSD = fig.KeepAliveSavedUSD, fig.SplitUSD
+	// The keep-alive rescue keeps its own column, outside the baseline, as the legacy rules had it.
+	e.KeepAliveSavedUSD = fig.KeepAliveSavedUSD
 	e.PriceEstimated = estimated
 	e.AccountantPriced = true
 	return ""

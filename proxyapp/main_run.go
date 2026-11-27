@@ -1165,7 +1165,7 @@ func (d *dashEmitter) KeepAlivePing(r components.KeepAliveReport) {
 	// current while the user is idle. auth_subscription stays 0: a ping carries no client auth kind.
 	ev.Limits = proxy.PingLimits(r)
 	// ev.Price still has to run: it is what fills TokenAccounting, BilledTokenFactor,
-	// BaselineCostUSD, CachesplitSavedUSD and KeepAliveSavedUSD, none of which the report
+	// BaselineCostUSD and KeepAliveSavedUSD, none of which the report
 	// carries. But r.CostUSD is already the authoritative figure — record1 computed it,
 	// priced the same way, to drive the keeper's OWN bookkeeping (e.spent, k.spentUSD) — so
 	// overwrite Price's recomputation with it afterward rather than trusting a second
@@ -1265,7 +1265,7 @@ func (a tenantMetricsAdapter) TenantMetrics(since int64) ([]proxy.TenantMetricRo
 			SavedUnique: r.SavedUnique, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
 			FreshInput: r.FreshInput, OutputTokens: r.OutputTokens,
 			CostUSD: r.CostUSD, BaselineUSD: r.BaselineUSD, CGLLMCostUSD: r.CGLLMCostUSD,
-			CacheSavedUSD: r.CacheSavedUSD, CachesplitSavedUSD: r.CachesplitSavedUSD,
+			CacheSavedUSD:   r.CacheSavedUSD,
 			KeepAliveNetUSD: kaNet[r.TenantID], DeclFilterUSD: declFilter[r.TenantID],
 			CGLatencyMs: r.CGLatencyMs, UpstreamMs: r.UpstreamMs, Sessions: r.Sessions,
 			ArchivedCount: r.ArchivedCount, ArchivedBytes: r.ArchivedBytes,

@@ -502,6 +502,14 @@ var removedComponents = map[string]bool{
 	"cachesplit": true,
 }
 
+// removedPresets are presets that no longer exist. A stored config or a --preset flag that still
+// names one loads with a warning and runs the pipeline as written (empty if none), never fails.
+//
+// cache named cachesplit alone (#567).
+var removedPresets = map[string]bool{
+	"cache": true,
+}
+
 // dropRemoved removes removedComponents from the pipeline and their config blocks.
 func (c *Config) dropRemoved() {
 	kept := c.Pipeline[:0:0]
@@ -527,6 +535,10 @@ func (c *Config) dropRemoved() {
 // were already decoded, so the preset only supplies what the user left unset.
 func (c *Config) applyPreset() error {
 	if c.Preset == "" {
+		return nil
+	}
+	if removedPresets[c.Preset] {
+		slog.Warn("config: preset was removed and is ignored", "preset", c.Preset)
 		return nil
 	}
 	// Rich preset: a full config doc carrying tuned per-component settings a bare
@@ -620,7 +632,7 @@ func (c *Config) applyPreset() error {
 //
 // CURRENT AND OBSOLETE PRESETS (#1345). Six presets are current: off, conservative, medium,
 // high, xhigh, ultrahigh. They are the effort ladder the plugin preset pickers offer. The
-// other 15 are OBSOLETE: cache, safe, balanced, aggressive, coding, mcp, agent, general,
+// other 14 are OBSOLETE: safe, balanced, aggressive, coding, mcp, agent, general,
 // summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm. They stay in
 // this map so old configs load and published numbers stay reproducible. They run exactly as
 // before. Do not pick one for a new setup, and do not copy one into a doc example. `conservative`
@@ -628,12 +640,8 @@ func (c *Config) applyPreset() error {
 // wording below that calls an obsolete preset "recommended" is historical.
 var presets = map[string][]string{
 	"off": {}, // passthrough: no components (baseline / A-B control)
-	// OBSOLETE (#1345): cache, safe, balanced, aggressive, coding, mcp, agent, general,
+	// OBSOLETE (#1345): safe, balanced, aggressive, coding, mcp, agent, general,
 	// summarize, summarizer1509, agentdiet, codesmart, codesafe, house, housellm.
-	// cache: RETIRED. It named `cachesplit` alone, which split the git snapshot out of the system
-	// prompt. Claude Code 2.1.328 to 2.1.332 no longer puts the snapshot there, so the component
-	// did nothing and was removed (#567). The preset still loads and now runs no component.
-	"cache": {},
 	// OBSOLETE (#1345): safe, balanced, aggressive.
 	"safe":       {"format", "textclean", "searchfold"},
 	"balanced":   {"format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter", "linecap"},

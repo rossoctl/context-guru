@@ -110,15 +110,6 @@ func TestFigure_RescueIsKeepAliveSaved(t *testing.T) {
 	}
 }
 
-func TestFigure_SplitIsReportedApart(t *testing.T) {
-	f := figOf(accountant.Result{CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectSplit, ChangeID: "cg:cachesplit:1",
-		Saved: accountant.TierTokens{CacheWrite5m: 1000}, Caused: accountant.TierTokens{CacheRead: 1000}}}})
-	want := 1000*3.75e-6 - 1000*0.3e-6
-	if !accNear(f.SplitUSD, want) || f.DeltaUSD != 0 || f.KeepAliveSavedUSD != 0 || len(f.ByComponent) != 0 {
-		t.Fatalf("%+v want %v", f, want)
-	}
-}
-
 func TestFigure_TTLPremiumIsANegativeSaving(t *testing.T) {
 	f := figOf(accountant.Result{CacheEffects: []accountant.CacheEffect{{Kind: accountant.EffectTTLPremium, ChangeID: "headttl:1",
 		Saved: accountant.TierTokens{CacheWrite5m: 1000}, Caused: accountant.TierTokens{CacheWrite1h: 1000}}}})

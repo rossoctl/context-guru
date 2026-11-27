@@ -38,8 +38,8 @@ the part that changes each session. It did nothing on current Claude Code, so we
   150 characters. That is far below the minimum a breakpoint needs, so the provider would ignore
   a breakpoint there.
 - **An old config still loads.** A pipeline or a `components:` block that names `cachesplit` loads
-  with a warning. The name is dropped. The preset `cache` named only `cachesplit`. It still loads and
-  runs no component.
+  with a warning. The name is dropped. The preset `cache` named only `cachesplit`. It was removed
+  too. A config with `preset: cache` loads with a warning and runs no component.
 
 ---
 

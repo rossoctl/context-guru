@@ -15,7 +15,6 @@ type SavingsTotals struct {
 	CGLLMCostUSD    float64 `json:"cg_llm_cost_usd"`
 	NetSavedUSD     float64 `json:"net_saved_usd"`
 
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
 	// DeferNetUSD is tool deferral's net saving (see deferNetSum).
 	DeferNetUSD float64 `json:"defer_net_usd"`
 
@@ -53,9 +52,9 @@ func (d *DB) SavingsTotals(f Filter) (*SavingsTotals, error) {
 	// stays outside the window (#678).
 	err := d.sql.QueryRowContext(d.readCtx(), `SELECT
 		COALESCE(SUM(r.cost_usd),0), COALESCE(SUM(r.baseline_cost_usd),0), COALESCE(SUM(r.cg_llm_cost_usd),0),
-		COALESCE(SUM(r.cachesplit_saved_usd),0), COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0), `+deferNetSum+`
+		COALESCE(SUM(`+kaSavedSince("r.", f.Since)+`),0), `+deferNetSum+`
 		FROM requests r WHERE `+cond, args...).Scan(
-		&s.CostUSD, &s.BaselineCostUSD, &s.CGLLMCostUSD, &s.CachesplitSavedUSD, &s.KeepAliveSavedUSD, &s.DeferNetUSD)
+		&s.CostUSD, &s.BaselineCostUSD, &s.CGLLMCostUSD, &s.KeepAliveSavedUSD, &s.DeferNetUSD)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +67,7 @@ func (d *DB) SavingsTotals(f Filter) (*SavingsTotals, error) {
 	}
 	s.ManualPings = manual.pings()
 	s.NetSavedUSD, s.KeepAliveNetUSD, s.TotalSavedUSD = savingsArithmetic(
-		s.CostUSD, s.BaselineCostUSD, s.CGLLMCostUSD, s.CachesplitSavedUSD, s.KeepAliveSavedUSD, s.KeepAlivePingUSD,
+		s.CostUSD, s.BaselineCostUSD, s.CGLLMCostUSD, s.KeepAliveSavedUSD, s.KeepAlivePingUSD,
 		s.ManualPings.SavedUSD, s.DeferNetUSD)
 	return s, nil
 }
@@ -83,10 +82,10 @@ func (d *DB) SavingsTotals(f Filter) (*SavingsTotals, error) {
 //
 // deferNet is tool deferral's net saving (#888): the deferred definitions are in the top-level
 // `tools` array, which tokens_before never counted, so no other addend holds them.
-func savingsArithmetic(cost, baseline, cgllm, cachesplitSaved, kaSaved, kaPing, manualNet, deferNet float64) (net, kaNet, total float64) {
+func savingsArithmetic(cost, baseline, cgllm, kaSaved, kaPing, manualNet, deferNet float64) (net, kaNet, total float64) {
 	net = baseline - cost - cgllm
 	kaNet = kaSaved - kaPing
-	total = net + cachesplitSaved + kaNet + manualNet + deferNet
+	total = net + kaNet + manualNet + deferNet
 	return net, kaNet, total
 }
 

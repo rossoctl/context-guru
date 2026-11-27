@@ -613,8 +613,6 @@ async function openRequest(id, fromURL) {
       // On a turn whose cache HIT this is usually the largest money figure on the row,
       // and it was not reported anywhere: the cache reads this request was billed for,
       // against the fresh rate they would have cost without the cache.
-      kv(term('Cache reorder saving', 'Dollars saved by moving the stable part of the prompt first so the provider cache could reuse it.'), priced ? usd(e.cachesplit_saved_usd) : '—'),
-      kv('Stable part moved', e.split_stable_tokens ? compact(e.split_stable_tokens) + ' tok' : '—'),
       kv(term('Provider cache saving', 'Dollars the provider prompt cache saved on this request.'), priced ? usd(e.cache_saved_usd) : '—'),
       kv('Delay added by context-guru', ms(e.cg_latency_ms)),
       kv('Provider response time', ms(e.upstream_ms)),

@@ -47,7 +47,7 @@ in `/stats`, never content. See [`config/config.go`](../design.md#config-registr
 ## Obsolete presets
 
 !!! warning "Obsolete (#1345)"
-    These 15 presets are **obsolete**: `cache`, `safe`, `balanced`, `aggressive`, `coding`,
+    These 14 presets are **obsolete**: `safe`, `balanced`, `aggressive`, `coding`,
     `mcp`, `agent`, `general`, `summarize`, `summarizer1509`, `agentdiet`, `codesmart`,
     `codesafe`, `house`, `housellm`. Do not pick one for a new setup. Use one of the six
     current presets above.
@@ -59,7 +59,7 @@ in `/stats`, never content. See [`config/config.go`](../design.md#config-registr
 |---|---|
 | `house` | `conservative` (same pipeline). `house` was the binary default before `conservative`. |
 | `housellm` | `xhigh` (adds the summarizer to it) or `medium`. |
-| `cache`, `safe`, `balanced`, `coding`, `mcp`, `codesafe` | `conservative` (no model calls). |
+| `safe`, `balanced`, `coding`, `mcp`, `codesafe` | `conservative` (no model calls). |
 | `codesmart`, `aggressive`, `agent`, `general` | `medium` or `high`. |
 | `summarize`, `summarizer1509`, `agentdiet` | None. These stay by name for baselines and A/B runs. |
 
@@ -67,7 +67,6 @@ in `/stats`, never content. See [`config/config.go`](../design.md#config-registr
 |---|---|
 | `codesmart` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap` |
 | `codesafe` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap` |
-| `cache` | *(empty)* |
 | `safe` | `format, textclean, searchfold` |
 | `balanced` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, linecap` |
 | `aggressive` | `format, textclean, searchfold, dedup, failed_run, cmdfilter, smartcrush, extract, extract_llm, linecap` |
@@ -87,17 +86,6 @@ baseline for A/B comparison. Neither is a recommendation.
 ## Notes on the obsolete presets
 
 These notes describe how the obsolete presets behave. They stay so that old configs make sense.
-
-### `cache`
-
-**Retired.** It named `cachesplit` alone. That component was removed (#567), because Claude Code
-2.1.328 to 2.1.332 no longer puts the git snapshot in the system prompt, so it did nothing. See
-[cachesplit was removed](../components/caching.md#cachesplit-was-removed).
-
-- The name still loads. It now runs **no component**, so it forwards requests unchanged.
-- It no longer adds the tail breakpoint, because an empty pipeline never runs it.
-- Use `conservative`, the default, if you want a pipeline.
-
 
 **`codesmart`** was the cheapest arm in the
 [benchmarks](../RESULTS.md) at the highest reward. It is the one preset that ships tuned
@@ -187,7 +175,6 @@ Pipelines below are taken exactly from the `presets` map in `config/config.go`. 
 | `codesmart` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract_llm` → `extract` → `linecap` | The SWE-bench-winning cache-aware config: structural offloaders + a cheap-model relevance-trimmer (`extract_llm`, routed to `CHEAP_MODEL`, gated so most turns make no model call) + deterministic `extract`. `extract_llm` no-ops (→ deterministic) when no cheap model is configured. **Changed 2026-08:** the lossless trio replaced `toon`, which acted 0 times on 5,752 production requests, and `linecap` was added. Re-measure before quoting the published SWE-bench numbers against it. |
 | `codesafe` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `extract` → `collapse` → `linecap` | `codesmart` minus the LLM pass — **deterministic-only, zero model calls by policy**. The safe control / the choice when you don't want an LLM on the hot path. |
 | `off` | *(empty)* | Passthrough — no components. The baseline / A-B control, and what the [Claude Code plugin](../how-to/install-plugin.md) installs by default; the plugin's actual default saving mechanism is the `auto` cache strategy (keep-alive), not a pipeline component. |
-| `cache` | *(empty)* | **Retired.** It named `cachesplit` alone, which was removed (#567). It still loads and runs no component. |
 | `safe` | `format` → `textclean` → `searchfold` | Lossless only: repack JSON compactly and split the volatile system tail so the shared prefix stays cacheable. Zero risk of dropping content. |
 | `balanced` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `linecap` | Lossless repack + conservative offloads (dedupe, drop superseded/failed runs, filter command noise) + the cache split. **Not recommended for agentic traffic** — it omits `mask`, the biggest lever there. |
 | `aggressive` | `format` → `textclean` → `searchfold` → `dedup` → `failed_run` → `cmdfilter` → `smartcrush` → `extract` → `extract_llm` → `linecap` | `balanced` plus `smartcrush` (crush long homogeneous arrays), deterministic `extract` (noise collapse), and `extract_llm` (cheap-model relevance trim) for deeper savings. |

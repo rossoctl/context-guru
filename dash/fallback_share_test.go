@@ -42,7 +42,7 @@ func fbEvents(prefix string, base int64, n int, fallback, record bool) []*Event 
 // pings): the priced saving over the priced spend plus the priced saving. Both leave the fallback rows out.
 func pricedShare(o *Overview) float64 {
 	fb := o.FallbackSaved
-	saved := o.TotalSavedUSD - (fb.CompactionUSD + fb.DeferUSD + fb.KeepAliveUSD + fb.ReorderUSD + fb.FilterUSD)
+	saved := o.TotalSavedUSD - (fb.CompactionUSD + fb.DeferUSD + fb.KeepAliveUSD + fb.FilterUSD)
 	spent := o.CostUSD + o.CGLLMCostUSD - o.FallbackCostUSD
 	if without := spent + saved; without > 0 {
 		return 100 * saved / without
@@ -222,7 +222,7 @@ func TestFallbackSavingIsLeftOutToo(t *testing.T) {
 	}
 	// The lean read (the hero's first paint) carries the same count, cost and SQL parts. It has no filter part,
 	// because it has no filter credit either.
-	lean, err := db.OverviewLean(Filter{TenantAll: true, Since: 1}, nil, nil)
+	lean, err := db.OverviewLean(Filter{TenantAll: true, Since: 1}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -102,7 +102,6 @@ SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3, "ok": 4}
 # PRESETS offers through the picker must have an entry here too.
 PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
     "off": (),
-    "cache": (),
     "house": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
               "toolfilter"),
     "codesmart": ("format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter",

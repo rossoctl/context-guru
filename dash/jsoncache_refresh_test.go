@@ -190,22 +190,16 @@ func statsLeanTotalSaved(t *testing.T, mux *http.ServeMux, lean bool, session st
 }
 
 // TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped is the fix for the PR #403
-// review's finding 1 (lean leaving CachesplitHistorical.USD and the declaration-filter credit
+// review's finding 1 (lean leaving the declaration-filter credit
 // out of total_saved_usd), kept exact for the ONE scope #502 found it can stay bounded for:
-// a single session. CachesplitHistoricalUSD's ranking and DeclFilterSavings' scan are both an
+// a single session. DeclFilterSavings' scan is an
 // indexed range read when scoped to one session (dash/overview_lean.go), so lean has no reason
 // to differ from the full handler there, and must not.
 //
-// seedCredit (dash/declcredit_test.go) gives the filter-credit half; a pre-instrumentation
-// cachesplit-historical pair (same shape as TestWaterfallTotalMatchesTheHeadlineAfterAllPricedAdditions
-// in dash/declcredit_test.go) gives the historical-split half, so both of the review's named
-// amounts are actually nonzero in this fixture rather than trivially matching by both being zero.
+// seedCredit (dash/declcredit_test.go) gives the filter-credit, so the amount is actually
+// nonzero in this fixture rather than trivially matching by both being zero.
 func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	db := seedCredit(t, 1000)
-	teach := mkEvent(9000, "s-hist", "aws/claude-sonnet-5", 100, 100)
-	teach.TenantID, teach.CacheRead, teach.CacheWrite, teach.SplitStableTokens = "t1", 54_304, 1_000, 5_697
-	qualifies := mkEvent(9100, "s-new-hist", "aws/claude-sonnet-5", 100, 100)
-	qualifies.TenantID, qualifies.CacheRead, qualifies.CacheWrite = "t1", 54_304, 1_000
 	// One filtered row on a model staticPricer refuses to price (see its own doc comment: the
 	// sentinel name "some/unmeasured-model" always returns Priced=false). This is the fixture
 	// gap a re-review of this PR found: DeclFilterSaving.Priced goes false the moment ANY ONE
@@ -215,7 +209,7 @@ func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	// price, so without this row the parity assertion below would pass for the wrong reason.
 	unpriced := mkEvent(9200, "s-unpriced", "some/unmeasured-model", 100, 90)
 	unpriced.TenantID, unpriced.Tools, unpriced.FilteredDeclTokens = "t1", 4, 500
-	if err := db.insertBatch([]*Event{teach, qualifies, unpriced}); err != nil {
+	if err := db.insertBatch([]*Event{unpriced}); err != nil {
 		t.Fatal(err)
 	}
 	rec := &Recorder{db: db, hub: NewHub(), done: make(chan struct{})}
@@ -234,9 +228,7 @@ func TestStatsLeanTotalSavedMatchesFullHandlerWhenSessionScoped(t *testing.T) {
 	for _, tc := range []struct {
 		session  string
 		wantDecl bool
-		wantHist bool
 	}{
-		{session: "s-new-hist", wantHist: true},
 		{session: "se", wantDecl: true},
 	} {
 		fullSaved, fullDecl := statsLeanTotalSaved(t, mux, false, tc.session)

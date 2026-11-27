@@ -31,7 +31,6 @@
  "cache_ttl_recorded": 0,
  "cache_write": 7804120,
  "cache_write_1h": 0,
- "cachesplit_saved_usd": 0,
  "cg_latency_ms_avg": 3.7766497461928936,
  "cg_latency_ms_p95": 6,
  "cg_llm_cost_usd": 0,
@@ -98,8 +97,7 @@
   "compaction_usd": 0,
   "defer_usd": 0,
   "filter_usd": 0,
-  "keepalive_usd": 0,
-  "reorder_usd": 0
+  "keepalive_usd": 0
  },
  "fresh_input": 23640,
  "frozen_tokens": 0,
@@ -157,10 +155,6 @@
  "saved_unique": 498363,
  "sessions": 60,
  "since": 0,
- "split_credited": 0,
- "split_credited_moved": 0,
- "split_requests": 0,
- "split_tail_moved": 0,
  "sse_buffered": 0,
  "sse_buffered_pct": 0,
  "sse_recorded": 0,
@@ -242,13 +236,6 @@
    "key": "net_saved",
    "label": "Net savings",
    "total": true
-  },
-  {
-   "delta_usd": -0,
-   "description": "A SECOND saving, outside the walk above, and the only cache figure we claim. Claude Code ends its big system block with a live environment snapshot, so the block's own breakpoint hashes the churn and the prefix never matches across sessions; cachesplit moves the breakpoint onto the stable half. Counted only where the component rewrote the prefix, the provider then read it from cache, AND the snapshot had MOVED since this session's previous request — the turn that would otherwise have missed. A turn whose snapshot did not move would have hit whether or not we ever split, so it is not ours. Priced against a cache MISS, which is what the counterfactual actually is: those tokens carry cache_control, so a miss bills them as creation at 1.25x fresh, not at 1x. A floor — a stable prefix serves a whole session and this counts one request of it.",
-   "key": "cachesplit_saved",
-   "label": "Prefix-cache savings",
-   "total": false
   },
   {
    "delta_usd": 0.006,

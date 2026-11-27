@@ -134,7 +134,7 @@ func TestLosslessFoldsAreInEveryWorkingPreset(t *testing.T) {
 	// fast. See TestCachePresetIsCachesplitAlone, which holds the other side of that trade.
 	// summarizer1509 is exempt for exactly summarize's reason — it IS summarize, configured as the
 	// cache-unaware no-reuse reference arm, and it restructures the transcript alone.
-	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true, "cache": true}
+	exempt := map[string]bool{"off": true, "summarize": true, "summarizer1509": true, "agentdiet": true}
 	for name, pipeline := range presets {
 		if exempt[name] {
 			continue
@@ -233,23 +233,35 @@ func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
 	}
 }
 
-// TestCachePresetIsRetired holds the retired `cache` preset to what it is now: a name that still
-// loads and runs no component. It named `cachesplit` alone, which was removed (#567). Old configs
-// and links that say `preset: cache` must keep working, so the name stays.
-func TestCachePresetIsRetired(t *testing.T) {
-	p, ok := presets["cache"]
-	if !ok {
-		t.Fatal("preset `cache` is gone; an old config that names it would fail to load")
+// TestRemovedCachePresetFailsOpen holds the removed `cache` preset to what an old config needs: it
+// loads with a warning, runs no component, and is no longer a preset. The same name from the
+// --preset flag goes through the same loader.
+func TestRemovedCachePresetFailsOpen(t *testing.T) {
+	if _, ok := PresetPipeline("cache"); ok {
+		t.Fatal("preset `cache` still exists")
 	}
-	if len(p) != 0 {
-		t.Fatalf("preset `cache` = %v, want no component", p)
+	for _, doc := range []string{
+		"preset: cache\n",
+		"preset: cache\ncache:\n  keepalive: true\n",
+		"preset: cache\npipeline: [format]\n",
+	} {
+		c, err := LoadBytes([]byte(doc))
+		if err != nil {
+			t.Fatalf("%q must load: %v", doc, err)
+		}
+		want := 0
+		if strings.Contains(doc, "format") {
+			want = 1
+		}
+		if len(c.Pipeline) != want {
+			t.Errorf("%q: pipeline %v, want %d component(s)", doc, c.Pipeline, want)
+		}
+		if err := Validate([]byte(doc)); err != nil {
+			t.Errorf("%q: Validate must accept it: %v", doc, err)
+		}
 	}
-	built, ok := PresetPipeline("cache")
-	if !ok {
-		t.Fatal(`PresetPipeline("cache") did not resolve, so ?preset=cache would 400`)
-	}
-	if len(built) != 0 {
-		t.Fatalf(`PresetPipeline("cache") = %v, want no component`, built)
+	if _, err := LoadBytes([]byte("preset: nonesuch\n")); err == nil {
+		t.Error("an unknown preset must still fail")
 	}
 }
 
@@ -391,8 +403,7 @@ func TestExpandInBandBreakpointReachesThePipeline(t *testing.T) {
 // `cache.tail_breakpoint` (#795) is on unless set to false, and never on an empty pipeline.
 func TestCacheTailBreakpointReachesThePipeline(t *testing.T) {
 	for doc, want := range map[string]bool{
-		"preset: cache\n":        false, // retired: it runs no component
-		"preset: conservative\n": true,
+		"preset: conservative\n":                                   true,
 		"preset: conservative\ncache:\n  tail_breakpoint: true\n":  true,
 		"preset: conservative\ncache:\n  tail_breakpoint: false\n": false,
 		"preset: off\n": false,

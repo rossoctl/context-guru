@@ -273,8 +273,7 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 }
 
 // DeclFilterSavingsByTenant is DeclFilterSavings for every tenant since a given time, in one
-// pass instead of one call per tenant — see CachesplitHistoricalUSDByTenant
-// (dash/cachehistory.go) for why a query per tenant re-pays the same table scan N times over.
+// pass instead of one call per tenant, which would re-pay the same table scan N times over.
 func (d *DB) DeclFilterSavingsByTenant(since int64, price func(string) (modelinfo.Price, bool)) (map[string]*DeclFilterSaving, error) {
 	cond, args := (Filter{Since: since, TenantAll: true}).where()
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.model, r.filtered_decl_tokens,

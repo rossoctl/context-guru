@@ -1398,14 +1398,11 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		// dash/overview_lean.go's own doc comment for exactly which fields and why.
 		//
 		// #502: this used to run the FULL Overview() (sixteen queries; lean reads a handful
-		// of their outputs) plus CachesplitHistoricalUSD and DeclFilterSavings
+		// of their outputs) plus DeclFilterSavings
 		// UNCONDITIONALLY. Overview()'s own window-function sub-queries (the replay ceiling,
 		// CompactionResets) are exactly the per-session-squared and whole-table costs #492
-		// and #502 measured; CachesplitHistoricalUSD and DeclFilterSavings are bounded for a
-		// session but not for a time window or `since=0` (CachesplitHistoricalUSD's own
-		// comment: its ranking must see a session's whole history, so it cannot be scoped by
-		// time without changing the answer). OverviewLean runs none of the unneeded queries,
-		// and the two read-time-priced credits only when `session=` is set, where they are
+		// and #502 measured. OverviewLean runs none of the unneeded queries,
+		// and the read-time-priced credit only when `session=` is set, where they are
 		// bounded. The rule, from #502's own plan comment: "/api/stats?lean=1 is the bounded
 		// path. Every query on it must have a cost that does not grow with the session's
 		// size squared, nor with the whole table."
@@ -1421,7 +1418,7 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 					repLedger, repErr = a.replayLedger(db, f)
 				}
 			}()
-			o, err := db.OverviewLean(f, a.pricer, a.priceFn(r))
+			o, err := db.OverviewLean(f, a.priceFn(r))
 			<-repDone
 			if err != nil {
 				return nil, err

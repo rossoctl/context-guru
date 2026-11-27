@@ -14,7 +14,7 @@ const fiveMin = int64(5 * 60 * 1000)
 // returns its miss label. Every request here re-wrote its prompt (cache_write > 0, no read),
 // which is the shape of the 46 misses issue #423 was filed for.
 func attribute(r *Recorder, session, threadID string, ts int64) string {
-	seenSession, seenModel, since, _ := r.ObserveThread("t1", session, threadID, "m", ts, 0)
+	seenSession, seenModel, since := r.ObserveThread("t1", session, threadID, "m", ts)
 	e := &Event{CacheWrite: 400_000}
 	e.AttributeCache(seenSession, seenModel, since, fiveMin, causeIf(e.CacheWrite > 0), 0)
 	return e.CacheMissReason
@@ -25,7 +25,7 @@ func attribute(r *Recorder, session, threadID string, ts int64) string {
 func TestInterleavedThreadsAttributeTheMainThreadsExpiry(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	run := func(sub string, observe func(r *Recorder, thread string, ts int64) string) string {
-		r := &Recorder{lastSeen: map[string]int64{}, lastTail: map[string]uint64{}, seenModel: map[string]bool{}}
+		r := &Recorder{lastSeen: map[string]int64{}, seenModel: map[string]bool{}}
 		observe(r, "", t0)
 		for i := int64(1); i <= 8; i++ {
 			observe(r, sub, t0+i*60_000)
@@ -46,7 +46,7 @@ func TestInterleavedThreadsAttributeTheMainThreadsExpiry(t *testing.T) {
 
 // Test 2 of the issue: a subagent's first request is a cold start for a new thread.
 func TestASubagentsFirstRequestIsAColdStart(t *testing.T) {
-	r := &Recorder{lastSeen: map[string]int64{}, lastTail: map[string]uint64{}, seenModel: map[string]bool{}}
+	r := &Recorder{lastSeen: map[string]int64{}, seenModel: map[string]bool{}}
 	const t0 = int64(1_700_000_000_000)
 	attribute(r, "s1", "", t0)
 	if got := attribute(r, "s1", "a:S", t0+1000); got != CacheColdStart {
@@ -58,11 +58,11 @@ func TestASubagentsFirstRequestIsAColdStart(t *testing.T) {
 }
 
 // The primary thread keys exactly as the session did, so single-thread traffic is unchanged:
-// ObserveSplit (the pre-#423 entry point) and ObserveThread with the primary id share state.
+// Observe (the pre-#423 entry point) and ObserveThread with the primary id share state.
 func TestThePrimaryThreadSharesTheSessionsState(t *testing.T) {
-	r := &Recorder{lastSeen: map[string]int64{}, lastTail: map[string]uint64{}, seenModel: map[string]bool{}}
-	r.ObserveSplit("t1", "s1", "m", 1000, 0)
-	seen, _, since, _ := r.ObserveThread("t1", "s1", "", "m", 4000, 0)
+	r := &Recorder{lastSeen: map[string]int64{}, seenModel: map[string]bool{}}
+	r.Observe("t1", "s1", "m", 1000)
+	seen, _, since := r.ObserveThread("t1", "s1", "", "m", 4000)
 	if !seen || since != 3000 {
 		t.Fatalf("primary thread did not see the session's state: seen=%v since=%d", seen, since)
 	}
@@ -90,11 +90,11 @@ func TestARestartRecoversRecencyPerThread(t *testing.T) {
 	if n, err := rec2.SeedSessions(now + 480_000); err != nil || n != 2 {
 		t.Fatalf("seeded %d threads (err %v), want 2", n, err)
 	}
-	seen, _, since, _ := rec2.ObserveThread("t1", "s1", "", "m", now+480_000, 0)
+	seen, _, since := rec2.ObserveThread("t1", "s1", "", "m", now+480_000)
 	if !seen || since != 480_000 {
 		t.Errorf("main thread recovered gap = %d ms (seen %v), want 480000 — the gap since its own last request", since, seen)
 	}
-	seen, _, since, _ = rec2.ObserveThread("t1", "s1", "a:S", "m", now+480_000, 0)
+	seen, _, since = rec2.ObserveThread("t1", "s1", "a:S", "m", now+480_000)
 	if !seen || since != 60_000 {
 		t.Errorf("subagent recovered gap = %d ms (seen %v), want 60000", since, seen)
 	}
@@ -118,14 +118,14 @@ func TestARestartRecoversRecencyPerThread(t *testing.T) {
 func TestAnInheritingThreadIsNotAColdStart(t *testing.T) {
 	const t0 = int64(1_700_000_000_000)
 	label := func(gap int64, inherit bool) string {
-		r := &Recorder{lastSeen: map[string]int64{}, lastTail: map[string]uint64{}, seenModel: map[string]bool{}}
+		r := &Recorder{lastSeen: map[string]int64{}, seenModel: map[string]bool{}}
 		attribute(r, "s1", "", t0)
 		var seen, seenModel bool
 		var since int64
 		if inherit {
-			seen, seenModel, since, _ = r.ObserveThreadFrom("t1", "s1", "p:rewind", "", "m", t0+gap, 0)
+			seen, seenModel, since = r.ObserveThreadFrom("t1", "s1", "p:rewind", "", "m", t0+gap)
 		} else {
-			seen, seenModel, since, _ = r.ObserveThread("t1", "s1", "p:rewind", "m", t0+gap, 0)
+			seen, seenModel, since = r.ObserveThread("t1", "s1", "p:rewind", "m", t0+gap)
 		}
 		e := &Event{CacheWrite: 400_000}
 		e.AttributeCache(seen, seenModel, since, fiveMin, CauseToolsChanged, 0)

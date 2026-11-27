@@ -2189,10 +2189,7 @@ type abVariant struct {
 	// went. This is the one place that number belongs in a comparison rather than in a
 	// savings total: here it is the control variable, not the credit.
 	CacheSavedUSD float64 `json:"cache_saved_usd"`
-	// CachesplitSavedUSD is our own prefix-cache saving, which is what an A/B of
-	// cachesplit on-versus-off is actually measuring.
-	CachesplitSavedUSD float64 `json:"cachesplit_saved_usd"`
-	Incomplete         int64   `json:"incomplete_rows"`
+	Incomplete    int64   `json:"incomplete_rows"`
 	// Components is per-component acted/reverted/saved, folded across this variant's
 	// accounts.
 	Components []abComponent `json:"components"`
@@ -2281,7 +2278,6 @@ func (h *Handler) ctlVariants(w http.ResponseWriter, r *http.Request) {
 			v.SavedUSD += g.SavedUSD
 			v.BaselineCostUSD += g.BaselineCostUSD
 			v.CacheSavedUSD += g.CacheSavedUSD
-			v.CachesplitSavedUSD += g.CachesplitSavedUSD
 			v.Incomplete += g.Incomplete
 		}
 		// Per-component rows are only available per tenant, so they are folded one account

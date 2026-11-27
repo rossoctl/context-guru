@@ -14,7 +14,7 @@ import (
 // handful of their outputs: confirmed against context-guru-plugin/scripts/statusline.py and
 // scripts/cg.py, lean needs total_saved_usd, keepalive_net_usd, keepalive_misses_avoided,
 // upstream_ms_avg, cg_latency_ms_avg, cost_usd, baseline_cost_usd, cache_saved_usd, and the
-// waterfall rows keyed "compaction", "cachesplit_saved", "keepalive_saved", "keepalive_ping",
+// waterfall rows keyed "compaction", "keepalive_saved", "keepalive_ping",
 // "decl_filter_saved", "cg_llm", plus the saved token counts saved_unique,
 // saved_gross and replay_tokens (the status line's `rd / wr`, #990) — every one a plain SUM/AVG of a
 // `requests` column or arithmetic on them, bounded by the session or the time window, same index Overview()'s own main
@@ -28,15 +28,10 @@ import (
 // call with neither bound to the full handler, which is exact. The status line stopped reading
 // lifetime (#510), so lean is only ever a bounded read.
 //
-// The 2 read-time-priced credits (CachesplitHistoricalUSD, DeclFilterSavings) are included for
-// SESSION and DAY scope, each wherever its OWN bound holds:
-//
-//   - DeclFilterSavings' SELECT is a plain filtered scan, bounded by the same index as the main
-//     aggregate for a session OR a time window — included for both.
-//   - CachesplitHistoricalUSD's ranking has to see a session's WHOLE history to know which row
-//     was its first (dash/cachehistory.go's own comment) — bounded for a session only, so a
-//     day-window call does not get it either.
-func (d *DB) OverviewLean(f Filter, pricer modelinfo.Pricer, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
+// The read-time-priced credit (DeclFilterSavings) is included for SESSION and DAY scope:
+// its SELECT is a plain filtered scan, bounded by the same index as the main aggregate for a
+// session OR a time window.
+func (d *DB) OverviewLean(f Filter, priceFn func(string) (modelinfo.Price, bool)) (*Overview, error) {
 	o, err := d.overviewLeanWindow(f)
 	if err != nil {
 		return nil, err
@@ -64,7 +59,7 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	var fb fallbackAgg
 	if err := d.sql.QueryRowContext(d.readCtx(), q, args...).Scan(append([]any{
 		&o.Requests, &o.TokensBefore, &o.TokensAfter, &o.SavedUnique,
-		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD, &o.CachesplitSavedUSD,
+		&o.CostUSD, &o.BaselineCostUSD, &o.CGLLMCostUSD, &o.CacheSavedUSD,
 		&o.KeepAliveSavedUSD, &o.KeepAliveMissesAvoided, &upAvg, &cgAvg, &o.KeepAlivePingUSD, &o.KeepAlivePings,
 		&o.EstimatedRequests, &o.EstimatedSavedUSD, &o.EstimatedSavedLowUSD},
 		append(append(append(manual.dest(), &o.DeferNetUSD), tok.dest()...), fb.dest()...)...)...); err != nil {
@@ -74,7 +69,7 @@ func (d *DB) overviewLeanWindow(f Filter) (*Overview, error) {
 	fb.apply(o)
 	o.UpstreamMsAvg, o.CGLatencyMsAvg = upAvg.Float64, cgAvg.Float64
 	o.NetSavedUSD, o.KeepAliveNetUSD, o.TotalSavedUSD = savingsArithmetic(
-		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.CachesplitSavedUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
+		o.CostUSD, o.BaselineCostUSD, o.CGLLMCostUSD, o.KeepAliveSavedUSD, o.KeepAlivePingUSD,
 		o.ManualPings.SavedUSD, o.DeferNetUSD)
 	// The same arithmetic as the full Overview(), from the same agent-only columns, so a lean read gives the status
 	// line's `rd` (replay_tokens) and not 0 (#990).
@@ -116,7 +111,6 @@ func leanWindowMainQuery(f Filter) (string, []any) {
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.baseline_cost_usd ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cg_llm_cost_usd ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cache_saved_usd ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN ` + agent + ` THEN r.cachesplit_saved_usd ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + agent + ` THEN ` + kaSavedSince("r.", f.Since) + ` ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN ` + agent + ` AND ` + kaSavedSince("r.", f.Since) + ` > 0 THEN 1 ELSE 0 END),0),
 			AVG(CASE WHEN ` + agent + ` THEN r.upstream_ms END),

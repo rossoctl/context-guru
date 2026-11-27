@@ -11,7 +11,7 @@ import (
 
 // Read-time valuation of figures the store recorded without pricing.
 //
-// Same principle as CachesplitHistoricalUSD next door: the store holds absolutes, the rates
+// The store holds absolutes, the rates
 // live outside it, and a dollar figure is therefore computed on every query rather than
 // frozen into a row. Two things are valued here.
 //

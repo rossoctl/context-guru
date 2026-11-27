@@ -6,11 +6,11 @@ import { readFileSync } from 'node:fs';
 const { savedParts } = createRequire(import.meta.url)('./ui/savings.js');
 
 test('cache + compaction + filter equal total_saved_usd', () => {
-  const o = { net_saved_usd: 89.82, keepalive_net_usd: 150.66, cachesplit_saved_usd: 3.5,
-    decl_filter_usd: 7.1, total_saved_usd: 89.82 + 150.66 + 3.5 + 7.1 };
+  const o = { net_saved_usd: 89.82, keepalive_net_usd: 150.66,
+    decl_filter_usd: 7.1, total_saved_usd: 89.82 + 150.66 + 7.1 };
   const p = savedParts(o);
   assert.ok(Math.abs(p.total - p.serverTotal) < 1e-9, `${p.total} vs ${p.serverTotal}`);
-  assert.equal(p.reorder, 3.5); assert.ok(Math.abs(p.cache - 154.16) < 1e-9);
+  assert.ok(Math.abs(p.cache - 150.66) < 1e-9);
 });
 
 test('missing parts count as zero, not as NaN', () => {
@@ -28,12 +28,12 @@ test('the capped note says what was not counted, or that the cap was not applied
 });
 
 test('manual pings are their own part, and the parts still add up to total_saved_usd', () => {
-  const o = { net_saved_usd: 10, keepalive_net_usd: 2, cachesplit_saved_usd: 1, decl_filter_usd: 0.5,
-    manual_pings: { count: 3, ping_usd: 0.04, saved_usd: 0.56 }, total_saved_usd: 10 + 2 + 1 + 0.5 + 0.56 };
+  const o = { net_saved_usd: 10, keepalive_net_usd: 2, decl_filter_usd: 0.5,
+    manual_pings: { count: 3, ping_usd: 0.04, saved_usd: 0.56 }, total_saved_usd: 10 + 2 + 0.5 + 0.56 };
   const p = savedParts(o);
   assert.equal(p.manual, 0.56);
   assert.ok(Math.abs(p.total - p.serverTotal) < 1e-9, `${p.total} vs ${p.serverTotal}`);
-  assert.equal(p.cache, 3); // the cache strategy's own part does not include the button
+  assert.equal(p.cache, 2); // the cache strategy's own part does not include the button
 });
 
 test('a server from before the Ping button has no manual_pings: that is zero, not NaN', () => {
@@ -51,7 +51,7 @@ test('fallback requests are left out on both sides: their cost and the saving th
   // ledger net and a $1 filter credit. Compaction books baseline - cost - cg_llm = -$2 on them.
   const o = { net_saved_usd: 28, cost_usd: 80, cg_llm_cost_usd: 12, defer_net_usd: 3, decl_filter_usd: 1, total_saved_usd: 32,
     fallback_requests: 4, fallback_cost_usd: 22,
-    fallback_saved: { compaction_usd: -2, defer_usd: 3, keepalive_usd: 0, reorder_usd: 0, filter_usd: 1 } };
+    fallback_saved: { compaction_usd: -2, defer_usd: 3, keepalive_usd: 0, filter_usd: 1 } };
   const t = overviewTotals(o);
   assert.equal(t.bill, 92); assert.equal(t.spent, 70); // the whole bill, and the priced spend
   assert.equal(t.saved, 30); assert.equal(t.without, 100); assert.equal(t.pct, 30); // the priced requests alone
@@ -205,13 +205,12 @@ test('the cards split tokens.by_feature: cache, filter, deferral, preset; the pi
   const f = (saved, caused) => ({ saved, caused });
   const o = {
     tokens: {
-      saved: { input: 0, cache_read: 600, cache_write_5m: 6500, cache_write_1h: 300 },
+      saved: { input: 0, cache_read: 600, cache_write_5m: 6300, cache_write_1h: 300 },
       caused: { input: 0, cache_read: 4000, cache_write_5m: 600, cache_write_1h: 0 },
       by_feature: {
         mask: f({ cache_read: 600, cache_write_5m: 2000 }, { cache_write_5m: 600 }),
         ended_change: f({ cache_write_5m: 100 }, {}),
         keepalive: f({ cache_write_5m: 4000 }, { cache_read: 4000 }),
-        cachesplit: f({ cache_write_5m: 200 }, {}),
         ttl: f({ cache_write_1h: 300 }, {}),
         toolfilter: f({ cache_write_5m: 150 }, {}),
         tooldefer: f({ cache_write_5m: 50 }, {}),
@@ -222,7 +221,7 @@ test('the cards split tokens.by_feature: cache, filter, deferral, preset; the pi
   const t = featureTokens(o);
   // The rescue's own cost only: the pings are not added into it.
   assert.equal(tokenLine(t.keepalive, String), 'saved 4000 wr · cost 4000 rd');
-  assert.equal(tokenLine(t.cache, String), 'saved 4200 wr · 300 wr1h · cost 4000 rd');
+  assert.equal(tokenLine(t.cache, String), 'saved 4000 wr · 300 wr1h · cost 4000 rd');
   assert.equal(tokenLine(t.compaction, String), 'saved 2100 wr · 600 rd · cost 600 wr');
   assert.equal(tokenLine(t.filter, String), 'saved 150 wr');
   assert.equal(tokenLine(t.defer, String), 'saved 50 wr');
@@ -236,7 +235,7 @@ test('the cards split tokens.by_feature: cache, filter, deferral, preset; the pi
   // The pings are a line of their own, on the card and under the total.
   assert.equal(pingLine(o, String), 'cost 20 wr · 10 wr1h · 9000 rd · 3 in');
   const h = subscriptionHeadline({ subscription: true }, o, null, 0, String);
-  assert.equal(h.main, 'saved 6500 wr · 300 wr1h · 600 rd · cost 600 wr · 4000 rd');
+  assert.equal(h.main, 'saved 6300 wr · 300 wr1h · 600 rd · cost 600 wr · 4000 rd');
   assert.equal(h.pings, 'Keep-alive pings (not in the total): cost 20 wr · 10 wr1h · 9000 rd · 3 in');
   assert.equal(subscriptionHeadline({ subscription: true }, { tokens: o.tokens }, null, 0, String).pings, ''); // no pings: no line
   assert.equal(pingLine({ keepalive_ping_tokens: { input: 0, cache_read: 0 } }, String), '');

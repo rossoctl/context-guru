@@ -3779,9 +3779,8 @@ def default_strategy(table: dict | None = None) -> str:
 # keep-alive, and the pipeline default should not be quietly editing anybody's requests to add 18%
 # to what their client already caches for free.
 #
-# `cache` remains a valid preset in config/config.go, reachable via /plugin configure's raw form —
-# only the default changed, and the picker no longer offers `cache` as one of its named options
-# (it isn't part of the "carry less" ladder; it doesn't drop or trim anything). Choosing a preset
+# `cache` was removed from config/config.go (#567); an old config that names it loads with a
+# warning and runs no component. Choosing a preset
 # such as `medium`/`high`/`xhigh` IS opting into context editing, which is fine - it is a
 # deliberate step rather than a default.
 #

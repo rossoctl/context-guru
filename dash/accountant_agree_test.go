@@ -26,7 +26,7 @@ type PlayedAcc struct {
 	Unpriced    []string
 }
 
-// PlayAcc drives the new path over a case. Net = DeltaUSD + KeepAliveSavedUSD + SplitUSD + TTLUSD,
+// PlayAcc drives the new path over a case. Net = DeltaUSD + KeepAliveSavedUSD + TTLUSD,
 // minus every spend op priced with its own model's rate (the host prices spends).
 func PlayAcc(c cases.Case) []PlayedAcc {
 	trackers := accountant.NewTrackers()
@@ -60,7 +60,7 @@ func PlayAcc(c cases.Case) []PlayedAcc {
 		for k, v := range fig.ByComponent {
 			p.ByComponent[k] = microsAcc(v)
 		}
-		p.NetMicro = microsAcc(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.SplitUSD+fig.TTLUSD) - cases.RoundMicros(spend)
+		p.NetMicro = microsAcc(fig.DeltaUSD+fig.KeepAliveSavedUSD+fig.TTLUSD) - cases.RoundMicros(spend)
 		out = append(out, p)
 	}
 	return out
@@ -213,7 +213,12 @@ type accPlace struct {
 
 // accLibraryDisagrees are cases where Compute itself returns something other than the case expects.
 // They are skipped, with the reason, so the suite stays green and the finding stays visible.
-var accLibraryDisagrees = map[string]string{}
+var accLibraryDisagrees = map[string]string{
+	// cachesplit was removed (#567): the proxy no longer reports a split and the dashboard no longer books
+	// the library's split effect. These cases stay in the library's suite until it drops the effect.
+	"split/delivered/stable-half-read":      "the split effect is not booked any more",
+	"split/short-conversation/tail-changed": "the split effect is not booked any more",
+}
 
 // TestProxyPathMatchesTheAccountantCases plays every shared case through the proxy path and wants
 // every step net, every component figure and the thread total to match. No difference is allowed.

@@ -163,7 +163,7 @@ func TestOverviewLeanOtherSessionsNeverChangeTheTarget(t *testing.T) {
 	db := openTestDB(t)
 	seedLeanFixture(t, db)
 
-	o, err := db.OverviewLean(Filter{Tenant: "t1", Session: "s-target"}, nil, nil)
+	o, err := db.OverviewLean(Filter{Tenant: "t1", Session: "s-target"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,11 +302,11 @@ func TestOverviewLeanSessionStaysUnderBudgetAt20000Requests(t *testing.T) {
 	// One warm-up call: the budget is about the QUERY's own cost (an indexed range read),
 	// not about page-cache or statement-prep warm-up, which the status line's own render
 	// budget separately accounts for (dash/overview_lean.go's doc comment).
-	if _, err := db.OverviewLean(f, nil, nil); err != nil {
+	if _, err := db.OverviewLean(f, nil); err != nil {
 		t.Fatal(err)
 	}
 	t0 := time.Now()
-	if _, err := db.OverviewLean(f, nil, nil); err != nil {
+	if _, err := db.OverviewLean(f, nil); err != nil {
 		t.Fatal(err)
 	}
 	if dt := time.Since(t0); dt > 10*time.Second {
@@ -337,7 +337,7 @@ func TestOverviewLeanCountsReplayTokensAsTheFullReadDoes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lean, err := db.OverviewLean(f, nil, nil)
+		lean, err := db.OverviewLean(f, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -7,16 +7,16 @@ import (
 
 // TestSavingsTotalsAgreesWithOverview pins the whole point of SavingsTotals: computed
 // through its own, smaller query, it must land on exactly the figures Overview's
-// hand-tuned megaquery reports for the same rows — cachesplit-only traffic, a priced
+// hand-tuned megaquery reports for the same rows — a priced
 // CG-LLM component, and a keep-alive ping all included, since each is a separate addend
 // in savingsArithmetic.
 func TestSavingsTotalsAgreesWithOverview(t *testing.T) {
 	db := openTestDB(t)
 	evs := []*Event{
 		{TS: 1, SessionID: "s", Model: "m", TokensBefore: 100, TokensAfter: 90,
-			CostUSD: 0.01, BaselineCostUSD: 0.02, CGLLMCostUSD: 0.001, CachesplitSavedUSD: 0.003},
+			CostUSD: 0.01, BaselineCostUSD: 0.02, CGLLMCostUSD: 0.001},
 		{TS: 2, SessionID: "s", Model: "m", TokensBefore: 100, TokensAfter: 100,
-			CostUSD: 0.02, BaselineCostUSD: 0.02, CachesplitSavedUSD: 0.001},
+			CostUSD: 0.02, BaselineCostUSD: 0.02},
 		// A keep-alive ping: counted in the ping-cost query only, never in the agent SUMs.
 		{TS: 3, SessionID: "s", Model: "m", TokensBefore: 100, TokensAfter: 100,
 			CostUSD: 0.0005, BaselineCostUSD: 0.0005, KeepAlive: true},
@@ -42,7 +42,6 @@ func TestSavingsTotalsAgreesWithOverview(t *testing.T) {
 		"cost_usd":            {o.CostUSD, s.CostUSD},
 		"baseline_cost_usd":   {o.BaselineCostUSD, s.BaselineCostUSD},
 		"cg_llm_cost_usd":     {o.CGLLMCostUSD, s.CGLLMCostUSD},
-		"cachesplit_saved":    {o.CachesplitSavedUSD, s.CachesplitSavedUSD},
 		"keepalive_ping_usd":  {o.KeepAlivePingUSD, s.KeepAlivePingUSD},
 		"keepalive_saved_usd": {o.KeepAliveSavedUSD, s.KeepAliveSavedUSD},
 		"net_saved_usd":       {o.NetSavedUSD, s.NetSavedUSD},
