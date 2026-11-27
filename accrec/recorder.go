@@ -328,3 +328,19 @@ func (s *Recorder) RatioFor(req *accountant.Request, u Usage) *accountant.Ratio 
 	}
 	return &r
 }
+
+// RatioTextFor is the request ratio's text counts that a thread keeps for its next turn (#1533): the provider's billed
+// tokens of the forwarded text and its bytes. It is the rule for which ratio a thread keeps, so a host only calls it.
+// 0, 0 (keep none) when the request books no figure (ShouldCompute: a rejected status, or several upstream rounds,
+// where the body is the first round's and the usage is the last's), when the ratio is out of range or missing
+// (RatioFor), or when it is capped (its text ratio is a floor). Nil-safe.
+func (s *Recorder) RatioTextFor(req *accountant.Request, u Usage, status, rounds int) (tokens, bytes int) {
+	if compute, _ := ShouldCompute(status, rounds, ""); !compute {
+		return 0, 0
+	}
+	r := s.RatioFor(req, u)
+	if r == nil || r.Capped() {
+		return 0, 0
+	}
+	return r.Text()
+}

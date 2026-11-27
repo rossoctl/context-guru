@@ -303,7 +303,7 @@ func TestFinishObserveWritesTheShadowStore(t *testing.T) {
 	live, shadow := newStore(), newStore()
 	Finish(Fin{
 		Store: live, Shadow: shadow, Mode: components.ModeObserve, Session: "", ThreadID: thread.Primary,
-		UsageOK: true, Billed: 500,
+		UsageOK: true, Billed: 500, RatioTokens: 30, RatioBytes: 60,
 		ObserveSession: func() string { return "sid" },
 		ObserveThread:  func(string) thread.Result { return thread.Result{ID: "obs"} },
 	})
@@ -312,6 +312,9 @@ func TestFinishObserveWritesTheShadowStore(t *testing.T) {
 	}
 	if billedOf(shadow, store.BilledThreadPrefix+thread.Key("sid", "obs")) != "500" {
 		t.Error("shadow thread record must use the resolved observe thread")
+	}
+	if billedOf(shadow, store.RatioThreadPrefix+thread.Key("sid", "obs")) != "30:60" {
+		t.Error("shadow thread ratio missing: observe mode would keep the table")
 	}
 	if billedOf(live, store.BilledPrefix+"sid") != "" {
 		t.Error("the live store must stay clean in observe mode")

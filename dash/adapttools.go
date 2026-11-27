@@ -502,6 +502,7 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			_, ok = price(r.model)
 		}
 		var rate float64
+		removedSized := r.removed // the removed tokens in the same unit as the price below: the provider's with a live ratio (#1533)
 		if ok {
 			in := accountant.RemovalInput{
 				Model: r.model, Tier: head, Prompt: modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite),
@@ -511,6 +512,7 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			// the provider's tokens per host token of this removal (#1533).
 			perHost := r.live.counts.ApplyTo(&in, r.removed, r.live.bytes)
 			rate = accountant.RemovalSaving(in, modelinfo.Rates{Lookup: price}).PerTokenUSD * perHost
+			removedSized = int64(math.Round(float64(r.removed) * perHost))
 		}
 		if ok {
 			out.pricedRequests++
@@ -521,7 +523,7 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			// OneHour stays false on purpose: this change keeps the old tier. A 1h rewrite is a separate behavior change.
 			// The accountant prices a miss (R1). It is sized as the request without the filter, as before.
 			prompt := modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite)
-			out.RewriteUSD, _ = accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: prompt, PromptTokens: prompt + r.removed},
+			out.RewriteUSD, _ = accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: prompt, PromptTokens: prompt + removedSized},
 				modelinfo.Rates{Lookup: price})
 		}
 		if ok && out.keepRequests {

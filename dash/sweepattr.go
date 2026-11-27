@@ -251,7 +251,8 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 }
 
 // expandProviderTokens is the restored sweep text of the scope, in the provider's tokens, by model. It reads one row
-// per request, because each request has its own ratio.
+// per request, because each request has its own ratio: the grouped query above sums over requests and so cannot apply
+// one. It reads only requests with a sweep expand, a small set, so the second scan is cheap.
 func (d *DB) expandProviderTokens(ctx context.Context, cond string, args []any) (map[string]float64, error) {
 	rows, err := d.sql.QueryContext(ctx, `SELECT r.model, r.sweep_expand_tokens, r.sweep_expand_bytes,
 		r.body_text_bytes, r.body_billed_tokens, r.ratio_capped FROM requests r WHERE `+cond+` AND r.sweep_expands > 0`, args...)

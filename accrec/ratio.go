@@ -5,8 +5,6 @@ import (
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
-var tokenLegacyFactor = tokens.LegacyFactor
-
 // The request ratio of a row (#1533). The accountant builds it for each priced request (Result.Ratio): the
 // provider's billed tokens of the forwarded text, over its bytes. The host stores its three counts and rebuilds
 // it at read time. No host writes the byte-to-token conversion: Ratio.Tokens is the only one.
@@ -46,11 +44,11 @@ func (c RatioCounts) Ratio() *accountant.Ratio {
 // bytes, it is Ratio.Tokens of the bytes: live is true, and the host's own count is not read. Without them, it is
 // the host's own token count scaled by the legacy table (tokens.LegacyFactor), the documented fallback for a row
 // written before the ratio existed: live is false.
-func ProviderTokens(model string, hostTokens, bytes int64, c RatioCounts) (tokens float64, live bool) {
+func ProviderTokens(model string, hostTokens, bytes int64, c RatioCounts) (provider float64, live bool) {
 	if r := c.Ratio(); r != nil && bytes > 0 {
 		return float64(r.Tokens(int(bytes))), true
 	}
-	f, _ := tokenLegacyFactor(model)
+	f, _ := tokens.LegacyFactor(model)
 	return float64(hostTokens) * f, false
 }
 

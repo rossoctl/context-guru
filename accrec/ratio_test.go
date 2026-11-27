@@ -137,3 +137,22 @@ func TestDeferSpendLoadedFromBytesWithARatio(t *testing.T) {
 		t.Fatalf("with no bytes the second pass reads %d tokens, want the table's 1500", got)
 	}
 }
+
+func TestRatioTextForKeepsOnlyARatioThatBooksAFigure(t *testing.T) {
+	r, req, _, u := pricedRatio(t)
+	if tok, by := r.RatioTextFor(req, u, 200, 1); tok <= 0 || by <= 0 {
+		t.Fatalf("one round, status 200: %d, %d, want a ratio", tok, by)
+	}
+	for name, c := range map[string][2]int{"several rounds": {200, 3}, "rejected": {429, 1}} {
+		if tok, by := r.RatioTextFor(req, u, c[0], c[1]); tok != 0 || by != 0 {
+			t.Errorf("%s: %d, %d, want none", name, tok, by)
+		}
+	}
+	if tok, by := r.RatioTextFor(req, Usage{FreshInput: 3}, 200, 1); tok != 0 || by != 0 {
+		t.Errorf("an out-of-range ratio: %d, %d, want none", tok, by)
+	}
+	var nilRec *Recorder
+	if tok, by := nilRec.RatioTextFor(req, u, 200, 1); tok != 0 || by != 0 {
+		t.Errorf("nil recorder: %d, %d", tok, by)
+	}
+}

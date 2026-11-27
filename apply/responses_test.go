@@ -608,8 +608,8 @@ func TestResponsesSummaryCoversTheLastToolExchange(t *testing.T) {
 	}
 }
 
-// The filter reports the bytes it took out of the body, for the accountant's request ratio (#1533). The toolschema
-// rewrite is not in it: it runs on the same body and shrinks it too.
+// The filter reports the serialized bytes of the declarations it removed, for the accountant's request ratio
+// (#1533): the same removal as the token count, not the body shrink. The toolschema rewrite is not in it.
 func TestFilteredDeclBytesAreTheBytesTheFilterRemoved(t *testing.T) {
 	removed := `{"type":"function","name":"unused","parameters":{"type":"object","title":"keep"}}`
 	body := []byte(`{"model":"gpt-5.6","instructions":"x","input":[{"role":"user","content":"task"}],"tools":[` +
@@ -625,14 +625,9 @@ func TestFilteredDeclBytesAreTheBytesTheFilterRemoved(t *testing.T) {
 		if res.FilteredDecls != 1 || res.FilteredDeclBytes == 0 {
 			t.Fatalf("%q: decls=%d bytes=%d, want one declaration and its bytes", yaml, res.FilteredDecls, res.FilteredDeclBytes)
 		}
-		if res.FilteredDeclBytes > len(removed)+1 {
-			t.Errorf("%q: %d bytes, more than the declaration and its comma (%d): another rewrite was counted", yaml, res.FilteredDeclBytes, len(removed)+1)
-		}
-		if strings.Contains(yaml, "toolschema") {
-			continue
-		}
-		if want := len(body) - len(res.Body); res.FilteredDeclBytes != want || want != len(removed)+1 {
-			t.Errorf("%q: bytes = %d, body shrank %d, want both %d (the declaration and its comma)", yaml, res.FilteredDeclBytes, want, len(removed)+1)
+		// With toolschema first, the declaration is compacted before the filter removes it: its bytes are those it had then.
+		if want := len(removed); res.FilteredDeclBytes > want || (!strings.Contains(yaml, "toolschema") && res.FilteredDeclBytes != want) {
+			t.Errorf("%q: %d bytes, want the declaration as serialized (%d): another rewrite was counted", yaml, res.FilteredDeclBytes, len(removed))
 		}
 	}
 }

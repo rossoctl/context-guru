@@ -89,6 +89,7 @@ func Finish(f Fin) {
 					obsThread = f.ObserveThread(sid).ID
 				}
 				apply.RecordBilledInputThread(f.Shadow, sid, obsThread, f.Billed)
+				apply.RecordRatioThread(f.Shadow, sid, obsThread, f.RatioTokens, f.RatioBytes)
 			}
 		})
 	}

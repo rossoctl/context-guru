@@ -18,6 +18,8 @@ import (
 func DeferSpendOps(s tooldefer.SearchSpend, ratio *accountant.Ratio) []accountant.Operation {
 	loaded := s.Loaded
 	if ratio != nil && s.LoadedBytes > 0 {
+		// Ratio.Tokens converts 0 above 2^31 bytes (no real definition set is that large), so the loaded weight is 0 then and
+		// the request books no search read or write: the safe side.
 		loaded = int64(ratio.Tokens(int(s.LoadedBytes))) // the request's own ratio (#1533); the table is the fallback
 	}
 	op := func(id string, u accountant.CallUsage, estimated bool) accountant.Operation {

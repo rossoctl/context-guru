@@ -290,12 +290,12 @@ func (c *capture) runDeferBook() {
 	f()
 }
 
-// liveRatioText is the request ratio's text counts for the thread's next turn (#1533): the provider's billed tokens of
-// the forwarded text, and its bytes. 0, 0 when there is none to keep: no usage, no accountant record, or a capped ratio
-// (its text ratio is a floor, so the next warm gate keeps the table answer). It runs before the request is priced, so it
-// builds the ratio the accountant builds (accrec.Recorder.RatioFor). Fail open: a panic gives 0, 0. Nil-safe.
+// liveRatioText is the request ratio's text counts for the thread's next turn (#1533). The rule for which ratio a
+// thread keeps is accrec.Recorder.RatioTextFor's. This only joins the accountant job first (the record is opened off
+// the request path, and finish reads it later), then calls it. It runs before the request is priced, while the forwarded
+// body is still held. Fail open: a panic gives 0, 0. Nil-safe.
 func (c *capture) liveRatioText(usage Usage, usageOK bool) (tokens, bytes int) {
-	if c == nil || c.accReq == nil || c.savings == nil || !usageOK || c.rejected() {
+	if c == nil || c.savings == nil || !usageOK {
 		return 0, 0
 	}
 	defer func() {
@@ -304,9 +304,13 @@ func (c *capture) liveRatioText(usage Usage, usageOK bool) (tokens, bytes int) {
 			tokens, bytes = 0, 0
 		}
 	}()
-	r := c.savings.RatioFor(c.accReq, usage.accrec())
-	if r == nil || r.Capped() {
+	if c.accMu != nil {
+		c.accMu.Lock() // the ledger's hook and the finish goroutine can both join the job
+		defer c.accMu.Unlock()
+	}
+	c.accWait() // idempotent: the record is c.accReq only after the job is joined
+	if c.accReq == nil {
 		return 0, 0
 	}
-	return r.Text()
+	return c.savings.RatioTextFor(c.accReq, usage.accrec(), c.status, c.rounds)
 }
