@@ -6,7 +6,7 @@ import "fmt"
 // produces, as opposed to the 26 builtins, which cover CI/build/IaC/package-manager
 // output and fire on essentially none of it.
 //
-// Why two extra documents instead of more builtins: `codesmart` and `codesafe` are the
+// Why two extra documents instead of more builtins: the `codesmart` and `codesafe` arms are the
 // published SWE-bench arms, so a filter added to `builtinFilters` silently moves a
 // measured baseline. These load only under `agent_filters: safe|lossy`, the same way
 // `textclean` and `searchfold` landed outside the measured presets.

@@ -163,7 +163,7 @@ func (r *recordingSink) Observe(o acmetrics.Observation) {
 func TestObservationCarriesTheOutputTokens(t *testing.T) {
 	up := usageUpstream(t)
 	rs := &recordingSink{}
-	h, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", func(o *Options) { o.MetricsSink = rs })
+	h, rec, _ := accHandlerOpts(t, up.URL, "preset: conservative\n", func(o *Options) { o.MetricsSink = rs })
 	accPost(t, h, "sess-output")
 	waitForRows(t, rec, 1)
 	testutil.WaitFor(t, "the sink sees a request", func() bool {

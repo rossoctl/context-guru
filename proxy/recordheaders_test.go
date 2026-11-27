@@ -26,7 +26,7 @@ func sendWithSecretHeaders(t *testing.T, rec *sessionRecorder, hdr map[string]st
 		w.Write([]byte(testSSE))
 	}))
 	defer up.Close()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

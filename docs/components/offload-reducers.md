@@ -89,6 +89,9 @@ No exact repeats, small outputs.
 
 ## failed_run
 
+!!! note "In no preset"
+    No preset names `failed_run`. Use it from a hand-written `pipeline:`.
+
 !!! info "Offload — lossy, reversible"
     Keeps the most recent test/build run in full, collapses every earlier superseded run to a pointer + marker.
 
@@ -171,7 +174,7 @@ the message content, its output is **byte-stable across turns**, so it never bus
 !!! note "Relevance-aware trimming is a different component"
     Query-relevance projection, regex rewriting, and summarization are the job of the separate
     **[`extract_llm`](extract_llm.md)** component. Configure them together (`[extract, extract_llm]`,
-    as in the `agent`/`general` presets) so the cheap deterministic pass runs every step and the LLM
+    as in `medium` and above) so the cheap deterministic pass runs every step and the LLM
     pass only fires on large outputs every few steps.
 
 ### Before → After
@@ -226,6 +229,9 @@ the message once the marker is added.
 
 ## linecap
 
+!!! note "In no preset"
+    No preset names `linecap`. Use it from a hand-written `pipeline:`.
+
 !!! info "Offload — lossy, reversible (deterministic, command-agnostic)"
     The two output rules that do not need a command signature: a per-line character cap, and a
     collapse of **non-adjacent** repeated lines.
@@ -260,7 +266,7 @@ line.
 
 **It runs last among the offloaders**, and that position is measured. Every offload leaves a
 marker and every offload skips marker-bearing content, so a *modest* reducer ahead of a *drastic*
-one steals its candidates. On `general` over 1,795 real captured requests: 7th in the pipeline it
+one steals its candidates. On the old `general` preset over 1,795 real captured requests: 7th in the pipeline it
 saved 5,524,476 tokens — **worse than the 5,556,801 with no `linecap` at all** — because it took
 39,335 tokens off messages `collapse` would have taken 76,554 off, and its marker then made
 `mask`/`extract`/`collapse` decline those messages outright. Last, it saves **5,811,621 (+1.33 pp
@@ -304,6 +310,9 @@ Output under `min_size`, output with no over-long or repeated lines, marker-bear
 
 ## smartcrush
 
+!!! note "In no preset"
+    No preset names `smartcrush`. Use it from a hand-written `pipeline:`.
+
 !!! info "Offload — lossy, reversible"
     Statistical JSON-array compressor: keep first/last items plus any error item, drop the rest, stash the full original.
 
@@ -338,7 +347,7 @@ Lossy but reversible — the full original array is stashed and recovered via `c
 
 ### When it shines
 
-Long homogeneous JSON arrays (list endpoints, search hits) — the `mcp` preset.
+Long homogeneous JSON arrays (list endpoints, search hits) — it was in the old `mcp` preset (retired).
 
 ### Measured on real traffic
 
@@ -362,6 +371,9 @@ Non-array output, fewer than `min_items`, nothing to drop.
 ---
 
 ## mask
+
+!!! note "In no preset"
+    No preset names `mask`. Use it from a hand-written `pipeline:`.
 
 !!! info "Offload — lossy, reversible"
     Age-based garbage collection: keep the newest few tool outputs verbatim, replace older ones with a short marker + stash.
@@ -419,7 +431,7 @@ on non-caching traffic, and why the `cold_cache` option matters most here.
 
 ### When it shines
 
-Long agent trajectories where old tool results are unlikely to matter. In the `agent` preset it is
+Long agent trajectories where old tool results are unlikely to matter. In the old `agent` preset (retired) it was
 the biggest lever (~27% content-token savings, no reward loss — see
 [RESULTS.md](../RESULTS.md)).
 
@@ -428,6 +440,9 @@ the biggest lever (~27% content-token savings, no reward loss — see
 ---
 
 ## collapse
+
+!!! note "In no preset"
+    No preset names `collapse`. Use it from a hand-written `pipeline:`.
 
 !!! info "Offload — lossy, reversible"
     Content-agnostic fallback for an oversized tool output: keep a head + tail window, stash the full original.
@@ -477,7 +492,7 @@ measures ~118 tokens out. The floor exists so a `max_tokens` of 0 cannot reduce 
 marker with no cue about what to expand; `head_lines: 0, tail_lines: 0` routes to the character
 window for the same reason. The seed is also never allowed above the content itself: `max_tokens
 × 4` overestimates on dense JSON, and testing the bail-out against the un-measured seed used to
-decline content the fit loop would have cut (at `max_tokens: 3000`, what `codesafe` sets, one-line
+decline content the fit loop would have cut (at `max_tokens: 3000`, what the old `codesafe` preset set, one-line
 JSON from 3,006 to 4,491 tokens was oversized and left entirely uncut). The never-worse guard
 measures the real marker and declines rather than growing a message, which is what makes the
 residual slack harmless. Negative `head_lines`/`tail_lines` are clamped to 0.

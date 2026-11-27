@@ -99,7 +99,7 @@ const (
 )
 
 // DefaultConfigYAML is the pipeline every new tenant starts on: the config named
-// `conservative` (formerly `house`), which is codesmart's structural offloaders in an operator-chosen order with
+// `conservative` (formerly `house`), which is a set of structural offloaders in an operator-chosen order with
 // the LLM extractor removed and no blind collapse. Deterministic all the way through,
 // which on a SHARED box is the property that matters — it makes no cheap-model
 // calls, so it adds no upstream spend, contends on no shared LLM budget, and costs
@@ -124,7 +124,7 @@ const (
 // −17,219 tokens = 1.73% of the capture corpus, at no upstream spend and no cache churn,
 // which is why it is safe to turn on for everyone rather than offer as an opt-in.
 // The order is the operator's: dedup and cmdfilter run ahead of searchfold and textclean,
-// so the lossless trio does NOT lead here as it does in config.presets["general"]. The
+// so the lossless trio does NOT lead here as it did in the old `general` preset. The
 // consequence is confined to attribution — two offloaders have already edited the messages
 // by the time the folds count theirs, so the per-component split in /stats is less honest
 // than `general`'s. Totals are unaffected. toolfilter is last and carries an empty removal

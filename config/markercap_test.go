@@ -27,7 +27,7 @@ func TestMarkerModeComponentsMatchTheRegistry(t *testing.T) {
 }
 
 func TestCapMarkerModeOverridesThePresetDefault(t *testing.T) {
-	c, err := LoadBytes([]byte("preset: general\n"))
+	c, err := LoadBytes([]byte("preset: housellm\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

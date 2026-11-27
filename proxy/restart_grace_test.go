@@ -25,7 +25,7 @@ import (
 // codesafePipeline builds the pipeline every test here serves through.
 func codesafePipeline(t *testing.T) (*config.Config, *metrics.Aggregator, *components.Pipeline) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

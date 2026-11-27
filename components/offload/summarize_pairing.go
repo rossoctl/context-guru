@@ -33,9 +33,9 @@ func wireGroupsStale(c *components.Ctx, msgs []bschemas.ChatMessage) bool {
 // Measured on live LOCA-bench traffic: 5 of 12 tasks failed this way once the earlier
 // system-role defect was fixed and summarize could finally act.
 //
-// This is an invariant for any component that deletes messages, and the reason coref does not
-// need it: coref rewrites a tool message's text IN PLACE and never removes a message, so
-// pairing is preserved by construction. summarize removes, so summarize must repair.
+// This is an invariant for any component that deletes messages, and the reason an in-place
+// rewriter does not need it: it rewrites a tool message's text IN PLACE and never removes a
+// message, so pairing is preserved by construction. summarize removes, so summarize must repair.
 //
 // The repair is deliberately one-directional — DROP orphaned results, never synthesise
 // placeholder ones. A synthetic "[tool result unavailable]" would be a second lie on top of

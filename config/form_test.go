@@ -36,8 +36,8 @@ func TestApplyFormSurvivesDocumentShapesTheOldWriterCorrupted(t *testing.T) {
 		"strategy": "single", "min_tokens": 1234, "model.model": "cg-test-model",
 	}
 	for name, doc := range map[string]string{
-		"block sequence pipeline": "mode: sync\npreset: general\npipeline:\n  - format\n  - extract\n",
-		"preset, no pipeline":     "preset: general\nmode: sync\n",
+		"block sequence pipeline": "mode: sync\npreset: safe\npipeline:\n  - format\n  - extract\n",
+		"preset, no pipeline":     "preset: safe\nmode: sync\n",
 		"comment header":          "# my configuration\npipeline: [format]\nmode: sync\n",
 		"components with no body": "pipeline: [format]\ncomponents:\nmode: sync\n",
 		"empty document":          "",
@@ -84,7 +84,7 @@ func TestApplyFormSurvivesDocumentShapesTheOldWriterCorrupted(t *testing.T) {
 // component silently stopped running. Nobody saw an error, which made it the worse of the
 // two bugs.
 func TestApplyFormKeepsAPresetsOtherComponents(t *testing.T) {
-	const doc = "preset: general\nmode: sync\n"
+	const doc = "preset: safe\nmode: sync\n"
 	f := mustParse(t, doc)
 	if len(f.Pipeline) < 2 {
 		t.Fatalf("the preset should resolve to a real pipeline, got %v", f.Pipeline)
@@ -796,22 +796,22 @@ func TestAStoredCredentialIsNeverEchoedAndASaveStillWorks(t *testing.T) {
 }
 
 // A component the form does not send is not touched at all. Without that, a round trip on a
-// `preset: codesafe` document deleted the tuned block of every component the preset does not
-// run — the form would be editing configuration nobody put on the page.
+// `preset: summarizer1509` document deleted the tuned block of every component the preset does
+// not run — the form would be editing configuration nobody put on the page.
 func TestAComponentTheFormDoesNotSendIsUntouched(t *testing.T) {
-	doc := "preset: codesafe\nmode: sync\n"
+	doc := "preset: summarizer1509\nmode: sync\n"
 	f := mustParse(t, doc)
-	if f.Components["collapse"]["max_tokens"] != 3000 {
-		t.Fatalf("the preset's collapse block is not on the form: %v", f.Components)
+	if f.Components["summarize"]["min_tokens"] != 500 {
+		t.Fatalf("the preset's summarize block is not on the form: %v", f.Components)
 	}
 	f.Components = map[string]map[string]any{"extract": {"min_tokens": 500}}
 	out, err := ApplyForm(doc, f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back := mustParse(t, out); back.Components["collapse"]["max_tokens"] != 3000 {
+	if back := mustParse(t, out); back.Components["summarize"]["min_tokens"] != 500 {
 		t.Errorf("a component the form did not send lost its configuration (%v):\n%s",
-			back.Components["collapse"], out)
+			back.Components["summarize"], out)
 	}
 }
 

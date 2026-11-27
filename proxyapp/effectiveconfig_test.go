@@ -31,7 +31,7 @@ func TestConfigPublishesTheEffectivePayloadHorizon(t *testing.T) {
 		{"defaults", "store: {}\n", int(store.DefaultStashTTL.Seconds())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := config.LoadBytes([]byte("preset: codesafe\n" + tc.yaml))
+			cfg, err := config.LoadBytes([]byte("preset: conservative\n" + tc.yaml))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -127,7 +127,7 @@ func fakeUpstreamUsage(t *testing.T, in, cacheRead, cacheWrite int) *httptest.Se
 // dashHandler wires a real pipeline + recorder in front of a fake upstream.
 func dashHandler(t *testing.T, up string, opts dash.Options) (*Handler, *dash.Recorder) {
 	t.Helper()
-	return dashHandlerCfg(t, up, opts, "preset: codesafe\n")
+	return dashHandlerCfg(t, up, opts, "preset: conservative\n")
 }
 
 // dashHandlerCfg is dashHandler with the proxy config given as YAML text.
@@ -222,7 +222,7 @@ func TestDashboardCapturesARealRequestEndToEnd(t *testing.T) {
 	if e.Model != "aws/claude-sonnet-5" {
 		t.Errorf("model = %q", e.Model)
 	}
-	if e.Provider != "anthropic" || e.Agent != "claude-cli" || e.Preset != "codesafe" {
+	if e.Provider != "anthropic" || e.Agent != "claude-cli" || e.Preset != "conservative" {
 		t.Errorf("labels wrong: provider=%q agent=%q preset=%q", e.Provider, e.Agent, e.Preset)
 	}
 	if e.Mode != dash.ModeActive {
@@ -409,7 +409,7 @@ func TestDashboardCapturesCompactRoute(t *testing.T) {
 func TestDisabledDashboardChangesNothing(t *testing.T) {
 	up := fakeUpstream(t)
 	defer up.Close()
-	cfg, _ := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, _ := config.LoadBytes([]byte("preset: conservative\n"))
 	agg := metrics.NewAggregator()
 	pipe, _ := cfg.Build(agg)
 	h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: up.URL})

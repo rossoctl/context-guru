@@ -140,12 +140,10 @@
   <section class="section reveal" id="components">
     <h2>Fourteen components, stacked by config</h2>
     <p class="section-intro">
-      Four lossless reformatters and ten reversible offloaders. Presets bundle the
-      combinations that were measured: <code>general</code> for everyday agent traffic,
-      <code>agent</code> for long sessions, <code>codesafe</code> for deterministic-only
-      pipelines, <code>mcp</code> for tool-heavy JSON. In the two agent presets
-      <code>mask</code> is the biggest single lever — ~27% of content tokens, with no
-      measured reward loss.
+      Four lossless reformatters and ten reversible offloaders. Six presets bundle the
+      combinations: <code>off</code>, <code>conservative</code>, <code>medium</code>,
+      <code>high</code>, <code>xhigh</code> and <code>ultrahigh</code>. A few offloaders
+      are in no preset. Name them in a hand-written <code>pipeline:</code> to use them.
     </p>
     <div class="card-grid">
       <a class="card" href="{{ 'components/' | url }}">

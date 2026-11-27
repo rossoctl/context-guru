@@ -13,9 +13,14 @@ import (
 
 // Economics of deliberately mutating the provider's CACHED PREFIX.
 //
-// Every other offloader refuses to touch the prefix (Ctx.TailOnly) because breaking the
-// prefix hash at index i forces the provider to cache-WRITE everything from i onward. coref chooses to
-// pay that on purpose, so the price lives here rather than being reimplemented in it.
+// Every offloader refuses to touch the prefix (Ctx.TailOnly) because breaking the prefix hash at
+// index i forces the provider to cache-WRITE everything from i onward. The coref component chose to
+// pay that on purpose. It was removed, and no component does this now: extract_llm skips all cached
+// content (extract_llm.go), and the sweep applies only on a cold request.
+//
+// What stays in this file is a REFERENCE for the guard tests, not production code: the gate below
+// (prefixRewritePays*), the horizon (cacheRewriteHorizon, noteThreadGrowth, prefixRewriteWindow) and
+// cacheWriteX. Production uses turnsUntilCut and the coref*Default classifier constants.
 //
 //	cost    = W x (2.50 - 0.20) = 11.5 x W   (in cache-read-equivalents)
 //	benefit = S x T x 0.20      =  S x T
@@ -32,16 +37,15 @@ import (
 // sweep chose to make on a LIVE cache, and a model ask charged against it. The sweep no longer does
 // either: it asks at the keep-alive ping, where the read is already paid, and applies only on a cold
 // request, where the write happens anyway. Nothing called that code but the sweep, so it went with the
-// trigger it served. What is left is exactly what coref reaches.
+// trigger it served. What is left is the reference for the guard tests.
 
 // cacheWriteX is one cache-write in cache-read-equivalents: ($2.50 - $0.20) / $0.20 on
-// Anthropic's published per-MTok prices. Shared with deploy/harbor/coref.py.
+// Anthropic's published per-MTok prices. Shared with the old deploy/harbor/coref.py.
 const cacheWriteX = 11.5
 
-// Co-reference classifier defaults, shared by coref and by extract_llm's prefix
-// pre-filter. One definition on purpose: if the two components classified the same output
-// differently, the "free deterministic pre-filter" would be answering a different question
-// from the component whose measurements calibrated it. Mirrors deploy/harbor/coref.py.
+// Co-reference classifier defaults, used by extract_llm_sweep's evidence and its rules. They were
+// calibrated by the removed coref component, and one definition stays on purpose: a second set of
+// numbers would classify the same output differently. Mirrors the old deploy/harbor/coref.py. The coref component was removed; the sweep still uses these values.
 const (
 	corefClosedDistDefault = 12
 	corefOpenRepsDefault   = 3
@@ -261,7 +265,7 @@ func cacheRewriteHorizon(req *bschemas.BifrostChatRequest, c *components.Ctx, g 
 		if c != nil {
 			window = c.CtxWindow
 		}
-		// Today's estimate, unchanged: coref's fallback does not credit the removal.
+		// Today's estimate, unchanged: the fallback does not credit the removal.
 		n := estimateTurnsRemaining(local, modelTurns(req), window)
 		return rewriteHorizon{N: float64(n), Model: horizonModelFallback, Why: why}
 	}
@@ -289,7 +293,7 @@ func cacheRewriteHorizon(req *bschemas.BifrostChatRequest, c *components.Ctx, g 
 }
 
 // turnsUntilCut is THE definition of the turns left: (cut - the billed prompt AFTER the removal) / (billed
-// growth per turn), never below 0. cacheRewriteHorizon (coref) and the warm gate (sweep v3) both use it, so
+// growth per turn), never below 0. cacheRewriteHorizon (test reference) and the warm gate (sweep v3) share it, so
 // "a removal postpones the cut" is counted one way.
 func turnsUntilCut(cut, billedAfter, growth float64) float64 {
 	n := (cut - billedAfter) / growth

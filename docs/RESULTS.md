@@ -18,10 +18,10 @@ SWE-bench Verified** — evaluated live, end-to-end, with the **claude-code** ag
 | added latency / req | — | 117 ms | 63 ms | **0 ms** |
 | tool LLM cost | $0 | $0.31 | $0 | $0 |
 
-These numbers record the SWE-bench run exactly as it happened. The shipped `codesmart`
-pipeline has changed since — `toon` was added, `cachesplit` replaced `cacheinject`, and a
-gating bug that kept `failed_run` inert was fixed — so a claim about today's default needs
-a fresh run. See [Reproduce the results](results/REPRODUCE.md).
+These numbers record the SWE-bench run exactly as it happened. The `codesmart`
+preset has since been retired. It had changed before that — `toon` was added, `cachesplit`
+replaced `cacheinject`, and a gating bug that kept `failed_run` inert was fixed. They are
+reproducible only on release `v0.7.10` or older. See [Reproduce the results](results/REPRODUCE.md).
 
 <!-- Static bars: same figures as the table above, one measure each, drawn in CSS.
      Bar widths are proportional to the value, zero-anchored, against the largest

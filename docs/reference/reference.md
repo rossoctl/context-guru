@@ -495,8 +495,8 @@ A client that read the old shape must move down one level into `config`.
 | Single-tenant | The configuration this proxy resolved at startup, and — since there are no accounts here — also the one every request ran through, subject to per-request overrides (`/compact?preset=`, `x-context-guru-pipeline`). |
 | Hosted | The server-wide default this process resolved at startup, and that it is **not necessarily what compacted the caller's traffic**: an account that stores its own configuration runs that one instead. |
 
-That distinction is the reason the envelope exists. A live hosted dashboard reported preset
-`codesmart` with `extract_llm` in the pipeline while every request that day ran preset
+That distinction is the reason the envelope exists. A live hosted dashboard reported a named preset
+with `extract_llm` in the pipeline while every request that day ran preset
 `custom` and `extract_llm` never fired once — the tenant was following its own
 configuration, and nothing on the page said whose configuration was being shown.
 

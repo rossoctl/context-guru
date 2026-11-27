@@ -135,7 +135,7 @@ func bobUpstreamHandler(t *testing.T, serve http.HandlerFunc) (*httptest.Server,
 	t.Helper()
 	up := httptest.NewServer(serve)
 	t.Cleanup(up.Close)
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

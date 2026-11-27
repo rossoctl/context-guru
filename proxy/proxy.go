@@ -2766,7 +2766,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// extract_llm's OWN gross_saved_tokens. Multiplying snap.SavedTokens here would price
 	// the WHOLE pipeline's savings (format, dedup, cmdfilter, extract, …) against
 	// extract_llm's cost alone and display the component as comfortably POSITIVE on a
-	// preset like codesmart — inverting its own arithmetic in the one field an operator
+	// config with extract_llm — inverting its own arithmetic in the one field an operator
 	// reads. The rate-based signature makes that mistake unrepresentable.
 	perSavedTok := agentCacheReadPerMTok / 1e6
 	if h.opts.CacheMode == "off" {

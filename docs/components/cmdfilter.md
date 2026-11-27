@@ -255,7 +255,7 @@ capture via `CG_CORPUS`), ranked by tokens that reached the filter and matched n
 | ruff / mypy / pylint / flake8 | ~0 | ~0% | no |
 | `go test` / cargo / jest / vitest / tsc / eslint / docker / kubectl | 0 | 0% | no |
 
-Two modes load extra filters, both **off by default** so `codesmart` and `codesafe` — the published
+Two modes load extra filters, both **off by default** so the old `codesmart` and `codesafe` presets — the published
 SWE-bench arms — keep their measured baseline:
 
 - **`safe`** removes only *enumerated* known-boilerplate line shapes. As with the builtins, an

@@ -172,7 +172,7 @@ func TestStrategySyncLeavesAConfigWeDidNotWriteAlone(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	port := "8787"
 	cfg := filepath.Join(state, "keepalive-"+port+".yaml")
-	foreign := "# somebody else's config\npreset: codesmart\ncache:\n  keepalive: false\n"
+	foreign := "# somebody else's config\npreset: medium\ncache:\n  keepalive: false\n"
 	if err := os.WriteFile(cfg, []byte(foreign), 0o600); err != nil {
 		t.Fatal(err)
 	}

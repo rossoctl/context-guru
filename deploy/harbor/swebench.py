@@ -95,7 +95,9 @@ def stop_proxy():
     time.sleep(2)  # let the port fully release (avoids bind race on restart)
 
 
-# Custom (non-preset) configs, referenced by name on --configs. `codesmart` is the
+# Custom (non-preset) configs, referenced by name on --configs. The presets `codesmart` and
+# `codesafe` were retired from config.go; these two arms are now their only definition, and
+# numbers from them are reproducible only with release v0.7.10 or older. `codesmart` is the
 # coding-appropriate best-effort config: NO blind `mask` (which hid re-referenced
 # outputs and tripled steps on SWE), instead the LLM extract:code strategy does
 # relevance-aware, deletion-only trimming, plus safe deterministic components.

@@ -1839,7 +1839,7 @@ func (a *API) facets(w http.ResponseWriter, r *http.Request) {
 // plane's /api/me already reports a tenant's effective configuration, and two routes
 // answering "what compacts my traffic" is two answers to drift apart.
 //
-// The live dashboard was reporting preset "codesmart" with extract_llm in the pipeline
+// The live dashboard was reporting a named preset with extract_llm in the pipeline
 // while every request that day ran preset "custom" and extract_llm never ran once —
 // because the tenant followed its own configuration. Nothing on the page said whose
 // configuration was on screen.

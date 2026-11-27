@@ -12,7 +12,7 @@ import (
 // accepts only full, so capping it would make Build fail.
 var markerModeComponents = map[string]bool{
 	"agentdiet": true, "cache_aware_summarizer": true, "cmdfilter": true, "collapse": true,
-	"coref": true, "dedup": true, "extract": true, "extract_llm": true,
+	"dedup": true, "extract": true, "extract_llm": true,
 	"extract_llm_sweep": true, "failed_run": true, "linecap": true, "mask": true,
 	"readlifecycle": true, "searchcap": true, "smartcrush": true, "summarize": true,
 }
