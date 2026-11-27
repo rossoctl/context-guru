@@ -104,8 +104,8 @@ func (d *Dedup) Offload(req *schemas.BifrostChatRequest, rep *components.Report,
 // equivalence the model cannot check; "repeat of earlier `python -c ...`" is a claim it can
 // locate, compare against its own expectations, and disbelieve — and disbelieving is the
 // point, because only the model can initiate recovery via the expand tool. The note
-// therefore states WHAT was removed and never why it was safe to remove, the rule coref.go
-// arrived at the hard way: wording that reassures talks the model out of the expand call
+// therefore states WHAT was removed and never why it was safe to remove, the rule the removed coref
+// component arrived at the hard way: wording that reassures talks the model out of the expand call
 // that would have repaired a mistake.
 //
 // WHY NOT THE TURN INDEX, which is what #281 actually suggested. "identical to the

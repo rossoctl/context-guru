@@ -14,7 +14,7 @@ import (
 // Economics of deliberately mutating the provider's CACHED PREFIX.
 //
 // Every other offloader refuses to touch the prefix (Ctx.TailOnly) because breaking the
-// prefix hash at index i forces the provider to cache-WRITE everything from i onward. coref chooses to
+// prefix hash at index i forces the provider to cache-WRITE everything from i onward. extract_llm's cold path chooses to
 // pay that on purpose, so the price lives here rather than being reimplemented in it.
 //
 //	cost    = W x (2.50 - 0.20) = 11.5 x W   (in cache-read-equivalents)
@@ -32,16 +32,16 @@ import (
 // sweep chose to make on a LIVE cache, and a model ask charged against it. The sweep no longer does
 // either: it asks at the keep-alive ping, where the read is already paid, and applies only on a cold
 // request, where the write happens anyway. Nothing called that code but the sweep, so it went with the
-// trigger it served. What is left is exactly what coref reaches.
+// trigger it served. What is left is what extract_llm's cold path reaches.
 
 // cacheWriteX is one cache-write in cache-read-equivalents: ($2.50 - $0.20) / $0.20 on
-// Anthropic's published per-MTok prices. Shared with deploy/harbor/coref.py.
+// Anthropic's published per-MTok prices. Shared with the old deploy/harbor/coref.py.
 const cacheWriteX = 11.5
 
 // Co-reference classifier defaults, shared by coref and by extract_llm's prefix
 // pre-filter. One definition on purpose: if the two components classified the same output
 // differently, the "free deterministic pre-filter" would be answering a different question
-// from the component whose measurements calibrated it. Mirrors deploy/harbor/coref.py.
+// from the component whose measurements calibrated it. Mirrors the old deploy/harbor/coref.py. The coref component was removed; the sweep still uses these values.
 const (
 	corefClosedDistDefault = 12
 	corefOpenRepsDefault   = 3

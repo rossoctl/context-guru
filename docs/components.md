@@ -37,7 +37,7 @@ Six presets are current: `off`, `conservative`, `medium`, `high`, `xhigh`, `ultr
 
 **The lossless trio leads the presets that run it** (`safe` and the old `cache` aside, every preset that does deterministic work starts with `format`, `textclean`, `searchfold`; the `house` family keeps the operator's order). The three are verify-then-adopt, so there is no risk argument for omitting one, and running them first makes every downstream token count honest. `toon` is absent from the older presets: it acted 0 times on 5,752 production requests.
 
-**Eight offloaders are in no preset.** `failed_run`, `collapse`, `mask`, `linecap`, `smartcrush`, `readlifecycle`, `agentdiet` and `skeleton` were only in presets that are now retired (see [Retired presets](reference/presets.md#retired-presets)). They still work: name them in a hand-written `pipeline:`. The `coref` component was removed (the `extract_llm_sweep` component replaced it).
+**Nine offloaders are in no preset:** `failed_run`, `collapse`, `mask`, `linecap`, `smartcrush`, `readlifecycle`, `agentdiet`, `skeleton` and `searchcap`. Some of them were named by presets that are now retired (see [Retired presets](reference/presets.md#retired-presets)). They still work: name them in a hand-written `pipeline:`. The `coref` component was removed (the `extract_llm_sweep` component replaced it).
 
 **Cold turns sweep at depth.** `mask`, `failed_run` and `collapse` default to `cold_cache: true`:
 on a turn whose prompt cache has provably expired there is no cached prefix to protect, and

@@ -29,7 +29,7 @@ PORT = 4021
 PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
-               "cmdfilter", "mask", "collapse", "extract", "smartcrush", "skeleton",
+               "cmdfilter", "mask", "collapse", "extract", "smartcrush",
                "phi_evict", "conservative"]
 # The old presets that named a heuristic offloader were retired: replaying one now runs no components.
 PIPE = {"off": None, "conservative": ("preset", "conservative")}

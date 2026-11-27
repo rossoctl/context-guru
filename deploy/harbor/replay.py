@@ -24,7 +24,7 @@ PORT = 4020
 # deterministic components (no model needed); LLM ones (extract-code, summarize)
 # are handled with a cheap model separately.
 DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
-               "cmdfilter", "mask", "collapse", "extract", "smartcrush", "skeleton",
+               "cmdfilter", "mask", "collapse", "extract", "smartcrush",
                "phi_evict", "conservative"]
 PIPE = {
     "off": None,

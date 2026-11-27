@@ -442,7 +442,7 @@ func ApplyForm(doc string, f Form) (string, error) {
 
 	// What the STORED document runs, so a component leaving the pipeline can be told apart
 	// from one that was never in it. Without that distinction a round trip on a `preset:
-	// codesafe` document deleted the preset's tuned block for every component the preset
+	// summarizer1509` document deleted the preset's tuned block for every component the preset
 	// does not run.
 	var was []string
 	if cur, err := LoadBytes([]byte(doc)); err == nil {

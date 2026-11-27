@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 # extract_llm, extract_llm_sweep), need a build tag (skeleton), or act only on `system`/`tools`, which a transcript
 # does not carry (cachesplit, cacheinject, toolschema, toolfilter).
 FREE = ["format", "textclean", "searchfold", "dedup", "toon", "cmdfilter", "failed_run", "extract", "linecap",
-        "smartcrush", "collapse", "mask", "coref", "readlifecycle"]
+        "smartcrush", "collapse", "mask", "readlifecycle"]
 # Non-default settings worth pricing: the knobs whose default is off on cache grounds, and the size threshold of the
 # one lossy component that touches whole files. Reported next to the single components; not used in the search.
 VARIANTS = {
