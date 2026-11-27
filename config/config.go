@@ -502,14 +502,6 @@ var removedComponents = map[string]bool{
 	"cachesplit": true,
 }
 
-// removedPresets are presets that no longer exist. A stored config or a --preset flag that still
-// names one loads with a warning and runs the pipeline as written (empty if none), never fails.
-//
-// cache named cachesplit alone (#567).
-var removedPresets = map[string]bool{
-	"cache": true,
-}
-
 // dropRemoved removes removedComponents from the pipeline and their config blocks.
 func (c *Config) dropRemoved() {
 	kept := c.Pipeline[:0:0]
@@ -530,6 +522,15 @@ func (c *Config) dropRemoved() {
 	}
 }
 
+// retiredPresets are presets that no longer exist. A config that names one loads, logs a
+// warning and runs no preset components: an explicit pipeline in the same document still runs
+// as written.
+//
+// cache named cachesplit alone (#567).
+var retiredPresets = map[string]bool{
+	"cache": true,
+}
+
 // applyPreset fills an empty Pipeline (and, for rich presets, default component
 // configs) from the named preset. Explicit fields in the document always win — they
 // were already decoded, so the preset only supplies what the user left unset.
@@ -537,8 +538,8 @@ func (c *Config) applyPreset() error {
 	if c.Preset == "" {
 		return nil
 	}
-	if removedPresets[c.Preset] {
-		slog.Warn("config: preset was removed and is ignored", "preset", c.Preset)
+	if retiredPresets[c.Preset] {
+		slog.Warn("config: preset was retired and is ignored", "preset", c.Preset)
 		return nil
 	}
 	// Rich preset: a full config doc carrying tuned per-component settings a bare
@@ -1100,8 +1101,12 @@ components:
 // PresetPipeline returns the default pipeline (ordered component names) for a
 // named preset. It's the safe way to resolve a caller-supplied preset name (e.g.
 // a /compact ?preset= query param) — a plain map lookup, no YAML parsing of
-// untrusted input.
+// untrusted input. A retired preset resolves to an empty pipeline and logs a warning.
 func PresetPipeline(name string) ([]string, bool) {
+	if retiredPresets[name] {
+		slog.Warn("config: preset was retired and is ignored", "preset", name)
+		return nil, true
+	}
 	p, ok := presets[name]
 	return append([]string(nil), p...), ok
 }

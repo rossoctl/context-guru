@@ -237,8 +237,11 @@ func TestLinecapRunsLastAmongTheOffloaders(t *testing.T) {
 // loads with a warning, runs no component, and is no longer a preset. The same name from the
 // --preset flag goes through the same loader.
 func TestRemovedCachePresetFailsOpen(t *testing.T) {
-	if _, ok := PresetPipeline("cache"); ok {
-		t.Fatal("preset `cache` still exists")
+	if _, ok := presets["cache"]; ok {
+		t.Fatal("preset `cache` is retired but still in the presets map")
+	}
+	if p, ok := PresetPipeline("cache"); !ok || len(p) != 0 {
+		t.Fatalf("PresetPipeline(cache) = %v, %v; want empty, true", p, ok)
 	}
 	for _, doc := range []string{
 		"preset: cache\n",
