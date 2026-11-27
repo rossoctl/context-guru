@@ -109,8 +109,8 @@ func TestMissUsesTheOneHourWriteRate(t *testing.T) {
 	if got, want := k.projectedMissUSD("claude-sonnet-5", prefix, "", true), hour; !near(got, want) {
 		t.Errorf("keeper 1h miss = %v, want %v", got, want)
 	}
-	if got, want := k.projectedPingUSD("claude-sonnet-5", prefix, "/v1/messages", ""), prefix*0.3e-6+15e-6; !near(got, want) {
-		t.Errorf("ping on a 1-hour entry = %v, want the read rate %v", got, want)
+	if got, want := k.projectedPingUSD("claude-sonnet-5", prefix, "/v1/messages", ""), prefix*0.3e-6+7*3e-6+15e-6; !near(got, want) {
+		t.Errorf("ping on a 1-hour entry = %v, want the read rate plus the 7 fresh input tokens %v", got, want)
 	}
 }
 

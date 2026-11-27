@@ -204,8 +204,7 @@ func (h *Handler) armedView(t *tenant.Tenant, session string, o sessionOverride)
 	out["last_prefix_tokens"], out["model"], out["worst_case_pings"] = prefix, model, spans
 	if p := h.opts.Prices; p != nil && model != "" && prefix > 0 {
 		if price, ok := p.Price(context.Background(), model); ok && !price.Zero() {
-			price = price.At(keepalive.PingPrompt(int64(prefix))) // the ping reads this prefix: the rates of that prompt size
-			each := keepalive.PingUSD(prefix, price.CacheRead, price.Output)
+			each := keepalive.PingUSD(price, model, prefix, 1) // the cost of the ping that goes out: one output token
 			out["ping_usd_each"] = each
 			out["worst_case_usd"] = each * float64(spans)
 			out["priced"] = true

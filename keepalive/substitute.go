@@ -283,9 +283,9 @@ func (k *Keeper) recordSubstitutePing(j pingJob, model string, u Usage, ms float
 	}
 	var cost float64
 	if priced && !price.Zero() && (u.CacheRead > 0 || u.CacheWrite > 0 || u.Output > 0) {
-		// u.CacheWrite1h, not 0: see record1's own call to CostWithCacheWrite1h for why the
+		// u.CacheWrite1h, not 0: see pingCost's own call to billedUSD for why the
 		// 1h-tier subset has to be passed through rather than folded into the 5-minute rate.
-		cost = price.CostWithCacheWrite1h(u.FreshInput, u.CacheRead, u.CacheWrite, u.Output, u.CacheWrite1h)
+		cost = billedUSD(price, model, billedPrompt(u, prefix), u)
 	}
 	k.mu.Lock()
 	e.spent += cost
@@ -344,7 +344,9 @@ func (k *Keeper) sweepAnswerUSD(j pingJob, model string, u Usage) float64 {
 	if !ok || price.Zero() {
 		return 0
 	}
-	return price.CostWithCacheWrite1h(u.FreshInput, 0, u.CacheWrite, u.Output, u.CacheWrite1h)
+	prompt := billedPrompt(u, prefix) // the tier of the whole call, as the price lookup above
+	u.CacheRead = 0                   // the answer's own bill: a read of the cached prefix is not part of it
+	return billedUSD(price, model, prompt, u)
 }
 
 // sweepOutputBudgetGuess is the assumed output size of the sweep's question, used ONLY to project its

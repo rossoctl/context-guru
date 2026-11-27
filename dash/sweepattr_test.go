@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/internal/modelinfo/modelinfotest"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
@@ -77,7 +78,7 @@ func TestM1TheAnswerCostIsBookedOnceOnThePingRowAndInItsOwnColumn(t *testing.T) 
 	ping.Price(sweepPrice, true)
 	// The keeper books the answer cost with the same arithmetic the proxy uses: output + fresh + write,
 	// no read.
-	ping.SweepAnswerUSD = sweepPrice.CostWithCacheWrite1h(fresh, 0, 0, out, 0)
+	ping.SweepAnswerUSD = modelinfotest.StoredBill(sweepPrice, fresh, 0, 0, out, 0)
 	wantAnswer := float64(out)*sweepPrice.Output + float64(fresh)*sweepPrice.Input
 	if !approx(ping.SweepAnswerUSD, wantAnswer) {
 		t.Fatalf("answer cost = %v, want output + fresh = %v", ping.SweepAnswerUSD, wantAnswer)
@@ -333,7 +334,7 @@ func TestTheLedgerCarriesTheNetSavingAndTheColdApplyCacheNumbers(t *testing.T) {
 	ping := &Event{TS: 0, TenantID: "t", SessionID: "s", Model: "claude-sonnet-5", KeepAlive: true, Status: 200,
 		FreshInput: 600, CacheRead: 80_000, OutputTokens: 7_000}
 	ping.Price(sweepPrice, true)
-	ping.SweepAnswerUSD = sweepPrice.CostWithCacheWrite1h(600, 0, 0, 7_000, 0)
+	ping.SweepAnswerUSD = modelinfotest.StoredBill(sweepPrice, 600, 0, 0, 7_000, 0)
 	if err := db.insertBatch([]*Event{ping, cold, warm, other}); err != nil {
 		t.Fatal(err)
 	}

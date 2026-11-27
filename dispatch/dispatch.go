@@ -26,7 +26,7 @@ import (
 type Ref string
 
 // Price is one model's per-token rates in USD. An alias, so every host and the core price with one
-// formula (Price.CostWithCacheWrite1h).
+// formula (accountant.RequestCost).
 type Price = modelinfo.Price
 
 // ErrNotHeld is what Do returns when the host holds nothing for the Ref: unknown, or released.

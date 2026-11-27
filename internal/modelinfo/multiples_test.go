@@ -28,10 +28,10 @@ func TestPriceCacheWrite1h(t *testing.T) {
 	if got, want := p.CacheWrite1h(), 6e-6; got != want {
 		t.Errorf("CacheWrite1h() = %v, want %v", got, want)
 	}
-	// CostWithCacheWrite1h adds (1h rate - 5m rate) on the 1h tokens, as before.
-	got := p.CostWithCacheWrite1h(0, 0, 1000, 0, 1000)
+	// storedBill adds (1h rate - 5m rate) on the 1h tokens, as before.
+	got := storedBill(p, 0, 0, 1000, 0, 1000)
 	if want := 1000 * 6e-6; got != want {
-		t.Errorf("CostWithCacheWrite1h = %v, want %v", got, want)
+		t.Errorf("storedBill = %v, want %v", got, want)
 	}
 }
 

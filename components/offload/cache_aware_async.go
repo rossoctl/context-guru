@@ -264,7 +264,7 @@ type KeepAliveSummaryResult struct {
 	// CacheWrite1h is the SUBSET of CacheWrite this call billed at the one-hour write premium
 	// (the `1-hour-head` cache strategy's own breakpoint) — never an addition to CacheWrite. The
 	// keeper's recordSummarySubstitute needs this to price the call with
-	// modelinfo.Price.CostWithCacheWrite1h the same way record1 prices an ordinary ping, instead
+	// accountant.RequestCost the same way record1 prices an ordinary ping, instead
 	// of folding every write into the five-minute rate.
 	CacheWrite1h int
 	// Header is the call's response headers, or nil when no answer came back. The keeper puts them

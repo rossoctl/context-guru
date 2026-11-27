@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/thread"
 )
@@ -302,6 +303,10 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		counted := f.Since == 0 || r.ts >= f.Since
 		p, priced := priceOf(rates, price, r.model)
 		ctx := r.fresh + r.read + r.write
+		// The request bills at the rates of ITS prompt size (a long prompt can sit in a dearer tier), as
+		// Event.Price does. Every dollar of the row below (the four lines, the write dollars of a cause and
+		// the rewrite excess) reads this one price, so the causes partition the cache-write line.
+		p = p.Resolved(r.model).At(int64(ctx)) // Resolved first, then At: the order of Price.RateAt
 		// Only an "a:" id is a stable thread name. A "p:" id is a fingerprint of one request, so
 		// keying on it would make every side request a new thread and hide real idle expiries.
 		th := ""
@@ -383,15 +388,17 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		}
 		sd.USD += u.Total
 		if isRewrite {
-			excess := float64(r.write) * (p.CacheWrite - p.CacheRead)
-			if r.write1h > 0 {
-				if prem := p.CacheWrite1hPremium(); prem > 0 {
-					excess += float64(r.write1h) * prem
-				}
+			// The accountant owns the miss formula (MissCost): each write tier at its own rate, never below zero.
+			w1h := int64(r.write1h) // the part of the write at the 1-hour tier, within [0, write]
+			if w1h > int64(r.write) {
+				w1h = int64(r.write)
 			}
-			if excess < 0 {
-				excess = 0
+			if w1h < 0 {
+				w1h = 0
 			}
+			m5, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: int64(r.write) - w1h, PromptTokens: int64(ctx)}, modelinfo.OnePrice{Model: r.model, Price: p})
+			m1h, _ := accountant.MissCost(accountant.MissInput{Model: r.model, Prefix: w1h, PromptTokens: int64(ctx), OneHour: true}, modelinfo.OnePrice{Model: r.model, Price: p})
+			excess := m5 + m1h
 			rc := out.Rewrites[cause]
 			if rc == nil {
 				rc = &RewriteCause{}
@@ -470,6 +477,9 @@ func (d *DB) SpendExplainFor(f Filter, price func(string) (modelinfo.Price, bool
 		}
 		return out.SessionDays[i].Session < out.SessionDays[j].Session
 	})
+	// Rates is the model's BASE price list, as configured. Each row is priced at the rates of its own prompt
+	// size, so on a tiered model a row above its price line has cache_write dollars that can exceed its write
+	// tokens times rates.cache_write.
 	out.Rates = map[string]map[string]float64{}
 	for model, p := range rates {
 		if p.Zero() {

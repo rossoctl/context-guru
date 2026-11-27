@@ -424,8 +424,9 @@ func TestCalculatorPricesFromTheRowsModelNotABlend(t *testing.T) {
 	if a.PingUSDEach == b.PingUSDEach {
 		t.Errorf("two models with different rates priced the same ping at $%.8f", a.PingUSDEach)
 	}
-	if a.PingUSDEach != 300_000*cheap.CacheRead+cheap.Output {
-		t.Errorf("ping cost = %.8f, want prefix x cache_read + one output token", a.PingUSDEach)
+	// The accountant prices the ping: the read of the prefix, the 7 fresh input tokens the ping carries, one output token.
+	if want := 300_000*cheap.CacheRead + 7*cheap.Input + cheap.Output; math.Abs(a.PingUSDEach-want) > 1e-12 {
+		t.Errorf("ping cost = %.8f, want prefix x cache_read + 7 input tokens + one output token = %.8f", a.PingUSDEach, want)
 	}
 	if a.AvoidedUSDEach != 300_000*(cheap.CacheWrite-cheap.CacheRead) {
 		t.Errorf("avoided = %.8f, want the WRITE PREMIUM (write - read) x prefix, not the whole "+
@@ -967,8 +968,8 @@ func TestTheLivePanelPricesOneSessionsOwnBreakeven(t *testing.T) {
 		got, want float64
 		why       string
 	}{
-		{"ping_usd_each", r.PingUSDEach, 100_000*3e-7 + 15e-6,
-			"the prefix at the cache-READ rate plus the one output token the ping asks for"},
+		{"ping_usd_each", r.PingUSDEach, 100_000*3e-7 + 7*3e-6 + 15e-6,
+			"the prefix at the cache-READ rate plus the 7 fresh input tokens and the one output token the ping asks for"},
 		{"miss_usd", r.MissUSD, 100_000 * (3.75e-6 - 3e-7),
 			"the avoidable WRITE PREMIUM, not the whole re-read: a resuming request pays to " +
 				"read its prefix either way"},
@@ -1009,7 +1010,11 @@ func TestTheLivePanelPricesOneSessionsOwnBreakeven(t *testing.T) {
 		t.Errorf("soon_usd = %.6f, want %.6f: the write premium of the two rows about to lapse",
 			got.SoonUSD, want)
 	}
-	if want := 3 * rows["five"].MissUSD; math.Abs(got.PotentialUSD-want) > 1e-9 {
+	// The 1-hour row's miss is a rewrite at the 1-hour rate (2.0x base input), the entry's own tier.
+	if hourMiss := 100_000 * (6e-6 - 3e-7); math.Abs(rows["hour"].MissUSD-hourMiss) > 1e-9 {
+		t.Errorf("hour miss_usd = %.6f, want %.6f: the miss of a 1-hour entry is a 1-hour write", rows["hour"].MissUSD, hourMiss)
+	}
+	if want := 2*rows["five"].MissUSD + rows["hour"].MissUSD; math.Abs(got.PotentialUSD-want) > 1e-9 {
 		t.Errorf("potential_usd = %.6f, want %.6f: every live row, not only the urgent ones",
 			got.PotentialUSD, want)
 	}

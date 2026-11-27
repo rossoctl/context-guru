@@ -236,8 +236,13 @@ func TestOverrideWorstCasePingsIsAPingPerIdleNotPerSpan(t *testing.T) {
 	if got := (Override{}).WorstCasePings(t0); got != 0 {
 		t.Fatalf("a zero idle gives 0, got %d", got)
 	}
-	if got := PingUSD(1000, 0.000001, 0.01); got != 0.011 {
+	// 1000 prefix tokens at 1e-6, 7 fresh input tokens at 4e-6 and 1 output token at 1e-2.
+	price := Price{Input: 4e-6, CacheRead: 1e-6, CacheWrite: 5e-6, Output: 0.01}
+	if got := PingUSD(price, "m", 1000, 1); !near(got, 1000*1e-6+7*4e-6+0.01) {
 		t.Fatalf("got %v", got)
+	}
+	if got := PingUSD(Price{}, "m", 1000, 1); got != 0 {
+		t.Fatalf("an unknown price is 0, got %v", got)
 	}
 }
 

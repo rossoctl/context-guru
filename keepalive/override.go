@@ -5,7 +5,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
+	"github.com/rossoctl/context-guru/kvcache"
 )
 
 // Per-session keep-alive overrides: a human pointing at one session and saying "keep this one
@@ -193,9 +195,23 @@ func (o Override) WorstCasePings(now time.Time) int64 {
 	return pings
 }
 
-// PingUSD is the worst-case cost of one ping on a prefix of prefixTokens tokens: a cache read of the
-// prefix plus the output of the ping. Per-ping cost is bimodal, so it is priced from the session's
-// own last billed prefix and its own model's rates, never a service-wide average.
-func PingUSD(prefixTokens int64, cacheReadUSDPerToken, outputUSD float64) float64 {
-	return float64(prefixTokens)*cacheReadUSDPerToken + outputUSD
+// PingUSD is the cost of one ping on a prefix of prefix tokens, with outputTokens of output: a cache
+// read of the prefix, the fresh input the ping carries (kvcache.DefaultPingInputTokens) and its output,
+// all at the rates of the ping's prompt size (PingPrompt). The accountant owns the formula
+// (accountant.PingCost). Per-ping cost is bimodal, so it is priced from the session's own last billed
+// prefix and its own model's rates, never a service-wide average. Zero when the price is unknown.
+//
+// The fresh input is the fixed size of our own ping body. A per-model override of the ping input
+// (kvcache.Pricing.PingInputTokens) is a what-if of the savings simulator and is not read here: the
+// ping that goes out always carries the same body, so the override would misprice it.
+func PingUSD(price Price, model string, prefix, outputTokens int64) float64 {
+	return pingUSDWith(modelinfo.OnePrice{Model: model, Price: price}, model, prefix, outputTokens)
+}
+
+// pingUSDWith is PingUSD for a rate table that the caller built once, so that a caller who prices a
+// ping and a miss on one price boxes the price once.
+func pingUSDWith(rates accountant.SizedPricer, model string, prefix, outputTokens int64) float64 {
+	usd, _ := accountant.PingCost(accountant.PingInput{Model: model, Prefix: prefix, FreshInput: kvcache.DefaultPingInputTokens,
+		Output: outputTokens, PromptTokens: PingPrompt(prefix)}, rates)
+	return usd
 }
