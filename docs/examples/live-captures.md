@@ -146,7 +146,7 @@ after:   [{"id":0,…},{"id":1,…},{"id":11,…}] [3 of 12 items shown] <<cg:70
 ## Savings, verified
 
 Driving a realistic agent transcript (repeated large tool outputs, several old file reads) through
-the `general` preset against a real gateway, `GET /stats` reported:
+the old `general` preset (retired) against a real gateway, `GET /stats` reported:
 
 ```json
 { "requests": 2, "tokens_before": 24021, "tokens_after": 259, "savings_pct": 98.9,

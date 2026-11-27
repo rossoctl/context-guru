@@ -16,15 +16,14 @@ import (
 
 // TestCompactRowNamesThePresetThatRan.
 //
-// Observed live: POST /compact?preset=codesafe ran codesafe's pipeline — `collapse` fired,
-// and collapse is in no other preset — while both /api/requests and the request drawer
-// labelled the row "codesmart", the process default. /compact is THE offline replay and
+// Observed live: POST /compact?preset=<name> ran that preset's pipeline while both /api/requests
+// and the request drawer labelled the row with the process default. /compact is THE offline replay and
 // eval endpoint (deploy/harbor/replay.py drives it), and the point of an eval sweep is
 // comparing presets, so every row carrying the default silently blended an A/B into one
 // bucket with nothing to show it had.
 func TestCompactRowNamesThePresetThatRan(t *testing.T) {
 	agg := metrics.NewAggregator()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,14 +58,14 @@ func TestCompactRowNamesThePresetThatRan(t *testing.T) {
 	// One request per override shape, each tagged by its model so the rows can be told
 	// apart without depending on insertion order.
 	want := map[string]string{
-		"m-default": "codesafe",  // no override: the tenant default stands
-		"m-preset":  "codesmart", // ?preset= actually swapped the pipeline
-		"m-header":  "custom",    // an explicit list has no preset name
-		"m-unknown": "codesafe",  // build failed => the configured pipeline ran, and IS the label
+		"m-default": "conservative", // no override: the tenant default stands
+		"m-preset":  "medium",       // ?preset= actually swapped the pipeline
+		"m-header":  "custom",       // an explicit list has no preset name
+		"m-unknown": "conservative", // build failed => the configured pipeline ran, and IS the label
 	}
 	for _, tc := range []struct{ model, query, header string }{
 		{"m-default", "", ""},
-		{"m-preset", "&preset=codesmart", ""},
+		{"m-preset", "&preset=medium", ""},
 		{"m-header", "", "format,textclean"},
 		{"m-unknown", "&preset=nosuchpreset", ""},
 	} {

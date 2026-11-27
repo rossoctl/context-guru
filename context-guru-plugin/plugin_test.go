@@ -3281,7 +3281,7 @@ func TestAnOldProxyThatRejectsTheOneHourKeysStillStarts(t *testing.T) {
 func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 	state, home := t.TempDir(), t.TempDir()
 	facts, code := settingsIn(t, state, home, "strategy", "set",
-		"--name", "auto", "--port", keepalivePort, "--preset", "codesmart")
+		"--name", "auto", "--port", keepalivePort, "--preset", "medium")
 	if code != 0 {
 		t.Fatalf("exit %d: %v", code, facts)
 	}
@@ -3294,7 +3294,7 @@ func TestStrategySetWritesTheStatedPresetAndRecordsTheName(t *testing.T) {
 		t.Fatalf("no config written at %s: %v", strategyCfg(state), err)
 	}
 	body := string(b)
-	if !strings.Contains(body, "preset: codesmart") {
+	if !strings.Contains(body, "preset: medium") {
 		t.Errorf("the CONFIGURED preset did not survive into the file, which silently drops "+
 			"compaction the moment --config is passed:\n%s", body)
 	}
@@ -4057,7 +4057,7 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 		"--unrouted", "--bin", fake, "--port", port, "--preset", "house", "--idle-exit", "90m")
 	// The options say something DIFFERENT, so a passing test cannot be reading them instead.
 	cmd.Env = append(sandboxEnv(t),
-		"CLAUDE_PLUGIN_OPTION_PRESET=codesmart",
+		"CLAUDE_PLUGIN_OPTION_PRESET=medium",
 		"CLAUDE_PLUGIN_OPTION_IDLE_EXIT=24h",
 		"ANTHROPIC_BASE_URL=",
 		"CONTEXT_GURU_BIN=",
@@ -4094,7 +4094,7 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 	if !strings.Contains(launched, "house") {
 		t.Errorf("--preset was not honoured as an argument: %s", launched)
 	}
-	if strings.Contains(launched, "codesmart") {
+	if strings.Contains(launched, "medium") {
 		t.Errorf("the option beat the argument for preset: %s", launched)
 	}
 }
@@ -4110,7 +4110,7 @@ func TestStartProxyTakesPresetAndIdleExitAsArguments(t *testing.T) {
 // "reported wrong", and neither beats "did not start" — hence the exit-0 and launched checks on every
 // row, not just the happy one.
 func TestStartProxyReportsThePresetActuallyInEffect(t *testing.T) {
-	const optionPreset = "codesmart" // what the PLUGIN OPTION says, and what the note must not parrot
+	const optionPreset = "medium" // what the PLUGIN OPTION says, and what the note must not parrot
 	for _, c := range []struct {
 		name       string
 		writeCfg   bool

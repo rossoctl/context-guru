@@ -115,7 +115,7 @@ Tool outputs on the Anthropic dialect ride in `tool_result` blocks inside a user
 CGO_ENABLED=1 go build -tags cg_skeleton -o bin/context-guru-proxy ./cmd/context-guru-proxy
 ```
 
-The `coding` preset, and any pipeline listing `skeleton`, needs that binary. Without the tag
+Any pipeline listing `skeleton` needs that binary. Without the tag
 the component is not registered, and the proxy refuses to start rather than quietly running
 a pipeline that is missing a component you asked for. Every other component is unaffected.
 

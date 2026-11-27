@@ -23,7 +23,7 @@ VARIANTS = {
     "collapse max_tokens 4000": "pipeline: [collapse]\ncomponents:\n  collapse:\n    max_tokens: 4000\n",
     "collapse max_tokens 8000": "pipeline: [collapse]\ncomponents:\n  collapse:\n    max_tokens: 8000\n",
 }
-PRESETS = ["conservative", "safe", "balanced", "coding", "codesafe"]
+PRESETS = ["conservative", "safe"]
 # The order components run in when combined: lossless repacking first, then noise removal, then the age and
 # relevance offloaders, as the shipped presets order them.
 ORDER = {c: i for i, c in enumerate(FREE)}

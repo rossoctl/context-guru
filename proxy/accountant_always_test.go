@@ -49,7 +49,7 @@ func (f *figTap) wait(t *testing.T, n int) {
 // noDashHandler is a handler with no dashboard. edit changes the options before New.
 func noDashHandler(t *testing.T, up string, edit func(*Options)) *Handler {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestAccountantFigureMatchesTheDashboardRow(t *testing.T) {
 	defer up.Close()
 	var tap figTap
 	var hh *Handler
-	h, rec, evs := accHandlerOpts(t, up.URL, "preset: codesafe\n", nil)
+	h, rec, evs := accHandlerOpts(t, up.URL, "preset: conservative\n", nil)
 	hh = h
 	tap.hook(hh)
 	postTwice(t, h, "sess-dash-on")
@@ -157,7 +157,7 @@ func TestAccountantFigureIsTheSameWithAndWithoutTheDashboard(t *testing.T) {
 	postTwice(t, off, "sess-same")
 	a.wait(t, 2)
 
-	on, rec, _ := accHandlerOpts(t, up.URL, "preset: codesafe\n", nil)
+	on, rec, _ := accHandlerOpts(t, up.URL, "preset: conservative\n", nil)
 	var b figTap
 	b.hook(on)
 	postTwice(t, on, "sess-same")
@@ -262,7 +262,7 @@ func BenchmarkRequestWithoutDashboard(b *testing.B) {
 				name = size + "/accountant_on"
 			}
 			b.Run(name, func(b *testing.B) {
-				cfg, _ := config.LoadBytes([]byte("preset: codesafe\n"))
+				cfg, _ := config.LoadBytes([]byte("preset: conservative\n"))
 				agg := metrics.NewAggregator()
 				pipe, _ := cfg.Build(agg)
 				h := New(pipe, store.NewMemory(store.Options{}), agg, Options{AnthropicUpstream: up.URL, OpenAIUpstream: up.URL, Preset: cfg.Preset, Prices: fixedPricer{}})

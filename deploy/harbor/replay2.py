@@ -30,9 +30,9 @@ PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_price
 
 DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
                "cmdfilter", "mask", "collapse", "extract", "smartcrush", "skeleton",
-               "phi_evict", "general", "agent", "balanced"]
-PIPE = {"off": None, "agent": ("preset", "agent"), "balanced": ("preset", "balanced"),
-        "general": ("preset", "general"), "coding": ("preset", "coding"), "mcp": ("preset", "mcp")}
+               "phi_evict", "conservative"]
+# The old presets that named a heuristic offloader were retired: replaying one now runs no components.
+PIPE = {"off": None, "conservative": ("preset", "conservative")}
 
 
 def get(url):

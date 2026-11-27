@@ -91,7 +91,7 @@ DAYS_PER_MONTH = 30.0
 # whose money is equal or, more often, both unpriced.
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3, "ok": 4}
 
-# The presets this plugin offers (plus house/codesmart/housellm, still explainable for anyone who
+# The presets this plugin offers (plus house/housellm, still explainable for anyone who
 # set one of those directly through /plugin configure's raw form before or instead of the picker),
 # each with the component pipeline it actually builds. This table is DUPLICATED from
 # config/config.go's presetPipelines on purpose — the plugin ships as a directory of scripts with
@@ -105,8 +105,6 @@ PRESET_PIPELINES: dict[str, tuple[str, ...]] = {
     "cache": ("cachesplit",),
     "house": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",
               "cachesplit", "toolfilter"),
-    "codesmart": ("format", "textclean", "searchfold", "dedup", "failed_run", "cmdfilter",
-                  "extract_llm", "extract", "linecap", "cachesplit"),
     "housellm": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract_llm",
                  "extract_llm_sweep", "extract", "cachesplit", "toolfilter"),
     "conservative": ("format", "dedup", "toon", "cmdfilter", "searchfold", "textclean", "extract",

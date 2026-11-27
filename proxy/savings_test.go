@@ -37,7 +37,7 @@ func savingsUpstream(t *testing.T) *httptest.Server {
 // (so two turns on a session land it in the keeper's live set) in front of a fake upstream.
 func savingsTestHandler(t *testing.T, up string) (*Handler, *dash.Recorder) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

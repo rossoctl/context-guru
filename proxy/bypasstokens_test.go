@@ -53,7 +53,7 @@ func TestBypassedRequestIsNotTokenizedOnTheRequestPath(t *testing.T) {
 		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
 	defer up.Close()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

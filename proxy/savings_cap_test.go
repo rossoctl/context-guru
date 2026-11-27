@@ -43,7 +43,7 @@ func cappedSession(session string, n int) []*dash.Event {
 
 func capTestHandler(t *testing.T, windows bool) (*Handler, *dash.Recorder) {
 	t.Helper()
-	cfg, err := config.LoadBytes([]byte("preset: codesafe\n"))
+	cfg, err := config.LoadBytes([]byte("preset: conservative\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

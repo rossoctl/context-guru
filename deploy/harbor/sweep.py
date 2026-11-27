@@ -13,9 +13,9 @@ Model: aws/claude-sonnet-5 via the IBM LiteLLM gateway (creds from ~/.claude/set
 Agent: claude-code (Anthropic dialect -> proxy /anthropic route).
 
 Usage:
-  sweep.py --matrix validate            # small baseline+agent validation matrix
-  sweep.py --configs off agent mask extract --benchmark terminal-bench-sample@2.0 --n-tasks 2
-  sweep.py --benchmark swebench-verified@1.0 --configs off agent --n-tasks 1 --timeout 5400
+  sweep.py --matrix validate            # small baseline+conservative validation matrix
+  sweep.py --configs off conservative mask extract --benchmark terminal-bench-sample@2.0 --n-tasks 2
+  sweep.py --benchmark swebench-verified@1.0 --configs off conservative --n-tasks 1 --timeout 5400
 """
 import argparse, csv, json, os, re, shutil, signal, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
@@ -34,8 +34,7 @@ MODEL = "aws/claude-sonnet-5"
 # config name -> pipeline (comma list) | "off" (passthrough) | "preset:<name>"
 CONFIGS = {
     "off":        "off",
-    "agent":      "preset:agent",
-    "balanced":   "preset:balanced",
+    "conservative": "preset:conservative",
     "format":     "format",
     "dedup":      "dedup",
     "failed_run": "failed_run",
@@ -170,9 +169,9 @@ def append(row):
 
 
 MATRICES = {
-    # small end-to-end validation: baseline vs agent preset on two benchmarks
+    # small end-to-end validation: baseline vs the conservative preset
     "validate": [
-        ("terminal-bench-sample@2.0", ["chess-best-move", "hello-world"], ["off", "agent"]),
+        ("terminal-bench-sample@2.0", ["chess-best-move", "hello-world"], ["off", "conservative"]),
     ],
 }
 
@@ -183,7 +182,7 @@ def main():
     ap.add_argument("--matrix", choices=list(MATRICES))
     ap.add_argument("--benchmark")
     ap.add_argument("--tasks", nargs="*", help="task-name globs (harbor -i); default first task")
-    ap.add_argument("--configs", nargs="*", default=["off", "agent"])
+    ap.add_argument("--configs", nargs="*", default=["off", "conservative"])
     ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--bin", default=BIN)
     a = ap.parse_args()

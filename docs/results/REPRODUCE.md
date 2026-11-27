@@ -90,18 +90,15 @@ Notes / gotchas learned the hard way:
   `CHEAP_MODEL=aws/claude-haiku-4-5` for its own compaction calls.
 
 **A re-run today will not reproduce the published figures exactly.** The harness embeds its
-own `codesmart` and `codesafe` documents, and both have since been brought back into step
-with the shipped presets, so the command above now runs the *current* pipelines: `codesmart`
-gained `toon`, both swapped `cacheinject` for `cachesplit`, and a gating bug that kept
-`failed_run` inert on this workload is fixed. Read any difference as a change in the
-treatment, not as run-to-run noise, and re-measure before a cost claim leans on the current
-pipeline. No published number has been adjusted.
+own `codesmart` and `codesafe` documents. The presets of the same names were retired from
+`config/config.go`, so these two documents are now their only definition. Both have drifted from
+the published run: `codesmart` gained `toon`, both swapped `cacheinject` for `cachesplit`, and a
+gating bug that kept `failed_run` inert on this workload is fixed. Read any difference as a change
+in the treatment, not as run-to-run noise. To reproduce the published numbers, use release
+`v0.7.10` or older. No published number has been adjusted.
 
-A drift guard (`deploy/harbor/pipeline_drift_test.go`) checks every preset a harness names an
-arm after, so a harness document that falls behind the shipped preset fails the test rather
-than quietly producing an unlabelled treatment. Arms that deliberately run a non-preset
-pipeline — `cacheonly`, which runs `[cacheinject]` alone to isolate the cache lever — are
-exempt, since there is no preset to compare them against.
+A drift guard (`deploy/harbor/pipeline_drift_test.go`) checks that every component a harness
+arm names is still registered, so an arm does not quietly run without a component that was removed.
 
 ## 4. Run headroom
 

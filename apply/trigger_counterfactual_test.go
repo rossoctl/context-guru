@@ -406,13 +406,13 @@ func TestTriggerDefaultsUnchanged(t *testing.T) {
 	if zero.IsHuge(1<<30, 200000) {
 		t.Fatal("zero Trigger reported a huge output; HugeOutputFrac is unset")
 	}
-	cfg, err := config.LoadBytes([]byte("preset: codesmart\n"))
+	cfg, err := config.LoadBytes([]byte("preset: medium\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, ok := cfg.Components["extract_llm"]
 	if !ok {
-		t.Fatal("codesmart lost its extract_llm block")
+		t.Fatal("medium lost its extract_llm block")
 	}
 	var got struct {
 		Trigger struct {
@@ -423,7 +423,7 @@ func TestTriggerDefaultsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Trigger.MinRequestTokens != 3000 {
-		t.Fatalf("codesmart extract_llm trigger.min_request_tokens = %d, want 3000 "+
+		t.Fatalf("medium extract_llm trigger.min_request_tokens = %d, want 3000 "+
 			"(unchanged: lowering it reaches 0.21%% of gated tokens for ~$245 of LLM spend "+
 			"— see docs/results/below-trigger-2026-08.md)", got.Trigger.MinRequestTokens)
 	}
