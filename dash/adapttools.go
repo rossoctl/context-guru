@@ -501,7 +501,6 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			rate = accountant.RemovalSaving(accountant.RemovalInput{
 				Model: r.model, Tier: head, Prompt: modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite),
 				Removed: int(r.removed), // no tokenizer factor: it is deferred
-
 			}, modelinfo.Rates{Lookup: price}).PerTokenUSD
 		}
 		if ok {
