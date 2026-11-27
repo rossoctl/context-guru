@@ -1,6 +1,6 @@
 # Lessons from review
 
-The reviewers of the 2026-11-01 run found these mistakes in the fixes. Put this file in every fix
+The reviewers of each run found these mistakes in the fixes. Put this file in every fix
 agent's brief. Add a lesson when a later run's review finds a new kind of mistake.
 
 ### The fix can repeat the bug
@@ -53,7 +53,7 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   only).
 - **Bit-equal money needs per-product rounding.** On arm64, `usd += r*n` fuses into one
   multiply-add. Round each product with an explicit `float64()` when a figure must equal a stored
-  one (accountant #125, #1128).
+  one (accountant #125, context-guru #1128).
 - **A constant above 2^31 breaks 32-bit builds.** Accountant #129's `1 << 31` did not fit a 32-bit
   int. Build with `GOARCH=386` when you add a bound.
 
@@ -97,7 +97,7 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
 ### Working with agents
 
 - **Messages cross.** Before you act on an agent's report, read the PR head and body from the
-  server. Two agents answered an older message, and one reported "done" for work it had listed as a
+  server. Two agents answered an older message (in the 2026-11-26 run, several times), and one reported "done" for work it had listed as a
   follow-up.
 - **Repeat open items.** When you send a second message, list every item still open. An agent may
   act on only the first message.
@@ -111,5 +111,3 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   "Stacked PRs" says (#1508).
 - **Agents stop mid-edit on a gateway error.** Two agents stopped on an API 502 with uncommitted
   work. Check the worktree's `git status` before you resume them.
-- **Messages cross, again.** Agents answered an older message several times. Repeat every open
-  item in the second message.
