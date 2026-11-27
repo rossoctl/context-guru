@@ -1297,9 +1297,9 @@ func (d *DB) KeepAliveLive(f Filter, now int64, idleSeconds float64, maxPings in
 				// A mixed entry (a 1-hour head, a 5-minute tail) whose head lives: the miss is the tail rewrite, as for the keeper.
 				r.MissUSD = keepalive.MissUSDHead(p, r.Model, r.Prefix, oneHour == 1, head)
 				if r.PingUSDEach > 0 {
-					r.BreakevenPings = int64(keepalive.MissUSD(p, r.Model, r.Prefix, false) / r.PingUSDEach)
+					r.BreakevenPings = int64(keepalive.MissUSDHead(p, r.Model, r.Prefix, false, head) / r.PingUSDEach) // the tail on a mixed row, as MissUSD
 					r.BreakevenMinutes = CoverageSecondsFor(idleSeconds, int(r.BreakevenPings), ttl) / 60
-					miss1h := keepalive.MissUSD(p, r.Model, r.Prefix, true)
+					miss1h := keepalive.MissUSDHead(p, r.Model, r.Prefix, true, head)
 					r.Breakeven1hPings = int64(miss1h / r.PingUSDEach)
 					// An hour-long entry needs a ping only once an hour, so the same count of
 					// pings bridges twelve times the wall clock: K x X per span still, but the

@@ -145,7 +145,7 @@ func TestLivePanelMissOfAMixedEntryIsTheTail(t *testing.T) {
 		e.CacheRead, e.CacheWrite, e.CacheWrite1h = read, write, write1h
 		return e
 	}
-	const head, tail = 20_000, 150
+	const head, tail = 20_000, 5_000
 	fx := newKAFixture(t,
 		ev(ago(100), "mixed", 0, head+tail, head),
 		ev(ago(400), "inherit", 0, head+tail, head),
@@ -181,6 +181,16 @@ func TestLivePanelMissOfAMixedEntryIsTheTail(t *testing.T) {
 		}
 		if r.MissUSD != c.want {
 			t.Errorf("%s: miss_usd = %v, want %v", c.session, r.MissUSD, c.want)
+		}
+	}
+	if rows["mixed"].BreakevenPings == 0 {
+		t.Error("the tail miss must pay for at least one ping here, or the breakeven check proves nothing")
+	}
+	// The breakeven counts divide the miss that the row shows, so the row has one miss figure.
+	for _, s := range []string{"mixed", "inherit"} {
+		r := rows[s]
+		if want := int64(r.MissUSD / r.PingUSDEach); r.BreakevenPings != want || r.Breakeven1hPings != want {
+			t.Errorf("%s: breakeven pings = %d / %d (1h), want %d from the tail miss %v", s, r.BreakevenPings, r.Breakeven1hPings, want, r.MissUSD)
 		}
 	}
 	if want := float64(tail) * (3.75e-6 - 3e-7); !(tailMiss > want*0.999 && tailMiss < want*1.001) {
