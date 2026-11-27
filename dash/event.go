@@ -5,8 +5,8 @@ import (
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/apply"
-	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/reqfacts"
@@ -851,6 +851,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	}
 	if tr.Run != nil {
 		e.TokensBefore, e.TokensAfter = tr.Run.TokensBefore, tr.Run.TokensAfter
+		opBytes := removedBytesByOperator(tr.Ops)
 		for _, r := range tr.Run.Components {
 			row := CompRow{
 				Component:  r.Component,
@@ -858,7 +859,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 				Reverted:   r.Reverted,
 				Skipped:    r.Skipped,
 				SavedGross: r.Saved(),
-				SavedBytes: removedBytes(r),
+				SavedBytes: opBytes[accwire.Operator(r.Component)],
 				DurationMs: r.DurationMs,
 			}
 			row.Mutated = !r.Reverted && !r.Skipped
@@ -1218,16 +1219,18 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 // CachePrefixChangeReason marks the miss as caused by a changed prefix.
 func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChange }
 
-// removedBytes is the bytes a component removed: the sum of its changes' before size minus after size. It is the
-// size the accountant is given for the same changes (apply.OpsFromRun), so it converts with the request's ratio. A
-// reverted or skipped component removed nothing.
-func removedBytes(r components.Report) int {
-	if r.Reverted || r.Skipped {
-		return 0
+// removedBytesByOperator is the bytes each operator removed on this request: the sum of its operations' before size minus
+// after size, never below 0 for one operation. Trace.Ops holds only the changes that were applied and kept on the wire
+// (a change the writeback discarded is not in it, and neither is a rewrite that is not sent), so these bytes are paired
+// with what the request's ratio was measured on: the forwarded body. They are the sizes the accountant is given, in wire
+// bytes. A dry-run operation (observe mode) changed nothing and counts 0.
+func removedBytesByOperator(ops []accountant.Operation) map[string]int {
+	out := map[string]int{}
+	for _, op := range ops {
+		if op.Kind != accountant.KindRewrite || op.DryRun {
+			continue
+		}
+		out[op.Operator] += max(op.SizeBefore.Bytes-op.SizeAfter.Bytes, 0)
 	}
-	n := 0
-	for _, c := range r.Changes {
-		n += max(c.BytesBefore-c.BytesAfter, 0)
-	}
-	return n
+	return out
 }

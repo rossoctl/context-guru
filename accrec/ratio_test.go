@@ -165,7 +165,8 @@ func TestRequestFactorIsLiveOrNotAtAll(t *testing.T) {
 	for name, a := range map[string]struct {
 		host, bytes int64
 		c           RatioCounts
-	}{"no ratio": {400, 1600, RatioCounts{}}, "no bytes": {400, 0, c}, "no removal": {0, 1600, c}} {
+	}{"no ratio": {400, 1600, RatioCounts{}}, "no bytes": {400, 0, c}, "no removal": {0, 1600, c},
+		"above the bound": {10, 1600, c}, "below one": {1000, 1600, c}} {
 		if f, ok := RequestFactor(a.host, a.bytes, a.c); ok || f != 0 {
 			t.Errorf("%s: %v %v, want the table (not ok)", name, f, ok)
 		}

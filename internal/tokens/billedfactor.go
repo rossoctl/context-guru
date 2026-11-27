@@ -72,3 +72,7 @@ func BilledDeltaFactor(model string) (factor float64, measured bool) {
 // the ratio columns existed, and a what-if over such a row. It is BilledDeltaFactor, read in one place, so the
 // table has one caller. A new row carries its own ratio (accrec.RatioCounts) and never reads the table.
 func LegacyFactor(model string) (factor float64, measured bool) { return BilledDeltaFactor(model) }
+
+// MaxBilledRatio bounds a provider-over-host token ratio that a reader trusts (#1533). A ratio outside [1, MaxBilledRatio]
+// came from a bad sample, and the reader keeps the legacy table. The warm gate and accrec.RequestFactor share it.
+const MaxBilledRatio = 8.0

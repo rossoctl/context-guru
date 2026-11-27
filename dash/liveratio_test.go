@@ -7,6 +7,8 @@ import (
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
+	"github.com/rossoctl/context-guru/accwire"
+	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
@@ -111,21 +113,29 @@ func TestTheDeclarationFilterCreditUsesTheRowsOwnRatio(t *testing.T) {
 	}
 }
 
-// A component's removed bytes are stored as a count (NULL when unknown), and the capture sums its changes (#1533).
-func TestTheComponentRemovedBytesAreStoredAndSummedFromItsChanges(t *testing.T) {
-	r := components.Report{Component: "mask", Kind: "offload", Changes: []components.Change{
-		{BytesBefore: 1000, BytesAfter: 100}, {BytesBefore: 50, BytesAfter: 80}, {BytesBefore: 500, BytesAfter: 0}}}
-	if got := removedBytes(r); got != 1400 {
-		t.Fatalf("removedBytes = %d, want 900 + 0 (a growth is not a removal) + 500 = 1400", got)
-	}
-	r.Reverted = true
-	if got := removedBytes(r); got != 0 {
-		t.Fatalf("a reverted component removed %d bytes, want 0", got)
+// A component's removed bytes come from the operations that were applied and kept, not from every change it reported:
+// a change the writeback discarded is in the report and not in Trace.Ops (#1533, review round 2).
+func TestTheComponentRemovedBytesCountOnlyTheKeptOperations(t *testing.T) {
+	kept := accountant.Operation{Kind: accountant.KindRewrite, Operator: accwire.Operator("mask"),
+		SizeBefore: accountant.Size{Bytes: 1000}, SizeAfter: accountant.Size{Bytes: 100}}
+	grown := accountant.Operation{Kind: accountant.KindRewrite, Operator: accwire.Operator("mask"),
+		SizeBefore: accountant.Size{Bytes: 50}, SizeAfter: accountant.Size{Bytes: 80}}
+	dry := accountant.Operation{Kind: accountant.KindRewrite, Operator: accwire.Operator("mask"), DryRun: true,
+		SizeBefore: accountant.Size{Bytes: 700}}
+	tr := apply.Trace{Ops: []accountant.Operation{kept, grown, dry},
+		Run: &components.RunReport{Components: []components.Report{{Component: "mask", Kind: "offload", Changes: []components.Change{
+			{BytesBefore: 1000, BytesAfter: 100}, {BytesBefore: 50, BytesAfter: 80},
+			{BytesBefore: 40000, BytesAfter: 0}, // discarded by the writeback: reported, not in Ops
+		}}}}}
+	e := &Event{}
+	e.FromTrace(tr, nil)
+	if len(e.Components) != 1 || e.Components[0].SavedBytes != 900 {
+		t.Fatalf("components = %+v, want mask with 900 bytes: the kept 900, a growth as 0, a dry run as 0, the discarded 40000 not counted", e.Components)
 	}
 	db := openTestDB(t)
-	e := mkEvent(1000, "s", "claude", 100, 90)
-	e.Components = []CompRow{{Component: "mask", Kind: "offload", SavedGross: 400, SavedBytes: 1400}, {Component: "other", Kind: "offload", SavedGross: 5}}
-	if err := db.insertBatch([]*Event{e}); err != nil {
+	e2 := mkEvent(1000, "s", "claude", 100, 90)
+	e2.Components = []CompRow{{Component: "mask", Kind: "offload", SavedGross: 400, SavedBytes: 900}, {Component: "other", Kind: "offload", SavedGross: 5}}
+	if err := db.insertBatch([]*Event{e2}); err != nil {
 		t.Fatal(err)
 	}
 	var mask, other sql.NullInt64
@@ -133,8 +143,8 @@ func TestTheComponentRemovedBytesAreStoredAndSummedFromItsChanges(t *testing.T) 
 		(SELECT saved_bytes FROM request_components WHERE component='other')`).Scan(&mask, &other); err != nil {
 		t.Fatal(err)
 	}
-	if mask.Int64 != 1400 || other.Valid {
-		t.Fatalf("stored mask=%v other=%v, want 1400 and NULL", mask, other)
+	if mask.Int64 != 900 || other.Valid {
+		t.Fatalf("stored mask=%v other=%v, want 900 and NULL", mask, other)
 	}
 }
 

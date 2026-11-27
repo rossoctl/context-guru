@@ -75,7 +75,7 @@ const (
 	maxWarmThreads  = 256
 	// maxBilledRatio bounds the billed-over-local ratio the gate trusts. A figure outside [1, max] came
 	// from another thread's turn or a bad sample, and the gate refuses instead of acting on it.
-	maxBilledRatio = 8.0
+	maxBilledRatio = tokens.MaxBilledRatio
 )
 
 // Wait-cause weights on the expected warm turns (#453). A thread whose last wake was its own tool's

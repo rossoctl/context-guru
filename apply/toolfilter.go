@@ -105,7 +105,6 @@ package apply
 // tool back.
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/rossoctl/context-guru/internal/skills"
@@ -507,7 +506,7 @@ func filterSkillListingWithAdapter(body []byte, remove []string, wire envelopeAd
 	for _, e := range l.Entries {
 		if drop[e.Name] {
 			removedTokens += tokens.Count(l.Text(e))
-			removedBytes += len(strconv.Quote(l.Text(e))) - 2 // as a JSON string: the escapes count
+			removedBytes += jsonStringLen(l.Text(e)) // as the body writes it: the escapes count
 		}
 	}
 	next, n := l.Without(drop)
@@ -533,4 +532,16 @@ func skillListingPath(body []byte) (string, string) {
 
 func (chatEnvelopeAdapter) skillListingPath(body []byte) (string, string) {
 	return skills.Locate(body) // the one rule, shared with dash's reader
+}
+
+// jsonStringLen is the bytes a string takes inside a JSON string in the body (the quotes not counted), written by the
+// same encoder the body is rewritten with (sjson), so control characters and quotes count as escapes and non-ASCII
+// text counts as its UTF-8 bytes.
+func jsonStringLen(s string) int {
+	const frame = len(`{"k":""}`)
+	b, err := sjson.SetBytes([]byte(`{}`), "k", s)
+	if err != nil {
+		return len(s)
+	}
+	return len(b) - frame
 }
