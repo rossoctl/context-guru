@@ -682,7 +682,7 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 		if !ok {
 			pr.p, pr.ok = p.Price(ctx, r.model)
 			pr.ok = pr.ok && !pr.p.Zero()
-			pr.factor, _ = tokens.BilledDeltaFactor(r.model)
+			pr.factor, _ = tokens.LegacyFactor(r.model)
 			prices[r.model] = pr
 		}
 		priced := pr.ok && acct == AccountingComplete

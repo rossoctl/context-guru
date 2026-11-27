@@ -183,7 +183,7 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 		c.accDone = true
 		out := c.savings.Price(c.accReq, accrec.PriceIn{
 			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
-			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend() },
+			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend(usage) },
 			// The metrics are booked before the rescue counter and the ping-facts drop, as they always were.
 			AfterCompute: func(res accountant.Result) {
 				c.observeMetrics(res, usage.accrec().Accountant(), int(usage.Output))
@@ -265,12 +265,12 @@ func failOpenAccountant(what string, step func()) {
 
 // accDeferSpend reports the search-turn costs of a deferred request to the accountant as spend operations on the
 // tooldefer operator (#1441), so the one figure for deferral holds them. It runs before Compute. Nil-safe.
-func (c *capture) accDeferSpend() {
+func (c *capture) accDeferSpend(usage Usage) {
 	d := c.deferFacts
 	if c.accReq == nil || d == nil || !d.spendOK {
 		return
 	}
-	for _, op := range accrec.DeferSpendOps(d.spend) {
+	for _, op := range accrec.DeferSpendOps(d.spend, c.savings.RatioFor(c.accReq, usage.accrec())) {
 		c.accReq.Add(op)
 	}
 }
@@ -288,4 +288,29 @@ func (c *capture) runDeferBook() {
 		}
 	}()
 	f()
+}
+
+// liveRatioText is the request ratio's text counts for the thread's next turn (#1533). The rule for which ratio a
+// thread keeps is accrec.Recorder.RatioTextFor's. This only joins the accountant job first (the record is opened off
+// the request path, and finish reads it later), then calls it. It runs before the request is priced, while the forwarded
+// body is still held. Fail open: a panic gives 0, 0. Nil-safe.
+func (c *capture) liveRatioText(usage Usage, usageOK bool) (tokens, bytes int) {
+	if c == nil || c.savings == nil || !usageOK {
+		return 0, 0
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: the request ratio panicked; the thread keeps its last ratio", "panic", p)
+			tokens, bytes = 0, 0
+		}
+	}()
+	if c.accMu != nil {
+		c.accMu.Lock() // the ledger's hook and the finish goroutine can both join the job
+		defer c.accMu.Unlock()
+	}
+	c.accWait() // idempotent: the record is c.accReq only after the job is joined
+	if c.accReq == nil {
+		return 0, 0
+	}
+	return c.savings.RatioTextFor(c.accReq, usage.accrec(), c.status, c.rounds)
 }

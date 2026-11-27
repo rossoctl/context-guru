@@ -3,11 +3,12 @@ package dash
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"sort"
 
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
-	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // THE SWEEP'S LEDGER (#404 PR C, points 7 and 9).
@@ -159,7 +160,6 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	if err != nil {
 		return nil, err
 	}
-	byModel := map[string]int64{}
 	for xrows.Next() {
 		var s, th, model string
 		var n, tok, fe, few int64
@@ -171,7 +171,6 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 		out.ExpandTokens += tok
 		out.FalseExpands += fe
 		out.FalseExpandsWarm += few
-		byModel[model] += tok
 		get(s, th).FalseDrops += fe
 	}
 	xrows.Close()
@@ -186,16 +185,20 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 	if out.Applied > 0 {
 		out.FalseDropRate = float64(out.FalseDrops) / float64(out.Applied)
 	}
-	// The charge: the restored text is new input on the request that carried it, so the write rate,
-	// with the same tokenizer correction every other counterfactual token count gets.
+	// The charge: the restored text is new input on the request that carried it, so the write rate. The tokens are
+	// the provider's: the restored bytes through the request's own ratio when the row has one, else the host's
+	// count through the legacy table (accrec.ProviderTokens, #1533).
 	if p != nil {
+		byModel, err := d.expandProviderTokens(ctx, cond, args)
+		if err != nil {
+			return nil, err
+		}
 		for model, tok := range byModel {
 			price, ok := p.Price(ctx, model)
 			if !ok || price.Zero() {
 				continue
 			}
-			factor, _ := tokens.BilledDeltaFactor(model)
-			out.ExpandChargeUSD += float64(tok) * price.CacheWrite * factor
+			out.ExpandChargeUSD += tok * price.CacheWrite
 		}
 	}
 
@@ -245,6 +248,30 @@ func (d *DB) SweepLedgerFor(ctx context.Context, f Filter, p modelinfo.Pricer) (
 		out.Threads = out.Threads[:20]
 	}
 	return out, nil
+}
+
+// expandProviderTokens is the restored sweep text of the scope, in the provider's tokens, by model. It reads one row
+// per request, because each request has its own ratio: the grouped query above sums over requests and so cannot apply
+// one. It reads only requests with a sweep expand, a small set, so the second scan is cheap.
+func (d *DB) expandProviderTokens(ctx context.Context, cond string, args []any) (map[string]float64, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT r.model, r.sweep_expand_tokens, r.sweep_expand_bytes,
+		r.body_text_bytes, r.body_billed_tokens, r.ratio_capped FROM requests r WHERE `+cond+` AND r.sweep_expands > 0`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var model string
+		var tok int64
+		var bytes, textBytes, billed, capped sql.NullInt64
+		if err := rows.Scan(&model, &tok, &bytes, &textBytes, &billed, &capped); err != nil {
+			return nil, err
+		}
+		t, _ := accrec.ProviderTokens(model, tok, bytes.Int64, ratioCountsOf(textBytes, billed, capped))
+		out[model] += t
+	}
+	return out, rows.Err()
 }
 
 // sprintfEv fills the one %s of an event-extraction template. Names are package constants, never

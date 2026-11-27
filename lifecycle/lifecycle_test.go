@@ -303,7 +303,7 @@ func TestFinishObserveWritesTheShadowStore(t *testing.T) {
 	live, shadow := newStore(), newStore()
 	Finish(Fin{
 		Store: live, Shadow: shadow, Mode: components.ModeObserve, Session: "", ThreadID: thread.Primary,
-		UsageOK: true, Billed: 500,
+		UsageOK: true, Billed: 500, RatioTokens: 30, RatioBytes: 60,
 		ObserveSession: func() string { return "sid" },
 		ObserveThread:  func(string) thread.Result { return thread.Result{ID: "obs"} },
 	})
@@ -312,6 +312,9 @@ func TestFinishObserveWritesTheShadowStore(t *testing.T) {
 	}
 	if billedOf(shadow, store.BilledThreadPrefix+thread.Key("sid", "obs")) != "500" {
 		t.Error("shadow thread record must use the resolved observe thread")
+	}
+	if billedOf(shadow, store.RatioThreadPrefix+thread.Key("sid", "obs")) != "30:60" {
+		t.Error("shadow thread ratio missing: observe mode would keep the table")
 	}
 	if billedOf(live, store.BilledPrefix+"sid") != "" {
 		t.Error("the live store must stay clean in observe mode")
@@ -429,5 +432,21 @@ func TestFinishRunsLaterStepsAfterAPanic(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The thread's request ratio is kept for its next turn (#1533), only on a response with usage, and only when
+// the host has one.
+func TestFinishKeepsTheRequestRatioForTheNextTurn(t *testing.T) {
+	st := newStore()
+	key := store.RatioThreadPrefix + thread.Key("s", "t1")
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 100, RatioTokens: 3000, RatioBytes: 6000})
+	if got := billedOf(st, key); got != "3000:6000" {
+		t.Fatalf("ratio = %q, want 3000:6000", got)
+	}
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 100}) // a host with no ratio
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: false, Billed: 100, RatioTokens: 1, RatioBytes: 2})
+	if got := billedOf(st, key); got != "3000:6000" {
+		t.Fatalf("ratio = %q, want the last known one to stay", got)
 	}
 }

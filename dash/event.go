@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
+	"github.com/rossoctl/context-guru/accwire"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -260,7 +262,7 @@ type Event struct {
 	BypassBytes int `json:"-"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
-	// tokens.BilledDeltaFactor(Model), resolved once in Price.
+	// tokens.LegacyFactor(Model), resolved once in Price.
 	//
 	// It is published rather than folded in silently: this factor is the whole difference
 	// between what the dashboard reported before #240 and after it, and a reader who sees a
@@ -404,6 +406,15 @@ type Event struct {
 	// query that reads them together rather than frozen into a second column that could
 	// disagree with them. See DB.DeclFilterSavings.
 	FilteredDeclTokens int `json:"filtered_decl_tokens"`
+	// FilteredDeclBytes is the bytes the declaration filter removed (#1533): the same removal as
+	// FilteredDeclTokens, in the unit the accountant's request ratio converts. A count. 0 is unknown.
+	FilteredDeclBytes int `json:"filtered_decl_bytes,omitempty"`
+	// SweepExpandBytes is the bytes the sweep's expands restored: SweepExpandTokens, in bytes (#1533). 0 is unknown.
+	SweepExpandBytes int `json:"sweep_expand_bytes,omitempty"`
+	// Ratio is the request's own ratio, as the accountant built it (Result.Ratio): the provider's billed tokens
+	// over the bytes of the forwarded text, and whether the media price was cut to the bill. Three counts, no text
+	// (#1533). Known is false when the request has no Result. Not serialized: the store writes it.
+	Ratio accrec.RatioCounts `json:"-"`
 	// DeclDigest is the declaration set this request carried (tool_declarations.digest).
 	DeclDigest string `json:"decl_digest,omitempty"`
 
@@ -710,6 +721,9 @@ type CompRow struct {
 	Skipped     bool   `json:"skipped"`
 	SavedGross  int    `json:"saved_gross"`
 	SavedUnique int    `json:"saved_unique"`
+	// SavedBytes is the same removal as SavedGross in bytes (#1533): the sum of the component's changes, before minus
+	// after. A count. 0 is unknown.
+	SavedBytes int `json:"saved_bytes,omitempty"`
 	// SavedUSD is this component's share of the request's baseline delta, in dollars,
 	// priced at write time from the request's OWN model and the tier the request itself
 	// paid. Set by the accountant library (PriceMode); the per-component figures sum to the
@@ -828,6 +842,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
 	e.CacheTTL = tr.CacheTTL
 	e.FilteredDeclTokens = tr.FilteredDeclTokens
+	e.FilteredDeclBytes = tr.FilteredDeclBytes
 	e.RestoredTokens = tr.RestoredTokens
 	if tr.Bypassed {
 		e.Mode = ModeBypass
@@ -836,6 +851,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	}
 	if tr.Run != nil {
 		e.TokensBefore, e.TokensAfter = tr.Run.TokensBefore, tr.Run.TokensAfter
+		opBytes := removedBytesByOperator(tr.Ops)
 		for _, r := range tr.Run.Components {
 			row := CompRow{
 				Component:  r.Component,
@@ -843,6 +859,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 				Reverted:   r.Reverted,
 				Skipped:    r.Skipped,
 				SavedGross: r.Saved(),
+				SavedBytes: opBytes[accwire.Operator(r.Component)],
 				DurationMs: r.DurationMs,
 			}
 			row.Mutated = !r.Reverted && !r.Skipped
@@ -1012,7 +1029,7 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	p = p.At(modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite))
 	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
 	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
-	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
+	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.LegacyFactor(e.Model)
 	// The accountant prices the bill (RequestCost): the rates of the prompt size, every write at the 5-minute
 	// rate, and the one-hour part with its premium on top. The proxy's live cost and the keeper's ping cost
 	// call the same function, so the three give the same bits.
@@ -1201,3 +1218,19 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 
 // CachePrefixChangeReason marks the miss as caused by a changed prefix.
 func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChange }
+
+// removedBytesByOperator is the bytes each operator removed on this request: the sum of its operations' before size minus
+// after size, never below 0 for one operation. Trace.Ops holds only the changes that were applied and kept on the wire
+// (a change the writeback discarded is not in it, and neither is a rewrite that is not sent), so these bytes are paired
+// with what the request's ratio was measured on: the forwarded body. They are the sizes the accountant is given, in wire
+// bytes. A dry-run operation (observe mode) changed nothing and counts 0.
+func removedBytesByOperator(ops []accountant.Operation) map[string]int {
+	out := map[string]int{}
+	for _, op := range ops {
+		if op.Kind != accountant.KindRewrite || op.DryRun {
+			continue
+		}
+		out[op.Operator] += max(op.SizeBefore.Bytes-op.SizeAfter.Bytes, 0)
+	}
+	return out
+}

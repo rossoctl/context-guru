@@ -265,3 +265,18 @@ func TestFilterSkillRemovesOneWhenEntriesHaveNoDescription(t *testing.T) {
 		}
 	}
 }
+
+// The skill bytes are the JSON length of the removed entry as the body writes it: each newline is an escape of 2
+// bytes, and non-ASCII text counts as its UTF-8 bytes (#1533). (The body shrink is not the measure: the rewrite of the
+// message escapes other characters, such as <, which are not part of the removed entry.)
+func TestFilterSkillBytesAreTheJSONLengthOfTheEntry(t *testing.T) {
+	body := strings.Replace(skillBody, "- dataviz: Use for charts and plots.\\n", "- dataviz: Größe der 图表 plots.\\n  second line\\n", 1)
+	_, _, n, bytes := filterSkillListingWithAdapter([]byte(body), []string{skills.RemovePrefix + "dataviz"}, chatEnvelopeAdapter{})
+	entry := "- dataviz: Größe der 图表 plots.\n  second line" // the entry text has no trailing newline
+	if want := len(entry) + strings.Count(entry, "\n"); n != 1 || bytes != want {
+		t.Fatalf("removed %d entries, %d bytes, want %d: UTF-8 bytes plus one extra byte for each escaped newline", n, bytes, want)
+	}
+	if got := jsonStringLen("é\n\""); got != len("é")+2+2 {
+		t.Fatalf("jsonStringLen = %d, want %d", got, len("é")+4)
+	}
+}

@@ -349,6 +349,7 @@ func (f Flow) Book(ctx context.Context, di *Info, u Response, usageOK bool, st S
 	r.Searches = n
 	r.DroppedSearches = u.SearchDropped + st.Dropped
 	r.LoadedTokens = LoadedWeight(di.Original, loaded)
+	r.LoadedBytes = LoadedBytes(di.Original, loaded)
 	r.WrongGuesses = WrongGuesses(di.Outcome.Deferred, di.Original, loaded)
 	f.Parts().Ledger.Add(r)
 	// The dashboard row takes the same r the ledger booked, so /stats and the panel agree (#869).

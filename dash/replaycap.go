@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/compactionpoint"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -222,6 +223,9 @@ type capRow struct {
 	// What Event.ComponentSavedUSD needs to price the first-removal split.
 	reason             string
 	fresh, read, write int64
+	// factor is the provider's tokens for each host token this request removed, from its own ratio and the bytes its
+	// components removed (#1533). 0 when the row has none: the table's factor stands.
+	factor float64
 }
 
 func sameConv(a, b *capRow) bool {
@@ -345,7 +349,7 @@ func walkCapConversation(conv []capRow, window windowFn, point pointFn, compacti
 	} else {
 		out.CeilingFrac[model] = ceil
 	}
-	f, _ := tokens.BilledDeltaFactor(model)
+	f, _ := tokens.LegacyFactor(model)
 
 	// The epoch. limited is false until the first close: the first epoch counts its replay in full.
 	// after a counterfactual close the baseline is a summary, so cf grows from S by what the transcript
@@ -375,11 +379,16 @@ func walkCapConversation(conv []capRow, window windowFn, point pointFn, compacti
 			closeEpoch(capClientCompaction, r.TokensBefore)
 			out.ClosedClientCompaction++
 		} else if r.Billed > 0 {
+			// The request's own factor when its row has the ratio and the removed bytes (#1533), else the table's.
+			fr := f
+			if r.factor > 0 {
+				fr = r.factor
+			}
 			var cf float64
 			if summarized {
-				cf = summaryFor(limit) + f*float64(max(r.TokensBefore-closedAt, 0))
+				cf = summaryFor(limit) + fr*float64(max(r.TokensBefore-closedAt, 0))
 			} else {
-				cf = float64(r.Billed) + f*math.Max(float64(r.TokensBefore-r.TokensAfter), 0)
+				cf = float64(r.Billed) + fr*math.Max(float64(r.TokensBefore-r.TokensAfter), 0)
 			}
 			if cf >= limit {
 				closeEpoch(capCounterfactual, r.TokensBefore)
@@ -461,7 +470,9 @@ const capSelect = `SELECT r.id, r.tenant_id, r.session_id, r.model, r.ts, r.bypa
 		r.compaction_point, r.compaction_point_source, r.client_compaction,
 		r.tokens_after, r.fresh_input + r.cache_read + r.cache_write,
 		r.cache_miss_reason, r.fresh_input, r.cache_read, r.cache_write,
-		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> ''
+		c.component, c.saved_gross, c.saved_unique, c.saved_usd, c.saved_first_usd, c.priced_by <> '',
+		(SELECT SUM(x.saved_bytes) FROM request_components x WHERE x.request_id = r.id),
+		r.body_text_bytes, r.body_billed_tokens, r.ratio_capped
 	FROM requests r
 	LEFT JOIN request_components c ON c.request_id = r.id AND %c
 
@@ -533,7 +544,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 				continue
 			}
 			ev := Event{Model: r.Model, CacheMissReason: r.reason, FreshInput: r.fresh, CacheRead: r.read, CacheWrite: r.write}
-			ev.BilledTokenFactor, _ = tokens.BilledDeltaFactor(r.Model)
+			ev.BilledTokenFactor, _ = tokens.LegacyFactor(r.Model)
 			var pr modelinfo.Price
 			priced := false
 			if price != nil {
@@ -559,9 +570,10 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 		var gross, unique sql.NullInt64
 		var usd, first sql.NullFloat64
 		var acc sql.NullBool
+		var savedBytes, textBytes, billedTok, capped sql.NullInt64
 		if err := rs.Scan(&id, &r.Tenant, &r.Session, &r.Model, &r.TS, &bypassed, &agentComp, &r.TokensBefore,
 			&r.CPoint, &r.CPointSource, &verdict, &r.TokensAfter, &r.Billed, &r.reason, &r.fresh, &r.read, &r.write,
-			&comp, &gross, &unique, &usd, &first, &acc); err != nil {
+			&comp, &gross, &unique, &usd, &first, &acc, &savedBytes, &textBytes, &billedTok, &capped); err != nil {
 			return nil, err
 		}
 		if id != lastID {
@@ -582,6 +594,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 			r.Bypassed = bypassed != 0
 			r.AgentCompaction = agentComp != 0
 			r.Verdict, r.HasVerdict = verdict.String, verdict.Valid
+			r.factor, _ = accrec.RequestFactor(r.TokensBefore-r.TokensAfter, savedBytes.Int64, ratioCountsOf(textBytes, billedTok, capped))
 			buf = append(buf, r)
 			lastID = id
 		}
