@@ -30,7 +30,7 @@ PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_price
 
 DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
                "cmdfilter", "mask", "collapse", "extract", "smartcrush",
-               "phi_evict", "conservative"]
+               "conservative"]
 # The old presets that named a heuristic offloader were retired: replaying one now runs no components.
 PIPE = {"off": None, "conservative": ("preset", "conservative")}
 

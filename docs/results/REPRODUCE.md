@@ -98,7 +98,7 @@ in the treatment, not as run-to-run noise. To reproduce the published numbers, u
 `v0.7.10` or older. No published number has been adjusted.
 
 A drift guard (`deploy/harbor/pipeline_drift_test.go`) checks that every component a harness
-arm names is still registered, so an arm does not quietly run without a component that was removed.
+arm names is still registered, so an arm cannot fail to build or quietly run without a removed component.
 
 ## 4. Run headroom
 

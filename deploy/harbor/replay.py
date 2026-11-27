@@ -25,7 +25,7 @@ PORT = 4020
 # are handled with a cheap model separately.
 DET_CONFIGS = ["off", "format", "toon", "cacheinject", "dedup", "failed_run",
                "cmdfilter", "mask", "collapse", "extract", "smartcrush",
-               "phi_evict", "conservative"]
+               "conservative"]
 PIPE = {
     "off": None,
     # A current preset needs the preset path, not a bare pipeline name-list: a preset's tuned

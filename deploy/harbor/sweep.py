@@ -44,8 +44,6 @@ CONFIGS = {
     "collapse":   "collapse",
     "extract":    "extract",
     "smartcrush": "smartcrush",
-    "skeleton":   "skeleton",
-    "phi_evict":  "phi_evict",
     "toon":       "toon",
 }
 FIELDS = ["benchmark", "task", "config", "reward", "wall_s", "gw_requests",
