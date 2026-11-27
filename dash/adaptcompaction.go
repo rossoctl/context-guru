@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -19,6 +20,7 @@ import (
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"gopkg.in/yaml.v3"
 
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/components"
 	_ "github.com/rossoctl/context-guru/components/all"
@@ -645,7 +647,9 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 	args = append(args, winArgs...)
 	rows, err := d.sql.QueryContext(ctx, `SELECT r.id, r.session_id, r.model, r.ts, r.fresh_input,
 		r.cache_read, r.cache_write, r.cache_write_1h, r.output_tokens, r.cost_usd, r.token_accounting,
-		r.expand_tokens, EXISTS(SELECT 1 FROM request_content c WHERE c.request_id = r.id)
+		r.expand_tokens, EXISTS(SELECT 1 FROM request_content c WHERE c.request_id = r.id),
+		r.tokens_before - r.tokens_after, (SELECT SUM(x.saved_bytes) FROM request_components x WHERE x.request_id = r.id),
+		r.body_text_bytes, r.body_billed_tokens, r.ratio_capped
 		FROM requests r WHERE `+cond+` ORDER BY r.session_id, r.ts, r.id`, args...)
 	if err != nil {
 		return nil, err
@@ -665,8 +669,10 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 		r := &adaptReq{}
 		var sess, acct string
 		var has int
+		var removedHost int64
+		var savedBytes, textBytes, billedTok, capped sql.NullInt64
 		if err := rows.Scan(&r.id, &sess, &r.model, &r.ts, &r.fresh, &r.read, &r.write, &r.write1h,
-			&r.output, &r.cost, &acct, &r.expandTok, &has); err != nil {
+			&r.output, &r.cost, &acct, &r.expandTok, &has, &removedHost, &savedBytes, &textBytes, &billedTok, &capped); err != nil {
 			return nil, err
 		}
 		r.inWindow = r.ts >= f.Since
@@ -688,6 +694,10 @@ func (d *DB) adaptDataset(ctx context.Context, f Filter, p modelinfo.Pricer, cov
 		priced := pr.ok && acct == AccountingComplete
 		if priced {
 			r.price, r.factor = pr.p, pr.factor
+			// The request's own factor when its row has the ratio and the removed bytes (#1533), else the table's.
+			if f, ok := accrec.RequestFactor(removedHost, savedBytes.Int64, ratioCountsOf(textBytes, billedTok, capped)); ok {
+				r.factor = f
+			}
 			if r.inWindow {
 				all[r.id] = r // savings to date are over every priced request, content or not
 			}

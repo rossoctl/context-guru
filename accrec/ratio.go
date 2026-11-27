@@ -67,3 +67,20 @@ func (c RatioCounts) ApplyTo(in *accountant.RemovalInput, hostTokens, bytes int6
 	}
 	return float64(r.Tokens(int(bytes))) / float64(hostTokens)
 }
+
+// RequestFactor is the provider's tokens for each of the host's tokens of what one request removed, from the request's
+// own ratio and the bytes the removal took out (#1533). hostRemoved is the host's count of the same removal
+// (tokens_before - tokens_after). ok is false when the request has no ratio or no bytes, or the removal is empty or
+// the answer is not a factor above 0: the caller then keeps the legacy table (tokens.LegacyFactor), the fallback for a
+// row written before the bytes were stored.
+func RequestFactor(hostRemoved, bytes int64, c RatioCounts) (factor float64, ok bool) {
+	r := c.Ratio()
+	if r == nil || bytes <= 0 || hostRemoved <= 0 {
+		return 0, false
+	}
+	f := float64(r.Tokens(int(bytes))) / float64(hostRemoved)
+	if f <= 0 {
+		return 0, false
+	}
+	return f, true
+}

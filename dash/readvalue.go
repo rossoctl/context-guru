@@ -276,6 +276,8 @@ func decomposeFromGroups(cgroups map[compGroupKey]*compGroup, p modelinfo.Pricer
 		// independent implementation of the same arithmetic, and a fix applied to one while
 		// the other stayed put is what TestPreColumnComponentRowsAreValuedNotZeroed exists
 		// to catch — it compares the two paths against each other.
+		// Rows here are legacy ones only (not accountant-priced, not a fallback): written before the switch, so before the
+		// ratio and the removed bytes were stored (#1533). The table is the only source for them.
 		bf, _ := tokens.LegacyFactor(model)
 		first, rep := float64(unique)*price.CacheWrite*bf, float64(replay)*rate*bf
 		c.SavedUSDFirstRemoval += first

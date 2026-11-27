@@ -6,6 +6,7 @@ import (
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
 	"github.com/rossoctl/context-guru/reqfacts"
@@ -720,6 +721,9 @@ type CompRow struct {
 	Skipped     bool   `json:"skipped"`
 	SavedGross  int    `json:"saved_gross"`
 	SavedUnique int    `json:"saved_unique"`
+	// SavedBytes is the same removal as SavedGross in bytes (#1533): the sum of the component's changes, before minus
+	// after. A count. 0 is unknown.
+	SavedBytes int `json:"saved_bytes,omitempty"`
 	// SavedUSD is this component's share of the request's baseline delta, in dollars,
 	// priced at write time from the request's OWN model and the tier the request itself
 	// paid. Set by the accountant library (PriceMode); the per-component figures sum to the
@@ -854,6 +858,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 				Reverted:   r.Reverted,
 				Skipped:    r.Skipped,
 				SavedGross: r.Saved(),
+				SavedBytes: removedBytes(r),
 				DurationMs: r.DurationMs,
 			}
 			row.Mutated = !r.Reverted && !r.Skipped
@@ -1212,3 +1217,17 @@ func (e *Event) AttributeCache(seenSession, seenModel bool, sinceLastMs int64, t
 
 // CachePrefixChangeReason marks the miss as caused by a changed prefix.
 func (e *Event) CachePrefixChangeReason() { e.CacheMissReason = CachePrefixChange }
+
+// removedBytes is the bytes a component removed: the sum of its changes' before size minus after size. It is the
+// size the accountant is given for the same changes (apply.OpsFromRun), so it converts with the request's ratio. A
+// reverted or skipped component removed nothing.
+func removedBytes(r components.Report) int {
+	if r.Reverted || r.Skipped {
+		return 0
+	}
+	n := 0
+	for _, c := range r.Changes {
+		n += max(c.BytesBefore-c.BytesAfter, 0)
+	}
+	return n
+}

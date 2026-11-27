@@ -619,9 +619,9 @@ func (d *DB) insertBatch(evs []*Event) error {
 	defer reqStmt.Close()
 	compStmt, err := tx.Prepare(`INSERT INTO request_components(
 		request_id, component, kind, acted, mutated, reverted, skipped, saved_gross, saved_unique,
-		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by,
+		saved_usd, duration_ms, err, gates, events, saved_first_usd, saved_replay_usd, priced_by, saved_bytes,
 		` + strings.Join(compTokenColumns, ", ") + `
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(compTokenColumns)) + `)`)
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(compTokenColumns)) + `)`)
 	if err != nil {
 		return err
 	}
@@ -711,7 +711,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			if _, err := compStmt.Exec(append([]any{id, c.Component, c.Kind,
 				boolInt(c.Acted), boolInt(c.Mutated), boolInt(c.Reverted), boolInt(c.Skipped),
 				c.SavedGross, c.SavedUnique, c.SavedUSD, c.DurationMs, c.Err,
-				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy},
+				gatesJSON(c.Gates), gatesJSON(c.Events), c.SavedFirstUSD, c.SavedReplayUSD, c.PricedBy, nullInt(c.SavedBytes)},
 				c.Tokens.args()...)...); err != nil {
 				return err
 			}

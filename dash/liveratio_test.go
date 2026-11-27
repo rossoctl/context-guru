@@ -7,6 +7,7 @@ import (
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/accrec"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
@@ -107,5 +108,49 @@ func TestTheDeclarationFilterCreditUsesTheRowsOwnRatio(t *testing.T) {
 	}
 	if s := byTenant["t1"]; s == nil || s.USD != got.USD {
 		t.Errorf("the per-tenant pass gave %+v, want the same USD as the scope pass (%g)", s, got.USD)
+	}
+}
+
+// A component's removed bytes are stored as a count (NULL when unknown), and the capture sums its changes (#1533).
+func TestTheComponentRemovedBytesAreStoredAndSummedFromItsChanges(t *testing.T) {
+	r := components.Report{Component: "mask", Kind: "offload", Changes: []components.Change{
+		{BytesBefore: 1000, BytesAfter: 100}, {BytesBefore: 50, BytesAfter: 80}, {BytesBefore: 500, BytesAfter: 0}}}
+	if got := removedBytes(r); got != 1400 {
+		t.Fatalf("removedBytes = %d, want 900 + 0 (a growth is not a removal) + 500 = 1400", got)
+	}
+	r.Reverted = true
+	if got := removedBytes(r); got != 0 {
+		t.Fatalf("a reverted component removed %d bytes, want 0", got)
+	}
+	db := openTestDB(t)
+	e := mkEvent(1000, "s", "claude", 100, 90)
+	e.Components = []CompRow{{Component: "mask", Kind: "offload", SavedGross: 400, SavedBytes: 1400}, {Component: "other", Kind: "offload", SavedGross: 5}}
+	if err := db.insertBatch([]*Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	var mask, other sql.NullInt64
+	if err := db.sql.QueryRow(`SELECT (SELECT saved_bytes FROM request_components WHERE component='mask'),
+		(SELECT saved_bytes FROM request_components WHERE component='other')`).Scan(&mask, &other); err != nil {
+		t.Fatal(err)
+	}
+	if mask.Int64 != 1400 || other.Valid {
+		t.Fatalf("stored mask=%v other=%v, want 1400 and NULL", mask, other)
+	}
+}
+
+// A request with its own ratio and the bytes its components removed has its own factor in the replay's ceiling
+// (cf = billed + f x removed). With the table's factor of 1 (an unmeasured model) the cap holds; with a factor of 3 the
+// counterfactual reaches the ceiling at once.
+func TestTheReplayCapUsesTheRequestsOwnFactor(t *testing.T) {
+	mk := func(factor float64) []capRow {
+		rows := []capRow{capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1), capTestRow(2, 110_000, 50_000, 450_000, "extract_llm", 1)}
+		rows[1].factor = factor
+		return rows
+	}
+	if l := walkReplayCap(mk(0), fixedWindow(1_000_000)); l.ClosedCounterfactual != 0 {
+		t.Fatalf("the table's factor closed the epoch: %d", l.ClosedCounterfactual)
+	}
+	if l := walkReplayCap(mk(12), fixedWindow(1_000_000)); l.ClosedCounterfactual != 1 {
+		t.Fatalf("a request factor of 12 (cf 450k + 600k) closed %d epochs, want 1", l.ClosedCounterfactual)
 	}
 }

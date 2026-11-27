@@ -156,3 +156,18 @@ func TestRatioTextForKeepsOnlyARatioThatBooksAFigure(t *testing.T) {
 		t.Errorf("nil recorder: %d, %d", tok, by)
 	}
 }
+
+func TestRequestFactorIsLiveOrNotAtAll(t *testing.T) {
+	c := RatioCounts{BilledTokens: 3000, TextBytes: 6000, Known: true} // 0.5 token a byte
+	if f, ok := RequestFactor(400, 1600, c); !ok || f != 2 {
+		t.Fatalf("factor = %v ok=%v, want 2 (800 provider tokens over 400 host tokens)", f, ok)
+	}
+	for name, a := range map[string]struct {
+		host, bytes int64
+		c           RatioCounts
+	}{"no ratio": {400, 1600, RatioCounts{}}, "no bytes": {400, 0, c}, "no removal": {0, 1600, c}} {
+		if f, ok := RequestFactor(a.host, a.bytes, a.c); ok || f != 0 {
+			t.Errorf("%s: %v %v, want the table (not ok)", name, f, ok)
+		}
+	}
+}

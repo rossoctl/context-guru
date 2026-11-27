@@ -482,7 +482,11 @@ CREATE TABLE IF NOT EXISTS request_components (
   -- folding them into the gates column made this row blind in proportion to how well the
   -- component was doing: a turn that removed twelve outputs showed an empty cell, while a turn
   -- that refused everything showed a full one.
-  events       TEXT    NOT NULL DEFAULT ''
+  events       TEXT    NOT NULL DEFAULT '',
+  -- The bytes this component removed from the request (#1533): the sum of its changes' before-size minus after-size,
+  -- the unit the accountant's request ratio converts. A count. NULL is "not measured" (a row from before the column),
+  -- never 0 bytes. saved_gross is the same removal in the host's own tokens.
+  saved_bytes  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_rc_request ON request_components(request_id);
 CREATE INDEX IF NOT EXISTS idx_rc_comp    ON request_components(component);
@@ -1009,6 +1013,8 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"request_components", "saved_first_usd", "REAL NOT NULL DEFAULT 0"},
 	{"request_components", "saved_replay_usd", "REAL NOT NULL DEFAULT 0"},
 	{"request_components", "priced_by", "TEXT NOT NULL DEFAULT ''"},
+	// The bytes the component removed (#1533). Nullable, no default: NULL is not measured.
+	{"request_components", "saved_bytes", "INTEGER"},
 	// extract_llm_sweep's quality signals and answer cost (#404 PR C). Additive with a default of 0:
 	// a row from before the sweep applied anything reads as "no sweep activity", which is true.
 	// sweep_expands / sweep_expand_tokens are the part of expands / expand_tokens that restored a
