@@ -108,12 +108,98 @@ func TestLiveTierOfTwoWritesInOneMillisecondFollowsTheLaterRow(t *testing.T) {
 	}
 }
 
-// seedOneHourTiers and FactsOf read the same rule as the keeper, on a mixed write too.
-func TestFactsOfOneHourIsTheKeepersRule(t *testing.T) {
+// FactsOf (and seedOneHourTiers) read the head rule, on a mixed write too: the same rule as the accountant's BilledTTL.
+func TestFactsOfOneHourIsTheHeadRule(t *testing.T) {
 	for _, c := range []struct{ write, write1h int64 }{{0, 0}, {100, 0}, {100, 40}, {100, 100}} {
 		got := FactsOf(&Event{CacheWrite: c.write, CacheWrite1h: c.write1h}).OneHour
-		if want := keepalive.BilledOneHour(c.write, c.write1h, false); got != want {
-			t.Errorf("write %d / 1h %d: FactsOf.OneHour = %v, keeper %v", c.write, c.write1h, got, want)
+		if want := keepalive.HeadLifetimeOneHour(c.write, c.write1h, false); got != want {
+			t.Errorf("write %d / 1h %d: FactsOf.OneHour = %v, head rule %v", c.write, c.write1h, got, want)
 		}
+	}
+}
+
+// The SQL form of the head size is the Go form: MixedHeadWriteSQL agrees with MixedHead on every shape.
+func TestMixedHeadSQLAgreesWithGo(t *testing.T) {
+	fx := newKAFixture(t)
+	for _, c := range []struct{ write, write1h int64 }{{0, 0}, {100, 0}, {100, 40}, {100, 100}, {100, 150}, {0, 5}} {
+		var got int64
+		q := `SELECT ` + keepalive.MixedHeadWriteSQL("") + ` FROM (SELECT ? AS cache_write, ? AS cache_write_1h)`
+		if err := fx.db.sql.QueryRow(q, c.write, c.write1h).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if want := keepalive.MixedHead(c.write, c.write1h); got != want {
+			t.Errorf("write %d / 1h %d: SQL head = %d, Go head = %d", c.write, c.write1h, got, want)
+		}
+	}
+}
+
+// The live panel prices a mixed entry's miss as the tail while the head lives, and inherits the head the way the
+// keeper does: a later 5-minute write that reads the head keeps it, a later write that does not read it drops it, and a
+// later all-1h write has no separate head.
+func TestLivePanelMissOfAMixedEntryIsTheTail(t *testing.T) {
+	now := int64(1_700_000_000_000)
+	ago := func(sec int64) int64 { return now - sec*1000 }
+	ev := func(ts int64, session string, read, write, write1h int64) *Event {
+		e := kaAgent(ts, session, 0.10)
+		e.Provider, e.Model = "anthropic", "aws/claude-sonnet-5"
+		e.CacheRead, e.CacheWrite, e.CacheWrite1h = read, write, write1h
+		return e
+	}
+	const head, tail = 20_000, 5_000
+	fx := newKAFixture(t,
+		ev(ago(100), "mixed", 0, head+tail, head),
+		ev(ago(400), "inherit", 0, head+tail, head),
+		ev(ago(100), "inherit", head, tail, 0), // reads the head, rewrites a 5-minute tail
+		ev(ago(400), "dead", 0, head+tail, head),
+		ev(ago(100), "dead", 0, head+tail, 0), // wrote it all again: the head was not read
+		// t0 a mixed write, t1 a 5-minute rewrite that does not read the head (it is dead), t2 a read-only turn that
+		// reads the new prefix: the read-only turn must not bring the head back.
+		ev(ago(400), "revive", 0, head+tail, head),
+		ev(ago(200), "revive", 0, head+tail, 0),
+		ev(ago(100), "revive", head+tail, 0, 0),
+		ev(ago(400), "allhour", 0, head+tail, head),
+		ev(ago(100), "allhour", 0, head+tail, head+tail), // a later all-1h write: no separate head
+	)
+	p := modelinfo.Price{Input: 3e-6, Output: 15e-6, CacheRead: 3e-7, CacheWrite: 3.75e-6}
+	got, err := fx.db.KeepAliveLive(Filter{TenantAll: true}, now, 280, 2, func(string) (modelinfo.Price, bool) { return p, true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]KeepAliveLiveRow{}
+	for _, r := range got.Rows {
+		rows[r.SessionID] = r
+	}
+	prefix := int64(head + tail)
+	tailMiss := keepalive.MissUSDHead(p, "aws/claude-sonnet-5", prefix, false, head)
+	for _, c := range []struct {
+		session string
+		want    float64
+	}{
+		{"mixed", tailMiss},
+		{"inherit", keepalive.MissUSDHead(p, "aws/claude-sonnet-5", prefix, false, head)},
+		{"dead", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, false)},
+		{"revive", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, false)},
+		{"allhour", keepalive.MissUSD(p, "aws/claude-sonnet-5", prefix, true)},
+	} {
+		r, ok := rows[c.session]
+		if !ok {
+			t.Fatalf("%s: no live row", c.session)
+		}
+		if r.MissUSD != c.want {
+			t.Errorf("%s: miss_usd = %v, want %v", c.session, r.MissUSD, c.want)
+		}
+	}
+	if rows["mixed"].BreakevenPings == 0 {
+		t.Error("the tail miss must pay for at least one ping here, or the breakeven check proves nothing")
+	}
+	// The breakeven counts divide the miss that the row shows, so the row has one miss figure.
+	for _, s := range []string{"mixed", "inherit"} {
+		r := rows[s]
+		if want := int64(r.MissUSD / r.PingUSDEach); r.BreakevenPings != want || r.Breakeven1hPings != want {
+			t.Errorf("%s: breakeven pings = %d / %d (1h), want %d from the tail miss %v", s, r.BreakevenPings, r.Breakeven1hPings, want, r.MissUSD)
+		}
+	}
+	if want := float64(tail) * (3.75e-6 - 3e-7); !(tailMiss > want*0.999 && tailMiss < want*1.001) {
+		t.Errorf("tail miss = %v, want the tail premium %v", tailMiss, want)
 	}
 }

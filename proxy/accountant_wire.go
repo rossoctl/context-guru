@@ -139,7 +139,7 @@ func entryFacts(provider bschemas.ModelProvider, model string, forwarded []byte,
 // TTL for the verdict and stores it as the entry's TTL. Without it the library treats a gap of 5 to 60
 // minutes as hot and can overstate a rescue by up to 55 minutes of idle time.
 //
-// The rule is keepalive.BilledOneHour's, which ResolveTier uses: a write bills its tier on the tokens it
+// The rule is keepalive.HeadLifetimeOneHour's: a write any token of which bills at 1 hour lives 1 hour (the head of a mixed write counts). A write bills its tier on the tokens it
 // wrote; a turn that wrote nothing bills none and keeps the thread's last billed tier (issue #1078). A
 // thread with no earlier write has none to keep, so the asked tier stands. Only an exact lifetime has a TTL
 // that can be lowered: a minimum (OpenAI) has no tier. SharedWarm was judged with the asked TTL at accEnd

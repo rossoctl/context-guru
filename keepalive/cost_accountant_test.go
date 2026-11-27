@@ -55,7 +55,7 @@ func TestProjectedPingAndMissUSDMatchesTheSeparateFunctions(t *testing.T) {
 	k, fd, _ := testKeeper(t)
 	fd.setPrices(proxyPricer{fixedPrice{tieredGPT56()}})
 	for _, oneHour := range []bool{false, true} {
-		ping, miss := k.projectedPingAndMissUSD("gpt-5.6", 300_000, "/v1/messages", "", oneHour)
+		ping, miss := k.projectedPingAndMissUSD("gpt-5.6", 300_000, "/v1/messages", "", oneHour, 0)
 		if want := k.projectedPingUSD("gpt-5.6", 300_000, "/v1/messages", ""); !near(ping, want) {
 			t.Errorf("ping %v want %v", ping, want)
 		}
@@ -63,7 +63,7 @@ func TestProjectedPingAndMissUSDMatchesTheSeparateFunctions(t *testing.T) {
 			t.Errorf("miss %v want %v", miss, want)
 		}
 	}
-	if p, m := k.projectedPingAndMissUSD("", 300_000, "/v1/messages", "", false); p != 0 || m != 0 {
+	if p, m := k.projectedPingAndMissUSD("", 300_000, "/v1/messages", "", false, 0); p != 0 || m != 0 {
 		t.Errorf("no model: %v %v", p, m)
 	}
 }
