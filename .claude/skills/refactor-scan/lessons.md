@@ -56,6 +56,12 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
   one (accountant #125, context-guru #1128).
 - **A constant above 2^31 breaks 32-bit builds.** Accountant #129's `1 << 31` did not fit a 32-bit
   int. Build with `GOARCH=386` when you add a bound.
+- **An overflow fix must find every product, not only the one in the issue.** Accountant #133
+  bounded `ratio.of`, but `rangeMedia` in `compute.go` still multiplied two body-scale counts in
+  `int64`. Grep every `int64(...) * ...` product of two counts, and list each one in the PR.
+- **On a 32-bit int, a conversion truncates. It does not clamp.** #133's fast path returned
+  `int(int64(...))`, which cuts the high bits on 386 and arm, so the documented clamp did not
+  hold. Clamp explicitly, and run the clamp test on every GOARCH, not behind a 64-bit build tag.
 
 ### Cost
 
@@ -70,6 +76,10 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
 - **A test that passes on the old code proves nothing.** Run each new test against origin/main, or
   with the fix disabled, and report the failure. PR #822's first-block test passed under the old
   rule until its fixture was changed.
+- **A guard test must check what the rule bans, not a subset.** Accountant #132's first guard
+  skipped test files, checked names but not paths, was case-sensitive, and missed untracked files.
+  List the rule's full scope (names and paths, comments in every Go file) and test each form in a
+  table.
 - **A test that checks source text is not a test.** Drive a real request through the test harness.
 - **Run the full non-race suite of each touched package**, and of its direct dependents if an
   exported API changed. Use `-race` only where [CLAUDE.md, Working on a task](../../../CLAUDE.md#working-on-a-task)
@@ -88,6 +98,12 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
 - **The behavior-change section must match the code exactly.** Reviewers blocked when a PR said
   "Anthropic values do not change" and one did. They also flagged a PR that claimed a change the
   write path can never produce.
+- **A doc that says "always" needs a test for the corner.** Accountant #129 said a Result's ratio
+  is always in range, but a hand-built body with no text bytes broke it. Two rounds missed the
+  doc fix. Pin the claim in a test, or scope it.
+- **A body-only edit after approval keeps the approvals, but `check-ready` reads the body.**
+  Several PRs failed `check-ready` only because `Local tests: waived (owner rule)` shared a line
+  with other text. Keep the waiver on a line by itself.
 - **Name every behavior change at the top:** who it affects, the old and new behavior, and how to
   turn it off. A refactor that adds a provider, a model or a form to a list is a behavior change.
 - **A finding can be wrong, or need no code change.** Finding 12 ended as comments only (#800).
@@ -99,6 +115,10 @@ agent's brief. Add a lesson when a later run's review finds a new kind of mistak
 - **Messages cross.** Before you act on an agent's report, read the PR head and body from the
   server. Two agents answered an older message (in the 2026-11-26 run, several times), and one
   reported "done" for work it had listed as a follow-up.
+- **Never let an agent write a spec's text from the code.** In accountant #132, an agent wrote 5
+  metrics-spec rule statements (R34, R45, R47, section 5.2, section 5.7) from what the code does,
+  because the spec lives in another repo. 4 of the 5 were wrong. Read the real spec (here:
+  context-guru `docs/metrics/spec.md`), and cite it.
 - **Repeat open items.** When you send a second message, list every item still open. An agent may
   act on only the first message.
 - **Rebase after main moves.** A rebase moves the head, so a PR with a real conflict needs one more
