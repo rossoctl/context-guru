@@ -60,7 +60,6 @@ import (
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
-	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // Sufficiency defaults. See the file comment for why these two numbers and not others.
@@ -263,12 +262,11 @@ func accumulateDeclFilterRow(out *DeclFilterSaving, sessions map[string]bool,
 		return 0
 	}
 	// The accountant prices the removal (R1): at the tier of the head, at the size WITHOUT the filter (sent
-	// plus removed, #1407), with the tokenizer correction applied once. A row from before fresh_input was
+	// plus removed, #1407). A row from before fresh_input was
 	// stored has 0 there: its size is then too small, so its tier is never too dear.
-	factor, _ := tokens.BilledDeltaFactor(model)
 	fig := accountant.RemovalSaving(accountant.RemovalInput{
 		Model: model, Tier: head, Prompt: modelinfo.PromptTokens(fresh, cacheRead, cacheWrite),
-		Removed: int(tok), Factor: factor,
+		Removed: int(tok), // no tokenizer factor: it is deferred (the accountant's live request ratio will give it)
 	}, modelinfo.Rates{Lookup: price})
 	out.USD += fig.SavedUSD
 	return fig.SavedUSD

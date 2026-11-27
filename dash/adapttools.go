@@ -35,7 +35,6 @@ import (
 	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/skills"
-	"github.com/rossoctl/context-guru/internal/tokens"
 )
 
 // KindMCPServer is a whole MCP server as one adapt item: every tool of it, none ever called.
@@ -490,7 +489,7 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 			continue
 		}
 		// The accountant prices the removal (R1): at the tier of the head of the prefix, at the size without
-		// the declarations (sent plus removed, #1407, #1438), with the tokenizer correction applied once.
+		// the declarations (sent plus removed, #1407, #1438).
 		// These declarations were carried, so the sent size is the size they were billed at.
 		head := accountant.HeadTier(accrec.Usage{FreshInput: r.fresh, CacheRead: r.cacheRead, CacheWrite: r.cacheWrite, CacheWrite1h: r.cacheWrite1h}.Accountant())
 		ok := false
@@ -499,14 +498,10 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 		}
 		var rate float64
 		if ok {
-			// The correction applies to a removal only. A carried-cost estimate (removed is 0) keeps its tokens.
-			factor := 1.0
-			if r.removed > 0 {
-				factor, _ = tokens.BilledDeltaFactor(r.model)
-			}
 			rate = accountant.RemovalSaving(accountant.RemovalInput{
 				Model: r.model, Tier: head, Prompt: modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite),
-				Removed: int(r.removed), Factor: factor,
+				Removed: int(r.removed), // no tokenizer factor: it is deferred
+
 			}, modelinfo.Rates{Lookup: price}).PerTokenUSD
 		}
 		if ok {
