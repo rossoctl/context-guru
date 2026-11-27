@@ -12,16 +12,15 @@ says what each one does at three storage levels: off, metadata only, and everyth
 - **The rule:** a component or feature works from **metadata** only. A feature that needs
   **content** is a rare, deliberate exception. Many users turn storage off, and a feature that
   quietly needs content then works worse, with nothing reported.
-- **13 of 24 components need no stored content to do their job:**
+- **11 of 15 components need no stored content to do their job:**
   - 5 keep nothing.
   - 2 keep only hashes or names: `cacheinject` keeps hashes, and `toolfilter` keeps tool names when
     tool deferral is on (the `ultrahigh` preset, or the Bob plugin's `bob-ultrahigh`).
   - 1 keeps only a speed-up cache.
-  - 5 keep only the original. Without it they still work, but the `expand` tool cannot give it back.
-- **5 more could work on metadata only**, with a small change: one "already done" flag per message.
-- **4 components cannot work without content.** A model writes their text, and the words differ
-  each time. These are `extract_llm`, `summarize`, `cache_aware_summarizer` and `agentdiet`.
-- **2 are special cases.** `skeleton` refuses to run without storage. `extract_llm_sweep` holds only
+  - 3 keep only the original. Without it they still work, but the `expand` tool cannot give it back.
+- **3 components cannot work without content.** A model writes their text, and the words differ
+  each time. These are `extract_llm`, `summarize` and `cache_aware_summarizer`.
+- **1 is a special case.** `extract_llm_sweep` holds only
   metadata (ids, hashes, counts, verdicts), but it keeps copies of the conversation in memory and
   its question to the model needs last turn's text.
 - **Context Guru keeps content after the user opts out**, in 7 places. The worst are 2 full
@@ -33,8 +32,8 @@ says what each one does at three storage levels: off, metadata only, and everyth
 ## Terms
 
 - **Content**: text from the user or the agent, or text made from it. Examples: transcript text,
-  tool output, request bodies, system prompts, tool declarations. A summary, a shortened tool
-  output and a code skeleton are content too.
+  tool output, request bodies, system prompts, tool declarations. A summary and a shortened tool
+  output are content too.
 - **Metadata**: values that do not let you read the content back. Examples: hashes, counts,
   sizes, ids, token numbers, timestamps, flags. **A short hash of content is metadata.** A
   shortened copy, a sample, or the first characters of content are content.
@@ -84,14 +83,11 @@ The results:
 
 - **A rewrite that depends only on the message needs no storage.** Context Guru runs it again every
   turn and gets the same bytes. Only CPU time is repeated. These components work this way:
-  `format`, `toon`, `searchfold`, `textclean`, `toolfilter`, `cachesplit`, `cmdfilter`, `linecap`,
-  `dedup`, `smartcrush` and `extract`.
+  `format`, `toon`, `searchfold`, `textclean`, `toolfilter`, `cachesplit`, `cmdfilter`,
+  `dedup` and `extract`.
 - **Storage is necessary only when Context Guru cannot rebuild the rewrite from the message:**
-  - **Model-written text** (`extract_llm`, `summarize`, `cache_aware_summarizer`, `agentdiet`). A
+  - **Model-written text** (`extract_llm`, `summarize`, `cache_aware_summarizer`). A
     model gives different words each time.
-  - **Gated rewrites** (`mask`, `failed_run`, `collapse`, `readlifecycle`, `coref`). They act only
-    on the part of the conversation that is not cached yet. On the next turn they must know that
-    they already acted. A flag is enough.
 - **The originals for `expand`** are a copy of what the client already has. Context Guru keeps them
   only because it cannot ask the client for its copy.
 
@@ -172,11 +168,10 @@ These presets are for the standalone proxy and for benchmarks.
 |---|---|---|---|
 | `cache`, `safe` | ✅ Works | ✅ Works | ✅ Works |
 | `house`, `coding`, `mcp` | ✅ Works, no `expand` | ✅ Works, no `expand` | ✅ Works |
-| `balanced`, `codesafe` | ❌ **Does not work.** `failed_run` (and `collapse` in `codesafe`) shortens a message once, then sends it in full the next turn. The user pays a cache write for a saving of one turn. | ❌ The same as Off | ✅ Works |
-| `codesmart`, `aggressive`, `agent`, `general`, `housellm` | ❌ **Does not work.** `extract_llm` (and the sweep in `housellm`) pays for model calls that last one turn. Some rule-based rewrites also last one turn. | ❌ The same as Off | ✅ Works |
+| `balanced`, `codesafe` | ✅ Works, no `expand`. The components that shortened a message once and then sent it in full the next turn were removed. | ✅ Works, no `expand` | ✅ Works |
+| `codesmart`, `aggressive`, `agent`, `general`, `housellm` | ❌ **Does not work.** `extract_llm` (and the sweep in `housellm`) pays for model calls that last one turn. | ❌ The same as Off | ✅ Works |
 | `summarize` | ❌ **Does not work.** It does not start, because it cannot tell how full the window is. | ❌ **Does not work, and costs money.** It pays for a summary every turn and throws it away. | ✅ Works |
 | `summarizer1509` | ❌ **Does not work, and costs money.** It starts at a fixed size (20,000 tokens), pays for a summary every turn and throws it away. | ❌ The same as Off | ✅ Works |
-| `agentdiet` | ❌ **Does not work.** It pays for a model call every turn, and the rewrite lasts one turn. | ❌ The same as Off | ✅ Works |
 
 ## Pipeline components
 
@@ -197,27 +192,18 @@ One row for each registered component. Each row is its own file,
 | `cachesplit` | none | Nothing kept. The dashboard keeps one hash per thread for savings reports. | ✅ Works | ✅ Works | ✅ Works | It moves the part of the system prompt that changes every session after the cache bookmark. That depends only on the current request. | #32 |
 | `textclean` | none | Nothing kept | ✅ Works | ✅ Works | ✅ Works | It removes terminal colour codes and screen-redraw leftovers that were never visible text. The result depends only on the output itself. | Osher Elhadad, #89 |
 | `toolfilter` | metadata | Nothing kept for `remove`. With `defer: auto` (the `ultrahigh` preset, or the Bob plugin's `bob-ultrahigh`): one record per thread with the names of the deferred tools (`cg:tdf:`; on GPT, GLM and Kimi, where our own search tool runs, a second record under the same prefix also lists the tools a search added back and, for each search the client received, its call id and the tool names it asked for, #825; on a Claude Code thread with its own `ToolSearch`, the thread record also keeps each search call id and the names the proxy added to its result, #898), and a session's tool search opt-out flag (`cg:tso:`), both pinned. They live in the session-state table when it is on (`--dashboard`), else in tool deferral's own file, `context-guru-tooldefer.db`, next to the dashboard database path. Plus the tool history (see *Tool deferral history* below). No tool text kept. In Claude Code mode (#898) the feature also reads the text of a `ToolSearch` result, in two places: the "No matching deferred tools found" text, and the error text "not loaded" or "does not exist". It reads them in the request and keeps nothing of them. | ✅ Works for `remove`. `defer: auto` defers nothing when there is no durable place for the record: no session-state table and the file cannot be opened (a read-only folder, `--dashboard-db=:memory:`). A record that dies with the process would move tools inside live cached prefixes at the next start. With the Store off nothing is deferred. | 🟡 Works, metadata. The record, the flag and the history are tool names, ids, flags and counts. | 🟡 Works, metadata. The same as metadata only: deferral keeps no content. | It removes the declarations the operator listed, from that fixed list and the current request. Deferral must send the same set on every turn of a thread, also across a restart, so it keeps the tool names it deferred on disk, and it decides from which tools the user declared and used before. | Osher Elhadad, #84; deferral: David Amid, #485, 2026-11-02 |
-| `mask` | content | Store: the frozen decision and the original | ❌ **Does not work.** Masks a message for one turn, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** 🟡 it works on metadata, and the cache stays stable. No way back. | ✅ Works, with `expand` | It hides old tool outputs, and must send the same masked text every later turn. It builds that text from the message alone, so a "masked" flag is enough to build it again. | Osher Elhadad, first commit a91d6f4; storage rules in #187 |
-| `failed_run` | content | Store: the frozen decision and the original | ❌ **Does not work.** Shortens once, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** 🟡 it works on metadata, and the cache stays stable. No way back. | ✅ Works, with `expand` | It replaces a failed run that the agent ran again with a fixed sentence. A "replaced" flag is enough to send the same sentence again. | Osher Elhadad, first commit a91d6f4 |
-| `collapse` | content | Store: the frozen decision and the original | ❌ **Does not work.** Cuts once, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** 🟡 it works on metadata if it also keeps the cut size, a number. No way back. | ✅ Works, with `expand` | It is the last-resort limit for very large outputs. It can build the cut again from the output and the cut size, so it needs a flag and one number. | Osher Elhadad, first commit a91d6f4 |
-| `readlifecycle` | content | Store: the frozen decision and the original file read | ❌ **Does not work.** Removes an old read once, then **breaks the cache**. No way back. | ❌ **Does not work today**: the same as Off. **With a change:** 🟡 it works on metadata if it also keeps its label ("stale" or "superseded"). No way back. | ✅ Works, with `expand` | It removes file reads that a later edit or read made out of date. The label can change later in the conversation, so it must keep the label it first used. | Osher Elhadad, #89 |
-| `skeleton` | content | Store: the frozen decision and the original source | ❌ **Does not work.** It skips, so it saves nothing. | ❌ **Does not work.** It skips. | ✅ Works | It removes function bodies from source code. Without the original, the agent cannot tell a removed body from an empty one, so it refuses to run. | Osher Elhadad, first commit a91d6f4 |
 | `cmdfilter` | content | Store: the filtered text (a speed-up) and the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It applies a filter for each known command, and the same output always gives the same text. It keeps the original only so the agent can get dropped lines back. | Osher Elhadad, first commit a91d6f4; memo in #188 |
-| `linecap` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It shortens very long lines and folds repeated lines, the same way every time. It keeps the original only so the agent can get the cut lines back. | Osher Elhadad, #89 |
 | `dedup` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. The note still says "expand", with nothing to expand. | ✅ Works, no `expand` | ✅ Works | It replaces a repeated tool output with a pointer to the earlier copy in the same request. It keeps the repeat only so the agent can get it back. | Osher Elhadad, first commit a91d6f4 |
-| `smartcrush` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It keeps the first and last items of a long JSON array, and any error items, the same way every time. It keeps the full array only for `expand`. | Osher Elhadad, first commit a91d6f4 |
 | `extract` | content | Store: the original | ✅ Works, no `expand`. Same bytes every turn. | ✅ Works, no `expand` | ✅ Works | It removes clear noise, such as repeated lines and progress bars, the same way every time. It keeps the original only for `expand`. | Osher Elhadad, first commit a91d6f4 |
-| `coref` | content | Store: the frozen decision, the original, and a count of cache rebuilds it spent (metadata) | ❌ **Does not work.** **No spending limit**, because the count always reads zero. Each cut lasts one turn, then **breaks the cache**. | ❌ **Does not work today, and is harmful.** The limit works, but each cut undoes itself next turn. **Turn it off.** **With a change:** 🟡 it works on metadata. | ✅ Works, with `expand` | It removes tool outputs that nothing later refers to, and so changes the cached history on purpose. It must remember which outputs it cut, and how many cache rebuilds it spent. | David Amid, commit b224704; docs/proposals/coref-compaction.md |
 | `extract_llm` | content | Store: the model's rewrite, a copy for other sessions, and the original. Memory: counts per session, and the time of the last stash refusal. | ❌ **Does not work.** Pays one model call per new large output, and uses it for one turn. Then it **breaks the cache**. Without prompt caching it pays again every turn, up to 8 calls. | ❌ **Does not work**: the same as Off, and it approves **more** calls. It remembers an output, and counts on a reuse that cannot happen. **Cannot work.** | ✅ Works: one call, then free reuse | A model rewrites each large tool output, and the words differ each time. To send the same bytes next turn, it must keep the rewrite, which is content. | Osher Elhadad, #51; storage rules in #40 and #188 |
 | `extract_llm_sweep` | content | Store: one **held answer** per thread (pinned, `cg:swh:`): for each judged output its tool-use id, a short hash of the message, its token counts, the model's keep-or-drop verdict, the length of the conversation when asked, the model name, the cost, and the wait cause. No text. Memory, not the Store: **two full copies of the conversation per thread** (the request as the pipeline holds it, and as the agent sent it), kept for a thread the keep-alive can ping, for at most 30 minutes, or, with `warm: true`, for a thread it cannot ping only while a warm question is due or running (#1191; at most 300 seconds after the request), for at most 256 threads. It writes **no** removals (`cg:res:`) any more. **Since the cold apply (#404 PR C), it also keeps, per applied drop, the original output** (the stash behind the `<<cg:HASH>>` marker, which is content, the same as every other offloader), and **metadata only** besides: a drop record per thread and output (`cg:swd:`: tool-use id, content key, marker id, token count, time, the kind, and **4-byte hashes of up to 48 identifiers** the output introduced, used to see a later reference), a marker-to-drop map (`cg:swx:`), and a process-wide counter ledger for the false-drop rate. No output text is in any record. **With `warm: true` (#491, off by default; on only in the Bob plugin's `bob-ultrahigh`)** it also keeps, **in memory only and never in the Store**: one waiting answer per thread (ids, hashes, counts, verdicts: metadata), for at most 30 minutes, **which also holds the drop verdicts a refused answer left behind (the same fields, at most 256 per thread, none older than 30 minutes since the question that judged them)**, and per thread a few numbers (the warm run length, the previous request's local token size, the cache read the provider reported for the previous turn (#1191: on a route with an unknown cache phase, such as IBM Bob's, a read above 0 makes the cache count as live on the next request, for the warm path, the apply of a held answer and the shadow report), the request count since the last question, a last-touched time, and a flag with the time a question is pending, 5 minutes at most), for at most 256 threads. The warm question uses the ping registry's existing conversation copy (already counted above) and keeps **no copy of its own**. Since #1191, with `warm: true` that registry copy is also kept for a thread the keep-alive cannot ping, such as IBM Bob's route, so the warm question can ask there. Such a copy is kept only while the warm question is due or running, only the warm question reads it (a ping never does), and it is dropped when the question ends or the request fails. An applied warm drop writes the same records and stash as a cold drop. **With sweep v3 (`selector: rule` or `hybrid`, or any v3 setting; off by default, needs `warm: true`)** the rules read tool names, tool input paths and commands from the request in flight, to see a file read that was read or written again, and a build, test or lint run that ran again. They write nothing new: no path or command is stored. Per thread they keep, in memory only, two numbers and two flags (the billed size after the last accepted cut, and whether a cut or a question is waiting). The counters hold counts and ratios only. **Rule (c), `rule_unreferenced` (off by default)** reads the text of later messages in the request in flight, to see whether any of them reuses an identifier the output introduced. This is the same reading the recheck already does for `referenced_later`, and it also stores nothing. The drop record gains the **name of the rule** (or `judge`) that chose the drop, a label with no content, so an expand can be counted per rule. Since #1191 the same label is also a count on the dashboard row of the request: the drops per rule (`sweep_v3_dropped_<rule>`) and the first expands per rule (`sweep_v3_expanded_<rule>`), counts only. **Since #1196** each request also counts its cache verdict once, by reason (`sweep_cache_verdict_<reason>`: `known_cold`, `known_warm`, `unknown_prefix`, `unknown_live`, `unknown_cold`), a count and nothing else. **With sweep v3 on, the drop record also gains the tool name and a hash of the file path or command of the call** that produced the output (an 8-byte hash, with a prefix that keeps a path and a command apart). **The path or command itself is not stored.** On each later request the sweep hashes the path or command of every later tool call and compares it with those hashes, to count a re-read of what a drop removed. The calls it hashes are read in flight, the same request text the rules already read. **With `tier_target` (#1329, off by default; needs sweep v3)** the sweep also reads the billed prompt size, the price table's tier lines and rates, and the growth per turn. These are token counts and prices. It stores nothing new and needs no customer text, so its data dependence does not change. **Since #721** the candidate scan and the cold apply also check whether a `<<cg:HASH>>` in an output has a Store key (presence only, no content read), so an output that merely quotes marker text is still a candidate. | ❌ **Does nothing.** It asks only at a keep-alive ping or, with `warm: true`, after a forwarded request, and both need the body stash. With no Store, the held answer is not kept. It costs nothing and removes nothing. | ✅ **Works for what it does today**: the held answer is metadata, so it is kept and rechecked. **But** the in-memory conversation copies are content, so this level is not metadata only in full (see the memory column). | ✅ Works: the question at the ping, the held answer, the recheck, shadow mode and the cold apply. The removals need the stash for `expand`. | It asks the agent's model which old outputs are spent, at the keep-alive ping, and keeps the answer until a cold request. The answer is ids, hashes, counts and verdicts, so it is metadata. The question needs the exact text from last turn, and the recheck needs the conversation the answer was given for, so it keeps copies of the conversation in memory. | David Amid, #118; ping-time question and held answer approved 2026-10-25 (#508); cold apply approved 2026-10-25 (#695); warm path approved 2026-10-26 (#491); sweep v3 rules reading tool names, paths and commands in flight approved 2026-10-28 (#491); the stored path hash (a hash of the file path or command in the drop record, never the path) approved 2026-11-01 (#491); the previous turn's cache read and the verdict counter: approved by David Amid 2026-11-22 (#1196); warm-on keeps the copy without a ping: approved 2026-11-26 (#1193) |
 | `summarize` | content | Store: the model-written summary and the replaced turns. Memory: a copy of the turns while the model call runs. | ❌ **Does not work.** **Does not start** by default, because it cannot tell how full the window is. Without a session (`/compact`) it works in one request. No way back. | ❌ **Does not work.** **Pays for a summary every turn above 90% full, and throws it away.** The next turn can wait up to 120 seconds for it. **Cannot work.** | ✅ Works | It replaces old turns with a model-written summary, and the words differ each time. It must keep the summary to send the same bytes next turn. | Osher Elhadad, commit 68e8b51; checkpoint in #430 |
 | `cache_aware_summarizer` | content | Store: the summary and the replaced turns. Memory: copies of turns, for summaries during idle time, after a cold turn, and for one request's lifetime while a summary waits for that request's body to be stashed (#722). | ❌ **Does not work.** **Does not start** by default, because it cannot tell how full the window is. | ❌ **Does not work.** It keeps copies of turns in memory, which is content. On Anthropic it does nothing and costs nothing. On OpenAI it **pays and throws the summary away** every turn. **Cannot work.** | ✅ Works | Like `summarize`, it must keep the summary to send the same bytes later. It also keeps the conversation in memory, to summarize while the user is idle. | Itay Nakash, #256 |
-| `agentdiet` | content | Store: the frozen decision and the original step | ❌ **Does not work.** **Pays one model call per turn.** The step it shortened last turn comes back in full, which **breaks the cache**. | ❌ **Does not work**: the same as Off. **Cannot work.** | ✅ Works | A model rewrites one older agent step each turn, and the words differ each time. The history stays short only if Context Guru keeps every rewrite. | Itay Nakash, #66 |
 
 ### Libraries that are not components
 
 - **`dsl`** (the filter engine) keeps nothing per request. It holds only the rules from your filter
-  files. `cmdfilter` and `linecap` use it, and those two keep the originals.
+  files. `cmdfilter` uses it, and it keeps the originals.
 
 ## Features outside the pipeline
 
@@ -269,17 +255,10 @@ One file for each row: `docs/data-dependence/features/<slug>.md`.
    Context Guru must ask it before it offers `expand`. Today one flag answers two questions: "can I
    keep the original?" and "can I keep the result?". Either answer makes some components pay for
    a model call and then throw the result away.
-2. **An "already done" flag per message** for the rule-based components. All of them except
-   `skeleton` can build the same text again from the message the client sends again. The flag
-   keeps the cache stable. The code already has a path that builds lost text again; the flag
-   would start it.
-3. **Two small extra values:** the cut size for `collapse`, and the label for `readlifecycle`.
-4. **A way for `coref` to send its cuts again.** Until then, turn `coref` off at this level.
-5. **A byte bound, and a switch, for the sweep's in-memory conversation copies** (#404 PR C). The removals it used to repeat from a flag are gone: the sweep no longer writes them.
-6. **Turn off the model-written components** (`extract_llm`, `summarize`, `cache_aware_summarizer`,
-   `agentdiet`). Context Guru cannot build their text again, so they either pay for nothing or break
+2. **A byte bound, and a switch, for the sweep's in-memory conversation copies** (#404 PR C). The removals it used to repeat from a flag are gone: the sweep no longer writes them.
+3. **Turn off the model-written components** (`extract_llm`, `summarize`, `cache_aware_summarizer`). Context Guru cannot build their text again, so they either pay for nothing or break
    the cache.
-7. **Turn off** keep-alive, the body stash and `expand`. The dashboard keeps only metadata columns,
+4. **Turn off** keep-alive, the body stash and `expand`. The dashboard keeps only metadata columns,
    and its memos keep only hashes and counts.
 
 ## What this audit found
@@ -310,19 +289,16 @@ behaviour. Each finding needs a decision from its owner.
 
 ### Problems with storage off today
 
-- **7 components do not work.** They pay for a saving that lasts one turn: `mask`, `failed_run`,
-  `collapse`, `readlifecycle`, `coref`, `extract_llm` and `agentdiet`.
-  - Each one shortens a message once, then sends it in full the next turn. The user pays a cache
-    write each time, so storage off can cost more than no compaction.
-  - `extract_llm` and `agentdiet` also pay for a model call each time.
-  - `coref` also loses its spending limit.
+- **1 component does not work.** `extract_llm` pays for a saving that lasts one turn.
+  - It shortens a message once, then sends it in full the next turn. The user pays a cache write
+    each time, so storage off can cost more than no compaction.
+  - It also pays for a model call each time.
 - **The summarizers do not work.**
   - `summarize` and `cache_aware_summarizer` do not start with their default settings. This is
     safe only by accident. They start as soon as Context Guru keeps the billed-token record, as at
     "metadata only".
   - `summarizer1509` starts at a fixed size, pays for a summary every turn and throws it away.
-- **`skeleton` refuses to run.** This is the safe behaviour.
-- **No way back** for the rest: `cmdfilter`, `linecap`, `dedup`, `smartcrush` and `extract` still
+- **No way back** for the rest: `cmdfilter`, `dedup` and `extract` still
   work, but the model cannot get removed text back through `expand`.
 - **Nothing warns at startup** when a component that does not work runs with storage off.
 

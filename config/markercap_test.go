@@ -12,11 +12,6 @@ import (
 // with a marker_mode field and not listed here would keep defaulting to full in Cortex.
 func TestMarkerModeComponentsMatchTheRegistry(t *testing.T) {
 	for _, name := range components.Names() {
-		if name == "skeleton" {
-			// skeleton (-tags cg_skeleton) has a marker_mode field but accepts only full, so it
-			// is deliberately not capped and not listed. See markerModeComponents.
-			continue
-		}
 		_, err := components.New(name, []byte("marker_mode: summary\n"))
 		accepts := err == nil
 		if accepts != markerModeComponents[name] {
@@ -53,7 +48,7 @@ func TestCapMarkerModeOverridesThePresetDefault(t *testing.T) {
 }
 
 func TestCapMarkerModeKeepsAStricterChoice(t *testing.T) {
-	c, err := LoadBytes([]byte("pipeline: [collapse]\ncomponents:\n  collapse: {marker_mode: \"off\", max_tokens: 300}\n"))
+	c, err := LoadBytes([]byte("pipeline: [extract]\ncomponents:\n  extract: {marker_mode: \"off\", min_tokens: 300}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,10 +56,10 @@ func TestCapMarkerModeKeepsAStricterChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	var m map[string]any
-	n := c.Components["collapse"]
+	n := c.Components["extract"]
 	_ = n.Decode(&m)
-	if m["marker_mode"] != "off" || m["max_tokens"] != 300 {
-		t.Fatalf("collapse = %v, want marker_mode off and max_tokens kept", m)
+	if m["marker_mode"] != "off" || m["min_tokens"] != 300 {
+		t.Fatalf("extract = %v, want marker_mode off and min_tokens kept", m)
 	}
 	if err := c.CapMarkerMode("full"); err == nil {
 		t.Fatal(`CapMarkerMode("full") accepted`)
@@ -75,7 +70,7 @@ func TestCapMarkerModeKeepsAStricterChoice(t *testing.T) {
 // capped like full, not left alone as if it ranked below summary.
 func TestCapMarkerModeCapsAnUnrecognizedValueAsFull(t *testing.T) {
 	for _, v := range []string{"Full", "fulll"} {
-		c, err := LoadBytes([]byte("pipeline: [collapse]\ncomponents:\n  collapse: {marker_mode: \"" + v + "\"}\n"))
+		c, err := LoadBytes([]byte("pipeline: [extract]\ncomponents:\n  extract: {marker_mode: \"" + v + "\"}\n"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,7 +78,7 @@ func TestCapMarkerModeCapsAnUnrecognizedValueAsFull(t *testing.T) {
 			t.Fatal(err)
 		}
 		var m map[string]any
-		n := c.Components["collapse"]
+		n := c.Components["extract"]
 		if err := n.Decode(&m); err != nil {
 			t.Fatal(err)
 		}

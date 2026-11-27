@@ -704,8 +704,7 @@ Three parts:
    cache-boundary tracker and the call's own timestamp. Per call it writes the tokens before and after,
    whether the forwarded body still starts with the previous forwarded body (if not, that is a cache
    break), and the saving by component and by `tool_use_id`.
-3. **`cc_replay_sweep.py`** runs the shipped presets, every zero-cost component alone, a few
-   non-default settings, and a greedy search for the best custom pipeline. It runs the search twice:
+3. **`cc_replay_sweep.py`** runs the shipped presets, every zero-cost component alone, and a greedy search for the best custom pipeline. It runs the search twice:
    once with no limits, and once limited to pipelines with 0 cache breaks and nothing removed that
    the agent edits later.
 

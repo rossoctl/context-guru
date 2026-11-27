@@ -137,9 +137,9 @@ func buildHandler(t *testing.T, yaml string, upstream string) (*proxy.Handler, s
 // and a test that hand-seeds the Store to simulate an offload has to use a pipeline where the
 // offload it is simulating could actually have happened.
 //
-// `linecap` is an Offload that does not act on the short bodies in these tests, so it leaves the
+// `extract` is an Offload that does not act on the short bodies in these tests, so it leaves the
 // asserted bytes alone.
-const offloadCapablePipeline = "pipeline: [linecap]\n"
+const offloadCapablePipeline = "pipeline: [extract]\n"
 
 func openAIBody(msgs ...map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{"model": "gpt-x", "temperature": 0.2, "messages": msgs})
@@ -1120,7 +1120,7 @@ func TestExpandOpenAISSEFallsBackToRaw(t *testing.T) {
 func TestExpandRoundTrip(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{}`)) }))
 	defer upstream.Close()
-	h, _ := buildHandler(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 20, head_lines: 2, tail_lines: 2}\n", upstream.URL)
+	h, _ := buildHandler(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 20}\n", upstream.URL)
 	srv := httptest.NewServer(h.Mux())
 	defer srv.Close()
 
@@ -1131,7 +1131,7 @@ func TestExpandRoundTrip(t *testing.T) {
 	body := openAIBody(map[string]any{"role": "tool", "content": b.String()})
 	http.Post(srv.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(string(body)))
 
-	// The collapsed message carries an expand marker; the id must resolve via /expand.
+	// The extracted message carries an expand marker; the id must resolve via /expand.
 	stats, _ := http.Get(srv.URL + "/stats")
 	var snap metrics.Snapshot
 	json.NewDecoder(stats.Body).Decode(&snap)

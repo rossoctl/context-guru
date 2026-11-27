@@ -69,7 +69,7 @@ type threadRun struct {
 }
 
 func newThreadRun(t *testing.T, threads bool) *threadRun {
-	cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 1, min_tokens: 50}\n")
+	cfg := pipe(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50}\n")
 	p, err := cfg.Build(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +325,7 @@ func TestNewThreadOnASharedPrefixKeepsTheCachedPart(t *testing.T) {
 		{"side request without a tracker", "", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 1, min_tokens: 50}\n")
+			cfg := pipe(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50}\n")
 			p, err := cfg.Build(nil)
 			if err != nil {
 				t.Fatal(err)
@@ -388,7 +388,7 @@ func TestResponsesSingleThreadSessionIsUnchanged(t *testing.T) {
 	at := func(i int) time.Time { return base.Add(time.Duration(i) * 7 * time.Minute) }
 	run := func(withThreadOf bool) ([]apply.Result, *modes.Tracker) {
 		st, tr := store.NewMemory(store.Options{}), modes.NewTracker(0)
-		cfg := pipe(t, "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 1, min_tokens: 50}\n")
+		cfg := pipe(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50}\n")
 		p, err := cfg.Build(nil)
 		if err != nil {
 			t.Fatal(err)
@@ -420,7 +420,7 @@ func TestResponsesSingleThreadSessionIsUnchanged(t *testing.T) {
 		}
 	}
 	if !with[2].Changed {
-		t.Fatal("fixture: mask acted on nothing, so the comparison proves little")
+		t.Fatal("fixture: extract acted on nothing, so the comparison proves little")
 	}
 	last := len(with) - 1
 	assertBareSessionRecord(t, "with ThreadOf", withTr, with[last], at(last))

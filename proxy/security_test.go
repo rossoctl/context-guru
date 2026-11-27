@@ -302,7 +302,7 @@ func TestCrossOriginWritesAreRefused(t *testing.T) {
 
 // TENANT_RPM and TENANT_CONCURRENT were enforced in chat() and nowhere else, so the two
 // other authenticated entry points ran the box for free: /compact drives the whole
-// pipeline (tokenisation, tree-sitter, several passes) over a body up to 32 MiB, and the
+// pipeline (tokenisation, several passes) over a body up to 32 MiB, and the
 // Bob catch-all forwards arbitrary methods and paths. With the limiter at one request a
 // minute, chat refused the second call while /compact served twenty.
 func TestEveryAuthenticatedRouteIsMetered(t *testing.T) {

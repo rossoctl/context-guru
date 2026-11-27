@@ -283,7 +283,7 @@ func Apply(c *Compiled, input string) (string, Lossiness) {
 // INSIDE the budget (so the result is never longer than n). Ported from rtk's
 // utils::truncate.
 //
-// Exported because the generic per-line cap in the `linecap` component applies the same
+// Exported because other callers apply the same
 // rule outside this package, and a second copy of "the ellipsis has to fit inside the
 // budget" is the kind of subtlety that drifts.
 func TruncateRunes(s string, n int) string {

@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	bschemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/rossoctl/context-guru/components"
 	"github.com/rossoctl/context-guru/config"
+	"github.com/rossoctl/context-guru/schema"
 )
 
 // writeRound writes a synthetic round: one user prompt, then three tool calls — a Read of a large file, a
@@ -95,32 +98,54 @@ func TestOffPresetReportsNothing(t *testing.T) {
 	}
 }
 
-// collapse cuts the large file body; the saving must be attributed to that component and to that tool_use_id,
+// extract cuts the large file body; the saving must be attributed to that component and to that tool_use_id,
 // and must agree with the token difference of the whole request.
-func TestCollapseIsAttributedToItsToolResult(t *testing.T) {
-	calls := runDoc(t, "pipeline: [collapse]\n")
+func TestExtractIsAttributedToItsToolResult(t *testing.T) {
+	calls := runDoc(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 200}\n")
 	last := calls[len(calls)-1]
 	removed := last.OrigTok - last.OutTok
 	if removed <= 0 {
-		t.Fatalf("collapse removed nothing from a 400-line file: %+v", last)
+		t.Fatalf("extract removed nothing from a 400-line file: %+v", last)
 	}
-	if last.ByComp["collapse"] <= 0 {
-		t.Fatalf("saving not attributed to collapse: %+v", last.ByComp)
+	if last.ByComp["extract"] <= 0 {
+		t.Fatalf("saving not attributed to extract: %+v", last.ByComp)
 	}
 	if last.ByTool["t1"] <= 0 || last.ByTool["t3"] != 0 {
 		t.Fatalf("saving attributed to the wrong tool result: %+v", last.ByTool)
 	}
 	for _, c := range calls {
 		if c.Broken {
-			t.Fatalf("call %d: collapse on the tail broke the cached prefix", c.K)
+			t.Fatalf("call %d: extract on the tail broke the cached prefix", c.K)
 		}
 	}
 }
 
+// lateRewrite is a test-only component. It rewrites a tool result the previous request already sent, once the
+// transcript has five messages. No shipped component does this on purpose, so the test brings its own.
+type lateRewrite struct{}
+
+func (lateRewrite) Name() string                 { return "late_rewrite" }
+func (lateRewrite) Enabled(*components.Ctx) bool { return true }
+func (lateRewrite) Reformat(req *bschemas.BifrostChatRequest, _ *components.Report, _ *components.Ctx) error {
+	if len(req.Input) < 5 {
+		return nil
+	}
+	for i := range req.Input {
+		if req.Input[i].Role == bschemas.ChatMessageRoleTool {
+			schema.SetMessageText(&req.Input[i], "rewritten after it was sent")
+			return nil
+		}
+	}
+	return nil
+}
+
+func init() {
+	components.Register("late_rewrite", func([]byte) (components.Component, error) { return lateRewrite{}, nil })
+}
+
 // A rewrite of a message the previous request already sent is a cache break, and the replay must say so.
-// readlifecycle with stale_at_depth offloads the Read once the Edit arrives, when the Read is already cached.
 func TestRewriteOfSentMessageIsABreak(t *testing.T) {
-	calls := runDoc(t, "pipeline: [readlifecycle]\ncomponents:\n  readlifecycle:\n    stale_at_depth: true\n")
+	calls := runDoc(t, "pipeline: [late_rewrite]\n")
 	broken := 0
 	for _, c := range calls {
 		if c.Broken {
@@ -131,6 +156,6 @@ func TestRewriteOfSentMessageIsABreak(t *testing.T) {
 		}
 	}
 	if broken == 0 {
-		t.Fatalf("readlifecycle rewrote a cached Read but no break was reported: %+v", calls)
+		t.Fatalf("a component rewrote a sent tool result but no break was reported: %+v", calls)
 	}
 }

@@ -104,9 +104,6 @@ ANTHROPIC_BASE_URL=https://127.0.0.1:1/nope ANTHROPIC_AUTH_TOKEN=bogus \
 
 **Which preset?** `conservative` is the safe start: no model calls. Step up to `medium`, `high` or `xhigh` when you want more cut. See [Choose a preset](../reference/presets.md).
 
-**`context-guru-proxy` exits with `unknown component "skeleton"`.** A pipeline that names
-`skeleton` needs a build with the `cg_skeleton` tag; `make build` does not pass it.
-
 **Pinning the model.** context-guru forwards whatever `model` Claude Code sends. Set
 `FORCE_MODEL` on the proxy to override it (useful in eval harnesses).
 

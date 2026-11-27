@@ -632,8 +632,8 @@ func (s *TenantSource) tenancy(t *tenant.Tenant) (*Tenancy, error) {
 	}
 	s.mu.Unlock()
 
-	// Build outside the lock: constructing a pipeline can be slow (tree-sitter
-	// parsers, tokenizer tables) and must not serialise every other tenant's request.
+	// Build outside the lock: constructing a pipeline can be slow (tokenizer
+	// tables) and must not serialise every other tenant's request.
 	tn, err := s.build(t, cfgDoc)
 	if err != nil {
 		return nil, err

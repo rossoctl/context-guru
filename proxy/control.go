@@ -1297,7 +1297,7 @@ func (h *Handler) ctlUpdateMe(w http.ResponseWriter, r *http.Request) {
 		// component back, because from the server's side an addition is indistinguishable
 		// from a deliberate one. So the page states the pipeline it rendered from, and a
 		// mismatch means the document moved underneath it — which is exactly what re-added
-		// `toon` to an operator's pipeline while dropping `linecap`.
+		// `toon` to an operator's pipeline while dropping another component.
 		//
 		// nil is accepted: an older cached bundle does not send it, and refusing every save
 		// from one would break the settings page for as long as that bundle lives in a cache.

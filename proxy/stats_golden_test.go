@@ -37,12 +37,6 @@ var statsGoldenTopLevel = []string{
 	// Replies on Bob's model route by backend label (A, B, other, none, id_no_usage). A preset comparison is
 	// valid only on one backend, and "other" says IBM changed the marks.
 	"bob_backend",
-	// agentdiet_* are the same three fail-open figures for the `agentdiet` baseline,
-	// which owns its own per-call budget (a window of steps sits between extract_llm's
-	// single tool output and summarize's whole span). Separate keys because it runs in
-	// its own arm: folded into llm_*, an agentdiet arm whose every reflection call
-	// expired would report llm_timeouts 0 and read as having nothing to reduce.
-	"agentdiet_call_timeout_ms",
 	// cache_aware_summarizer. `declined` matters most to a reader of this contract: a declining
 	// arm is byte-identical to `off` on every other field here.
 	"cache_aware_summarizer_calls",
@@ -84,8 +78,6 @@ var statsGoldenTopLevel = []string{
 	"cache_aware_summarizer_cache_write_tokens",
 	"cache_aware_summarizer_truncated",
 
-	"agentdiet_errors",
-	"agentdiet_timeouts",
 	"attempted_tokens",
 	"bounces",
 	"cache_read_tokens",

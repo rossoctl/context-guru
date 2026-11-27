@@ -2,7 +2,6 @@ package offload
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -38,49 +37,6 @@ func resolveTimeoutEnv(name string, def time.Duration) time.Duration {
 		return d
 	}
 	return def
-}
-
-// resolveBudget converts an absolute token knob + an optional fraction-of-window
-// into an effective token count: the fraction (ceil(frac*window)) wins when set and
-// the window is known, else the absolute. Lets size knobs (collapse.max_tokens)
-// scale with the model context window while staying backward compatible when no
-// fraction is configured or the window is unknown.
-func resolveBudget(absolute int, frac float64, window int) int {
-	if frac > 0 && window > 0 {
-		return int(math.Ceil(frac * float64(window)))
-	}
-	return absolute
-}
-
-// headPeek returns a single-line, whitespace-collapsed, clipped snippet of the
-// start of content — the cue an age/budget-based offloader (mask) can
-// leave inside its marker so the model knows WHAT was hidden without a blind
-// expand round-trip. Replay/diff analysis showed a bare "[older tool output
-// masked]" marker gives the model zero signal (e.g. it masked a still-relevant
-// source-file read on SWE), forcing needless expand calls; a ~1-line peek fixes
-// that at negligible token cost (the marker-inclusive never-worse guard in
-// tryMark still drops the rewrite if the peek would make it not shrink).
-// maxChars<=0 disables the peek (returns "").
-func headPeek(content string, maxChars int) string {
-	if maxChars <= 0 {
-		return ""
-	}
-	// Peek across the START of the content (not just the first line): a bounded
-	// prefix, newlines→spaces, whitespace collapsed. This keeps the cue useful for
-	// line-numbered file reads (first line is a bare number) as well as command
-	// output (first line "Exit code 1 / Traceback ..."). Slice first so we never
-	// scan a multi-KB output.
-	head := clipRunes(content, maxChars*4)
-	head = strings.Join(strings.Fields(head), " ") // newlines+runs → single spaces
-	if head == "" {
-		return ""
-	}
-	// never let a peek carry a marker sentinel back into the request
-	head = strings.ReplaceAll(head, "<<cg:", "<< cg:")
-	if r := []rune(head); len(r) > maxChars {
-		head = string(r[:maxChars]) + "…"
-	}
-	return head
 }
 
 // clipRunes returns at most maxBytes bytes of s truncated on a UTF-8 rune boundary,
@@ -213,21 +169,6 @@ func collapseObviousNoise(content string) (string, bool) {
 		return content, termChanged // terminal-noise stripping may have changed it alone
 	}
 	return strings.Join(out, "\n"), true
-}
-
-// errWords mark a tool output (or an item) as carrying a failure — such items
-// are preserved by smartcrush and prioritized elsewhere, since dropping the one
-// error in a haystack is exactly the accuracy loss to avoid.
-var errWords = []string{"error", "fail", "exception", "panic", "fatal", "traceback"}
-
-func hasError(s string) bool {
-	ls := strings.ToLower(s)
-	for _, w := range errWords {
-		if strings.Contains(ls, w) {
-			return true
-		}
-	}
-	return false
 }
 
 // goalCap bounds the conversational context handed to an LLM component so a huge

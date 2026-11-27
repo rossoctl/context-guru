@@ -157,3 +157,29 @@ func offloadWithParkedLeader(t *testing.T, e *ExtractLLM, req *bschemas.BifrostC
 	close(release)
 	return <-done
 }
+
+// headPeek returns a single-line, whitespace-collapsed, clipped snippet of the
+// start of content. No component uses it now. It stays here as the test fixture for clipRunes,
+// which must never split a multibyte rune into invalid UTF-8.
+// maxChars<=0 returns "".
+func headPeek(content string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	// Peek across the START of the content (not just the first line): a bounded
+	// prefix, newlines→spaces, whitespace collapsed. This keeps the cue useful for
+	// line-numbered file reads (first line is a bare number) as well as command
+	// output (first line "Exit code 1 / Traceback ..."). Slice first so we never
+	// scan a multi-KB output.
+	head := clipRunes(content, maxChars*4)
+	head = strings.Join(strings.Fields(head), " ") // newlines+runs → single spaces
+	if head == "" {
+		return ""
+	}
+	// never let a peek carry a marker sentinel back into the request
+	head = strings.ReplaceAll(head, "<<cg:", "<< cg:")
+	if r := []rune(head); len(r) > maxChars {
+		head = string(r[:maxChars]) + "…"
+	}
+	return head
+}

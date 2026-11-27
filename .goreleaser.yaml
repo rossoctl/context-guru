@@ -3,15 +3,10 @@
 # The whole file is a plain GOOS/GOARCH matrix with no C cross-toolchains, no zig, and no
 # libc coupling, because `CGO_ENABLED=0` builds the shipped binary. That is verified rather
 # than assumed — the `Assert the binary is pure Go` step in .github/workflows/release.yaml fails
-# the release if a cgo dependency ever escapes the cg_skeleton build tag. Measured directly on
+# the release if a cgo dependency ever appears. Measured directly on
 # go 1.26.4:
 # all four targets build, the artifact is 27–34 MB stripped, `file` reports "statically
 # linked" and `ldd` "not a dynamic executable", and the resulting binary serves /healthz.
-#
-# `cg_skeleton` is the ONE thing that needs cgo (tree-sitter), and it is deliberately not
-# built here: it is in no default preset, not in the cache story, and shipping it would mean
-# per-platform C cross-compilation for a component this funnel never runs. Source build is
-# documented in docs/components/skeleton.md.
 #
 # There is no `brews:` block yet — the tap repo and release signing are an open ownership
 # question (spec §"Open questions", 3). Until it is answered the funnel installs from the

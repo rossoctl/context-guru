@@ -41,7 +41,7 @@ var codeRef = regexp.MustCompile(`\.go(:\d+)?\b|:\d+\b`)
 // buildTagged are components that register only under a build tag, so a default `go test` does
 // not see them. Their rows are allowed without a registration; a run with the tag checks them the
 // same way as every other component.
-var buildTagged = map[string]string{"skeleton": "cg_skeleton"}
+var buildTagged = map[string]string{}
 
 func TestDataDependenceDocCoversEveryComponent(t *testing.T) {
 	loaded, err := datadep.Load(dataDepRoot, datadep.Components)

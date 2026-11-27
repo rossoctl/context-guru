@@ -49,20 +49,18 @@ func TestTriggerCounterfactual(t *testing.T) {
 	// Arm A is what production runs (codesmart minus the LLM call). Arm B lifts every
 	// size floor those components own — that IS "the trigger lifted" on the deterministic
 	// path, because no deployed component except extract_llm consults Trigger.Fires.
-	const armA = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+	const armA = `pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
 `
-	const armB = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+	const armB = `pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   format:
     min_tokens: 1
   toon:
     min_tokens: 1
   dedup:
-    min_tokens: 1
-  failed_run:
     min_tokens: 1
   cmdfilter:
     min_size: 1
@@ -220,13 +218,11 @@ func replayArm(t *testing.T, name, yaml string, recs []capRec) armResult {
 // Deliberately hermetic: a synthetic 1-message request with no tool_result surface, which
 // is the shape 53% of production's gated tokens actually have.
 func TestBelowTriggerIsNotTheTrigger(t *testing.T) {
-	cfg := pipe(t, `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+	cfg := pipe(t, `pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 1
   dedup:
-    min_tokens: 1
-  failed_run:
     min_tokens: 1
 `)
 	p, _ := cfg.Build(nil)
@@ -252,17 +248,17 @@ components:
 
 // deterministicPipeline is the deployed pipeline minus the LLM call: what production
 // actually runs on the traffic this file measures.
-const deterministicPipeline = `pipeline: [format, toon, dedup, failed_run, cmdfilter, extract, cachesplit]
+const deterministicPipeline = `pipeline: [format, toon, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400
 `
 
-// actingPipeline is a reducer that demonstrably rewrites this transcript (mask changes 34
+// actingPipeline is a reducer that demonstrably rewrites this transcript (extract changes some
 // positions on turn 2 below). The freeze assertions have to be made against a component
 // that ACTS, or they pass vacuously — the deployed deterministic pipeline finds nothing on
 // a synthetic transcript, which is the whole subject of this file.
-const actingPipeline = "pipeline: [mask]\ncomponents:\n  mask: {keep_recent: 3, min_tokens: 50}\n"
+const actingPipeline = "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 50}\n"
 
 // TestUpperFrozenModeStaysConservative is the guarantee for the upper mode of the frozen
 // distribution (p75 0.995, p90 0.9996). The invariant that actually protects the provider's

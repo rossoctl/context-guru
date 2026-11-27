@@ -9,6 +9,12 @@ no agent, no task, no reward. Total spend **~$3**.
 
 Reproduce: `deploy/harbor/replay2.py <capture> --configs ...`, with `CACHE_MODE` set per run.
 
+!!! note "Removed components"
+    `mask`, `failed_run`, `collapse`, `linecap`, `smartcrush`, `readlifecycle`, `coref`, `agentdiet` and
+    `skeleton` were removed in #474 (see [Compaction cleanup](https://github.com/rossoctl/context-guru/issues/471)).
+    The figures below are history. `replay2.py` no longer offers them as arms, and a current build
+    cannot reproduce them.
+
 ## 1. The tail gate costs more than the docs imply — **measured**
 
 `replay2.py` inherits `CACHE_MODE`, so the same configs can be replayed with cache-awareness on and
@@ -25,7 +31,7 @@ off. The delta *is* the tail gate. 200 requests of `capture-swebench`:
 Only `mask`, `failed_run` and `extract_llm` consult `TailOnly`. The others are pure functions of
 content, so replaying them each turn is byte-stable and needs no gate.
 
-This is the quantified form of the geometry in [`mask`](../components/offload-reducers.md#when-its-inert_4):
+This is the quantified form of the geometry in `mask`:
 `TailOnly(i)` permits only `i > MaxCachedIdx = prevLen − 1`, while `mask`'s candidates are by
 definition outputs that were present last turn. `failed_run` lands in the same place and reaches
 exactly zero. Both are in shipped presets — `failed_run` in `codesmart`, `agent`, `general`,
@@ -61,7 +67,7 @@ that way rather than by reputation.
 No configuration tried reproduces it on this corpus with current code. That is consistent with
 `config.go`'s own note that the published numbers "describe an ancestor" of the preset. Whatever
 produced it was a different workload with much larger outputs, or pre-gate code with a far lower
-floor. See also the [reattribution](../components/offload-reducers.md#mask) — the figure was long credited to `mask`,
+floor. See also the reattribution — the figure was long credited to `mask`,
 which was never in the arm that produced it.
 
 ## 3. A mispricing in the economic gate — **found, fixed**
@@ -117,6 +123,6 @@ Sobering even there: only 31 of 1,639 LOCA outputs clear the corrected `extract_
 `coref` has a better case on the same corpus — its floor is 300 tokens, giving it 580 candidate
 blocks (35%) — which is the one place the two components' economics genuinely diverge.
 
-See also: [`mask`](../components/offload-reducers.md#mask) · [`extract_llm`](../components/extract_llm.md) ·
+See also: `mask` (removed) · [`extract_llm`](../components/extract_llm.md) ·
 [density](coref-density.md) · [the eval-box measurement](coref-evalbox.md) ·
 [reachability](coref-reachability.md)

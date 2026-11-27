@@ -8,13 +8,10 @@ import (
 
 // markerModeComponents are the components whose `marker_mode` CapMarkerMode may lower. Held to
 // the registry by TestMarkerModeComponentsMatchTheRegistry, so a new offloader cannot be missed
-// silently. skeleton (-tags cg_skeleton) is deliberately absent: it has a marker_mode field but
-// accepts only full, so capping it would make Build fail.
+// silently.
 var markerModeComponents = map[string]bool{
-	"agentdiet": true, "cache_aware_summarizer": true, "cmdfilter": true, "collapse": true,
-	"coref": true, "dedup": true, "extract": true, "extract_llm": true,
-	"extract_llm_sweep": true, "failed_run": true, "linecap": true, "mask": true,
-	"readlifecycle": true, "smartcrush": true, "summarize": true,
+	"cache_aware_summarizer": true, "cmdfilter": true, "dedup": true, "extract": true,
+	"extract_llm": true, "extract_llm_sweep": true, "summarize": true,
 }
 
 // markerRank orders the modes. A value not listed here (a typo, "Full", "Summary") ranks as

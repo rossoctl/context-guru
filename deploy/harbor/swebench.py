@@ -111,7 +111,7 @@ CUSTOM_CONFIGS = {
         # deterministic extract then strips ANSI/noise on the smaller outputs the LLM left
         # untouched. (When extract ran first it marked outputs so extract_llm skipped them
         # via HasPlaceholder → the LLM never fired.)
-        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract_llm, extract, linecap, cachesplit]\n"
+        "pipeline: [format, textclean, searchfold, dedup, cmdfilter, extract_llm, extract, cachesplit]\n"
         "components:\n"
         "  extract:\n"
         "    min_tokens: 400\n"  # deterministic, zero-latency: catches obvious noise every step
@@ -125,8 +125,7 @@ CUSTOM_CONFIGS = {
         # cache-WRITE with zero prefix mutation. Fires only on MEDIUM/LARGE outputs
         # (>=1200 tok) so most turns make no model call at all (low latency + low CG cost).
         # File reads: skip_file_reads unset = AUTO (skipped on cached agents where they
-        # already bill cheap; skeletonized on non-caching backends). failed_run likewise
-        # auto-skips NEW collapses on cached agents (superseded runs already bill cheap).
+        # already bill cheap; skeletonized on non-caching backends).
         # Threshold raised to 1500: the LLM fires only on genuinely LARGE outputs (which
         # hold the bulk of the token mass), so most turns make no model call — cutting
         # latency and CG cost — while the free deterministic `extract` handles smaller
@@ -148,12 +147,9 @@ CUSTOM_CONFIGS = {
     # earns its place — the offline model says placement headroom against
     # claude-code's own breakpoints is ~0%, and this is the live check of that.
     "cacheonly": "pipeline: [cacheinject]\n",
-    # conservative deterministic-only (no LLM, no mask): safe control
+    # conservative deterministic-only (no LLM): safe control
     "codesafe": (
-        "pipeline: [format, textclean, searchfold, dedup, failed_run, cmdfilter, extract, collapse, linecap, cachesplit]\n"
-        "components:\n"
-        "  collapse:\n"
-        "    max_tokens: 3000\n"
+        "pipeline: [format, textclean, searchfold, dedup, cmdfilter, extract, cachesplit]\n"
     ),
 }
 

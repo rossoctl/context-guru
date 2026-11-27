@@ -18,7 +18,7 @@ import (
 
 // benchPipeline is the DETERMINISTIC hosted default: codesmart minus the LLM
 // component (extract_llm is off by default), which is what the latency work targets.
-const benchPipeline = `pipeline: [format, dedup, failed_run, cmdfilter, extract, cachesplit]
+const benchPipeline = `pipeline: [format, dedup, cmdfilter, extract, cachesplit]
 components:
   extract:
     min_tokens: 400

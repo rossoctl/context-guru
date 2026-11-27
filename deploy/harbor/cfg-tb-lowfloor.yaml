@@ -18,7 +18,7 @@
 # identical 87 outputs. 800 is therefore the same measurement at a strictly higher
 # floor: same 59.4% of the mass, no extra marginal candidates on a workload whose
 # distribution differs. The shipped 3000 sits above the maximum — inert, not underwater.
-pipeline: [format, toon, dedup, failed_run, cmdfilter, extract_llm, extract, cachesplit]
+pipeline: [format, toon, dedup, cmdfilter, extract_llm, extract, cachesplit]
 components:
   extract:
     min_tokens: 400

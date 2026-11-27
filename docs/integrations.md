@@ -134,7 +134,7 @@ How the gateway routes Bob's traffic:
     Use the lossless components — `format`, `toon`, `cachesplit` — which need no
     cheap-model config and leave the transcript intact. Verified end to end: with
     `[format, toon]` Bob authenticates and answers correctly through the proxy with its
-    model call reduced. Add a lossy component (`mask`, `dedup`, `cmdfilter`, `extract`)
+    model call reduced. Add a lossy component (`dedup`, `cmdfilter`, `extract`)
     only where permanently losing that content is acceptable.
 
 !!! note "Bob speaks its own backend protocol"

@@ -179,23 +179,6 @@ func TestHorizonCreditsTheRemoval(t *testing.T) {
 	}
 }
 
-func TestCorefCountsHorizonFallback(t *testing.T) {
-	req := bigReq(24, 400)
-	c := horizonCtx(0, 2_000_000, true)
-	var rep components.Report
-	cf := &Coref{}
-	cf.breakEvenTurns(req, []plannedCut{{idx: 2, saved: 800}}, c, billedGrowth{}, &rep)
-	if rep.Events[horizonFallbackEventPrefix+horizonWhyNoBilled] != 1 {
-		t.Fatalf("fallback not counted: %v", rep.Events)
-	}
-	rep = components.Report{}
-	c = horizonCtx(100_000, 2_000_000, true)
-	cf.breakEvenTurns(req, []plannedCut{{idx: 2, saved: 800}}, c, growthOf(100_000, 2000, 5), &rep)
-	if len(rep.Events) != 0 {
-		t.Fatalf("billed horizon counted as a fallback: %v", rep.Events)
-	}
-}
-
 // A side request between the main thread's turns does not reset the main thread's run, because the
 // horizon notes PrevBilledInputThread, not the session figure (which the side request overwrites).
 func TestSideRequestDoesNotResetMainThreadGrowth(t *testing.T) {

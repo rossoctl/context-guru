@@ -136,7 +136,6 @@ func TestEveryModelComponentLoadsAConfigWithARetiredKey(t *testing.T) {
 		"extract_llm":            newExtractLLM,
 		"summarize":              newSummarize,
 		"cache_aware_summarizer": newCacheAwareSummarizer,
-		"agentdiet":              newAgentDiet,
 	}
 	for name, ctor := range ctors {
 		t.Run(name, func(t *testing.T) {

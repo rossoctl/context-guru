@@ -298,8 +298,7 @@ On the four **fresh interactive Claude Code** captures — the true target workl
 All of the 4.23%/7.41% above is SWE-bench and Terminal-Bench traffic, which is Python-test-heavy.
 Interactive traffic is 85% `Read` file dumps, and **a file dump has no lossless reduction**: its
 content *is* the file, the only removable bytes are `Read`'s `NNN\t` gutter, and a line number is on
-the never-drop list. Shrinking a file dump needs signature extraction
-([`skeleton`](skeleton.md), tree-sitter), not a line filter. That is the finding, not a defect in the
+the never-drop list. Shrinking a file dump would need signature extraction, not a line filter. That is the finding, not a defect in the
 filters: `cmdfilter` is the wrong mechanism for 81% of the mass.
 
 Nothing here duplicates the lossless reformatters. `grep`/`find`/`ls` path-prefix output is folded by

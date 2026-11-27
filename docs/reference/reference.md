@@ -157,7 +157,7 @@ Present only when an extraction component has recorded something. See
 | Field | Meaning |
 |---|---|
 | `by_component` | The same fields again, keyed by the component that recorded them. The only per-component-safe figures here. Omitted when nothing recorded. |
-| `cost_source` | Where `extraction_cost_usd` came from, because `$0` and *no evidence* are the same number and the opposite claim. `component` = every call priced itself at the rates of the model it called (trust it). `host_total` = the host's process-global cheap-model spend, a **superset** that also carries `summarize` and `agentdiet` and prices everything through one card. `partial` = some calls priced themselves and some did not, so the total is a **floor**. `unpriced` = this row made calls and priced none, so nothing is known about what it spent. `none` = no calls, no spend; `0` is true. |
+| `cost_source` | Where `extraction_cost_usd` came from, because `$0` and *no evidence* are the same number and the opposite claim. `component` = every call priced itself at the rates of the model it called (trust it). `host_total` = the host's process-global cheap-model spend, a **superset** that also carries `summarize` and prices everything through one card. `partial` = some calls priced themselves and some did not, so the total is a **floor**. `unpriced` = this row made calls and priced none, so nothing is known about what it spent. `none` = no calls, no spend; `0` is true. |
 | `net_value_usd` | `null` when the spend behind it is not known (`cost_source: unpriced`). The aggregate is never null. |
 | `unpriced_components` | Which components' calls priced nothing, so `partial` and `host_total` say what the total is **short of** rather than only that it is incomplete. Aggregate only; omitted when every call priced itself. |
 
@@ -274,7 +274,7 @@ at 11.5× the read price — unless it is re-derived.
 | `frozen_hits` | Replay lookups that found a stored decision and re-sent the same bytes. |
 | `frozen_misses` | Replay lookups that found nothing. **Dominated by the ordinary "never frozen yet" case** — it is a lookup counter, not an error counter. Read it beside `frozen_dropped`, not instead of it. |
 | `frozen_dropped` | Stored decisions the store actually **lost** (TTL expiry or the pin cap). Counted per drop *event*. |
-| `frozen_repaired` | Dropped decisions re-derived, so a replay lands again. Only `mask` and `failed_run` qualify — `extract_llm` is deliberately excluded (its replacement is a *sampled* model output, so re-deriving could splice different bytes into the cached prefix). |
+| `frozen_repaired` | Dropped decisions re-derived, so a replay lands again. Only a deterministic offloader whose replacement is a pure function of its input qualifies — `extract_llm` is deliberately excluded (its replacement is a *sampled* model output, so re-deriving could splice different bytes into the cached prefix). |
 | `frozen_flips` | `frozen_dropped − frozen_repaired` — outstanding losses, i.e. drops that plausibly cost a suffix cache-write. **Should be 0.** |
 
 A healthy long-horizon run shows `frozen_hits` climbing with turn count and `frozen_dropped` at
@@ -741,10 +741,10 @@ split shrinks that hangover to `stash_ttl_seconds` without making any removal ir
 
 | Offloader | Per-turn re-stash | If its payload is reclaimed |
 |---|---|---|
-| `mask`, `cmdfilter`, `collapse`, `failed_run`, `skeleton`, `readlifecycle`, `agentdiet` | `reapplyFrozen` → `commitRefresh`, every turn regardless of the tail gate | re-created on the request path; `stash_revived` |
+| `cmdfilter` | `reapplyFrozen` → `commitRefresh`, every turn regardless of the tail gate | re-created on the request path; `stash_revived` |
 | `summarize` | **every turn once a checkpoint exists**, regardless of its trigger or whether a model is available — `replayStale`/`tryReuse` → `commitRefresh` | re-created on the request path; `stash_missing` if the payload has already gone, and the replay proceeds anyway because the summary text must stay byte-identical |
 | `extract_llm` | only past its own gate — `no_goal_keywords` | a skipped turn refreshes nothing, but it splices nothing either, so no marker of its own dangles while the skip lasts |
-| `dedup`, `extract`, `linecap`, `smartcrush` | **none** — no replay path at all; they redo the transformation from the re-sent original through the *refusable* `commitMark` | once reclaimed it is a new stash, so a saturated reserve **refuses** and the message goes upstream verbatim after earlier turns sent it compacted: `stash_refused` **plus a representation flip** |
+| `dedup`, `extract` | **none** — no replay path at all; they redo the transformation from the re-sent original through the *refusable* `commitMark` | once reclaimed it is a new stash, so a saturated reserve **refuses** and the message goes upstream verbatim after earlier turns sent it compacted: `stash_refused` **plus a representation flip** |
 
 That last row is worth reading twice, because `stash_refused`'s own description promises "nothing
 became irreversible" — true about reversibility, and silent about the cache-write actually paid. It
@@ -857,10 +857,8 @@ Always explicit — nothing infers it from the rest of the configuration.
 
 ```yaml
 preset: conservative
-pipeline: [format, dedup, failed_run, cmdfilter, cachesplit]   # order + enable
+pipeline: [format, dedup, cmdfilter, cachesplit]   # order + enable
 components:
-  collapse:   { max_tokens: 2000, head_lines: 20, tail_lines: 20 }
-  smartcrush: { min_items: 5, keep_first: 3, keep_last: 2 }
   cmdfilter:  { min_size: 400 }   # the default; measured, see components/cmdfilter.md
 store: { ttl_seconds: 10000, max_entries: 5000 }
 mode: sync                          # sync | observe

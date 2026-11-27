@@ -21,7 +21,7 @@
 //     is measurably slow.
 //
 // The driver is modernc.org/sqlite (pure Go), so a dashboard build needs no C
-// toolchain beyond the one tree-sitter already forces.
+// toolchain.
 package dash
 
 import (

@@ -84,7 +84,7 @@ Everything below was derived from the scripts in `deploy/service/`, which are th
 
 | For | You need |
 |---|---|
-| Building the binary | Go 1.26 — no C toolchain: the binary is pure Go and statically linked (`make build-static`, which CI proves needs no C compiler). Or an already-installed `/usr/local/bin/context-guru-proxy`, which `install` keeps if there is no fresh build. A C toolchain is needed only for the optional `cg_skeleton` tag |
+| Building the binary | Go 1.26 — no C toolchain: the binary is pure Go and statically linked (`make build-static`, which CI proves needs no C compiler). Or an already-installed `/usr/local/bin/context-guru-proxy`, which `install` keeps if there is no fresh build. |
 | Installing | root, and systemd. The scripts are written for **RHEL 9** (`dnf`, and nginx 1.20's config dialect) |
 | The TLS front end | `nginx`, plus a certificate and key at `/etc/context-guru/tls/{fullchain,privkey}.pem` |
 | Each upstream | a host to send it to. A key only if you want the server to hold one — the default forwards each caller’s own |
@@ -673,10 +673,7 @@ ahead of `toon`. `toolfilter` ships with an empty removal list, so it is a no-op
 account names a tool, MCP server or skill to stop sending — it is in the default so that
 naming one is a settings change rather than a pipeline change. `toon` stays in this order at
 the operator's request even though it acted 0 times on 5,752 measured requests; it is
-lossless, so what it costs is latency, never content. `linecap` is **not** here. Its 20.3% is
-gross reach, not incremental value: measured on the same corpus, adding it to this pipeline is
-worth +0.797 pp (+152,615 tokens), because the offloaders ahead of it have already taken most
-of what it would have caught.
+lossless, so what it costs is latency, never content.
 
 `textclean` was added on 2026-08-20 and is the reason to re-read this section if you last
 saw it earlier. It strips ANSI escapes and carriage-return redraws from tool output, which
@@ -697,10 +694,8 @@ automatic for everyone. To take it: either add `textclean` to your own pipeline 
 future improvement to it.
 
 `failed_run` used to be in that list and is not any more. It acted **zero** times on every
-workload measured here — 251 requests on one account (843 ms spent scanning), and 28.8 s on
-the Terminal-Bench arm — so it was latency with a name. It is still a registered component
-and can be added back on the settings page by anyone whose traffic actually re-sends
-superseded failures.
+workload measured here, and the component has since been removed; a stored config that names it
+loads with a warning and runs without it.
 
 Fully deterministic, which is the property that matters on a shared box: no
 cheap-model calls, so it adds no upstream spend, contends for no shared LLM budget,

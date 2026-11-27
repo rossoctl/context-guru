@@ -112,7 +112,7 @@ func TestLosslessGuardProtectsUnmodeledFields(t *testing.T) {
 // TestMixedContentNotFlattened proves an offload skips a tool message that
 // carries a non-text block (an image), so the image is never silently dropped.
 func TestMixedContentNotFlattened(t *testing.T) {
-	cfg := pipe(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 5, head_lines: 1, tail_lines: 1}\n")
+	cfg := pipe(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 5}\n")
 	p, _ := cfg.Build(nil)
 	st := store.NewMemory(store.Options{})
 
@@ -190,7 +190,7 @@ func TestAnthropicToolResultOffloaded(t *testing.T) {
 // output silently uncompactable. Non-text blocks (images) are never touched, so no data
 // is dropped.
 func TestAnthropicStructuredToolResultKeepsNonTextBlocks(t *testing.T) {
-	cfg := pipe(t, "pipeline: [collapse]\ncomponents:\n  collapse: {max_tokens: 5, head_lines: 1, tail_lines: 1}\n")
+	cfg := pipe(t, "pipeline: [extract]\ncomponents:\n  extract: {min_tokens: 5}\n")
 	p, _ := cfg.Build(nil)
 	st := store.NewMemory(store.Options{})
 

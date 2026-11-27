@@ -64,23 +64,6 @@ after (2nd copy):  [identical to an earlier tool output] <<cg:0abfad591bbe1c9a>>
     ``[repeat of earlier `git diff`; expand <<cg:0abf…>>]``. The capture above is left as it
     was recorded.
 
-### `failed_run` — superseded run → pointer, latest kept in full
-Captured with `CACHE_MODE=off` (on a cached agent `failed_run` auto-disables *new* collapses — a
-superseded run is already cached, so collapsing it would force a cache-write for little gain):
-```text
-after (run 1):  [superseded by a later failed→re-run] <<cg:f5ea169d42c07f05>>
-after (run 2):  === test session starts === … 21 passed          ← kept verbatim
-```
-
-### `cmdfilter` — pytest builtin filter strips passing noise
-```text
-before:  ==== test session starts ==== … 30× "PASSED" … test_z FAILED … 1 failed, 30 passed
-after:   ============ test session starts ============
-         tests/test_bad.py::test_z FAILED
-         === 1 failed, 30 passed in 2.3s ===
-         <<cg:5a1fe10e52a388f6>>
-```
-
 ### `extract` — deterministic noise collapse
 ```text
 before:  resolved 200 packages / warning: peer dependency unmet ×15 / blank runs / build complete
@@ -103,46 +86,6 @@ after:   2024 GET /users/58 200 12ms
          <<cg:923fff04ab267215>> [full output: call context_guru_expand]
 ```
 
-### `mask` — age-based GC (keep newest N, stash older with a head-peek)
-With `keep_recent: 1`, the two older tool outputs are masked, the newest kept verbatim:
-```text
-after (old #1): [older tool output masked; starts: 700 701 def __rmul__(self, m): 702 return …]
-                <<cg:34d71f938f17c88d>> [full output: call context_guru_expand]
-after (old #2): [older tool output masked; starts: FILE B row 0 row 1 row 2 row 3 …]
-                <<cg:98b8420fc3f623a1>> [full output: call context_guru_expand]
-after (newest): FILE C latest / cur 0 / cur 1 / …                ← kept verbatim
-```
-
-### `collapse` — head/tail window on an oversized output
-200-line log with `head_lines: 3, tail_lines: 3`:
-```text
-after:   log line 0: doing work step 0
-         log line 1: doing work step 1
-         log line 2: doing work step 2
-         ... (194 lines omitted) <<cg:c6a32e9e9c9fcf1f>> [full output: call context_guru_expand]
-         log line 197: doing work step 197
-         log line 198: doing work step 198
-         log line 199: doing work step 199
-```
-
-### `skeleton` — code bodies → signatures (needs the `cg_skeleton` build)
-```text
-before:  ```go                                after:  ```go
-         func F0(a, b int) int {                       func F0(a, b int) int { … }
-             x := a + b                                 func F1(a, b int) int { … }
-             y := x * 2                                 … F2–F5 …
-             return y - a                               ```
-         }  … F1–F5 …                                  <<cg:f6617716293ead3f>> [full source: …]
-         ```
-```
-
-### `smartcrush` — keep anchor items of a JSON array
-12-item array, `keep_first: 2, keep_last: 1`:
-```text
-after:   [{"id":0,…},{"id":1,…},{"id":11,…}] [3 of 12 items shown] <<cg:70cf850ef4972a84>>
-         [full array: call context_guru_expand]
-```
-
 ## Savings, verified
 
 Driving a realistic agent transcript (repeated large tool outputs, several old file reads) through
@@ -152,20 +95,19 @@ the `general` preset against a real gateway, `GET /stats` reported:
 { "requests": 2, "tokens_before": 24021, "tokens_after": 259, "savings_pct": 98.9,
   "components": {
     "dedup":       { "acted": 1, "saved_tokens": 11958 },
-    "mask":        { "acted": 1, "saved_tokens": 9540 },
     "extract_llm": { "acted": 1, "saved_tokens": 2264 } },
   "llm_calls": 1, "llm_input_tokens": 5463, "llm_output_tokens": 451 }
 ```
 
-`dedup` + `mask` are deterministic; `extract_llm` made one real cheap-model call. Components that
-found nothing to do (`format`, `toon`, `cmdfilter`, `collapse`, `extract`, `failed_run`) sit in
+`dedup` is deterministic; `extract_llm` made one real cheap-model call. Components that
+found nothing to do (`format`, `toon`, `cmdfilter`, `extract`) sit in
 `top_passthrough` at zero cost — the pipeline is never worse. `cachesplit` is there too, but
 permanently and by design: its `Reformat` always skips because the split it enables is a body-level
 rewrite in `apply`.
 
 ## Reversibility, verified
 
-Every marker is recoverable. Taking the `collapse` marker above and calling the HTTP recovery route:
+Every marker is recoverable. Taking any marker above and calling the HTTP recovery route:
 
 ```sh
 curl -s 'localhost:4000/expand?id=c6a32e9e9c9fcf1f'

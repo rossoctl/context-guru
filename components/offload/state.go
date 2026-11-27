@@ -57,8 +57,8 @@ type cachedResult struct {
 
 // getResult returns a previously cached reduced output for content id, if any. This is
 // extract_llm's replay lookup, so it feeds the same hit/miss counters as reapplyFrozen —
-// otherwise the shipped coding config (no mask, failed_run self-skipping) would report
-// zero freeze activity while doing all of its replay through here.
+// otherwise a config with extract_llm and no cmdfilter would report zero freeze activity
+// while doing all of its replay through here.
 func getResult(c *components.Ctx, id string) (cachedResult, bool) {
 	b, ok := c.Store.Get(resultKey(c.Session, id))
 	if !ok {
@@ -285,10 +285,9 @@ func reapplyFrozen(c *components.Ctx, rep *components.Report, comp string, m *bs
 // skipReduce guards still apply, so this only ever LIFTS the depth restriction.
 //
 // ONLY safe for offloaders whose replacement is a pure function of (content, config):
-// mask and failed_run build `prefix + headPeek(content) + Marker(sha256(content))`, which
-// is position-independent — their windows (keep_recent, runs[:len-1]) gate WHETHER the
-// component considers a message, never WHAT bytes it emits, and config cannot drift
-// mid-session (no hot reload; a restart wipes the store with it).
+// cmdfilter builds its replacement from the message alone, which is position-independent:
+// its filter rules gate WHETHER the component considers a message, never WHAT bytes it emits,
+// and config cannot drift mid-session (no hot reload; a restart wipes the store with it).
 //
 // It is deliberately NOT offered to extract_llm. That replacement is a SAMPLED model
 // output (cheapmodel sends no temperature/seed), so re-deriving may emit different bytes

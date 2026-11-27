@@ -30,7 +30,7 @@ jobs:
 
       # The claim the release rests on, asserted in CI rather than trusted: the shipped
       # binary needs no C toolchain. CGO_ENABLED=0 with no compiler on PATH would fail loudly
-      # here if a cgo dependency ever escaped the cg_skeleton build tag — which is exactly the
+      # here if a cgo dependency ever appeared — which is exactly the
       # regression that would otherwise be discovered by an evaluator, at install time.
       - name: Assert the binary is pure Go
         env:

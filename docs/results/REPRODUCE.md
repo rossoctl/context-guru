@@ -12,7 +12,7 @@ cache-aware token/cost metrics.
 ## 1. Prerequisites (one-time)
 
 - **OS**: Linux (RHEL/Fedora family here), passwordless `sudo`.
-- **Go 1.26** + `CGO_ENABLED=1` (context-guru's `cg_skeleton` build tag needs cgo/tree-sitter).
+- **Go 1.26**. The build is pure Go: no C toolchain.
 - **Python 3.13** + [`uv`](https://docs.astral.sh/uv/) (Harbor needs ≥3.12).
 - **Docker** (each task builds a container). Use it via `sg docker -c '...'` — do **not**
   loosen the socket permissions.
@@ -57,8 +57,8 @@ runs. (Optionally `gh auth login` for `ghcr.io`, but the SWE images are not mirr
 
 ```
 cd "$CG"
-CGO_ENABLED=1 go build -tags cg_skeleton -o /tmp/cg-runs/cg-proxy-d1 ./cmd/context-guru-proxy
-CGO_ENABLED=1 go test -tags cg_skeleton ./...      # all green
+CGO_ENABLED=0 go build -o /tmp/cg-runs/cg-proxy-d1 ./cmd/context-guru-proxy
+go test ./...      # all green
 ```
 
 ## 3. Run baseline + context-guru (one command)
