@@ -46,7 +46,7 @@ Rows are leaks of business logic out of the host packages. All issues are closed
 
 ## 2026-11-26 run (tracking #1503)
 
-Each row is a cluster of findings. The Result column gives the issues and the PR. All PRs are merged, except where the row says open.
+Each row is a cluster of findings. The Result column gives the issues and the PR. All PRs are merged.
 
 | # | Concern | Result |
 |---|---|---|
@@ -58,8 +58,8 @@ Each row is a cluster of findings. The Result column gives the issues and the PR
 | G-F | Two named rules: the whole entry `BilledOneHour`, and the head `HeadLifetimeOneHour` (A2) | #1476, PR #1521 (merged) |
 | G-G | B6, B7, B8, B9, B10, B14, B16 | #1492, #1493, #1494, #1495, #1496, #1500, #1502, PR #1535 (merged) |
 | - | The dash accountant path did not fail open | #1504, fixed by another session |
-| - | Head TTL: accrec lowers the 1h head on a mixed write, and the keeper prices a mixed miss as a full rewrite | #1525, #1526, PR #1530 (open) |
-| - | The live request ratio replaces the `BilledDeltaFactor` table | #1533, accountant PR #129 (merged), PR #1536 (open) |
+| - | Head TTL: accrec lowers the 1h head on a mixed write, and the keeper prices a mixed miss as a full rewrite | #1525, #1526, PR #1530 (merged) |
+| - | The live request ratio replaces the `BilledDeltaFactor` table | #1533, accountant PR #129 (merged), PR #1536 (merged). #1533 stays open for the comparison only. |
 
 ## How to add a run
 
