@@ -3,6 +3,7 @@ package dash
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -571,15 +572,18 @@ func TestAMalformedRateIsDroppedWholeAndAModelNameMayContainSlashes(t *testing.T
 // kvcache cannot call back into this package. A shared table is the alternative to a shared
 // function, and this is that table.
 func TestPingScheduleMatchesTheKeepAliveTab(t *testing.T) {
-	for _, gap := range []float64{0, 1, 279, 280, 281, 559, 560, 600, 1800, 3600, 14400, 86400} {
-		for _, idle := range []float64{60, 280, 300, 3360} {
+	// The rule as the tab wrote it before it called kvcache: float seconds, floor division.
+	ref := func(gap, idle float64, k int) int {
+		if gap <= idle || idle <= 0 || k <= 0 {
+			return 0
+		}
+		return min(int(math.Floor((gap-idle)/idle))+1, k)
+	}
+	for _, gap := range []float64{0, 0.3, 1, 279, 279.9, 280, 280.5, 281, 559, 560, 600, 1800, 3600, 14400, 86400} {
+		for _, idle := range []float64{0, 60, 240, 280, 299.9, 300, 3360, 3540} {
 			for k := 0; k <= 4; k++ {
-				want := PingsPerSpan(gap, idle, k)
-				got := kvcache.PingsPerSpan(time.Duration(gap)*time.Second,
-					time.Duration(idle)*time.Second, k)
-				if got != want {
-					t.Fatalf("gap=%.0f idle=%.0f k=%d: kvcache says %d, the keep-alive tab says %d",
-						gap, idle, k, got, want)
+				if got, want := PingsPerSpan(gap, idle, k), ref(gap, idle, k); got != want {
+					t.Fatalf("gap=%v idle=%v k=%d: PingsPerSpan says %d, the old rule says %d", gap, idle, k, got, want)
 				}
 			}
 		}

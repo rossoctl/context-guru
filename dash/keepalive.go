@@ -1404,19 +1404,18 @@ func CoverageSecondsFor(idleSeconds float64, maxPings int, ttl time.Duration) fl
 	return float64(maxPings)*idleSeconds + ttl.Seconds()
 }
 
-// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K).
+// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K). It is
+// kvcache.PingsPerSpan, the one schedule rule, with seconds as the unit.
 //
 // The first ping fires at X, each subsequent one X after the last, and K caps the count. A gap
 // no wider than X attracts none.
 func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
-	if gap <= idleSeconds || idleSeconds <= 0 || maxPings <= 0 {
-		return 0
-	}
-	n := int(math.Floor((gap-idleSeconds)/idleSeconds)) + 1
-	if n > maxPings {
-		n = maxPings
-	}
-	return n
+	return kvcache.PingsPerSpan(secondsToDuration(gap), secondsToDuration(idleSeconds), maxPings)
+}
+
+// secondsToDuration rounds to the nearest nanosecond, so a whole number of seconds stays exact.
+func secondsToDuration(s float64) time.Duration {
+	return time.Duration(math.Round(s * float64(time.Second)))
 }
 
 // kaGateMinPrefix and kaGateToolWaitMinPrefix are the billed-prefix floors a replay gates on: the
