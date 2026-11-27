@@ -18,6 +18,7 @@ import (
 	"github.com/rossoctl/context-guru/internal/coref"
 	"github.com/rossoctl/context-guru/internal/extract"
 	"github.com/rossoctl/context-guru/internal/logging"
+	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/metrics"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/thread"
@@ -846,7 +847,7 @@ func (e *ExtractSweep) adjudicateWith(req *bschemas.BifrostChatRequest, c *compo
 		legPricing := pricing
 		if !card.Zero() {
 			// Above a price-tier line the whole call bills at the tier's rates (#1329).
-			legPricing = ratesPricing(card.At(int64(u.Fresh) + int64(u.CacheWrite) + int64(u.CacheRead)))
+			legPricing = ratesPricing(card.At(modelinfo.PromptTokens(int64(u.Fresh), int64(u.CacheRead), int64(u.CacheWrite))))
 		}
 		cost := legPricing.Cost(int64(u.Fresh), int64(u.Output),
 			int64(u.CacheWrite), int64(u.CacheRead))
