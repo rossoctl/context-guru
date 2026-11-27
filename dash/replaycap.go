@@ -350,7 +350,7 @@ func walkCapConversation(conv []capRow, window windowFn, point pointFn, compacti
 	} else {
 		out.CeilingFrac[model] = ceil
 	}
-	f, _ := tokens.BilledDeltaFactor(model)
+	f, _ := tokens.LegacyFactor(model)
 
 	// The epoch. limited is false until the first close: the first epoch counts its replay in full.
 	// after a counterfactual close the baseline is a summary, so cf grows from S by what the transcript
@@ -538,7 +538,7 @@ func (d *DB) ReplayLedgerForCtx(ctx context.Context, f Filter, windows modelinfo
 				continue
 			}
 			ev := Event{Model: r.Model, CacheMissReason: r.reason, FreshInput: r.fresh, CacheRead: r.read, CacheWrite: r.write}
-			ev.BilledTokenFactor, _ = tokens.BilledDeltaFactor(r.Model)
+			ev.BilledTokenFactor, _ = tokens.LegacyFactor(r.Model)
 			var pr modelinfo.Price
 			priced := false
 			if price != nil {

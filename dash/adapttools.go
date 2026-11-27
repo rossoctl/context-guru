@@ -261,6 +261,8 @@ type adaptToolsReq struct {
 	// removed is the tokens the filter removed (opt.onlyFiltered only). The saving prices at the size the
 	// request would have had without the filter: sent plus removed.
 	removed int64
+	// live is the removed bytes and the request ratio of the row (#1533), when it has them.
+	live declCounts
 }
 
 // adaptToolsSet is one declaration set: its tool count, when it was first seen, and the billed
@@ -348,7 +350,7 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	out := &carriedScan{Items: map[string]*carried{}, keepRequests: opt.perRequest}
 	reqs := map[string][]adaptToolsReq{} // tenant\x00session -> requests, oldest first
 	rows, err := d.sql.QueryContext(d.readCtx(), `SELECT r.tenant_id, r.session_id, r.ts, r.model,
-		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input, `+inBaselineCol+`, r.filtered_decl_tokens
+		r.token_accounting, r.decl_digest, r.tools, r.cache_read, r.cache_write, r.cache_write_1h, r.fresh_input, `+inBaselineCol+`, r.filtered_decl_tokens, `+declRatioCols+`
 		FROM requests r WHERE `+where+` AND r.tools > 0 ORDER BY r.ts`, args...)
 	if err != nil {
 		return nil, err
@@ -356,12 +358,15 @@ func (d *DB) carriedCost(f Filter, price func(string) (modelinfo.Price, bool),
 	for rows.Next() {
 		var t, s string
 		var q adaptToolsReq
-		if err := rows.Scan(&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh, &q.inBaseline, &q.removed); err != nil {
+		var live declRatio
+		if err := rows.Scan(append([]any{&t, &s, &q.ts, &q.model, &q.accounting, &q.digest, &q.tools, &q.cacheRead, &q.cacheWrite, &q.cacheWrite1h, &q.fresh, &q.inBaseline, &q.removed}, live.dest()...)...); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		if !opt.onlyFiltered {
 			q.removed = 0
+		} else {
+			q.live = live.counts()
 		}
 		reqs[t+"\x00"+s] = append(reqs[t+"\x00"+s], q)
 		out.Coverage.Requests++
@@ -498,10 +503,14 @@ func priceCarriedSession(out *carriedScan, byID []*carried, keys []string, list 
 		}
 		var rate float64
 		if ok {
-			rate = accountant.RemovalSaving(accountant.RemovalInput{
+			in := accountant.RemovalInput{
 				Model: r.model, Tier: head, Prompt: modelinfo.PromptTokens(r.fresh, r.cacheRead, r.cacheWrite),
-				Removed: int(r.removed), // no tokenizer factor: it is deferred
-			}, modelinfo.Rates{Lookup: price}).PerTokenUSD
+				Removed: int(r.removed), // the host's count, factor 1: the answer of a row with no live ratio
+			}
+			// The items below weigh host tokens. A row with its own ratio and removed bytes prices each of them at
+			// the provider's tokens per host token of this removal (#1533).
+			perHost := r.live.counts.ApplyTo(&in, r.removed, r.live.bytes)
+			rate = accountant.RemovalSaving(in, modelinfo.Rates{Lookup: price}).PerTokenUSD * perHost
 		}
 		if ok {
 			out.pricedRequests++

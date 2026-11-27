@@ -16,6 +16,6 @@ func BenchmarkAccumulateDeclFilterRow(b *testing.B) {
 	sessions := map[string]bool{}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		accumulateDeclFilterRow(&out, sessions, "s", "opus", 1000, 9_000, 90_000, 0, 0, 1000, false, price)
+		accumulateDeclFilterRow(&out, sessions, "s", "opus", 1000, 9_000, 90_000, 0, 0, 1000, false, declCounts{}, price)
 	}
 }

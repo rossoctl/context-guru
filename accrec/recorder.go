@@ -40,6 +40,9 @@ type Recorder struct {
 	Thinking *thinkcount.Table
 	// Clients holds the hash of each open request's client body, by request, from Begin to End.
 	Clients sync.Map // *accountant.Request -> clientHash
+	// Forwarded holds the forwarded body of each ended request, by request, from End to Price or Drop (#1533): the
+	// request ratio is built from it, before Compute, for a cost the host reports as an operation.
+	Forwarded sync.Map // *accountant.Request -> accountant.Body
 	// OnEnd, when set, is called with each record after EndRequest. Tests only.
 	OnEnd func(*accountant.Request, EndRecord)
 
@@ -96,6 +99,7 @@ type EndRecord struct {
 func (s *Recorder) Drop(req *accountant.Request) {
 	if s != nil && req != nil {
 		s.Clients.Delete(req)
+		s.Forwarded.Delete(req)
 	}
 }
 
@@ -132,6 +136,7 @@ func (s *Recorder) End(req *accountant.Request, th accountant.Thread, forwarded 
 	}
 	facts.SharedWarm = s.Siblings.SharedWarm(meta.Session, th.ID, meta.At, facts.TTL, fwd, bps)
 	req.EndRequest(th, fwd, bps, facts)
+	s.Forwarded.Store(req, fwd)
 	rec := EndRecord{Client: client, Forwarded: fwd, Breakpoints: bps}
 	if s.OnEnd != nil {
 		s.OnEnd(req, rec)
@@ -202,6 +207,7 @@ type PriceOut struct {
 // the library (ComputePanicked). It also counts a request that followed pings and found no ping facts, and
 // spends the ping facts it read: they belong to the next priced request only.
 func (s *Recorder) Price(req *accountant.Request, in PriceIn) PriceOut {
+	defer s.Forwarded.Delete(req) // the body served BeforeCompute (RatioFor); nothing reads it after the request is priced
 	out := PriceOut{NoResult: in.NoResult}
 	compute, why := ShouldCompute(in.Status, in.Rounds, in.NoResult)
 	if !compute {
@@ -297,4 +303,28 @@ func (s *Recorder) LowerTTL(req *accountant.Request, session, thread string, f a
 		req.LowerTTL(BaseTTL)
 	}
 	return f
+}
+
+// RatioFor is the request ratio of an ended request, before Compute: the provider's billed tokens of the forwarded
+// text (accountant.NewRatio), the same ratio Compute builds. A host uses it to convert the bytes of a cost it
+// reports as an operation, so the operation and the figure share one ratio (#1533). nil when the request has no
+// forwarded body here, the usage bills nothing, or the ratio is out of range (accountant check 9): the host keeps its fallback. Nil-safe.
+func (s *Recorder) RatioFor(req *accountant.Request, u Usage) *accountant.Ratio {
+	if s == nil || req == nil {
+		return nil
+	}
+	v, ok := s.Forwarded.Load(req)
+	if !ok {
+		return nil
+	}
+	a := u.Accountant()
+	billed := a.Input + a.CacheRead + a.CacheWrite
+	if billed <= 0 {
+		return nil
+	}
+	r := accountant.NewRatio(billed, v.(accountant.Body))
+	if !r.InRange() {
+		return nil // Compute would refuse this ratio (check 9) and set no Result.Ratio: a host keeps its fallback
+	}
+	return &r
 }

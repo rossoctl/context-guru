@@ -273,6 +273,11 @@ const (
 	// other reader uses. Pinned like BilledPrefix, so memory pressure does not erase it between
 	// turns. A lost key is safe: the growth run restarts and the horizon falls back to the estimate.
 	BilledThreadPrefix = "cg:bint:"
+	// RatioThreadPrefix is the request ratio of the previous turn of one thread (thread.Key(session, thread)):
+	// the provider's billed tokens of the forwarded text and its bytes, as "tokens:bytes" (#1533). Two integers, no
+	// text. The warm gate reads it to turn removed bytes into the provider's tokens before the request is sent
+	// (Ctx.PrevRatioTokens). Pinned like BilledThreadPrefix. A lost key is safe: the gate keeps the table answer.
+	RatioThreadPrefix = "cg:ratio:"
 	// UsagePrefix is model usage a DETACHED summarizer call incurred, waiting to be attributed to
 	// this session's next turn.
 	//
@@ -312,7 +317,7 @@ const (
 // Callers that build their own Store may pass a different set; the zero value means "none",
 // so a host that opts out simply gets plain TTL+LRU.
 var DefaultPinPrefixes = []string{FrozenPrefix, ResultPrefix, LenPrefix, XResultPrefix, TTLPrefix, SeenPrefix, SumPrefix,
-	BilledPrefix, BilledThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix,
+	BilledPrefix, BilledThreadPrefix, RatioThreadPrefix, UsagePrefix, RestorePrefix, SweepHeldPrefix, SweepDropPrefix, SweepExpandPrefix,
 	ToolDeferPrefix, ToolSearchOffPrefix}
 
 // pinned reports whether key belongs to one of the configured pin namespaces.

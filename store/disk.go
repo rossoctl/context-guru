@@ -94,7 +94,7 @@ type DiskOptions struct {
 // metadataPrefixes hold counts, hashes, ids, flags and verdicts: no transcript text and no model
 // output text.
 var metadataPrefixes = []string{
-	BilledPrefix, BilledThreadPrefix, LenPrefix, TTLPrefix, SeenPrefix,
+	BilledPrefix, BilledThreadPrefix, RatioThreadPrefix, LenPrefix, TTLPrefix, SeenPrefix,
 	SweepDropPrefix, SweepKeepPrefix, SweepExpandPrefix, RestorePrefix, UsagePrefix, ToolDeferPrefix,
 	ToolSearchOffPrefix, KeptPrefix,
 }

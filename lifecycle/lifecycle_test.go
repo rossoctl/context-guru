@@ -431,3 +431,19 @@ func TestFinishRunsLaterStepsAfterAPanic(t *testing.T) {
 		})
 	}
 }
+
+// The thread's request ratio is kept for its next turn (#1533), only on a response with usage, and only when
+// the host has one.
+func TestFinishKeepsTheRequestRatioForTheNextTurn(t *testing.T) {
+	st := newStore()
+	key := store.RatioThreadPrefix + thread.Key("s", "t1")
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 100, RatioTokens: 3000, RatioBytes: 6000})
+	if got := billedOf(st, key); got != "3000:6000" {
+		t.Fatalf("ratio = %q, want 3000:6000", got)
+	}
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: true, Billed: 100}) // a host with no ratio
+	Finish(Fin{Store: st, Session: "s", ThreadID: "t1", UsageOK: false, Billed: 100, RatioTokens: 1, RatioBytes: 2})
+	if got := billedOf(st, key); got != "3000:6000" {
+		t.Fatalf("ratio = %q, want the last known one to stay", got)
+	}
+}

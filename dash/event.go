@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/rossoctl/accountant"
+	"github.com/rossoctl/context-guru/accrec"
 	"github.com/rossoctl/context-guru/apply"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/internal/tokens"
@@ -260,7 +261,7 @@ type Event struct {
 	BypassBytes int `json:"-"`
 	// BilledTokenFactor is the tokenizer correction applied to this row's COUNTERFACTUAL
 	// dollars — baseline_cost_usd's delta and every request_components.saved_usd. It is
-	// tokens.BilledDeltaFactor(Model), resolved once in Price.
+	// tokens.LegacyFactor(Model), resolved once in Price.
 	//
 	// It is published rather than folded in silently: this factor is the whole difference
 	// between what the dashboard reported before #240 and after it, and a reader who sees a
@@ -404,6 +405,15 @@ type Event struct {
 	// query that reads them together rather than frozen into a second column that could
 	// disagree with them. See DB.DeclFilterSavings.
 	FilteredDeclTokens int `json:"filtered_decl_tokens"`
+	// FilteredDeclBytes is the bytes the declaration filter removed (#1533): the same removal as
+	// FilteredDeclTokens, in the unit the accountant's request ratio converts. A count. 0 is unknown.
+	FilteredDeclBytes int `json:"filtered_decl_bytes,omitempty"`
+	// SweepExpandBytes is the bytes the sweep's expands restored: SweepExpandTokens, in bytes (#1533). 0 is unknown.
+	SweepExpandBytes int `json:"sweep_expand_bytes,omitempty"`
+	// Ratio is the request's own ratio, as the accountant built it (Result.Ratio): the provider's billed tokens
+	// over the bytes of the forwarded text, and whether the media price was cut to the bill. Three counts, no text
+	// (#1533). Known is false when the request has no Result. Not serialized: the store writes it.
+	Ratio accrec.RatioCounts `json:"-"`
 	// DeclDigest is the declaration set this request carried (tool_declarations.digest).
 	DeclDigest string `json:"decl_digest,omitempty"`
 
@@ -828,6 +838,7 @@ func (e *Event) FromTrace(tr apply.Trace, uniqueSaved map[string]int) {
 	e.SplitStableTokens, e.SplitTailHash = tr.SplitStableTokens, tr.SplitTailHash
 	e.CacheTTL = tr.CacheTTL
 	e.FilteredDeclTokens = tr.FilteredDeclTokens
+	e.FilteredDeclBytes = tr.FilteredDeclBytes
 	e.RestoredTokens = tr.RestoredTokens
 	if tr.Bypassed {
 		e.Mode = ModeBypass
@@ -1012,7 +1023,7 @@ func (e *Event) priceCost(p modelinfo.Price, accountingComplete bool) bool {
 	p = p.At(modelinfo.PromptTokens(e.FreshInput, e.CacheRead, e.CacheWrite))
 	// Resolve the tokenizer correction ONCE per request. It is kept for the read-time passes that
 	// price a stored row's tokens (ComponentSavedUSD); CostUSD below is untouched by it.
-	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.BilledDeltaFactor(e.Model)
+	e.BilledTokenFactor, e.BilledTokenFactorMeasured = tokens.LegacyFactor(e.Model)
 	// See Price.CostWithCacheWrite1h for the one-hour write premium this folds in.
 	e.CostUSD = p.CostWithCacheWrite1h(e.FreshInput, e.CacheRead, e.CacheWrite, e.OutputTokens, e.CacheWrite1h)
 	if e.FallbackRateCostUSD = p.FallbackCost(e.CacheRead); e.FallbackRateCostUSD > e.CostUSD {

@@ -21,6 +21,9 @@ type Fin struct {
 	// UsageOK says the response reported usage. Billed is fresh + cache read + cache write input.
 	UsageOK bool
 	Billed  int64
+	// RatioTokens and RatioBytes are the request ratio of this turn: the provider's billed tokens of the forwarded
+	// text and its bytes (accountant.Ratio.Text), 0 when the host has none. Kept for the thread's next turn (#1533).
+	RatioTokens, RatioBytes int
 	// Forwarded says the upstream answered with a 2xx status. CacheRead is the cache-read tokens of the response.
 	Forwarded bool
 	CacheRead int
@@ -71,6 +74,7 @@ func Finish(f Fin) {
 	failOpen("billed input", func() {
 		apply.RecordBilledInput(f.Store, f.Session, f.Billed)
 		apply.RecordBilledInputThread(f.Store, f.Session, f.ThreadID, f.Billed)
+		apply.RecordRatioThread(f.Store, f.Session, f.ThreadID, f.RatioTokens, f.RatioBytes)
 	})
 	// Observe mode needs its own record. The enforced path runs no pipeline there, so Session is
 	// empty and the write above does nothing. The off-path run reads the shadow store, which

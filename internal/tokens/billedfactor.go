@@ -67,3 +67,8 @@ func BilledDeltaFactor(model string) (factor float64, measured bool) {
 	// Fable was not measured: it stays unmeasured (1.0) until someone measures it.
 	return 1.0, false
 }
+
+// LegacyFactor is the one fallback for a stored row that has no live request ratio (#1533): a row written before
+// the ratio columns existed, and a what-if over such a row. It is BilledDeltaFactor, read in one place, so the
+// table has one caller. A new row carries its own ratio (accrec.RatioCounts) and never reads the table.
+func LegacyFactor(model string) (factor float64, measured bool) { return BilledDeltaFactor(model) }

@@ -608,11 +608,11 @@ func (d *DB) insertBatch(evs []*Event) error {
 		price_estimated, acc_priced, estimated_saved_usd, estimate_held, estimated_saved_low_usd,
 		defer_tokens, defer_list_tokens, defer_searches, defer_loaded, defer_wrong_guesses,
 		defer_gross_usd, defer_net_usd, defer_dropped_searches, compaction_point, compaction_point_source,
-		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, restored_tokens, currency, ` + strings.Join(requestStoredTokenColumns(), ", ") + `, backend, client_compaction, acc_fallback, ` + strategyMetaCols + `
+		defer_cost_usd, ` + limitCols + `, auth_subscription, sweep_false_expands_warm, restored_tokens, currency, ` + strings.Join(requestStoredTokenColumns(), ", ") + `, backend, client_compaction, acc_fallback, ` + strategyMetaCols + `, ` + liveRatioCols + `
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
 		?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-		?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `,?,?,?,` + placeholders(strategyMetaN) + `)`)
+		?,?,?,?,?,?,?,?,?,?,?,?,` + placeholders(len(requestStoredTokenColumns())) + `,?,?,?,` + placeholders(strategyMetaN) + `,` + placeholders(liveRatioN) + `)`)
 	if err != nil {
 		return err
 	}
@@ -692,7 +692,7 @@ func (d *DB) insertBatch(evs []*Event) error {
 			e.DeferTokens, e.DeferListTokens, e.DeferSearches, e.DeferLoaded, e.DeferWrongGuesses,
 			e.DeferGrossUSD, e.DeferNetUSD, e.DeferDroppedSearches,
 			e.CompactionPoint, e.CompactionPointSource, e.DeferCostUSD,
-		}, append(limitArgs(e.Limits), append(append(append([]any{boolInt(e.AuthSubscription), e.SweepFalseExpandsWarm, e.RestoredTokens, rowCurrency(e.Currency)}, requestStoredTokenArgs(e)...), backendOf(e.Backend), clientCompactionArg(e), e.AccFallback), strategyMetaArgs(e)...)...)...)...)
+		}, append(limitArgs(e.Limits), append(append(append([]any{boolInt(e.AuthSubscription), e.SweepFalseExpandsWarm, e.RestoredTokens, rowCurrency(e.Currency)}, requestStoredTokenArgs(e)...), backendOf(e.Backend), clientCompactionArg(e), e.AccFallback), append(strategyMetaArgs(e), liveRatioArgs(e)...)...)...)...)...)
 		if err != nil {
 			return err
 		}

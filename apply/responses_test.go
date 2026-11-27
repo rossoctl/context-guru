@@ -607,3 +607,32 @@ func TestResponsesSummaryCoversTheLastToolExchange(t *testing.T) {
 		t.Fatalf("the Responses summary kept the last tool exchange, which no breakpoint can mark")
 	}
 }
+
+// The filter reports the bytes it took out of the body, for the accountant's request ratio (#1533). The toolschema
+// rewrite is not in it: it runs on the same body and shrinks it too.
+func TestFilteredDeclBytesAreTheBytesTheFilterRemoved(t *testing.T) {
+	removed := `{"type":"function","name":"unused","parameters":{"type":"object","title":"keep"}}`
+	body := []byte(`{"model":"gpt-5.6","instructions":"x","input":[{"role":"user","content":"task"}],"tools":[` +
+		`{"type":"function","name":"Keep","parameters":{"type":"object"}},` + removed + `]}`)
+	for _, yaml := range []string{
+		"pipeline: [toolfilter]\ncomponents:\n  toolfilter: {remove: [unused]}\n",
+		"pipeline: [toolschema, toolfilter]\ncomponents:\n  toolfilter: {remove: [unused]}\n",
+	} {
+		p, _ := pipe(t, yaml).Build(nil)
+		res := apply.BodyOpts(context.Background(), p, store.NewMemory(store.Options{}), apply.Opts{
+			Provider: bschemas.OpenAI, API: "responses", Body: body,
+		})
+		if res.FilteredDecls != 1 || res.FilteredDeclBytes == 0 {
+			t.Fatalf("%q: decls=%d bytes=%d, want one declaration and its bytes", yaml, res.FilteredDecls, res.FilteredDeclBytes)
+		}
+		if res.FilteredDeclBytes > len(removed)+1 {
+			t.Errorf("%q: %d bytes, more than the declaration and its comma (%d): another rewrite was counted", yaml, res.FilteredDeclBytes, len(removed)+1)
+		}
+		if strings.Contains(yaml, "toolschema") {
+			continue
+		}
+		if want := len(body) - len(res.Body); res.FilteredDeclBytes != want || want != len(removed)+1 {
+			t.Errorf("%q: bytes = %d, body shrank %d, want both %d (the declaration and its comma)", yaml, res.FilteredDeclBytes, want, len(removed)+1)
+		}
+	}
+}

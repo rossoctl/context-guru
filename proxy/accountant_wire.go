@@ -183,7 +183,7 @@ func (c *capture) accCompute(usage Usage, usageOK bool) (accountant.Result, bool
 		c.accDone = true
 		out := c.savings.Price(c.accReq, accrec.PriceIn{
 			Status: c.status, Rounds: c.rounds, NoResult: c.accNoResult, Usage: usage.accrec(),
-			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend() },
+			BeforeCompute: func() { c.accBilledTTL(usage); c.accDeferSpend(usage) },
 			// The metrics are booked before the rescue counter and the ping-facts drop, as they always were.
 			AfterCompute: func(res accountant.Result) {
 				c.observeMetrics(res, usage.accrec().Accountant(), int(usage.Output))
@@ -265,12 +265,12 @@ func failOpenAccountant(what string, step func()) {
 
 // accDeferSpend reports the search-turn costs of a deferred request to the accountant as spend operations on the
 // tooldefer operator (#1441), so the one figure for deferral holds them. It runs before Compute. Nil-safe.
-func (c *capture) accDeferSpend() {
+func (c *capture) accDeferSpend(usage Usage) {
 	d := c.deferFacts
 	if c.accReq == nil || d == nil || !d.spendOK {
 		return
 	}
-	for _, op := range accrec.DeferSpendOps(d.spend) {
+	for _, op := range accrec.DeferSpendOps(d.spend, c.savings.RatioFor(c.accReq, usage.accrec())) {
 		c.accReq.Add(op)
 	}
 }
@@ -288,4 +288,25 @@ func (c *capture) runDeferBook() {
 		}
 	}()
 	f()
+}
+
+// liveRatioText is the request ratio's text counts for the thread's next turn (#1533): the provider's billed tokens of
+// the forwarded text, and its bytes. 0, 0 when there is none to keep: no usage, no accountant record, or a capped ratio
+// (its text ratio is a floor, so the next warm gate keeps the table answer). It runs before the request is priced, so it
+// builds the ratio the accountant builds (accrec.Recorder.RatioFor). Fail open: a panic gives 0, 0. Nil-safe.
+func (c *capture) liveRatioText(usage Usage, usageOK bool) (tokens, bytes int) {
+	if c == nil || c.accReq == nil || c.savings == nil || !usageOK || c.rejected() {
+		return 0, 0
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("accountant: the request ratio panicked; the thread keeps its last ratio", "panic", p)
+			tokens, bytes = 0, 0
+		}
+	}()
+	r := c.savings.RatioFor(c.accReq, usage.accrec())
+	if r == nil || r.Capped() {
+		return 0, 0
+	}
+	return r.Text()
 }

@@ -17,7 +17,7 @@ type envelopeAdapter interface {
 // outside the normalized message view. Shape differences belong in the small
 // wire readers used by the transforms, not in separate component algorithms.
 // It runs before an adapter records any write-back path or byte offset.
-func transformEnvelope(body []byte, pipe *components.Pipeline, bypass bool, wire envelopeAdapter) (out []byte, toolSchema bool, filteredTokens, filteredDecls int) {
+func transformEnvelope(body []byte, pipe *components.Pipeline, bypass bool, wire envelopeAdapter) (out []byte, toolSchema bool, filteredTokens, filteredDecls, filteredBytes int) {
 	out = body
 	if bypass || pipe == nil {
 		return
@@ -26,11 +26,15 @@ func transformEnvelope(body []byte, pipe *components.Pipeline, bypass bool, wire
 		out, toolSchema = reformat.CompactToolSchemas(out)
 	}
 	if tf, ok := pipe.Find("toolfilter").(interface{ Removed() []string }); ok {
+		before := len(out)
 		out, filteredTokens, filteredDecls = filterDeclarationsWithAdapter(out, tf.Removed(), wire)
 		var skillTokens, skillDecls int
 		out, skillTokens, skillDecls = filterSkillListingWithAdapter(out, tf.Removed(), wire)
 		filteredTokens += skillTokens
 		filteredDecls += skillDecls
+		// The bytes the filter took out of the body, for the accountant's request ratio (#1533): a count, the
+		// same removal that filteredTokens counts. The toolschema rewrite above is not in it.
+		filteredBytes = max(before-len(out), 0)
 	}
 	return
 }

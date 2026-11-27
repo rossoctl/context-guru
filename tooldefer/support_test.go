@@ -136,7 +136,7 @@ func TestProberCachesPerKeyAndForgets(t *testing.T) {
 // SearchSpend is the search-turn cost as token counts: the output, the second pass and the next write.
 func TestSearchSpend(t *testing.T) {
 	model := "claude-sonnet-5-5"
-	f, _ := tokens.BilledDeltaFactor(model)
+	f, _ := tokens.LegacyFactor(model)
 	if _, ok := (Request{Model: model, DeferredTokens: 10000}).SearchSpend(); ok {
 		t.Fatal("a request with no search has a search spend")
 	}
@@ -852,5 +852,22 @@ func TestReadSearchesSSEFraming(t *testing.T) {
 		"data: [DONE]\r\n\r\n")
 	if r := ReadSearchesSSE(sse); r.Searches != 1 {
 		t.Fatalf("crlf: %+v", r)
+	}
+}
+
+// LoadedBytes is the size of the loaded definitions as sent, and SearchSpend carries it (#1533).
+func TestLoadedBytesAreTheDefinitionsAsSent(t *testing.T) {
+	a := `{"name":"alpha","description":"first tool","input_schema":{"type":"object"}}`
+	b := `{"name":"beta","description":"second tool","input_schema":{"type":"object"}}`
+	body := []byte(`{"tools":[` + a + `,` + b + `]}`)
+	if got := LoadedBytes(body, []string{"beta"}); got != len(b) {
+		t.Fatalf("LoadedBytes(beta) = %d, want %d", got, len(b))
+	}
+	if got := LoadedBytes(body, []string{"alpha", "beta", "alpha", "missing"}); got != len(a)+len(b) {
+		t.Fatalf("LoadedBytes(all) = %d, want %d (each tool once, a missing name nothing)", got, len(a)+len(b))
+	}
+	s, ok := Request{Model: "claude-sonnet-5-5", Searches: 1, LoadedTokens: 100, LoadedBytes: 321}.SearchSpend()
+	if !ok || s.LoadedBytes != 321 {
+		t.Fatalf("SearchSpend = %+v ok=%v, want LoadedBytes 321", s, ok)
 	}
 }

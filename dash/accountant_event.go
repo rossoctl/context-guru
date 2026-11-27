@@ -1,12 +1,19 @@
 package dash
 
-import "github.com/rossoctl/accountant"
+import (
+	"github.com/rossoctl/accountant"
+
+	"github.com/rossoctl/context-guru/accrec"
+)
 
 // The accountant Result of the request, set by the proxy when a dashboard is on. It is unexported,
 // so neither JSON nor the SQLite writer sees it.
 
 // SetAccountant attaches the library's Result to the event.
-func (e *Event) SetAccountant(r accountant.Result) { e.accRes = &r }
+func (e *Event) SetAccountant(r accountant.Result) {
+	e.accRes = &r
+	e.Ratio = accrec.RatioCountsOf(r) // the request's own ratio, stored as counts (#1533)
+}
 
 // HasAccountant reports whether a Result is attached.
 func (e *Event) HasAccountant() bool { return e.accRes != nil }

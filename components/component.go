@@ -609,6 +609,11 @@ type Ctx struct {
 	// how it GROWS (the billed-growth horizon). PrevBilledInput describes no single transcript, so do not
 	// use it to ask how full this request's context is (#1183).
 	PrevBilledInputThread int
+	// PrevRatioTokens and PrevRatioBytes are the request ratio of the previous turn of THIS thread (#1533): the
+	// provider's billed tokens of the forwarded text, and the bytes of that text (accountant.Ratio.Text). Both are 0
+	// when the thread has none (unknown), when its last turn was capped, or on a host that does not record it. 0 is
+	// UNKNOWN: a component keeps its own answer, as for PrevBilledInputThread.
+	PrevRatioTokens, PrevRatioBytes int
 	// CacheAware is true when this request goes to a prompt-caching backend and the
 	// pipeline should avoid mutating already-cached content. When true, supersession/
 	// age-based offloaders (failed_run, mask, collapse) must restrict their

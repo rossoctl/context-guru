@@ -58,7 +58,7 @@ func rePriceRow(r *compactRow, price rePriceFn) {
 		Model: r.Model, CacheMissReason: r.MissReason,
 		FreshInput: r.FreshInput, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite,
 	}
-	ev.BilledTokenFactor, _ = tokens.BilledDeltaFactor(r.Model)
+	ev.BilledTokenFactor, _ = tokens.LegacyFactor(r.Model)
 	r.SavedUSD = ev.ComponentSavedUSD(p, SummarizerComponents[0], int(r.SavedGross), int(r.SavedUnique))
 	r.FirstUSD = ev.ComponentSavedUSD(p, SummarizerComponents[0], int(r.SavedUnique), int(r.SavedUnique))
 }
