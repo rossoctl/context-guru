@@ -5,6 +5,7 @@ import (
 
 	bschemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/rossoctl/context-guru/agent"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/schema"
 	"github.com/rossoctl/context-guru/thread"
 	"github.com/rossoctl/context-guru/waitcause"
@@ -36,9 +37,9 @@ const (
 	// config.DefaultKeepAliveBackgroundExtraPings and DefaultKeepAliveHumanExtraPings.
 	DefaultBackgroundExtraPings = 3
 	DefaultHumanExtraPings      = 1
-	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait, background work, a teammate and any subagent wait. Mirrored by
+	// DefaultToolWaitMinPrefix is the prefix floor of a tool wait, background work, a teammate and any subagent wait. It is
 	// config.DefaultKeepAliveToolWaitMinPrefix.
-	DefaultToolWaitMinPrefix = 20000
+	DefaultToolWaitMinPrefix = config.DefaultKeepAliveToolWaitMinPrefix
 	// MaxWaitPings bounds any plan result unless the base itself is higher. It equals the highest
 	// strategy ping count, so the credential hold stays at (11+1) x 299 s = 60 min or less.
 	MaxWaitPings = 11

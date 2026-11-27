@@ -376,6 +376,8 @@ func TestAssumedWindowIsTheSmallestOfKnownFamilyAndDefault(t *testing.T) {
 		{"claude-x", 0, 200_000}, {"claude-x", 1_000_000, 200_000}, {"claude-x", 100_000, 100_000},
 		{"gpt-4o-mini", 0, 128_000}, {"gpt-4o-mini", 1_000_000, 128_000}, {"mistral-large", 0, 32_000},
 		{"Llama-3", 0, 128_000},
+		{"gpt-4.1", 0, 128_000}, {"GPT-4o", 0, 128_000}, {"o1-mini", 0, 200_000}, {"gemini-2.5-pro", 0, 200_000},
+		{"gpt-5.4", 0, 200_000}, {"claude-opus-5-5", 0, 200_000}, {"unlisted-model", 0, 200_000}, {"mistral-large", 20_000, 20_000},
 	} {
 		if got := assumedWindowFor(tc.model, tc.known); got != tc.want {
 			t.Errorf("assumedWindowFor(%q, %d) = %d, want %d", tc.model, tc.known, got, tc.want)

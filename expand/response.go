@@ -216,16 +216,9 @@ func Continuation(provider string, reqBody, resp []byte, resolved map[string]str
 	}
 }
 
-// The summary headers, mirrored from schema.SummaryHeader and schema.CacheAwareSummaryHeader (this
-// leaf package imports no context-guru package); TestSummaryHeadersMatchSchema pins them equal.
-const (
-	summaryHeader           = "=== History Summary ==="
-	cacheAwareSummaryHeader = "=== Compacted Context (cache-aware summary) ==="
-)
-
 // isSummaryText reports whether content is a summarizer's spliced summary, from either summarizer.
 func isSummaryText(content string) bool {
-	return strings.HasPrefix(content, summaryHeader) || strings.HasPrefix(content, cacheAwareSummaryHeader)
+	return strings.HasPrefix(content, schema.SummaryHeader) || strings.HasPrefix(content, schema.CacheAwareSummaryHeader)
 }
 
 // responsesInputItem reports whether a stashed element can go back into a Responses `input` array
