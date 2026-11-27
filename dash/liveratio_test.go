@@ -149,18 +149,18 @@ func TestTheComponentRemovedBytesCountOnlyTheKeptOperations(t *testing.T) {
 }
 
 // A request with its own ratio and the bytes its components removed has its own factor in the replay's ceiling
-// (cf = billed + f x removed). With the table's factor of 1 (an unmeasured model) the cap holds; with a factor of 3 the
-// counterfactual reaches the ceiling at once.
+// (cf = billed + f x removed). With the table's factor of 1 (an unmeasured model) the cap holds (cf 550k); with a factor of 6, which RequestFactor can
+// produce (it is bounded to 1..8), the counterfactual reaches the ceiling.
 func TestTheReplayCapUsesTheRequestsOwnFactor(t *testing.T) {
 	mk := func(factor float64) []capRow {
-		rows := []capRow{capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1), capTestRow(2, 110_000, 50_000, 450_000, "extract_llm", 1)}
+		rows := []capRow{capTestRow(1, 100_000, 50_000, 400_000, "extract_llm", 1), capTestRow(2, 210_000, 100_000, 450_000, "extract_llm", 1)}
 		rows[1].factor = factor
 		return rows
 	}
 	if l := walkReplayCap(mk(0), fixedWindow(1_000_000)); l.ClosedCounterfactual != 0 {
 		t.Fatalf("the table's factor closed the epoch: %d", l.ClosedCounterfactual)
 	}
-	if l := walkReplayCap(mk(12), fixedWindow(1_000_000)); l.ClosedCounterfactual != 1 {
-		t.Fatalf("a request factor of 12 (cf 450k + 600k) closed %d epochs, want 1", l.ClosedCounterfactual)
+	if l := walkReplayCap(mk(6), fixedWindow(1_000_000)); l.ClosedCounterfactual != 1 {
+		t.Fatalf("a request factor of 6 (cf 450k + 6 x 100k = 1,050k) closed %d epochs, want 1", l.ClosedCounterfactual)
 	}
 }
