@@ -61,7 +61,7 @@ const (
 	// Opus calls every large cache drop read back exactly the fixed size and nothing partial. A drop
 	// WITHIN the look-back still finds the entry just before it, so only the tail from the drop is
 	// written again.
-	warmLookbackBlocks = 20
+	warmLookbackBlocks = schema.LookbackBlocks
 
 	// warmHeldMaxAge is how long a waiting answer lives. Past it the answer is dropped, not applied: the
 	// conversation has moved on. It matches the ping registry's bound.
@@ -687,6 +687,11 @@ func cachedEnd(c *components.Ctx, req *bschemas.BifrostChatRequest) int {
 
 // contentBlocks counts the content items of one message, one block per item: each content block, or one
 // for a plain text, plus one per tool call. A message with nothing counts zero.
+//
+// It reads the typed chat messages that the sweep holds. apply's blocksAfter reads the wire JSON of the
+// request being sent and counts a message with no content as one block. The two answer different
+// questions on different inputs (a drop's distance in the normalized history, against a mark's
+// distance in the sent body), so they stay apart. The look-back size is the one, schema.LookbackBlocks.
 func contentBlocks(m bschemas.ChatMessage) int {
 	n := 0
 	if m.Content != nil {

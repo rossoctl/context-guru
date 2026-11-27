@@ -135,6 +135,32 @@ func elemMarks(v gjson.Result, escaped bool) int {
 	return n
 }
 
+// EachMark calls fn with each breakpoint mark on one array element (a system block, a tool, or a
+// content block): the value of cache_control and of cachePoint, when it is an object. A null, a
+// string or a bool is no mark. It is the rule behind ElemMarks, for a caller that needs the marks
+// themselves (the accountant reads each mark's ttl).
+func EachMark(v gjson.Result, fn func(mark gjson.Result)) {
+	if !MayHoldBreakpoint(v.Raw) {
+		return
+	}
+	for _, k := range blockMarks {
+		if m := v.Get(k); m.IsObject() {
+			fn(m)
+		}
+	}
+}
+
+// EachMessageMark calls fn with the mark on a message itself. A message carries only the Anthropic
+// spelling, cache_control: cachePoint is a block, and never sits on a message.
+func EachMessageMark(m gjson.Result, fn func(mark gjson.Result)) {
+	if !MayHoldBreakpoint(m.Raw) {
+		return
+	}
+	if cc := m.Get("cache_control"); cc.IsObject() {
+		fn(cc)
+	}
+}
+
 // HasBlockBreakpoint reports whether a chat-schema message already carries a breakpoint on one
 // of its content blocks. The chat-schema twin of CountBreakpoints, for components that hold
 // bifrost messages and not the wire body.

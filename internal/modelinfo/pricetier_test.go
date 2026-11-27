@@ -186,3 +186,24 @@ func TestTableFlatKeyMustBeABool(t *testing.T) {
 		t.Error("flat: maybe loaded; want an error")
 	}
 }
+
+func TestTierBelowPicksTheHighestLineBelowThePrompt(t *testing.T) {
+	lines := []int64{200, 0, 100, 300}
+	for _, tc := range []struct {
+		prompt int64
+		idx    int
+		ok     bool
+	}{
+		{50, 0, false},
+		{100, 0, false}, // at the line: the tier does not apply
+		{101, 2, true},
+		{200, 2, true},
+		{201, 0, true},
+		{301, 3, true},
+	} {
+		idx, ok := TierBelow(tc.prompt, lines)
+		if ok != tc.ok || (ok && idx != tc.idx) {
+			t.Errorf("TierBelow(%d) = %d, %v; want %d, %v", tc.prompt, idx, ok, tc.idx, tc.ok)
+		}
+	}
+}

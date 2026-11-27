@@ -3161,3 +3161,11 @@ func BenchmarkWarmLiveContent(b *testing.B) {
 		}
 	}
 }
+
+// The warm sweep's look-back is the provider's, schema.LookbackBlocks, and its value is 20.
+func TestWarmLookbackIsTheSchemaLookback(t *testing.T) {
+	got, want := warmLookbackBlocks, schema.LookbackBlocks
+	if got != 20 || want != 20 {
+		t.Fatalf("warmLookbackBlocks = %d, schema.LookbackBlocks = %d, want both 20", got, want)
+	}
+}

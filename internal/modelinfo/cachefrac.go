@@ -113,6 +113,16 @@ func CacheReadFracFor(model string) float64 {
 	return AnthropicCacheReadFrac
 }
 
+// IsTierVersion reports whether the model is the given tier at exactly major.minor, such as opus 5.5.
+// The match is on the whole version, as CacheReadFracFor reads it: "claude-opus-5" is not 5.5, a
+// date suffix does not change the answer, and vendor prefixes and "[1m]" are ignored. The
+// separator may be '-', '.' or '_'.
+func IsTierVersion(model, tier string, major, minor int) bool {
+	full, _ := Normalize(model)
+	maj, min, ok := tierVersion(full, tier)
+	return ok && maj == major && min == minor
+}
+
 // tierVersion reads the "<major><sep><minor>" that follows a tier word in a normalized id.
 // The separator is '-', '.' or '_'. It reports ok=false when the word is missing or no version
 // follows. A missing minor reads as -1, so "claude-opus-5" is (5, -1), never (5, 5).

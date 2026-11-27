@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/accountant"
 	"github.com/rossoctl/context-guru/apply"
+	"github.com/rossoctl/context-guru/config"
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/keepalive"
 	"github.com/rossoctl/context-guru/kvcache"
@@ -1403,29 +1404,27 @@ func CoverageSecondsFor(idleSeconds float64, maxPings int, ttl time.Duration) fl
 	return float64(maxPings)*idleSeconds + ttl.Seconds()
 }
 
-// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K).
+// PingsPerSpan is how many pings one idle span of `gap` seconds attracts under (X, K). It is
+// kvcache.PingsPerSpan, the one schedule rule, with seconds as the unit.
 //
 // The first ping fires at X, each subsequent one X after the last, and K caps the count. A gap
 // no wider than X attracts none.
 func PingsPerSpan(gap, idleSeconds float64, maxPings int) int {
-	if gap <= idleSeconds || idleSeconds <= 0 || maxPings <= 0 {
-		return 0
-	}
-	n := int(math.Floor((gap-idleSeconds)/idleSeconds)) + 1
-	if n > maxPings {
-		n = maxPings
-	}
-	return n
+	return kvcache.PingsPerSpan(secondsToDuration(gap), secondsToDuration(idleSeconds), maxPings)
+}
+
+// secondsToDuration rounds to the nearest nanosecond, so a whole number of seconds stays exact.
+func secondsToDuration(s float64) time.Duration {
+	return time.Duration(math.Round(s * float64(time.Second)))
 }
 
 // kaGateMinPrefix and kaGateToolWaitMinPrefix are the billed-prefix floors a replay gates on: the
-// shipped defaults, mirroring config.DefaultKeepAliveMinPrefix (80000) and
-// config.DefaultKeepAliveToolWaitMinPrefix (20000), which this package may not import. The second
+// shipped defaults: config.DefaultKeepAliveMinPrefix and config.DefaultKeepAliveToolWaitMinPrefix. The second
 // applies to a tool wait, background work, a teammate and any subagent wait (keepalive.Policy.WaitMinPrefix). Pinned by
 // TestTheReplayGateMatchesTheShippedPolicy.
 const (
-	kaGateMinPrefix         = 80000
-	kaGateToolWaitMinPrefix = 20000
+	kaGateMinPrefix         = config.DefaultKeepAliveMinPrefix
+	kaGateToolWaitMinPrefix = config.DefaultKeepAliveToolWaitMinPrefix
 )
 
 // gatePolicy is the policy a replay gates and counts with: wait, with the shipped floors where it
@@ -2085,8 +2084,8 @@ type RecInterval struct {
 // plan's base and the interval is the plan's; recMaxPings alone is the fixed-count policy, the one with
 // keepalive_wait_plan off.
 const (
-	recIdleSeconds = 240
-	recMaxPings    = 2
+	recIdleSeconds = config.DefaultKeepAliveIdle
+	recMaxPings    = config.DefaultKeepAliveMaxPings
 )
 
 // The service-wide interval, for scale inside a refusal. Measured by the adjudicated bootstrap

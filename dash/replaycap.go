@@ -97,14 +97,12 @@ const assumedSummaryTokens = 80_000
 
 // assumedWindow stands in for a model whose context window is not exactly known: 200k, the smallest
 // window of the Claude families seen here. A family with smaller windows has its own floor
-// (familyWindowFloor), and a known but unpublished window below both wins. It is an assumption, not a
+// (modelinfo's table), and a known but unpublished window below both wins. It is an assumption, not a
 // bound: a model of an unlisted family with a smaller window still over-credits, and is labelled.
 const assumedWindow = 200_000
 
-var familyWindowFloor = []struct {
-	substr string
-	window int
-}{{"gpt-4", 128_000}, {"llama", 128_000}, {"mistral", 32_000}}
+// familyWindows is modelinfo's table of family windows. Its entries below assumedWindow are the family floors.
+var familyWindows = modelinfo.DefaultStatic()
 
 // assumedWindowFor is the smallest of the resolver's (inexact) window, the model family's floor and
 // assumedWindow.
@@ -113,11 +111,8 @@ func assumedWindowFor(model string, known int) int {
 	if known > 0 && known < w {
 		w = known
 	}
-	m := strings.ToLower(model)
-	for _, f := range familyWindowFloor {
-		if strings.Contains(m, f.substr) && f.window < w {
-			w = f.window
-		}
+	if fw, ok := familyWindows.Window(context.Background(), model); ok && fw < w {
+		w = fw
 	}
 	return w
 }

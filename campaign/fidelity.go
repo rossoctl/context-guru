@@ -2,7 +2,6 @@ package campaign
 
 import (
 	"math"
-	"strings"
 
 	"github.com/rossoctl/context-guru/internal/modelinfo"
 	"github.com/rossoctl/context-guru/kvcache"
@@ -23,7 +22,7 @@ const (
 // FidMiss is the default miss rate of a request that only a ping kept alive, by model family.
 func FidMiss(model string) float64 {
 	switch fam := modelinfo.Family(model); {
-	case fam == modelinfo.FamilyOpus && strings.Contains(strings.ToLower(model), "opus-5-5"):
+	case fam == modelinfo.FamilyOpus && modelinfo.IsTierVersion(model, modelinfo.FamilyOpus, 5, 5):
 		return 0.009
 	case fam == modelinfo.FamilySonnet:
 		return 0.013

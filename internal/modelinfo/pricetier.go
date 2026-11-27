@@ -27,17 +27,32 @@ func PromptTokens(fresh, cacheRead, cacheWrite int64) int64 {
 	return fresh + cacheRead + cacheWrite
 }
 
+// TierBelow picks the tier that applies to a prompt of promptTokens tokens. lines holds each tier's
+// AbovePromptTokens line, 0 for an unused entry. It returns the index of the highest line that the
+// prompt is above. ok is false when the price is flat or the prompt is at or below every line. It is
+// the ONE place that says which tier applies. Price.At and components.TokenRates call it.
+func TierBelow(promptTokens int64, lines []int64) (idx int, ok bool) {
+	var best int64
+	for i, c := range lines {
+		if c > 0 && promptTokens > c && (!ok || c > best) {
+			idx, best, ok = i, c, true
+		}
+	}
+	return idx, ok
+}
+
 // At returns the rates for a request whose prompt has promptTokens tokens. At or below a tier's
 // line, that tier does not apply. Above it, the tier's rates apply to every token. With several
 // tiers, the highest line below the prompt size wins. A price with no tiers returns itself.
 // The result carries no tiers.
 func (p Price) At(promptTokens int64) Price {
 	var t *PriceTier
+	var lines [MaxTiers]int64
 	for i := range p.Tiers {
-		c := &p.Tiers[i]
-		if c.AbovePromptTokens > 0 && promptTokens > c.AbovePromptTokens && (t == nil || c.AbovePromptTokens > t.AbovePromptTokens) {
-			t = c
-		}
+		lines[i] = p.Tiers[i].AbovePromptTokens
+	}
+	if i, ok := TierBelow(promptTokens, lines[:]); ok {
+		t = &p.Tiers[i]
 	}
 	q := p
 	q.Tiers = [MaxTiers]PriceTier{}
